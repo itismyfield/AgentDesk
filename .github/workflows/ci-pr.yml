@@ -132,6 +132,15 @@ jobs:
               # tests; changes to the owner or its sidecars must run them.
               - 'src/services/discord/health/recovery.rs'
               - 'src/services/discord/health/recovery/**'
+              # #5025: terminal-delivery evidence routing and every local
+              # producer/epilogue sibling run in `test_fast`, whose registered
+              # required mirror is `Fast targeted tests (ubuntu-latest)`.
+              - 'src/services/discord/inflight.rs'
+              - 'src/services/discord/inflight/**'
+              - 'src/services/discord/tmux_watcher.rs'
+              - 'src/services/discord/tmux_watcher/**'
+              - 'src/services/discord/turn_bridge/terminal_outcome_delivery.rs'
+              - 'src/services/discord/turn_bridge/terminal_outcome_delivery/**'
               - 'src/services/scheduled_messages.rs'
               - 'src/services/scheduled_messages/**'
               - 'src/services/discord/outbound/source_registry.rs'
@@ -585,6 +594,23 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: env -u AGENTDESK_ROOT_DIR cargo test --lib services::session_forwarding -- --skip _pg --skip pg_ --skip postgres
+
+      # #5025: this job is mirrored by the branch-protected
+      # `Fast targeted tests (ubuntu-latest)` context above. Keep the router test
+      # and both real identity-gate producers together so a red WARN regression
+      # blocks merge instead of remaining advisory.
+      - name: Terminal delivery evidence regressions
+        timeout-minutes: 10
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: |
+          env -u AGENTDESK_ROOT_DIR cargo test --lib inflight::terminal_delivery_evidence_loss::tests
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests
+          env -u AGENTDESK_ROOT_DIR cargo test --lib watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row
+          env -u AGENTDESK_ROOT_DIR cargo test --lib identity_guarded_save_rejects_stale_write_against_newer_turn
 
       - name: just test-postgres
         timeout-minutes: 20

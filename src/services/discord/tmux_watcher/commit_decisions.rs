@@ -75,19 +75,17 @@ pub(super) fn mark_watcher_terminal_delivery_committed(
             last_watcher_relayed_generation_mtime_ns: generation_mtime_ns,
         },
     );
-    match outcome {
-        crate::services::discord::inflight::WatcherTerminalCommitOutcome::Committed => true,
-        crate::services::discord::inflight::WatcherTerminalCommitOutcome::Skipped => false,
-        crate::services::discord::inflight::WatcherTerminalCommitOutcome::IoError => {
-            tracing::warn!(
-                provider = %provider.as_str(),
-                channel_id = channel_id.get(),
-                tmux_session = %tmux_session_name,
-                "watcher failed to mirror committed terminal delivery into inflight state"
-            );
-            false
-        }
-    }
+    crate::services::discord::inflight::terminal_delivery_evidence_loss::warn_for_watcher_terminal_commit_outcome(
+        outcome,
+        crate::services::discord::inflight::terminal_delivery_evidence_loss::WatcherEvidenceLossContext {
+            provider,
+            channel_id,
+            tmux_session_name,
+            expected_user_msg_id: expected_identity.user_msg_id,
+            last_offset,
+            turn_data_start_offset,
+        },
+    )
 }
 
 #[cfg(test)]
