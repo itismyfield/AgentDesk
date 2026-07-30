@@ -101,15 +101,13 @@ async fn confirm_spawned_watcher(
     let deadline = Instant::now() + AUTO_HEAL_CONFIRM_TIMEOUT;
     let mut heartbeat_stable_since = None;
     loop {
-        if !spawned_watcher_still_current(shared, &probe) {
-            return SpawnedWatcherConfirmation::WatcherGone;
-        }
-        // The frontier is channel-scoped rather than watcher/episode-scoped. The
-        // current check prevents an already replaced watcher from taking credit,
-        // but another relay actor can still advance it while this watcher remains
-        // current. Exact attribution belongs to #5022.
-        if shared.committed_relay_offset(ChannelId::new(channel_id)) > baseline_frontier {
-            return SpawnedWatcherConfirmation::Confirmed;
+        if let Some(result) = current_watcher_frontier_confirmation(
+            shared,
+            ChannelId::new(channel_id),
+            &probe,
+            baseline_frontier,
+        ) {
+            return result;
         }
         if probe.heartbeat.load(Ordering::Acquire) > probe.baseline_heartbeat_ms {
             let stable_since = heartbeat_stable_since.get_or_insert_with(Instant::now);
@@ -122,6 +120,23 @@ async fn confirm_spawned_watcher(
         }
         tokio::time::sleep(AUTO_HEAL_CONFIRM_POLL).await;
     }
+}
+
+fn current_watcher_frontier_confirmation(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    probe: &SpawnedWatcherProbe,
+    baseline_frontier: u64,
+) -> Option<SpawnedWatcherConfirmation> {
+    if !spawned_watcher_still_current(shared, probe) {
+        return Some(SpawnedWatcherConfirmation::WatcherGone);
+    }
+    // The frontier is channel-scoped rather than watcher/episode-scoped. The
+    // current check prevents an already replaced watcher from taking credit,
+    // but another relay actor can still advance it while this watcher remains
+    // current. Exact attribution belongs to #5022.
+    (shared.committed_relay_offset(channel_id) > baseline_frontier)
+        .then_some(SpawnedWatcherConfirmation::Confirmed)
 }
 
 fn confirmation_at_deadline(
@@ -373,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_recovery_cancelled_watcher_fails_even_with_channel_emission() {
+    fn relay_recovery_cancelled_watcher_fails_even_with_frontier_progress() {
         let shared = make_shared_data_for_tests();
         let channel = ChannelId::new(4_423_204);
         let tmux_session = "AgentDesk-codex-4423-cancelled-emitting";
@@ -385,12 +400,13 @@ mod tests {
         probe.cancel.store(true, Ordering::Release);
         shared
             .tmux_relay_coord(channel)
-            .relay_slot
+            .confirmed_end_offset
             .store(128, Ordering::Release);
 
         assert_eq!(
-            confirmation_at_deadline(&shared, channel, &probe),
-            SpawnedWatcherConfirmation::WatcherGone
+            current_watcher_frontier_confirmation(&shared, channel, &probe, 0),
+            Some(SpawnedWatcherConfirmation::WatcherGone),
+            "current identity must be checked before channel-scoped frontier progress"
         );
         assert_eq!(
             confirmation_after_probe(SpawnedWatcherConfirmation::WatcherGone, 10_000, 10_001),
