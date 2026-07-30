@@ -23,7 +23,14 @@ pub enum HealthStatus {
     Unhealthy,
 }
 
-/// Per-channel watcher and relay state for `GET /api/channels/:id/watcher-state`.
+/// #964 / #1133: per-channel watcher + relay state surfaced via
+/// `GET /api/channels/:id/watcher-state`.
+///
+/// #1133 enriched the read-only response with operational diagnostics:
+/// inflight timing/IDs (PII-free), `tmux_session_alive` (PID check),
+/// `has_pending_queue`, and `mailbox_active_user_msg_id`. All new fields
+/// are scalar (no message text, no user IDs, no transcripts) so the
+/// response remains safe for non-privileged operator dashboards.
 #[derive(Clone, Debug, Serialize)]
 pub struct WatcherStateSnapshot {
     pub provider: String,
@@ -181,8 +188,18 @@ struct RelayThreadProofSnapshot {
     stale_thread_proof: bool,
 }
 
-/// A synthetic rebind-origin row is idle unless a mailbox cancel token proves
-/// that a real turn has since started on the adopted session.
+/// #3631: a rebind-origin inflight row (POST /api/inflight/rebind) is a
+/// synthetic origin marker — `turn_id`/`dispatch_id` null, `user_msg_id`/
+/// `current_msg_id` 0, `full_response` empty — NOT a real user/agent turn.
+/// With no mailbox cancel token there is no live turn, so the channel is idle.
+/// The classifier previously fell through to `Foreground`, falsely reporting
+/// `active_foreground_stream` and stranding queued messages (they never
+/// dispatch because no real turn ever ends to drain the queue). A cancel token
+/// present means a real turn HAS since started on the adopted session, so it is
+/// genuinely active — only treat it as idle when no cancel token is held.
+///
+/// Pure seam so the idle decision is unit-testable without constructing a full
+/// `InflightTurnState`.
 fn rebind_origin_inflight_is_idle(mailbox_has_cancel_token: bool, rebind_origin: bool) -> bool {
     rebind_origin && !mailbox_has_cancel_token
 }
@@ -352,6 +369,7 @@ struct RelayHealthBuildInput {
     mailbox_has_cancel_token: bool,
     mailbox_active_user_msg_id: Option<u64>,
     mailbox_turn_started_at_ms: Option<i64>,
+    relay_turn_key: Option<discord::DeliveryLeaseKey>,
     queue_depth: usize,
     watcher_attached: bool,
     watcher_attached_stale: bool,
@@ -407,10 +425,9 @@ fn build_relay_health_snapshot(input: RelayHealthBuildInput) -> RelayHealthSnaps
         thread_channel_id: input.thread_proof.thread_channel_id,
         last_relay_ts_ms: (input.last_relay_ts_ms > 0).then_some(input.last_relay_ts_ms),
         last_outbound_activity_ms: input.last_outbound_activity_ms,
-        confirmed_delivery_since_turn_start:
-            discord::outbound::delivery_evidence_store::confirmed_delivery_since_turn_start(
-                ChannelId::new(input.channel_id),
-            ),
+        confirmed_delivery_since_turn_start: input.relay_turn_key.as_ref().and_then(
+            discord::outbound::delivery_evidence_store::confirmed_relay_for_turn,
+        ),
         last_capture_offset: input.last_capture_offset,
         last_relay_offset: input.last_relay_offset,
         last_relay_offset_recorded: input.last_relay_offset_recorded,
@@ -588,6 +605,14 @@ async fn watcher_state_snapshot_for_shared(
         mailbox_turn_started_at_ms: mailbox_snapshot
             .turn_started_at
             .map(|started_at| started_at.timestamp_millis()),
+        relay_turn_key: session.inflight.as_ref().map(|state| {
+            discord::DeliveryLeaseKey::from_inflight_state_for_site(
+                ChannelId::new(session.watcher_owner_channel_id.unwrap_or(channel.get())),
+                shared.restart.current_generation,
+                state,
+                "relay_health",
+            )
+        }),
         queue_depth: mailbox_snapshot.intervention_queue.len(),
         watcher_attached: session.attached,
         watcher_attached_stale: session.watcher_attached_stale,
@@ -771,6 +796,16 @@ async fn build_health_snapshot_with_options(
                     mailbox_turn_started_at_ms: snapshot
                         .turn_started_at
                         .map(|started_at| started_at.timestamp_millis()),
+                    relay_turn_key: session.inflight.as_ref().map(|state| {
+                        discord::DeliveryLeaseKey::from_inflight_state_for_site(
+                            ChannelId::new(
+                                session.watcher_owner_channel_id.unwrap_or(channel.get()),
+                            ),
+                            entry.shared.restart.current_generation,
+                            state,
+                            "relay_health",
+                        )
+                    }),
                     queue_depth,
                     watcher_attached: session.watcher_attached,
                     watcher_attached_stale: session.watcher_attached_stale,

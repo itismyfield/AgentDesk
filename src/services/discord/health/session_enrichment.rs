@@ -85,7 +85,11 @@ impl SessionEnrichment {
             watcher_binding_tmux_session.as_deref(),
         );
         let relay_coord = shared.tmux_relay_coords.get(&channel);
-        let last_relay_offset_recorded = relay_coord.is_some();
+        let last_relay_offset_recorded = relay_coord.as_ref().is_some_and(|coord| {
+            coord
+                .confirmed_end_recorded
+                .load(std::sync::atomic::Ordering::Acquire)
+        });
         let (last_relay_offset, last_relay_ts_ms, reconnect_count) = relay_coord
             .as_ref()
             .map(|coord| {

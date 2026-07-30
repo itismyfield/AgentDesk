@@ -132,6 +132,7 @@ impl TmuxRelayCoord {
             )
             .is_ok();
         if reset {
+            self.confirmed_end_recorded.store(true, Ordering::Release);
             state.incarnation = state.incarnation.wrapping_add(1);
         }
         reset

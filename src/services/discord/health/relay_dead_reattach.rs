@@ -58,6 +58,9 @@ pub(super) async fn try_apply(
     snapshot: &WatcherStateSnapshot,
     now_unix_secs: i64,
 ) -> bool {
+    if shared.relay_emission_in_flight(channel_id) {
+        return false;
+    }
     let Some(latest_activity_unix_nanos) = snapshot
         .tmux_session
         .as_deref()

@@ -1595,6 +1595,9 @@ pub(super) struct TmuxRelayCoord {
     /// For a normal Discord-origin turn (inflight present) the watcher remains
     /// sole relay owner; only no-inflight wake/idle paths gate on this watermark.
     pub(super) confirmed_end_offset: Arc<std::sync::atomic::AtomicU64>,
+    /// Set only by the confirmed-end writer path, including an explicit zero
+    /// write. Creating or reading the coordination entry never sets this bit.
+    pub(super) confirmed_end_recorded: Arc<std::sync::atomic::AtomicBool>,
     pub(in crate::services::discord) reset_state:
         std::sync::Mutex<relay_health::FrontierResetState>,
     /// Wall-clock timestamp (ms since epoch) of the most recent confirmed
@@ -1638,6 +1641,7 @@ impl TmuxRelayCoord {
         Self {
             relay_slot: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             confirmed_end_offset: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            confirmed_end_recorded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reset_state: std::sync::Mutex::new(relay_health::FrontierResetState::default()),
             last_relay_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             reconnect_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1921,6 +1925,7 @@ impl DeliveryLeaseCell {
         deadline_ms: u64,
     ) -> bool {
         use std::sync::atomic::Ordering;
+        let evidence_key = key.clone();
         let mut guard = self
             .payload
             .lock()
@@ -1947,6 +1952,7 @@ impl DeliveryLeaseCell {
             start,
             end,
         };
+        outbound::delivery_evidence_store::begin_relay_attempt(&evidence_key);
         true
     }
 
@@ -1983,6 +1989,7 @@ impl DeliveryLeaseCell {
                 && *cur_start == start
                 && *cur_end == end =>
             {
+                let evidence_key = key.clone();
                 *guard = LeaseState::Committed {
                     holder,
                     key,
@@ -1991,6 +1998,9 @@ impl DeliveryLeaseCell {
                     outcome,
                 };
                 self.state_tag.store(TAG_COMMITTED, Ordering::Release);
+                if outcome == LeaseOutcome::Delivered {
+                    outbound::delivery_evidence_store::record_confirmed_relay(&evidence_key);
+                }
                 true
             }
             // Identity mismatch (holder / stale turn / range) or not Leased.

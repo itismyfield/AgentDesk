@@ -1,96 +1,67 @@
-//! Process-lifetime evidence that Discord accepted an outbound write.
+//! Process-lifetime evidence for terminal relay delivery leases.
 //!
-//! Relay offsets can be absent or reset independently of successful Discord
-//! transport calls. This module keeps a separate monotonic sequence per channel
-//! and snapshots that sequence when a mailbox turn starts.
+//! The lease key is the relay contract's turn identity. Recording only at the
+//! lease acquire/confirmed-commit boundary excludes placeholders and other
+//! auxiliary outbound writes while covering every watcher, bridge, and
+//! session-bound terminal transport, including formatting-layer long sends.
 
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
-use poise::serenity_prelude::ChannelId;
 
-#[derive(Default)]
-struct DeliveryEvidence {
-    next_sequence: AtomicU64,
-    delivered_sequence: DashMap<ChannelId, u64>,
-    turn_start_sequence: DashMap<ChannelId, u64>,
+use crate::services::discord::DeliveryLeaseKey;
+
+fn evidence() -> &'static DashMap<DeliveryLeaseKey, bool> {
+    static EVIDENCE: OnceLock<DashMap<DeliveryLeaseKey, bool>> = OnceLock::new();
+    EVIDENCE.get_or_init(DashMap::new)
 }
 
-fn evidence() -> &'static DeliveryEvidence {
-    static EVIDENCE: OnceLock<DeliveryEvidence> = OnceLock::new();
-    EVIDENCE.get_or_init(DeliveryEvidence::default)
+pub(in crate::services::discord) fn begin_relay_attempt(key: &DeliveryLeaseKey) {
+    evidence().entry(key.clone()).or_insert(false);
 }
 
-pub(in crate::services::discord) fn begin_turn(channel_id: ChannelId) {
-    let state = evidence();
-    let delivered_sequence = state
-        .delivered_sequence
-        .get(&channel_id)
-        .map(|sequence| *sequence)
-        .unwrap_or(0);
-    state
-        .turn_start_sequence
-        .insert(channel_id, delivered_sequence);
+pub(in crate::services::discord) fn record_confirmed_relay(key: &DeliveryLeaseKey) {
+    evidence().insert(key.clone(), true);
 }
 
-pub(super) fn record_confirmed_delivery(channel_id: ChannelId) {
-    let state = evidence();
-    let previous = state
-        .next_sequence
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |sequence| {
-            Some(sequence.saturating_add(1))
-        })
-        .unwrap_or(u64::MAX);
-    let sequence = previous.saturating_add(1);
-    state
-        .delivered_sequence
-        .entry(channel_id)
-        .and_modify(|current| *current = (*current).max(sequence))
-        .or_insert(sequence);
-}
-
-/// `None` means this process did not observe the mailbox turn start. Callers
-/// that authorize destructive recovery must treat that state as unknown.
-pub(in crate::services::discord) fn confirmed_delivery_since_turn_start(
-    channel_id: ChannelId,
+/// `None` means this process has not acquired a terminal relay lease for this
+/// exact turn. Recovery must keep that unknown state fail-closed.
+pub(in crate::services::discord) fn confirmed_relay_for_turn(
+    key: &DeliveryLeaseKey,
 ) -> Option<bool> {
-    let state = evidence();
-    let turn_start_sequence = *state.turn_start_sequence.get(&channel_id)?;
-    let delivered_sequence = state
-        .delivered_sequence
-        .get(&channel_id)
-        .map(|sequence| *sequence)
-        .unwrap_or(0);
-    Some(delivered_sequence > turn_start_sequence)
+    evidence().get(key).map(|confirmed| *confirmed)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use poise::serenity_prelude::ChannelId;
 
-    #[test]
-    fn delivery_evidence_is_unknown_until_turn_start_then_monotonic() {
-        let channel = ChannelId::new(50_220_001);
-        assert_eq!(confirmed_delivery_since_turn_start(channel), None);
-
-        begin_turn(channel);
-        assert_eq!(confirmed_delivery_since_turn_start(channel), Some(false));
-
-        record_confirmed_delivery(channel);
-        assert_eq!(confirmed_delivery_since_turn_start(channel), Some(true));
-        record_confirmed_delivery(channel);
-        assert_eq!(confirmed_delivery_since_turn_start(channel), Some(true));
+    fn key(channel: u64, turn: u64) -> DeliveryLeaseKey {
+        DeliveryLeaseKey::new(ChannelId::new(channel), 7, turn, None, None)
     }
 
     #[test]
-    fn a_new_turn_uses_the_existing_monotonic_delivery_sequence_as_its_baseline() {
-        let channel = ChannelId::new(50_220_002);
-        record_confirmed_delivery(channel);
-        begin_turn(channel);
-        assert_eq!(confirmed_delivery_since_turn_start(channel), Some(false));
+    fn relay_evidence_is_scoped_to_the_exact_turn_key() {
+        let first = key(50_220_001, 10);
+        let second = key(50_220_001, 11);
+        assert_eq!(confirmed_relay_for_turn(&first), None);
 
-        record_confirmed_delivery(channel);
-        assert_eq!(confirmed_delivery_since_turn_start(channel), Some(true));
+        begin_relay_attempt(&first);
+        assert_eq!(confirmed_relay_for_turn(&first), Some(false));
+        assert_eq!(confirmed_relay_for_turn(&second), None);
+
+        record_confirmed_relay(&first);
+        assert_eq!(confirmed_relay_for_turn(&first), Some(true));
+        assert_eq!(confirmed_relay_for_turn(&second), None);
+    }
+
+    #[test]
+    fn a_later_attempt_cannot_erase_confirmed_relay_evidence() {
+        let turn = key(50_220_002, 20);
+        begin_relay_attempt(&turn);
+        record_confirmed_relay(&turn);
+        begin_relay_attempt(&turn);
+        assert_eq!(confirmed_relay_for_turn(&turn), Some(true));
     }
 }

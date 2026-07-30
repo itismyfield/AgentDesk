@@ -1342,6 +1342,9 @@ fn advance_watcher_confirmed_end_inner(
         tmux_session_name,
     } = target;
     let relay_coord = shared.tmux_relay_coord(channel_id);
+    relay_coord
+        .confirmed_end_recorded
+        .store(true, std::sync::atomic::Ordering::Release);
     let mut cur = relay_coord
         .confirmed_end_offset
         .load(std::sync::atomic::Ordering::Acquire);
