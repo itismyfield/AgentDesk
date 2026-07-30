@@ -248,7 +248,6 @@ pub(in crate::services::discord) fn committed_frontier_for_current_generation(
     channel_id: ChannelId,
     tmux_session_name: &str,
 ) -> Option<u64> {
-    use std::sync::atomic::Ordering::Acquire;
     let coord = shared.tmux_relay_coord(channel_id);
     // #3358 r2 review P1 (TOCTOU): the (offset, generation) pair lives in two
     // atomics — a concurrent commit between the loads could pair an OLD offset
@@ -256,9 +255,13 @@ pub(in crate::services::discord) fn committed_frontier_for_current_generation(
     // Double-read fence: the generation stamp must agree on both sides of the
     // offset load; a mid-transition mismatch returns None (no clamp — the
     // content-skip-safe direction, same tradeoff as the stale-generation path).
-    let generation_before = coord.confirmed_end_generation_mtime_ns.load(Acquire);
-    let committed_offset = coord.confirmed_end_offset.load(Acquire);
-    let generation_after = coord.confirmed_end_generation_mtime_ns.load(Acquire);
+    let generation_before = coord
+        .confirmed_end_generation_mtime_ns
+        .load(std::sync::atomic::Ordering::Acquire);
+    let committed_offset = coord.confirmed_end_or_zero();
+    let generation_after = coord
+        .confirmed_end_generation_mtime_ns
+        .load(std::sync::atomic::Ordering::Acquire);
     if generation_before != generation_after {
         return None;
     }
@@ -301,9 +304,9 @@ pub(in crate::services::discord) fn reset_relay_watermark_on_generation_change(
     if !different_wrapper {
         return false;
     }
-    let watermark = relay_coord
-        .confirmed_end_offset
-        .load(std::sync::atomic::Ordering::Acquire);
+    let Some(watermark) = relay_coord.confirmed_end_publication() else {
+        return false;
+    };
     if watermark == 0 {
         return false;
     }
@@ -334,9 +337,9 @@ pub(in crate::services::discord) fn reset_stale_relay_watermark_if_output_regres
     context: &str,
 ) -> bool {
     let relay_coord = shared.tmux_relay_coord(channel_id);
-    let mut confirmed = relay_coord
-        .confirmed_end_offset
-        .load(std::sync::atomic::Ordering::Acquire);
+    let Some(mut confirmed) = relay_coord.confirmed_end_publication() else {
+        return false;
+    };
 
     while confirmed != 0 && observed_output_end < confirmed {
         let stored_gen_mtime_ns = relay_coord
@@ -369,9 +372,9 @@ pub(in crate::services::discord) fn reset_stale_relay_watermark_if_output_regres
             );
             return true;
         }
-        let observed = relay_coord
-            .confirmed_end_offset
-            .load(std::sync::atomic::Ordering::Acquire);
+        let Some(observed) = relay_coord.confirmed_end_publication() else {
+            return false;
+        };
         if observed == confirmed {
             // An admitted frontier mutation currently owns this incarnation.
             // Yield this tick rather than spin on the async executor thread;
@@ -548,6 +551,29 @@ pub(super) async fn sweep_orphan_session_files() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_coord_output_regression_probe_is_a_noop() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(50_220_005);
+        let coord = shared.tmux_relay_coord(channel);
+        assert_eq!(coord.confirmed_end_publication(), None);
+
+        assert!(!reset_stale_relay_watermark_if_output_regressed(
+            &shared,
+            channel,
+            "AgentDesk-codex-fresh-coord",
+            128,
+            "fresh-first-tick",
+        ));
+
+        assert_eq!(
+            coord.confirmed_end_publication(),
+            None,
+            "a fresh watcher tick must not manufacture a recorded-zero frontier"
+        );
+        assert_eq!(coord.frontier_token().reset_incarnation, 0);
+    }
 
     // #3358 round 2 — Finding 1 guard at the pure-decision level.
     #[test]

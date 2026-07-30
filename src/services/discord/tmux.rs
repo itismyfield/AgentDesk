@@ -1342,38 +1342,7 @@ fn advance_watcher_confirmed_end_inner(
         tmux_session_name,
     } = target;
     let relay_coord = shared.tmux_relay_coord(channel_id);
-    let mut cur = relay_coord
-        .confirmed_end_offset
-        .load(std::sync::atomic::Ordering::Acquire);
-    let mut won_advance = false;
-    if cur == super::UNRECORDED_RELAY_OFFSET {
-        cur = match relay_coord.confirmed_end_offset.compare_exchange(
-            super::UNRECORDED_RELAY_OFFSET,
-            committed_end_offset,
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire,
-        ) {
-            Ok(_) => {
-                won_advance = true;
-                committed_end_offset
-            }
-            Err(observed) => observed,
-        };
-    }
-    while cur < committed_end_offset {
-        match relay_coord.confirmed_end_offset.compare_exchange(
-            cur,
-            committed_end_offset,
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire,
-        ) {
-            Ok(_) => {
-                won_advance = true;
-                break;
-            }
-            Err(observed) => cur = observed,
-        }
-    }
+    let won_advance = relay_coord.advance_confirmed_end(committed_end_offset);
     // Pair the pre-CAS mtime with the offset only on a real advance. If
     // the loop exits because the stored watermark is already at/past
     // `committed_end_offset` (the stale-high watermark from an older
@@ -1386,9 +1355,7 @@ fn advance_watcher_confirmed_end_inner(
             .confirmed_end_generation_mtime_ns
             .store(mtime, std::sync::atomic::Ordering::Release);
     }
-    let confirmed_end = relay_coord
-        .confirmed_end_offset
-        .load(std::sync::atomic::Ordering::Acquire);
+    let confirmed_end = relay_coord.confirmed_end_or_zero();
     let confirmed_reached_current = confirmed_end >= committed_end_offset;
     record_watcher_invariant(
         confirmed_reached_current,
@@ -1611,7 +1578,7 @@ fn watcher_stop_decision_after_terminal_finalize(
     dispatch_ok: bool,
     watcher_handled_mailbox_finish: bool,
     tmux_alive: bool,
-    confirmed_end: u64,
+    confirmed_end: Option<u64>,
     tmux_tail_offset: u64,
     idle_duration: Option<std::time::Duration>,
 ) -> WatcherStopDecision {
@@ -1657,7 +1624,7 @@ mod terminal_finalize_liveness_tests {
                 true,
                 true,
                 true,
-                4096,
+                Some(4096),
                 4096,
                 Some(WATCHER_POST_TERMINAL_IDLE_WINDOW),
             ),
@@ -1666,14 +1633,28 @@ mod terminal_finalize_liveness_tests {
         );
 
         assert_eq!(
-            watcher_stop_decision_after_terminal_finalize(true, true, true, true, 2048, 4096, None,),
+            watcher_stop_decision_after_terminal_finalize(
+                true,
+                true,
+                true,
+                true,
+                Some(2048),
+                4096,
+                None,
+            ),
             WatcherStopDecision::PostTerminalSuccessContinuation,
             "terminal finalization with live tmux and unread tail bytes must stay attached"
         );
 
         assert_eq!(
             watcher_stop_decision_after_terminal_finalize(
-                true, true, true, false, 4096, 4096, None,
+                true,
+                true,
+                true,
+                false,
+                Some(4096),
+                4096,
+                None,
             ),
             WatcherStopDecision::Stop,
             "terminal finalization may stop only after tmux liveness is gone"
@@ -1681,7 +1662,13 @@ mod terminal_finalize_liveness_tests {
 
         assert_eq!(
             watcher_stop_decision_after_terminal_finalize(
-                false, true, true, false, 4096, 4096, None,
+                false,
+                true,
+                true,
+                false,
+                Some(4096),
+                4096,
+                None,
             ),
             WatcherStopDecision::Continue,
             "non-committed terminal output is not a stop candidate even if liveness is gone"

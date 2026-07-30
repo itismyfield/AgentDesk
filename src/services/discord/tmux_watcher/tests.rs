@@ -4502,7 +4502,7 @@ mod watcher_short_replace_controller {
             coord
                 .confirmed_end_generation_mtime_ns
                 .store(generation, Ordering::Release);
-            coord.confirmed_end_offset.store(START, Ordering::Release);
+            coord.publish_confirmed_end_for_test(START);
 
             let reset_shared = Arc::clone(&shared);
             let mut gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, true);
@@ -4535,7 +4535,7 @@ mod watcher_short_replace_controller {
                 WatcherShortReplaceResult::LandedStale
             );
             assert_eq!(
-                coord.confirmed_end_offset.load(Ordering::Acquire),
+                coord.confirmed_end_or_zero(),
                 0,
                 "the stale POST must not advance the replacement incarnation"
             );
@@ -4583,7 +4583,7 @@ mod watcher_short_replace_controller {
             coord
                 .confirmed_end_generation_mtime_ns
                 .store(generation_a, Ordering::Release);
-            coord.confirmed_end_offset.store(START, Ordering::Release);
+            coord.publish_confirmed_end_for_test(START);
 
             let reset_shared = Arc::clone(&shared);
             let mut gw = long_gateway(true, true);
@@ -4617,7 +4617,7 @@ mod watcher_short_replace_controller {
                 super::super::terminal_long_chunks::WatcherLongChunksResult::LandedStale
             ));
             assert_eq!(
-                coord.confirmed_end_offset.load(Ordering::Acquire),
+                coord.confirmed_end_or_zero(),
                 0,
                 "the stale long POST must not advance the replacement incarnation"
             );

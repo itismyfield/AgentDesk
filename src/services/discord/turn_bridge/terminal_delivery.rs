@@ -384,39 +384,7 @@ pub(super) fn advance_tmux_relay_confirmed_end(
         .map(tmux_generation_file_mtime_ns)
         .filter(|m| *m != 0);
 
-    let mut current = relay_coord
-        .confirmed_end_offset
-        .load(std::sync::atomic::Ordering::Acquire);
-    let mut won_advance = false;
-    if current == super::super::UNRECORDED_RELAY_OFFSET {
-        current = match relay_coord.confirmed_end_offset.compare_exchange(
-            super::super::UNRECORDED_RELAY_OFFSET,
-            target_end,
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire,
-        ) {
-            Ok(_) => {
-                won_advance = true;
-                target_end
-            }
-            Err(observed) => observed,
-        };
-    }
-
-    while current < target_end {
-        match relay_coord.confirmed_end_offset.compare_exchange(
-            current,
-            target_end,
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire,
-        ) {
-            Ok(_) => {
-                won_advance = true;
-                break;
-            }
-            Err(observed) => current = observed,
-        }
-    }
+    let won_advance = relay_coord.advance_confirmed_end(target_end);
 
     // #964: observability timestamp — updated through the same relay-progress
     // heartbeat used by confirmed chunk sends. Regression recovery may benignly
@@ -434,9 +402,7 @@ pub(super) fn advance_tmux_relay_confirmed_end(
             .store(mtime, std::sync::atomic::Ordering::Release);
     }
 
-    let confirmed_end = relay_coord
-        .confirmed_end_offset
-        .load(std::sync::atomic::Ordering::Acquire);
+    let confirmed_end = relay_coord.confirmed_end_or_zero();
     let confirmed_reached_target = confirmed_end >= target_end;
     crate::services::observability::record_invariant_check(
         confirmed_reached_target,

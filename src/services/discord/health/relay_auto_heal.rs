@@ -1035,8 +1035,7 @@ mod tests {
         ));
         shared
             .tmux_relay_coord(channel_id)
-            .confirmed_end_offset
-            .store(256, Ordering::Release);
+            .publish_confirmed_end_for_test(256);
 
         assert!(!nudge_existing_watcher_for_backlog(
             &shared,
@@ -1080,7 +1079,7 @@ mod tests {
         );
         let snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 100, 301_613);
         let coord = shared.tmux_relay_coord(channel_id);
-        coord.confirmed_end_offset.store(100, Ordering::Release);
+        coord.publish_confirmed_end_for_test(100);
         let high_token = shared.relay_frontier_token(channel_id);
 
         assert!(coord.reset_confirmed_frontier(100, 0));
@@ -1126,8 +1125,7 @@ mod tests {
         let snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 128, capture_offset);
         shared
             .tmux_relay_coord(channel_id)
-            .confirmed_end_offset
-            .store(snapshot.last_relay_offset, Ordering::Release);
+            .publish_confirmed_end_for_test(snapshot.last_relay_offset);
         // Prime the stall observation, then mark a relay emission in-flight
         // (non-zero `relay_slot`) while the committed frontier stays frozen.
         assert!(!nudge_existing_watcher_for_backlog(
@@ -1366,8 +1364,7 @@ mod tests {
         );
         shared
             .tmux_relay_coord(channel_id)
-            .confirmed_end_offset
-            .store(128, Ordering::Release);
+            .publish_confirmed_end_for_test(128);
         let mut snapshot = backlog_snapshot(channel_id, tmux_session, &output_path, 128, 301_613);
         let started_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         snapshot.inflight_started_at = Some(started_at.clone());
@@ -1501,8 +1498,7 @@ mod tests {
         let snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 128, 301_613);
         shared
             .tmux_relay_coord(channel_id)
-            .confirmed_end_offset
-            .store(snapshot.last_relay_offset, Ordering::Release);
+            .publish_confirmed_end_for_test(snapshot.last_relay_offset);
         let base = 1_800_000_000;
         assert_eq!(
             gated_nudge(
@@ -1623,9 +1619,7 @@ mod tests {
         let tmux_session = "AgentDesk-codex-4181-reset-cap";
         let snapshot = backlog_snapshot(channel_id, tmux_session, "/tmp/4181.jsonl", 128, 256);
         let coord = shared.tmux_relay_coord(channel_id);
-        coord
-            .confirmed_end_offset
-            .store(snapshot.last_relay_offset, Ordering::Release);
+        coord.publish_confirmed_end_for_test(snapshot.last_relay_offset);
         let base = 1_800_000_000;
         drive_attempt_state_to_cap(&shared, &provider, channel_id, &snapshot, base);
         assert!(
@@ -1660,9 +1654,7 @@ mod tests {
         let snapshot =
             backlog_snapshot(channel_id, tmux_session, "/tmp/4181-shield.jsonl", 128, 256);
         let coord = shared.tmux_relay_coord(channel_id);
-        coord
-            .confirmed_end_offset
-            .store(snapshot.last_relay_offset, Ordering::Release);
+        coord.publish_confirmed_end_for_test(snapshot.last_relay_offset);
         let key = shared.redrive_key(&provider, channel_id);
         REDRIVE_PLACEHOLDER_SHIELDS.insert(
             key,
@@ -2092,8 +2084,7 @@ mod tests {
         let mut snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 128, 301_613);
         shared
             .tmux_relay_coord(channel_id)
-            .confirmed_end_offset
-            .store(snapshot.last_relay_offset, Ordering::Release);
+            .publish_confirmed_end_for_test(snapshot.last_relay_offset);
         snapshot.watcher_owner_channel_id = Some(owner_channel_id.get());
         snapshot.relay_health.watcher_owner_channel_id = Some(owner_channel_id.get());
         let stale_snapshot_owner = ChannelId::new(4_299_007);
@@ -2175,8 +2166,7 @@ mod tests {
 
         shared
             .tmux_relay_coord(owner_channel_id)
-            .confirmed_end_offset
-            .store(64, Ordering::Release);
+            .publish_confirmed_end_for_test(64);
         let second_owner = synthetic_rebind_state(
             &provider,
             owner_channel_id,

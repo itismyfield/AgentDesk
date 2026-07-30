@@ -1,4 +1,4 @@
-use std::sync::{Arc, atomic::Ordering};
+use std::sync::Arc;
 
 use poise::serenity_prelude::ChannelId;
 
@@ -6,8 +6,8 @@ use super::super::{SharedData, TmuxRelayCoord};
 
 #[derive(Default)]
 pub(in crate::services::discord) struct FrontierResetState {
-    incarnation: u64,
-    active_mutations: usize,
+    pub(in crate::services::discord) incarnation: u64,
+    pub(in crate::services::discord) active_mutations: usize,
 }
 
 pub(in crate::services::discord) struct RelayFrontierMutationGuard {
@@ -58,7 +58,7 @@ impl SharedData {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if state.incarnation != token.reset_incarnation
-            || coord.confirmed_end_offset.load(Ordering::Acquire) != token.committed_offset
+            || coord.confirmed_end_or_zero() != token.committed_offset
         {
             return None;
         }
@@ -105,36 +105,8 @@ impl TmuxRelayCoord {
             .incarnation;
         RelayFrontierToken {
             reset_incarnation,
-            committed_offset: self.confirmed_end_offset.load(Ordering::Acquire),
+            committed_offset: self.confirmed_end_or_zero(),
         }
-    }
-
-    pub(in crate::services::discord) fn reset_confirmed_frontier(
-        &self,
-        expected_offset: u64,
-        new_offset: u64,
-    ) -> bool {
-        debug_assert!(new_offset < expected_offset);
-        let mut state = self
-            .reset_state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if state.active_mutations != 0 {
-            return false;
-        }
-        let reset = self
-            .confirmed_end_offset
-            .compare_exchange(
-                expected_offset,
-                new_offset,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok();
-        if reset {
-            state.incarnation = state.incarnation.wrapping_add(1);
-        }
-        reset
     }
 }
 
@@ -145,7 +117,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn reset_yields_to_pending_mutation_on_same_thread_without_deadlock() {
         let coord = Arc::new(TmuxRelayCoord::new(ChannelId::new(4_182)));
-        coord.confirmed_end_offset.store(100, Ordering::Release);
+        coord.publish_confirmed_end_for_test(100);
         let mut state = coord
             .reset_state
             .lock()
@@ -161,7 +133,7 @@ mod tests {
         })
         .await
         .expect("reset must not block the executor needed to release the mutation");
-        assert_eq!(coord.confirmed_end_offset.load(Ordering::Acquire), 100);
+        assert_eq!(coord.confirmed_end_publication(), Some(100));
         drop(guard);
         tokio::task::yield_now().await;
         assert!(coord.reset_confirmed_frontier(100, 40));
@@ -170,7 +142,7 @@ mod tests {
     #[test]
     fn reset_frontier_publishes_a_new_incarnation_token() {
         let coord = TmuxRelayCoord::new(ChannelId::new(4_181));
-        coord.confirmed_end_offset.store(100, Ordering::Release);
+        coord.publish_confirmed_end_for_test(100);
         let high = coord.frontier_token();
         assert!(coord.reset_confirmed_frontier(100, 40));
         let low = coord.frontier_token();

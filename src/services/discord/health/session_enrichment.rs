@@ -269,13 +269,7 @@ fn published_relay_frontier(
     coord: Option<&crate::services::discord::TmuxRelayCoord>,
 ) -> (bool, u64) {
     coord
-        .and_then(|coord| {
-            crate::services::discord::published_relay_offset(
-                coord
-                    .confirmed_end_offset
-                    .load(std::sync::atomic::Ordering::Acquire),
-            )
-        })
+        .and_then(crate::services::discord::TmuxRelayCoord::confirmed_end_publication)
         .map_or((false, 0), |offset| (true, offset))
 }
 
@@ -319,9 +313,7 @@ mod tests {
         assert_eq!(published_relay_frontier(Some(&coord)), (false, 0));
         assert_eq!(shared.committed_relay_offset_publication(channel), None);
 
-        coord
-            .confirmed_end_offset
-            .store(128, std::sync::atomic::Ordering::Release);
+        coord.publish_confirmed_end_for_test(128);
         assert_eq!(published_relay_frontier(Some(&coord)), (true, 128));
         assert_eq!(
             shared.committed_relay_offset_publication(channel),

@@ -628,9 +628,7 @@ mod tests {
                 "generation marker mtime is observable"
             );
             let coord = shared.tmux_relay_coord(channel);
-            coord
-                .confirmed_end_offset
-                .store(4096, std::sync::atomic::Ordering::Release);
+            coord.publish_confirmed_end_for_test(4096);
             coord.confirmed_end_generation_mtime_ns.store(
                 current_generation.saturating_sub(1),
                 std::sync::atomic::Ordering::Release,
@@ -696,9 +694,7 @@ mod tests {
                 "generation marker mtime is observable"
             );
             let coord = shared.tmux_relay_coord(channel);
-            coord
-                .confirmed_end_offset
-                .store(4096, std::sync::atomic::Ordering::Release);
+            coord.publish_confirmed_end_for_test(4096);
             coord
                 .confirmed_end_generation_mtime_ns
                 .store(current_generation, std::sync::atomic::Ordering::Release);

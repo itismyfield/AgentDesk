@@ -34,9 +34,9 @@ pub(crate) struct WatcherStopInput {
     /// Tmux pane liveness — `crate::services::platform::tmux::has_session`
     /// (or the watcher's wrapper `tmux_session_has_live_pane`).
     pub(crate) tmux_alive: bool,
-    /// Shared `confirmed_end_offset` watermark across all watcher replicas
-    /// for this channel.
-    pub(crate) confirmed_end: u64,
+    /// Published shared `confirmed_end_offset` watermark across all watcher
+    /// replicas for this channel. `None` means no writer has published yet.
+    pub(crate) confirmed_end: Option<u64>,
     /// Current tmux jsonl tail offset (`std::fs::metadata(output).len()`).
     pub(crate) tmux_tail_offset: u64,
     /// Time since the last new-output observation. `None` means we have not
@@ -84,7 +84,9 @@ pub(crate) fn watcher_stop_decision_after_terminal_success(
         return WatcherStopDecision::Continue;
     }
 
-    let confirmed_caught_up = input.confirmed_end >= input.tmux_tail_offset;
+    let confirmed_caught_up = input
+        .confirmed_end
+        .is_some_and(|confirmed| confirmed >= input.tmux_tail_offset);
     if !confirmed_caught_up {
         return WatcherStopDecision::PostTerminalSuccessContinuation;
     }
@@ -218,7 +220,7 @@ mod tests {
         WatcherStopInput {
             terminal_success_seen: true,
             tmux_alive: true,
-            confirmed_end: 100,
+            confirmed_end: Some(100),
             tmux_tail_offset: 100,
             idle_duration: Some(WATCHER_POST_TERMINAL_IDLE_WINDOW),
             idle_threshold: WATCHER_POST_TERMINAL_IDLE_WINDOW,
@@ -237,6 +239,19 @@ mod tests {
                 ..stop_input()
             }),
             WatcherStopDecision::Stop
+        );
+    }
+
+    #[test]
+    fn unpublished_frontier_preserves_continuation_signal() {
+        assert_eq!(
+            watcher_stop_decision_after_terminal_success(WatcherStopInput {
+                confirmed_end: None,
+                idle_duration: Some(WATCHER_POST_TERMINAL_IDLE_WINDOW),
+                ..stop_input()
+            }),
+            WatcherStopDecision::PostTerminalSuccessContinuation,
+            "a fresh coordination cell must not masquerade as a caught-up maximum offset"
         );
     }
 

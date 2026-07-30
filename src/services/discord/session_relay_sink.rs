@@ -2155,7 +2155,7 @@ mod tests {
 
         // The watcher (primary) commits the relay at 128, exactly as
         // `advance_watcher_confirmed_end` does after a confirmed delivery.
-        coord.confirmed_end_offset.store(128, Ordering::Release);
+        coord.publish_confirmed_end_for_test(128);
         assert_eq!(shared.committed_relay_offset(channel), 128);
 
         // (2) The OTHER actor (idle relay, or a re-observing watcher) now sees
@@ -2173,7 +2173,7 @@ mod tests {
             !already_relayed(shared.committed_relay_offset(channel), 256),
             "a new wake output past the committed offset must be relayed (not suppressed)"
         );
-        coord.confirmed_end_offset.store(256, Ordering::Release);
+        coord.publish_confirmed_end_for_test(256);
         assert!(
             already_relayed(shared.committed_relay_offset(channel), 256),
             "after it is committed the new range must not be relayed twice"
@@ -3617,7 +3617,7 @@ mod tests {
 
         let shared = super::super::make_shared_data_for_tests();
         let coord = shared.tmux_relay_coord(channel);
-        coord.confirmed_end_offset.store(300, Ordering::Release);
+        coord.publish_confirmed_end_for_test(300);
         coord
             .confirmed_end_generation_mtime_ns
             .store(generation, Ordering::Release);
@@ -3697,7 +3697,7 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(outcome, SessionRelayDeliveryOutcome::LandedStale);
-        assert_eq!(coord.confirmed_end_offset.load(Ordering::Acquire), 17);
+        assert_eq!(coord.confirmed_end_or_zero(), 17);
         let record = dr::read_record(&provider, channel.get()).unwrap();
         assert_eq!(record.delivered_frontier.unwrap().range, (0, 17));
         assert_eq!(record.recent_delivered_contents.len(), 1);
@@ -3772,7 +3772,7 @@ mod tests {
                 super::super::inflight::save_inflight_state(&matching).unwrap();
                 let shared = super::super::make_shared_data_for_tests();
                 let coord = shared.tmux_relay_coord(channel);
-                coord.confirmed_end_offset.store(300, Ordering::Release);
+                coord.publish_confirmed_end_for_test(300);
                 coord
                     .confirmed_end_generation_mtime_ns
                     .store(generation, Ordering::Release);
@@ -3843,7 +3843,7 @@ mod tests {
                     delivery_frontier::SinkDeliveryProofResult::LandedStale
                 );
                 drop(lease_guard);
-                assert_eq!(coord.confirmed_end_offset.load(Ordering::Acquire), 17);
+                assert_eq!(coord.confirmed_end_or_zero(), 17);
                 let record = dr::read_record(&provider, channel.get()).unwrap();
                 assert_eq!(record.delivered_frontier.unwrap().range, (0, 17));
                 assert_eq!(record.recent_delivered_contents.len(), 1);

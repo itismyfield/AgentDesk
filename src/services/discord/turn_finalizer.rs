@@ -4189,8 +4189,7 @@ mod tests {
             super::super::inflight::save_inflight_state(&state).unwrap();
             shared
                 .tmux_relay_coord(ch)
-                .confirmed_end_offset
-                .store(64, Ordering::Release);
+                .publish_confirmed_end_for_test(64);
 
             assert!(
                 !watcher_backstop_turn_is_terminal(&shared, ch, &ProviderKind::Claude, false),
@@ -4202,8 +4201,7 @@ mod tests {
             );
             shared
                 .tmux_relay_coord(ch)
-                .confirmed_end_offset
-                .store(128, Ordering::Release);
+                .publish_confirmed_end_for_test(128);
             assert!(
                 watcher_backstop_turn_is_terminal(&shared, ch, &ProviderKind::Claude, false),
                 "strict fast-path Done may finalize once delivery is confirmed"
@@ -4263,8 +4261,7 @@ mod tests {
             super::super::inflight::save_inflight_state(&state).unwrap();
             shared
                 .tmux_relay_coord(ch)
-                .confirmed_end_offset
-                .store(64, Ordering::Release);
+                .publish_confirmed_end_for_test(64);
 
             let fin = TurnFinalizer::spawn();
             let k = TurnKey::new(ch, 180, 0);
@@ -4280,8 +4277,7 @@ mod tests {
 
             shared
                 .tmux_relay_coord(ch)
-                .confirmed_end_offset
-                .store(192, Ordering::Release);
+                .publish_confirmed_end_for_test(192);
             tokio::time::sleep(FAST_PATH_WINDOW).await;
             tokio::task::yield_now().await;
             assert_eq!(
@@ -4369,8 +4365,7 @@ mod tests {
             );
             shared
                 .tmux_relay_coord(ch)
-                .confirmed_end_offset
-                .store(64, Ordering::Release);
+                .publish_confirmed_end_for_test(64);
 
             assert!(
                 !watcher_backstop_turn_is_terminal(&shared, ch, &ProviderKind::Claude, false),
@@ -4378,8 +4373,7 @@ mod tests {
             );
             shared
                 .tmux_relay_coord(ch)
-                .confirmed_end_offset
-                .store(160, Ordering::Release);
+                .publish_confirmed_end_for_test(160);
             assert!(
                 watcher_backstop_turn_is_terminal(&shared, ch, &ProviderKind::Claude, false),
                 "strict Done may finalize once confirmation reaches the matching lease end"

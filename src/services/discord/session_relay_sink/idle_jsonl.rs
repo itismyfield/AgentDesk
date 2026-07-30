@@ -543,8 +543,7 @@ mod tests {
 
         shared
             .tmux_relay_coord(channel)
-            .confirmed_end_offset
-            .store(end, Ordering::Release);
+            .publish_confirmed_end_for_test(end);
         let committed =
             crate::services::discord::outbound::delivery_record::effective_committed_offset(
                 shared.as_ref(),

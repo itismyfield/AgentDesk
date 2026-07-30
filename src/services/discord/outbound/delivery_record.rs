@@ -2061,7 +2061,7 @@ fn shadow_mirror_delivered_frontier_inner(
         );
         return false;
     }
-    let in_memory_confirmed_end = coord.confirmed_end_offset.load(Ordering::Acquire);
+    let in_memory_confirmed_end = coord.confirmed_end_or_zero();
     let delivery_channel_id = terminal_anchor_channel_id.unwrap_or(channel_id);
     let delivery_channel = ChannelId::new(delivery_channel_id);
     // Capture the delivered turn's nonce/session from its DELIVERY-channel row,
@@ -3680,7 +3680,7 @@ mod tests {
 
         let shared = crate::services::discord::make_shared_data_for_tests();
         let coord = shared.tmux_relay_coord(owner);
-        coord.confirmed_end_offset.store(200, Ordering::Release);
+        coord.publish_confirmed_end_for_test(200);
         coord
             .confirmed_end_generation_mtime_ns
             .store(generation, Ordering::Release);
@@ -3800,7 +3800,7 @@ mod tests {
             .expect("persist receipt-less delivery incarnation");
         let shared = crate::services::discord::make_shared_data_for_tests();
         let coord = shared.tmux_relay_coord(owner);
-        coord.confirmed_end_offset.store(300, Ordering::Release);
+        coord.publish_confirmed_end_for_test(300);
         coord
             .confirmed_end_generation_mtime_ns
             .store(generation, Ordering::Release);
@@ -3854,7 +3854,7 @@ mod tests {
         let generation = set_phase_a_generation(tmux, 1_700_491_601);
         let shared = crate::services::discord::make_shared_data_for_tests();
         let coord = shared.tmux_relay_coord(owner);
-        coord.confirmed_end_offset.store(240, Ordering::Release);
+        coord.publish_confirmed_end_for_test(240);
         coord
             .confirmed_end_generation_mtime_ns
             .store(generation, Ordering::Release);
@@ -3900,7 +3900,7 @@ mod tests {
         let stale_generation = set_phase_a_generation(tmux, 1_700_491_611);
         let shared = crate::services::discord::make_shared_data_for_tests();
         let coord = shared.tmux_relay_coord(owner);
-        coord.confirmed_end_offset.store(200, Ordering::Release);
+        coord.publish_confirmed_end_for_test(200);
         coord
             .confirmed_end_generation_mtime_ns
             .store(stale_generation, Ordering::Release);
@@ -4530,7 +4530,7 @@ mod tests {
         coord
             .confirmed_end_generation_mtime_ns
             .store(generation_mtime_ns, Ordering::Release);
-        coord.confirmed_end_offset.store(128, Ordering::Release);
+        coord.publish_confirmed_end_for_test(128);
 
         // Y's answered turn commits terminally while reusing X's session.
         shadow_mirror_delivered_frontier(
@@ -4734,8 +4734,7 @@ mod tests {
         let shared = crate::services::discord::make_shared_data_for_tests();
         shared
             .tmux_relay_coord(channel)
-            .confirmed_end_offset
-            .store(in_memory, Ordering::Release);
+            .publish_confirmed_end_for_test(in_memory);
         shared
     }
 

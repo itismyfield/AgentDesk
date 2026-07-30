@@ -2789,8 +2789,7 @@ mod tests {
             .expect("write ready output");
             shared
                 .tmux_relay_coord(channel)
-                .confirmed_end_offset
-                .store(64, std::sync::atomic::Ordering::Release);
+                .publish_confirmed_end_for_test(64);
             let token = Arc::new(crate::services::provider::CancelToken::new());
             assert!(
                 super::super::mailbox_try_start_turn(

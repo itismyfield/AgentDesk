@@ -794,9 +794,7 @@ mod tests {
 
         let shared = crate::services::discord::make_shared_data_for_tests();
         let coord = shared.tmux_relay_coord(channel);
-        coord
-            .confirmed_end_offset
-            .store(13_400_000, Ordering::Release);
+        coord.publish_confirmed_end_for_test(13_400_000);
         coord
             .confirmed_end_generation_mtime_ns
             .store(current_generation.saturating_sub(1), Ordering::Release);

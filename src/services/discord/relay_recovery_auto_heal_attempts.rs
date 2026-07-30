@@ -195,9 +195,14 @@ pub(super) fn max_attempts_per_window_for_snapshot(
     snapshot: &RelayHealthSnapshot,
     action: RelayRecoveryActionKind,
 ) -> u32 {
+    // Exact NotDelivered and post-restart unobserved dead-frontier shapes share
+    // the same non-destructive reattach budget: at most two attempts per ten
+    // minutes in the shared probe/watchdog lane. The relaxed predicate therefore
+    // cannot consume retries faster than the original dead-frontier recovery.
     if action == RelayRecoveryActionKind::ReattachWatcher
         && is_agentdesk_tmux_session(snapshot.tmux_session.as_deref())
-        && snapshot.relay_frontier_never_advanced_with_unread_tail()
+        && (snapshot.relay_frontier_never_advanced_with_unread_tail()
+            || snapshot.relay_frontier_unobserved_with_unread_tail())
     {
         return AUTO_HEAL_DEAD_FRONTIER_REATTACH_MAX_ATTEMPTS_PER_WINDOW;
     }

@@ -135,6 +135,7 @@ mod tmux_lifecycle;
 mod tmux_overload_retry;
 #[cfg(unix)]
 mod tmux_reaper;
+mod tmux_relay_coord;
 #[cfg(unix)]
 mod tmux_restart_handoff;
 mod tui_direct_abort_marker;
@@ -160,6 +161,7 @@ pub(crate) use meeting_orchestrator as meeting;
 pub(in crate::services::discord) use {
     delivery_lease_key::DeliveryLeaseKey,
     relay_health::{RelayFrontierMutationGuard, RelayFrontierToken},
+    tmux_relay_coord::TmuxRelayCoord,
 };
 // #3479 item-2: re-export the catch-up subsystem entry points referenced
 // outside the extracted cluster (`maybe_schedule_catch_up_retry_after_queue_drain`
@@ -1570,95 +1572,10 @@ mod tmux_watcher_registry_restore_tests {
     }
 }
 
-/// Per-channel coordination for watcher-to-Discord relay emission.
-///
-/// Shared across watcher-handle replacements, this serializes overlapping
-/// outgoing/successor relay emission and exposes the confirmed-output watermark.
-/// Scope: intra-process only; restart-persistent dedupe remains in
-/// `InflightTurnState::last_watcher_relayed_offset`.
 pub(super) const UNRECORDED_RELAY_OFFSET: u64 = u64::MAX;
 
-pub(super) fn published_relay_offset(raw_offset: u64) -> Option<u64> {
+fn published_relay_offset(raw_offset: u64) -> Option<u64> {
     (raw_offset != UNRECORDED_RELAY_OFFSET).then_some(raw_offset)
-}
-
-pub(super) struct TmuxRelayCoord {
-    /// Non-zero while some watcher instance is actively emitting a relay for
-    /// this channel. Holds the `data_start_offset` of the in-progress emission.
-    /// Acquired via `compare_exchange(0, offset)` — only one watcher can
-    /// hold the slot, so concurrent attempts from outgoing+incoming watchers
-    /// serialize rather than double-fire.
-    pub(super) relay_slot: Arc<std::sync::atomic::AtomicU64>,
-    /// End offset (exclusive) of the last relay this process has confirmed
-    /// delivery for. `UNRECORDED_RELAY_OFFSET` means no frontier writer has
-    /// published yet; 0 is an intentionally published zero frontier.
-    ///
-    /// #3017: this is the single output-offset authority for the relay-dedup
-    /// paths (read via `SharedData::committed_relay_offset`, advanced by the
-    /// watcher's `advance_watcher_confirmed_end`). For an inflight-less wake /
-    /// idle-background / monitor-auto-turn turn, the secondary relay actors
-    /// (idle-JSONL relay, session-bound sink) CONSULT this watermark so a
-    /// byte-range the watcher already committed is relayed exactly once
-    /// regardless of which actor observes it first (the E-13 dedup invariant).
-    /// For a normal Discord-origin turn (inflight present) the watcher remains
-    /// sole relay owner; only no-inflight wake/idle paths gate on this watermark.
-    pub(super) confirmed_end_offset: Arc<std::sync::atomic::AtomicU64>,
-    pub(in crate::services::discord) reset_state:
-        std::sync::Mutex<relay_health::FrontierResetState>,
-    /// Wall-clock timestamp (ms since epoch) of the most recent confirmed
-    /// relay. 0 = no confirmed relay observed yet. Read by the
-    /// `watcher-state` observability endpoint (#964). Monotonic is NOT
-    /// required — this is a telemetry field only.
-    pub(super) last_relay_ts_ms: Arc<std::sync::atomic::AtomicI64>,
-    /// Number of watcher reattach/reconnect spawns observed for this channel
-    /// in the current dcserver process. Exposed through watcher-state (#964).
-    pub(super) reconnect_count: Arc<std::sync::atomic::AtomicU64>,
-    /// `.generation` marker file mtime (nanos since epoch) snapshotted the
-    /// last time `confirmed_end_offset` was advanced. 0 = never observed.
-    ///
-    /// `reset_stale_relay_watermark_if_output_regressed` (#1270) uses this
-    /// to distinguish two output-regression scenarios that look identical
-    /// at the byte level:
-    ///   - Mid-flight rotation (`truncate_jsonl_head_safe` rename — same
-    ///     wrapper, same `.generation` mtime): pin watermark to current
-    ///     EOF so we don't re-relay surviving content (PR #1256 intent).
-    ///   - Cancel→respawn (`cleanup_session_temp_files` deletes
-    ///     `.generation`, claude.rs writes a fresh one — new wrapper, new
-    ///     mtime): reset watermark to 0 so the genuinely-new response is
-    ///     relayed.
-    ///
-    /// `.generation` is the stable wrapper-identity signal because it's
-    /// written once per spawn and never touched by the live wrapper, so its
-    /// mtime survives jsonl rotation but flips on a fresh spawn.
-    pub(super) confirmed_end_generation_mtime_ns: Arc<std::sync::atomic::AtomicI64>,
-    /// #3041 P1-1: the LIVE per-channel delivery lease. Added ALONGSIDE
-    /// `relay_slot` (which is NOT removed yet — its guard migration is a later
-    /// step). The watcher acquires this before delivering the terminal response
-    /// and commits it after; the commit is what advances `confirmed_end_offset`
-    /// (replacing the watcher's inline advance). Shared via `Arc` across all
-    /// watcher instances for the channel so a replacement watcher observes a
-    /// live holder's lease and skips the duplicate send (the §5.2 B2 invariant).
-    pub(in crate::services::discord) delivery_lease: Arc<DeliveryLeaseCell>,
-}
-
-impl TmuxRelayCoord {
-    pub(super) fn new(channel_id: ChannelId) -> Self {
-        Self {
-            relay_slot: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            confirmed_end_offset: Arc::new(std::sync::atomic::AtomicU64::new(
-                UNRECORDED_RELAY_OFFSET,
-            )),
-            reset_state: std::sync::Mutex::new(relay_health::FrontierResetState::default()),
-            last_relay_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),
-            reconnect_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            confirmed_end_generation_mtime_ns: Arc::new(std::sync::atomic::AtomicI64::new(0)),
-            delivery_lease: Arc::new(DeliveryLeaseCell::new(channel_id)),
-        }
-    }
-
-    pub(super) fn note_relay_progress_heartbeat(&self, now_ms: i64) {
-        self.last_relay_ts_ms.store(now_ms, Ordering::Release);
-    }
 }
 
 #[cfg(test)]
@@ -1674,10 +1591,7 @@ mod relay_coord_tests {
 
         coord.note_relay_progress_heartbeat(1_500);
         assert_eq!(coord.last_relay_ts_ms.load(Ordering::Acquire), 1_500);
-        assert_eq!(
-            coord.confirmed_end_offset.load(Ordering::Acquire),
-            UNRECORDED_RELAY_OFFSET
-        );
+        assert_eq!(coord.confirmed_end_publication(), None);
     }
 }
 
@@ -1991,20 +1905,12 @@ impl SharedData {
     /// cross-actor generalization of the watcher's process-local
     /// `last_relayed_offset`.
     pub(super) fn committed_relay_offset(&self, channel_id: ChannelId) -> u64 {
-        published_relay_offset(
-            self.tmux_relay_coord(channel_id)
-                .confirmed_end_offset
-                .load(Ordering::Acquire),
-        )
-        .unwrap_or(0)
+        self.tmux_relay_coord(channel_id).confirmed_end_or_zero()
     }
 
     pub(super) fn committed_relay_offset_publication(&self, channel_id: ChannelId) -> Option<u64> {
-        published_relay_offset(
-            self.tmux_relay_coord(channel_id)
-                .confirmed_end_offset
-                .load(Ordering::Acquire),
-        )
+        self.tmux_relay_coord(channel_id)
+            .confirmed_end_publication()
     }
 
     /// #4181/#5022: `true` while a watcher emission slot OR any shared terminal

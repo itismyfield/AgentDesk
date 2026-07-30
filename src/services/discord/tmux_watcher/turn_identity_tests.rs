@@ -598,9 +598,7 @@ fn watcher_long_chunk_wrapper_uses_caller_identity_without_registry_4911() {
     coord
         .confirmed_end_generation_mtime_ns
         .store(generation, std::sync::atomic::Ordering::Release);
-    coord
-        .confirmed_end_offset
-        .store(128, std::sync::atomic::Ordering::Release);
+    coord.publish_confirmed_end_for_test(128);
 
     // The send has committed, but both the inflight row and registry binding are
     // gone. The immutable caller identity still supplies the receipt-less guard.
@@ -665,9 +663,7 @@ fn watcher_long_chunk_a_range_is_not_stamped_as_replacement_b_4911() {
     coord
         .confirmed_end_generation_mtime_ns
         .store(generation_a, std::sync::atomic::Ordering::Release);
-    coord
-        .confirmed_end_offset
-        .store(128, std::sync::atomic::Ordering::Release);
+    coord.publish_confirmed_end_for_test(128);
 
     // Same-name replacement B resets the shared frontier after A captured G1,
     // but before A enters the durable record lock.
@@ -768,9 +764,7 @@ fn watcher_legacy_short_and_long_same_generation_reset_reject_delayed_record_491
     coord
         .confirmed_end_generation_mtime_ns
         .store(generation, std::sync::atomic::Ordering::Release);
-    coord
-        .confirmed_end_offset
-        .store(128, std::sync::atomic::Ordering::Release);
+    coord.publish_confirmed_end_for_test(128);
     let identity_a = watcher_long_chunk_identity(&shared, channel, tmux, a_user_msg_id);
 
     assert!(coord.reset_confirmed_frontier(128, 0));
@@ -823,12 +817,7 @@ fn watcher_legacy_short_and_long_same_generation_reset_reject_delayed_record_491
             "legacy short and long landed POSTs both settle stale without advancing"
         );
     }
-    assert_eq!(
-        coord
-            .confirmed_end_offset
-            .load(std::sync::atomic::Ordering::Acquire),
-        64
-    );
+    assert_eq!(coord.confirmed_end_or_zero(), 64);
     let record =
         crate::services::discord::outbound::delivery_record::read_record(&provider, channel.get())
             .expect("replacement record survives delayed A");

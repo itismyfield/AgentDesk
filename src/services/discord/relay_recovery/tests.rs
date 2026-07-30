@@ -1777,6 +1777,23 @@ async fn dead_frontier_reattach_gets_one_bounded_retry_only() {
         AUTO_HEAL_DEAD_FRONTIER_REATTACH_MAX_ATTEMPTS_PER_WINDOW
     );
     assert_eq!(decision.auto_heal.remaining_attempts, 2);
+    let unobserved = plan_relay_recovery(
+        &RelayHealthSnapshot {
+            delivery_evidence: crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::Unknown,
+            ..snapshot.clone()
+        },
+        RelayStallState::TmuxAliveRelayDead,
+        1_000,
+    );
+    assert_eq!(
+        unobserved.auto_heal.max_attempts_per_window,
+        AUTO_HEAL_DEAD_FRONTIER_REATTACH_MAX_ATTEMPTS_PER_WINDOW,
+        "post-restart unobserved evidence shares the bounded dead-frontier retry budget"
+    );
+    assert_eq!(
+        unobserved.auto_heal.window_secs, AUTO_HEAL_WINDOW_SECS,
+        "the relaxed non-destructive lane remains capped to two attempts per ten minutes"
+    );
     assert_eq!(
         reserve_auto_heal_attempt(&key, 1_000, decision.auto_heal.max_attempts_per_window),
         Ok(1)
