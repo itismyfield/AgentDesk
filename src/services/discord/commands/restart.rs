@@ -125,11 +125,11 @@ async fn retry_restart_seed_turn<F, Fut>(mut start: F) -> RestartSeedStatus
 where
     F: FnMut(super::super::router::HeadlessTurnReservation) -> Fut,
     Fut: std::future::Future<
-        Output = Result<
-            super::super::router::HeadlessTurnStartOutcome,
-            super::super::router::HeadlessTurnStartError,
+            Output = Result<
+                super::super::router::HeadlessTurnStartOutcome,
+                super::super::router::HeadlessTurnStartError,
+            >,
         >,
-    >,
 {
     const MAX_ATTEMPTS: usize = 30;
     const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
@@ -195,11 +195,11 @@ pub(super) async fn retry_restart_seed_turn_for_test<F, Fut>(start: F) -> Restar
 where
     F: FnMut(super::super::router::HeadlessTurnReservation) -> Fut,
     Fut: std::future::Future<
-        Output = Result<
-            super::super::router::HeadlessTurnStartOutcome,
-            super::super::router::HeadlessTurnStartError,
+            Output = Result<
+                super::super::router::HeadlessTurnStartOutcome,
+                super::super::router::HeadlessTurnStartError,
+            >,
         >,
-    >,
 {
     retry_restart_seed_turn(start).await
 }
