@@ -582,47 +582,147 @@ pub(crate) async fn try_intake_runtime_transition_after_redirect(
     )
 }
 
+enum MailboxReleaseKickoff {
+    Fast(&'static str),
+    SlowBackstop(&'static str),
+}
+
+async fn release_mailbox_after_turn_start_failure(
+    shared: &Arc<SharedData>,
+    provider: &super::super::ProviderKind,
+    channel_id: ChannelId,
+    kickoff: MailboxReleaseKickoff,
+) -> bool {
+    let finish = super::super::mailbox_finish_turn(shared, provider, channel_id).await;
+    if !finish.mailbox_online || !finish.has_pending {
+        return false;
+    }
+    match kickoff {
+        MailboxReleaseKickoff::Fast(reason) => {
+            super::super::schedule_deferred_idle_queue_kickoff(
+                shared.clone(),
+                provider.clone(),
+                channel_id,
+                reason,
+            );
+            true
+        }
+        MailboxReleaseKickoff::SlowBackstop(reason) => {
+            super::super::arm_slow_idle_queue_backstop_if_queue_nonempty(
+                shared, provider, channel_id, reason,
+            )
+            .await
+        }
+    }
+}
+
 pub(in crate::services::discord) async fn release_mailbox_after_placeholder_post_failure(
     shared: &Arc<SharedData>,
     provider: &super::super::ProviderKind,
     channel_id: ChannelId,
 ) -> bool {
-    let finish = super::super::mailbox_finish_turn(shared, provider, channel_id).await;
-    if finish.mailbox_online && finish.has_pending {
-        super::super::schedule_deferred_idle_queue_kickoff(
-            shared.clone(),
-            provider.clone(),
-            channel_id,
-            "intake_placeholder_post_failed",
-        );
-        true
-    } else {
-        false
-    }
+    release_mailbox_after_turn_start_failure(
+        shared,
+        provider,
+        channel_id,
+        MailboxReleaseKickoff::Fast("intake_placeholder_post_failed"),
+    )
+    .await
 }
 
-pub(in crate::services::discord) async fn release_mailbox_after_hosted_tui_busy_pre_submit(
+pub(in crate::services::discord) async fn release_mailbox_after_busy_pre_submit_defer(
     shared: &Arc<SharedData>,
     provider: &super::super::ProviderKind,
     channel_id: ChannelId,
 ) -> bool {
-    let finish = super::super::mailbox_finish_turn(shared, provider, channel_id).await;
-    if finish.mailbox_online && finish.has_pending {
-        // #4270 B — edge-trigger conversion: do NOT re-arm the fast ~2s deferred
-        // kickoff for a hosted-TUI busy-defer release (that fixed-delay re-kick,
-        // combined with the mailbox-only kickoff gate, was the ~2s promote
-        // spin). Arm ONLY the slow (60s) fail-open backstop; the fast wakeup is
-        // delegated to the watcher-idle re-drain when the TUI reaches Idle, and
-        // the pre-claim readiness gate (#4270 A) absorbs any interim kick
-        // without re-claiming the mailbox.
-        super::super::arm_slow_idle_queue_backstop_if_queue_nonempty(
-            shared,
-            provider,
-            channel_id,
-            "hosted_tui_busy_pre_submit_pending",
+    // #4270 B — edge-trigger conversion: do NOT re-arm the fast ~2s deferred
+    // kickoff for a busy-defer release. Arm ONLY the slow (60s) fail-open
+    // backstop; the watcher-idle re-drain supplies the fast edge.
+    release_mailbox_after_turn_start_failure(
+        shared,
+        provider,
+        channel_id,
+        MailboxReleaseKickoff::SlowBackstop("busy_pre_submit_defer_pending"),
+    )
+    .await
+}
+
+#[cfg(test)]
+mod mailbox_release_tests {
+    use super::*;
+    use crate::services::provider::CancelToken;
+    use crate::services::turn_orchestrator::{Intervention, InterventionMode};
+    use poise::serenity_prelude::{MessageId, UserId};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn busy_defer_release_arms_only_slow_backstop() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let shared = super::super::super::make_shared_data_for_tests();
+        let provider = super::super::super::ProviderKind::Claude;
+        let channel_id = ChannelId::new(50_150_100);
+        let user_msg_id = MessageId::new(50_150_101);
+        assert!(
+            super::super::super::mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                Arc::new(CancelToken::new()),
+                UserId::new(50_150_102),
+                user_msg_id,
+            )
+            .await
+        );
+        super::super::super::with_post_enqueue_idle_queue_kick_suppressed(
+            super::super::super::mailbox_enqueue_intervention(
+                &shared,
+                &provider,
+                channel_id,
+                Intervention {
+                    author_id: UserId::new(50_150_102),
+                    author_is_bot: false,
+                    message_id: MessageId::new(50_150_103),
+                    queued_generation: 0,
+                    source_message_ids: vec![MessageId::new(50_150_103)],
+                    source_message_queued_generations: Vec::new(),
+                    source_text_segments: Vec::new(),
+                    text: "pending after defer".to_string(),
+                    mode: InterventionMode::Soft,
+                    created_at: Instant::now(),
+                    reply_context: None,
+                    has_reply_boundary: false,
+                    merge_consecutive: false,
+                    pending_uploads: Vec::new(),
+                    voice_announcement: None,
+                },
+            ),
         )
-        .await
-    } else {
-        false
+        .await;
+
+        let fast_calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&fast_calls);
+        let _hook =
+            super::super::super::set_idle_queue_kick_hook_for_tests(Arc::new(move |_, _, _, _| {
+                let observed = Arc::clone(&observed);
+                Box::pin(async move {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    None
+                })
+            }));
+
+        assert!(release_mailbox_after_busy_pre_submit_defer(&shared, &provider, channel_id).await);
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(fast_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            shared.restart.deferred_hook_backlog.load(Ordering::Relaxed),
+            1,
+            "only the slow backstop is armed"
+        );
     }
 }

@@ -2039,12 +2039,9 @@ pub(super) async fn handle_text_message(
     if runtime_mismatch_verdict.should_defer() || tui_busy_diagnostic.is_some() {
         let mismatch_deferred = runtime_mismatch_verdict.should_defer();
         let bot_owner_provider = super::super::super::resolve_discord_bot_provider(token);
-        let queue_kickoff_scheduled_by_release = release_mailbox_after_hosted_tui_busy_pre_submit(
-            shared,
-            &bot_owner_provider,
-            channel_id,
-        )
-        .await;
+        let queue_kickoff_scheduled_by_release =
+            release_mailbox_after_busy_pre_submit_defer(shared, &bot_owner_provider, channel_id)
+                .await;
         let enqueue_outcome = enqueue_busy_tui_followup_for_retry(
             shared,
             &bot_owner_provider,

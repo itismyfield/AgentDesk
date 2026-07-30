@@ -33,7 +33,7 @@ tokio::task_local! {
 }
 
 #[cfg(test)]
-type IdleQueueKickHookForTests = std::sync::Arc<
+pub(in crate::services::discord) type IdleQueueKickHookForTests = std::sync::Arc<
     dyn Fn(
             Arc<SharedData>,
             ProviderKind,
@@ -50,7 +50,7 @@ static IDLE_QUEUE_KICK_HOOK_FOR_TESTS: std::sync::Mutex<Option<IdleQueueKickHook
     std::sync::Mutex::new(None);
 
 #[cfg(test)]
-struct IdleQueueKickHookResetForTests;
+pub(in crate::services::discord) struct IdleQueueKickHookResetForTests;
 
 #[cfg(test)]
 impl Drop for IdleQueueKickHookResetForTests {
@@ -62,7 +62,7 @@ impl Drop for IdleQueueKickHookResetForTests {
 }
 
 #[cfg(test)]
-fn set_idle_queue_kick_hook_for_tests(
+pub(in crate::services::discord) fn set_idle_queue_kick_hook_for_tests(
     hook: IdleQueueKickHookForTests,
 ) -> IdleQueueKickHookResetForTests {
     *IDLE_QUEUE_KICK_HOOK_FOR_TESTS
@@ -102,7 +102,9 @@ pub(in crate::services::discord) async fn mailbox_cancel_queued_primary_message(
     result.removed
 }
 
-pub(super) async fn with_post_enqueue_idle_queue_kick_suppressed<F>(future: F) -> F::Output
+pub(in crate::services::discord) async fn with_post_enqueue_idle_queue_kick_suppressed<F>(
+    future: F,
+) -> F::Output
 where
     F: std::future::Future,
 {
