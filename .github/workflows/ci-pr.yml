@@ -695,6 +695,7 @@ jobs:
           cargo test --lib services::discord::health::session_enrichment::tests -- --test-threads=1
           cargo test --lib services::discord::health::relay_dead_reattach::tests -- --test-threads=1
           cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1
+          cargo test --lib services::discord::turn_bridge::terminal_delivery::tests -- --test-threads=1
           cargo test --lib services::discord::terminal_ui_obligation::tests -- --test-threads=1
 
       # #5003: this production-path E2E previously ran only in main's broad
