@@ -40,6 +40,9 @@ use serde::{Deserialize, Serialize};
 
 use super::SharedData;
 
+#[path = "tui_direct_pending_start/watcher_cancel.rs"]
+mod watcher_cancel;
+
 /// Conservative poll interval for the wait predicate.
 pub(super) const PENDING_START_POLL: Duration = Duration::from_millis(100);
 
@@ -826,7 +829,9 @@ async fn submit_stale_foreign_inflight_cancel(
         .pin
         .tmux_session_name
         .as_deref()
-        .and_then(|tmux_session| shared.tmux_watchers.cancel_for_tmux_session(tmux_session));
+        .and_then(|tmux_session| {
+            watcher_cancel::cancel_for_tmux_session(&shared.tmux_watchers, tmux_session)
+        });
     let cancel_for_commit = expected_cancel.clone();
     let commit_outcome = super::inflight::commit_destructive_cancel_locked(
         provider,
