@@ -77,3 +77,11 @@ old_cap = 3558
 new_cap = 3571
 decompose_issue = 4712
 count = 3
+
+[[admission]]
+ratchet = "giant_file_ratchet"
+file = "src/services/discord/mod.rs"
+old_cap = 4169
+new_cap = 4170
+decompose_issue = 5031
+count = 2
