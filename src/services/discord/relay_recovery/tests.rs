@@ -689,14 +689,20 @@ async fn dead_frontier_gate_pass_then_generation_mismatch_preserves_turn() {
         bridge_inflight_present: true,
         mailbox_has_cancel_token: true,
         mailbox_active_user_msg_id: Some(user_msg.get()),
-        last_capture_offset: Some(0),
+        last_capture_offset: Some(1),
         last_relay_offset: 0,
-        unread_bytes: Some(0),
+        unread_bytes: Some(1),
         desynced: true,
         ..snapshot()
     };
     let mut decision = plan_relay_recovery(&snapshot, RelayStallState::TmuxAliveRelayDead, 1_000);
     decision.affected.finalizer_turn_id = Some(persisted.effective_finalizer_turn_id());
+    assert_eq!(
+        relay_frontier_dead_reattach_owner(&decision),
+        Some(channel),
+        "fixture must reach the destructive dead-frontier branch"
+    );
+    assert!(decision.affected.finalizer_turn_id.is_some());
 
     let _ = apply_relay_recovery_decision(
         &registry,
