@@ -120,7 +120,7 @@ pub(super) fn reserve_auto_heal_attempt(
     key: &str,
     now_ms: i64,
     max_attempts_per_window: u32,
-) -> Result<u32, &'static str> {
+) -> Result<(u32, u64), &'static str> {
     let mut attempts = auto_heal_attempts()
         .lock()
         .expect("relay recovery attempt map poisoned");
@@ -136,12 +136,13 @@ pub(super) fn reserve_auto_heal_attempt(
     }
     window.attempts += 1;
     window.generation = window.generation.wrapping_add(1);
-    Ok(max_attempts_per_window.saturating_sub(window.attempts))
+    Ok((
+        max_attempts_per_window.saturating_sub(window.attempts),
+        window.generation,
+    ))
 }
 
-/// Return a reservation consumed by a spawn/rebind failure. Consecutive
-/// refunds are retained across ordinary windows; the third failure opens a
-/// 1,200s retry window and later consecutive failures expand it exponentially.
+#[cfg(test)]
 pub(super) fn auto_heal_attempt_generation(key: &str) -> Option<u64> {
     auto_heal_attempts()
         .lock()
@@ -150,31 +151,47 @@ pub(super) fn auto_heal_attempt_generation(key: &str) -> Option<u64> {
         .map(|window| window.generation)
 }
 
-fn current_attempt_generation(key: &str, generation: u64) -> bool {
-    auto_heal_attempt_generation(key) == Some(generation)
-}
-
 pub(super) fn refund_auto_heal_attempt_if_current(key: &str, generation: u64, now_ms: i64) {
-    if current_attempt_generation(key, generation) {
-        refund_auto_heal_attempt(key, now_ms);
+    let mut attempts = auto_heal_attempts()
+        .lock()
+        .expect("relay recovery attempt map poisoned");
+    if let Some(window) = attempts.get_mut(key)
+        && window.generation == generation
+    {
+        refund_auto_heal_attempt_in_window(window, now_ms);
     }
 }
 
 pub(super) fn cancel_unapplied_auto_heal_attempt_if_current(key: &str, generation: u64) {
-    if current_attempt_generation(key, generation) {
-        cancel_unapplied_auto_heal_attempt(key);
+    let mut attempts = auto_heal_attempts()
+        .lock()
+        .expect("relay recovery attempt map poisoned");
+    if let Some(window) = attempts.get_mut(key)
+        && window.generation == generation
+    {
+        window.attempts = window.attempts.saturating_sub(1);
     }
 }
 
 pub(super) fn record_auto_heal_confirm_failure_if_current(key: &str, generation: u64, now_ms: i64) {
-    if current_attempt_generation(key, generation) {
-        record_auto_heal_confirm_failure(key, now_ms);
+    let mut attempts = auto_heal_attempts()
+        .lock()
+        .expect("relay recovery attempt map poisoned");
+    if let Some(window) = attempts.get_mut(key)
+        && window.generation == generation
+    {
+        record_auto_heal_confirm_failure_in_window(window, now_ms);
     }
 }
 
 pub(super) fn commit_auto_heal_attempt_if_current(key: &str, generation: u64) {
-    if current_attempt_generation(key, generation) {
-        commit_auto_heal_attempt(key);
+    let mut attempts = auto_heal_attempts()
+        .lock()
+        .expect("relay recovery attempt map poisoned");
+    if let Some(window) = attempts.get_mut(key)
+        && window.generation == generation
+    {
+        commit_auto_heal_attempt_in_window(window);
     }
 }
 
@@ -185,6 +202,10 @@ pub(super) fn refund_auto_heal_attempt(key: &str, now_ms: i64) {
     let Some(window) = attempts.get_mut(key) else {
         return;
     };
+    refund_auto_heal_attempt_in_window(window, now_ms);
+}
+
+fn refund_auto_heal_attempt_in_window(window: &mut AttemptWindow, now_ms: i64) {
     window.attempts = window.attempts.saturating_sub(1);
     window.consecutive_refunds = window.consecutive_refunds.saturating_add(1);
     if window.consecutive_refunds < AUTO_HEAL_REFUND_BACKOFF_THRESHOLD {
@@ -201,7 +222,8 @@ pub(super) fn refund_auto_heal_attempt(key: &str, now_ms: i64) {
 
 /// Return a reservation when a fail-closed pre-apply gate refused the action.
 /// This is deliberately narrower than confirmation settlement: once rebind was
-/// attempted, StartupGrace and RelayEmissionInFlight consume their reservation.
+/// attempted, confirmation policy decides whether to consume or refund it.
+#[cfg(test)]
 pub(super) fn cancel_unapplied_auto_heal_attempt(key: &str) {
     let mut attempts = auto_heal_attempts()
         .lock()
@@ -218,6 +240,10 @@ pub(super) fn record_auto_heal_confirm_failure(key: &str, now_ms: i64) {
     let window = attempts
         .entry(key.to_string())
         .or_insert_with(|| AttemptWindow::new(now_ms));
+    record_auto_heal_confirm_failure_in_window(window, now_ms);
+}
+
+fn record_auto_heal_confirm_failure_in_window(window: &mut AttemptWindow, now_ms: i64) {
     window.consecutive_refunds = 0;
     window.retry_not_before_ms = Some(now_ms.saturating_add(AUTO_HEAL_WINDOW_SECS * 1000));
 }
@@ -227,9 +253,13 @@ pub(super) fn commit_auto_heal_attempt(key: &str) {
         .lock()
         .expect("relay recovery attempt map poisoned");
     if let Some(window) = attempts.get_mut(key) {
-        window.consecutive_refunds = 0;
-        window.retry_not_before_ms = None;
+        commit_auto_heal_attempt_in_window(window);
     }
+}
+
+fn commit_auto_heal_attempt_in_window(window: &mut AttemptWindow) {
+    window.consecutive_refunds = 0;
+    window.retry_not_before_ms = None;
 }
 
 pub(super) fn max_attempts_per_window_for_snapshot(
@@ -323,14 +353,17 @@ mod tests {
             RelayRecoveryApplySource::Manual,
         );
 
-        assert_eq!(reserve_auto_heal_attempt(&probe, 1_000, 1), Ok(0));
         assert_eq!(
-            reserve_auto_heal_attempt(&watchdog, 2_000, 1),
+            reserve_auto_heal_attempt(&probe, 1_000, 1).map(|(remaining, _)| remaining),
+            Ok(0)
+        );
+        assert_eq!(
+            reserve_auto_heal_attempt(&watchdog, 2_000, 1).map(|(remaining, _)| remaining),
             Err("auto_heal_rate_limited"),
             "probe and watchdog must consume the same internal budget"
         );
         assert_eq!(
-            reserve_auto_heal_attempt(&manual, 2_000, 1),
+            reserve_auto_heal_attempt(&manual, 2_000, 1).map(|(remaining, _)| remaining),
             Ok(0),
             "internal exhaustion must not consume the manual budget"
         );
@@ -353,9 +386,12 @@ mod tests {
             RelayRecoveryApplySource::ProbeAutoHeal,
         );
 
-        assert_eq!(reserve_auto_heal_attempt(&manual, 1_000, 1), Ok(0));
         assert_eq!(
-            reserve_auto_heal_attempt(&internal, 2_000, 1),
+            reserve_auto_heal_attempt(&manual, 1_000, 1).map(|(remaining, _)| remaining),
+            Ok(0)
+        );
+        assert_eq!(
+            reserve_auto_heal_attempt(&internal, 2_000, 1).map(|(remaining, _)| remaining),
             Ok(0),
             "manual exhaustion must not consume the internal budget"
         );
@@ -366,10 +402,14 @@ mod tests {
         let _guard = auto_heal_test_lock().lock().await;
         clear_auto_heal_attempts_for_tests();
         let key = key();
-        assert_eq!(reserve_auto_heal_attempt(&key, 1_000, 1), Ok(0));
+        assert_eq!(
+            reserve_auto_heal_attempt(&key, 1_000, 1).map(|(remaining, _)| remaining),
+            Ok(0)
+        );
         let stale_generation = auto_heal_attempt_generation(&key).expect("old generation");
         assert_eq!(
-            reserve_auto_heal_attempt(&key, 1_000 + AUTO_HEAL_WINDOW_SECS * 1000, 1),
+            reserve_auto_heal_attempt(&key, 1_000 + AUTO_HEAL_WINDOW_SECS * 1000, 1)
+                .map(|(remaining, _)| remaining),
             Ok(0)
         );
         let current_generation = auto_heal_attempt_generation(&key).expect("new generation");
@@ -377,7 +417,8 @@ mod tests {
 
         refund_auto_heal_attempt_if_current(&key, stale_generation, 2_000);
         assert_eq!(
-            reserve_auto_heal_attempt(&key, 1_000 + AUTO_HEAL_WINDOW_SECS * 1000 + 1, 1),
+            reserve_auto_heal_attempt(&key, 1_000 + AUTO_HEAL_WINDOW_SECS * 1000 + 1, 1)
+                .map(|(remaining, _)| remaining),
             Err("auto_heal_rate_limited"),
             "late settlement from the old round must not refund the new reservation"
         );
@@ -388,11 +429,17 @@ mod tests {
         let _guard = auto_heal_test_lock().lock().await;
         clear_auto_heal_attempts_for_tests();
         let key = key();
-        assert_eq!(reserve_auto_heal_attempt(&key, 1_000, 1), Ok(0));
+        assert_eq!(
+            reserve_auto_heal_attempt(&key, 1_000, 1).map(|(remaining, _)| remaining),
+            Ok(0)
+        );
 
         refund_auto_heal_attempt(&key, 2_000);
 
-        assert_eq!(reserve_auto_heal_attempt(&key, 3_000, 1), Ok(0));
+        assert_eq!(
+            reserve_auto_heal_attempt(&key, 3_000, 1).map(|(remaining, _)| remaining),
+            Ok(0)
+        );
     }
 
     #[tokio::test]
@@ -401,16 +448,19 @@ mod tests {
         clear_auto_heal_attempts_for_tests();
         let key = key();
         for now_ms in [1_000, 2_000, 3_000] {
-            assert_eq!(reserve_auto_heal_attempt(&key, now_ms, 1), Ok(0));
+            assert_eq!(
+                reserve_auto_heal_attempt(&key, now_ms, 1).map(|(remaining, _)| remaining),
+                Ok(0)
+            );
             refund_auto_heal_attempt(&key, now_ms);
         }
 
         assert_eq!(
-            reserve_auto_heal_attempt(&key, 4_000, 1),
+            reserve_auto_heal_attempt(&key, 4_000, 1).map(|(remaining, _)| remaining),
             Err("auto_heal_failure_backoff")
         );
         assert_eq!(
-            reserve_auto_heal_attempt(&key, 3_000 + 1_200_000, 1),
+            reserve_auto_heal_attempt(&key, 3_000 + 1_200_000, 1).map(|(remaining, _)| remaining),
             Ok(0),
             "the third consecutive refund must expand the base 600s window to 1200s"
         );
@@ -421,16 +471,20 @@ mod tests {
         let _guard = auto_heal_test_lock().lock().await;
         clear_auto_heal_attempts_for_tests();
         let key = key();
-        assert_eq!(reserve_auto_heal_attempt(&key, 1_000, 2), Ok(1));
+        assert_eq!(
+            reserve_auto_heal_attempt(&key, 1_000, 2).map(|(remaining, _)| remaining),
+            Ok(1)
+        );
 
         record_auto_heal_confirm_failure(&key, 2_000);
 
         assert_eq!(
-            reserve_auto_heal_attempt(&key, 3_000, 2),
+            reserve_auto_heal_attempt(&key, 3_000, 2).map(|(remaining, _)| remaining),
             Err("auto_heal_failure_backoff")
         );
         assert_eq!(
-            reserve_auto_heal_attempt(&key, 2_000 + AUTO_HEAL_WINDOW_SECS * 1000, 2),
+            reserve_auto_heal_attempt(&key, 2_000 + AUTO_HEAL_WINDOW_SECS * 1000, 2)
+                .map(|(remaining, _)| remaining),
             Ok(1)
         );
     }

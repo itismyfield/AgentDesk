@@ -40,10 +40,18 @@ async fn reseed_recovered_finalizer_ledger(
     } else {
         super::turn_finalizer::CompletionAdmissionPlan::Immediate
     };
+    // Only watcher-owned entries create the deferred terminal-projection
+    // obligation this repair detector tracks. Bridge/standby registration below
+    // still restores finalization authority, but immediate admission makes that
+    // idempotent bookkeeping, not a relay repair.
     let changed = relay_owner == super::inflight::RelayOwnerKind::Watcher
         && !shared
             .turn_finalizer
-            .has_live_watcher_pending(channel_id, shared.restart.current_generation)
+            .has_exact_live_watcher_pending(super::turn_finalizer::TurnKey::new(
+                channel_id,
+                finalizer_turn_id,
+                shared.restart.current_generation,
+            ))
             .await;
     shared
         .turn_finalizer
@@ -334,7 +342,11 @@ async fn reregister_active_turn_from_inflight_inner(
     )
     .await;
     if started {
-        let _ = reseed_recovered_finalizer_ledger(
+        // Starting the mailbox is already an authoritative mutation, so the
+        // finalizer reseed cannot change this outcome from repaired to no-op.
+        // Keep the call for its ledger side effect without re-deriving repair
+        // from its return value.
+        reseed_recovered_finalizer_ledger(
             shared,
             channel_id,
             finalizer_turn_id,
@@ -367,10 +379,8 @@ async fn reregister_active_turn_from_inflight_inner(
 pub(in crate::services::discord) async fn reregister_active_turn_from_inflight(
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
-) -> bool {
-    reregister_active_turn_from_inflight_inner(shared, state, true)
-        .await
-        .finish_mailbox_on_completion
+) -> ActiveTurnReregisterOutcome {
+    reregister_active_turn_from_inflight_inner(shared, state, true).await
 }
 
 /// Automatic reattach holds the canonical episode flock across mailbox and
@@ -458,6 +468,46 @@ mod delivered_inflight_reregister_tests {
         );
     }
 
+    #[tokio::test]
+    async fn exact_finalizer_reseed_is_counted_despite_other_watcher_entry() {
+        use serenity::model::id::ChannelId;
+
+        let shared = super::super::make_shared_data_for_tests_with_storage(None);
+        let channel = ChannelId::new(4_246);
+        let generation = shared.restart.current_generation;
+        shared.turn_finalizer.register_start(
+            super::super::turn_finalizer::TurnKey::new(channel, 8_001, generation),
+            ProviderKind::Claude,
+            inflight::RelayOwnerKind::Watcher,
+            &shared,
+        );
+        assert!(
+            shared
+                .turn_finalizer
+                .has_live_watcher_pending(channel, generation)
+                .await
+        );
+        assert!(
+            super::reseed_recovered_finalizer_ledger(
+                &shared,
+                channel,
+                8_002,
+                &ProviderKind::Claude,
+                inflight::RelayOwnerKind::Watcher,
+            )
+            .await,
+            "a different live watcher entry must not hide the exact turn's ledger repair"
+        );
+        assert!(
+            shared
+                .turn_finalizer
+                .has_exact_live_watcher_pending(super::super::turn_finalizer::TurnKey::new(
+                    channel, 8_002, generation,
+                ))
+                .await
+        );
+    }
+
     #[test]
     fn ordinary_inflight_still_recoverable_even_with_relayed_prefix() {
         let mut state = inflight::InflightTurnState::new(
@@ -537,7 +587,9 @@ mod reregister_ledger_reseed_tests {
             "ledger must start empty (simulating a post-restart in-memory ledger)"
         );
 
-        let restored = super::reregister_active_turn_from_inflight(&shared, &state).await;
+        let restored = super::reregister_active_turn_from_inflight(&shared, &state)
+            .await
+            .finish_mailbox_on_completion;
         assert!(
             restored,
             "an empty mailbox must let the reattach start the active turn"
@@ -565,10 +617,16 @@ mod reregister_ledger_reseed_tests {
         let mut state = active_turn_state(ch.get(), 9101);
         state.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
 
-        assert!(super::reregister_active_turn_from_inflight(&shared, &state).await);
+        assert!(
+            super::reregister_active_turn_from_inflight(&shared, &state)
+                .await
+                .finish_mailbox_on_completion
+        );
         // Second call: the mailbox already holds the active turn, so this takes
         // the "existing active turn" rebind branch and re-seeds again.
-        let restored_again = super::reregister_active_turn_from_inflight(&shared, &state).await;
+        let restored_again = super::reregister_active_turn_from_inflight(&shared, &state)
+            .await
+            .finish_mailbox_on_completion;
         assert!(
             restored_again,
             "re-attaching an already-active turn re-binds (returns true) without panic"
@@ -604,7 +662,11 @@ mod reregister_ledger_reseed_tests {
             .restore_active_turn(token, UserId::new(7), MessageId::new(turn_id))
             .await;
 
-        assert!(super::reregister_active_turn_from_inflight(&shared, &state).await);
+        assert!(
+            super::reregister_active_turn_from_inflight(&shared, &state)
+                .await
+                .finish_mailbox_on_completion
+        );
         assert!(
             !shared
                 .turn_finalizer
@@ -653,7 +715,9 @@ mod reregister_ledger_reseed_tests {
         state.finalizer_turn_id = 9_010_777;
         state.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
 
-        let restored = super::reregister_active_turn_from_inflight(&shared, &state).await;
+        let restored = super::reregister_active_turn_from_inflight(&shared, &state)
+            .await
+            .finish_mailbox_on_completion;
         assert!(
             restored,
             "a zero user_msg_id turn with a stable finalizer_turn_id is re-attached"
@@ -704,7 +768,9 @@ mod reregister_ledger_reseed_tests {
         state.current_msg_id = 0;
         state.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
 
-        let restored = super::reregister_active_turn_from_inflight(&shared, &state).await;
+        let restored = super::reregister_active_turn_from_inflight(&shared, &state)
+            .await
+            .finish_mailbox_on_completion;
         assert!(
             !restored,
             "a zero-owner row must not report a mailbox re-registration"

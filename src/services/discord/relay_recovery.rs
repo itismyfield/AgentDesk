@@ -381,6 +381,12 @@ fn relay_recovery_status_counts_as_applied(status: &'static str) -> bool {
 /// escalates, and never surfaces as a failure.
 fn relay_recovery_status_repaired_nothing(status: &str) -> bool {
     status == "reuse_existing_live_watcher"
+        || matches!(
+            status,
+            "skipped_idle_tmux_stale_turn_io_error"
+                | "skipped_idle_tmux_stale_turn_missing"
+                | "skipped_idle_tmux_stale_turn_pin_mismatch"
+        )
 }
 
 /// #3277/#5021: report a successful repair when any authoritative rebind

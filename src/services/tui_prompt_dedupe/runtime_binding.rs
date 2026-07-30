@@ -118,6 +118,37 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding(
     channel_id: u64,
     binding: TuiRuntimeBinding,
 ) {
+    let _ = register_rehydrated_tmux_runtime_binding_inner(
+        provider,
+        tmux_session_name,
+        channel_id,
+        binding,
+        false,
+    );
+}
+
+pub(crate) fn merge_rehydrated_tmux_runtime_binding(
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: u64,
+    binding: TuiRuntimeBinding,
+) -> Option<(Option<TuiRuntimeBinding>, TuiRuntimeBinding, Option<u64>)> {
+    register_rehydrated_tmux_runtime_binding_inner(
+        provider,
+        tmux_session_name,
+        channel_id,
+        binding,
+        true,
+    )
+}
+
+fn register_rehydrated_tmux_runtime_binding_inner(
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: u64,
+    mut binding: TuiRuntimeBinding,
+    preserve_same_path_cursor: bool,
+) -> Option<(Option<TuiRuntimeBinding>, TuiRuntimeBinding, Option<u64>)> {
     let provider = normalize_provider(provider);
     let tmux_session_name = tmux_session_name.trim();
     if provider.is_empty()
@@ -126,11 +157,31 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding(
         || binding.output_path.trim().is_empty()
         || binding.relay_output_path().trim().is_empty()
     {
-        return;
+        return None;
     }
-    let session_id = binding.session_id.clone();
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
+    let previous_binding = state
+        .runtime_by_tmux
+        .get(tmux_session_name)
+        .map(|entry| entry.value.clone());
+    let previous_channel = state
+        .channel_by_tmux
+        .get(tmux_session_name)
+        .map(|entry| entry.value);
+    // Rehydration may race a live reader that advances the same transcript
+    // cursor after recovery sampled it. Merge under the registry lock so a
+    // stale whole-binding insert cannot move that cursor backwards. A changed
+    // output path is a new transcript and deliberately keeps its supplied
+    // restart offset (including zero after truncate/recreate).
+    if preserve_same_path_cursor
+        && let Some(previous) = state.runtime_by_tmux.get(tmux_session_name)
+        && previous.value.output_path == binding.output_path
+    {
+        binding.last_offset = binding.last_offset.max(previous.value.last_offset);
+    }
+    let session_id = binding.session_id.clone();
+    let installed_binding = binding.clone();
     state.runtime_by_tmux.insert(
         tmux_session_name.to_string(),
         TimedValue {
@@ -158,6 +209,7 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding(
             },
         );
     }
+    Some((previous_binding, installed_binding, previous_channel))
 }
 
 /// #3018: DIAGNOSTIC / MIRROR USE ONLY.

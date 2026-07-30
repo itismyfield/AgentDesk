@@ -470,6 +470,20 @@ fn reattach_eligibility_distinguishes_stale_attached_watcher_from_live() {
     assert!(detached.auto_heal.eligible);
 }
 
+#[test]
+fn idle_clear_skips_are_classified_as_repairing_nothing() {
+    for status in [
+        "skipped_idle_tmux_stale_turn_io_error",
+        "skipped_idle_tmux_stale_turn_missing",
+        "skipped_idle_tmux_stale_turn_pin_mismatch",
+    ] {
+        assert!(relay_recovery_status_repaired_nothing(status));
+    }
+    assert!(!relay_recovery_status_repaired_nothing(
+        "cleared_idle_tmux_stale_turn"
+    ));
+}
+
 /// #3277/#5021: status follows authoritative repair, not just the last watcher
 /// claim. A reused watcher can still pick up a newly adopted episode.
 #[test]
@@ -1578,11 +1592,13 @@ async fn auto_heal_attempts_are_rate_limited_per_window() {
     );
 
     assert_eq!(
-        reserve_auto_heal_attempt(&key, 1_000, AUTO_HEAL_DEFAULT_MAX_ATTEMPTS_PER_WINDOW),
+        reserve_auto_heal_attempt(&key, 1_000, AUTO_HEAL_DEFAULT_MAX_ATTEMPTS_PER_WINDOW)
+            .map(|(remaining, _)| remaining),
         Ok(0)
     );
     assert_eq!(
-        reserve_auto_heal_attempt(&key, 2_000, AUTO_HEAL_DEFAULT_MAX_ATTEMPTS_PER_WINDOW),
+        reserve_auto_heal_attempt(&key, 2_000, AUTO_HEAL_DEFAULT_MAX_ATTEMPTS_PER_WINDOW)
+            .map(|(remaining, _)| remaining),
         Err("auto_heal_rate_limited")
     );
     assert_eq!(
@@ -1590,7 +1606,8 @@ async fn auto_heal_attempts_are_rate_limited_per_window() {
             &key,
             1_000 + AUTO_HEAL_WINDOW_SECS * 1000,
             AUTO_HEAL_DEFAULT_MAX_ATTEMPTS_PER_WINDOW
-        ),
+        )
+        .map(|(remaining, _)| remaining),
         Ok(0)
     );
 }
@@ -1634,16 +1651,19 @@ async fn dead_frontier_reattach_gets_one_bounded_retry_only() {
     );
     assert_eq!(decision.auto_heal.remaining_attempts, 2);
     assert_eq!(
-        reserve_auto_heal_attempt(&key, 1_000, decision.auto_heal.max_attempts_per_window),
+        reserve_auto_heal_attempt(&key, 1_000, decision.auto_heal.max_attempts_per_window)
+            .map(|(remaining, _)| remaining),
         Ok(1)
     );
     assert_eq!(
-        reserve_auto_heal_attempt(&key, 2_000, decision.auto_heal.max_attempts_per_window),
+        reserve_auto_heal_attempt(&key, 2_000, decision.auto_heal.max_attempts_per_window)
+            .map(|(remaining, _)| remaining),
         Ok(0),
         "a still-dead relay frontier gets one bounded non-destructive reattach retry"
     );
     assert_eq!(
-        reserve_auto_heal_attempt(&key, 3_000, decision.auto_heal.max_attempts_per_window),
+        reserve_auto_heal_attempt(&key, 3_000, decision.auto_heal.max_attempts_per_window)
+            .map(|(remaining, _)| remaining),
         Err("auto_heal_rate_limited")
     );
 

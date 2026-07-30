@@ -222,10 +222,10 @@ fn replacement_after_adoption_before_claim_is_untouched() {
         "AGENTDESK_ROOT_DIR",
         tmp.path(),
     );
-    if !crate::services::platform::tmux::is_available() {
-        eprintln!("skipping post-adoption exact-episode test: tmux unavailable");
-        return;
-    }
+    assert!(
+        crate::services::platform::tmux::is_available(),
+        "post-adoption exact-episode integration test requires tmux"
+    );
 
     let provider = ProviderKind::Claude;
     let channel_id = 4_465_880_000_001_u64;
@@ -497,10 +497,10 @@ fn full_rebind_noop_reuse_reports_no_repair_and_mutation_reports_repair() {
         "AGENTDESK_ROOT_DIR",
         tmp.path(),
     );
-    if !crate::services::platform::tmux::is_available() {
-        eprintln!("skipping full-path repair detector test: tmux unavailable");
-        return;
-    }
+    assert!(
+        crate::services::platform::tmux::is_available(),
+        "full-path repair detector integration test requires tmux"
+    );
 
     let provider = ProviderKind::Claude;
     let channel_id = 4_465_880_000_003_u64;
@@ -594,7 +594,6 @@ fn full_rebind_noop_reuse_reports_no_repair_and_mutation_reports_repair() {
         },
     );
 
-    let pin = super::inflight::InflightEpisodePin::from_state(&state);
     let first = runtime
         .block_on(rebind_inflight_for_channel(
             &http,
@@ -603,7 +602,7 @@ fn full_rebind_noop_reuse_reports_no_repair_and_mutation_reports_repair() {
             channel_id,
             Some(tmux_session.clone()),
             ManualRebindOverrides::default(),
-            Some(&pin),
+            None,
         ))
         .expect("initial session repair");
     assert!(
@@ -611,9 +610,6 @@ fn full_rebind_noop_reuse_reports_no_repair_and_mutation_reports_repair() {
         "missing session must be detected as repair"
     );
 
-    let pin = super::inflight::InflightEpisodePin::from_state(
-        &super::inflight::load_inflight_state(&provider, channel_id).expect("reload inflight"),
-    );
     let noop = runtime
         .block_on(rebind_inflight_for_channel(
             &http,
@@ -622,7 +618,7 @@ fn full_rebind_noop_reuse_reports_no_repair_and_mutation_reports_repair() {
             channel_id,
             Some(tmux_session.clone()),
             ManualRebindOverrides::default(),
-            Some(&pin),
+            None,
         ))
         .expect("no-op rebind");
     assert!(!noop.watcher_spawned);
@@ -646,9 +642,6 @@ fn full_rebind_noop_reuse_reports_no_repair_and_mutation_reports_repair() {
         channel_id,
         regressed,
     );
-    let pin = super::inflight::InflightEpisodePin::from_state(
-        &super::inflight::load_inflight_state(&provider, channel_id).expect("reload inflight"),
-    );
     let repaired = runtime
         .block_on(rebind_inflight_for_channel(
             &http,
@@ -657,7 +650,7 @@ fn full_rebind_noop_reuse_reports_no_repair_and_mutation_reports_repair() {
             channel_id,
             Some(tmux_session.clone()),
             ManualRebindOverrides::default(),
-            Some(&pin),
+            None,
         ))
         .expect("repair rebind");
     assert!(!repaired.watcher_spawned);
@@ -687,9 +680,6 @@ fn full_rebind_noop_reuse_reports_no_repair_and_mutation_reports_repair() {
             relay_last_offset: None,
         },
     );
-    let pin = super::inflight::InflightEpisodePin::from_state(
-        &super::inflight::load_inflight_state(&provider, channel_id).expect("reload inflight"),
-    );
     let newer_cursor = runtime
         .block_on(rebind_inflight_for_channel(
             &http,
@@ -698,7 +688,7 @@ fn full_rebind_noop_reuse_reports_no_repair_and_mutation_reports_repair() {
             channel_id,
             Some(tmux_session.clone()),
             ManualRebindOverrides::default(),
-            Some(&pin),
+            None,
         ))
         .expect("monotonic cursor rebind");
     assert!(!newer_cursor.repaired_state);
@@ -730,10 +720,10 @@ fn replacement_writer_linearizes_after_episode_authority_handoff() {
         "AGENTDESK_ROOT_DIR",
         tmp.path(),
     );
-    if !crate::services::platform::tmux::is_available() {
-        eprintln!("skipping episode-authority serialization test: tmux unavailable");
-        return;
-    }
+    assert!(
+        crate::services::platform::tmux::is_available(),
+        "episode-authority serialization integration test requires tmux"
+    );
 
     let provider = ProviderKind::Claude;
     let channel_id = 4_465_880_000_002_u64;

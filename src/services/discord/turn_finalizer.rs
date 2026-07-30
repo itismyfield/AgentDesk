@@ -183,10 +183,12 @@ fn ledger_has_live_watcher_pending(
     ledger: &HashMap<LedgerKey, LedgerEntry>,
     channel_id: ChannelId,
     generation: u64,
+    user_msg_id: Option<u64>,
 ) -> bool {
     ledger.iter().any(|(lk, entry)| {
         lk.channel_id == channel_id
             && lk.generation == generation
+            && user_msg_id.is_none_or(|expected| lk.user_msg_id == expected)
             && entry.phase != Phase::Finalized
             && entry.relay_owner == RelayOwnerKind::Watcher
     })
@@ -567,6 +569,27 @@ impl TurnFinalizer {
             .send(FinalizeMsg::QueryWatcherPending {
                 channel_id,
                 generation,
+                user_msg_id: None,
+                ack,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
+    pub(in crate::services::discord) async fn has_exact_live_watcher_pending(
+        &self,
+        key: TurnKey,
+    ) -> bool {
+        let (ack, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(FinalizeMsg::QueryWatcherPending {
+                channel_id: key.channel_id,
+                generation: key.generation,
+                user_msg_id: Some(key.user_msg_id),
                 ack,
             })
             .is_err()
@@ -798,10 +821,15 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                     FinalizeMsg::QueryWatcherPending {
                         channel_id,
                         generation,
+                        user_msg_id,
                         ack,
                     } => {
-                        let pending =
-                            ledger_has_live_watcher_pending(&ledger, channel_id, generation);
+                        let pending = ledger_has_live_watcher_pending(
+                            &ledger,
+                            channel_id,
+                            generation,
+                            user_msg_id,
+                        );
                         let _ = ack.send(pending);
                     }
                 }

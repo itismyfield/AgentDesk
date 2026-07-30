@@ -51,13 +51,11 @@ pub(super) async fn classify_reattach_confirmation(
     }
     let probe_result = match decision.affected.tmux_session.as_deref() {
         Some(tmux_session) if !tmux_session.is_empty() => {
-            confirm_spawned_watcher(
-                shared,
-                decision.channel_id,
-                tmux_session,
-                decision.evidence.last_relay_offset,
-            )
-            .await
+            let baseline_frontier = shared
+                .committed_relay_offset(ChannelId::new(decision.channel_id))
+                .max(decision.evidence.last_relay_offset);
+            confirm_spawned_watcher(shared, decision.channel_id, tmux_session, baseline_frontier)
+                .await
         }
         _ => SpawnedWatcherConfirmation::Failed,
     };
@@ -202,6 +200,70 @@ mod tests {
             SpawnedWatcherConfirmation::Confirmed
         );
         advance.await.expect("heartbeat task");
+    }
+
+    #[tokio::test]
+    async fn channel_frontier_existing_before_probe_is_not_spawn_confirmation() {
+        let shared = make_shared_data_for_tests();
+        let channel = ChannelId::new(4_423_207);
+        let tmux_session = "AgentDesk-codex-4423-frontier-baseline";
+        shared
+            .tmux_relay_coord(channel)
+            .confirmed_end_offset
+            .store(512, Ordering::Release);
+        shared.tmux_watchers.insert(
+            channel,
+            watcher_handle(tmux_session, Arc::new(AtomicI64::new(100))),
+        );
+        let decision = super::super::plan_relay_recovery(
+            &super::super::RelayHealthSnapshot {
+                provider: "codex".to_string(),
+                channel_id: channel.get(),
+                active_turn: super::super::RelayActiveTurn::Foreground,
+                tmux_session: Some(tmux_session.to_string()),
+                tmux_alive: Some(true),
+                watcher_attached: false,
+                watcher_attached_stale: false,
+                watcher_owner_channel_id: None,
+                watcher_owns_live_relay: false,
+                bridge_inflight_present: true,
+                bridge_current_msg_id: Some(4_423_217),
+                mailbox_has_cancel_token: true,
+                mailbox_active_user_msg_id: Some(4_423_227),
+                mailbox_turn_started_at_ms: None,
+                queue_depth: 0,
+                pending_discord_callback_msg_id: None,
+                pending_thread_proof: false,
+                parent_channel_id: None,
+                thread_channel_id: None,
+                last_relay_ts_ms: None,
+                last_outbound_activity_ms: None,
+                last_capture_offset: Some(512),
+                last_relay_offset: 0,
+                unread_bytes: Some(512),
+                desynced: true,
+                stale_thread_proof: false,
+            },
+            super::super::RelayStallState::TmuxAliveRelayDead,
+            1_000,
+        );
+        let apply_result = RelayRecoveryApplyResult {
+            status: "reattached_watcher",
+            removed_thread_proofs: 0,
+            removed_mailbox_token: false,
+            post_mailbox_has_cancel_token: None,
+            post_mailbox_queue_depth: None,
+            reattach_watcher_spawned: Some(true),
+            reattach_watcher_replaced: Some(false),
+            reattach_initial_offset: Some(0),
+            reattach_error: None,
+        };
+
+        assert_ne!(
+            classify_reattach_confirmation(&shared, &decision, &apply_result, 0, 1_000).await,
+            ReattachConfirmation::Confirmed,
+            "frontier committed before this probe must not confirm the spawned watcher"
+        );
     }
 
     #[test]

@@ -485,7 +485,8 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                     super::super::super::recovery::reregister_active_turn_from_inflight(
                         &shared, &state,
                     )
-                    .await;
+                    .await
+                    .finish_mailbox_on_completion;
                 restored_turn = Some(RestoredWatcherTurn {
                     finish_mailbox_on_completion,
                     ..restored_tmux

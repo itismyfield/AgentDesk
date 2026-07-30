@@ -1192,7 +1192,8 @@ mod tests {
                 crate::services::discord::recovery::reregister_active_turn_from_inflight(
                     &shared, &pre,
                 )
-                .await;
+                .await
+                .finish_mailbox_on_completion;
             assert!(readopted, "{label}: restart must re-adopt the live turn");
 
             // Transition #1: the REAL user owns the mailbox post-restart.
@@ -1302,7 +1303,8 @@ mod tests {
         inflight::save_inflight_state(&pre).expect("seed pre-restart inflight");
         let readopted =
             crate::services::discord::recovery::reregister_active_turn_from_inflight(&shared, &pre)
-                .await;
+                .await
+                .finish_mailbox_on_completion;
         assert!(readopted, "restart must re-adopt the live turn");
         shared.restart.global_active.store(1, Ordering::Relaxed);
         // Capture the mailbox cancel token the re-adopt bound, to prove the reclaim
