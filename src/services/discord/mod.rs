@@ -1083,6 +1083,15 @@ impl TmuxWatcherRegistry {
         self.by_tmux_session.get(&tmux_session_name)
     }
 
+    pub(super) fn cancel_for_tmux_session(
+        &self,
+        tmux_session_name: &str,
+    ) -> Option<Arc<std::sync::atomic::AtomicBool>> {
+        self.by_tmux_session
+            .get(tmux_session_name)
+            .map(|entry| entry.cancel.clone())
+    }
+
     // #3034: test-only convenience wrapper (prod code calls `insert_locked`
     // with an explicit registry guard). Used only by `#[cfg(test)]` setup.
     #[allow(dead_code)]
