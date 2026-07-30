@@ -187,8 +187,9 @@ jobs:
               sleep 5
             done
           }
+          # No PID handoff: a later step runs in a different shell, so it cannot
+          # `wait` on this sampler. The hosted VM reclaims it when the job ends.
           resource_sample > "$RUNNER_TEMP/pg-resource-samples.log" 2>&1 &
-          echo "sample_pid=$!" >> "$GITHUB_ENV"
 
       - name: just test-postgres
         timeout-minutes: 20
