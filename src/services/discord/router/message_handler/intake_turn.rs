@@ -1771,12 +1771,15 @@ pub(super) async fn handle_text_message(
         Some(channel_id.get()),
     );
     #[cfg(unix)]
-    reconcile_managed_tmux_runtime_kind_for_config(
+    let runtime_mismatch_verdict = reconcile_managed_tmux_runtime_kind_for_config(
         &provider,
         channel_id,
         tmux_session_name.as_deref(),
         prelaunch_runtime_kind,
+        Some(&current_path),
+        session_id.as_deref(),
     );
+    let effective_runtime_kind = prelaunch_runtime_kind.map(|expectation| expectation.runtime_kind);
 
     let model_for_turn =
         super::super::super::commands::resolve_model_for_turn(shared, channel_id, &provider).await;
@@ -1818,7 +1821,7 @@ pub(super) async fn handle_text_message(
             &provider,
             remote_profile.is_none(),
             tmux_session_name.as_deref(),
-            prelaunch_runtime_kind,
+            effective_runtime_kind,
         );
     let watcher_tmux_name = inflight_tmux_name.clone();
     let watcher_output_path = inflight_output_path.clone();
@@ -2033,7 +2036,8 @@ pub(super) async fn handle_text_message(
         }
     };
     #[cfg(unix)]
-    if let Some(diagnostic) = tui_busy_diagnostic {
+    if runtime_mismatch_verdict.should_defer() || tui_busy_diagnostic.is_some() {
+        let mismatch_deferred = runtime_mismatch_verdict.should_defer();
         let bot_owner_provider = super::super::super::resolve_discord_bot_provider(token);
         let queue_kickoff_scheduled_by_release = release_mailbox_after_hosted_tui_busy_pre_submit(
             shared,
@@ -2080,7 +2084,10 @@ pub(super) async fn handle_text_message(
         let queued_card_rendered = false;
         let queue_kickoff_scheduled =
             queue_kickoff_scheduled_by_release || retry_present_or_accepted;
-        let mut diagnostic_json = diagnostic.to_json();
+        let mut diagnostic_json = tui_busy_diagnostic
+            .as_ref()
+            .map(ClaudeTuiBusyFollowupDiagnostic::to_json)
+            .unwrap_or_else(|| serde_json::json!({"runtime_kind_mismatch": true}));
         if let Some(object) = diagnostic_json.as_object_mut() {
             object.insert(
                 "queued_for_retry".to_string(),
@@ -2117,7 +2124,8 @@ pub(super) async fn handle_text_message(
             channel_id = channel_id.get(),
             user_msg_id = user_msg_id.get(),
             diagnostics = %diagnostic_json,
-            "claude_tui follow-up queued because hosted TUI is busy before prompt submission"
+            mismatch_deferred,
+            "turn queued because managed TUI dispatch must be deferred before prompt submission"
         );
         crate::services::observability::emit_inflight_lifecycle_event(
             provider.as_str(),
@@ -2125,7 +2133,11 @@ pub(super) async fn handle_text_message(
             dispatch_id.as_deref(),
             adk_session_key.as_deref(),
             Some(turn_id.as_str()),
-            "claude_tui_followup_busy_pre_submit",
+            if mismatch_deferred {
+                "runtime_kind_mismatch_deferred_pre_submit"
+            } else {
+                "claude_tui_followup_busy_pre_submit"
+            },
             diagnostic_json,
         );
         super::super::super::saturating_decrement_global_active(shared);
@@ -2150,13 +2162,14 @@ pub(super) async fn handle_text_message(
         .await;
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
-            "  [{ts}] 📬 Claude TUI busy follow-up queued before prompt submission (channel {}, enqueued={}, merged={}, depth={}, card_rendered={}, queue_kickoff_scheduled={})",
-            channel_id,
-            enqueue_outcome.enqueued,
-            enqueue_outcome.merged,
+            channel_id = channel_id.get(),
+            mismatch_deferred,
+            enqueued = enqueue_outcome.enqueued,
+            merged = enqueue_outcome.merged,
             queue_depth_after_busy_enqueue,
             queued_card_rendered,
-            queue_kickoff_scheduled
+            queue_kickoff_scheduled,
+            "turn queued before prompt submission"
         );
         cancel_token
             .cancelled
@@ -2211,7 +2224,7 @@ pub(super) async fn handle_text_message(
     );
     inflight_state.busy_followup_retry_user_msg_id = busy_followup_retry_user_msg_id.get();
     inflight_state.turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
-    apply_prelaunch_runtime_kind(&mut inflight_state, prelaunch_runtime_kind);
+    apply_prelaunch_runtime_kind(&mut inflight_state, effective_runtime_kind);
     let (worktree_path, worktree_branch, base_commit) = {
         let data = shared.core.lock().await;
         data.sessions
