@@ -1405,6 +1405,46 @@ mod stall_recovery_tests {
         );
     }
 
+    /// A stale watcher terminal commit must exercise the real identity gate and
+    /// return `Skipped` without modifying the newer row. `commit_decisions.rs`
+    /// exhaustively routes that production outcome to its evidence-loss WARN.
+    #[test]
+    fn watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row() {
+        let temp = TempDir::new().unwrap();
+        let channel_id = 50_250_001;
+        let session = "AgentDesk-claude-5025";
+        let stale = seed_watcher_stream_state(temp.path(), channel_id, session, "old body", 100);
+        let stale_identity = InflightTurnIdentity::from_state(&stale);
+
+        let mut newer = stale.clone();
+        newer.user_msg_id = stale.user_msg_id + 1;
+        newer.current_msg_id = stale.current_msg_id + 1;
+        newer.full_response = "new turn body".to_string();
+        newer.response_sent_offset = 0;
+        newer.terminal_delivery_committed = false;
+        force_write_state(temp.path(), &newer);
+
+        let outcome = commit_watcher_terminal_delivery_locked_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            channel_id,
+            &stale_identity,
+            session,
+            WatcherTerminalCommitPatch {
+                full_response: "delivered old body".to_string(),
+                last_offset: 256,
+                last_watcher_relayed_offset: Some(64),
+                last_watcher_relayed_generation_mtime_ns: Some(9),
+            },
+        );
+
+        assert_eq!(outcome, WatcherTerminalCommitOutcome::Skipped);
+        let persisted = loaded_row(temp.path(), channel_id);
+        assert_eq!(persisted.user_msg_id, newer.user_msg_id);
+        assert_eq!(persisted.full_response, "new turn body");
+        assert!(!persisted.terminal_delivery_committed);
+    }
+
     /// #3558: a forward commit (larger watermark than disk) advances normally —
     /// the max-serialize is a no-op when the commit is the authoritative tip.
     #[test]
