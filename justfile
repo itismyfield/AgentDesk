@@ -86,6 +86,7 @@ test-non-pg:
     env -u AGENTDESK_ROOT_DIR cargo test --lib single_message_panel::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::discord::outbound::serenity_reference::tests::lifecycle_notice_nonce_is_stable_and_semantic_event_scoped -- --exact
     cargo test --lib services::discord::outbound::delivery::tests::v3_referenced_send_preserves_reference_and_dedupes -- --exact
+    cargo test --lib services::discord::outbound::delivery_evidence_store::tests -- --skip _pg --skip pg_ --skip postgres
     # #4913 GO-A1: retain canonical Discord identity validation, collision, and observability contracts.
     cargo test --lib canonical_identity::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib session_canonical_identity::tests -- --skip _pg --skip pg_ --skip postgres
