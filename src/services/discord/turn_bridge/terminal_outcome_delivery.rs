@@ -45,6 +45,51 @@ mod prompt_too_long_guidance;
 mod queue_retry_silence;
 mod recovery_retry;
 
+fn bridge_terminal_delivery_evidence_loss_should_warn(
+    outcome: crate::services::discord::inflight::GuardedSaveOutcome,
+) -> bool {
+    matches!(
+        outcome,
+        crate::services::discord::inflight::GuardedSaveOutcome::IdentityMismatch
+    )
+}
+
+fn warn_if_bridge_terminal_delivery_evidence_lost(
+    outcome: crate::services::discord::inflight::GuardedSaveOutcome,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    current_msg_id: MessageId,
+    response_sent_offset: usize,
+) {
+    if bridge_terminal_delivery_evidence_loss_should_warn(outcome) {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = channel_id.get(),
+            current_msg_id = current_msg_id.get(),
+            response_sent_offset,
+            "turn bridge delivered the terminal answer but could not mirror terminal_delivery_committed: the inflight row is owned by a different turn identity, so this turn's delivery evidence is lost (row will read as undelivered)"
+        );
+    } else if outcome == crate::services::discord::inflight::GuardedSaveOutcome::IoError {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = channel_id.get(),
+            "turn bridge failed to mirror committed terminal delivery before cleanup"
+        );
+    }
+}
+
+#[cfg(test)]
+mod terminal_delivery_evidence_loss_tests {
+    use super::*;
+
+    #[test]
+    fn identity_mismatch_bridge_mirror_warns_about_lost_delivery_evidence() {
+        assert!(bridge_terminal_delivery_evidence_loss_should_warn(
+            crate::services::discord::inflight::GuardedSaveOutcome::IdentityMismatch
+        ));
+    }
+}
+
 use crate::services::discord::session_banner::DiscordTurnSessionBanner;
 
 pub(super) async fn run_terminal_outcome_delivery(
