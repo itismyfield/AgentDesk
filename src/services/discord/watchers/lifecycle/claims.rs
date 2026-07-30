@@ -71,6 +71,97 @@ pub(crate) fn find_watcher_by_tmux_session(
     ))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ThreadFollowUpParent {
+    channel_id: ChannelId,
+    provenance: &'static str,
+}
+
+impl ThreadFollowUpParent {
+    fn persisted(channel_id: ChannelId) -> Self {
+        Self {
+            channel_id,
+            provenance: "persisted_inflight",
+        }
+    }
+
+    fn live_discord(channel_id: ChannelId) -> Self {
+        Self {
+            channel_id,
+            provenance: "live_discord",
+        }
+    }
+}
+
+pub(crate) fn thread_follow_up_parent_from_live(
+    thread_parent_channel_id: Option<ChannelId>,
+) -> Option<ThreadFollowUpParent> {
+    thread_parent_channel_id.map(ThreadFollowUpParent::live_discord)
+}
+
+pub(crate) fn thread_follow_up_parent_channel_id(
+    channel_id: ChannelId,
+    logical_channel_id: Option<u64>,
+    thread_id: Option<u64>,
+) -> Option<ThreadFollowUpParent> {
+    (thread_id == Some(channel_id.get()))
+        .then_some(logical_channel_id)
+        .flatten()
+        .filter(|parent_channel_id| *parent_channel_id != channel_id.get())
+        .map(ChannelId::new)
+        .map(ThreadFollowUpParent::persisted)
+}
+
+fn observe_cross_channel_tmux_claim(
+    provider: Option<&ProviderKind>,
+    requested_channel_id: ChannelId,
+    existing_channel_id: ChannelId,
+    tmux_session_name: &str,
+    source: &str,
+    thread_parent: Option<ThreadFollowUpParent>,
+) {
+    let intended_thread_follow_up =
+        thread_parent.is_some_and(|thread_parent| thread_parent.channel_id == existing_channel_id);
+    let (claim_classification, intention_basis) = if intended_thread_follow_up {
+        (
+            "intended_thread_follow_up",
+            "requesting thread parent matches the existing watcher owner",
+        )
+    } else {
+        (
+            "unintended_cross_channel_claim",
+            "existing owner does not match the requesting thread parent",
+        )
+    };
+
+    let _ = crate::services::observability::record_invariant_check_with_severity(
+        false,
+        crate::services::observability::InvariantViolation {
+            provider: provider.map(ProviderKind::as_str),
+            channel_id: Some(requested_channel_id.get()),
+            dispatch_id: None,
+            session_key: None,
+            turn_id: None,
+            invariant: "watcher_cross_channel_tmux_claim_observed",
+            code_location: "src/services/discord/watchers/lifecycle/claims.rs",
+            message: "cross-channel tmux watcher claim classification recorded",
+            details: serde_json::json!({
+                "source": source,
+                "requested_channel_id": requested_channel_id.get(),
+                "existing_channel_id": existing_channel_id.get(),
+                "tmux_session_name": tmux_session_name,
+                "claim_classification": claim_classification,
+                "intention_basis": intention_basis,
+                "thread_parent_channel_id": thread_parent.map(|parent| parent.channel_id.get()),
+                "thread_parent_provenance": thread_parent
+                    .map(|parent| parent.provenance)
+                    .unwrap_or("none"),
+            }),
+        },
+        crate::services::observability::InvariantSeverity::Warn,
+    );
+}
+
 pub(crate) fn restore_scan_should_skip_existing_watcher(
     cancelled: bool,
     paused: bool,
@@ -88,10 +179,30 @@ pub(in crate::services::discord) fn try_claim_watcher(
     channel_id: ChannelId,
     handle: TmuxWatcherHandle,
 ) -> bool {
+    try_claim_watcher_with_thread_parent(watchers, channel_id, handle, None, None)
+}
+
+pub(in crate::services::discord) fn try_claim_watcher_with_thread_parent(
+    watchers: &TmuxWatcherRegistry,
+    channel_id: ChannelId,
+    handle: TmuxWatcherHandle,
+    provider: Option<&ProviderKind>,
+    thread_parent: Option<ThreadFollowUpParent>,
+) -> bool {
     let guard = lock_tmux_watcher_registry();
     let requested_tmux = handle.tmux_session_name.clone();
     let requested_output_path = handle.output_path.clone();
     if let Some(existing) = find_watcher_by_tmux_session(watchers, &requested_tmux) {
+        if channel_id != existing.0 {
+            observe_cross_channel_tmux_claim(
+                provider,
+                channel_id,
+                existing.0,
+                &requested_tmux,
+                "try_claim_watcher",
+                thread_parent,
+            );
+        }
         if existing.1 || existing.2 || existing.3 != requested_output_path {
             if let Some((_, existing_handle)) =
                 watchers.remove_tmux_session_locked(&guard, &requested_tmux)
@@ -160,7 +271,26 @@ pub(in crate::services::discord) fn claim_or_reuse_watcher(
     provider: &ProviderKind,
     source: &str,
 ) -> WatcherClaimOutcome {
-    claim_watcher(watchers, channel_id, handle, provider, source, false)
+    claim_or_reuse_watcher_with_thread_parent(watchers, channel_id, handle, provider, source, None)
+}
+
+pub(in crate::services::discord) fn claim_or_reuse_watcher_with_thread_parent(
+    watchers: &TmuxWatcherRegistry,
+    channel_id: ChannelId,
+    handle: TmuxWatcherHandle,
+    provider: &ProviderKind,
+    source: &str,
+    thread_parent: Option<ThreadFollowUpParent>,
+) -> WatcherClaimOutcome {
+    claim_watcher(
+        watchers,
+        channel_id,
+        handle,
+        provider,
+        source,
+        false,
+        thread_parent,
+    )
 }
 
 /// Force a fresh watcher/converter generation even when a live same-session
@@ -174,7 +304,28 @@ pub(in crate::services::discord) fn claim_or_replace_watcher(
     provider: &ProviderKind,
     source: &str,
 ) -> WatcherClaimOutcome {
-    claim_watcher(watchers, channel_id, handle, provider, source, true)
+    claim_or_replace_watcher_with_thread_parent(
+        watchers, channel_id, handle, provider, source, None,
+    )
+}
+
+pub(in crate::services::discord) fn claim_or_replace_watcher_with_thread_parent(
+    watchers: &TmuxWatcherRegistry,
+    channel_id: ChannelId,
+    handle: TmuxWatcherHandle,
+    provider: &ProviderKind,
+    source: &str,
+    thread_parent: Option<ThreadFollowUpParent>,
+) -> WatcherClaimOutcome {
+    claim_watcher(
+        watchers,
+        channel_id,
+        handle,
+        provider,
+        source,
+        true,
+        thread_parent,
+    )
 }
 
 pub(crate) fn claim_watcher(
@@ -184,6 +335,7 @@ pub(crate) fn claim_watcher(
     provider: &ProviderKind,
     source: &str,
     force_replace_live_same_tmux: bool,
+    thread_parent: Option<ThreadFollowUpParent>,
 ) -> WatcherClaimOutcome {
     let guard = lock_tmux_watcher_registry();
     let requested_tmux = handle.tmux_session_name.clone();
@@ -202,11 +354,21 @@ pub(crate) fn claim_watcher(
         // that provisional path must not downgrade the live registry binding.
         let replace_for_output_path =
             output_path_changed && !turn_start_uses_provisional_output_path;
-        if force_replace_live_same_tmux
+        let replaces_existing = force_replace_live_same_tmux
             || existing_cancelled
             || replace_paused_incumbent
-            || replace_for_output_path
-        {
+            || replace_for_output_path;
+        if channel_id != existing_channel_id {
+            observe_cross_channel_tmux_claim(
+                Some(provider),
+                channel_id,
+                existing_channel_id,
+                &requested_tmux,
+                source,
+                thread_parent,
+            );
+        }
+        if replaces_existing {
             if let Some((_, existing_handle)) =
                 watchers.remove_tmux_session_locked(&guard, &requested_tmux)
             {
@@ -334,4 +496,48 @@ pub(crate) fn claim_watcher(
         "watcher replacement must leave a channel-owned watcher slot"
     );
     outcome
+}
+
+#[cfg(test)]
+pub(crate) fn claim_cross_channel_tmux_watcher_for_test(
+    requested_channel_id: ChannelId,
+    existing_channel_id: ChannelId,
+    thread_parent_channel_id: Option<ChannelId>,
+) {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
+
+    fn handle(tmux_session_name: &str) -> TmuxWatcherHandle {
+        TmuxWatcherHandle {
+            tmux_session_name: tmux_session_name.to_string(),
+            output_path: "/tmp/agentdesk-4984-cross-channel-claim.jsonl".to_string(),
+            paused: Arc::new(AtomicBool::new(false)),
+            resume_offset: Arc::new(std::sync::Mutex::new(None)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            pause_epoch: Arc::new(AtomicU64::new(0)),
+            turn_delivered: Arc::new(AtomicBool::new(false)),
+            last_heartbeat_ts_ms: Arc::new(AtomicI64::new(
+                crate::services::discord::tmux_watcher_now_ms(),
+            )),
+        }
+    }
+
+    let watchers = TmuxWatcherRegistry::new();
+    let tmux_session_name = "AgentDesk-claude-4984-cross-channel-claim";
+    assert!(try_claim_watcher(
+        &watchers,
+        existing_channel_id,
+        handle(tmux_session_name),
+    ));
+    let outcome = claim_watcher(
+        &watchers,
+        requested_channel_id,
+        handle(tmux_session_name),
+        &ProviderKind::Claude,
+        "high_risk_recovery_4984",
+        false,
+        thread_follow_up_parent_from_live(thread_parent_channel_id),
+    );
+    assert_eq!(outcome.action, WatcherClaimAction::ReuseExisting);
+    assert_eq!(outcome.owner_channel_id(), existing_channel_id);
 }

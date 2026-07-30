@@ -312,6 +312,68 @@ async fn second_watcher_owner_stamp_io_error_retries_from_exact_partial_checkpoi
 }
 
 #[tokio::test]
+async fn thread_follow_up_tmux_ready_claim_records_intended_classification_4984() {
+    let _config_lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let _observability_lock = crate::services::observability::test_runtime_lock();
+    crate::services::observability::reset_for_tests();
+    let root = tempfile::tempdir().expect("runtime root");
+    let _env_reset = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        root.path(),
+    );
+    let provider = ProviderKind::Claude;
+    let parent_channel_id = ChannelId::new(42_592_699);
+    let thread_channel_id = 42_592_700;
+    let tmux_session_name = "AgentDesk-claude-4984-thread-follow-up";
+    let output_path = "/runtime/4984-thread-follow-up.jsonl";
+    let mut state = runtime_seed(provider.clone(), thread_channel_id);
+    state.logical_channel_id = Some(parent_channel_id.get());
+    state.thread_id = Some(thread_channel_id);
+    save_inflight_state(&state).expect("seed thread inflight row");
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    shared.tmux_watchers.insert(
+        parent_channel_id,
+        live_watcher_handle(tmux_session_name, output_path),
+    );
+    let mut state_dirty = false;
+
+    let observed = dispatch_process_handoff(
+        &shared,
+        &provider,
+        &mut state,
+        RuntimeHandoffLoopMessage::TmuxReady {
+            output_path: output_path.to_string(),
+            input_fifo_path: "/runtime/4984-thread-follow-up.input".to_string(),
+            tmux_session_name: tmux_session_name.to_string(),
+            last_offset: 0,
+        },
+        &mut state_dirty,
+        false,
+    )
+    .await;
+
+    assert_eq!(observed.outcome, Some(GuardedSaveOutcome::Saved));
+    assert_eq!(observed.watcher_owner_channel_id, parent_channel_id);
+    let classification = crate::services::observability::events::recent(20)
+        .into_iter()
+        .find(|event| {
+            event.event_type == "invariant_violation"
+                && event.payload["invariant"] == "watcher_cross_channel_tmux_claim_observed"
+        })
+        .expect("runtime handoff must persist the intended thread follow-up classification");
+    assert_eq!(
+        classification.payload["details"]["claim_classification"],
+        "intended_thread_follow_up"
+    );
+    assert_eq!(
+        classification.payload["details"]["thread_parent_provenance"],
+        "persisted_inflight"
+    );
+}
+
+#[tokio::test]
 async fn process_ready_skips_reowned_row_and_does_not_queue_stale_flush() {
     let _lock = crate::config::shared_test_env_lock()
         .lock()

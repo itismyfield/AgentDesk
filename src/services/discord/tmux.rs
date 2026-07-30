@@ -67,11 +67,17 @@ use self::tmux_session_files::{
     preserve_mtime_after_write, reset_stale_local_relay_offset_if_output_regressed,
     sweep_orphan_session_files,
 };
+#[cfg(test)]
+pub(in crate::services::discord) use self::watcher_lifecycle::claim_cross_channel_tmux_watcher_for_test;
 use self::watcher_lifecycle::*;
 pub(in crate::services::discord) use self::watcher_lifecycle::{
-    claim_or_replace_watcher, claim_or_reuse_watcher, clear_recovery_handled_channels,
-    fail_dispatch_for_ready_for_input_stall, refresh_session_heartbeat_from_tmux_output,
-    restore_tmux_watchers, session_belongs_to_current_runtime, store_recovery_handled_channels,
+    ThreadFollowUpParent, claim_or_replace_watcher, claim_or_replace_watcher_with_thread_parent,
+    claim_or_reuse_watcher, claim_or_reuse_watcher_with_thread_parent,
+    clear_recovery_handled_channels, fail_dispatch_for_ready_for_input_stall,
+    refresh_session_heartbeat_from_tmux_output, restore_tmux_watchers,
+    session_belongs_to_current_runtime, store_recovery_handled_channels,
+    thread_follow_up_parent_channel_id, thread_follow_up_parent_from_live,
+    try_claim_watcher_with_thread_parent,
 };
 use super::watcher_lifecycle_decision::*;
 const READY_FOR_INPUT_IDLE_PROBE_INTERVAL: Duration = Duration::from_secs(2);

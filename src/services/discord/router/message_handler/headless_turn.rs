@@ -545,7 +545,8 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         )
     };
 
-    let fast_mode_channel_id = effective_fast_mode_channel_id(channel_id, early_thread_parent);
+    let fast_mode_channel_id =
+        effective_fast_mode_channel_id(channel_id, early_thread_parent.clone());
     super::super::super::commands::reset_provider_session_if_pending(
         &ctx.http,
         shared,
@@ -1169,6 +1170,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         watcher_output_path,
         inflight_offset,
         "turn_start_headless",
+        early_thread_parent.map(|(parent_channel_id, _)| parent_channel_id),
         &mut inflight_state,
     );
     let (tx, rx) = mpsc::channel();
