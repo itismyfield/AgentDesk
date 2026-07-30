@@ -1256,10 +1256,11 @@
   - `src/services/discord/recovery_engine/completion_delivery.rs` (sub-1000;
     behavior-preserving #3834 r2 extraction of recovery terminal relay,
     visible completion/status-panel completion helpers, and their tests.)
-  - `src/services/discord/recovery_engine/manual_rebind/mod.rs` (911 prod lines
-    after the #4712 pure-move extraction of the test-only race-seam barrier
-    cluster into `manual_rebind/test_barriers.rs` (114 prod lines); no longer a
-    prod giant. Keeps the manual rebind entrypoints,
+  - `src/services/discord/recovery_engine/manual_rebind/mod.rs` (950 prod lines
+    after #5021 added explicit relay-repair accounting and the #4712 pure-move
+    extraction of the test-only race-seam barrier cluster into
+    `manual_rebind/test_barriers.rs` (114 prod lines); no longer a prod giant.
+    Keeps the manual rebind entrypoints,
     rollback carrier, session refresh, active-turn re-registration hook, and
     watcher claim/spawn path. #4465's durable automatic lane performs the
     blocking exact-episode adoption on `spawn_blocking`, retains that same
