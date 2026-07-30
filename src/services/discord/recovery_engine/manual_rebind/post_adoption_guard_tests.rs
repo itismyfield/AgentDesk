@@ -146,7 +146,7 @@ fn durable_episode_authority_lexically_covers_every_handoff_side_effect() {
         "note_footer_suppressed_for_message_takeover",
         "let session = core",
         "reregister_active_turn_from_inflight_under_episode_guard",
-        "register_rehydrated_tmux_runtime_binding",
+        "merge_rehydrated_tmux_runtime_binding",
     ] {
         handoff
             .find(mutation)
