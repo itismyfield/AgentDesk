@@ -383,10 +383,6 @@ pub(crate) fn enqueue_intervention(
     if queue
         .iter()
         .any(|item| item.source_message_ids.contains(&intervention.message_id))
-        || (intervention.is_headless_runtime_mismatch_defer()
-            && queue
-                .iter()
-                .any(Intervention::is_headless_runtime_mismatch_defer))
     {
         return EnqueueInterventionResult {
             enqueued: false,

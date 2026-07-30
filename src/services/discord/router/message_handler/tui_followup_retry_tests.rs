@@ -35,7 +35,7 @@ mod busy_retry_fifo_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn headless_runtime_mismatch_defer_is_bounded_and_appended_5015() {
+    async fn headless_runtime_mismatch_defer_preserves_distinct_prompts_in_fifo_order_5015() {
         let temp = tempfile::tempdir().expect("temporary runtime root");
         let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
 
@@ -56,21 +56,45 @@ mod busy_retry_fifo_tests {
                 &provider,
                 channel_id,
                 serenity::MessageId::new(50_150_220 + attempt),
-                "headless retry",
+                &format!("headless retry {attempt}"),
             )
             .await;
-            assert_eq!(retry.enqueued, attempt == 0);
-            if attempt > 0 {
-                assert_eq!(
-                    retry.refusal_reason,
-                    Some(crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued)
-                );
-            }
-            let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
-            assert_eq!(snapshot.intervention_queue.len(), 2);
-            assert_eq!(snapshot.intervention_queue[0].message_id, human.message_id);
-            assert!(snapshot.intervention_queue[1].is_headless_runtime_mismatch_defer());
+            assert!(
+                retry.enqueued,
+                "distinct headless prompts must not deduplicate"
+            );
         }
+        let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
+        assert_eq!(snapshot.intervention_queue.len(), 7);
+        assert_eq!(snapshot.intervention_queue[0].message_id, human.message_id);
+        for (index, queued) in snapshot.intervention_queue[1..].iter().enumerate() {
+            assert!(queued.is_headless_runtime_mismatch_defer());
+            assert_eq!(queued.text, format!("headless retry {index}"));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_runtime_mismatch_marker_survives_disk_roundtrip_5015() {
+        let temp = tempfile::tempdir().expect("temporary runtime root");
+        let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = serenity::ChannelId::new(50_150_230);
+
+        let retry = enqueue_headless_runtime_mismatch_defer(
+            &shared,
+            &provider,
+            channel_id,
+            serenity::MessageId::new(50_150_231),
+            "durable headless retry",
+        )
+        .await;
+        assert!(retry.enqueued);
+        let (restored, _) =
+            crate::services::turn_orchestrator::load_pending_queues(&provider, &shared.token_hash);
+        let item = &restored[&channel_id][0];
+        assert!(item.is_headless_runtime_mismatch_defer());
+        assert_eq!(item.text, "durable headless retry");
     }
 
     // SAFETY: holds shared_test_env_lock across await to serialize the

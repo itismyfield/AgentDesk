@@ -120,13 +120,18 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
                     // between an out-of-actor snapshot and a blind replace.
                     let mut allowed_items: Vec<Intervention> = Vec::with_capacity(items.len());
                     for item in items {
-                        if super::is_allowed_turn_sender(
-                            &allowed_bot_ids_for_restore,
-                            announce_bot_id_for_restore,
-                            item.author_id.get(),
-                            item.author_is_bot,
-                            &item.text,
-                        ) {
+                        // The synthetic runtime-mismatch retry is produced only
+                        // by the internal headless path. Admit that exact marker
+                        // without widening #706 to arbitrary bot-authored turns.
+                        if item.is_headless_runtime_mismatch_defer()
+                            || super::is_allowed_turn_sender(
+                                &allowed_bot_ids_for_restore,
+                                announce_bot_id_for_restore,
+                                item.author_id.get(),
+                                item.author_is_bot,
+                                &item.text,
+                            )
+                        {
                             allowed_items.push(item);
                         } else {
                             skipped_sender += 1;
@@ -215,13 +220,15 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
                         skipped_unowned += 1;
                         continue;
                     }
-                    if !super::is_allowed_turn_sender(
-                        &allowed_bot_ids_for_restore,
-                        announce_bot_id_for_restore,
-                        marker.intervention.author_id.get(),
-                        marker.intervention.author_is_bot,
-                        &marker.intervention.text,
-                    ) {
+                    if !marker.intervention.is_headless_runtime_mismatch_defer()
+                        && !super::is_allowed_turn_sender(
+                            &allowed_bot_ids_for_restore,
+                            announce_bot_id_for_restore,
+                            marker.intervention.author_id.get(),
+                            marker.intervention.author_is_bot,
+                            &marker.intervention.text,
+                        )
+                    {
                         skipped_sender += 1;
                         continue;
                     }
