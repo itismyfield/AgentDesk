@@ -79,16 +79,8 @@ fn warn_if_bridge_terminal_delivery_evidence_lost(
 }
 
 #[cfg(test)]
-mod terminal_delivery_evidence_loss_tests {
-    use super::*;
-
-    #[test]
-    fn identity_mismatch_bridge_mirror_warns_about_lost_delivery_evidence() {
-        assert!(bridge_terminal_delivery_evidence_loss_should_warn(
-            crate::services::discord::inflight::GuardedSaveOutcome::IdentityMismatch
-        ));
-    }
-}
+#[path = "terminal_outcome_delivery/evidence_loss_tests.rs"]
+mod terminal_delivery_evidence_loss_tests;
 
 use crate::services::discord::session_banner::DiscordTurnSessionBanner;
 

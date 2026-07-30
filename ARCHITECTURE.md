@@ -938,6 +938,7 @@ src/
 │   │   │   │   ├── contracts.rs
 │   │   │   │   ├── delivery_epilogue.rs
 │   │   │   │   ├── empty_response_recovery.rs
+│   │   │   │   ├── evidence_loss_tests.rs
 │   │   │   │   ├── prompt_too_long_guidance.rs
 │   │   │   │   ├── queue_retry_silence.rs
 │   │   │   │   └── recovery_retry.rs

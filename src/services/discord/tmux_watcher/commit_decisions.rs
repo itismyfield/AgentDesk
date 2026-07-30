@@ -28,6 +28,40 @@ fn watcher_terminal_delivery_evidence_loss_should_warn(
     )
 }
 
+struct WatcherTerminalEvidenceLossContext<'a> {
+    provider: &'a ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &'a str,
+    expected_user_msg_id: u64,
+    last_offset: u64,
+    turn_data_start_offset: u64,
+}
+
+fn warn_if_watcher_terminal_delivery_evidence_lost(
+    outcome: crate::services::discord::inflight::WatcherTerminalCommitOutcome,
+    ctx: WatcherTerminalEvidenceLossContext<'_>,
+) {
+    let WatcherTerminalEvidenceLossContext {
+        provider,
+        channel_id,
+        tmux_session_name,
+        expected_user_msg_id,
+        last_offset,
+        turn_data_start_offset,
+    } = ctx;
+    if watcher_terminal_delivery_evidence_loss_should_warn(outcome) {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = channel_id.get(),
+            tmux_session = %tmux_session_name,
+            expected_user_msg_id,
+            last_offset,
+            turn_data_start_offset,
+            "watcher relayed a terminal answer but the inflight identity guard refused the commit; this turn's delivery evidence is lost (row will read as undelivered)"
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn mark_watcher_terminal_delivery_committed(
     provider: &ProviderKind,
@@ -90,17 +124,17 @@ pub(super) fn mark_watcher_terminal_delivery_committed(
     // is the thing the guard exists to prevent — but returning `false` with no
     // trace made a delivered turn indistinguishable from a turn that never
     // delivered. Keep the non-clobber behavior and make that evidence loss loud.
-    if watcher_terminal_delivery_evidence_loss_should_warn(outcome) {
-        tracing::warn!(
-            provider = %provider.as_str(),
-            channel_id = channel_id.get(),
-            tmux_session = %tmux_session_name,
-            expected_user_msg_id = expected_identity.user_msg_id,
+    warn_if_watcher_terminal_delivery_evidence_lost(
+        outcome,
+        WatcherTerminalEvidenceLossContext {
+            provider,
+            channel_id,
+            tmux_session_name,
+            expected_user_msg_id: expected_identity.user_msg_id,
             last_offset,
             turn_data_start_offset,
-            "watcher relayed a terminal answer but the inflight identity guard refused the commit; this turn's delivery evidence is lost (row will read as undelivered)"
-        );
-    }
+        },
+    );
     match outcome {
         crate::services::discord::inflight::WatcherTerminalCommitOutcome::Committed => true,
         crate::services::discord::inflight::WatcherTerminalCommitOutcome::Skipped => false,
@@ -118,13 +152,69 @@ pub(super) fn mark_watcher_terminal_delivery_committed(
 
 #[cfg(test)]
 mod terminal_delivery_evidence_loss_tests {
+    use std::{
+        io::{self, Write},
+        sync::{Arc, Mutex},
+    };
+
     use super::*;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone)]
+    struct CapturingWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for CapturingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
 
     #[test]
     fn skipped_watcher_terminal_commit_warns_about_lost_delivery_evidence() {
-        assert!(watcher_terminal_delivery_evidence_loss_should_warn(
-            crate::services::discord::inflight::WatcherTerminalCommitOutcome::Skipped
-        ));
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(CapturingWriter {
+                buffer: buffer.clone(),
+            })
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            warn_if_watcher_terminal_delivery_evidence_lost(
+                crate::services::discord::inflight::WatcherTerminalCommitOutcome::Skipped,
+                WatcherTerminalEvidenceLossContext {
+                    provider: &ProviderKind::Claude,
+                    channel_id: ChannelId::new(5025),
+                    tmux_session_name: "AgentDesk-claude-5025",
+                    expected_user_msg_id: 77,
+                    last_offset: 128,
+                    turn_data_start_offset: 64,
+                },
+            );
+        });
+        let logs = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+
+        assert!(
+            logs.contains("watcher relayed a terminal answer but the inflight identity guard refused the commit"),
+            "logs={logs}"
+        );
     }
 }
 
