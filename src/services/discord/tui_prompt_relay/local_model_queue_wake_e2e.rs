@@ -772,7 +772,7 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
     // CompletionAdmission::claim_queue_eligible then emits QueueEligible(B) exactly once after its
     // mailbox-released and terminal barriers settle. Inspect that exact ordered pair before opening
     // the strict window. The idle-queue consumer continues without dispatch on MailboxReleased; the
-    // other production consumer can only stop B's typing indicator. TODO: a causal-origin issue must
+    // other production consumer can only stop B's typing indicator. #5018 tracks causal origin to
     // close the remaining value-only gap where a faulty local-only publisher replaces, rather than
     // duplicates, one of B's own lifecycle edges.
     assert_local_only_completion_lifecycle(
