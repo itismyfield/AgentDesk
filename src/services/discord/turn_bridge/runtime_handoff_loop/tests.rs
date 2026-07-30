@@ -312,7 +312,7 @@ async fn second_watcher_owner_stamp_io_error_retries_from_exact_partial_checkpoi
 }
 
 #[tokio::test]
-async fn thread_follow_up_tmux_ready_claim_does_not_record_cross_channel_observation_4984() {
+async fn thread_follow_up_tmux_ready_claim_records_intended_classification_4984() {
     let _config_lock = crate::config::shared_test_env_lock()
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
