@@ -168,16 +168,27 @@ pub(super) async fn commit_episode_side_effects(
         authoritative_runtime_kind,
         authoritative_output_path,
     ) {
+        let previous_binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
+            authoritative_tmux_session,
+        );
         let desired_binding = crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
             runtime_kind: RuntimeHandoffKind::ClaudeTui,
             output_path: authoritative_output_path.to_string(),
             relay_output_path: None,
             input_fifo_path: authoritative_state.input_fifo_path.clone(),
             session_id: authoritative_session_id,
-            // Recovery can intentionally restart at zero when this output file
-            // was recreated/truncated below the durable cursor. Monotonic merge
-            // is therefore scoped to an existing binding for this exact path.
-            last_offset: initial_offset.max(authoritative_state.last_offset),
+            last_offset: previous_binding
+                .as_ref()
+                .filter(|previous| previous.output_path == authoritative_output_path)
+                .map_or(
+                    initial_offset.max(authoritative_state.last_offset),
+                    |previous| {
+                        previous
+                            .last_offset
+                            .max(initial_offset)
+                            .max(authoritative_state.last_offset)
+                    },
+                ),
             relay_last_offset: None,
         };
         crate::services::tui_prompt_dedupe::merge_rehydrated_tmux_runtime_binding(

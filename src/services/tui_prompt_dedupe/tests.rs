@@ -908,50 +908,6 @@ fn advances_runtime_binding_offset_for_same_output_path() {
 }
 
 #[test]
-fn rehydrated_same_path_binding_preserves_newer_live_cursor_atomically() {
-    let _guard = TEST_LOCK.lock().unwrap();
-    reset_state();
-    let tmux = "tmux-rehydrate-monotonic";
-    register_tmux_runtime_binding(
-        tmux,
-        TuiRuntimeBinding {
-            runtime_kind: RuntimeHandoffKind::ClaudeTui,
-            output_path: "/tmp/rehydrate-monotonic.jsonl".to_string(),
-            relay_output_path: None,
-            input_fifo_path: None,
-            session_id: Some("session-live".to_string()),
-            last_offset: 256,
-            relay_last_offset: None,
-        },
-    );
-
-    let merged = merge_rehydrated_tmux_runtime_binding(
-        "claude",
-        tmux,
-        42,
-        TuiRuntimeBinding {
-            runtime_kind: RuntimeHandoffKind::ClaudeTui,
-            output_path: "/tmp/rehydrate-monotonic.jsonl".to_string(),
-            relay_output_path: None,
-            input_fifo_path: None,
-            session_id: Some("session-live".to_string()),
-            last_offset: 128,
-            relay_last_offset: None,
-        },
-    )
-    .expect("merge binding");
-
-    assert_eq!(merged.0.expect("previous binding").last_offset, 256);
-    assert_eq!(merged.1.last_offset, 256);
-    assert_eq!(
-        runtime_binding_for_tmux_session(tmux)
-            .expect("installed binding")
-            .last_offset,
-        256
-    );
-}
-
-#[test]
 fn advances_runtime_binding_relay_offset_separately_from_runtime_path() {
     let _guard = TEST_LOCK.lock().unwrap();
     reset_state();

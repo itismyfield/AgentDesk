@@ -123,7 +123,6 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding(
         tmux_session_name,
         channel_id,
         binding,
-        false,
     );
 }
 
@@ -133,21 +132,14 @@ pub(crate) fn merge_rehydrated_tmux_runtime_binding(
     channel_id: u64,
     binding: TuiRuntimeBinding,
 ) -> Option<(Option<TuiRuntimeBinding>, TuiRuntimeBinding, Option<u64>)> {
-    register_rehydrated_tmux_runtime_binding_inner(
-        provider,
-        tmux_session_name,
-        channel_id,
-        binding,
-        true,
-    )
+    register_rehydrated_tmux_runtime_binding_inner(provider, tmux_session_name, channel_id, binding)
 }
 
 fn register_rehydrated_tmux_runtime_binding_inner(
     provider: &str,
     tmux_session_name: &str,
     channel_id: u64,
-    mut binding: TuiRuntimeBinding,
-    preserve_same_path_cursor: bool,
+    binding: TuiRuntimeBinding,
 ) -> Option<(Option<TuiRuntimeBinding>, TuiRuntimeBinding, Option<u64>)> {
     let provider = normalize_provider(provider);
     let tmux_session_name = tmux_session_name.trim();
@@ -169,17 +161,6 @@ fn register_rehydrated_tmux_runtime_binding_inner(
         .channel_by_tmux
         .get(tmux_session_name)
         .map(|entry| entry.value);
-    // Rehydration may race a live reader that advances the same transcript
-    // cursor after recovery sampled it. Merge under the registry lock so a
-    // stale whole-binding insert cannot move that cursor backwards. A changed
-    // output path is a new transcript and deliberately keeps its supplied
-    // restart offset (including zero after truncate/recreate).
-    if preserve_same_path_cursor
-        && let Some(previous) = state.runtime_by_tmux.get(tmux_session_name)
-        && previous.value.output_path == binding.output_path
-    {
-        binding.last_offset = binding.last_offset.max(previous.value.last_offset);
-    }
     let session_id = binding.session_id.clone();
     let installed_binding = binding.clone();
     state.runtime_by_tmux.insert(
