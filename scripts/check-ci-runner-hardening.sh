@@ -102,7 +102,7 @@ targets = {
     "runs_on" => "ubuntu-latest",
     # #5025 re-pins after adding the production bridge-epilogue routing test to
     # the existing toolchain-provisioned targeted lane whose mirror is required.
-    "job_sha256" => "3b221523a5a5d734c4f040c6efc9c008a679afd5c6ccd874abd36cae3058ee5c",
+    "job_sha256" => "561114d54ad205a9e65f82c5ce27c79b03069e26c94af0d35b515fe6fce3f082",
     "cargo_steps" => {
       "Trusted session forwarding tests" => {
         "commands" => ["env -u AGENTDESK_ROOT_DIR cargo test --lib services::session_forwarding -- --skip _pg --skip pg_ --skip postgres"],
@@ -112,7 +112,7 @@ targets = {
       "Terminal delivery evidence regressions" => {
         "commands" => [
           "env -u AGENTDESK_ROOT_DIR cargo test --lib inflight::terminal_delivery_evidence_loss::tests",
-          "env -u AGENTDESK_ROOT_DIR cargo test --lib terminal_delivery_epilogue_routes_identity_mismatch_to_warn",
+          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests",
           "env -u AGENTDESK_ROOT_DIR cargo test --lib watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row",
           "env -u AGENTDESK_ROOT_DIR cargo test --lib identity_guarded_save_rejects_stale_write_against_newer_turn",
         ],
