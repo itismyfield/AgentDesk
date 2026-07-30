@@ -30,6 +30,7 @@ mod inflight_heartbeat_sweeper;
 pub(crate) mod internal_api;
 mod jsonl_watcher;
 mod mailbox_finish;
+mod manual_steer_interaction;
 mod mcp_credential_watcher;
 pub(crate) mod meeting_artifact_store;
 pub(crate) mod meeting_orchestrator;

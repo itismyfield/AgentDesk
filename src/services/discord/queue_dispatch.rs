@@ -121,6 +121,80 @@ impl MailboxTakeNextSoftOutcome {
     }
 }
 
+/// The one-shot queue claim held while a manual steer button attempts native
+/// TUI injection. The dispatch lease is the actor-authorized rollback token.
+#[derive(Debug, Default)]
+pub(in crate::services::discord) struct ManualSteerClaimOutcome {
+    intervention: Option<Intervention>,
+    dispatch_lease: Option<DispatchLeaseHandle>,
+}
+
+impl ManualSteerClaimOutcome {
+    pub(in crate::services::discord) fn into_claim(
+        self,
+    ) -> Option<(Intervention, DispatchLeaseHandle)> {
+        self.intervention.zip(self.dispatch_lease)
+    }
+}
+
+/// Atomically removes only the exact card head from the channel mailbox.
+///
+/// `take_soft_matching` validates, removes, persists, and creates the lease in
+/// a single mailbox actor operation, so concurrent clicks yield one claimant.
+pub(in crate::services::discord) async fn mailbox_claim_manual_steer(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    message_id: MessageId,
+) -> ManualSteerClaimOutcome {
+    let result = shared
+        .mailbox(channel_id)
+        .take_soft_matching(
+            super::queue_persistence_context(shared, provider, channel_id),
+            Some(message_id),
+        )
+        .await;
+    super::apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    if let Some(error) = result.persistence_error {
+        tracing::warn!(
+            provider = provider.as_str(),
+            channel_id = channel_id.get(),
+            message_id = message_id.get(),
+            error = %error,
+            "manual steer claim failed durable queue persistence"
+        );
+        return ManualSteerClaimOutcome::default();
+    }
+    let Some(intervention) = result.intervention else {
+        return ManualSteerClaimOutcome::default();
+    };
+    let Some(dispatch_lease) = result.dispatch_lease else {
+        tracing::error!(
+            provider = provider.as_str(),
+            channel_id = channel_id.get(),
+            message_id = message_id.get(),
+            "manual steer claim returned intervention without dispatch lease"
+        );
+        return ManualSteerClaimOutcome::default();
+    };
+    ManualSteerClaimOutcome {
+        intervention: Some(intervention),
+        dispatch_lease: Some(dispatch_lease),
+    }
+}
+
+/// Roll back a failed manual native-TUI injection without changing survivor
+/// order. The lease ensures only the successful claimant can restore its head.
+pub(in crate::services::discord) async fn mailbox_restore_manual_steer_claim(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    intervention: Intervention,
+    dispatch_lease: DispatchLeaseHandle,
+) -> MailboxEnqueueOutcome {
+    mailbox_restore_dequeued_head(shared, provider, channel_id, intervention, dispatch_lease).await
+}
+
 pub(super) async fn mailbox_take_next_soft_intervention(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,

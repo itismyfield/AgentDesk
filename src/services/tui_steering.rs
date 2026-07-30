@@ -5,7 +5,6 @@ use crate::services::codex_tui;
 use crate::services::provider::ProviderKind;
 use crate::services::provider_hosting::{ProviderSessionDriver, ProviderSessionSelection};
 
-const TUI_STEERING_ENV: &str = "AGENTDESK_TUI_STEERING";
 const RETRY_BACKOFF: [Duration; 3] = [
     Duration::from_millis(0),
     Duration::from_millis(80),
@@ -30,14 +29,6 @@ pub(crate) enum SteeringOutcome {
     Injected,
     Unsafe(&'static str),
     Failed(String),
-}
-
-pub(crate) fn tui_steering_enabled_from(value: Option<&str>) -> bool {
-    value == Some("1")
-}
-
-pub(crate) fn tui_steering_enabled() -> bool {
-    tui_steering_enabled_from(std::env::var(TUI_STEERING_ENV).ok().as_deref())
 }
 
 pub(crate) fn route_input_by_session_driver(selection: &ProviderSessionSelection) -> SteeringRoute {
@@ -139,14 +130,6 @@ mod tests {
             driver,
             fallback_reason: None,
         }
-    }
-
-    #[test]
-    fn flag_default_off_keeps_existing_mailbox_path() {
-        assert!(!tui_steering_enabled_from(None));
-        assert!(!tui_steering_enabled_from(Some("0")));
-        assert!(!tui_steering_enabled_from(Some("true")));
-        assert!(tui_steering_enabled_from(Some("1")));
     }
 
     #[test]

@@ -745,6 +745,24 @@ async fn reuse_merged_queued_placeholder(
         );
         return MergedPlaceholderReuse::PostFresh;
     }
+    let button_rendered =
+        crate::services::discord::manual_steer_interaction::attach_manual_steer_button(
+            ctx,
+            channel_id,
+            placeholder_msg_id,
+            user_msg_id,
+        )
+        .await;
+    if !button_rendered {
+        data.shared
+            .remove_queued_placeholder_locked(channel_id, user_msg_id);
+        data.shared.insert_queued_placeholder_locked(
+            channel_id,
+            prior_source_id,
+            placeholder_msg_id,
+        );
+        return MergedPlaceholderReuse::PostFresh;
+    }
     drop(persist_guard);
 
     let ts = chrono::Local::now().format("%H:%M:%S");
@@ -916,6 +934,21 @@ async fn reuse_any_queued_placeholder_for_channel(
             channel_id,
             outcome,
         );
+        return Some(false);
+    }
+    let button_rendered =
+        crate::services::discord::manual_steer_interaction::attach_manual_steer_button(
+            ctx,
+            channel_id,
+            placeholder_msg_id,
+            user_msg_id,
+        )
+        .await;
+    if !button_rendered {
+        data.shared
+            .remove_queued_placeholder_locked(channel_id, user_msg_id);
+        data.shared
+            .insert_queued_placeholder_locked(channel_id, prior_owner, placeholder_msg_id);
         return Some(false);
     }
     drop(persist_guard);
@@ -1103,6 +1136,20 @@ pub(super) async fn render_visible_queued_ack(
         crate::services::discord::placeholder_controller::PlaceholderControllerOutcome::Edited
             | crate::services::discord::placeholder_controller::PlaceholderControllerOutcome::Coalesced
     ) {
+        let button_rendered = crate::services::discord::manual_steer_interaction::attach_manual_steer_button(
+            ctx,
+            channel_id,
+            placeholder_msg_id,
+            user_msg_id,
+        )
+        .await;
+        if !button_rendered {
+            data.shared
+                .remove_queued_placeholder_locked(channel_id, user_msg_id);
+            drop(persist_guard);
+            let _ = channel_id.delete_message(&ctx.http, placeholder_msg_id).await;
+            return false;
+        }
         drop(persist_guard);
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(

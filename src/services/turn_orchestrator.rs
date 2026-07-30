@@ -4754,6 +4754,60 @@ mod active_turn_kind_tests {
         );
     }
 
+    #[tokio::test]
+    async fn concurrent_exact_head_claims_have_one_winner_and_preserve_survivor_fifo() {
+        let _lock = lock_test_env();
+        let _env_guard = EnvGuard;
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(ChannelId::new(4_754_001));
+        for message_id in [101, 102, 103] {
+            assert!(
+                handle
+                    .enqueue(test_intervention(message_id), test_persistence())
+                    .await
+                    .enqueued
+            );
+        }
+
+        let first = handle.take_soft_matching(test_persistence(), Some(MessageId::new(102)));
+        let second = handle.take_soft_matching(test_persistence(), Some(MessageId::new(102)));
+        let (first, second) = tokio::join!(first, second);
+        let results = [first, second];
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result.intervention.is_some())
+                .count(),
+            1,
+            "two stale/concurrent button clicks must have exactly one atomic claimant"
+        );
+        let winner = results
+            .iter()
+            .find(|result| result.intervention.is_some())
+            .expect("one claimant");
+        assert_eq!(
+            winner.intervention.as_ref().map(|item| item.message_id),
+            Some(MessageId::new(102))
+        );
+        assert!(
+            winner.dispatch_lease.is_some(),
+            "the winner needs the rollback lease"
+        );
+        let snapshot = handle.snapshot().await;
+        assert_eq!(
+            snapshot
+                .intervention_queue
+                .iter()
+                .map(|item| item.message_id)
+                .collect::<Vec<_>>(),
+            vec![MessageId::new(101), MessageId::new(103)],
+            "manual exact-head claim must not reorder remaining FIFO entries"
+        );
+    }
+
     // #3167 BLOCKER-2 — the dequeue→claim window. `TakeNextSoft` removes the
     // queued head BEFORE the dequeued user turn claims the slot, leaving an
     // EMPTY queue. A Background start arriving in that window must still yield
