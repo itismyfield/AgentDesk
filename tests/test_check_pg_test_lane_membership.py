@@ -1,28 +1,32 @@
-"""Mutation fixtures for the PostgreSQL test-lane membership gate (#4979)."""
+"""Hermetic mutation fixtures for the PostgreSQL lane membership gate (#4979)."""
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts/check_pg_test_lane_membership.py"
 INTEGRITY_SCRIPT = REPO_ROOT / "scripts/check_test_target_integrity.py"
-_spec = importlib.util.spec_from_file_location("check_pg_test_lane_membership", SCRIPT)
-assert _spec and _spec.loader
-membership = importlib.util.module_from_spec(_spec)
-sys.modules[_spec.name] = membership
-_spec.loader.exec_module(membership)
-_integrity_spec = importlib.util.spec_from_file_location(
-    "check_test_target_integrity_cross_fixture", INTEGRITY_SCRIPT
-)
-assert _integrity_spec and _integrity_spec.loader
-integrity = importlib.util.module_from_spec(_integrity_spec)
-sys.modules[_integrity_spec.name] = integrity
-_integrity_spec.loader.exec_module(integrity)
+
+
+def load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+membership = load_module("check_pg_test_lane_membership", SCRIPT)
+integrity = load_module("check_test_target_integrity_cross_fixture", INTEGRITY_SCRIPT)
 
 
 class Fixture:
@@ -35,8 +39,7 @@ class Fixture:
             (REPO_ROOT / "scripts/check_test_lane_coverage.py").read_text("utf-8"), "utf-8"
         )
         (root / "justfile").write_text(
-            "test-postgres:\n    cargo test -- _pg pg_ postgres --test-threads=1\n",
-            "utf-8",
+            "test-postgres:\n    cargo test -- _pg pg_ postgres --test-threads=1\n", "utf-8"
         )
         (root / ".github/workflows/ci-main.yml").write_text(
             self.workflow("cargo test postgres_ -- --test-threads=1", require=True), "utf-8"
@@ -46,21 +49,20 @@ class Fixture:
         )
         self.write_pr(("src/db/**",))
         (root / "scripts/pg_test_lane_allowlist.txt").write_text("", "utf-8")
+        (root / "src/lib.rs").write_text("", "utf-8")
 
     @staticmethod
     def workflow(command: str, *, require: bool = False, start: bool = False) -> str:
         env = "    env:\n      AGENTDESK_REQUIRE_PG: \"1\"\n" if require else ""
         start_step = "      - run: ./scripts/ci/postgres-service.sh start\n" if (start or require) else ""
-        return (
-            "jobs:\n  lane:\n" + env + "    steps:\n" + start_step
-            + f"      - run: {command}\n"
-        )
+        return "on:\n  push:\njobs:\n  lane:\n" + env + "    steps:\n" + start_step + f"      - run: {command}\n"
 
-    def write_pr(self, patterns: tuple[str, ...]) -> None:
-        rendered = "\n".join(f"              - '{pattern}'" for pattern in patterns)
+    def write_pr(self, patterns: tuple[str, ...], indent: int = 12) -> None:
+        prefix = " " * indent
+        rendered = "\n".join(f"{prefix}  - '{pattern}'" for pattern in patterns)
         (self.root / ".github/workflows/ci-pr.yml").write_text(
             "jobs:\n  changes:\n    steps:\n      - with:\n          filters: |\n"
-            f"            pg_db:\n{rendered}\n            rust:\n              - 'src/**'\n",
+            f"{prefix}pg_db:\n{rendered}\n{prefix}rust:\n{prefix}  - 'src/**'\n",
             "utf-8",
         )
 
@@ -70,14 +72,12 @@ class Fixture:
         target.write_text(source, "utf-8")
         if lib is not None:
             (self.root / "src/lib.rs").write_text(lib, "utf-8")
-        elif not (self.root / "src/lib.rs").exists():
-            (self.root / "src/lib.rs").write_text("", "utf-8")
 
-    def debts(self):
-        return membership.analyze(self.root).debts
+    def analysis(self):
+        return membership.analyze(self.root)
 
 
-class FixtureTestCase(unittest.TestCase):
+class FixtureCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -85,8 +85,8 @@ class FixtureTestCase(unittest.TestCase):
         self.fx = Fixture(self.root)
 
 
-class DetectionMutation(FixtureTestCase):
-    def test_unmarked_seed_test_is_detected_and_production_pgpool_is_not(self) -> None:
+class DetectionMutation(FixtureCase):
+    def test_seed_detection_and_production_counterexample(self) -> None:
         self.fx.write_source(
             "src/service.rs",
             "use sqlx::PgPool;\n#[cfg(test)] mod tests {\n"
@@ -94,10 +94,9 @@ class DetectionMutation(FixtureTestCase):
             "#[test] fn counterexample() { assert!(true); }\n}\n",
             "mod service;\n",
         )
-        inventory = membership.discover_pg_inventory(self.root)
-        self.assertEqual(set(inventory.tests), {"service::tests::bad"})
+        self.assertEqual(set(membership.discover_pg_inventory(self.root).tests), {"service::tests::bad"})
 
-    def test_one_hop_struct_closure_detects_use_but_pgpool_signature_does_not(self) -> None:
+    def test_struct_closure_and_pgpool_signature_counterexample(self) -> None:
         self.fx.write_source(
             "src/service.rs",
             "#[cfg(test)] mod tests {\n"
@@ -107,116 +106,148 @@ class DetectionMutation(FixtureTestCase):
             "#[test] fn counterexample() { let _ = Mock; }\n}\n",
             "mod service;\n",
         )
-        inventory = membership.discover_pg_inventory(self.root)
-        self.assertEqual(set(inventory.tests), {"service::tests::bad"})
+        self.assertEqual(set(membership.discover_pg_inventory(self.root).tests), {"service::tests::bad"})
+
+    def test_seed_names_require_word_boundaries(self) -> None:
+        self.fx.write_source(
+            "src/service.rs",
+            "#[cfg(test)] mod tests { #[test] fn lazy() { let _ = PgPoolOptions::new(); } }\n",
+            "mod service;\n",
+        )
+        self.assertEqual(membership.discover_pg_inventory(self.root).tests, {})
 
 
-class RuleMutations(FixtureTestCase):
-    def test_rule1_unmarked_module_fails_and_postgres_module_passes(self) -> None:
+class RuleMutations(FixtureCase):
+    def test_rule1_bad_and_good(self) -> None:
         for module, bad in (("tests", True), ("postgres_tests", False)):
             with self.subTest(module=module):
-                self.fx.write_source(
-                    "src/db/service.rs",
-                    f"#[cfg(test)] mod {module} {{ #[test] fn case() {{ create_test_database(); }} }}\n",
-                    "mod db { pub mod service; }\n",
-                )
-                self.assertEqual(bool(self.fx.debts()["rule1"]), bad)
+                self.fx.write_source("src/db/service.rs", f"#[cfg(test)] mod {module} {{ #[test] fn case() {{ create_test_database(); }} }}\n", "mod db { pub mod service; }\n")
+                self.assertEqual(bool(self.fx.analysis().debts["rule1"]), bad)
 
-    def test_rule2_bare_pg_tests_fails_and_canonical_names_pass(self) -> None:
+    def test_rule2_bad_and_good(self) -> None:
         for module, bad in (("pg_tests", True), ("thing_pg_tests", False), ("postgres_tests", False)):
             with self.subTest(module=module):
-                self.fx.write_source(
-                    "src/db/service.rs",
-                    f"#[cfg(test)] mod {module} {{ #[test] fn case() {{ create_test_database(); }} }}\n",
-                    "mod db { pub mod service; }\n",
-                )
-                self.assertEqual(bool(self.fx.debts()["rule2"]), bad)
+                self.fx.write_source("src/db/service.rs", f"#[cfg(test)] mod {module} {{ #[test] fn case() {{ create_test_database(); }} }}\n", "mod db { pub mod service; }\n")
+                self.assertEqual(bool(self.fx.analysis().debts["rule2"]), bad)
 
-    def test_rule3_outside_filter_fails_explicit_glob_and_db_tree_pass(self) -> None:
-        cases = (
-            ("src/service.rs", ("src/db/**",), True),
-            ("src/service.rs", ("src/service.rs",), False),
-            ("src/db/service.rs", ("src/db/**",), False),
-        )
+    def test_rule3_bad_explicit_and_db_glob(self) -> None:
+        cases = (("src/service.rs", ("src/db/**",), True), ("src/service.rs", ("src/service.rs",), False), ("src/db/service.rs", ("src/db/**",), False))
         for path, patterns, bad in cases:
-            with self.subTest(path=path, patterns=patterns), tempfile.TemporaryDirectory() as temp:
+            with self.subTest(path=path), tempfile.TemporaryDirectory() as temp:
                 fx = Fixture(Path(temp))
                 fx.write_pr(patterns)
-                fx.write_source(
-                    path,
-                    "#[cfg(test)] mod postgres_tests { #[test] fn case() { create_test_database(); } }\n",
-                    "#[path = \"%s\"] mod service;\n" % path.removeprefix("src/"),
-                )
-                self.assertEqual(bool(fx.debts()["rule3"]), bad)
+                fx.write_source(path, "#[cfg(test)] mod postgres_tests { #[test] fn case() { create_test_database(); } }\n", "#[path = \"%s\"] mod service;\n" % path.removeprefix("src/"))
+                self.assertEqual(bool(fx.analysis().debts["rule3"]), bad)
 
-    def test_rule4_start_without_env_fails_and_pgless_job_passes(self) -> None:
+    def test_rule4_bad_and_pgless_counterexample(self) -> None:
         workflow = self.root / ".github/workflows/ci-main.yml"
         workflow.write_text(self.fx.workflow("cargo test postgres_", start=True), "utf-8")
-        self.assertEqual(self.fx.debts()["rule4"], {".github/workflows/ci-main.yml:lane"})
+        self.assertEqual(self.fx.analysis().debts["rule4"], {".github/workflows/ci-main.yml:lane"})
         workflow.write_text(self.fx.workflow("cargo test --all-targets"), "utf-8")
-        self.assertEqual(self.fx.debts()["rule4"], set())
+        self.assertEqual(self.fx.analysis().debts["rule4"], set())
 
 
-class ParserMutations(FixtureTestCase):
-    def test_path_alias_and_inline_nested_modules_use_logical_names(self) -> None:
+class ParserMutations(FixtureCase):
+    def test_alias_and_nested_module(self) -> None:
         (self.root / "src/physical").mkdir()
-        self.fx.write_source(
-            "src/lib.rs", '#[path = "physical/leaf.rs"] mod logical;\n'
-        )
-        self.fx.write_source(
-            "src/physical/leaf.rs",
-            "mod nested { #[cfg(test)] mod postgres_tests {\n"
-            "#[test] fn case() { create_test_database(); } } }\n",
-        )
-        inventory = membership.discover_pg_inventory(self.root)
-        self.assertEqual(
-            set(inventory.tests), {"logical::nested::postgres_tests::case"}
-        )
+        self.fx.write_source("src/lib.rs", '#[path = "physical/leaf.rs"] mod logical;\n')
+        self.fx.write_source("src/physical/leaf.rs", "mod nested { #[cfg(test)] mod postgres_tests { #[test] fn case() { create_test_database(); } } }\n")
+        self.assertEqual(set(membership.discover_pg_inventory(self.root).tests), {"logical::nested::postgres_tests::case"})
 
-    def test_pg_db_negation_overrides_positive_and_normal_case_passes(self) -> None:
-        self.fx.write_source(
-            "src/db/service.rs",
-            "#[cfg(test)] mod postgres_tests { #[test] fn case() { create_test_database(); } }\n",
-            "mod db { pub mod service; }\n",
-        )
-        self.fx.write_pr(("src/db/**", "!src/db/service.rs"))
-        self.assertEqual(self.fx.debts()["rule3"], {"src/db/service.rs"})
-        self.fx.write_pr(("src/db/**",))
-        self.assertEqual(self.fx.debts()["rule3"], set())
+    def test_negation_and_indentation_refactor(self) -> None:
+        self.fx.write_source("src/db/service.rs", "#[cfg(test)] mod postgres_tests { #[test] fn case() { create_test_database(); } }\n", "mod db { pub mod service; }\n")
+        self.fx.write_pr(("src/db/**", "!src/db/service.rs"), indent=8)
+        self.assertEqual(self.fx.analysis().debts["rule3"], {"src/db/service.rs"})
+        self.fx.write_pr(("src/db/**",), indent=8)
+        self.assertEqual(self.fx.analysis().debts["rule3"], set())
 
-    def test_bin_target_command_is_excluded_without_crashing(self) -> None:
+    def test_step_name_is_not_a_cargo_command(self) -> None:
+        text = "steps:\n  - name: cargo test (postgres bootstrap)\n    run: echo no\n  - run: cargo test postgres_\n"
+        self.assertEqual(membership._cargo_commands(text), ["cargo test postgres_"])
+
+    def test_trigger_keys_are_not_jobs_and_yaml_extension_is_seen(self) -> None:
+        workflow = self.root / ".github/workflows/extra.yaml"
+        workflow.write_text("on:\n  push:\n  workflow_dispatch:\njobs:\n  real:\n    steps:\n      - run: echo ok\n", "utf-8")
+        self.assertEqual([job.name for job in membership.parse_jobs(workflow, self.root)], ["real"])
+        with mock.patch.object(membership, "discover_pg_inventory", return_value=membership.PgInventory({})):
+            self.assertEqual(self.fx.analysis().inventory.tests, {})
+
+    def test_cross_checker_bin_command(self) -> None:
         command = "cargo test --bin agentdesk foo:: -- --test-threads=1"
-        self.assertIsNone(
-            membership._load_coverage_module(self.root).cargo_test_filter(command)
-        )
-        (self.root / ".github/workflows/ci-main.yml").write_text(
-            self.fx.workflow(command, require=True), "utf-8"
-        )
-        self.assertEqual(membership.analyze(self.root).inventory.tests, {})
-
-    def test_same_bin_command_is_integrity_mismatch_but_not_membership_lane(self) -> None:
-        command = "cargo test --bin agentdesk foo:: -- --test-threads=1"
-        (self.root / "Cargo.toml").write_text(
-            '[package]\nname = "fixture"\n\n[lib]\npath = "src/lib.rs"\n\n'
-            '[[bin]]\nname = "agentdesk"\npath = "src/main.rs"\n',
-            "utf-8",
-        )
+        (self.root / "Cargo.toml").write_text('[package]\nname="fixture"\n[lib]\npath="src/lib.rs"\n[[bin]]\nname="agentdesk"\npath="src/main.rs"\n', "utf-8")
         (self.root / "src/lib.rs").write_text("mod foo;\n", "utf-8")
         (self.root / "src/foo.rs").write_text("#[cfg(test)] mod tests {}\n", "utf-8")
         (self.root / "src/main.rs").write_text("fn main() {}\n", "utf-8")
         workflow = self.root / ".github/workflows/cross.yml"
         workflow.write_text(self.fx.workflow(command), "utf-8")
-        violations = integrity.check_workflows(
-            self.root, [workflow], set(), with_list_check=False
-        )
+        violations = integrity.check_workflows(self.root, [workflow], set(), False)
         self.assertEqual([violation.kind for violation in violations], ["target-mismatch"])
-        self.assertIsNone(
-            membership._load_coverage_module(self.root).cargo_test_filter(command)
+        self.assertIsNone(membership._load_coverage_module(self.root).cargo_test_filter(command))
+
+
+class BaselineAndEnforcement(FixtureCase):
+    def analysis(self, debts: dict[str, set[str]] | None = None):
+        return membership.Analysis(
+            membership.PgInventory({"service::postgres_tests::case": "src/db/service.rs"}),
+            debts or {section: set() for section in membership.SECTIONS},
+            0,
         )
 
+    def run_check(self, analysis, baseline, reference, manifest=None):
+        stderr = io.StringIO()
+        stdout = io.StringIO()
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(stdout):
+            rc = membership.check_analysis(
+                analysis,
+                baseline,
+                reference,
+                manifest if manifest is not None else membership.render_manifest(analysis.inventory),
+                reference_label="fixture base",
+                allowlist_label="scripts/pg_test_lane_allowlist.txt",
+            )
+        return rc, stdout.getvalue(), stderr.getvalue()
 
-class BaselineAndAllowlistContract(FixtureTestCase):
-    def test_allowlist_requires_inline_reason(self) -> None:
+    def test_repair_passes_and_stale_baseline_fails(self) -> None:
+        old = {section: set() for section in membership.SECTIONS}
+        old["rule3"] = {"src/db/service.rs"}
+        rc, _, _ = self.run_check(self.analysis(), {section: set() for section in membership.SECTIONS}, old)
+        self.assertEqual(rc, 0)
+        rc, _, error = self.run_check(self.analysis(), old, old)
+        self.assertEqual(rc, 1)
+        self.assertIn("Remove '-' entries", error)
+
+    def test_new_violation_and_baseline_coverup_fail(self) -> None:
+        empty = {section: set() for section in membership.SECTIONS}
+        current = {section: set() for section in membership.SECTIONS}
+        current["rule1"] = {"service::tests::case"}
+        rc, _, error = self.run_check(self.analysis(current), empty, empty)
+        self.assertEqual(rc, 1)
+        self.assertIn("Fix '+' violations", error)
+        rc, _, error = self.run_check(self.analysis(current), current, empty)
+        self.assertEqual(rc, 1)
+        self.assertIn("baseline growth forbidden", error)
+
+    def test_manifest_drift_fails_with_complete_recovery_command(self) -> None:
+        empty = {section: set() for section in membership.SECTIONS}
+        rc, _, error = self.run_check(self.analysis(), empty, empty, "")
+        self.assertEqual(rc, 1)
+        self.assertIn("python3 scripts/check_pg_test_lane_membership.py --write-snapshots", error)
+        self.assertIn("rewrites BOTH the manifest and baseline", error)
+        self.assertIn("will not excuse", error)
+
+    def test_inventory_change_passes_when_manifest_matches(self) -> None:
+        empty = {section: set() for section in membership.SECTIONS}
+        analysis = membership.Analysis(
+            membership.PgInventory({
+                "service::postgres_tests::case": "src/db/service.rs",
+                "service::postgres_tests::new_case": "src/db/service.rs",
+            }),
+            empty,
+            0,
+        )
+        self.assertEqual(self.run_check(analysis, empty, empty)[0], 0)
+
+    def test_allowlist_requires_reason(self) -> None:
         path = self.root / "scripts/pg_test_lane_allowlist.txt"
         path.write_text("test:service::tests::case\n", "utf-8")
         with self.assertRaisesRegex(ValueError, "reason comment"):
@@ -224,26 +255,15 @@ class BaselineAndAllowlistContract(FixtureTestCase):
         path.write_text("test:service::tests::case # tracked by #999\n", "utf-8")
         self.assertEqual(membership.load_allowlist(path)[0], {"service::tests::case"})
 
-    def test_manifest_and_sectioned_baseline_are_sorted(self) -> None:
-        inventory = membership.PgInventory({"z::tests::b": "src/z.rs", "a::tests::a": "src/a.rs"})
-        manifest = membership.render_manifest(inventory)
-        self.assertLess(manifest.index("src/a.rs"), manifest.index("src/z.rs"))
-        baseline = membership.render_baseline({section: {"z", "a"} for section in membership.SECTIONS})
-        parsed = membership.parse_baseline(baseline, "fixture")
-        self.assertEqual(parsed["rule1"], {"a", "z"})
 
-
-class RealRepositoryContract(unittest.TestCase):
-    def test_rederived_counts_match_design_revision_two(self) -> None:
-        analysis = membership.analyze(REPO_ROOT)
-        self.assertEqual(len(analysis.inventory.tests), 419)
-        self.assertEqual(len(analysis.inventory.files), 70)
-        self.assertEqual(len(analysis.debts["rule1"]), 118)
-        self.assertEqual(len({name.rpartition("::")[0] for name in analysis.debts["rule1"]}), 25)
-        self.assertEqual(len(analysis.debts["rule2"]), 260)
-        self.assertEqual(len({name.rpartition("::")[0] for name in analysis.debts["rule2"]}), 55)
-        self.assertEqual(len(analysis.debts["rule3"]), 30)
-        self.assertEqual(len(analysis.debts["rule4"]), 7)
+class MutationProof(FixtureCase):
+    def test_detector_patch_is_caught_by_fixture_assertion(self) -> None:
+        self.fx.write_source("src/service.rs", "#[cfg(test)] mod tests { #[test] fn bad() { create_test_database(); } }\n", "mod service;\n")
+        expected = {"service::tests::bad"}
+        self.assertEqual(set(membership.discover_pg_inventory(self.root).tests), expected)
+        with mock.patch.object(membership, "discover_pg_inventory", return_value=membership.PgInventory({})):
+            with self.assertRaises(AssertionError):
+                self.assertEqual(set(membership.discover_pg_inventory(self.root).tests), expected)
 
 
 if __name__ == "__main__":

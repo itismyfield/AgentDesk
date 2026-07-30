@@ -31,7 +31,11 @@ SEEDS = (
     "PgPool", "connect_and_migrate", "create_test_database",
     "connect_test_pool", "PostgresTestLifecycleGuard", "lock_test_lifecycle",
 )
-CONNECT_SEEDS = tuple(seed for seed in SEEDS if seed != "PgPool")
+# Some repository helpers wrap the shared test database behind locally named
+# constructors. They stay explicit so word-boundary seed matching does not need
+# to regress to broad substrings such as PgPoolOptions.
+LOCAL_HELPER_NAMES = ("create_test_pg_db",)
+CONNECT_SEEDS = tuple(seed for seed in SEEDS if seed != "PgPool") + LOCAL_HELPER_NAMES
 SECTIONS = ("rule1", "rule2", "rule3", "rule4")
 
 
@@ -105,7 +109,8 @@ _TEST_ATTR = re.compile(
 )
 _STRUCT = re.compile(r"\bstruct\s+([A-Za-z_][A-Za-z0-9_]*)\b")
 _IMPL = re.compile(r"\bimpl(?:\s*<[^>{}]*>)?\s+(?:[^{}]*?\s+for\s+)?([A-Za-z_][A-Za-z0-9_]*)\b[^{};]*\{")
-_JOB = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$", re.MULTILINE)
+_JOBS_KEY = re.compile(r"^(?P<indent>\s*)jobs:\s*$", re.MULTILINE)
+_JOB = re.compile(r"^(?P<indent>\s+)(?P<name>[A-Za-z0-9_-]+):\s*$", re.MULTILINE)
 
 
 def _matching_brace(clean: str, opening: int) -> int:
@@ -204,8 +209,6 @@ def _aliases(repo_root: Path, coverage) -> dict[tuple[str, ...], tuple[str, ...]
 
 
 def discover_pg_inventory(repo_root: Path) -> PgInventory:
-    if os.environ.get("PG_LANE_MUTATION_DISABLE_DETECTION") == "1":
-        return PgInventory({})
     repo_root = repo_root.resolve()
     coverage = _load_coverage_module(repo_root)
     src_root = (repo_root / "src").resolve()
@@ -236,14 +239,14 @@ def discover_pg_inventory(repo_root: Path) -> PgInventory:
             if opening is None:
                 continue
             body = clean[opening:_matching_brace(clean, opening) + 1]
-            if any(seed in body for seed in CONNECT_SEEDS):
+            if any(re.search(rf"\b{re.escape(seed)}\b", body) for seed in CONNECT_SEEDS):
                 helpers.add(match.group(1))
         for match in _IMPL.finditer(clean):
             if not _inside_test_region(match.start(), ranges, external):
                 continue
             opening = match.end() - 1
             body = clean[opening:_matching_brace(clean, opening) + 1]
-            if any(seed in body for seed in CONNECT_SEEDS):
+            if any(re.search(rf"\b{re.escape(seed)}\b", body) for seed in CONNECT_SEEDS):
                 helpers.add(match.group(1))
 
         for match in _ATTR_FN.finditer(clean):
@@ -263,7 +266,10 @@ def discover_pg_inventory(repo_root: Path) -> PgInventory:
 
     tests: dict[str, str] = {}
     for name, path, body, helpers in records:
-        direct = any(seed in body for seed in SEEDS)
+        direct = any(
+            re.search(rf"\b{re.escape(seed)}\b", body)
+            for seed in (*SEEDS, *LOCAL_HELPER_NAMES)
+        )
         indirect = any(re.search(rf"\b{re.escape(helper)}\b", body) for helper in helpers)
         if direct or indirect:
             tests[name] = path
@@ -271,22 +277,60 @@ def discover_pg_inventory(repo_root: Path) -> PgInventory:
 
 
 def parse_jobs(path: Path, repo_root: Path) -> list[Job]:
+    """Parse top-level jobs without treating workflow trigger keys as jobs.
+
+    This intentionally stays dependency-free instead of relying on PyYAML, which
+    is not declared by AgentDesk's script-check environment. It supports the
+    repository's block-style workflows and fails closed if ``jobs:`` is absent.
+    """
     text = path.read_text("utf-8")
-    matches = list(_JOB.finditer(text))
+    jobs_key = _JOBS_KEY.search(text)
+    if jobs_key is None:
+        return []
+    jobs_indent = len(jobs_key.group("indent"))
+    candidates = [
+        match for match in _JOB.finditer(text, jobs_key.end())
+        if len(match.group("indent")) == jobs_indent + 2
+    ]
     rel = str(path.relative_to(repo_root))
     return [
-        Job(rel, match.group(1), text[match.end():matches[index + 1].start() if index + 1 < len(matches) else len(text)])
-        for index, match in enumerate(matches)
+        Job(
+            rel,
+            match.group("name"),
+            text[match.end():candidates[index + 1].start() if index + 1 < len(candidates) else len(text)],
+        )
+        for index, match in enumerate(candidates)
     ]
 
 
 def _cargo_commands(text: str) -> list[str]:
+    """Extract only YAML ``run:`` scalar command lines, never step names."""
     commands: list[str] = []
+    block_indent: int | None = None
     for line in text.splitlines():
-        stripped = line.strip().strip('"\'')
-        start = stripped.find("cargo test")
-        if start >= 0 and not stripped.startswith("#"):
-            commands.append(stripped[start:])
+        indent = len(line) - len(line.lstrip())
+        stripped = line.strip()
+        run = re.match(r"^(?:-\s+)?run:\s*(.*)$", stripped)
+        if run:
+            value = run.group(1).strip().strip('"\'')
+            if value in ("", "|"):
+                block_indent = indent
+            else:
+                block_indent = None
+                start = value.find("cargo test")
+                if start >= 0:
+                    commands.append(value[start:])
+            continue
+        if block_indent is not None:
+            if not stripped or stripped.startswith("#"):
+                continue
+            if indent <= block_indent:
+                block_indent = None
+                continue
+            value = stripped.strip('"\'')
+            start = value.find("cargo test")
+            if start >= 0:
+                commands.append(value[start:])
     return commands
 
 
@@ -321,15 +365,28 @@ def pgless_lane_filters(jobs: Iterable[Job], coverage) -> tuple:
 
 
 def parse_pg_db_patterns(path: Path) -> tuple[str, ...]:
+    """Parse the block-style dorny ``pg_db`` filter by relative indentation."""
     lines = path.read_text("utf-8").splitlines()
-    start = next((index for index, line in enumerate(lines) if re.match(r"^\s{12}pg_db:\s*$", line)), None)
+    start = next(
+        (
+            (index, len(line) - len(line.lstrip()))
+            for index, line in enumerate(lines)
+            if re.match(r"^\s+pg_db:\s*$", line)
+        ),
+        None,
+    )
     if start is None:
         raise ValueError(f"missing pg_db path filter in {path}")
+    start_index, section_indent = start
     patterns: list[str] = []
-    for line in lines[start + 1:]:
-        if re.match(r"^\s{12}[A-Za-z0-9_-]+:\s*$", line):
+    for line in lines[start_index + 1:]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent <= section_indent:
             break
-        match = re.match(r"^\s+-\s+['\"]([^'\"]+)['\"]\s*$", line)
+        match = re.match(r"^-\s+['\"]([^'\"]+)['\"]\s*$", stripped)
         if match:
             patterns.append(match.group(1))
     if not patterns:
@@ -370,7 +427,10 @@ def load_allowlist(path: Path) -> tuple[set[str], set[str]]:
 
 def analyze(repo_root: Path, allowlist_path: Path | None = None) -> Analysis:
     coverage = _load_coverage_module(repo_root)
-    workflows = sorted((repo_root / ".github/workflows").glob("*.yml"))
+    workflows = sorted(
+        set((repo_root / ".github/workflows").glob("*.yml"))
+        | set((repo_root / ".github/workflows").glob("*.yaml"))
+    )
     jobs = [job for path in workflows for job in parse_jobs(path, repo_root)]
     inventory = discover_pg_inventory(repo_root)
     allowed_tests, allowed_files = load_allowlist(allowlist_path or repo_root / ALLOWLIST_REL)
@@ -439,23 +499,51 @@ def reference_baseline(repo_root: Path, ref: str) -> tuple[str, dict[str, set[st
     return sha, parse_baseline(blob.stdout, f"{sha}:{BASELINE_REL}")
 
 
-def check(repo_root: Path, baseline_path: Path, manifest_path: Path, baseline_ref: str, allowlist_path: Path | None = None) -> int:
-    analysis = analyze(repo_root, allowlist_path)
+def check_analysis(
+    analysis: Analysis,
+    baseline: dict[str, set[str]],
+    reference: dict[str, set[str]] | None,
+    actual_manifest: str,
+    *,
+    reference_label: str,
+    allowlist_label: str,
+) -> int:
+    """Apply manifest and one-way baseline contracts to a supplied analysis."""
     failed = False
     expected_manifest = render_manifest(analysis.inventory)
-    actual_manifest = manifest_path.read_text("utf-8")
     if actual_manifest != expected_manifest:
-        print("FAIL: PG test-lane manifest drift; regenerate with --write-snapshots.", file=sys.stderr)
+        print("FAIL: PG test-lane manifest drift.", file=sys.stderr)
+        print(
+            "Run `python3 scripts/check_pg_test_lane_membership.py --write-snapshots` "
+            "after intentional PG test inventory changes. This rewrites BOTH the manifest "
+            "and baseline; inspect both diffs.",
+            file=sys.stderr,
+        )
+        print(
+            "If the change creates a new rule violation, snapshot regeneration will not "
+            "excuse it: fix the test/module/workflow, or add a narrowly scoped entry with "
+            f"an inline reason to {allowlist_label}.",
+            file=sys.stderr,
+        )
         failed = True
-    baseline = parse_baseline(baseline_path.read_text("utf-8"), str(baseline_path))
-    sha, reference = reference_baseline(repo_root, baseline_ref)
     if reference is not None:
         for section in SECTIONS:
             growth = sorted(baseline[section] - reference[section])
             if growth:
-                print(f"FAIL: [{section}] baseline growth forbidden vs commit {sha}:", file=sys.stderr)
+                print(f"FAIL: [{section}] baseline growth forbidden vs {reference_label}:", file=sys.stderr)
                 for entry in growth:
                     print(f"  + {entry}", file=sys.stderr)
+                print(
+                    "Remove '+' entries; the candidate baseline may only preserve or "
+                    "remove debt from its immutable reference snapshot. Fix the test, "
+                    "module name, or workflow lane instead.",
+                    file=sys.stderr,
+                )
+                print(
+                    f"For a proven classifier false positive only, add `test:<path> # reason` "
+                    f"or `file:<path> # reason` to {allowlist_label}.",
+                    file=sys.stderr,
+                )
                 failed = True
     for section in SECTIONS:
         new = sorted(analysis.debts[section] - baseline[section])
@@ -466,14 +554,38 @@ def check(repo_root: Path, baseline_path: Path, manifest_path: Path, baseline_re
                 print(f"  + {entry}", file=sys.stderr)
             for entry in stale:
                 print(f"  - {entry}", file=sys.stderr)
+            print(
+                "Fix '+' violations in the test/module/workflow. Remove '-' entries from "
+                "the baseline to lock in debt reduction; then regenerate the manifest.",
+                file=sys.stderr,
+            )
+            print(
+                f"For a proven classifier false positive only, use {allowlist_label}; "
+                "every entry requires an inline reason comment.",
+                file=sys.stderr,
+            )
             failed = True
     counts = analysis.debts
     print(f"pg-lane debt: rule1={len(counts['rule1'])} rule2={len(counts['rule2'])} rule3={len(counts['rule3'])} (allowlist={analysis.allowlist_count})")
     if failed:
         return 1
-    bootstrap = " (bootstrap reference has no baseline)" if reference is None else ""
-    print(f"PG test-lane membership check passed: {len(analysis.inventory.tests)} tests, {len(analysis.inventory.files)} files; rule4={len(counts['rule4'])}{bootstrap}")
+    print(f"PG test-lane membership check passed: {len(analysis.inventory.tests)} tests, {len(analysis.inventory.files)} files; rule4={len(counts['rule4'])}")
     return 0
+
+
+def check(repo_root: Path, baseline_path: Path, manifest_path: Path, baseline_ref: str, allowlist_path: Path | None = None) -> int:
+    analysis = analyze(repo_root, allowlist_path)
+    baseline = parse_baseline(baseline_path.read_text("utf-8"), str(baseline_path))
+    sha, reference = reference_baseline(repo_root, baseline_ref)
+    allowlist = allowlist_path or repo_root / ALLOWLIST_REL
+    return check_analysis(
+        analysis,
+        baseline,
+        reference,
+        manifest_path.read_text("utf-8"),
+        reference_label=f"commit {sha}" if reference is not None else "bootstrap snapshot",
+        allowlist_label=str(allowlist),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
