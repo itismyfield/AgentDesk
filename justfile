@@ -50,6 +50,8 @@ test-non-pg:
     cargo test --lib intake_queue_transaction::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib pending_reaction_failure_adapter_tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib intake_dispatch_invariant_queued_entrypoints_promote_markers -- --skip _pg --skip pg_ --skip postgres
+    # #5040: telemetry-only owner planning cannot fence an unopted live-local channel.
+    cargo test --lib services::discord::router::intake_dispatch::tests::telemetry_only_unopted -- --skip _pg --skip pg_ --skip postgres
     # #4788: raw attachment preparation must remain behind local admission.
     cargo test --lib attachment -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib mailbox_reaction_tests -- --skip _pg --skip pg_ --skip postgres

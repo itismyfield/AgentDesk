@@ -125,10 +125,13 @@ use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
 
 use super::{
-    IntakeOrigin, IntakeSubmission, QueuedAdmissionDisposition, dispatch_skill_intake,
-    dispatch_text_intake,
+    IntakeAdmission, IntakeOrigin, IntakeSubmission, QueuedAdmissionDisposition,
+    admission_for_decision, dispatch_skill_intake, dispatch_text_intake,
 };
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::cluster::intake_router_hook::{
+    IntakeRouterDecision, IntakeRoutingBasis, ResolvedSessionOwner,
+};
 use crate::services::discord::router::message_handler::{IntakeDeps, IntakeRequest};
 use crate::services::discord::router::{TurnKind, admit_queued_intake};
 use crate::services::provider::ProviderKind;
@@ -273,6 +276,62 @@ fn queued_intervention(message_id: u64, pending_uploads: Vec<String>) -> Interve
         pending_uploads,
         voice_announcement: None,
     }
+}
+
+fn submission_for_admission(channel_id: ChannelId, message_id: u64) -> IntakeSubmission {
+    IntakeSubmission {
+        provider: ProviderKind::Claude,
+        request: request(channel_id, message_id, "admission policy"),
+        origin: IntakeOrigin::LiveMessage,
+        preserve_on_cancel: false,
+        has_nonportable_uploads: false,
+        attachments: Vec::new(),
+        preloaded_uploads: Vec::new(),
+        voice_announcement: None,
+    }
+}
+
+#[test]
+fn telemetry_only_unopted_live_local_open_route_runs_locally_5040() {
+    let submission = submission_for_admission(ChannelId::new(4_350_351), 4_350_361);
+    let admission = admission_for_decision(
+        false,
+        IntakeRouterDecision::DeferredOpenRoute {
+            target_instance_id: "local-instance".to_string(),
+            resolved_owner: ResolvedSessionOwner::LiveLocal,
+        },
+        &submission,
+    );
+
+    assert!(
+        matches!(admission, IntakeAdmission::Local(_)),
+        "telemetry-only owner planning must not fence an unopted live-local channel"
+    );
+}
+
+#[test]
+fn telemetry_only_unopted_live_foreign_owner_stays_fenced_5040() {
+    let submission = submission_for_admission(ChannelId::new(4_350_371), 4_350_381);
+    let admission = admission_for_decision(
+        false,
+        IntakeRouterDecision::Forwarded {
+            target_instance_id: "foreign-instance".to_string(),
+            outbox_id: 5040,
+            basis: IntakeRoutingBasis::LiveForeignOwner,
+        },
+        &submission,
+    );
+
+    assert!(
+        matches!(
+            admission,
+            IntakeAdmission::Forwarded {
+                ref target_instance_id,
+                outbox_id: 5040,
+            } if target_instance_id == "foreign-instance"
+        ),
+        "a live foreign owner must retain exclusive remote execution"
+    );
 }
 
 fn deps<'a>(

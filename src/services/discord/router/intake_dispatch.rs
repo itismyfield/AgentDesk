@@ -178,7 +178,17 @@ pub(crate) async fn admit_text_intake(
         authority_channel_opted_in,
         &decision,
     );
-    let admission = match decision {
+    let admission = admission_for_decision(authority_channel_opted_in, decision, submission);
+    log_nonlocal_admission(&admission, &channel_id, &user_msg_id);
+    admission
+}
+
+fn admission_for_decision(
+    authority_channel_opted_in: bool,
+    decision: IntakeRouterDecision,
+    submission: &IntakeSubmission,
+) -> IntakeAdmission {
+    match decision {
         IntakeRouterDecision::RanLocal { .. } | IntakeRouterDecision::Observed { .. } => {
             IntakeAdmission::Local(LocalAdmissionPermit::for_submission(submission))
         }
@@ -192,12 +202,17 @@ pub(crate) async fn admit_text_intake(
         },
         IntakeRouterDecision::SkippedDuplicate { .. } => IntakeAdmission::SkippedDuplicate,
         IntakeRouterDecision::DeferredOpenRoute {
+            resolved_owner:
+                crate::services::cluster::intake_router_hook::ResolvedSessionOwner::LiveLocal,
+            ..
+        } if !authority_channel_opted_in => {
+            IntakeAdmission::Local(LocalAdmissionPermit::for_submission(submission))
+        }
+        IntakeRouterDecision::DeferredOpenRoute {
             target_instance_id, ..
         } => IntakeAdmission::DeferredOpenRoute { target_instance_id },
         IntakeRouterDecision::Blocked { reason } => IntakeAdmission::Blocked { reason },
-    };
-    log_nonlocal_admission(&admission, &channel_id, &user_msg_id);
-    admission
+    }
 }
 
 /// Common convenience path for producers that do not already own a durable
