@@ -73,8 +73,7 @@ pub(super) fn relay_liveness_forfeited(evidence: WatcherRelayLivenessEvidence<'_
                 !relay_frontier_advanced(
                     evidence.relay_frontier_at_snapshot,
                     evidence.relay_frontier_now,
-                ) && evidence.output_len_now.unwrap_or(0)
-                    > evidence.relay_frontier_now.unwrap_or(0)
+                ) && evidence.output_len_now.unwrap_or(0) > evidence.relay_frontier_now.unwrap_or(0)
                     && stall_age_secs >= ZERO_DELIVERY_FORFEIT_MIN_AGE_SECS
                     && stall_age_secs <= turn_age_secs
             }
