@@ -586,11 +586,10 @@ fn reconcile_managed_tmux_runtime_kind_for_config(
 
     let inflight = inflight_evidence();
     let transcript_state = (!inflight.open || inflight.stale).then(transcript_state);
-    let transcript_live = transcript_state.is_some_and(|state| state.is_busy());
-    let transcript_unknown = transcript_state
-        .is_some_and(|state| state == crate::services::tui_turn_state::TuiTurnState::Unknown);
-    let live_turn = (inflight.open && !inflight.stale) || transcript_live;
-    let destructive_evidence_unknown = inflight.open && inflight.stale && transcript_unknown;
+    let live_turn =
+        (inflight.open && !inflight.stale) || transcript_state.is_some_and(|state| state.is_busy());
+    let destructive_evidence_unknown = transcript_state
+        .is_none_or(|state| state == crate::services::tui_turn_state::TuiTurnState::Unknown);
     let verdict = runtime_mismatch_verdict(
         expected,
         observed,
