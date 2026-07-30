@@ -42,7 +42,6 @@ jobs:
     outputs:
       dashboard: ${{ steps.filter.outputs.dashboard }}
       high_risk_recovery: ${{ steps.filter.outputs.high_risk_recovery }}
-      terminal_delivery_evidence: ${{ steps.filter.outputs.terminal_delivery_evidence }}
       pg_db: ${{ steps.filter.outputs.pg_db }}
       rust_or_policy: ${{ steps.filter.outputs.rust_or_policy }}
       rust_compile: ${{ steps.filter.outputs.rust_compile }}
@@ -105,13 +104,6 @@ jobs:
               - 'src/services/message_outbox_recovery_tests.rs'
               - 'src/services/platform/tmux.rs'
               - 'src/services/tmux_common.rs'
-            terminal_delivery_evidence:
-              - 'src/services/discord/inflight.rs'
-              - 'src/services/discord/inflight/**'
-              - 'src/services/discord/inflight/terminal_delivery_evidence_loss.rs'
-              - 'src/services/discord/tmux_watcher/commit_decisions.rs'
-              - 'src/services/discord/turn_bridge/terminal_outcome_delivery.rs'
-              - 'src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue.rs'
             pg_db:
               - '.github/workflows/**'
               - 'justfile'
@@ -140,6 +132,14 @@ jobs:
               # tests; changes to the owner or its sidecars must run them.
               - 'src/services/discord/health/recovery.rs'
               - 'src/services/discord/health/recovery/**'
+              # #5025: outcome-to-WARN routing and its two identity-gate producers
+              # run in `test_fast`, whose registered required mirror is
+              # `Fast targeted tests (ubuntu-latest)`.
+              - 'src/services/discord/inflight.rs'
+              - 'src/services/discord/inflight/**'
+              - 'src/services/discord/tmux_watcher/commit_decisions.rs'
+              - 'src/services/discord/turn_bridge/terminal_outcome_delivery.rs'
+              - 'src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue.rs'
               - 'src/services/scheduled_messages.rs'
               - 'src/services/scheduled_messages/**'
               - 'src/services/discord/outbound/source_registry.rs'
@@ -499,59 +499,6 @@ jobs:
           UPSTREAM_RESULT: ${{ needs.check_fast.result }}
         run: ./scripts/required-check-mirror.sh
 
-  terminal_delivery_evidence_tests:
-    name: Terminal delivery evidence tests
-    needs: changes
-    if: needs.changes.outputs.terminal_delivery_evidence == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.94.1"
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-targets: false
-          cache-bin: false
-          shared-key: cargo-dependencies-v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Terminal delivery evidence regressions
-        run: |
-          env -u AGENTDESK_ROOT_DIR cargo test --lib inflight::terminal_delivery_evidence_loss::tests
-          env -u AGENTDESK_ROOT_DIR cargo test --lib watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row
-          env -u AGENTDESK_ROOT_DIR cargo test --lib identity_guarded_save_rejects_stale_write_against_newer_turn
-
-      - name: sccache stats
-        if: always()
-        run: sccache --show-stats || true
-
-  terminal_delivery_evidence_required_context:
-    name: Terminal delivery evidence required context (ubuntu-latest)
-    needs:
-      - changes
-      - terminal_delivery_evidence_tests
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Mirror terminal delivery evidence result for branch protection
-        env:
-          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
-          FILTER_NAME: terminal_delivery_evidence
-          FILTER_OUTPUT: ${{ needs.changes.outputs.terminal_delivery_evidence }}
-          UPSTREAM_JOB_NAME: terminal_delivery_evidence_tests
-          UPSTREAM_RESULT: ${{ needs.terminal_delivery_evidence_tests.result }}
-        run: ./scripts/required-check-mirror.sh
-
   fast_targeted_tests_required_context:
     name: Fast targeted tests (ubuntu-latest)
     needs:
@@ -646,6 +593,22 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: env -u AGENTDESK_ROOT_DIR cargo test --lib services::session_forwarding -- --skip _pg --skip pg_ --skip postgres
+
+      # #5025: this job is mirrored by the branch-protected
+      # `Fast targeted tests (ubuntu-latest)` context above. Keep the router test
+      # and both real identity-gate producers together so a red WARN regression
+      # blocks merge instead of remaining advisory.
+      - name: Terminal delivery evidence regressions
+        timeout-minutes: 10
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: |
+          env -u AGENTDESK_ROOT_DIR cargo test --lib inflight::terminal_delivery_evidence_loss::tests
+          env -u AGENTDESK_ROOT_DIR cargo test --lib watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row
+          env -u AGENTDESK_ROOT_DIR cargo test --lib identity_guarded_save_rejects_stale_write_against_newer_turn
 
       - name: just test-postgres
         timeout-minutes: 20
