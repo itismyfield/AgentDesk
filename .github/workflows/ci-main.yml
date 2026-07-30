@@ -141,8 +141,8 @@ jobs:
       PGUSER: postgres
       PGPASSWORD: postgres
       # The PostgreSQL service shares the hosted runner with a cold Rust build.
-      # Two rustc jobs keep the peak below the runner's 16 GiB memory limit.
-      CARGO_BUILD_JOBS: "2"
+      # A single rustc job keeps the cold-build peak below its 16 GiB limit.
+      CARGO_BUILD_JOBS: "1"
     steps:
       - uses: actions/checkout@v4
 
