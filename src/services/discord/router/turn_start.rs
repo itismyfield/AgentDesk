@@ -648,7 +648,7 @@ pub(in crate::services::discord) async fn release_mailbox_after_busy_pre_submit_
 }
 
 #[cfg(test)]
-mod mailbox_release_tests {
+mod tests {
     use super::*;
     use crate::services::provider::CancelToken;
     use crate::services::turn_orchestrator::{Intervention, InterventionMode};
