@@ -117,6 +117,9 @@ echo "=== Relay recovery targeted-lane wiring contract (#4423) ==="
 echo "=== Destructive cancel targeted-lane wiring contract (#4992) ==="
 "$PYTHON" -m unittest tests.test_destructive_cancel_ci_wiring
 
+echo "=== Stall recovery targeted-lane wiring contract (#4992) ==="
+"$PYTHON" -m unittest tests.test_stall_recovery_ci_wiring
+
 echo "=== Fast compile check PR/main/nightly split contract (#4747) ==="
 "$PYTHON" -m unittest tests.test_fast_check_ci_wiring
 
