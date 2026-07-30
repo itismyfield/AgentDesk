@@ -111,29 +111,18 @@ pub(super) async fn handle_delivery_epilogue(
             inflight_state.response_sent_offset = response_sent_offset;
             inflight_state.terminal_delivery_committed = true;
             inflight_state.full_response = full_response.clone();
-            match crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
-                &mut *inflight_state,
-                "turn_bridge::terminal_delivery_committed_mirror@5536",
-            ) {
-                crate::services::discord::inflight::GuardedSaveOutcome::Saved
-                | crate::services::discord::inflight::GuardedSaveOutcome::Missing => {}
-                crate::services::discord::inflight::GuardedSaveOutcome::IdentityMismatch => {
-                    tracing::warn!(
-                        provider = %provider.as_str(),
-                        channel_id = channel_id.get(),
-                        current_msg_id = current_msg_id.get(),
-                        response_sent_offset,
-                        "turn bridge delivered the terminal answer but could not mirror terminal_delivery_committed: the inflight row is owned by a different turn identity, so this turn's delivery evidence is lost (row will read as undelivered)"
-                    );
-                }
-                crate::services::discord::inflight::GuardedSaveOutcome::IoError => {
-                    tracing::warn!(
-                        provider = %provider.as_str(),
-                        channel_id = channel_id.get(),
-                        "turn bridge failed to mirror committed terminal delivery before cleanup"
-                    );
-                }
-            }
+            let mirror_outcome =
+                crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
+                    &mut *inflight_state,
+                    "turn_bridge::terminal_delivery_committed_mirror@5536",
+                );
+            super::warn_if_bridge_terminal_delivery_evidence_lost(
+                mirror_outcome,
+                &provider,
+                channel_id,
+                current_msg_id,
+                response_sent_offset,
+            );
             for frozen_msg_id in terminal_full_replay_cleanup_msg_ids.drain(..) {
                 // #5413/#3607: current_msg_id is the terminal answer and is
                 // already excluded here, so no terminal-anchor guard is
