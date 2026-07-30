@@ -75,9 +75,9 @@ pub(super) fn mark_watcher_terminal_delivery_committed(
             last_watcher_relayed_generation_mtime_ns: generation_mtime_ns,
         },
     );
-    crate::services::discord::terminal_delivery_evidence_loss::warn_for_watcher_terminal_commit_outcome(
+    crate::services::discord::inflight::terminal_delivery_evidence_loss::warn_for_watcher_terminal_commit_outcome(
         outcome,
-        crate::services::discord::terminal_delivery_evidence_loss::WatcherEvidenceLossContext {
+        crate::services::discord::inflight::terminal_delivery_evidence_loss::WatcherEvidenceLossContext {
             provider,
             channel_id,
             tmux_session_name,

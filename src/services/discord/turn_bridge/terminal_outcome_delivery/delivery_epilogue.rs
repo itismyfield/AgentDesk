@@ -116,9 +116,9 @@ pub(super) async fn handle_delivery_epilogue(
                     &mut *inflight_state,
                     "turn_bridge::terminal_delivery_committed_mirror@5536",
                 );
-            crate::services::discord::terminal_delivery_evidence_loss::warn_for_bridge_terminal_mirror_outcome(
+            crate::services::discord::inflight::terminal_delivery_evidence_loss::warn_for_bridge_terminal_mirror_outcome(
                 mirror_outcome,
-                crate::services::discord::terminal_delivery_evidence_loss::BridgeEvidenceLossContext {
+                crate::services::discord::inflight::terminal_delivery_evidence_loss::BridgeEvidenceLossContext {
                     provider: &provider,
                     channel_id,
                     current_msg_id,

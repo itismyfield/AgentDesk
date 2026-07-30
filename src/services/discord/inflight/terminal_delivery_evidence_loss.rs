@@ -2,7 +2,7 @@
 
 use serenity::all::{ChannelId, MessageId};
 
-use super::inflight::{GuardedSaveOutcome, WatcherTerminalCommitOutcome};
+use super::{GuardedSaveOutcome, WatcherTerminalCommitOutcome};
 use crate::services::provider::ProviderKind;
 
 pub(super) struct WatcherEvidenceLossContext<'a> {

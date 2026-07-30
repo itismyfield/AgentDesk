@@ -215,7 +215,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             test_job,
             r"(?m)^    if: needs\.changes\.outputs\.terminal_delivery_evidence == 'true'$",
         )
-        self.assertIn("cargo test --lib terminal_delivery_evidence_loss::tests", test_job)
+        self.assertIn("cargo test --lib inflight::terminal_delivery_evidence_loss::tests", test_job)
         self.assertIn(
             "cargo test --lib watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row",
             test_job,

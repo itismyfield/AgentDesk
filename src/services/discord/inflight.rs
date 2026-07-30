@@ -12,6 +12,7 @@ mod finalizer_identity;
 #[cfg(test)]
 mod invariant_test_capture;
 mod model;
+pub(in crate::services::discord) mod terminal_delivery_evidence_loss;
 
 // #3479: the pure domain model moved to `model.rs`; re-export every public
 // item at its original visibility so existing `inflight::*` / `super::*`

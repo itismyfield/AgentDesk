@@ -576,6 +576,7 @@ src/
 │   │   │   ├── removal.rs
 │   │   │   ├── save_store.rs
 │   │   │   ├── store.rs
+│   │   │   ├── terminal_delivery_evidence_loss.rs
 │   │   │   └── watcher_state.rs
 │   │   ├── meeting_orchestrator/
 │   │   │   ├── lifecycle.rs
