@@ -388,6 +388,14 @@ pub(super) async fn handle_manual_steer_interaction(
             )
             .await;
             data.shared
+                .mailbox(component.channel_id)
+                .restore_active_turn(
+                    Arc::new(crate::services::provider::CancelToken::new()),
+                    intervention.author_id,
+                    intervention.message_id,
+                )
+                .await;
+            data.shared
                 .remove_queued_placeholder(component.channel_id, intervention.message_id)
                 .await;
             render_current_head_response(ctx, component, data, "즉시 주입됨").await;
@@ -418,6 +426,14 @@ pub(super) async fn handle_manual_steer_interaction(
                 dispatch_lease,
             )
             .await;
+            data.shared
+                .mailbox(component.channel_id)
+                .restore_active_turn(
+                    Arc::new(crate::services::provider::CancelToken::new()),
+                    intervention.author_id,
+                    intervention.message_id,
+                )
+                .await;
             data.shared
                 .remove_queued_placeholder(component.channel_id, intervention.message_id)
                 .await;
