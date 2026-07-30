@@ -50,8 +50,10 @@ async fn durable_reattach_circuit_open_preserves_every_live_turn_authority() {
         mailbox_has_cancel_token: true,
         mailbox_active_user_msg_id: Some(user_message.get()),
         mailbox_turn_started_at_ms: None,
+        confirmed_delivery_since_turn_start: Some(false),
         last_capture_offset: Some(128),
         last_relay_offset: 0,
+        last_relay_offset_recorded: true,
         unread_bytes: Some(128),
         desynced: true,
         ..snapshot()
@@ -193,8 +195,10 @@ async fn zero_originating_message_with_a_distinct_mailbox_anchor_reaches_reattac
         mailbox_has_cancel_token: true,
         mailbox_active_user_msg_id: Some(mailbox_message.get()),
         mailbox_turn_started_at_ms: None,
+        confirmed_delivery_since_turn_start: Some(false),
         last_capture_offset: Some(128),
         last_relay_offset: 0,
+        last_relay_offset_recorded: true,
         unread_bytes: Some(128),
         desynced: true,
         ..snapshot()
@@ -309,8 +313,10 @@ async fn first_reserved_dead_frontier_apply_preserves_episode_and_reattaches_wat
         mailbox_has_cancel_token: true,
         mailbox_active_user_msg_id: Some(user_message.get()),
         mailbox_turn_started_at_ms: None,
+        confirmed_delivery_since_turn_start: Some(false),
         last_capture_offset: Some(128),
         last_relay_offset: 0,
+        last_relay_offset_recorded: true,
         unread_bytes: Some(128),
         desynced: true,
         ..snapshot()

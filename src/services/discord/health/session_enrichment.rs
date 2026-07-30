@@ -25,6 +25,7 @@ pub(super) struct SessionEnrichment {
     pub inflight_state_present: bool,
     pub tmux_session_mismatch: bool,
     pub last_relay_offset: u64,
+    pub last_relay_offset_recorded: bool,
     pub last_relay_ts_ms: i64,
     pub reconnect_count: u64,
     pub last_capture_offset: Option<u64>,
@@ -83,9 +84,10 @@ impl SessionEnrichment {
             inflight_tmux_session.as_deref(),
             watcher_binding_tmux_session.as_deref(),
         );
-        let (last_relay_offset, last_relay_ts_ms, reconnect_count) = shared
-            .tmux_relay_coords
-            .get(&channel)
+        let relay_coord = shared.tmux_relay_coords.get(&channel);
+        let last_relay_offset_recorded = relay_coord.is_some();
+        let (last_relay_offset, last_relay_ts_ms, reconnect_count) = relay_coord
+            .as_ref()
             .map(|coord| {
                 (
                     coord
@@ -146,6 +148,7 @@ impl SessionEnrichment {
             inflight_state_present,
             tmux_session_mismatch,
             last_relay_offset,
+            last_relay_offset_recorded,
             last_relay_ts_ms,
             reconnect_count,
             last_capture_offset,

@@ -84,8 +84,10 @@ pub(in crate::services::discord) struct RelayHealthSnapshot {
     pub thread_channel_id: Option<u64>,
     pub last_relay_ts_ms: Option<i64>,
     pub last_outbound_activity_ms: Option<i64>,
+    pub confirmed_delivery_since_turn_start: Option<bool>,
     pub last_capture_offset: Option<u64>,
     pub last_relay_offset: u64,
+    pub last_relay_offset_recorded: bool,
     pub unread_bytes: Option<u64>,
     pub desynced: bool,
     pub stale_thread_proof: bool,
@@ -116,8 +118,10 @@ impl RelayHealthSnapshot {
             thread_channel_id: None,
             last_relay_ts_ms: None,
             last_outbound_activity_ms: None,
+            confirmed_delivery_since_turn_start: Some(false),
             last_capture_offset: None,
             last_relay_offset: 0,
+            last_relay_offset_recorded: true,
             unread_bytes: None,
             desynced: false,
             stale_thread_proof: false,
@@ -140,6 +144,9 @@ impl RelayHealthSnapshot {
         self.desynced
             && self.tmux_alive == Some(true)
             && self.last_relay_ts_ms.is_none()
+            && self.last_outbound_activity_ms.is_none()
+            && self.confirmed_delivery_since_turn_start == Some(false)
+            && self.last_relay_offset_recorded
             && self.last_relay_offset == 0
             && self
                 .last_capture_offset

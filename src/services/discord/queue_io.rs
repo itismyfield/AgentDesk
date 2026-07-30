@@ -372,6 +372,9 @@ pub(super) async fn mailbox_try_start_turn_kinded_with_feedback(
             "mailbox try-start failed durable active-source queue purge"
         );
     }
+    if result.started {
+        super::outbound::delivery_evidence::begin_turn(channel_id);
+    }
     result.started
 }
 
