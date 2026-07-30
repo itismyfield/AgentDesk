@@ -647,6 +647,11 @@ jobs:
           cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1
           cargo test --lib services::discord::terminal_ui_obligation::tests -- --test-threads=1
 
+      # #5003: this production-path E2E previously ran only in main's broad
+      # non-PG lane, so test-only fixes could merge without executing it on PRs.
+      - name: Local model durable queue wake regression
+        run: env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1
+
       - name: Stop PostgreSQL service
         if: always()
         run: ./scripts/ci/postgres-service.sh stop

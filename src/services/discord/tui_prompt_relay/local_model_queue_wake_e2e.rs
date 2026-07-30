@@ -194,6 +194,235 @@ async fn gateway_socket(ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(|mut socket| async move { while socket.recv().await.is_some() {} })
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum PromotedBCompletionProgress {
+    AwaitingMailboxRelease,
+    AwaitingQueueEligible,
+    Complete,
+}
+
+fn validate_promoted_b_completion_lifecycle(
+    events: &[super::super::turn_completion_events::TurnCompletionEvent],
+    channel_id: ChannelId,
+) -> Result<PromotedBCompletionProgress, String> {
+    let expected_mailbox_release =
+        super::super::turn_completion_events::TurnCompletionEvent::mailbox_released(
+            channel_id,
+            Some(B_MESSAGE_ID),
+        );
+    let expected_queue_eligible =
+        super::super::turn_completion_events::TurnCompletionEvent::queue_eligible(
+            channel_id,
+            Some(B_MESSAGE_ID),
+        );
+    match events {
+        [] => Ok(PromotedBCompletionProgress::AwaitingMailboxRelease),
+        [event] if *event == expected_mailbox_release => {
+            Ok(PromotedBCompletionProgress::AwaitingQueueEligible)
+        }
+        [event] => Err(format!(
+            "promoted B must publish MailboxReleased first; received phase={:?}, turn_id={:?}, channel_id={}",
+            event.phase, event.turn_id, event.channel_id
+        )),
+        [mailbox_release, queue_eligible]
+            if *mailbox_release == expected_mailbox_release
+                && *queue_eligible == expected_queue_eligible =>
+        {
+            Ok(PromotedBCompletionProgress::Complete)
+        }
+        [_, event, ..] => Err(format!(
+            "promoted B must publish exactly one MailboxReleased followed by exactly one QueueEligible; received phase={:?}, turn_id={:?}, channel_id={}",
+            event.phase, event.turn_id, event.channel_id
+        )),
+    }
+}
+
+async fn drain_promoted_b_completion_lifecycle(
+    rx: &mut tokio::sync::broadcast::Receiver<
+        super::super::turn_completion_events::TurnCompletionEvent,
+    >,
+    channel_id: ChannelId,
+    timeout: std::time::Duration,
+) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut events = Vec::with_capacity(2);
+
+    loop {
+        let event = match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Err(_) => panic!(
+                "promoted B completion lifecycle did not reach QueueEligible before the deadline; observed_events={events:?}"
+            ),
+            Ok(Ok(event)) => event,
+            Ok(Err(error)) => panic!(
+                "completion receiver must remain open while draining promoted B; recv error={error:?}"
+            ),
+        };
+        events.push(event);
+        match validate_promoted_b_completion_lifecycle(&events, channel_id) {
+            Ok(PromotedBCompletionProgress::Complete) => return,
+            Ok(PromotedBCompletionProgress::AwaitingMailboxRelease)
+            | Ok(PromotedBCompletionProgress::AwaitingQueueEligible) => {}
+            Err(error) => panic!("{error}"),
+        }
+    }
+}
+
+async fn assert_no_local_only_completion_event(
+    rx: &mut tokio::sync::broadcast::Receiver<
+        super::super::turn_completion_events::TurnCompletionEvent,
+    >,
+    window: std::time::Duration,
+) {
+    let deadline = tokio::time::Instant::now() + window;
+    loop {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Err(_) => return,
+            Ok(Ok(event)) => panic!(
+                "local-only halves must not publish a completion event; received phase={:?}, turn_id={:?}, channel_id={}",
+                event.phase, event.turn_id, event.channel_id
+            ),
+            Ok(Err(error)) => {
+                panic!("local-only completion receiver must remain open; recv error={error:?}")
+            }
+        }
+    }
+}
+
+async fn assert_local_only_completion_lifecycle(
+    rx: &mut tokio::sync::broadcast::Receiver<
+        super::super::turn_completion_events::TurnCompletionEvent,
+    >,
+    channel_id: ChannelId,
+    lifecycle_timeout: std::time::Duration,
+    strict_window: std::time::Duration,
+) {
+    drain_promoted_b_completion_lifecycle(rx, channel_id, lifecycle_timeout).await;
+    assert_no_local_only_completion_event(rx, strict_window).await;
+}
+
+async fn completion_guard_must_panic(
+    events: Vec<super::super::turn_completion_events::TurnCompletionEvent>,
+) {
+    let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+    for event in events {
+        tx.send(event).expect("completion receiver registered");
+    }
+    let task = tokio::spawn(async move {
+        assert_local_only_completion_lifecycle(
+            &mut rx,
+            ChannelId::new(CHANNEL_ID),
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(100),
+        )
+        .await;
+    });
+    let error = task
+        .await
+        .expect_err("the completion lifecycle guard must reject the mutation");
+    assert!(
+        error.is_panic(),
+        "completion lifecycle rejection must terminate through its own assertion"
+    );
+}
+
+#[test]
+fn promoted_b_completion_lifecycle_validates_order_and_cardinality() {
+    let channel_id = ChannelId::new(CHANNEL_ID);
+    let mailbox_release =
+        super::super::turn_completion_events::TurnCompletionEvent::mailbox_released(
+            channel_id,
+            Some(B_MESSAGE_ID),
+        );
+    let queue_eligible = super::super::turn_completion_events::TurnCompletionEvent::queue_eligible(
+        channel_id,
+        Some(B_MESSAGE_ID),
+    );
+
+    assert_eq!(
+        validate_promoted_b_completion_lifecycle(
+            &[mailbox_release.clone(), queue_eligible.clone()],
+            channel_id,
+        ),
+        Ok(PromotedBCompletionProgress::Complete)
+    );
+    assert!(
+        validate_promoted_b_completion_lifecycle(
+            &[queue_eligible.clone(), mailbox_release.clone()],
+            channel_id,
+        )
+        .is_err(),
+        "QueueEligible before MailboxReleased must be rejected"
+    );
+    assert!(
+        validate_promoted_b_completion_lifecycle(
+            &[mailbox_release.clone(), mailbox_release],
+            channel_id,
+        )
+        .is_err(),
+        "duplicate MailboxReleased must be rejected"
+    );
+    assert!(
+        validate_promoted_b_completion_lifecycle(&[queue_eligible], channel_id).is_err(),
+        "QueueEligible without MailboxReleased must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn completion_lifecycle_rejects_duplicate_mailbox_release() {
+    let channel_id = ChannelId::new(CHANNEL_ID);
+    completion_guard_must_panic(vec![
+        super::super::turn_completion_events::TurnCompletionEvent::mailbox_released(
+            channel_id,
+            Some(B_MESSAGE_ID),
+        ),
+        super::super::turn_completion_events::TurnCompletionEvent::mailbox_released(
+            channel_id,
+            Some(B_MESSAGE_ID),
+        ),
+        super::super::turn_completion_events::TurnCompletionEvent::queue_eligible(
+            channel_id,
+            Some(B_MESSAGE_ID),
+        ),
+    ])
+    .await;
+}
+
+#[tokio::test]
+async fn completion_lifecycle_rejects_event_after_queue_eligible() {
+    let channel_id = ChannelId::new(CHANNEL_ID);
+    completion_guard_must_panic(vec![
+        super::super::turn_completion_events::TurnCompletionEvent::mailbox_released(
+            channel_id,
+            Some(B_MESSAGE_ID),
+        ),
+        super::super::turn_completion_events::TurnCompletionEvent::queue_eligible(
+            channel_id,
+            Some(B_MESSAGE_ID),
+        ),
+        super::super::turn_completion_events::TurnCompletionEvent::queue_eligible(
+            channel_id,
+            Some(B_MESSAGE_ID),
+        ),
+    ])
+    .await;
+}
+
+#[tokio::test]
+async fn completion_lifecycle_rejects_queue_eligible_before_mailbox_release() {
+    let channel_id = ChannelId::new(CHANNEL_ID);
+    completion_guard_must_panic(vec![
+        super::super::turn_completion_events::TurnCompletionEvent::queue_eligible(
+            channel_id,
+            Some(B_MESSAGE_ID),
+        ),
+        super::super::turn_completion_events::TurnCompletionEvent::mailbox_released(
+            channel_id,
+            Some(B_MESSAGE_ID),
+        ),
+    ])
+    .await;
+}
+
 async fn start_mock_discord(
     state: DiscordMockState,
 ) -> (String, String, tokio::task::JoinHandle<()>) {
@@ -528,9 +757,8 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
         .insert(channel_id, test_watcher_handle(tmux, &transcript_path));
     super::spawn_tui_prompt_relay(shared.clone(), ProviderKind::Claude);
 
-    // Subscribe after draining A's release event. This excludes events published between that
-    // drain and this subscription from the local-only assertion. The relay spawn in that interval
-    // is a likely publisher, but its event source has not yet been characterized.
+    // Subscribe after draining A's release event so every edge after the local-only observations is
+    // inspected, including promoted B's known two-phase completion lifecycle.
     let mut local_only_completion_rx =
         super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
     let command_half = "<command-message>x</command-message>\n<command-name>/model</command-name>";
@@ -602,21 +830,23 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
         !super::tui_direct_watcher_synthetic_inflight_matches(inflight.as_ref(), tmux, 1),
         "local-only halves must not create synthetic inflight ownership"
     );
-    match tokio::time::timeout(
+
+    // Source tracing reproduced MailboxReleased(B) 3/3 as promoted B's normal Discord bridge
+    // lifecycle: TerminalEvent::Complete with FinalizeContext::bridge(),
+    // request_owner_name="queue-user", is_external_input_tui_direct=false, and no TUI runtime.
+    // CompletionAdmission::claim_queue_eligible then emits QueueEligible(B) exactly once after its
+    // mailbox-released and terminal barriers settle. Inspect that exact ordered pair before opening
+    // the strict window. The idle-queue consumer continues without dispatch on MailboxReleased; the
+    // other production consumer can only stop B's typing indicator. #5018 tracks causal origin to
+    // close the remaining value-only gap where a faulty local-only publisher replaces, rather than
+    // duplicates, one of B's own lifecycle edges.
+    assert_local_only_completion_lifecycle(
+        &mut local_only_completion_rx,
+        channel_id,
+        std::time::Duration::from_secs(10),
         std::time::Duration::from_millis(100),
-        local_only_completion_rx.recv(),
     )
-    .await
-    {
-        Err(_) => {}
-        Ok(Ok(event)) => panic!(
-            "local-only halves must not publish completion events; received phase={:?}, turn_id={:?}, channel_id={}",
-            event.phase, event.turn_id, event.channel_id
-        ),
-        Ok(Err(error)) => {
-            panic!("local-only completion receiver must remain open; recv error={error:?}")
-        }
-    }
+    .await;
 
     drop(_dedupe_guard);
     drop(_intake_mode_guard);
