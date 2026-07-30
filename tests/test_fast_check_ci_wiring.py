@@ -273,6 +273,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
             "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::turn_start::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
             "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::tui_followup_retry_tests -- --test-threads=1",
+            "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::commands::restart_seed_retry_tests -- --test-threads=1",
         )
         self.assertEqual(
             test_job.count("- name: Runtime mismatch and headless defer regressions"), 1
