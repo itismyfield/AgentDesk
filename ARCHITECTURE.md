@@ -1158,6 +1158,7 @@ src/
 │   │   ├── tmux_overload_retry.rs
 │   │   ├── tmux_reaper.rs
 │   │   ├── tmux_reattach_offsets.rs
+│   │   ├── tmux_relay_coord.rs
 │   │   ├── tmux_restart_handoff.rs
 │   │   ├── tmux_session_files.rs
 │   │   ├── tmux_watcher.rs
