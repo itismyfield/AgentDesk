@@ -555,6 +555,13 @@ async fn dead_frontier_watcher_cancel_finalizes_owner_and_releases_inflight() {
     let (watcher, watcher_cancel) = test_watcher_handle(tmux, &output_path);
     watcher.last_heartbeat_ts_ms.store(1, Ordering::Release);
     shared.tmux_watchers.insert(channel, watcher);
+    let lease_key = super::super::DeliveryLeaseKey::from_inflight_state_for_site(
+        channel,
+        shared.restart.current_generation,
+        &state,
+        "relay_recovery_dead_frontier_test",
+    );
+    super::super::outbound::delivery_evidence_store::record_not_delivered(&lease_key);
 
     let snapshot = RelayHealthSnapshot {
         provider: provider.as_str().to_string(),
