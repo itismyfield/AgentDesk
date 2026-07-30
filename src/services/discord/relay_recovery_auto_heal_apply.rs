@@ -180,26 +180,20 @@ pub(super) async fn apply_relay_recovery_plan_with_seams(
         source,
     )
     .await;
-    if let Some(episode) = reserved_episode.as_ref() {
-        let before_handoff = matches!(
+    if let Some(episode) = reserved_episode.as_ref()
+        && matches!(
             apply_result.status,
             "rebind_failed" | "provider_unavailable" | "reattach_episode_changed"
+        )
+        && !circuit_breaker::refund_unhanded_episode_attempt(provider, decision.channel_id, episode)
+    {
+        tracing::warn!(
+            target: "agentdesk::discord::relay_recovery",
+            provider = provider.as_str(),
+            channel_id = decision.channel_id,
+            episode = episode.short_key(),
+            "failed to refund durable relay reattach attempt before watcher handoff"
         );
-        let settled = if before_handoff {
-            circuit_breaker::refund_unhanded_episode_attempt(provider, decision.channel_id, episode)
-        } else {
-            circuit_breaker::mark_episode_attempt_handed_off(provider, decision.channel_id, episode)
-        };
-        if !settled {
-            tracing::warn!(
-                target: "agentdesk::discord::relay_recovery",
-                provider = provider.as_str(),
-                channel_id = decision.channel_id,
-                episode = episode.short_key(),
-                before_handoff,
-                "failed to settle durable relay reattach reservation receipt"
-            );
-        }
     }
     let confirmation = classify_reattach_confirmation(
         shared,
@@ -764,116 +758,6 @@ mod tests {
             circuit_breaker::reserve_inspected_episode(&provider, &decision, &expected, 2),
             circuit_breaker::CircuitReservation::Reserved { attempt: 1, .. }
         ));
-    }
-
-    #[tokio::test]
-    async fn production_internal_crash_receipt_recovery_reaches_open_alert() {
-        let _guard = auto_heal_test_lock().lock().await;
-        clear_auto_heal_attempts_for_tests();
-        let root = tempfile::tempdir().expect("isolated AgentDesk root");
-        let _env = crate::config::set_agentdesk_root_for_test(root.path());
-        let provider = ProviderKind::Codex;
-        let registry = HealthRegistry::new();
-        let shared = super::super::super::make_shared_data_for_tests();
-        let channel_id = 5_023_202;
-        let tmux = "AgentDesk-codex-5023-crash-alert";
-        let mut state = super::super::super::inflight::InflightTurnState::new(
-            provider.clone(),
-            channel_id,
-            None,
-            7,
-            channel_id + 1,
-            channel_id + 2,
-            "crash alert".to_string(),
-            Some("session-5023-alert".to_string()),
-            Some(tmux.to_string()),
-            Some("/tmp/missing-5023-alert.jsonl".to_string()),
-            None,
-            0,
-        );
-        state.finalizer_turn_id = state.user_msg_id;
-        state.turn_nonce = Some("nonce-5023-alert".to_string());
-        super::super::super::inflight::save_inflight_state(&state).expect("seed inflight");
-        let mut decision = plan_relay_recovery(
-            &RelayHealthSnapshot {
-                provider: provider.as_str().to_string(),
-                channel_id,
-                active_turn: RelayActiveTurn::Foreground,
-                tmux_session: Some(tmux.to_string()),
-                tmux_alive: Some(true),
-                watcher_attached: false,
-                watcher_attached_stale: false,
-                watcher_owner_channel_id: None,
-                watcher_owns_live_relay: false,
-                bridge_inflight_present: true,
-                bridge_current_msg_id: Some(state.current_msg_id),
-                mailbox_has_cancel_token: true,
-                mailbox_active_user_msg_id: Some(state.user_msg_id),
-                mailbox_turn_started_at_ms: None,
-                queue_depth: 0,
-                pending_discord_callback_msg_id: None,
-                pending_thread_proof: false,
-                parent_channel_id: None,
-                thread_channel_id: None,
-                last_relay_ts_ms: None,
-                last_outbound_activity_ms: None,
-                last_capture_offset: Some(128),
-                last_relay_offset: 0,
-                unread_bytes: Some(128),
-                desynced: true,
-                stale_thread_proof: false,
-            },
-            RelayStallState::TmuxAliveRelayDead,
-            1_000,
-        );
-        decision.affected.finalizer_turn_id = Some(state.effective_finalizer_turn_id());
-        decision.auto_heal.eligible = true;
-        decision.auto_heal.skipped_reason = None;
-        decision.auto_heal.max_attempts_per_window = 1;
-        super::super::super::runtime_store::set_process_generation_for_tests(Some(61));
-        let expected = circuit_breaker::inspect_current_episode(&provider, &decision)
-            .expect("inspect crash episode");
-        assert!(matches!(
-            circuit_breaker::reserve_inspected_episode(&provider, &decision, &expected, 1),
-            circuit_breaker::CircuitReservation::Reserved { .. }
-        ));
-        super::super::super::runtime_store::set_process_generation_for_tests(Some(62));
-        let recovered = circuit_breaker::inspect_current_episode(&provider, &decision)
-            .expect("inspect recovered episode");
-        let circuit_breaker::CircuitReservation::Reserved { episode, .. } =
-            circuit_breaker::reserve_inspected_episode(&provider, &decision, &recovered, 1)
-        else {
-            panic!("replacement process must reclaim the crashed pre-handoff spend")
-        };
-        assert!(circuit_breaker::mark_episode_attempt_handed_off(
-            &provider, channel_id, &episode
-        ));
-        clear_auto_heal_attempts_for_tests();
-        let alert = CountingAlert {
-            calls: std::sync::atomic::AtomicUsize::new(0),
-        };
-        let response = apply_relay_recovery_plan_with_seams(
-            &registry,
-            &shared,
-            &provider,
-            decision,
-            2_000,
-            RelayRecoveryApplySource::ProbeAutoHeal,
-            &alert,
-            &ImmediateApplyBoundary,
-        )
-        .await;
-        assert!(response.skipped);
-        assert_eq!(
-            response.decision.auto_heal.skipped_reason,
-            Some("durable_reattach_circuit_open")
-        );
-        assert_eq!(
-            alert.calls.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "the replacement process must reach the real circuit-open alert path"
-        );
-        super::super::super::runtime_store::set_process_generation_for_tests(None);
     }
 
     #[tokio::test]

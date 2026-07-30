@@ -25,7 +25,6 @@ pub(super) struct RelayReattachEpisode {
     owner_user_id: u64,
     pin: super::super::inflight::InflightEpisodePin,
     reservation_generation: Option<u64>,
-    reserved_process_generation: Option<u64>,
 }
 
 impl RelayReattachEpisode {
@@ -62,7 +61,6 @@ impl RelayReattachEpisode {
             owner_user_id: state.request_owner_user_id,
             pin: super::super::inflight::InflightEpisodePin::from_state(state),
             reservation_generation: None,
-            reserved_process_generation: None,
         }
     }
 
@@ -138,11 +136,6 @@ struct CircuitRecord {
     orphaned_staged_alert_ids: Vec<i64>,
     #[serde(default)]
     open_generation: u64,
-    /// Process generation that reserved the newest pre-handoff attempt. Zero
-    /// means handed off/settled or legacy data. A later process may reclaim one
-    /// nonzero stale receipt before applying the durable limit.
-    #[serde(default)]
-    unhanded_process_generation: u64,
 }
 
 struct CircuitFileLock {
@@ -214,24 +207,6 @@ fn reserve_in_root(
     observed_relay_offset: u64,
     max_attempts: u32,
 ) -> CircuitReservation {
-    reserve_in_root_for_process_generation(
-        root,
-        snapshot,
-        expected,
-        observed_relay_offset,
-        max_attempts,
-        super::super::runtime_store::process_generation(),
-    )
-}
-
-fn reserve_in_root_for_process_generation(
-    root: &Path,
-    snapshot: &super::super::inflight::InflightTurnState,
-    expected: &RelayReattachEpisode,
-    observed_relay_offset: u64,
-    max_attempts: u32,
-    current_process_generation: u64,
-) -> CircuitReservation {
     let current = RelayReattachEpisode::from_state(snapshot);
     if &current != expected {
         return CircuitReservation::StaleIdentity;
@@ -273,24 +248,11 @@ fn reserve_in_root_for_process_generation(
             staged_alert_id: None,
             orphaned_staged_alert_ids: Vec::new(),
             open_generation: 1,
-            unhanded_process_generation: 0,
         },
         Err(_) => return CircuitReservation::IoError,
     };
     if record.version != CIRCUIT_VERSION {
         return CircuitReservation::IoError;
-    }
-    // A receipt owned by an older dcserver generation can only be a
-    // reservation whose stack disappeared before watcher handoff. Reclaim it
-    // under the circuit flock before testing the lifetime cap. The receipt is
-    // cleared at the handoff boundary; crash after handoff intentionally spends.
-    if current_process_generation != 0
-        && record.episode_key == expected.key
-        && record.unhanded_process_generation != 0
-        && record.unhanded_process_generation != current_process_generation
-    {
-        record.attempts = record.attempts.saturating_sub(1);
-        record.unhanded_process_generation = 0;
     }
     if record.episode_key != expected.key {
         if let Some(id) = record.staged_alert_id.take()
@@ -303,7 +265,6 @@ fn reserve_in_root_for_process_generation(
         record.attempts = 0;
         record.alert_queued = false;
         record.open_generation = 1;
-        record.unhanded_process_generation = 0;
     } else if frontier > record.baseline_relay_offset {
         if let Some(id) = record.staged_alert_id.take()
             && !record.orphaned_staged_alert_ids.contains(&id)
@@ -314,7 +275,6 @@ fn reserve_in_root_for_process_generation(
         record.attempts = 0;
         record.alert_queued = false;
         record.open_generation = record.open_generation.saturating_add(1).max(1);
-        record.unhanded_process_generation = 0;
     } else if record.open_generation == 0 {
         record.open_generation = 1;
     }
@@ -330,13 +290,11 @@ fn reserve_in_root_for_process_generation(
         };
     }
     record.attempts = record.attempts.saturating_add(1);
-    record.unhanded_process_generation = current_process_generation;
     if persist_record(&path, &record).is_err() {
         return CircuitReservation::IoError;
     }
     let mut reserved_episode = expected.clone();
     reserved_episode.reservation_generation = Some(record.open_generation);
-    reserved_episode.reserved_process_generation = Some(current_process_generation);
     CircuitReservation::Reserved {
         episode: reserved_episode,
         attempt: record.attempts,
@@ -410,32 +368,12 @@ pub(super) fn reserve_current_episode(
     reserve_inspected_episode(provider, decision, &expected, max_attempts)
 }
 
-pub(super) fn mark_episode_attempt_handed_off(
-    provider: &ProviderKind,
-    channel_id: u64,
-    episode: &RelayReattachEpisode,
-) -> bool {
-    settle_unhanded_episode_attempt(provider, channel_id, episode, false)
-}
-
 pub(super) fn refund_unhanded_episode_attempt(
     provider: &ProviderKind,
     channel_id: u64,
     episode: &RelayReattachEpisode,
 ) -> bool {
-    settle_unhanded_episode_attempt(provider, channel_id, episode, true)
-}
-
-fn settle_unhanded_episode_attempt(
-    provider: &ProviderKind,
-    channel_id: u64,
-    episode: &RelayReattachEpisode,
-    refund: bool,
-) -> bool {
-    let (Some(generation), Some(process_generation)) = (
-        episode.reservation_generation,
-        episode.reserved_process_generation,
-    ) else {
+    let Some(generation) = episode.reservation_generation else {
         return false;
     };
     let Some(root) = super::super::runtime_store::runtime_root()
@@ -453,15 +391,11 @@ fn settle_unhanded_episode_attempt(
     if record.version != CIRCUIT_VERSION
         || record.episode_key != episode.key
         || record.open_generation != generation
-        || record.unhanded_process_generation != process_generation
         || record.attempts == 0
     {
         return false;
     }
-    if refund {
-        record.attempts -= 1;
-    }
-    record.unhanded_process_generation = 0;
+    record.attempts -= 1;
     persist_record(&path, &record).is_ok()
 }
 
@@ -486,7 +420,7 @@ fn open_alert_cas_in_root(
     else {
         return false;
     };
-    if RelayReattachEpisode::from_state(&authoritative).key() != expected.key()
+    if RelayReattachEpisode::from_state(&authoritative) != *expected
         || record.version != CIRCUIT_VERSION
         || record.episode_key != open.episode_key
         || record.baseline_relay_offset != open.baseline_relay_offset
@@ -788,8 +722,8 @@ pub(super) async fn queue_or_resume_open_alert_with_enqueue(
         )
         .is_ok_and(|locked_episode| {
             debug_assert_eq!(
-                RelayReattachEpisode::from_state(locked_episode.state()).key(),
-                validate_episode.key()
+                RelayReattachEpisode::from_state(locked_episode.state()),
+                validate_episode
             );
             open_alert_cas_in_root(
                 &validate_root,
@@ -1037,7 +971,7 @@ mod tests {
     }
 
     #[test]
-    fn same_process_unhanded_attempt_refund_restores_budget() {
+    fn unhanded_attempt_refund_prevents_no_watcher_frontier_deadlock() {
         let temp = tempfile::tempdir().expect("circuit root");
         let _env = crate::config::set_agentdesk_root_for_test(temp.path());
         let provider = ProviderKind::Codex;
@@ -1063,87 +997,6 @@ mod tests {
         assert!(matches!(
             reserve_inspected_episode(&provider, &decision, &expected, 2),
             CircuitReservation::Reserved { attempt: 1, .. }
-        ));
-    }
-
-    #[test]
-    fn crashed_pre_handoff_receipt_is_reclaimed_by_next_process() {
-        let temp = tempfile::tempdir().expect("circuit root");
-        let _env = crate::config::set_agentdesk_root_for_test(temp.path());
-        let provider = ProviderKind::Codex;
-        let state = state(44_648);
-        let decision = decision_for_state(&state);
-        super::super::super::inflight::save_inflight_state(&state)
-            .expect("seed authoritative inflight");
-
-        let expected = inspect_current_episode(&provider, &decision).expect("inspect episode");
-        assert!(matches!(
-            reserve_in_root_for_process_generation(
-                temp.path(),
-                &state,
-                &expected,
-                decision.evidence.last_relay_offset,
-                1,
-                41,
-            ),
-            CircuitReservation::Reserved { attempt: 1, .. }
-        ));
-
-        let expected =
-            inspect_current_episode(&provider, &decision).expect("inspect after restart");
-        assert!(matches!(
-            reserve_in_root_for_process_generation(
-                temp.path(),
-                &state,
-                &expected,
-                decision.evidence.last_relay_offset,
-                1,
-                42,
-            ),
-            CircuitReservation::Reserved { attempt: 1, .. }
-        ));
-    }
-
-    #[test]
-    fn handed_off_attempt_survives_restart_until_frontier_progress() {
-        let temp = tempfile::tempdir().expect("circuit root");
-        let _env = crate::config::set_agentdesk_root_for_test(temp.path());
-        let provider = ProviderKind::Codex;
-        let state = state(44_647);
-        let decision = decision_for_state(&state);
-        super::super::super::inflight::save_inflight_state(&state)
-            .expect("seed authoritative inflight");
-
-        let expected = inspect_current_episode(&provider, &decision).expect("inspect episode");
-        let CircuitReservation::Reserved { episode, .. } = reserve_in_root_for_process_generation(
-            temp.path(),
-            &state,
-            &expected,
-            decision.evidence.last_relay_offset,
-            1,
-            51,
-        ) else {
-            panic!("reserve handed-off attempt")
-        };
-        let record_path = circuit_path(temp.path(), &provider, state.channel_id);
-        let mut record = load_record(&record_path)
-            .expect("load handed-off receipt")
-            .expect("handed-off receipt");
-        assert_eq!(record.unhanded_process_generation, 51);
-        record.unhanded_process_generation = 0;
-        persist_record(&record_path, &record).expect("mark receipt handed off");
-        let expected =
-            inspect_current_episode(&provider, &decision).expect("inspect after restart");
-        assert!(matches!(
-            reserve_in_root_for_process_generation(
-                temp.path(),
-                &state,
-                &expected,
-                decision.evidence.last_relay_offset,
-                1,
-                52,
-            ),
-            CircuitReservation::Open { .. }
         ));
     }
 
@@ -1590,11 +1443,6 @@ mod tests {
         else {
             panic!("first attempt must reserve");
         };
-        assert!(mark_episode_attempt_handed_off(
-            &provider,
-            channel.get(),
-            &episode
-        ));
         let circuit_root = super::super::super::runtime_store::runtime_root()
             .expect("runtime root")
             .join("discord_relay_recovery_circuit");
