@@ -1406,8 +1406,8 @@ mod stall_recovery_tests {
     }
 
     /// A stale watcher terminal commit must exercise the real identity gate and
-    /// return `Skipped` without modifying the newer row. `commit_decisions.rs`
-    /// exhaustively routes that production outcome to its evidence-loss WARN.
+    /// return `Skipped` without modifying the newer row. The separate outcome
+    /// routing tests verify the operator-visible WARN for this typed result.
     #[test]
     fn watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row() {
         let temp = TempDir::new().unwrap();

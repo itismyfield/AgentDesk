@@ -201,6 +201,38 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertEqual(test_job.count(command), 1)
         self.assertNotIn(command, job_block(workflow, "scripts"))
 
+    def test_terminal_delivery_evidence_regressions_are_required(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        changes_job = job_block(workflow, "changes")
+        test_job = job_block(workflow, "terminal_delivery_evidence_tests")
+        mirror_job = job_block(workflow, "terminal_delivery_evidence_required_context")
+
+        self.assertIn(
+            "terminal_delivery_evidence: ${{ steps.filter.outputs.terminal_delivery_evidence }}",
+            changes_job,
+        )
+        self.assertRegex(
+            test_job,
+            r"(?m)^    if: needs\.changes\.outputs\.terminal_delivery_evidence == 'true'$",
+        )
+        self.assertIn("cargo test --lib terminal_delivery_evidence_loss::tests", test_job)
+        self.assertIn(
+            "cargo test --lib watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row",
+            test_job,
+        )
+        self.assertIn(
+            "cargo test --lib identity_guarded_save_rejects_stale_write_against_newer_turn",
+            test_job,
+        )
+        self.assertIn(
+            "name: Terminal delivery evidence required context (ubuntu-latest)",
+            mirror_job,
+        )
+        self.assertIn("- terminal_delivery_evidence_tests", mirror_job)
+        self.assertIn("if: always()", mirror_job)
+        self.assertIn("FILTER_NAME: terminal_delivery_evidence", mirror_job)
+        self.assertIn("UPSTREAM_JOB_NAME: terminal_delivery_evidence_tests", mirror_job)
+
     def test_pr_cross_os_lane_is_compile_only(self) -> None:
         job = job_block(PR_WORKFLOW.read_text(encoding="utf-8"), "check_fast_cross_os")
 

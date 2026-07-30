@@ -116,12 +116,14 @@ pub(super) async fn handle_delivery_epilogue(
                     &mut *inflight_state,
                     "turn_bridge::terminal_delivery_committed_mirror@5536",
                 );
-            super::warn_if_bridge_terminal_delivery_evidence_lost(
+            crate::services::discord::terminal_delivery_evidence_loss::warn_for_bridge_terminal_mirror_outcome(
                 mirror_outcome,
-                &provider,
-                channel_id,
-                current_msg_id,
-                response_sent_offset,
+                crate::services::discord::terminal_delivery_evidence_loss::BridgeEvidenceLossContext {
+                    provider: &provider,
+                    channel_id,
+                    current_msg_id,
+                    response_sent_offset,
+                },
             );
             for frozen_msg_id in terminal_full_replay_cleanup_msg_ids.drain(..) {
                 // #5413/#3607: current_msg_id is the terminal answer and is

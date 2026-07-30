@@ -42,6 +42,7 @@ jobs:
     outputs:
       dashboard: ${{ steps.filter.outputs.dashboard }}
       high_risk_recovery: ${{ steps.filter.outputs.high_risk_recovery }}
+      terminal_delivery_evidence: ${{ steps.filter.outputs.terminal_delivery_evidence }}
       pg_db: ${{ steps.filter.outputs.pg_db }}
       rust_or_policy: ${{ steps.filter.outputs.rust_or_policy }}
       rust_compile: ${{ steps.filter.outputs.rust_compile }}
@@ -104,6 +105,13 @@ jobs:
               - 'src/services/message_outbox_recovery_tests.rs'
               - 'src/services/platform/tmux.rs'
               - 'src/services/tmux_common.rs'
+            terminal_delivery_evidence:
+              - 'src/services/discord/inflight.rs'
+              - 'src/services/discord/inflight/**'
+              - 'src/services/discord/terminal_delivery_evidence_loss.rs'
+              - 'src/services/discord/tmux_watcher/commit_decisions.rs'
+              - 'src/services/discord/turn_bridge/terminal_outcome_delivery.rs'
+              - 'src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue.rs'
             pg_db:
               - '.github/workflows/**'
               - 'justfile'
@@ -489,6 +497,59 @@ jobs:
           FILTER_OUTPUT: ${{ needs.changes.outputs.relay_contract }}
           UPSTREAM_JOB_NAME: check_fast
           UPSTREAM_RESULT: ${{ needs.check_fast.result }}
+        run: ./scripts/required-check-mirror.sh
+
+  terminal_delivery_evidence_tests:
+    name: Terminal delivery evidence tests
+    needs: changes
+    if: needs.changes.outputs.terminal_delivery_evidence == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Terminal delivery evidence regressions
+        run: |
+          env -u AGENTDESK_ROOT_DIR cargo test --lib terminal_delivery_evidence_loss::tests
+          env -u AGENTDESK_ROOT_DIR cargo test --lib watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row
+          env -u AGENTDESK_ROOT_DIR cargo test --lib identity_guarded_save_rejects_stale_write_against_newer_turn
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
+
+  terminal_delivery_evidence_required_context:
+    name: Terminal delivery evidence required context (ubuntu-latest)
+    needs:
+      - changes
+      - terminal_delivery_evidence_tests
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mirror terminal delivery evidence result for branch protection
+        env:
+          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
+          FILTER_NAME: terminal_delivery_evidence
+          FILTER_OUTPUT: ${{ needs.changes.outputs.terminal_delivery_evidence }}
+          UPSTREAM_JOB_NAME: terminal_delivery_evidence_tests
+          UPSTREAM_RESULT: ${{ needs.terminal_delivery_evidence_tests.result }}
         run: ./scripts/required-check-mirror.sh
 
   fast_targeted_tests_required_context:

@@ -105,6 +105,7 @@ mod status_panel_transition_v2;
 pub(in crate::services::discord) mod streaming_finalizer;
 mod task_notification_delivery;
 pub(in crate::services::discord) mod task_supervisor;
+mod terminal_delivery_evidence_loss;
 mod terminal_ui_obligation;
 #[cfg(unix)]
 mod tmux;
