@@ -8,7 +8,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use super::*;
 use crate::services::discord::{formatting::ReplaceLongMessageOutcome, gateway::GatewayFuture};
 use tracing_subscriber::fmt::MakeWriter;
 
