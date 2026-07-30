@@ -2868,11 +2868,9 @@ mod tests {
             let hook_root = root.path().to_path_buf();
             let hook_provider = provider.clone();
             let _hook = set_destructive_cancel_post_gate_hook_for_tests(Arc::new(move || {
-                let current = super::super::inflight::load_inflight_state(
-                    &hook_provider,
-                    channel_id,
-                )
-                .expect("load post-gate inflight");
+                let current =
+                    super::super::inflight::load_inflight_state(&hook_provider, channel_id)
+                        .expect("load post-gate inflight");
                 write_inflight_fixture(&hook_root, &hook_provider, &current);
             }));
 

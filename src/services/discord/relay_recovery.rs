@@ -98,9 +98,8 @@ type IdleTmuxReattachInflightCandidateHook =
 type DestructiveCancelPostGateHook = Arc<dyn Fn() + Send + Sync + 'static>;
 
 #[cfg(test)]
-static DESTRUCTIVE_CANCEL_POST_GATE_HOOK: OnceLock<
-    Mutex<Option<DestructiveCancelPostGateHook>>,
-> = OnceLock::new();
+static DESTRUCTIVE_CANCEL_POST_GATE_HOOK: OnceLock<Mutex<Option<DestructiveCancelPostGateHook>>> =
+    OnceLock::new();
 #[cfg(test)]
 static IDLE_TMUX_REATTACH_INFLIGHT_CANDIDATE_HOOK: OnceLock<
     Mutex<Option<IdleTmuxReattachInflightCandidateHook>>,

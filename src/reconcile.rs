@@ -1840,11 +1840,7 @@ fn backfill_legacy_rebind_origin_turn_source(path: &std::path::Path) -> bool {
     );
     object.insert(
         "updated_at".to_string(),
-        serde_json::Value::String(
-            chrono::Local::now()
-                .format("%Y-%m-%d %H:%M:%S")
-                .to_string(),
-        ),
+        serde_json::Value::String(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
     );
     let Ok(updated) = serde_json::to_string_pretty(&value) else {
         return false;

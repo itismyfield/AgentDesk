@@ -16,7 +16,9 @@ pub(in crate::services::discord) enum DestructiveCancelPinField {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum DestructiveCancelCommitOutcome {
     Committed,
-    PinMismatch { field: DestructiveCancelPinField },
+    PinMismatch {
+        field: DestructiveCancelPinField,
+    },
     RowMissing,
     RowMalformed,
     /// Lock setup or syscall failure. Lock contention blocks because the flock
