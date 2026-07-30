@@ -54,6 +54,7 @@ impl DestructiveCancelIdentityPin {
 #[derive(Clone, Debug)]
 pub(in crate::services::discord) struct DestructiveCancelProbeSnapshot {
     pub pin: DestructiveCancelIdentityPin,
+    pub inflight_identity: inflight::InflightTurnIdentity,
     pub updated_at: String,
     pub save_generation: u64,
     pub output_path: Option<String>,
@@ -95,6 +96,7 @@ impl DestructiveCancelProbeSnapshot {
         );
         Self {
             pin,
+            inflight_identity: inflight::InflightTurnIdentity::from_state(state),
             updated_at: state.updated_at.clone(),
             save_generation: state.save_generation,
             output_path,

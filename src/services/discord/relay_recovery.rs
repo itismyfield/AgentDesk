@@ -94,11 +94,54 @@ const ORPHAN_PENDING_TOKEN_ADMISSION_GRACE: Duration = Duration::from_secs(30);
 #[cfg(test)]
 type IdleTmuxReattachInflightCandidateHook =
     Arc<dyn Fn(&super::inflight::InflightTurnState) + Send + Sync + 'static>;
+#[cfg(test)]
+type DestructiveCancelPostGateHook = Arc<dyn Fn() + Send + Sync + 'static>;
 
+#[cfg(test)]
+static DESTRUCTIVE_CANCEL_POST_GATE_HOOK: OnceLock<Mutex<Option<DestructiveCancelPostGateHook>>> =
+    OnceLock::new();
 #[cfg(test)]
 static IDLE_TMUX_REATTACH_INFLIGHT_CANDIDATE_HOOK: OnceLock<
     Mutex<Option<IdleTmuxReattachInflightCandidateHook>>,
 > = OnceLock::new();
+
+#[cfg(test)]
+fn destructive_cancel_post_gate_hook() -> &'static Mutex<Option<DestructiveCancelPostGateHook>> {
+    DESTRUCTIVE_CANCEL_POST_GATE_HOOK.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+fn run_destructive_cancel_post_gate_hook_for_tests() {
+    let hook = destructive_cancel_post_gate_hook()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(test)]
+struct DestructiveCancelPostGateHookGuard;
+
+#[cfg(test)]
+impl Drop for DestructiveCancelPostGateHookGuard {
+    fn drop(&mut self) {
+        *destructive_cancel_post_gate_hook()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = None;
+    }
+}
+
+#[cfg(test)]
+fn set_destructive_cancel_post_gate_hook_for_tests(
+    hook: DestructiveCancelPostGateHook,
+) -> DestructiveCancelPostGateHookGuard {
+    *destructive_cancel_post_gate_hook()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = Some(hook);
+    DestructiveCancelPostGateHookGuard
+}
 
 #[cfg(test)]
 fn idle_tmux_reattach_inflight_candidate_hook()

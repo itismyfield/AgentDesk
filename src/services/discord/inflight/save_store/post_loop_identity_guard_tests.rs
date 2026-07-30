@@ -21,6 +21,7 @@ fn post_loop_state() -> InflightTurnState {
     );
     state.full_response = "partial response".to_string();
     state.long_running_placeholder_active = true;
+    state.updated_at = "2026-07-30 12:00:00".to_string();
     state
 }
 
@@ -36,6 +37,8 @@ fn post_loop_finalize_saves_require_matching_identity() {
     );
     let original = post_loop_state();
     save_inflight_state(&original).expect("seed current turn row");
+    let original = load_inflight_state(&ProviderKind::Codex, original.channel_id)
+        .expect("persisted current turn row");
 
     let mut same_turn_finalize = original.clone();
     same_turn_finalize.long_running_placeholder_active = false;
