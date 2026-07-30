@@ -206,6 +206,10 @@ mod tests {
         committed.inflight_terminal_delivery_committed = true;
         let mut fresh_outbound = snapshot(&stale);
         fresh_outbound.relay_health.last_outbound_activity_ms = Some((now - 5) * 1000);
+        let mut delivered_live_fingerprint = snapshot(&stale);
+        delivered_live_fingerprint
+            .relay_health
+            .confirmed_delivery_since_turn_start = Some(true);
         let mut advanced_frontier = snapshot(&stale);
         advanced_frontier.last_relay_ts_ms = (now - 30) * 1000;
         advanced_frontier.last_relay_offset = 64;
@@ -267,14 +271,24 @@ mod tests {
             "advanced relay frontiers still require stale runtime activity before reattach"
         );
         assert!(
-            should_reattach_relay_dead_watcher(
+            !should_reattach_relay_dead_watcher(
                 &fresh_outbound,
                 ChannelId::new(42),
-                stale_activity,
+                fresh_activity,
                 now,
                 boot,
             ),
-            "recent outbound activity must not block non-destructive watcher reattach"
+            "fresh outbound and runtime activity must restore the destructive-cleanup blocker"
+        );
+        assert!(
+            !should_reattach_relay_dead_watcher(
+                &delivered_live_fingerprint,
+                ChannelId::new(42),
+                fresh_activity,
+                now,
+                boot,
+            ),
+            "confirmed Discord delivery must not bypass the fresh-runtime-activity guard"
         );
     }
 }

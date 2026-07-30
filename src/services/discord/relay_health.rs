@@ -202,6 +202,87 @@ mod tests {
     use super::*;
 
     #[test]
+    fn delivered_live_fingerprint_does_not_claim_the_relay_frontier_never_advanced() {
+        let snapshot = RelayHealthSnapshot {
+            provider: "claude".to_string(),
+            channel_id: 1_479_671_298_497_183_835,
+            active_turn: RelayActiveTurn::Foreground,
+            tmux_alive: Some(true),
+            watcher_attached: true,
+            watcher_owner_channel_id: Some(1_479_671_298_497_183_835),
+            watcher_owns_live_relay: true,
+            bridge_inflight_present: true,
+            last_relay_ts_ms: None,
+            last_outbound_activity_ms: None,
+            confirmed_delivery_since_turn_start: Some(true),
+            last_capture_offset: Some(19_525_394),
+            last_relay_offset: 0,
+            last_relay_offset_recorded: true,
+            unread_bytes: Some(19_525_394),
+            desynced: true,
+            ..RelayHealthSnapshot::test_snapshot()
+        };
+
+        assert!(!snapshot.relay_frontier_never_advanced_with_unread_tail());
+        assert_eq!(
+            RelayStallClassifier::classify(&snapshot),
+            RelayStallState::ActiveForegroundStream
+        );
+    }
+
+    #[test]
+    fn recorded_zero_frontier_without_delivery_evidence_is_still_relay_dead() {
+        let snapshot = RelayHealthSnapshot {
+            active_turn: RelayActiveTurn::Foreground,
+            tmux_alive: Some(true),
+            watcher_attached: true,
+            watcher_owns_live_relay: true,
+            bridge_inflight_present: true,
+            confirmed_delivery_since_turn_start: Some(false),
+            last_capture_offset: Some(128),
+            last_relay_offset: 0,
+            last_relay_offset_recorded: true,
+            unread_bytes: Some(128),
+            desynced: true,
+            ..RelayHealthSnapshot::test_snapshot()
+        };
+
+        assert!(snapshot.relay_frontier_never_advanced_with_unread_tail());
+        assert_eq!(
+            RelayStallClassifier::classify(&snapshot),
+            RelayStallState::TmuxAliveRelayDead
+        );
+    }
+
+    #[test]
+    fn unknown_or_unrecorded_frontier_fails_closed_against_relay_dead_claim() {
+        for snapshot in [
+            RelayHealthSnapshot {
+                confirmed_delivery_since_turn_start: None,
+                last_capture_offset: Some(128),
+                last_relay_offset: 0,
+                last_relay_offset_recorded: true,
+                unread_bytes: Some(128),
+                desynced: true,
+                tmux_alive: Some(true),
+                ..RelayHealthSnapshot::test_snapshot()
+            },
+            RelayHealthSnapshot {
+                confirmed_delivery_since_turn_start: Some(false),
+                last_capture_offset: Some(128),
+                last_relay_offset: 0,
+                last_relay_offset_recorded: false,
+                unread_bytes: Some(128),
+                desynced: true,
+                tmux_alive: Some(true),
+                ..RelayHealthSnapshot::test_snapshot()
+            },
+        ] {
+            assert!(!snapshot.relay_frontier_never_advanced_with_unread_tail());
+        }
+    }
+
+    #[test]
     fn relay_stall_classifier_is_table_driven() {
         let cases: Vec<(&str, RelayHealthSnapshot, RelayStallState)> = vec![
             (
