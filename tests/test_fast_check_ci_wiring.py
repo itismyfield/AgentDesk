@@ -253,9 +253,9 @@ class FastCheckCiWiringTests(unittest.TestCase):
 
         changes = job_block(workflow, "changes")
         for path in (
-            "src/services/discord/task_notification_delivery/mod.rs",
-            "src/services/discord/task_notification_delivery/terminal_identity.rs",
-            "src/services/discord/task_notification_delivery/tests.rs",
+            # Glob, not a file list: a per-file enumeration silently excludes
+            # modules added later (see the matching comment in ci-pr.yml).
+            "src/services/discord/task_notification_delivery/**",
             "src/services/discord/tmux.rs",
             "src/services/discord/tmux_watcher/discrete_trigger_marker.rs",
             "src/services/discord/tui_prompt_relay/task_notification_prompt.rs",

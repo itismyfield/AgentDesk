@@ -145,9 +145,11 @@ jobs:
               - 'src/services/scheduled_messages/**'
               - 'src/services/discord/outbound/source_registry.rs'
               # #4985: footer marker changes require the protected targeted lane.
-              - 'src/services/discord/task_notification_delivery/mod.rs'
-              - 'src/services/discord/task_notification_delivery/terminal_identity.rs'
-              - 'src/services/discord/task_notification_delivery/tests.rs'
+              # Glob rather than a file list: enumerating siblings silently drops
+              # newly extracted modules (footer_only_marker.rs was created by this
+              # PR and missed the list), which skips the lane for the very file
+              # the change lives in.
+              - 'src/services/discord/task_notification_delivery/**'
               - 'src/services/discord/tmux.rs'
               - 'src/services/discord/tmux_watcher/discrete_trigger_marker.rs'
               - 'src/services/discord/tui_prompt_relay/task_notification_prompt.rs'
