@@ -7,6 +7,7 @@
 
 pub(in crate::services::discord) mod anchor_repost;
 pub(in crate::services::discord) mod budget;
+mod destructive_commit;
 mod finalizer_identity;
 #[cfg(test)]
 mod invariant_test_capture;
@@ -40,6 +41,10 @@ mod store;
 // (root callers only) and is brought in via a plain import. `InflightStateFileLock`
 // is named nowhere outside `store` (it only flows as a return type), so it keeps
 // its module-tree visibility there without a parent re-export.
+pub(in crate::services::discord) use destructive_commit::{
+    CommitError, CommitEvidence, DestructiveCancelCommitOutcome, DestructiveCancelPinField,
+    commit_destructive_cancel_locked,
+};
 pub(in crate::services::discord) use episode_guard::{
     InflightEpisodeLockError, InflightEpisodePin, LockedInflightEpisode,
     adopt_and_lock_inflight_episode, lock_inflight_episode,
