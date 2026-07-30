@@ -1084,14 +1084,20 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     );
     #[cfg(unix)]
     if runtime_mismatch_verdict.should_defer() {
-        // Releasing the mailbox consumes this claimed request, so retain one
-        // headless mismatch retry behind existing user work. The synthetic id
-        // changes on every caller retry; the queue therefore deduplicates this
-        // marked class per channel instead of relying on source identity.
+        // Releasing the mailbox consumes this claimed request, so retain the
+        // headless mismatch retry behind existing user work. Queue identity is
+        // the synthetic source id. Callers retrying one logical request must
+        // therefore reuse their HeadlessTurnReservation; distinct prompts keep
+        // distinct reservations and remain separate FIFO entries.
         let bot_owner_provider = super::super::super::resolve_discord_bot_provider(token);
         let _ =
             release_mailbox_after_busy_pre_submit_defer(shared, &bot_owner_provider, channel_id)
                 .await;
+        // Queue persistence removes normal-process loss after this enqueue
+        // commits. A crash or persistence error after mailbox release but before
+        // the atomic rename can still lose the request because admission and
+        // release are not one durable transaction; callers receive Internal on
+        // persistence failure, while a process crash has no recovery record.
         let retry = enqueue_headless_runtime_mismatch_defer(
             shared,
             &bot_owner_provider,

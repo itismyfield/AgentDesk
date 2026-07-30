@@ -121,36 +121,25 @@ fn build_restart_response(
         .join("\n")
 }
 
-async fn start_restart_seed_turn(ctx: &Context<'_>) -> RestartSeedStatus {
+async fn retry_restart_seed_turn<F, Fut>(mut start: F) -> RestartSeedStatus
+where
+    F: FnMut(super::super::router::HeadlessTurnReservation) -> Fut,
+    Fut: std::future::Future<
+        Output = Result<
+            super::super::router::HeadlessTurnStartOutcome,
+            super::super::router::HeadlessTurnStartError,
+        >,
+    >,
+{
     const MAX_ATTEMPTS: usize = 30;
     const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 
-    let channel_id = ctx.channel_id();
-    let channel_name_hint = {
-        let data = ctx.data().shared.core.lock().await;
-        data.sessions
-            .get(&channel_id)
-            .and_then(|session| session.channel_name.clone())
-    };
-    let metadata = serde_json::json!({
-        "command": "/restart",
-        "provider": ctx.data().provider.as_str(),
-    });
-
+    // One reservation is the logical /restart request identity. Reusing it makes
+    // every conflict retry collide with any still-queued or dispatch-reserved copy
+    // of the same prompt instead of minting another durable queue obligation.
+    let reservation = super::super::router::reserve_headless_turn();
     for attempt in 0..MAX_ATTEMPTS {
-        match super::super::router::start_headless_turn(
-            ctx.serenity_context(),
-            channel_id,
-            RESTART_SEED_PROMPT,
-            "/restart",
-            &ctx.data().shared,
-            &ctx.data().token,
-            Some("/restart"),
-            Some(metadata.clone()),
-            channel_name_hint.clone(),
-        )
-        .await
-        {
+        match start(reservation).await {
             Ok(_) => return RestartSeedStatus::Started,
             Err(super::super::router::HeadlessTurnStartError::Conflict(_))
                 if attempt + 1 < MAX_ATTEMPTS =>
@@ -167,6 +156,80 @@ async fn start_restart_seed_turn(ctx: &Context<'_>) -> RestartSeedStatus {
     }
 
     RestartSeedStatus::Busy
+}
+
+async fn start_restart_seed_turn(ctx: &Context<'_>) -> RestartSeedStatus {
+    let channel_id = ctx.channel_id();
+    let channel_name_hint = {
+        let data = ctx.data().shared.core.lock().await;
+        data.sessions
+            .get(&channel_id)
+            .and_then(|session| session.channel_name.clone())
+    };
+    let metadata = serde_json::json!({
+        "command": "/restart",
+        "provider": ctx.data().provider.as_str(),
+    });
+
+    retry_restart_seed_turn(|reservation| {
+        super::super::router::start_reserved_headless_turn(
+            ctx.serenity_context(),
+            channel_id,
+            RESTART_SEED_PROMPT,
+            "/restart",
+            &ctx.data().shared,
+            &ctx.data().token,
+            Some("/restart"),
+            Some(metadata.clone()),
+            channel_name_hint.clone(),
+            None,
+            None,
+            reservation,
+        )
+    })
+    .await
+}
+
+#[cfg(test)]
+mod restart_seed_retry_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test(start_paused = true)]
+    async fn restart_conflict_retries_reuse_one_logical_request_identity_5015() {
+        let reservations = Arc::new(Mutex::new(Vec::new()));
+        let seen = reservations.clone();
+        let mut attempts = 0_usize;
+
+        let status = retry_restart_seed_turn(move |reservation| {
+            attempts += 1;
+            seen.lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .push(reservation);
+            async move {
+                if attempts < 3 {
+                    Err(super::super::super::router::HeadlessTurnStartError::Conflict(
+                        "deferred mismatch".to_string(),
+                    ))
+                } else {
+                    Ok(super::super::super::router::HeadlessTurnStartOutcome {
+                        turn_id: "restart-seed".to_string(),
+                        status: super::super::super::router::HeadlessTurnStartStatus::Started,
+                    })
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(status, RestartSeedStatus::Started);
+        let reservations = reservations
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        assert_eq!(reservations.len(), 3);
+        assert!(reservations
+            .windows(2)
+            .all(|pair| pair[0] == pair[1]));
+    }
 }
 
 async fn run_restart(ctx: Context<'_>, command_name: &'static str) -> Result<(), Error> {
