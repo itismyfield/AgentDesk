@@ -2822,27 +2822,63 @@ _post_deploy_smoke_check_fail_closed_warn_rate() {
     fi
 }
 
-_post_deploy_smoke_check_relay_round_trip() {
-    local cluster_standby channel_id relay_output relay_log resolve_rc cell_busy cell_guard_rc
-    local config_path="$ADK_REL/config/agentdesk.yaml"
-    if [ -z "$POST_DEPLOY_SMOKE_HEALTH_BODY" ] || [ ! -s "$POST_DEPLOY_SMOKE_HEALTH_BODY" ]; then
-        _post_deploy_smoke_fail "relay E-1: /api/health body unavailable for standby gate" || true
+# #5026: resolve the `cluster_standby` flag as a *value*, never through `jq -e`.
+#
+# `jq -e` sets exit status 1 whenever the last output value is `false` or
+# `null`, and `false` is exactly the healthy non-standby value. The previous
+# `-e` spelling therefore reported "could not prove non-standby" on every
+# normal node even though it had extracted the flag correctly. Combined with
+# the deliberate skip on `cluster_standby=true`, no input value could ever
+# reach the round-trip below — the relay check was unreachable on every
+# deploy, which is why it never caught a relay regression.
+#
+# Echoes `true`/`false` on stdout and returns non-zero only when the flag is
+# genuinely unreadable (missing body, malformed JSON, non-boolean field).
+# jq stderr is left to the caller's redirect so evidence capture is unchanged.
+_post_deploy_smoke_resolve_cluster_standby() {
+    local health_body="$1" value
+    if [ -z "$health_body" ] || [ ! -s "$health_body" ]; then
         return 1
     fi
-    if ! cluster_standby=$(jq -er '
+    if ! value=$(jq -r '
         if (.cluster_standby | type) == "boolean" then
             .cluster_standby
         else
             error("cluster_standby is not boolean")
         end
-    ' "$POST_DEPLOY_SMOKE_HEALTH_BODY" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"); then
-        _post_deploy_smoke_fail "relay E-1: could not prove node is non-standby; round-trip skipped" || true
+    ' "$health_body"); then
+        return 1
+    fi
+    case "$value" in
+        true | false)
+            printf '%s\n' "$value"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+_post_deploy_smoke_check_relay_round_trip() {
+    local cluster_standby channel_id relay_output relay_log resolve_rc cell_busy cell_guard_rc
+    local config_path="$ADK_REL/config/agentdesk.yaml"
+    if [ -z "$POST_DEPLOY_SMOKE_HEALTH_BODY" ] || [ ! -s "$POST_DEPLOY_SMOKE_HEALTH_BODY" ]; then
+        _post_deploy_smoke_fail "relay E-1 NOT VERIFIED: /api/health body unavailable for standby gate; round-trip did not run (smoke coverage gap, not a relay failure)" || true
+        return 1
+    fi
+    if ! cluster_standby=$(_post_deploy_smoke_resolve_cluster_standby \
+        "$POST_DEPLOY_SMOKE_HEALTH_BODY" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"); then
+        _post_deploy_smoke_fail "relay E-1 NOT VERIFIED: cluster_standby missing or non-boolean in /api/health; round-trip did not run (smoke coverage gap, not a relay failure)" || true
         return 1
     fi
     if [ "$cluster_standby" = "true" ]; then
         _post_deploy_smoke_note "relay E-1=skipped cluster_standby=true (no standby injection)" || return 1
         return 0
     fi
+    # Positive breadcrumb (#5026): the standby gate passed and the round-trip is
+    # actually executing. Absence of this line in a deploy log means the relay
+    # check did not run, which is what silently held for every prior deploy.
+    _post_deploy_smoke_note "relay E-1=round-trip proceeding cluster_standby=false" || return 1
 
     # Reuse the #3729 wrapper's config resolver: channel ids remain
     # machine-local agentdesk.yaml data and are never hard-coded here.
