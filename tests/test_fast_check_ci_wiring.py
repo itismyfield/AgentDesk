@@ -248,6 +248,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         for command in (
             "cargo test --lib services::discord::outbound::delivery_evidence_store::tests",
             "cargo test --lib services::discord::relay_health::tests",
+            "cargo test --lib services::discord::health::session_enrichment::tests",
             "cargo test --lib services::discord::health::relay_dead_reattach::tests",
         ):
             self.assertIn(command, job)

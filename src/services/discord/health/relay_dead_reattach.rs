@@ -11,11 +11,13 @@ use crate::services::provider::ProviderKind;
 fn should_reattach_relay_dead_watcher(
     snapshot: &WatcherStateSnapshot,
     channel_id: ChannelId,
+    relay_emission_in_flight: bool,
     latest_runtime_activity_unix_nanos: i64,
     now_unix_secs: i64,
     boot_unix_secs: i64,
 ) -> bool {
-    if snapshot.relay_stall_state != RelayStallState::TmuxAliveRelayDead
+    if relay_emission_in_flight
+        || snapshot.relay_stall_state != RelayStallState::TmuxAliveRelayDead
         || !snapshot.attached
         || snapshot.watcher_owner_channel_id != Some(channel_id.get())
         || snapshot.tmux_session_alive != Some(true)
@@ -58,9 +60,7 @@ pub(super) async fn try_apply(
     snapshot: &WatcherStateSnapshot,
     now_unix_secs: i64,
 ) -> bool {
-    if shared.relay_emission_in_flight(channel_id) {
-        return false;
-    }
+    let relay_emission_in_flight = shared.relay_emission_in_flight(channel_id);
     let Some(latest_activity_unix_nanos) = snapshot
         .tmux_session
         .as_deref()
@@ -71,6 +71,7 @@ pub(super) async fn try_apply(
     if !should_reattach_relay_dead_watcher(
         snapshot,
         channel_id,
+        relay_emission_in_flight,
         latest_activity_unix_nanos,
         now_unix_secs,
         registry.started_at_unix(),
@@ -106,6 +107,7 @@ pub(super) async fn try_apply(
 mod tests {
     use super::*;
     use crate::services::discord::relay_health::{RelayActiveTurn, RelayHealthSnapshot};
+    use std::sync::atomic::Ordering;
     use chrono::TimeZone;
 
     fn local_string(unix: i64) -> String {
@@ -184,6 +186,17 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn relay_dead_reattach_yields_while_watcher_emission_is_in_flight() {
+        let shared = Arc::new(crate::services::discord::make_shared_data_for_tests());
+        let channel = ChannelId::new(50_220_004);
+        shared
+            .tmux_relay_coord(channel)
+            .relay_slot
+            .store(1, Ordering::Release);
+        assert!(shared.relay_emission_in_flight(channel));
+    }
+
     #[test]
     fn relay_dead_watcher_reattach_handles_dead_frontier_liveness() {
         let now = chrono::Utc::now().timestamp();
@@ -197,6 +210,15 @@ mod tests {
         assert!(should_reattach_relay_dead_watcher(
             &snapshot(&stale),
             ChannelId::new(42),
+            false,
+            stale_activity,
+            now,
+            boot,
+        ));
+        assert!(!should_reattach_relay_dead_watcher(
+            &snapshot(&stale),
+            ChannelId::new(42),
+            true,
             stale_activity,
             now,
             boot,
@@ -246,6 +268,7 @@ mod tests {
                 !should_reattach_relay_dead_watcher(
                     &candidate,
                     ChannelId::new(42),
+                    false,
                     activity,
                     now,
                     boot_unix_secs,
@@ -257,6 +280,7 @@ mod tests {
             should_reattach_relay_dead_watcher(
                 &snapshot(&stale),
                 ChannelId::new(42),
+                false,
                 fresh_activity,
                 now,
                 boot,
@@ -267,6 +291,7 @@ mod tests {
             should_reattach_relay_dead_watcher(
                 &advanced_frontier,
                 ChannelId::new(42),
+                false,
                 stale_activity,
                 now,
                 boot,
@@ -277,6 +302,7 @@ mod tests {
             !should_reattach_relay_dead_watcher(
                 &fresh_outbound,
                 ChannelId::new(42),
+                false,
                 fresh_activity,
                 now,
                 boot,
@@ -287,6 +313,7 @@ mod tests {
             !should_reattach_relay_dead_watcher(
                 &delivered_live_fingerprint,
                 ChannelId::new(42),
+                false,
                 fresh_activity,
                 now,
                 boot,

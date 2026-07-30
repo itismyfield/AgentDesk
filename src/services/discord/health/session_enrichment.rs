@@ -85,11 +85,9 @@ impl SessionEnrichment {
             watcher_binding_tmux_session.as_deref(),
         );
         let relay_coord = shared.tmux_relay_coords.get(&channel);
-        let last_relay_offset_recorded = relay_coord.as_ref().is_some_and(|coord| {
-            coord
-                .confirmed_end_recorded
-                .load(std::sync::atomic::Ordering::Acquire)
-        });
+        let last_relay_offset_recorded = relay_offset_was_recorded(
+            relay_coord.as_ref().map(|coord| coord.value().as_ref()),
+        );
         let (last_relay_offset, last_relay_ts_ms, reconnect_count) = relay_coord
             .as_ref()
             .map(|coord| {
@@ -271,6 +269,16 @@ fn liveness_probe_session(inflight: Option<&str>, watcher: Option<&str>) -> Opti
     inflight.or(watcher).map(str::to_string)
 }
 
+fn relay_offset_was_recorded(
+    coord: Option<&crate::services::discord::TmuxRelayCoord>,
+) -> bool {
+    coord.is_some_and(|coord| {
+        coord
+            .confirmed_end_recorded
+            .load(std::sync::atomic::Ordering::Acquire)
+    })
+}
+
 fn liveness_as_alive(liveness: PaneLiveness) -> Option<bool> {
     match liveness {
         PaneLiveness::Live => Some(true),
@@ -299,5 +307,16 @@ mod tests {
     fn only_exact_dead_or_absent_maps_to_dead() {
         assert_eq!(liveness_as_alive(PaneLiveness::DeadOrAbsent), Some(false));
         assert_eq!(liveness_as_alive(PaneLiveness::ProbeError), None);
+    }
+
+    #[test]
+    fn coordination_entry_creation_is_not_offset_write_evidence() {
+        let coord = crate::services::discord::TmuxRelayCoord::new(ChannelId::new(50_220_003));
+        assert!(!relay_offset_was_recorded(Some(&coord)));
+
+        coord
+            .confirmed_end_recorded
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(relay_offset_was_recorded(Some(&coord)));
     }
 }
