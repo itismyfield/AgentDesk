@@ -132,8 +132,8 @@ impl TaskNotificationContext {
         &self.event_key
     }
 
-    pub(super) fn summary(&self) -> &str {
-        &self.summary
+    pub(super) fn summary(&self) -> Option<&str> {
+        (!self.summary.is_empty()).then_some(self.summary.as_str())
     }
 
     /// Mirrors the footer-only eligibility used by the card policy: background
@@ -666,7 +666,16 @@ pub(super) fn footer_only_background_marker_content(rendered_card: &str) -> Stri
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .filter(|line| !line.starts_with("-#"))
-        .filter(|line| !crate::services::provider_output_guard::contains_private_task_anchor(line))
+        .filter(|line| {
+            ![
+                "<task-notification>",
+                "<task-id>",
+                "<tool-use-id>",
+                "<output-file>",
+            ]
+            .iter()
+            .any(|anchor| line.contains(anchor))
+        })
         .collect::<Vec<_>>()
         .join("\n");
     if detail.is_empty() {

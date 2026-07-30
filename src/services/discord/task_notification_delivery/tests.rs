@@ -50,7 +50,16 @@ fn footer_only_marker_omits_private_task_anchors_from_rendered_preview() {
 
     let marker = event.footer_only_marker_content();
     assert!(marker.contains("> Visible result line."));
-    assert!(!crate::services::provider_output_guard::contains_private_task_anchor(&marker));
+    assert!(
+        ![
+            "<task-notification>",
+            "<task-id>",
+            "<tool-use-id>",
+            "<output-file>",
+        ]
+        .iter()
+        .any(|anchor| marker.contains(anchor))
+    );
 }
 
 #[tokio::test]

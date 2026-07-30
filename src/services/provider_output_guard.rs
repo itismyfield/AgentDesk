@@ -20,12 +20,6 @@ const PRIVATE_TASK_ANCHORS: &[&str] = &[
     "<tool-use-id>",
     "<output-file>",
 ];
-
-pub(crate) fn contains_private_task_anchor(text: &str) -> bool {
-    PRIVATE_TASK_ANCHORS
-        .iter()
-        .any(|anchor| text.contains(anchor))
-}
 const CONTROL_ANCHORS: &[&str] = &[
     SYSTEM_BANNER,
     "<task-notification>",

@@ -241,6 +241,27 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertIn("UPSTREAM_JOB_NAME: test_fast", mirror_job)
         self.assertIn("UPSTREAM_RESULT: ${{ needs.test_fast.result }}", mirror_job)
 
+    def test_footer_marker_regressions_run_in_required_test_fast_lane(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        test_job = job_block(workflow, "test_fast")
+        self.assertEqual(test_job.count("- name: Footer-only marker regressions"), 1)
+        for command in (
+            "cargo test --lib task_notification -- --skip _pg --skip pg_ --skip postgres",
+            "cargo test --lib services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests -- --skip _pg --skip pg_ --skip postgres",
+        ):
+            self.assertEqual(test_job.count(command), 1)
+
+        changes = job_block(workflow, "changes")
+        for path in (
+            "src/services/discord/task_notification_delivery/mod.rs",
+            "src/services/discord/task_notification_delivery/terminal_identity.rs",
+            "src/services/discord/task_notification_delivery/tests.rs",
+            "src/services/discord/tmux.rs",
+            "src/services/discord/tmux_watcher/discrete_trigger_marker.rs",
+            "src/services/discord/tui_prompt_relay/task_notification_prompt.rs",
+        ):
+            self.assertIn(f"- '{path}'", changes)
+
     def test_pr_cross_os_lane_is_compile_only(self) -> None:
         job = job_block(PR_WORKFLOW.read_text(encoding="utf-8"), "check_fast_cross_os")
 

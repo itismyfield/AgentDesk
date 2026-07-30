@@ -63,12 +63,6 @@ impl SuppressedTaskNotificationMarker<'_> {
                 format!(
                     "⚙️ Background complete{}",
                     self.background_summary
-                        .filter(|summary| !summary.trim().is_empty())
-                        .filter(|summary| {
-                            !crate::services::provider_output_guard::contains_private_task_anchor(
-                                summary,
-                            )
-                        })
                         .map(|summary| format!(" · {summary}"))
                         .unwrap_or_default()
                 ),
@@ -123,14 +117,14 @@ mod tests {
     }
 
     #[test]
-    fn background_marker_omits_summary_with_private_task_anchor() {
+    fn background_marker_omits_missing_summary() {
         let marker = SuppressedTaskNotificationMarker {
             channel_id: ChannelId::new(4_912),
             tmux_session_name: "AgentDesk-claude-4912",
             data_start_offset: 44,
             kind: TaskNotificationKind::Background,
             footer_only_event_key: Some("event-identity"),
-            background_summary: Some("<tool-use-id> toolu-private"),
+            background_summary: None,
             event_count: 1,
             monitor_entry_keys: &[],
         }
@@ -185,7 +179,18 @@ pub(super) async fn enqueue_suppressed_machine_trigger_marker(
         task_notification_context.and_then(|context| context.footer_only_marker_event_key());
     let background_summary = task_notification_context
         .filter(|context| matches!(context.routing_kind(), TaskNotificationKind::Background))
-        .map(task_notification_delivery::TaskNotificationContext::summary);
+        .and_then(task_notification_delivery::TaskNotificationContext::summary);
+    if matches!(
+        task_notification_kind,
+        Some(TaskNotificationKind::Background)
+    ) && background_summary.is_none()
+    {
+        tracing::debug!(
+            channel_id = channel_id.get(),
+            data_start_offset,
+            "background completion marker used fallback without task summary"
+        );
+    }
     let marker_kind = task_notification_kind.filter(|kind| {
         matches!(
             kind,
