@@ -472,3 +472,45 @@ pub(super) async fn handle_manual_steer_interaction(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn intervention(message_id: u64) -> crate::services::turn_orchestrator::Intervention {
+        crate::services::turn_orchestrator::Intervention {
+            author_id: serenity::UserId::new(7),
+            author_is_bot: false,
+            message_id: serenity::MessageId::new(message_id),
+            queued_generation: 1,
+            source_message_ids: vec![serenity::MessageId::new(message_id)],
+            source_message_queued_generations: Vec::new(),
+            source_text_segments: Vec::new(),
+            text: "manual steer".to_string(),
+            mode: crate::services::turn_orchestrator::InterventionMode::Soft,
+            created_at: std::time::Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            pending_uploads: Vec::new(),
+            voice_announcement: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_steer_turn_registration_starts_mailbox_turn() {
+        let shared = super::super::make_shared_data_for_tests();
+        let channel_id = serenity::ChannelId::new(4_754_004);
+        let intervention = intervention(4_754_005);
+
+        register_manual_steer_turn(&shared, channel_id, &intervention).await;
+
+        let snapshot = shared.mailbox(channel_id).snapshot().await;
+        assert!(snapshot.cancel_token.is_some());
+        assert_eq!(
+            snapshot.active_user_message_id,
+            Some(intervention.message_id)
+        );
+        assert_eq!(snapshot.active_request_owner, Some(intervention.author_id));
+    }
+}
