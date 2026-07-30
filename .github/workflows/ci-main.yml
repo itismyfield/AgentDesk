@@ -5,6 +5,12 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      resource_diagnostics:
+        description: Emit PostgreSQL lane memory samples every five seconds
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: ci-main-${{ github.ref }}
@@ -172,31 +178,36 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: just test-postgres
-        timeout-minutes: 20
+      - name: PostgreSQL lane resource diagnostics
+        if: ${{ inputs.resource_diagnostics == true }}
         run: |
           resource_sample() {
             while true; do
               printf 'PG_RESOURCE_SAMPLE '
               date --iso-8601=seconds
               free -m | awk '/Mem:/ { printf "mem_total_mib=%s mem_used_mib=%s mem_available_mib=%s ", $2, $3, $7 }'
-              printf 'cgroup_max_bytes='
-              cat /sys/fs/cgroup/memory.max || true
-              printf 'cgroup_current_bytes='
-              cat /sys/fs/cgroup/memory.current || true
               docker stats --no-stream --format 'pg_mem={{.MemUsage}}' agentdesk-postgres || true
               sleep 5
             done
           }
-          resource_sample &
-          sample_pid=$!
-          trap 'kill "$sample_pid" 2>/dev/null || true; wait "$sample_pid" 2>/dev/null || true' EXIT
-          just test-postgres
+          resource_sample > "$RUNNER_TEMP/pg-resource-samples.log" 2>&1 &
+          echo "sample_pid=$!" >> "$GITHUB_ENV"
+
+      - name: just test-postgres
+        timeout-minutes: 20
+        run: just test-postgres
         env:
           # #4245: see Full tests lane — keep test debuginfo off so the build
           # and serial PostgreSQL suite retain headroom in the bounded step.
           CARGO_PROFILE_TEST_DEBUG: "0"
           CARGO_PROFILE_DEV_DEBUG: "0"
+
+      - name: Stop PostgreSQL lane resource diagnostics
+        if: always() && inputs.resource_diagnostics == true
+        run: |
+          kill "$sample_pid" 2>/dev/null || true
+          wait "$sample_pid" 2>/dev/null || true
+          cat "$RUNNER_TEMP/pg-resource-samples.log" || true
 
       - name: PostgreSQL lane OOM evidence
         if: failure()
