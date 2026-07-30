@@ -418,8 +418,7 @@ mod tests {
             removed_mailbox_token: false,
             post_mailbox_has_cancel_token: None,
             post_mailbox_queue_depth: None,
-            // `reattach_apply_status(false)`: the claim found a live incumbent
-            // and changed nothing.
+            // The rebind reported no authoritative state mutation.
             reattach_watcher_spawned: Some(false),
             reattach_watcher_replaced: Some(false),
             reattach_initial_offset: None,

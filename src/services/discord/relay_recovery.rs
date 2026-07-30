@@ -368,8 +368,8 @@ fn relay_recovery_status_counts_as_applied(status: &'static str) -> bool {
 /// #5021: statuses that report a successful *apply* while performing no actual
 /// repair.
 ///
-/// `reuse_existing_live_watcher` means the claim found an already-live
-/// incumbent and changed nothing (`reattach_apply_status(false)`), so relay
+/// `reuse_existing_live_watcher` means the rebind reported no authoritative
+/// adoption, session, mailbox, runtime-binding, or watcher mutation. Relay
 /// delivery is left exactly as healthy — or as stalled — as it was before the
 /// attempt. Such a round still counts as applied for tick sequencing (it
 /// legitimately suppresses the destructive watchdog branches downstream of
@@ -383,18 +383,12 @@ fn relay_recovery_status_repaired_nothing(status: &str) -> bool {
     status == "reuse_existing_live_watcher"
 }
 
-/// #3277 verify-2: `rebind_inflight_for_channel` reports apply honestly through the claim
-/// (`claim_or_reuse_watcher`, source `"recovery_restore_inflight"`), which
-/// REPLACES a cancelled / heartbeat-stale / paused / output-path-changed
-/// same-session incumbent (`find_watcher_by_tmux_session` folds
-/// `heartbeat_stale()` into its replace predicate — see the lifecycle
-/// truth-table test) but NEVER a genuinely-live fresh-heartbeat handle (no
-/// duplicate-relay vector). When the claim reused such a live incumbent
-/// (`watcher_spawned == false` — e.g. the heartbeat recovered between the
-/// stale-handle decision and the apply, or a reused watcher owns the session
-/// under another channel), say so instead of claiming "reattached_watcher".
-fn reattach_apply_status(watcher_spawned: bool) -> &'static str {
-    if watcher_spawned {
+/// #3277/#5021: report a successful repair when any authoritative rebind
+/// mutation landed, even if the final watcher claim reused a live incumbent.
+/// `watcher_spawned` is only the last claim result; adoption and runtime/mailbox
+/// repair happen before it and are independently authoritative.
+fn reattach_apply_status(repaired_state: bool) -> &'static str {
+    if repaired_state {
         "reattached_watcher"
     } else {
         "reuse_existing_live_watcher"

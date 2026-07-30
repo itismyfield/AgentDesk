@@ -182,11 +182,17 @@ pub(super) fn mark_readopted_from_inflight(
     outcome
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(in crate::services::discord) struct ActiveTurnReregisterOutcome {
+    pub finish_mailbox_on_completion: bool,
+    pub mailbox_binding_changed: bool,
+}
+
 async fn reregister_active_turn_from_inflight_inner(
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
     persist_durable_marker: bool,
-) -> bool {
+) -> ActiveTurnReregisterOutcome {
     let Some(finalizer_msg_id) =
         super::inflight::opt_message_id(state.effective_finalizer_turn_id())
     else {
@@ -194,11 +200,11 @@ async fn reregister_active_turn_from_inflight_inner(
             channel_id = state.channel_id,
             "inflight reregister skipped because finalizer turn id is zero"
         );
-        return false;
+        return ActiveTurnReregisterOutcome::default();
     };
     let Some(channel_id) = super::inflight::opt_channel_id(state.channel_id) else {
         tracing::warn!("inflight reregister skipped because persisted channel id is zero");
-        return false;
+        return ActiveTurnReregisterOutcome::default();
     };
     let finalizer_turn_id = finalizer_msg_id.get();
     let snapshot = super::mailbox_snapshot(shared, channel_id).await;
@@ -208,7 +214,7 @@ async fn reregister_active_turn_from_inflight_inner(
             state.provider,
             state.channel_id
         );
-        return false;
+        return ActiveTurnReregisterOutcome::default();
     };
     if recovery_terminal_delivery_already_committed(state) {
         tracing::info!(
@@ -233,21 +239,26 @@ async fn reregister_active_turn_from_inflight_inner(
                 "inflight reregister skipped recursive clear while exact-episode guard owns the sidecar flock"
             );
         }
-        return false;
+        return ActiveTurnReregisterOutcome::default();
     }
     if snapshot.cancel_token.is_some() {
-        if let Some(token) = snapshot.cancel_token.as_ref()
-            && snapshot.active_user_message_id == Some(finalizer_msg_id)
-        {
-            super::ensure_cancel_token_bound_from_inflight_state(
-                &provider,
-                state,
-                token,
-                "inflight reregister existing active turn",
-            );
-        }
         let restored = snapshot.active_user_message_id == Some(finalizer_msg_id);
+        let mailbox_binding_changed = if restored {
+            snapshot.cancel_token.as_ref().is_some_and(|token| {
+                token.tmux_session_name().as_deref() != state.tmux_session_name.as_deref()
+            })
+        } else {
+            false
+        };
         if restored {
+            if let Some(token) = snapshot.cancel_token.as_ref() {
+                super::ensure_cancel_token_bound_from_inflight_state(
+                    &provider,
+                    state,
+                    token,
+                    "inflight reregister existing active turn",
+                );
+            }
             reseed_recovered_finalizer_ledger(
                 shared,
                 channel_id,
@@ -266,7 +277,10 @@ async fn reregister_active_turn_from_inflight_inner(
                 );
             }
         }
-        return restored;
+        return ActiveTurnReregisterOutcome {
+            finish_mailbox_on_completion: restored,
+            mailbox_binding_changed,
+        };
     }
 
     if state.request_owner_user_id == 0 {
@@ -277,7 +291,7 @@ async fn reregister_active_turn_from_inflight_inner(
             &provider,
             state.effective_relay_owner_kind(),
         );
-        return false;
+        return ActiveTurnReregisterOutcome::default();
     }
 
     let cancel_token = Arc::new(CancelToken::new());
@@ -320,14 +334,19 @@ async fn reregister_active_turn_from_inflight_inner(
             );
         }
     }
-    started
+    ActiveTurnReregisterOutcome {
+        finish_mailbox_on_completion: started,
+        mailbox_binding_changed: started,
+    }
 }
 
 pub(in crate::services::discord) async fn reregister_active_turn_from_inflight(
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
 ) -> bool {
-    reregister_active_turn_from_inflight_inner(shared, state, true).await
+    reregister_active_turn_from_inflight_inner(shared, state, true)
+        .await
+        .finish_mailbox_on_completion
 }
 
 /// Automatic reattach holds the canonical episode flock across mailbox and
@@ -338,7 +357,7 @@ pub(in crate::services::discord) async fn reregister_active_turn_from_inflight(
 pub(in crate::services::discord) async fn reregister_active_turn_from_inflight_under_episode_guard(
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
-) -> bool {
+) -> ActiveTurnReregisterOutcome {
     reregister_active_turn_from_inflight_inner(shared, state, false).await
 }
 

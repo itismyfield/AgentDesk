@@ -23,7 +23,7 @@ pub(super) async fn apply_rebind(
         .await
     {
         Some(Ok(outcome)) => RelayRecoveryApplyResult {
-            status: reattach_apply_status(outcome.watcher_spawned),
+            status: reattach_apply_status(outcome.repaired_state),
             removed_thread_proofs: 0,
             removed_mailbox_token: false,
             post_mailbox_has_cancel_token: None,

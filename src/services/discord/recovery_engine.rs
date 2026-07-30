@@ -167,7 +167,9 @@ pub(crate) use self::manual_rebind::{
     rebind_inflight_for_channel, rebind_inflight_for_channel_with_minimum_start_offset,
 };
 pub(crate) use self::manual_rebind_override::ManualRebindOverrides;
-pub(in crate::services::discord) use self::runtime::reregister_active_turn_from_inflight_under_episode_guard;
+pub(in crate::services::discord) use self::runtime::{
+    ActiveTurnReregisterOutcome, reregister_active_turn_from_inflight_under_episode_guard,
+};
 // #3834: `reregister_active_turn_from_inflight` is re-exported (not just
 // re-imported) so the `recovery_engine::reregister_active_turn_from_inflight`
 // path stays valid for its `watchers::lifecycle` caller (via the `recovery`
@@ -433,6 +435,9 @@ pub struct RebindOutcome {
     /// from a zombie-slot recovery, which is the common case where an old
     /// watcher kept its DashMap entry after its tmux exited.
     pub watcher_replaced: bool,
+    /// `true` when this call changed durable inflight adoption, restored a
+    /// session/mailbox/runtime binding, or spawned/replaced a watcher.
+    pub repaired_state: bool,
 }
 
 /// #896: Errors from [`rebind_inflight_for_channel`]. Map 1:1 to HTTP status

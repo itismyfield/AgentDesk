@@ -574,6 +574,7 @@ async fn rebind_inflight_for_channel_inner(
     if expected_episode.is_some() {
         await_post_adoption_claim_barrier().await;
     }
+    let mut adoption_changed = existing_inflight.is_none();
     let recovered_state_for_session = if let Some(mut existing) = existing_inflight.clone() {
         let rollback_state = existing.clone();
         let expected = super::inflight::InflightTurnIdentity::from_state(&existing);
@@ -595,6 +596,8 @@ async fn rebind_inflight_for_channel_inner(
             existing.session_id = session_id_for_state.clone();
         }
         existing.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
+        adoption_changed =
+            serde_json::to_value(&rollback_state).ok() != serde_json::to_value(&existing).ok();
         let rollback_expected = super::inflight::InflightTurnIdentity::from_state(&existing);
         let rollback_expected_turn_start_offset = existing.turn_start_offset;
         let rollback_expected_last_offset_for_rebase =
@@ -747,24 +750,23 @@ async fn rebind_inflight_for_channel_inner(
         state
     };
 
-    let (locked_episode, finish_mailbox_on_completion) =
-        episode_handoff::commit_episode_side_effects(
-            shared,
-            provider,
-            channel_id,
-            discord_channel_id,
-            &recovered_state_for_session,
-            locked_episode_from_adoption.take(),
-            existing_inflight.is_some(),
-            &existing_session_id,
-            &channel_name,
-            &session_id_for_state,
-            runtime_kind_for_state,
-            &output_path,
-            &tmux_session_name,
-            initial_offset,
-        )
-        .await?;
+    let (locked_episode, episode_side_effects) = episode_handoff::commit_episode_side_effects(
+        shared,
+        provider,
+        channel_id,
+        discord_channel_id,
+        &recovered_state_for_session,
+        locked_episode_from_adoption.take(),
+        existing_inflight.is_some(),
+        &existing_session_id,
+        &channel_name,
+        &session_id_for_state,
+        runtime_kind_for_state,
+        &output_path,
+        &tmux_session_name,
+        initial_offset,
+    )
+    .await?;
 
     let (watcher_spawned, watcher_replaced) = {
         #[cfg(unix)]
@@ -866,7 +868,7 @@ async fn rebind_inflight_for_channel_inner(
                     super::tmux::restored_watcher_turn_from_inflight(
                         &recovered_state_for_session,
                         &tmux_session_name,
-                        finish_mailbox_on_completion,
+                        episode_side_effects.finish_mailbox_on_completion,
                     )
                 };
                 super::task_supervisor::spawn_observed_tmux_watcher(
@@ -906,7 +908,34 @@ async fn rebind_inflight_for_channel_inner(
         initial_offset,
         watcher_spawned,
         watcher_replaced,
+        repaired_state: rebind_repaired_state(
+            adoption_changed,
+            episode_side_effects.repaired_state,
+            watcher_spawned,
+            watcher_replaced,
+        ),
     })
+}
+
+fn rebind_repaired_state(
+    adoption_changed: bool,
+    episode_side_effects_changed: bool,
+    watcher_spawned: bool,
+    watcher_replaced: bool,
+) -> bool {
+    adoption_changed || episode_side_effects_changed || watcher_spawned || watcher_replaced
+}
+
+#[cfg(test)]
+mod repaired_state_tests {
+    use super::rebind_repaired_state;
+
+    #[test]
+    fn reused_watcher_still_reports_prior_authoritative_repair() {
+        assert!(rebind_repaired_state(true, false, false, false));
+        assert!(rebind_repaired_state(false, true, false, false));
+        assert!(!rebind_repaired_state(false, false, false, false));
+    }
 }
 
 #[cfg(test)]

@@ -2,6 +2,12 @@
 
 use super::*;
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct EpisodeSideEffectOutcome {
+    pub finish_mailbox_on_completion: bool,
+    pub repaired_state: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn commit_episode_side_effects(
     shared: &Arc<SharedData>,
@@ -18,7 +24,13 @@ pub(super) async fn commit_episode_side_effects(
     output_path: &str,
     tmux_session_name: &str,
     initial_offset: u64,
-) -> Result<(Option<super::inflight::LockedInflightEpisode>, bool), RebindError> {
+) -> Result<
+    (
+        Option<super::inflight::LockedInflightEpisode>,
+        EpisodeSideEffectOutcome,
+    ),
+    RebindError,
+> {
     // A terminal commit is a lifecycle-authority transition, not a reattachable
     // episode. The reservation pin normally rejects a commit that wins before
     // adoption; keep this lock-held check as defense in depth so the guarded
@@ -45,6 +57,7 @@ pub(super) async fn commit_episode_side_effects(
         );
     }
 
+    let previous_session = core.sessions.get(&discord_channel_id).cloned();
     let session = core
         .sessions
         .entry(discord_channel_id)
@@ -86,6 +99,25 @@ pub(super) async fn commit_episode_side_effects(
         session.session_id = authoritative_session_id.clone();
     }
     restore_recovered_session_worktree(session, authoritative_state);
+    let session_binding_changed = previous_session.as_ref().is_none_or(|previous| {
+        previous.session_id != session.session_id
+            || previous.channel_id != session.channel_id
+            || previous.channel_name != session.channel_name
+            || previous.current_path != session.current_path
+            || previous.worktree.as_ref().map(|worktree| {
+                (
+                    worktree.original_path.as_str(),
+                    worktree.worktree_path.as_str(),
+                    worktree.branch_name.as_str(),
+                )
+            }) != session.worktree.as_ref().map(|worktree| {
+                (
+                    worktree.original_path.as_str(),
+                    worktree.worktree_path.as_str(),
+                    worktree.branch_name.as_str(),
+                )
+            })
+    });
     drop(core);
 
     #[cfg(test)]
@@ -93,7 +125,7 @@ pub(super) async fn commit_episode_side_effects(
         super::test_barriers::await_episode_authority_held_barrier().await;
     }
 
-    let finish_mailbox_on_completion = if existing_inflight_present {
+    let reregister_outcome = if existing_inflight_present {
         if locked_episode.is_some() {
             super::reregister_active_turn_from_inflight_under_episode_guard(
                 shared,
@@ -101,13 +133,21 @@ pub(super) async fn commit_episode_side_effects(
             )
             .await
         } else {
-            reregister_active_turn_from_inflight(shared, authoritative_state).await
+            let finish_mailbox_on_completion =
+                reregister_active_turn_from_inflight(shared, authoritative_state).await;
+            super::ActiveTurnReregisterOutcome {
+                finish_mailbox_on_completion,
+                mailbox_binding_changed: finish_mailbox_on_completion,
+            }
         }
     } else {
-        false
+        super::ActiveTurnReregisterOutcome::default()
     };
+    let finish_mailbox_on_completion = reregister_outcome.finish_mailbox_on_completion;
+    let mut readoption_marker_changed = false;
 
     if finish_mailbox_on_completion && let Some(guard) = locked_episode.as_mut() {
+        readoption_marker_changed = !guard.state().readopted_from_inflight;
         let outcome = guard.mark_readopted_under_guard();
         if !matches!(outcome, super::inflight::GuardedSaveOutcome::Saved) {
             shared.evict_readopted_mailbox_owner(provider, channel_id);
@@ -129,25 +169,46 @@ pub(super) async fn commit_episode_side_effects(
         .as_ref()
         .and_then(|_| authoritative_state.tmux_session_name.as_deref())
         .unwrap_or(tmux_session_name);
-    if claude_tui_rebind_should_reregister_runtime_binding(
+    let runtime_binding_changed = if claude_tui_rebind_should_reregister_runtime_binding(
         authoritative_runtime_kind,
         authoritative_output_path,
     ) {
+        let binding = crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: authoritative_output_path.to_string(),
+            relay_output_path: None,
+            input_fifo_path: authoritative_state.input_fifo_path.clone(),
+            session_id: authoritative_session_id,
+            last_offset: initial_offset.max(authoritative_state.last_offset),
+            relay_last_offset: None,
+        };
+        let changed = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
+            authoritative_tmux_session,
+        )
+        .as_ref()
+            != Some(&binding)
+            || crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(
+                authoritative_tmux_session,
+            ) != Some(channel_id);
         crate::services::tui_prompt_dedupe::register_rehydrated_tmux_runtime_binding(
             provider.as_str(),
             authoritative_tmux_session,
             channel_id,
-            crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
-                runtime_kind: RuntimeHandoffKind::ClaudeTui,
-                output_path: authoritative_output_path.to_string(),
-                relay_output_path: None,
-                input_fifo_path: authoritative_state.input_fifo_path.clone(),
-                session_id: authoritative_session_id,
-                last_offset: initial_offset.max(authoritative_state.last_offset),
-                relay_last_offset: None,
-            },
+            binding,
         );
-    }
+        changed
+    } else {
+        false
+    };
 
-    Ok((locked_episode, finish_mailbox_on_completion))
+    Ok((
+        locked_episode,
+        EpisodeSideEffectOutcome {
+            finish_mailbox_on_completion,
+            repaired_state: session_binding_changed
+                || reregister_outcome.mailbox_binding_changed
+                || readoption_marker_changed
+                || runtime_binding_changed,
+        },
+    ))
 }

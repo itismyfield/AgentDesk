@@ -470,12 +470,10 @@ fn reattach_eligibility_distinguishes_stale_attached_watcher_from_live() {
     assert!(detached.auto_heal.eligible);
 }
 
-/// #3277 verify-2: the reattach apply reports HONESTLY whether a watcher
-/// was actually spawned (dead incumbent replaced / fresh claim) or a live
-/// same-session incumbent was reused untouched — the latter must not be
-/// labelled "reattached_watcher".
+/// #3277/#5021: status follows authoritative repair, not just the last watcher
+/// claim. A reused watcher can still pick up a newly adopted episode.
 #[test]
-fn reattach_status_reports_live_incumbent_reuse_honestly() {
+fn reattach_status_reports_authoritative_repair_honestly() {
     assert_eq!(reattach_apply_status(true), "reattached_watcher");
     assert_eq!(reattach_apply_status(false), "reuse_existing_live_watcher");
 }
