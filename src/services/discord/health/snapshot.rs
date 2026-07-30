@@ -807,9 +807,11 @@ mod tests {
 
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
+    use super::super::snapshot_relay::{
+        rebind_origin_inflight_is_idle, relay_active_turn_from_inflight,
+    };
     use super::{
-        HealthRegistry, authoritative_tmux_session, build_health_snapshot,
-        rebind_origin_inflight_is_idle, relay_active_turn_from_inflight, resolve_bound_selector,
+        HealthRegistry, authoritative_tmux_session, build_health_snapshot, resolve_bound_selector,
     };
     use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::discord::inflight::InflightTurnState;
