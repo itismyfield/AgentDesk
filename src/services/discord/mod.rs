@@ -135,6 +135,7 @@ mod tmux_lifecycle;
 mod tmux_overload_retry;
 #[cfg(unix)]
 mod tmux_reaper;
+#[path = "tmux_relay_coord.rs"]
 mod tmux_relay_coord;
 #[cfg(unix)]
 mod tmux_restart_handoff;
