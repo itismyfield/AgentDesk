@@ -77,6 +77,8 @@ test-non-pg:
     env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::intake_dispatch::queued::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1
     env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::turn_start::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1
     env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::intake_turn::placeholder_handoff::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1
+    env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::runtime_mismatch::tests -- --test-threads=1
+    env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::tui_followup_retry_tests -- --test-threads=1
     env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::completion_admission::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1
     env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::completion_admission_actor::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1
     env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::cleanup::tests::late_already_finalized_cleanup_releases_mailbox_and_rearms_once_4906 -- --exact --test-threads=1
