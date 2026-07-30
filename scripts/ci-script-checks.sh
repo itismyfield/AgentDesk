@@ -125,6 +125,15 @@ fi
 "$PYTHON" scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"
 "$PYTHON" -m unittest tests.test_test_lane_coverage
 
+echo "=== Test-target integrity gate (#5003, warn-only rollout) ==="
+# cargo exits 0 on zero filter matches, so a curated lane with the wrong
+# --lib/--bin/--test flag can run 0 tests while its required check stays
+# green. Warn-only until the known offenders are repaired (separate slice);
+# flip to --enforce afterwards. The unittest run below is the gate's own
+# mutation proof (bad fixture must fail, fixed fixture must pass).
+"$PYTHON" scripts/check_test_target_integrity.py
+"$PYTHON" -m unittest tests.test_check_test_target_integrity
+
 echo "=== Scheduled-message PG path-filter wiring contract ==="
 "$PYTHON" -m unittest tests.test_scheduled_messages_ci_wiring
 
