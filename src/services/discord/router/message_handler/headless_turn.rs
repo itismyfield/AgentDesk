@@ -1073,7 +1073,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         Some(channel_id.get()),
     );
     #[cfg(unix)]
-    let runtime_mismatch_verdict = reconcile_managed_tmux_runtime_kind_for_config(
+    let runtime_mismatch_verdict = reconcile_managed_tmux_runtime_kind_using_runtime(
         &provider,
         channel_id,
         tmux_session_name.as_deref(),
