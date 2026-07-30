@@ -675,7 +675,7 @@ mod tests {
             )
             .await
         );
-        super::super::super::with_post_enqueue_idle_queue_kick_suppressed(
+        super::super::super::queue_io::with_post_enqueue_idle_queue_kick_suppressed(
             super::super::super::mailbox_enqueue_intervention(
                 &shared,
                 &provider,
@@ -703,14 +703,15 @@ mod tests {
 
         let fast_calls = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&fast_calls);
-        let _hook =
-            super::super::super::set_idle_queue_kick_hook_for_tests(Arc::new(move |_, _, _, _| {
+        let _hook = super::super::super::queue_io::set_idle_queue_kick_hook_for_tests(Arc::new(
+            move |_, _, _, _| {
                 let observed = Arc::clone(&observed);
                 Box::pin(async move {
                     observed.fetch_add(1, Ordering::SeqCst);
                     None
                 })
-            }));
+            },
+        ));
 
         assert!(release_mailbox_after_busy_pre_submit_defer(&shared, &provider, channel_id).await);
         tokio::task::yield_now().await;
