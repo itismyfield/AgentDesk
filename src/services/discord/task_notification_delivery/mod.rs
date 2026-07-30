@@ -146,11 +146,6 @@ impl TaskNotificationContext {
         .then_some(self.event_key())
     }
 
-    #[cfg(test)]
-    pub(super) fn footer_only_marker_event_key_for_test(&self) -> Option<&str> {
-        self.footer_only_marker_event_key()
-    }
-
     pub(super) fn to_event(
         &self,
         channel_id: u64,
