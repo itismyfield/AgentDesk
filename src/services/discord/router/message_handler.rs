@@ -51,6 +51,7 @@ mod headless_turn;
 mod intake_turn;
 mod latency_spans;
 mod provider_isolation;
+mod runtime_mismatch;
 mod tui_followup;
 mod turn_lifecycle;
 pub(in crate::services::discord) mod typing_indicator;
@@ -60,6 +61,7 @@ mod watchdog;
 
 use self::goal_lifecycle::*;
 use self::provider_isolation::*;
+use self::runtime_mismatch::*;
 use self::tui_followup::*;
 pub(in crate::services::discord) use self::turn_lifecycle::mailbox_try_start_turn_with_terminal_marker_cleanup;
 use self::turn_lifecycle::{

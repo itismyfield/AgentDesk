@@ -124,6 +124,10 @@ impl Intervention {
             .any(|source| source.preserve_on_cancel)
     }
 
+    pub(crate) fn is_headless_runtime_mismatch_defer(&self) -> bool {
+        self.author_id.get() == 1 && self.author_is_bot && self.voice_announcement.is_none()
+    }
+
     pub(crate) fn source_message_queued_generations(&self) -> Vec<SourceMessageQueuedGeneration> {
         let source_message_ids = if self.source_message_ids.is_empty() {
             vec![self.message_id]
@@ -379,6 +383,10 @@ pub(crate) fn enqueue_intervention(
     if queue
         .iter()
         .any(|item| item.source_message_ids.contains(&intervention.message_id))
+        || (intervention.is_headless_runtime_mismatch_defer()
+            && queue
+                .iter()
+                .any(Intervention::is_headless_runtime_mismatch_defer))
     {
         return EnqueueInterventionResult {
             enqueued: false,

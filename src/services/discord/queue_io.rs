@@ -443,9 +443,9 @@ pub(super) async fn arm_event_backstop_after_no_start_if_queue_nonempty(
 
 /// #4270 — busy-defer edge-trigger net: arm ONLY the slow (60s) fail-open
 /// backstop for a channel, WITHOUT the fast 2s deferred kick. Used by (1) the
-/// hosted-TUI busy-defer release path
-/// (`release_mailbox_after_hosted_tui_busy_pre_submit`) and (2) the live
-/// dispatch promote gate (`DiscordGateway::dispatch_queued_turn`), so a
+/// busy pre-submit mailbox release path
+/// (`release_mailbox_after_busy_pre_submit_defer`) and (2) the live dispatch
+/// promote gate (`DiscordGateway::dispatch_queued_turn`), so a
 /// still-busy follow-up does not fast-spin the kickoff: the watcher-idle
 /// re-drain delivers the fast edge when the TUI reaches Idle, and this backstop
 /// is the lost-wakeup net. Thin wrapper over
