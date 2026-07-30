@@ -286,6 +286,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
             "src/services/discord/router/message_handler/tui_followup_retry.rs",
             "src/services/discord/router/message_handler/tui_followup_retry_tests.rs",
             "src/services/discord/router/turn_start.rs",
+            "src/services/discord/runtime_bootstrap/**",
+            "src/services/turn_orchestrator.rs",
         ):
             self.assertIn(f"- '{path}'", changes)
         self.assertIn("- test_fast", mirror_job)
