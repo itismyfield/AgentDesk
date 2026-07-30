@@ -65,8 +65,7 @@ pub(in crate::services::discord) fn confirmed_delivery_since_turn_start(
     Some(delivered_sequence > turn_start_sequence)
 }
 
-#[cfg(test)]
-mod tests {
+#[cfg(test)] mod tests {
     use super::*;
 
     #[test]

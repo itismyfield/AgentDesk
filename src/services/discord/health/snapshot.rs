@@ -26,11 +26,7 @@ pub enum HealthStatus {
 /// #964 / #1133: per-channel watcher + relay state surfaced via
 /// `GET /api/channels/:id/watcher-state`.
 ///
-/// #1133 enriched the read-only response with operational diagnostics:
-/// inflight timing/IDs (PII-free), `tmux_session_alive` (PID check),
-/// `has_pending_queue`, and `mailbox_active_user_msg_id`. All new fields
-/// are scalar (no message text, no user IDs, no transcripts) so the
-/// response remains safe for non-privileged operator dashboards.
+/// #1133 fields are scalar and safe for non-privileged operator dashboards.
 #[derive(Clone, Debug, Serialize)]
 pub struct WatcherStateSnapshot {
     pub provider: String,
@@ -424,10 +420,7 @@ fn build_relay_health_snapshot(input: RelayHealthBuildInput) -> RelayHealthSnaps
         thread_channel_id: input.thread_proof.thread_channel_id,
         last_relay_ts_ms: (input.last_relay_ts_ms > 0).then_some(input.last_relay_ts_ms),
         last_outbound_activity_ms: input.last_outbound_activity_ms,
-        confirmed_delivery_since_turn_start:
-            discord::outbound::delivery_evidence::confirmed_delivery_since_turn_start(
-                ChannelId::new(input.channel_id),
-            ),
+        confirmed_delivery_since_turn_start: discord::outbound::delivery_evidence_store::confirmed_delivery_since_turn_start(ChannelId::new(input.channel_id)),
         last_capture_offset: input.last_capture_offset,
         last_relay_offset: input.last_relay_offset,
         last_relay_offset_recorded: input.last_relay_offset_recorded,

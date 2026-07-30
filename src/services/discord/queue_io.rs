@@ -373,7 +373,7 @@ pub(super) async fn mailbox_try_start_turn_kinded_with_feedback(
         );
     }
     if result.started {
-        super::outbound::delivery_evidence::begin_turn(channel_id);
+        super::outbound::delivery_evidence_store::begin_turn(channel_id);
     }
     result.started
 }

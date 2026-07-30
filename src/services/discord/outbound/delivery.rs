@@ -324,7 +324,7 @@ where
                     Ok(raw_message_id) => {
                         let messages = vec![DeliveredMessage::single_raw(parent, raw_message_id)];
                         record_success(dedup, reservation.as_mut(), dedup_key, message, &messages);
-                        record_confirmed_delivery_evidence(&messages);
+                        record_confirmed_delivery_evidence_store(&messages);
                         return DeliveryResult::Fallback {
                             dedup_key: dedup_key.clone(),
                             messages,
@@ -394,7 +394,7 @@ where
                     message,
                     &messages,
                 );
-                record_confirmed_delivery_evidence(&messages);
+                record_confirmed_delivery_evidence_store(&messages);
                 DeliveryResult::Fallback {
                     dedup_key: dedup_key.clone(),
                     messages,
@@ -472,7 +472,7 @@ where
     }
 
     record_success(dedup, reservation.as_mut(), dedup_key, message, &messages);
-    record_confirmed_delivery_evidence(&messages);
+    record_confirmed_delivery_evidence_store(&messages);
     DeliveryResult::Fallback {
         dedup_key: dedup_key.clone(),
         messages,
@@ -624,7 +624,7 @@ fn delivery_success(
     messages: Vec<DeliveredMessage>,
     fallback_used: Option<FallbackUsed>,
 ) -> DeliveryResult {
-    record_confirmed_delivery_evidence(&messages);
+    record_confirmed_delivery_evidence_store(&messages);
     match fallback_used {
         Some(fallback_used) => DeliveryResult::Fallback {
             dedup_key,
@@ -639,9 +639,9 @@ fn delivery_success(
     }
 }
 
-fn record_confirmed_delivery_evidence(messages: &[DeliveredMessage]) {
+fn record_confirmed_delivery_evidence_store(messages: &[DeliveredMessage]) {
     for message in messages {
-        super::delivery_evidence::record_confirmed_delivery(message.channel_id);
+        super::delivery_evidence_store::record_confirmed_delivery(message.channel_id);
     }
 }
 
