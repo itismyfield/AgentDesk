@@ -1082,10 +1082,32 @@ impl ChannelMailboxHandle {
         persistence: QueuePersistenceContext,
         primary_message_id: Option<MessageId>,
     ) -> TakeNextSoftResult {
+        self.take_soft_matching_inner(persistence, primary_message_id, false, false)
+            .await
+    }
+
+    pub(crate) async fn take_queue_head_matching_while_active(
+        &self,
+        persistence: QueuePersistenceContext,
+        primary_message_id: MessageId,
+    ) -> TakeNextSoftResult {
+        self.take_soft_matching_inner(persistence, Some(primary_message_id), true, true)
+            .await
+    }
+
+    async fn take_soft_matching_inner(
+        &self,
+        persistence: QueuePersistenceContext,
+        primary_message_id: Option<MessageId>,
+        require_queue_head: bool,
+        require_active_turn: bool,
+    ) -> TakeNextSoftResult {
         self.request(
             |reply| ChannelMailboxMsg::TakeNextSoft {
                 persistence,
                 primary_message_id,
+                require_queue_head,
+                require_active_turn,
                 reply,
             },
             TakeNextSoftResult {
@@ -1744,6 +1766,8 @@ enum ChannelMailboxMsg {
     TakeNextSoft {
         persistence: QueuePersistenceContext,
         primary_message_id: Option<MessageId>,
+        require_queue_head: bool,
+        require_active_turn: bool,
         reply: oneshot::Sender<TakeNextSoftResult>,
     },
     RequeueFront {
@@ -2635,9 +2659,25 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 ChannelMailboxMsg::TakeNextSoft {
                     persistence,
                     primary_message_id,
+                    require_queue_head,
+                    require_active_turn,
                     reply,
                 } => {
                     state.last_persistence = Some(persistence.clone());
+                    if require_active_turn && state.cancel_token.is_none() {
+                        let _ = reply.send(TakeNextSoftResult {
+                            intervention: None,
+                            dispatch_lease: None,
+                            has_more: state
+                                .intervention_queue
+                                .iter()
+                                .any(|item| item.mode == InterventionMode::Soft),
+                            queue_len_after: state.intervention_queue.len(),
+                            queue_exit_events: Vec::new(),
+                            persistence_error: None,
+                        });
+                        continue;
+                    }
                     let _ = clear_stale_pending_dispatch_reservation(&mut state, channel_id);
                     if let Some(result) = reconcile_pending_dispatch_marker_before_take_next(
                         &mut state,
@@ -2651,6 +2691,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     let next_result = dequeue_next_soft_intervention(
                         &mut state.intervention_queue,
                         primary_message_id,
+                        require_queue_head,
                     );
                     let queue_len_after = state.intervention_queue.len();
                     // #3167 BLOCKER-2 — capture the dispatched head id BEFORE the

@@ -748,9 +748,9 @@ async fn reuse_merged_queued_placeholder(
     let button_rendered =
         crate::services::discord::manual_steer_interaction::attach_manual_steer_button(
             ctx,
+            data,
             channel_id,
             placeholder_msg_id,
-            user_msg_id,
         )
         .await;
     if !button_rendered {
@@ -939,9 +939,9 @@ async fn reuse_any_queued_placeholder_for_channel(
     let button_rendered =
         crate::services::discord::manual_steer_interaction::attach_manual_steer_button(
             ctx,
+            data,
             channel_id,
             placeholder_msg_id,
-            user_msg_id,
         )
         .await;
     if !button_rendered {
@@ -1138,9 +1138,9 @@ pub(super) async fn render_visible_queued_ack(
     ) {
         let button_rendered = crate::services::discord::manual_steer_interaction::attach_manual_steer_button(
             ctx,
+            data,
             channel_id,
             placeholder_msg_id,
-            user_msg_id,
         )
         .await;
         if !button_rendered {

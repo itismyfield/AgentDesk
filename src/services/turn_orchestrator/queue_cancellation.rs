@@ -36,15 +36,27 @@ pub(crate) fn has_soft_intervention(queue: &mut Vec<Intervention>) -> HasPending
 pub(crate) fn dequeue_next_soft_intervention(
     queue: &mut Vec<Intervention>,
     primary_message_id: Option<MessageId>,
+    require_queue_head: bool,
 ) -> TakeNextSoftResult {
     let queue_exit_events = super::prune_interventions(queue);
-    let intervention = queue
-        .iter()
-        .position(|item| {
-            item.mode == InterventionMode::Soft
-                && primary_message_id.is_none_or(|message_id| item.message_id == message_id)
-        })
-        .map(|index| queue.remove(index));
+    let intervention = if require_queue_head {
+        queue
+            .first()
+            .filter(|item| {
+                item.mode == InterventionMode::Soft
+                    && primary_message_id.is_some_and(|message_id| item.message_id == message_id)
+            })
+            .is_some()
+            .then(|| queue.remove(0))
+    } else {
+        queue
+            .iter()
+            .position(|item| {
+                item.mode == InterventionMode::Soft
+                    && primary_message_id.is_none_or(|message_id| item.message_id == message_id)
+            })
+            .map(|index| queue.remove(index))
+    };
     let has_more = queue.iter().any(|item| item.mode == InterventionMode::Soft);
     TakeNextSoftResult {
         intervention,
@@ -126,7 +138,7 @@ mod tests {
     fn matching_dequeue_preserves_blocked_head_and_fifo_of_remaining_items() {
         let mut queue = vec![intervention(10), intervention(11), intervention(12)];
 
-        let result = dequeue_next_soft_intervention(&mut queue, Some(MessageId::new(11)));
+        let result = dequeue_next_soft_intervention(&mut queue, Some(MessageId::new(11)), false);
 
         assert_eq!(
             result.intervention.as_ref().map(|item| item.message_id),

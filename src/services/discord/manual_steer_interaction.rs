@@ -1,8 +1,7 @@
 //! Manual queued-message steering controls.
 //!
-//! A queue card can expose one authenticated action that atomically claims its
-//! current queued head, injects it into a live native TUI, and restores the
-//! exact entry at the front if injection does not succeed.
+//! The single queue card always names the oldest queued intervention. A click
+//! can claim only that exact head while a foreground mailbox turn remains live.
 
 use std::sync::Arc;
 
@@ -43,49 +42,145 @@ fn queued_card_components(message_id: serenity::MessageId) -> Vec<serenity::Crea
     ])]
 }
 
-pub(super) async fn attach_manual_steer_button(
+fn render_head_card(intervention: &crate::services::turn_orchestrator::Intervention) -> String {
+    let mut body =
+        crate::services::discord::formatting::build_monitor_handoff_placeholder_with_context(
+            crate::services::discord::formatting::MonitorHandoffStatus::Queued,
+            crate::services::discord::formatting::MonitorHandoffReason::Queued,
+            chrono::Utc::now().timestamp(),
+            None,
+            None,
+            Some(QUEUED_CARD_LABEL),
+            None,
+            Some(&intervention.text),
+            None,
+        );
+    body.push_str("\n\n버튼은 가장 오래 대기한 메시지를 주입합니다.");
+    body
+}
+
+async fn current_queue_head(
+    shared: &SharedData,
+    channel_id: serenity::ChannelId,
+) -> Option<crate::services::turn_orchestrator::Intervention> {
+    crate::services::discord::mailbox_snapshot(shared, channel_id)
+        .await
+        .intervention_queue
+        .into_iter()
+        .find(|item| item.mode == crate::services::turn_orchestrator::InterventionMode::Soft)
+}
+
+async fn render_current_head_card(
     ctx: &serenity::Context,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
     channel_id: serenity::ChannelId,
     placeholder_message_id: serenity::MessageId,
-    queued_message_id: serenity::MessageId,
-) -> bool {
-    match crate::services::discord::http::edit_channel_message_with_components(
+) -> Result<bool, serenity::Error> {
+    let Some(head) = current_queue_head(shared, channel_id).await else {
+        return Ok(false);
+    };
+    let content = render_head_card(&head);
+    crate::services::discord::http::edit_channel_message_with_components(
         &ctx.http,
         channel_id,
         placeholder_message_id,
-        QUEUED_CARD_LABEL,
-        queued_card_components(queued_message_id),
+        &content,
+        queued_card_components(head.message_id),
+    )
+    .await?;
+    let key = crate::services::discord::placeholder_controller::PlaceholderKey {
+        provider: provider.clone(),
+        channel_id,
+        message_id: placeholder_message_id,
+    };
+    shared
+        .ui
+        .placeholder_controller
+        .invalidate_render_cache(&key)
+        .await;
+    Ok(true)
+}
+
+pub(super) async fn attach_manual_steer_button(
+    ctx: &serenity::Context,
+    data: &Data,
+    channel_id: serenity::ChannelId,
+    placeholder_message_id: serenity::MessageId,
+) -> bool {
+    match render_current_head_card(
+        ctx,
+        &data.shared,
+        &data.provider,
+        channel_id,
+        placeholder_message_id,
     )
     .await
     {
-        Ok(_) => true,
+        Ok(rendered) => rendered,
         Err(error) => {
             tracing::warn!(
                 channel_id = channel_id.get(),
                 placeholder_message_id = placeholder_message_id.get(),
-                queued_message_id = queued_message_id.get(),
                 error = %error,
-                "manual steer button render failed"
+                "manual steer button render failed; retaining queue card"
             );
-            false
+            true
         }
     }
 }
 
-async fn update_component_message(
+async fn update_deferred_component(
     ctx: &serenity::Context,
     component: &serenity::ComponentInteraction,
     content: &str,
+    components: Vec<serenity::CreateActionRow>,
 ) {
-    let _ = component
-        .create_response(
+    if let Err(error) = component
+        .edit_response(
             ctx,
-            serenity::CreateInteractionResponse::UpdateMessage(
-                serenity::CreateInteractionResponseMessage::new()
-                    .content(content)
-                    .components(Vec::new()),
-            ),
+            serenity::EditInteractionResponse::new()
+                .content(content)
+                .components(components),
         )
+        .await
+    {
+        tracing::warn!(
+            channel_id = component.channel_id.get(),
+            message_id = component.message.id.get(),
+            error = %error,
+            "manual steer failed to edit deferred component response"
+        );
+    }
+}
+
+async fn render_current_head_response(
+    ctx: &serenity::Context,
+    component: &serenity::ComponentInteraction,
+    data: &Data,
+    prefix: &str,
+) {
+    let Some(head) = current_queue_head(&data.shared, component.channel_id).await else {
+        update_deferred_component(ctx, component, prefix, Vec::new()).await;
+        return;
+    };
+    let content = format!("{prefix}\n\n{}", render_head_card(&head));
+    update_deferred_component(
+        ctx,
+        component,
+        &content,
+        queued_card_components(head.message_id),
+    )
+    .await;
+    let key = crate::services::discord::placeholder_controller::PlaceholderKey {
+        provider: data.provider.clone(),
+        channel_id: component.channel_id,
+        message_id: component.message.id,
+    };
+    data.shared
+        .ui
+        .placeholder_controller
+        .invalidate_render_cache(&key)
         .await;
 }
 
@@ -93,7 +188,7 @@ async fn reject_unauthorized_component(
     ctx: &serenity::Context,
     component: &serenity::ComponentInteraction,
 ) {
-    let _ = component
+    if let Err(error) = component
         .create_response(
             ctx,
             serenity::CreateInteractionResponse::Message(
@@ -102,7 +197,10 @@ async fn reject_unauthorized_component(
                     .ephemeral(true),
             ),
         )
-        .await;
+        .await
+    {
+        tracing::warn!(error = %error, "manual steer authorization response failed");
+    }
 }
 
 fn steering_prompt(intervention: &crate::services::turn_orchestrator::Intervention) -> String {
@@ -163,8 +261,8 @@ async fn inject_claimed_intervention(
     let Some((tmux_session_name, selection)) =
         native_tui_steering_context(shared, provider, channel_id).await
     else {
-        return crate::services::tui_steering::SteeringOutcome::Unsafe(
-            "native TUI session unavailable",
+        return crate::services::tui_steering::SteeringOutcome::NotDelivered(
+            "native TUI session unavailable".to_string(),
         );
     };
     let provider = provider.clone();
@@ -179,7 +277,7 @@ async fn inject_claimed_intervention(
     })
     .await
     .unwrap_or_else(|error| {
-        crate::services::tui_steering::SteeringOutcome::Failed(error.to_string())
+        crate::services::tui_steering::SteeringOutcome::NotDelivered(error.to_string())
     })
 }
 
@@ -202,7 +300,6 @@ pub(super) async fn handle_manual_steer_interaction(
         reject_unauthorized_component(ctx, component).await;
         return Ok(());
     }
-
     let settings_snapshot = { data.shared.settings.read().await.clone() };
     if !crate::services::discord::provider_handles_channel(
         ctx,
@@ -212,12 +309,32 @@ pub(super) async fn handle_manual_steer_interaction(
     )
     .await
     {
-        update_component_message(
+        if let Err(error) = component
+            .create_response(ctx, serenity::CreateInteractionResponse::Acknowledge)
+            .await
+        {
+            tracing::warn!(error = %error, "manual steer channel rejection acknowledgement failed");
+            return Ok(());
+        }
+        render_current_head_response(
             ctx,
             component,
+            data,
             "이 버튼은 현재 봇의 채널에 속하지 않습니다.",
         )
         .await;
+        return Ok(());
+    }
+    if let Err(error) = component
+        .create_response(ctx, serenity::CreateInteractionResponse::Acknowledge)
+        .await
+    {
+        tracing::warn!(
+            channel_id = component.channel_id.get(),
+            message_id = component.message.id.get(),
+            error = %error,
+            "manual steer acknowledgement failed before queue claim"
+        );
         return Ok(());
     }
 
@@ -229,10 +346,11 @@ pub(super) async fn handle_manual_steer_interaction(
     )
     .await;
     let Some((intervention, dispatch_lease)) = claim.into_claim() else {
-        update_component_message(
+        render_current_head_response(
             ctx,
             component,
-            "이미 처리됨 — 이 큐 항목은 더 이상 대기 중이 아닙니다.",
+            data,
+            "대상이 바뀌었거나 이미 처리됨 — 현재 대기 항목으로 갱신했습니다.",
         )
         .await;
         return Ok(());
@@ -244,51 +362,63 @@ pub(super) async fn handle_manual_steer_interaction(
         &intervention,
     )
     .await;
-    if matches!(
-        outcome,
-        crate::services::tui_steering::SteeringOutcome::Injected
-    ) {
-        mailbox_abandon_unclaimed_dispatch_after_success(
-            &data.shared,
-            &data.provider,
-            component.channel_id,
-            intervention.message_id,
-            dispatch_lease,
-        )
-        .await;
-        update_component_message(ctx, component, "즉시 주입됨").await;
-        return Ok(());
-    }
-
-    let restored = mailbox_restore_manual_steer_claim(
-        &data.shared,
-        &data.provider,
-        component.channel_id,
-        intervention,
-        dispatch_lease,
-    )
-    .await
-    .enqueued;
-    if restored {
-        update_component_message(
-            ctx,
-            component,
-            "주입에 실패하여 메시지를 큐의 맨 앞에 복원했습니다.",
-        )
-        .await;
-    } else {
-        tracing::error!(
-            channel_id = component.channel_id.get(),
-            message_id = message_id.get(),
-            outcome = ?outcome,
-            "manual steer injection failed and queue rollback did not complete"
-        );
-        update_component_message(
-            ctx,
-            component,
-            "주입 실패 — 안전 복원을 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.",
-        )
-        .await;
+    match outcome {
+        crate::services::tui_steering::SteeringOutcome::Injected => {
+            mailbox_abandon_unclaimed_dispatch_after_success(
+                &data.shared,
+                &data.provider,
+                component.channel_id,
+                intervention.message_id,
+                dispatch_lease,
+            )
+            .await;
+            data.shared
+                .remove_queued_placeholder(component.channel_id, intervention.message_id)
+                .await;
+            render_current_head_response(ctx, component, data, "즉시 주입됨").await;
+        }
+        crate::services::tui_steering::SteeringOutcome::NotDelivered(_) => {
+            let restored = mailbox_restore_manual_steer_claim(
+                &data.shared,
+                &data.provider,
+                component.channel_id,
+                intervention,
+                dispatch_lease,
+            )
+            .await
+            .enqueued;
+            let notice = if restored {
+                "주입 전 실패를 확인해 큐 맨 앞에 복원했습니다."
+            } else {
+                "주입 전 실패했지만 큐 복원을 확인하지 못했습니다."
+            };
+            render_current_head_response(ctx, component, data, notice).await;
+        }
+        crate::services::tui_steering::SteeringOutcome::PossiblyDelivered(_)
+        | crate::services::tui_steering::SteeringOutcome::Injected => unreachable!(),
+        crate::services::tui_steering::SteeringOutcome::Unsafe(_)
+        | crate::services::tui_steering::SteeringOutcome::ExistingMailbox => {
+            let restored = mailbox_restore_manual_steer_claim(
+                &data.shared,
+                &data.provider,
+                component.channel_id,
+                intervention,
+                dispatch_lease,
+            )
+            .await
+            .enqueued;
+            render_current_head_response(
+                ctx,
+                component,
+                data,
+                if restored {
+                    "주입하지 않아 큐를 복원했습니다."
+                } else {
+                    "주입하지 않았고 큐 복원을 확인하지 못했습니다."
+                },
+            )
+            .await;
+        }
     }
     Ok(())
 }

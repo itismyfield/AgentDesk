@@ -1169,18 +1169,32 @@ pub(crate) fn steering_snapshot_decision(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SteeringPromptInjectionError {
+    NotDelivered(String),
+    PossiblyDelivered(String),
+}
+
 fn steering_submit_outcome_to_result(
     outcome: CodexFollowupPromptSubmitOutcome,
-) -> Result<(), String> {
+) -> Result<(), SteeringPromptInjectionError> {
     match outcome {
         CodexFollowupPromptSubmitOutcome::Submitted => Ok(()),
-        CodexFollowupPromptSubmitOutcome::NotSubmitted { error }
-        | CodexFollowupPromptSubmitOutcome::Unconfirmed { error, .. } => Err(error),
-        CodexFollowupPromptSubmitOutcome::RetrySafeDraft { .. } => {
-            Err("codex tui steering prompt remained in the composer after submit".to_string())
+        CodexFollowupPromptSubmitOutcome::NotSubmitted { error } => {
+            Err(SteeringPromptInjectionError::NotDelivered(error))
         }
         CodexFollowupPromptSubmitOutcome::Cancelled => {
-            Err("codex tui steering prompt submission was cancelled".to_string())
+            Err(SteeringPromptInjectionError::NotDelivered(
+                "codex tui steering prompt submission was cancelled".to_string(),
+            ))
+        }
+        CodexFollowupPromptSubmitOutcome::Unconfirmed { error, .. } => {
+            Err(SteeringPromptInjectionError::PossiblyDelivered(error))
+        }
+        CodexFollowupPromptSubmitOutcome::RetrySafeDraft { .. } => {
+            Err(SteeringPromptInjectionError::PossiblyDelivered(
+                "codex tui steering prompt remained in the composer after submit".to_string(),
+            ))
         }
     }
 }
@@ -1192,17 +1206,18 @@ fn inject_steering_prompt_using<C, R, U, S>(
     mut record_prompt: R,
     mut remove_prompt: U,
     mut submit: S,
-) -> Result<(), String>
+) -> Result<(), SteeringPromptInjectionError>
 where
     C: FnMut(&str) -> PromptReadinessSnapshot,
     R: FnMut(&str, &str, &str),
     U: FnMut(&str, &str, &str),
     S: FnMut(&str, &str) -> CodexFollowupPromptSubmitOutcome,
 {
-    plan_prompt_submit(prompt)?;
+    plan_prompt_submit(prompt).map_err(SteeringPromptInjectionError::NotDelivered)?;
     with_composer_mutation_lock(session_name, || {
         let final_snapshot = capture(session_name);
-        steering_snapshot_decision(&final_snapshot).map_err(str::to_string)?;
+        steering_snapshot_decision(&final_snapshot)
+            .map_err(|error| SteeringPromptInjectionError::NotDelivered(error.to_string()))?;
         record_prompt("codex", session_name, prompt);
         let result = steering_submit_outcome_to_result(submit(session_name, prompt));
         if result.is_err() {
@@ -1212,7 +1227,10 @@ where
     })
 }
 
-pub(crate) fn inject_steering_prompt(session_name: &str, prompt: &str) -> Result<(), String> {
+pub(crate) fn inject_steering_prompt(
+    session_name: &str,
+    prompt: &str,
+) -> Result<(), SteeringPromptInjectionError> {
     inject_steering_prompt_using(
         session_name,
         prompt,

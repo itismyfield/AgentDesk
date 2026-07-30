@@ -137,10 +137,11 @@ impl ManualSteerClaimOutcome {
     }
 }
 
-/// Atomically removes only the exact card head from the channel mailbox.
+/// Atomically removes the queue head only when it matches the card identity.
 ///
-/// `take_soft_matching` validates, removes, persists, and creates the lease in
-/// a single mailbox actor operation, so concurrent clicks yield one claimant.
+/// The actor validates head identity, removes it, persists, and creates the
+/// rollback lease in one operation, so stale or concurrent clicks cannot claim
+/// a later queue entry.
 pub(in crate::services::discord) async fn mailbox_claim_manual_steer(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -149,9 +150,9 @@ pub(in crate::services::discord) async fn mailbox_claim_manual_steer(
 ) -> ManualSteerClaimOutcome {
     let result = shared
         .mailbox(channel_id)
-        .take_soft_matching(
+        .take_queue_head_matching_while_active(
             super::queue_persistence_context(shared, provider, channel_id),
-            Some(message_id),
+            message_id,
         )
         .await;
     super::apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
