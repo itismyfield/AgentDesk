@@ -403,6 +403,49 @@ mod delivered_inflight_reregister_tests {
         assert!(recovery_terminal_delivery_already_committed(&state));
     }
 
+    #[tokio::test]
+    async fn committed_terminal_cleanup_reports_authoritative_mutation() {
+        use serenity::model::id::{ChannelId, MessageId, UserId};
+        use std::sync::Arc;
+
+        let shared = super::super::make_shared_data_for_tests_with_storage(None);
+        let channel = ChannelId::new(4_245);
+        let mut state = inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            channel.get(),
+            Some("adk-cc".to_string()),
+            7,
+            9_301,
+            9_302,
+            "already delivered".to_string(),
+            Some("session-4".to_string()),
+            Some("AgentDesk-claude-adk-cc".to_string()),
+            Some("/tmp/claude-transcript.jsonl".to_string()),
+            None,
+            256,
+        );
+        state.terminal_delivery_committed = true;
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+        shared
+            .mailbox(channel)
+            .restore_active_turn(token, UserId::new(7), MessageId::new(state.user_msg_id))
+            .await;
+
+        let outcome =
+            super::reregister_active_turn_from_inflight_inner(&shared, &state, false).await;
+        assert!(!outcome.finish_mailbox_on_completion);
+        assert!(
+            outcome.mailbox_binding_changed,
+            "terminal commit cleanup must count as an authoritative repair"
+        );
+        assert!(
+            super::super::mailbox_snapshot(&shared, channel)
+                .await
+                .cancel_token
+                .is_none()
+        );
+    }
+
     #[test]
     fn ordinary_inflight_still_recoverable_even_with_relayed_prefix() {
         let mut state = inflight::InflightTurnState::new(
