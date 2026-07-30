@@ -428,7 +428,8 @@ fn record_runtime_mismatch_defer(
     expected: ManagedRuntimeExpectation,
     observed: ObservedManagedRuntimeKind,
     open_inflight: bool,
-    transcript_busy: bool,
+    transcript_busy: Option<bool>,
+    defer_reason: &'static str,
 ) {
     let key = (provider.as_str().to_string(), channel_id.get());
     let mut state =
@@ -464,7 +465,7 @@ fn record_runtime_mismatch_defer(
             "elapsed_secs": elapsed_secs,
             "escalation_threshold": RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT,
             "action": "continue_defer_without_kill",
-            "persistent_endpoint_absence_can_defer_indefinitely": true,
+            "defer_reason": defer_reason,
             "expected_runtime_kind": expected.runtime_kind.as_str(),
             "observed_runtime_kind": observed.runtime_kind.as_str(),
             "open_inflight": open_inflight,
@@ -483,15 +484,61 @@ fn record_runtime_mismatch_defer(
     }
 }
 
-fn execute_runtime_mismatch_recreate(
-    verdict: RuntimeMismatchVerdict,
-    recreate: impl FnOnce(),
-) -> bool {
-    if verdict != RuntimeMismatchVerdict::Recreate {
-        return false;
+#[cfg(unix)]
+fn reconcile_managed_tmux_runtime_kind_with(
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    tmux_session_name: Option<&str>,
+    expected: Option<ManagedRuntimeExpectation>,
+    live_pane: impl FnOnce(&str) -> bool,
+    observe: impl FnOnce(&ProviderKind, &str) -> Option<ObservedManagedRuntimeKind>,
+    open_inflight: impl FnOnce() -> bool,
+    transcript_busy: impl FnOnce() -> bool,
+    recreate: impl FnOnce(&str, ManagedRuntimeExpectation, ObservedManagedRuntimeKind),
+) -> RuntimeMismatchVerdict {
+    let (Some(tmux_session_name), Some(expected)) = (tmux_session_name, expected) else {
+        clear_runtime_mismatch_defer(provider, channel_id);
+        return RuntimeMismatchVerdict::Match;
+    };
+    if !provider.uses_managed_tmux_backend() || !live_pane(tmux_session_name) {
+        clear_runtime_mismatch_defer(provider, channel_id);
+        return RuntimeMismatchVerdict::Match;
     }
-    recreate();
-    true
+    let Some(observed) = observe(provider, tmux_session_name) else {
+        clear_runtime_mismatch_defer(provider, channel_id);
+        return RuntimeMismatchVerdict::Match;
+    };
+    if observed.runtime_kind == expected.runtime_kind {
+        clear_runtime_mismatch_defer(provider, channel_id);
+        return RuntimeMismatchVerdict::Match;
+    }
+
+    let open_inflight = open_inflight();
+    let transcript_busy = (!open_inflight).then(transcript_busy);
+    let verdict = runtime_mismatch_verdict(
+        expected,
+        observed,
+        open_inflight || transcript_busy.unwrap_or(false),
+    );
+    if verdict.should_defer() {
+        record_runtime_mismatch_defer(
+            provider,
+            channel_id,
+            expected,
+            observed,
+            open_inflight,
+            transcript_busy,
+            if open_inflight {
+                "live_turn"
+            } else {
+                "weak_expected_evidence"
+            },
+        );
+        return verdict;
+    }
+    clear_runtime_mismatch_defer(provider, channel_id);
+    recreate(tmux_session_name, expected, observed);
+    verdict
 }
 
 #[cfg(unix)]
@@ -503,89 +550,54 @@ pub(super) fn reconcile_managed_tmux_runtime_kind_for_config(
     current_path: Option<&str>,
     session_id: Option<&str>,
 ) -> RuntimeMismatchVerdict {
-    let (Some(tmux_session_name), Some(expected)) = (tmux_session_name, expected) else {
-        clear_runtime_mismatch_defer(provider, channel_id);
-        return RuntimeMismatchVerdict::Match;
-    };
-    if !provider.uses_managed_tmux_backend()
-        || !crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name)
-    {
-        clear_runtime_mismatch_defer(provider, channel_id);
-        return RuntimeMismatchVerdict::Match;
-    }
-    let Some(observed) = observed_runtime_kind_for_managed_tmux(provider, tmux_session_name) else {
-        clear_runtime_mismatch_defer(provider, channel_id);
-        return RuntimeMismatchVerdict::Match;
-    };
-    if observed.runtime_kind == expected.runtime_kind {
-        clear_runtime_mismatch_defer(provider, channel_id);
-        return RuntimeMismatchVerdict::Match;
-    }
-
-    let open_inflight =
-        super::super::super::inflight::load_inflight_state(provider, channel_id.get())
-            .is_some_and(|state| !state.terminal_delivery_completed());
-    let transcript_busy = !open_inflight
-        && managed_runtime_transcript_busy(
-            provider,
-            current_path,
-            session_id,
-            Some(tmux_session_name),
-        );
-    let verdict = runtime_mismatch_verdict(expected, observed, open_inflight || transcript_busy);
-    if verdict.should_defer() {
-        record_runtime_mismatch_defer(
-            provider,
-            channel_id,
-            expected,
-            observed,
-            open_inflight,
-            transcript_busy,
-        );
-        return verdict;
-    }
-    clear_runtime_mismatch_defer(provider, channel_id);
-
-    let reason = format!(
-        "tui_hosting config changed: expected {}, found {}; recreating tmux session",
-        expected.runtime_kind.as_str(),
-        observed.runtime_kind.as_str()
-    );
-    let recreated = execute_runtime_mismatch_recreate(verdict, || {
-        tracing::warn!(
-            provider = provider.as_str(),
-            channel_id = channel_id.get(),
-            tmux_session_name,
-            expected_runtime_kind = expected.runtime_kind.as_str(),
-            observed_runtime_kind = observed.runtime_kind.as_str(),
-            "managed tmux runtime kind mismatch detected; killing stale session before dispatch"
-        );
-        crate::services::termination_audit::record_termination_for_tmux(
-            tmux_session_name,
-            None,
-            "discord_dispatch",
-            "runtime_kind_mismatch_recreate",
-            Some(&reason),
-            None,
-        );
-        crate::services::tmux_diagnostics::record_tmux_exit_reason(tmux_session_name, &reason);
-        crate::services::platform::tmux::kill_session(tmux_session_name, &reason);
-        crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
-        let cleared_runtime_binding =
-            crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(tmux_session_name);
-        tracing::debug!(
-            provider = provider.as_str(),
-            channel_id = channel_id.get(),
-            tmux_session_name,
-            cleared_runtime_binding,
-            "cleared stale tmux runtime binding after runtime kind mismatch"
-        );
-    });
-    debug_assert!(
-        recreated,
-        "only Recreate may reach destructive mismatch action"
-    );
-    verdict
+    reconcile_managed_tmux_runtime_kind_with(
+        provider,
+        channel_id,
+        tmux_session_name,
+        expected,
+        crate::services::tmux_diagnostics::tmux_session_has_live_pane,
+        observed_runtime_kind_for_managed_tmux,
+        || {
+            super::super::super::inflight::load_inflight_state(provider, channel_id.get())
+                .is_some_and(|state| !state.terminal_delivery_completed())
+        },
+        || managed_runtime_transcript_busy(provider, current_path, session_id, tmux_session_name),
+        |tmux_session_name, expected, observed| {
+            let reason = format!(
+                "tui_hosting config changed: expected {}, found {}; recreating tmux session",
+                expected.runtime_kind.as_str(),
+                observed.runtime_kind.as_str()
+            );
+            tracing::warn!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                tmux_session_name,
+                expected_runtime_kind = expected.runtime_kind.as_str(),
+                observed_runtime_kind = observed.runtime_kind.as_str(),
+                "managed tmux runtime kind mismatch detected; killing stale session before dispatch"
+            );
+            crate::services::termination_audit::record_termination_for_tmux(
+                tmux_session_name,
+                None,
+                "discord_dispatch",
+                "runtime_kind_mismatch_recreate",
+                Some(&reason),
+                None,
+            );
+            crate::services::tmux_diagnostics::record_tmux_exit_reason(tmux_session_name, &reason);
+            crate::services::platform::tmux::kill_session(tmux_session_name, &reason);
+            crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
+            let cleared_runtime_binding =
+                crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(tmux_session_name);
+            tracing::debug!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                tmux_session_name,
+                cleared_runtime_binding,
+                "cleared stale tmux runtime binding after runtime kind mismatch"
+            );
+        },
+    )
 }
 
 pub(super) fn apply_prelaunch_runtime_kind(
@@ -990,26 +1002,94 @@ mod thread_role_inheritance_tests {
         }
     }
 
-    #[test]
-    fn recreate_executor_never_runs_for_defer_or_match() {
-        for verdict in [RuntimeMismatchVerdict::Match, RuntimeMismatchVerdict::Defer] {
-            let mut called = false;
-            assert!(!execute_runtime_mismatch_recreate(verdict, || called = true));
-            assert!(!called, "non-recreate verdict must not execute kill wiring");
-        }
-        let mut called = false;
-        assert!(execute_runtime_mismatch_recreate(
-            RuntimeMismatchVerdict::Recreate,
-            || called = true
-        ));
-        assert!(called, "Recreate must execute the destructive wiring once");
+    #[cfg(unix)]
+    fn reconcile_with_observation(
+        expected: ManagedRuntimeExpectation,
+        observed: ObservedManagedRuntimeKind,
+        live_turn: bool,
+        sink: &mut Vec<String>,
+    ) -> RuntimeMismatchVerdict {
+        reconcile_managed_tmux_runtime_kind_with(
+            &ProviderKind::Claude,
+            ChannelId::new(50_150_001),
+            Some("AgentDesk-5015-runtime"),
+            Some(expected),
+            |_| true,
+            |_, _| Some(observed),
+            || live_turn,
+            || false,
+            |name, _, _| sink.push(name.to_string()),
+        )
     }
 
+    #[cfg(unix)]
     #[test]
-    fn defer_verdict_is_the_shared_call_site_gate() {
-        assert!(RuntimeMismatchVerdict::Defer.should_defer());
-        assert!(!RuntimeMismatchVerdict::Match.should_defer());
-        assert!(!RuntimeMismatchVerdict::Recreate.should_defer());
+    fn reconcile_match_does_not_call_recreate_sink() {
+        let runtime = ManagedRuntimeExpectation {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            evidence_strength: RuntimeKindEvidenceStrength::Strong,
+        };
+        let mut calls = Vec::new();
+        assert_eq!(
+            reconcile_with_observation(
+                runtime,
+                ObservedManagedRuntimeKind {
+                    runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                    evidence_strength: RuntimeKindEvidenceStrength::Strong,
+                },
+                false,
+                &mut calls,
+            ),
+            RuntimeMismatchVerdict::Match
+        );
+        assert!(calls.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reconcile_defer_does_not_call_recreate_sink() {
+        let mut calls = Vec::new();
+        assert_eq!(
+            reconcile_with_observation(
+                ManagedRuntimeExpectation {
+                    runtime_kind: RuntimeHandoffKind::LegacyTmuxWrapper,
+                    evidence_strength: RuntimeKindEvidenceStrength::Strong,
+                },
+                ObservedManagedRuntimeKind {
+                    runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                    evidence_strength: RuntimeKindEvidenceStrength::Strong,
+                },
+                true,
+                &mut calls,
+            ),
+            RuntimeMismatchVerdict::Defer
+        );
+        assert!(
+            calls.is_empty(),
+            "Defer must return before destructive wiring"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reconcile_recreate_calls_sink_once_for_exact_tmux_session() {
+        let mut calls = Vec::new();
+        assert_eq!(
+            reconcile_with_observation(
+                ManagedRuntimeExpectation {
+                    runtime_kind: RuntimeHandoffKind::LegacyTmuxWrapper,
+                    evidence_strength: RuntimeKindEvidenceStrength::Strong,
+                },
+                ObservedManagedRuntimeKind {
+                    runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                    evidence_strength: RuntimeKindEvidenceStrength::Strong,
+                },
+                false,
+                &mut calls,
+            ),
+            RuntimeMismatchVerdict::Recreate
+        );
+        assert_eq!(calls, ["AgentDesk-5015-runtime"]);
     }
 
     #[test]

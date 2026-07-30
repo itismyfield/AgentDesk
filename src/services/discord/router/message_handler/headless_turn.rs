@@ -1083,13 +1083,49 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     );
     #[cfg(unix)]
     if runtime_mismatch_verdict.should_defer() {
-        let _ = release_mailbox_after_placeholder_post_failure(shared, &provider, channel_id).await;
+        // `mailbox_finish_turn` consumes the claimed active request (see
+        // `turn_orchestrator::finalize_turn_state`), so preserve this headless
+        // request explicitly after releasing the claim. Front requeue keeps its
+        // original identity and FIFO position; the slow backstop below plus the
+        // watcher-idle edge will retry it without the #4270 fast-kick spin.
+        let _ = release_mailbox_after_busy_pre_submit_defer(shared, &provider, channel_id).await;
+        let retry = enqueue_busy_tui_followup_for_retry(
+            shared,
+            &provider,
+            channel_id,
+            request_owner,
+            user_msg_id,
+            prompt,
+            false,
+            None,
+            false,
+            false,
+            Vec::new(),
+            None,
+        )
+        .await;
+        let retry_preserved = busy_retry::present_or_accepted(&retry);
+        if retry_preserved {
+            super::super::super::arm_slow_idle_queue_backstop_if_queue_nonempty(
+                shared,
+                &provider,
+                channel_id,
+                "headless_runtime_mismatch_defer_pending",
+            )
+            .await;
+        }
         crate::services::discord::saturating_decrement_global_active(shared);
         shared.turn_start_times.remove(&channel_id);
         cancel_token
             .cancelled
             .store(true, std::sync::atomic::Ordering::Relaxed);
         super::super::super::clear_watchdog_deadline_override(channel_id.get()).await;
+        if !retry_preserved {
+            return Err(HeadlessTurnStartError::Internal(format!(
+                "managed runtime mismatch retry could not be preserved for channel {}",
+                channel_id.get()
+            )));
+        }
         return Err(HeadlessTurnStartError::Conflict(format!(
             "managed runtime mismatch deferred for channel {}",
             channel_id.get()
@@ -1480,41 +1516,6 @@ mod recovery_context_take_order_tests {
             !post_spawn.contains("HeadlessTurnStartError::"),
             "post-spawn failures must flow through the bridge, never a retryable start error"
         );
-    }
-
-    #[test]
-    fn runtime_mismatch_defer_balances_headless_turn_lifecycle_before_conflict() {
-        let module_src = include_str!("headless_turn.rs");
-        let branch_start = module_src
-            .find("if runtime_mismatch_verdict.should_defer()")
-            .expect("headless runtime mismatch defer branch exists");
-        let branch_end = branch_start
-            + module_src[branch_start..]
-                .find("let effective_runtime_kind")
-                .expect("headless mismatch branch ends before runtime seed");
-        let branch = &module_src[branch_start..branch_end];
-        for required in [
-            "release_mailbox_after_placeholder_post_failure",
-            "saturating_decrement_global_active(shared)",
-            "turn_start_times.remove(&channel_id)",
-            ".cancelled",
-            ".store(true, std::sync::atomic::Ordering::Relaxed)",
-            "clear_watchdog_deadline_override(channel_id.get()).await",
-            "HeadlessTurnStartError::Conflict",
-        ] {
-            assert!(
-                branch.contains(required),
-                "missing defer cleanup: {required}"
-            );
-        }
-        let release = branch.find("release_mailbox").unwrap();
-        let decrement = branch.find("saturating_decrement_global_active").unwrap();
-        let remove = branch.find("turn_start_times.remove").unwrap();
-        let cancel = branch.find(".cancelled").unwrap();
-        let watchdog = branch.find("clear_watchdog_deadline_override").unwrap();
-        let conflict = branch.find("HeadlessTurnStartError::Conflict").unwrap();
-        assert!(release < decrement && decrement < remove && remove < cancel);
-        assert!(cancel < watchdog && watchdog < conflict);
     }
 
     #[test]

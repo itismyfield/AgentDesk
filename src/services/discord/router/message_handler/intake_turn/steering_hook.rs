@@ -162,8 +162,7 @@ pub(super) async fn maybe_handle_intake_steering(
 
     let bot_owner_provider = super::super::super::super::resolve_discord_bot_provider(token);
     let _ =
-        release_mailbox_after_hosted_tui_busy_pre_submit(shared, &bot_owner_provider, channel_id)
-            .await;
+        release_mailbox_after_busy_pre_submit_defer(shared, &bot_owner_provider, channel_id).await;
     let _ = channel_id.delete_message(http, placeholder_msg_id).await;
     tv_clear_current(shared, http, channel_id, user_msg_id, "intake_tui_steering").await;
     super::super::super::super::saturating_decrement_global_active(shared);
