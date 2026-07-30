@@ -40,7 +40,7 @@ def build_fixture_repo(root: Path, command: str) -> Path:
         encoding="utf-8",
     )
     (root / "src" / "lib.rs").write_text(
-        "mod server;\nmod high_risk_recovery;\n", encoding="utf-8"
+        "mod server;\nmod high_risk_recovery;\nmod route;\n", encoding="utf-8"
     )
     (root / "src" / "high_risk_recovery.rs").write_text(
         "#[cfg(test)]\nmod tests {}\n", encoding="utf-8"
@@ -49,6 +49,16 @@ def build_fixture_repo(root: Path, command: str) -> Path:
         "pub(crate) mod multinode_regression;\n", encoding="utf-8"
     )
     (root / "src" / "server" / "multinode_regression.rs").write_text(
+        "#[cfg(test)]\nmod tests {}\n", encoding="utf-8"
+    )
+    # #[path] redirection mirroring src/services/auto_queue/route.rs style:
+    # the redirected file lives next to the declaring file, not under a
+    # directory named after the declaring module.
+    (root / "src" / "route.rs").write_text(
+        '#[cfg(test)]\n#[path = "redirected_impl.rs"]\nmod redirected_impl;\n',
+        encoding="utf-8",
+    )
+    (root / "src" / "redirected_impl.rs").write_text(
         "#[cfg(test)]\nmod tests {}\n", encoding="utf-8"
     )
     (root / "src" / "main.rs").write_text("fn main() {}\n", encoding="utf-8")
@@ -103,6 +113,42 @@ class MutationProof(unittest.TestCase):
         self.assertEqual(violations, [])
 
 
+class PathRedirection(unittest.TestCase):
+    """#[path = "..."] mod declarations must resolve (review blocker #2)."""
+
+    def test_redirected_module_is_not_a_false_positive(self) -> None:
+        self.assertEqual(
+            run_fixture("cargo test --lib redirected_impl::tests"), [])
+
+    def test_real_repo_inventories_path_redirected_modules(self) -> None:
+        # These real modules are only reachable through #[path] redirections
+        # (e.g. src/services/auto_queue/route.rs) and produced false
+        # unknown-module hits before the fix.
+        targets = integrity.discover_targets(REPO_ROOT)
+        modules = integrity.collect_modules(targets["lib"], REPO_ROOT)
+        for name in ("completion_gate", "liveness", "output_policy",
+                     "activate_command"):
+            with self.subTest(module=name):
+                self.assertIn(name, modules)
+
+
+class EmptyTargetRule(unittest.TestCase):
+    """A filtered command on a module-less target always runs 0 tests."""
+
+    def test_typo_filter_on_empty_bin_is_flagged(self) -> None:
+        violations = run_fixture(
+            "cargo test --bin agentdesk high_risk_recovry -- --test-threads=1"
+        )
+        self.assertEqual([v.kind for v in violations], ["empty-target"])
+
+    def test_unfiltered_empty_bin_is_not_flagged(self) -> None:
+        self.assertEqual(run_fixture("cargo test --bin agentdesk"), [])
+
+    def test_mismatch_takes_precedence_over_empty_target(self) -> None:
+        violations = run_fixture(BAD_COMMAND)
+        self.assertEqual([v.kind for v in violations], ["target-mismatch"])
+
+
 class ExitCodeContract(unittest.TestCase):
     """Warn-only rollout must exit 0; --enforce must exit 1 on violations."""
 
@@ -128,9 +174,19 @@ class ExitCodeContract(unittest.TestCase):
 
 
 class AllowlistContract(unittest.TestCase):
-    def test_allowlisted_command_is_excused(self) -> None:
-        allow = "# platform-cfg suite legitimately empty here\n" + BAD_COMMAND + "\n"
-        self.assertEqual(run_fixture(BAD_COMMAND, allowlist=allow), [])
+    def test_allowlist_cannot_excuse_target_mismatch(self) -> None:
+        # A target-mismatch means the command itself is wrong; the allowlist
+        # (meant for legitimately-empty platform-cfg lanes) must not hide it.
+        allow = "# attempted excuse\n" + BAD_COMMAND + "\n"
+        violations = run_fixture(BAD_COMMAND, allowlist=allow)
+        self.assertEqual([v.kind for v in violations], ["target-mismatch"])
+
+    def test_allowlist_excuses_non_mismatch_kinds(self) -> None:
+        command = "cargo test --lib bogus_module::tests"
+        self.assertEqual(
+            [v.kind for v in run_fixture(command)], ["unknown-module"])
+        allow = "# legitimately-empty on this platform\n" + command + "\n"
+        self.assertEqual(run_fixture(command, allowlist=allow), [])
 
     def test_comments_and_blanks_do_not_allowlist(self) -> None:
         allow = "# comment only\n\n"
@@ -195,20 +251,24 @@ class RunListCheckContract(unittest.TestCase):
 
 
 class KnownOffenderRegression(unittest.TestCase):
-    """Pin the real-repo offenders the gate was built to catch (#5003).
+    """Upper-bound ratchet over the real-repo offenders (#5003).
 
-    The repair slice that fixes these workflow commands must update this
-    expectation (it should drop to an empty set there).
+    `mismatches <= KNOWN`: repair slices may shrink the set freely (fixing a
+    lane stays green here), but any NEW target-mismatch lane fails this test.
+    Once all four offenders are repaired this set can be emptied.
     """
 
+    HRR = "cargo test --bin agentdesk high_risk_recovery:: -- --test-threads=1"
     KNOWN = {
-        (".github/workflows/ci-main.yml", "high_risk_recovery::"),
-        (".github/workflows/ci-nightly.yml", "multinode_regression::"),
-        (".github/workflows/ci-nightly.yml", "high_risk_recovery::"),
-        (".github/workflows/ci-pr.yml", "high_risk_recovery::"),
+        (".github/workflows/ci-main.yml", HRR),
+        (".github/workflows/ci-nightly.yml", HRR),
+        (".github/workflows/ci-nightly.yml",
+         "cargo test --bin agentdesk multinode_regression:: "
+         "-- --nocapture --test-threads=1"),
+        (".github/workflows/ci-pr.yml", HRR),
     }
 
-    def test_known_offenders_are_detected_in_real_workflows(self) -> None:
+    def test_no_new_offenders_beyond_known_set(self) -> None:
         workflows = sorted((REPO_ROOT / ".github/workflows").glob("*.yml"))
         violations = integrity.check_workflows(
             REPO_ROOT, workflows,
@@ -217,16 +277,18 @@ class KnownOffenderRegression(unittest.TestCase):
             with_list_check=False,
         )
         mismatches = {
-            (violation.workflow, filter_token)
-            for violation in violations if violation.kind == "target-mismatch"
-            for filter_token in violation.command.split()
-            if filter_token.endswith("::")
+            (violation.workflow, violation.command)
+            for violation in violations
+            if violation.kind in ("target-mismatch", "empty-target")
         }
         self.assertTrue(
-            self.KNOWN <= mismatches,
-            f"expected known offenders {self.KNOWN}, got {mismatches}",
+            mismatches <= self.KNOWN,
+            f"NEW mismatch lanes beyond known set: {mismatches - self.KNOWN}",
         )
-        unexpected = [v for v in violations if v.kind != "target-mismatch"]
+        unexpected = [
+            v for v in violations
+            if v.kind not in ("target-mismatch", "empty-target")
+        ]
         self.assertEqual(unexpected, [], "gate must not false-positive")
 
     def test_real_repo_warn_only_run_exits_zero(self) -> None:
