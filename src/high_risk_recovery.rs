@@ -99,33 +99,58 @@ fn cross_channel_tmux_claim_observability_distinguishes_thread_follow_up_4984() 
         .collect();
     assert_eq!(
         cross_channel_events.len(),
-        1,
-        "only an unintended cross-channel tmux claim must persist an invariant event"
+        2,
+        "both intended and unintended cross-channel tmux claims must persist classifications"
     );
-    let event = &cross_channel_events[0];
-    assert_eq!(event.channel_id, Some(unrelated_channel_id.get()));
-    assert_eq!(event.provider.as_deref(), Some("claude"));
+    let unintended = cross_channel_events
+        .iter()
+        .find(|event| {
+            event.payload["details"]["claim_classification"] == "unintended_cross_channel_claim"
+        })
+        .expect("unintended cross-channel claim event");
+    assert_eq!(unintended.channel_id, Some(unrelated_channel_id.get()));
+    assert_eq!(unintended.provider.as_deref(), Some("claude"));
     assert_eq!(
-        event.payload["details"]["requested_channel_id"],
+        unintended.payload["details"]["requested_channel_id"],
         unrelated_channel_id.get()
     );
     assert_eq!(
-        event.payload["details"]["existing_channel_id"],
+        unintended.payload["details"]["existing_channel_id"],
         parent_channel_id.get()
     );
     assert_eq!(
-        event.payload["details"]["tmux_session_name"],
+        unintended.payload["details"]["tmux_session_name"],
         "AgentDesk-claude-4984-cross-channel-claim"
     );
     assert_eq!(
-        event.payload["details"]["claim_classification"],
-        "unintended_cross_channel_claim"
-    );
-    assert_eq!(
-        event.payload["details"]["intention_basis"],
+        unintended.payload["details"]["intention_basis"],
         "existing owner does not match the requesting thread parent"
     );
-    assert!(event.payload["details"]["thread_parent_channel_id"].is_null());
+    assert!(unintended.payload["details"]["thread_parent_channel_id"].is_null());
+    assert_eq!(
+        unintended.payload["details"]["thread_parent_provenance"],
+        "none"
+    );
+
+    let intended = cross_channel_events
+        .iter()
+        .find(|event| {
+            event.payload["details"]["claim_classification"] == "intended_thread_follow_up"
+        })
+        .expect("intended thread follow-up classification event");
+    assert_eq!(intended.channel_id, Some(thread_channel_id.get()));
+    assert_eq!(
+        intended.payload["details"]["thread_parent_channel_id"],
+        parent_channel_id.get()
+    );
+    assert_eq!(
+        intended.payload["details"]["thread_parent_provenance"],
+        "live_discord"
+    );
+    assert_eq!(
+        intended.payload["details"]["intention_basis"],
+        "requesting thread parent matches the existing watcher owner"
+    );
 }
 
 fn pg_test_base_database_url() -> String {

@@ -913,7 +913,7 @@ fn attach_paused_turn_watcher_inner(
             handle,
             &provider,
             source,
-            thread_parent_channel_id,
+            super::super::super::tmux::thread_follow_up_parent_from_live(thread_parent_channel_id),
         );
         watcher_owner_channel_id = claim.owner_channel_id();
         if claim.should_spawn() {
