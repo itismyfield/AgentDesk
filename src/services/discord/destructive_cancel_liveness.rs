@@ -301,12 +301,12 @@ mod tests {
     }
 
     #[test]
-    fn destructive_cancel_tool_only_turn_abstains_independently_of_readiness() {
+    fn destructive_cancel_tool_only_turn_abstains_from_payload_forfeit() {
         let tool_only = WatcherRelayLivenessEvidence {
             full_response: "",
             ..evidence()
         };
         assert!(!relay_liveness_forfeited(tool_only));
-        assert!(fresh_watcher_heartbeat_blocks_rebind(tool_only));
+        assert!(!fresh_watcher_heartbeat_blocks_rebind(tool_only));
     }
 }

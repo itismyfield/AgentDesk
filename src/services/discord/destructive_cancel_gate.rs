@@ -705,7 +705,7 @@ mod tests {
 
             let gate = evaluate(&shared, &provider, channel, channel, &snapshot).await;
 
-            assert_eq!(gate.denied_reason(), Some("fresh_watcher_heartbeat"));
+            assert_eq!(gate.denied_reason(), Some("capture_progress_on_reprobe"));
         });
     }
 
