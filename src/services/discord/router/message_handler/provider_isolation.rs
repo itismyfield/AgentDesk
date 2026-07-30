@@ -755,6 +755,7 @@ mod thread_role_inheritance_tests {
     #[cfg(unix)]
     const RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT: u32 = 3;
 
+    #[cfg(unix)]
     fn clear_test_defer(channel_id: ChannelId) {
         clear_runtime_mismatch_defer(&ProviderKind::Claude, channel_id);
     }
