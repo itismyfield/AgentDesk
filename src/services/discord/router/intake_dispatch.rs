@@ -1,6 +1,7 @@
 use super::message_handler::{self, IntakeDeps, IntakeRequest};
 use crate::services::cluster::intake_router_hook::{
-    IntakeBlockedReason, IntakeRouterContext, IntakeRouterDecision, try_route_intake,
+    IntakeBlockedReason, IntakeRouterContext, IntakeRouterDecision, ResolvedSessionOwner,
+    try_route_intake,
 };
 use crate::services::provider::ProviderKind;
 use poise::serenity_prelude as serenity;
@@ -202,8 +203,7 @@ fn admission_for_decision(
         },
         IntakeRouterDecision::SkippedDuplicate { .. } => IntakeAdmission::SkippedDuplicate,
         IntakeRouterDecision::DeferredOpenRoute {
-            resolved_owner:
-                crate::services::cluster::intake_router_hook::ResolvedSessionOwner::LiveLocal,
+            resolved_owner: ResolvedSessionOwner::LiveLocal,
             ..
         } if !authority_channel_opted_in => {
             IntakeAdmission::Local(LocalAdmissionPermit::for_submission(submission))

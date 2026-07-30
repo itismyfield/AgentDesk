@@ -129,9 +129,7 @@ use super::{
     admission_for_decision, dispatch_skill_intake, dispatch_text_intake,
 };
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::cluster::intake_router_hook::{
-    IntakeRouterDecision, IntakeRoutingBasis, ResolvedSessionOwner,
-};
+use crate::services::cluster::intake_router_hook::{IntakeRouterDecision, ResolvedSessionOwner};
 use crate::services::discord::router::message_handler::{IntakeDeps, IntakeRequest};
 use crate::services::discord::router::{TurnKind, admit_queued_intake};
 use crate::services::provider::ProviderKind;
@@ -314,10 +312,9 @@ fn telemetry_only_unopted_live_foreign_owner_stays_fenced_5040() {
     let submission = submission_for_admission(ChannelId::new(4_350_371), 4_350_381);
     let admission = admission_for_decision(
         false,
-        IntakeRouterDecision::Forwarded {
+        IntakeRouterDecision::DeferredOpenRoute {
             target_instance_id: "foreign-instance".to_string(),
-            outbox_id: 5040,
-            basis: IntakeRoutingBasis::LiveForeignOwner,
+            resolved_owner: ResolvedSessionOwner::LiveForeign,
         },
         &submission,
     );
@@ -325,12 +322,11 @@ fn telemetry_only_unopted_live_foreign_owner_stays_fenced_5040() {
     assert!(
         matches!(
             admission,
-            IntakeAdmission::Forwarded {
+            IntakeAdmission::DeferredOpenRoute {
                 ref target_instance_id,
-                outbox_id: 5040,
             } if target_instance_id == "foreign-instance"
         ),
-        "a live foreign owner must retain exclusive remote execution"
+        "a live foreign owner must retain the open-route fence"
     );
 }
 
