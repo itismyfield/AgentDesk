@@ -7,10 +7,11 @@ use std::time::Duration;
 mod destructive_cancel_liveness;
 use super::{SharedData, inflight, mailbox_snapshot};
 use destructive_cancel_liveness::{
-    WatcherRelayLivenessEvidence, fresh_watcher_heartbeat_blocks_rebind, relay_liveness_forfeited,
-    turn_age_secs,
+    RelayForfeitArm, WatcherRelayLivenessEvidence, fresh_watcher_heartbeat_blocks_rebind,
+    relay_forfeit_arm, relay_liveness_forfeited, turn_age_secs,
 };
 use poise::serenity_prelude::{ChannelId, MessageId};
+use serde_json::json;
 
 use crate::services::provider::ProviderKind;
 
@@ -187,20 +188,106 @@ fn prior_delivery_evidence(state: &inflight::InflightTurnState) -> bool {
         || !state.streaming_rollover_frozen_msg_ids.is_empty()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RelayLivenessForfeitSeam {
+    FreshWatcherHeartbeat,
+    CaptureProgressOnReprobe,
+}
+
+impl RelayLivenessForfeitSeam {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::FreshWatcherHeartbeat => "fresh_watcher_heartbeat",
+            Self::CaptureProgressOnReprobe => "capture_progress_on_reprobe",
+        }
+    }
+}
+
+fn relay_liveness_forfeit_decision(
+    evidence: WatcherRelayLivenessEvidence<'_>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    pin: &DestructiveCancelIdentityPin,
+    seam: RelayLivenessForfeitSeam,
+) -> bool {
+    let would_forfeit = relay_liveness_forfeited(evidence);
+    if would_forfeit {
+        let arm = relay_forfeit_arm(evidence.prior_delivery_evidence);
+        let turn_id = pin.finalizer_turn_id.to_string();
+        // Observation-only until #5007 E0 (identity-locked final verification)
+        // and E1 (atomic verify-and-cancel) land. Never enable destructive allow
+        // from this signal before both prerequisites are deployed.
+        let _ = crate::services::observability::record_invariant_check_with_severity(
+            false,
+            crate::services::observability::InvariantViolation {
+                provider: Some(provider.as_str()),
+                channel_id: Some(channel.get()),
+                dispatch_id: None,
+                session_key: pin.tmux_session_name.as_deref(),
+                turn_id: Some(turn_id.as_str()),
+                invariant: "relay_liveness_would_forfeit",
+                code_location: "destructive_cancel_gate.rs:relay_liveness_forfeit_decision",
+                message: "relay liveness model would forfeit, but destructive use is disabled pending #5007 E0+E1",
+                details: json!({
+                    "channel_id": channel.get(),
+                    "tmux_session_name": pin.tmux_session_name.as_deref(),
+                    "turn_pin": {
+                        "finalizer_turn_id": pin.finalizer_turn_id,
+                        "mailbox_active_user_msg_id": pin.mailbox_active_user_msg_id,
+                    },
+                    "seam": seam.as_str(),
+                    "arm": match arm {
+                        RelayForfeitArm::ZeroDelivery => "zero_delivery",
+                        RelayForfeitArm::StalledDelivery => "stalled_delivery",
+                    },
+                    "evidence": {
+                        "output_len_at_snapshot": evidence.output_len_at_snapshot,
+                        "output_len_now": evidence.output_len_now,
+                        "output_mtime_age_secs": evidence.output_mtime_age_secs,
+                        "relay_frontier_at_snapshot": evidence.relay_frontier_at_snapshot,
+                        "relay_frontier_now": evidence.relay_frontier_now,
+                        "last_watcher_relayed_offset": evidence.last_watcher_relayed_offset,
+                        "last_watcher_relayed_at_unix": evidence.last_watcher_relayed_at_unix,
+                        "terminal_delivery_committed": evidence.terminal_delivery_committed,
+                        "full_response_utf8_bytes": evidence.full_response.len(),
+                        "full_response_chars": evidence.full_response.chars().count(),
+                        "response_sent_offset": evidence.response_sent_offset,
+                        "prior_delivery_evidence": evidence.prior_delivery_evidence,
+                        "turn_age_secs": evidence.turn_age_secs,
+                        "now_unix": evidence.now_unix,
+                    },
+                }),
+            },
+            crate::services::observability::InvariantSeverity::Warn,
+        );
+    }
+    false
+}
+
 fn fresh_watcher_heartbeat_should_block(
     shared: &SharedData,
+    provider: &ProviderKind,
+    channel: ChannelId,
     watcher_owner_channel: ChannelId,
     snapshot: &DestructiveCancelProbeSnapshot,
     state: &inflight::InflightTurnState,
     watcher_output_path: &str,
 ) -> bool {
-    fresh_watcher_heartbeat_blocks_rebind(liveness_evidence(
+    let evidence = liveness_evidence(
         shared,
         watcher_owner_channel,
         snapshot,
         state,
         watcher_output_path,
-    ))
+    );
+    let forfeited = relay_liveness_forfeit_decision(
+        evidence,
+        provider,
+        channel,
+        &snapshot.pin,
+        RelayLivenessForfeitSeam::FreshWatcherHeartbeat,
+    );
+    fresh_watcher_heartbeat_blocks_rebind(evidence, forfeited)
 }
 
 fn output_mtime_age_secs(output_path: &str) -> Option<i64> {
@@ -268,6 +355,8 @@ pub(in crate::services::discord) async fn evaluate(
                 if let Some(output_path) = shared.tmux_watchers.watcher_output_path(tmux_session) {
                     if fresh_watcher_heartbeat_should_block(
                         shared,
+                        provider,
+                        channel,
                         watcher_owner_channel,
                         snapshot,
                         &initial_state,
@@ -286,6 +375,8 @@ pub(in crate::services::discord) async fn evaluate(
         if !watcher_heartbeat_stale
             && fresh_watcher_heartbeat_should_block(
                 shared,
+                provider,
+                channel,
                 watcher_owner_channel,
                 snapshot,
                 &initial_state,
@@ -351,24 +442,32 @@ pub(in crate::services::discord) async fn evaluate(
         if relay_frontier_advanced(previous_relay_frontier, current_relay_frontier) {
             return DestructiveCancelGate::Denied("relay_frontier_progress_on_reprobe");
         }
-        if output_len_now != Some(expected_output_len)
-            && !relay_liveness_forfeited(WatcherRelayLivenessEvidence {
-                output_len_at_snapshot: Some(expected_output_len),
-                output_len_now,
-                output_mtime_age_secs: output_mtime_age_secs(expected_output_path),
-                relay_frontier_at_snapshot: snapshot.relay_frontier,
-                relay_frontier_now: current_relay_frontier,
-                last_watcher_relayed_offset: current.last_watcher_relayed_offset,
-                last_watcher_relayed_at_unix: current.last_watcher_relayed_at_unix,
-                terminal_delivery_committed: current.terminal_delivery_committed,
-                full_response: &current.full_response,
-                response_sent_offset: current.response_sent_offset,
-                prior_delivery_evidence: prior_delivery_evidence(&current),
-                turn_age_secs: turn_age_secs(&current, inflight::now_unix()),
-                now_unix: inflight::now_unix(),
-            })
-        {
-            return DestructiveCancelGate::Denied("capture_progress_on_reprobe");
+        if output_len_now != Some(expected_output_len) {
+            let now_unix = inflight::now_unix();
+            let forfeited = relay_liveness_forfeit_decision(
+                WatcherRelayLivenessEvidence {
+                    output_len_at_snapshot: Some(expected_output_len),
+                    output_len_now,
+                    output_mtime_age_secs: output_mtime_age_secs(expected_output_path),
+                    relay_frontier_at_snapshot: snapshot.relay_frontier,
+                    relay_frontier_now: current_relay_frontier,
+                    last_watcher_relayed_offset: current.last_watcher_relayed_offset,
+                    last_watcher_relayed_at_unix: current.last_watcher_relayed_at_unix,
+                    terminal_delivery_committed: current.terminal_delivery_committed,
+                    full_response: &current.full_response,
+                    response_sent_offset: current.response_sent_offset,
+                    prior_delivery_evidence: prior_delivery_evidence(&current),
+                    turn_age_secs: turn_age_secs(&current, now_unix),
+                    now_unix,
+                },
+                provider,
+                channel,
+                &snapshot.pin,
+                RelayLivenessForfeitSeam::CaptureProgressOnReprobe,
+            );
+            if !forfeited {
+                return DestructiveCancelGate::Denied("capture_progress_on_reprobe");
+            }
         }
         previous_relay_frontier =
             relay_frontier_high_water(previous_relay_frontier, current_relay_frontier);
@@ -442,6 +541,71 @@ mod tests {
         assert_eq!(previous, Some(4096));
         assert!(!relay_frontier_advanced(previous, Some(4096)));
         assert!(relay_frontier_advanced(previous, Some(4097)));
+    }
+
+    #[test]
+    fn destructive_cancel_forfeit_decision_is_observation_only_and_persists_context() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let events = crate::services::observability::events::global();
+        events.clear();
+        let pin = DestructiveCancelIdentityPin {
+            finalizer_turn_id: 4_992_777,
+            mailbox_active_user_msg_id: Some(4_992_778),
+            tmux_session_name: Some("tmux-4992-observation".to_string()),
+        };
+        let evidence = WatcherRelayLivenessEvidence {
+            output_len_at_snapshot: Some(100),
+            output_len_now: Some(101),
+            output_mtime_age_secs: Some(0),
+            relay_frontier_at_snapshot: None,
+            relay_frontier_now: None,
+            last_watcher_relayed_offset: None,
+            last_watcher_relayed_at_unix: None,
+            terminal_delivery_committed: false,
+            full_response: "unsent",
+            response_sent_offset: 0,
+            prior_delivery_evidence: false,
+            turn_age_secs: Some(
+                destructive_cancel_liveness::ZERO_DELIVERY_FORFEIT_MIN_AGE_SECS + 1,
+            ),
+            now_unix: 100_000,
+        };
+
+        assert!(relay_liveness_forfeited(evidence));
+        assert!(!relay_liveness_forfeit_decision(
+            evidence,
+            &ProviderKind::Claude,
+            ChannelId::new(4_992_779),
+            &pin,
+            RelayLivenessForfeitSeam::CaptureProgressOnReprobe,
+        ));
+
+        let event = events
+            .recent(4)
+            .into_iter()
+            .rev()
+            .find(|event| {
+                event.event_type == "invariant_violation"
+                    && event.payload["invariant"] == "relay_liveness_would_forfeit"
+            })
+            .expect("would-forfeit event must enter the durable JSONL event buffer");
+        assert_eq!(event.channel_id, Some(4_992_779));
+        assert_eq!(
+            event.payload["details"]["seam"],
+            "capture_progress_on_reprobe"
+        );
+        assert_eq!(event.payload["details"]["arm"], "zero_delivery");
+        assert_eq!(
+            event.payload["details"]["turn_pin"]["finalizer_turn_id"],
+            4_992_777
+        );
+        assert_eq!(
+            event.payload["details"]["tmux_session_name"],
+            "tmux-4992-observation"
+        );
+        assert_eq!(event.payload["details"]["evidence"]["output_len_now"], 101);
     }
 
     fn save_gate_state(
@@ -572,16 +736,13 @@ mod tests {
 
             let gate = evaluate(&shared, &provider, channel, channel, &snapshot).await;
 
-            assert_eq!(
-                gate.denied_reason(),
-                Some("tmux_pane_not_ready_for_input")
-            );
+            assert_eq!(gate.denied_reason(), Some("fresh_watcher_heartbeat"));
             assert!(inflight::load_inflight_state(&provider, channel.get()).is_some());
         });
     }
 
     #[test]
-    fn destructive_cancel_growing_capture_ready_readiness_allows() {
+    fn destructive_cancel_growing_capture_ready_forfeit_remains_disabled() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -620,9 +781,9 @@ mod tests {
             let gate = evaluate(&shared, &provider, channel, channel, &snapshot).await;
 
             assert_eq!(
-                gate.allowed_reason(),
-                Some("capture_and_jsonl_halted"),
-                "unexpected gate: {gate:?}"
+                gate.denied_reason(),
+                Some("fresh_watcher_heartbeat"),
+                "would-forfeit observation must not enable destructive cancel: {gate:?}"
             );
         });
     }
