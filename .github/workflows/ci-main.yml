@@ -199,16 +199,9 @@ jobs:
           CARGO_PROFILE_TEST_DEBUG: "0"
           CARGO_PROFILE_DEV_DEBUG: "0"
 
-      - name: Stop PostgreSQL lane resource diagnostics
+      - name: Show PostgreSQL lane resource diagnostics
         if: always() && inputs.resource_diagnostics == true
-        run: |
-          kill "$sample_pid" 2>/dev/null || true
-          wait "$sample_pid" 2>/dev/null || true
-          cat "$RUNNER_TEMP/pg-resource-samples.log" || true
-
-      - name: PostgreSQL lane OOM evidence
-        if: failure()
-        run: dmesg | grep -i -E 'out of memory|oom|killed process' || true
+        run: cat "$RUNNER_TEMP/pg-resource-samples.log" || true
 
       - name: Stop PostgreSQL service
         if: always()

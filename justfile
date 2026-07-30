@@ -111,6 +111,8 @@ test-non-pg:
     # Filter the real rustdoc harness to this public capability contract.
     cargo test --doc ClaudeBinary
 
+# PostgreSQL tests belong in the library harness. Integration and doctest targets
+# are intentionally excluded; add a separate PG lane command if either gains PG coverage.
 test-postgres:
     cargo test --lib -- _pg pg_ postgres --nocapture --test-threads=1
 
