@@ -585,9 +585,7 @@ async fn build_health_snapshot_with_options(
                         .turn_started_at
                         .map(|started_at| started_at.timestamp_millis()),
                     relay_turn_key: relay_turn_key_for_health(
-                        ChannelId::new(
-                            session.watcher_owner_channel_id.unwrap_or(channel.get()),
-                        ),
+                        ChannelId::new(session.watcher_owner_channel_id.unwrap_or(channel.get())),
                         entry.shared.restart.current_generation,
                         session.inflight.as_ref(),
                     ),

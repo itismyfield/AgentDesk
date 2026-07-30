@@ -265,7 +265,9 @@ fn liveness_probe_session(inflight: Option<&str>, watcher: Option<&str>) -> Opti
     inflight.or(watcher).map(str::to_string)
 }
 
-fn published_relay_frontier(coord: Option<&crate::services::discord::TmuxRelayCoord>) -> (bool, u64) {
+fn published_relay_frontier(
+    coord: Option<&crate::services::discord::TmuxRelayCoord>,
+) -> (bool, u64) {
     match coord {
         Some(coord) => (
             true,
@@ -325,5 +327,4 @@ mod tests {
             "an intentional reset retains recorded-zero without a separate publication bit"
         );
     }
-
 }

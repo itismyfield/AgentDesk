@@ -1,8 +1,8 @@
 use poise::serenity_prelude::ChannelId;
 
 use crate::services::discord::{self as discord, DeliveryLeaseKey, SharedData};
-use discord::outbound::delivery_evidence_store::RelayDeliveryEvidence;
 use crate::services::provider::ProviderKind;
+use discord::outbound::delivery_evidence_store::RelayDeliveryEvidence;
 
 use super::super::relay_health::{RelayActiveTurn, RelayHealthSnapshot, RelayStallState};
 
