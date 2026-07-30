@@ -665,6 +665,50 @@ fn full_rebind_noop_reuse_reports_no_repair_and_mutation_reports_repair() {
         repaired.repaired_state,
         "runtime-binding mutation must be detected through the full rebind path"
     );
+    assert_eq!(
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&tmux_session)
+            .expect("repaired runtime binding")
+            .last_offset,
+        128,
+        "rebind must repair a stale cursor forward without rewinding a newer cursor"
+    );
+
+    crate::services::tui_prompt_dedupe::register_rehydrated_tmux_runtime_binding(
+        provider.as_str(),
+        &tmux_session,
+        channel_id,
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: output_path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: state.session_id.clone(),
+            last_offset: 192,
+            relay_last_offset: None,
+        },
+    );
+    let pin = super::inflight::InflightEpisodePin::from_state(
+        &super::inflight::load_inflight_state(&provider, channel_id).expect("reload inflight"),
+    );
+    let newer_cursor = runtime
+        .block_on(rebind_inflight_for_channel(
+            &http,
+            &shared,
+            &provider,
+            channel_id,
+            Some(tmux_session.clone()),
+            ManualRebindOverrides::default(),
+            Some(&pin),
+        ))
+        .expect("monotonic cursor rebind");
+    assert!(!newer_cursor.repaired_state);
+    assert_eq!(
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&tmux_session)
+            .expect("preserved runtime binding")
+            .last_offset,
+        192,
+        "rebind must not rewind a newer same-output runtime cursor"
+    );
 
     if let Some((_, handle)) = shared.tmux_watchers.remove(&channel) {
         handle
