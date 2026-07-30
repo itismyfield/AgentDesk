@@ -181,18 +181,8 @@ struct RelayThreadProofSnapshot {
     stale_thread_proof: bool,
 }
 
-/// #3631: a rebind-origin inflight row (POST /api/inflight/rebind) is a
-/// synthetic origin marker — `turn_id`/`dispatch_id` null, `user_msg_id`/
-/// `current_msg_id` 0, `full_response` empty — NOT a real user/agent turn.
-/// With no mailbox cancel token there is no live turn, so the channel is idle.
-/// The classifier previously fell through to `Foreground`, falsely reporting
-/// `active_foreground_stream` and stranding queued messages (they never
-/// dispatch because no real turn ever ends to drain the queue). A cancel token
-/// present means a real turn HAS since started on the adopted session, so it is
-/// genuinely active — only treat it as idle when no cancel token is held.
-///
-/// Pure seam so the idle decision is unit-testable without constructing a full
-/// `InflightTurnState`.
+/// A synthetic rebind-origin row is idle unless a mailbox cancel token proves
+/// that a real turn has since started on the adopted session.
 fn rebind_origin_inflight_is_idle(mailbox_has_cancel_token: bool, rebind_origin: bool) -> bool {
     rebind_origin && !mailbox_has_cancel_token
 }
@@ -414,9 +404,13 @@ fn build_relay_health_snapshot(input: RelayHealthBuildInput) -> RelayHealthSnaps
         pending_thread_proof: input.thread_proof.parent_channel_id.is_some()
             || input.thread_proof.thread_channel_id.is_some(),
         parent_channel_id: input.thread_proof.parent_channel_id,
-        thread_channel_id: input.thread_proof.thread_channel_id, last_relay_ts_ms: (input.last_relay_ts_ms > 0).then_some(input.last_relay_ts_ms),
+        thread_channel_id: input.thread_proof.thread_channel_id,
+        last_relay_ts_ms: (input.last_relay_ts_ms > 0).then_some(input.last_relay_ts_ms),
         last_outbound_activity_ms: input.last_outbound_activity_ms,
-        confirmed_delivery_since_turn_start: discord::outbound::delivery_evidence_store::confirmed_delivery_since_turn_start(ChannelId::new(input.channel_id)),
+        confirmed_delivery_since_turn_start:
+            discord::outbound::delivery_evidence_store::confirmed_delivery_since_turn_start(
+                ChannelId::new(input.channel_id),
+            ),
         last_capture_offset: input.last_capture_offset,
         last_relay_offset: input.last_relay_offset,
         last_relay_offset_recorded: input.last_relay_offset_recorded,
