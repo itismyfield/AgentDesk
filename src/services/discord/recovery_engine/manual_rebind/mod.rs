@@ -927,18 +927,6 @@ fn rebind_repaired_state(
 }
 
 #[cfg(test)]
-mod repaired_state_tests {
-    use super::rebind_repaired_state;
-
-    #[test]
-    fn reused_watcher_still_reports_prior_authoritative_repair() {
-        assert!(rebind_repaired_state(true, false, false, false));
-        assert!(rebind_repaired_state(false, true, false, false));
-        assert!(!rebind_repaired_state(false, false, false, false));
-    }
-}
-
-#[cfg(test)]
 #[path = "post_adoption_guard_tests.rs"]
 mod post_adoption_guard_tests;
 
@@ -948,6 +936,13 @@ mod post_work_evidence_tests {
     use crate::services::agent_protocol::{RuntimeHandoff, RuntimeHandoffKind};
     use crate::services::discord::inflight;
     use crate::services::provider::ProviderKind;
+
+    #[test]
+    fn reused_watcher_still_reports_prior_authoritative_repair() {
+        assert!(rebind_repaired_state(true, false, false, false));
+        assert!(rebind_repaired_state(false, true, false, false));
+        assert!(!rebind_repaired_state(false, false, false, false));
+    }
 
     #[test]
     fn recovery_input_fifo_requirement_is_runtime_specific() {

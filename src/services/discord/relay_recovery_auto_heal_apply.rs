@@ -510,6 +510,88 @@ mod tests {
         );
     }
 
+    /// Production-wiring regression: this crosses the real apply adapter and
+    /// settlement call. The apply fails before mutation, so each round must refund
+    /// through the exact key reserved by the orchestration layer.
+    #[tokio::test]
+    async fn production_apply_failure_rounds_open_failure_backoff() {
+        let _guard = auto_heal_test_lock().lock().await;
+        clear_auto_heal_attempts_for_tests();
+        let provider = ProviderKind::Codex;
+        let registry = HealthRegistry::new();
+        let shared = super::super::super::make_shared_data_for_tests();
+        let channel_id = 5_021_001;
+        let mut decision = plan_relay_recovery(
+            &RelayHealthSnapshot {
+                provider: provider.as_str().to_string(),
+                channel_id,
+                active_turn: RelayActiveTurn::Foreground,
+                tmux_session: Some("AgentDesk-codex-5021-missing-runtime".to_string()),
+                tmux_alive: Some(true),
+                watcher_attached: false,
+                watcher_attached_stale: false,
+                watcher_owner_channel_id: None,
+                watcher_owns_live_relay: false,
+                bridge_inflight_present: true,
+                bridge_current_msg_id: Some(5_021_201),
+                mailbox_has_cancel_token: true,
+                mailbox_active_user_msg_id: Some(5_021_101),
+                mailbox_turn_started_at_ms: None,
+                queue_depth: 0,
+                pending_discord_callback_msg_id: None,
+                pending_thread_proof: false,
+                parent_channel_id: None,
+                thread_channel_id: None,
+                last_relay_ts_ms: None,
+                last_outbound_activity_ms: None,
+                last_capture_offset: Some(128),
+                last_relay_offset: 0,
+                unread_bytes: Some(128),
+                desynced: true,
+                stale_thread_proof: false,
+            },
+            RelayStallState::TmuxAliveRelayDead,
+            1_000,
+        );
+        decision.auto_heal.max_attempts_per_window = NOOP_REUSE_WINDOW_BUDGET;
+        let key = auto_heal_key(
+            provider.as_str(),
+            channel_id,
+            RelayRecoveryActionKind::ReattachWatcher,
+            RelayRecoveryApplySource::Manual,
+        );
+
+        let mut now_ms = 1_000_i64;
+        for _ in 0..AUTO_HEAL_REFUND_BACKOFF_THRESHOLD {
+            let response = apply_relay_recovery_plan_with_seams(
+                &registry,
+                &shared,
+                &provider,
+                decision.clone(),
+                now_ms,
+                RelayRecoveryApplySource::Manual,
+                &NeverAlert,
+                &ImmediateApplyBoundary,
+            )
+            .await;
+            assert_eq!(
+                response.apply_result.as_ref().map(|result| result.status),
+                Some("provider_unavailable")
+            );
+            now_ms += 1_000;
+        }
+
+        assert_eq!(
+            remaining_auto_heal_attempts(&key, now_ms, NOOP_REUSE_WINDOW_BUDGET),
+            0,
+            "production orchestration must settle the exact reserved key"
+        );
+        assert_eq!(
+            reserve_auto_heal_attempt(&key, now_ms, NOOP_REUSE_WINDOW_BUDGET),
+            Err("auto_heal_failure_backoff")
+        );
+    }
+
     #[tokio::test]
     async fn relay_recovery_startup_grace_consumes_budget_until_frontier_progress() {
         let _guard = auto_heal_test_lock().lock().await;
