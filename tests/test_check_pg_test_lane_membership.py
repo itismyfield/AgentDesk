@@ -108,6 +108,16 @@ class DetectionMutation(FixtureCase):
         )
         self.assertEqual(set(membership.discover_pg_inventory(self.root).tests), {"service::tests::bad"})
 
+    def test_free_function_closure_and_seed_suffix_variant(self) -> None:
+        self.fx.write_source(
+            "src/service.rs",
+            "#[cfg(test)] mod tests {\n"
+            "async fn create_pool() { connect_and_migrate_with_max_connections(); }\n"
+            "#[test] fn bad() { create_pool(); }\n}\n",
+            "mod service;\n",
+        )
+        self.assertEqual(set(membership.discover_pg_inventory(self.root).tests), {"service::tests::bad"})
+
     def test_seed_names_require_word_boundaries(self) -> None:
         self.fx.write_source(
             "src/service.rs",
@@ -165,10 +175,38 @@ class ParserMutations(FixtureCase):
         text = "steps:\n  - name: cargo test (postgres bootstrap)\n    run: echo no\n  - run: cargo test postgres_\n"
         self.assertEqual(membership._cargo_commands(text), ["cargo test postgres_"])
 
-    def test_trigger_keys_are_not_jobs_and_yaml_extension_is_seen(self) -> None:
+    def test_realistic_jobs_whitespace_first_job_and_comment_separator(self) -> None:
         workflow = self.root / ".github/workflows/extra.yaml"
-        workflow.write_text("on:\n  push:\n  workflow_dispatch:\njobs:\n  real:\n    steps:\n      - run: echo ok\n", "utf-8")
-        self.assertEqual([job.name for job in membership.parse_jobs(workflow, self.root)], ["real"])
+        workflow.write_text(
+            "on:\n  push:\n  workflow_dispatch:\n\njobs:\n"
+            "  first:\n    steps:\n      - run: echo first\n"
+            "\n  # The comment must not make the following job disappear.\n"
+            "  second:\n    steps:\n      - run: echo second\n",
+            "utf-8",
+        )
+        jobs = membership.parse_jobs(workflow, self.root)
+        self.assertEqual([job.name for job in jobs], ["first", "second"])
+        self.assertNotIn("second", jobs[0].text)
+
+    def test_first_job_rule4_violation_is_visible(self) -> None:
+        workflow = self.root / ".github/workflows/ci-main.yml"
+        workflow.write_text(
+            "on:\n  push:\n\njobs:\n"
+            "  first_pg_job:\n    steps:\n"
+            "      - run: ./scripts/ci/postgres-service.sh start\n"
+            "      - run: cargo test postgres_\n"
+            "\n  # A separated second job exercises job boundaries.\n"
+            "  second:\n    steps:\n      - run: echo ok\n",
+            "utf-8",
+        )
+        self.assertEqual(
+            self.fx.analysis().debts["rule4"],
+            {".github/workflows/ci-main.yml:first_pg_job"},
+        )
+
+    def test_yaml_extension_is_seen(self) -> None:
+        workflow = self.root / ".github/workflows/extra.yaml"
+        workflow.write_text("jobs:\n  real:\n    steps:\n      - run: echo ok\n", "utf-8")
         with mock.patch.object(membership, "discover_pg_inventory", return_value=membership.PgInventory({})):
             self.assertEqual(self.fx.analysis().inventory.tests, {})
 

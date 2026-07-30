@@ -31,11 +31,21 @@ SEEDS = (
     "PgPool", "connect_and_migrate", "create_test_database",
     "connect_test_pool", "PostgresTestLifecycleGuard", "lock_test_lifecycle",
 )
-# Some repository helpers wrap the shared test database behind locally named
-# constructors. They stay explicit so word-boundary seed matching does not need
-# to regress to broad substrings such as PgPoolOptions.
-LOCAL_HELPER_NAMES = ("create_test_pg_db",)
-CONNECT_SEEDS = tuple(seed for seed in SEEDS if seed != "PgPool") + LOCAL_HELPER_NAMES
+CONNECT_SEEDS = tuple(seed for seed in SEEDS if seed != "PgPool")
+
+
+def _seed_pattern(seed: str) -> re.Pattern[str]:
+    """Match exact type seeds and supported function-name suffix variants."""
+    suffix = r"[A-Za-z0-9_]*" if seed in {
+        "connect_and_migrate",
+        "connect_test_pool",
+        "lock_test_lifecycle",
+    } else ""
+    return re.compile(rf"\b{re.escape(seed)}{suffix}\b")
+
+
+SEED_PATTERNS = tuple(_seed_pattern(seed) for seed in SEEDS)
+CONNECT_SEED_PATTERNS = tuple(_seed_pattern(seed) for seed in CONNECT_SEEDS)
 SECTIONS = ("rule1", "rule2", "rule3", "rule4")
 
 
@@ -109,8 +119,11 @@ _TEST_ATTR = re.compile(
 )
 _STRUCT = re.compile(r"\bstruct\s+([A-Za-z_][A-Za-z0-9_]*)\b")
 _IMPL = re.compile(r"\bimpl(?:\s*<[^>{}]*>)?\s+(?:[^{}]*?\s+for\s+)?([A-Za-z_][A-Za-z0-9_]*)\b[^{};]*\{")
-_JOBS_KEY = re.compile(r"^(?P<indent>\s*)jobs:\s*$", re.MULTILINE)
-_JOB = re.compile(r"^(?P<indent>\s+)(?P<name>[A-Za-z0-9_-]+):\s*$", re.MULTILINE)
+_JOBS_KEY = re.compile(r"^(?P<indent>[^\S\n]*)jobs:[^\S\n]*$", re.MULTILINE)
+_JOB = re.compile(
+    r"^(?P<indent>[^\S\n]+)(?P<name>[A-Za-z0-9_-]+):[^\S\n]*$",
+    re.MULTILINE,
+)
 
 
 def _matching_brace(clean: str, opening: int) -> int:
@@ -239,14 +252,23 @@ def discover_pg_inventory(repo_root: Path) -> PgInventory:
             if opening is None:
                 continue
             body = clean[opening:_matching_brace(clean, opening) + 1]
-            if any(re.search(rf"\b{re.escape(seed)}\b", body) for seed in CONNECT_SEEDS):
+            if any(pattern.search(body) for pattern in CONNECT_SEED_PATTERNS):
                 helpers.add(match.group(1))
         for match in _IMPL.finditer(clean):
             if not _inside_test_region(match.start(), ranges, external):
                 continue
             opening = match.end() - 1
             body = clean[opening:_matching_brace(clean, opening) + 1]
-            if any(re.search(rf"\b{re.escape(seed)}\b", body) for seed in CONNECT_SEEDS):
+            if any(pattern.search(body) for pattern in CONNECT_SEED_PATTERNS):
+                helpers.add(match.group(1))
+        for match in re.finditer(r"\b(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)", clean):
+            if not _inside_test_region(match.start(), ranges, external):
+                continue
+            opening = _opening_brace(clean, match.end())
+            if opening is None:
+                continue
+            body = clean[opening:_matching_brace(clean, opening) + 1]
+            if any(pattern.search(body) for pattern in CONNECT_SEED_PATTERNS):
                 helpers.add(match.group(1))
 
         for match in _ATTR_FN.finditer(clean):
@@ -266,10 +288,7 @@ def discover_pg_inventory(repo_root: Path) -> PgInventory:
 
     tests: dict[str, str] = {}
     for name, path, body, helpers in records:
-        direct = any(
-            re.search(rf"\b{re.escape(seed)}\b", body)
-            for seed in (*SEEDS, *LOCAL_HELPER_NAMES)
-        )
+        direct = any(pattern.search(body) for pattern in SEED_PATTERNS)
         indirect = any(re.search(rf"\b{re.escape(helper)}\b", body) for helper in helpers)
         if direct or indirect:
             tests[name] = path

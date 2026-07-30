@@ -11,6 +11,7 @@ src/db/idempotency.rs
 src/db/intake_outbox.rs
 src/db/postgres.rs
 src/db/relay_dead_letter.rs
+src/db/session_transcripts.rs
 src/dispatch/dispatch_cancel.rs
 src/dispatch/dispatch_context.rs
 src/dispatch/dispatch_status.rs
@@ -45,6 +46,7 @@ src/services/discord/health/recovery.rs
 src/services/discord/health/recovery/stall_alert.rs
 src/services/discord/idle_recap_interaction.rs
 src/services/discord/mod.rs
+src/services/discord/relay_recovery_circuit_alert_producer.rs
 src/services/discord/relay_recovery_circuit_breaker.rs
 src/services/discord/router/message_handler/voice_announcement_route.rs
 src/services/discord/session_runtime.rs
@@ -62,6 +64,7 @@ src/services/observability/recovery_audit.rs
 src/services/observability/turn_lifecycle.rs
 src/services/pipeline_override.rs
 src/services/pipeline_routes.rs
+src/services/scheduled_messages/context_snapshot.rs
 src/services/session_forwarding.rs
 src/services/session_resume.rs
 src/services/settings.rs
@@ -82,6 +85,7 @@ db::intake_outbox::migration_tests
 db::intake_outbox::postgres_tests
 db::postgres::tests
 db::relay_dead_letter::tests
+db::session_transcripts::clear_fence_pg_tests
 dispatch::dispatch_cancel::pg_observability_tests
 dispatch::dispatch_context::pg_rereview_tests
 dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests
@@ -118,6 +122,7 @@ services::discord::health::recovery::stall_watchdog_auto_heal_tests
 services::discord::idle_cleanup_selector_tests
 services::discord::idle_recap_interaction::tests
 services::discord::relay_recovery::circuit_breaker::tests
+services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_tests
@@ -137,6 +142,7 @@ services::observability::recovery_audit::tests
 services::observability::turn_lifecycle::tests
 services::pipeline_override::tests
 services::pipeline_routes::tests
+services::scheduled_messages::context_snapshot::postgres_tests
 services::session_forwarding::tests
 services::session_resume::tests
 services::settings::tests
@@ -276,6 +282,9 @@ db::postgres::tests::postgres_startup_reseed_preserves_configured_legacy_opencla
 db::postgres::tests::sync_agents_writes_and_preserves_preferred_intake_node_labels
 db::postgres::tests::worker_node_reseed_does_not_clobber_shared_agent_roster
 db::relay_dead_letter::tests::insert_read_back_detached_and_retention_roundtrip_pg
+db::session_transcripts::clear_fence_pg_tests::boundary_lookup_failure_preserves_legacy_persist_pg
+db::session_transcripts::clear_fence_pg_tests::bridge_owned_pre_clear_turn_is_blocked_and_post_clear_turn_is_reinjected_pg
+db::session_transcripts::clear_fence_pg_tests::pre_clear_turn_committed_after_boundary_is_not_reinjected_pg
 dispatch::dispatch_cancel::pg_observability_tests::cancel_emits_dispatch_result_observability_event
 dispatch::dispatch_context::pg_rereview_tests::pg_build_review_context_rereview_uses_pr_tracking_head_when_repo_root_dirty
 dispatch::dispatch_context::pg_rereview_tests::pg_canonical_worktree_fallback_omits_worktree_path_when_dirty
@@ -420,6 +429,9 @@ services::cluster::intake_router_hook::pg_tests::observe_mode_uses_live_foreign_
 services::cluster::intake_router_hook::pg_tests::observe_mode_uses_live_local_owner_without_mutation
 services::cluster::intake_router_hook::pg_tests::observe_mode_with_eligible_worker_returns_observed_without_inserting
 services::cluster::intake_router_hook::pg_tests::one_live_owner_beats_stale_duplicate_pg
+services::cluster::intake_router_hook::pg_tests::open_route_telemetry_preserves_foreign_owner_pg
+services::cluster::intake_router_hook::pg_tests::open_route_telemetry_preserves_local_owner_pg
+services::cluster::intake_router_hook::pg_tests::open_route_telemetry_preserves_no_owner_pg
 services::cluster::intake_router_hook::pg_tests::owner_beats_override_and_labels_pg
 services::cluster::intake_router_hook::pg_tests::paired_provider_owner_and_outbox_use_current_bot_provider_pg
 services::cluster::intake_router_hook::pg_tests::preserving_node_override_rejects_legacy_worker_pg
@@ -440,6 +452,8 @@ services::discord::idle_recap_interaction::tests::concurrent_recap_compact_claim
 services::discord::idle_recap_interaction::tests::recap_compact_claim_pg_rejects_owner_handoff_without_consuming_pointer
 services::discord::relay_recovery::circuit_breaker::tests::pg_alert_is_actionable_and_durably_one_shot_per_episode
 services::discord::relay_recovery::circuit_breaker::tests::progress_during_pg_stage_cancels_stale_alert_and_reopen_is_distinct
+services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests::activate_unknown_status_fails_safe_without_reopen_pg
+services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests::enqueue_default_off_leaves_all_circuit_columns_null_pg
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::direct_dispatch_carry_forward_admits_announcement_and_still_dedups
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::durable_duplicate_voice_announcement_pg_invokes_foreground_once
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::exact_owned_row_with_null_cwd_is_channel_scoped_empty_path
@@ -508,6 +522,13 @@ services::pipeline_override::tests::repo_write_accepts_unassigned_repo_card_with
 services::pipeline_override::tests::repo_write_rejects_malformed_existing_agent_override
 services::pipeline_override::tests::repo_write_rejects_state_id_that_would_fail_kanban_status_check
 services::pipeline_routes::tests::replace_stages_persists_backoff_round_trip_pg
+services::scheduled_messages::context_snapshot::postgres_tests::capture_refuses_empty_channel_pg
+services::scheduled_messages::context_snapshot::postgres_tests::capture_respects_clear_boundary_pg
+services::scheduled_messages::context_snapshot::postgres_tests::capture_then_validate_roundtrip_pg
+services::scheduled_messages::context_snapshot::postgres_tests::snapshot_is_immutable_against_post_capture_transcripts_pg
+services::scheduled_messages::context_snapshot::postgres_tests::validate_missing_snapshot_is_missing_pg
+services::scheduled_messages::context_snapshot::postgres_tests::validate_rejects_tampered_snapshot_pg
+services::scheduled_messages::context_snapshot::postgres_tests::validate_transient_db_error_is_not_missing_pg
 services::session_forwarding::tests::cancel_owner_does_not_fall_back_to_agent_binding_pg
 services::session_forwarding::tests::cancel_owner_ignores_disconnected_sessions_pg
 services::session_forwarding::tests::cancel_owner_matches_exact_channel_not_session_key_text_pg

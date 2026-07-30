@@ -264,6 +264,9 @@ services::cluster::intake_router_hook::pg_tests::observe_mode_uses_live_foreign_
 services::cluster::intake_router_hook::pg_tests::observe_mode_uses_live_local_owner_without_mutation
 services::cluster::intake_router_hook::pg_tests::observe_mode_with_eligible_worker_returns_observed_without_inserting
 services::cluster::intake_router_hook::pg_tests::one_live_owner_beats_stale_duplicate_pg
+services::cluster::intake_router_hook::pg_tests::open_route_telemetry_preserves_foreign_owner_pg
+services::cluster::intake_router_hook::pg_tests::open_route_telemetry_preserves_local_owner_pg
+services::cluster::intake_router_hook::pg_tests::open_route_telemetry_preserves_no_owner_pg
 services::cluster::intake_router_hook::pg_tests::owner_beats_override_and_labels_pg
 services::cluster::intake_router_hook::pg_tests::paired_provider_owner_and_outbox_use_current_bot_provider_pg
 services::cluster::intake_router_hook::pg_tests::preserving_node_override_rejects_legacy_worker_pg
@@ -280,6 +283,8 @@ services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backsto
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_flat_capture_pages_genuine_stall_pg
 services::discord::idle_cleanup_selector_tests::idle_cleanup_preserves_provider_selector_columns_pg
 services::discord::relay_recovery::circuit_breaker::tests::pg_alert_is_actionable_and_durably_one_shot_per_episode
+services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests::activate_unknown_status_fails_safe_without_reopen_pg
+services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests::enqueue_default_off_leaves_all_circuit_columns_null_pg
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::direct_dispatch_carry_forward_admits_announcement_and_still_dedups
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::exact_owned_row_with_null_cwd_is_channel_scoped_empty_path
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::fallback_refused_when_single_row_has_different_channel
@@ -393,6 +398,7 @@ src/services/cluster/intake_preflight.rs
 src/services/discord/catch_up/too_old_notice.rs
 src/services/discord/idle_recap_interaction.rs
 src/services/discord/mod.rs
+src/services/discord/relay_recovery_circuit_alert_producer.rs
 src/services/discord/relay_recovery_circuit_breaker.rs
 src/services/discord/router/message_handler/voice_announcement_route.rs
 src/services/discord/session_runtime.rs
