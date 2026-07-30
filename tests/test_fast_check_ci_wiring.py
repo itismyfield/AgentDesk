@@ -201,6 +201,46 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertEqual(test_job.count(command), 1)
         self.assertNotIn(command, job_block(workflow, "scripts"))
 
+    def test_terminal_delivery_evidence_regressions_flow_through_registered_required_context(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        changes_job = job_block(workflow, "changes")
+        test_job = job_block(workflow, "test_fast")
+        mirror_job = job_block(workflow, "fast_targeted_tests_required_context")
+        registered_required_contexts = {
+            "Lint",
+            "Script checks",
+            "Fast check (ubuntu-latest)",
+            "High-risk recovery",
+            "Dashboard (Node 22)",
+            "Fast targeted tests (ubuntu-latest)",
+        }
+
+        self.assertNotIn("terminal_delivery_evidence_tests:", workflow)
+        self.assertNotIn("terminal_delivery_evidence_required_context:", workflow)
+        for path in (
+            "src/services/discord/inflight.rs",
+            "src/services/discord/inflight/**",
+            "src/services/discord/tmux_watcher.rs",
+            "src/services/discord/tmux_watcher/**",
+            "src/services/discord/turn_bridge/terminal_outcome_delivery.rs",
+            "src/services/discord/turn_bridge/terminal_outcome_delivery/**",
+        ):
+            self.assertIn(f"- '{path}'", changes_job)
+        for command in (
+            "cargo test --lib inflight::terminal_delivery_evidence_loss::tests",
+            "cargo test --lib services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests",
+            "cargo test --lib watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row",
+            "cargo test --lib identity_guarded_save_rejects_stale_write_against_newer_turn",
+        ):
+            self.assertIn(command, test_job)
+        self.assertIn("name: Fast targeted tests (ubuntu-latest)", mirror_job)
+        self.assertIn("Fast targeted tests (ubuntu-latest)", registered_required_contexts)
+        self.assertIn("- test_fast", mirror_job)
+        self.assertIn("FILTER_NAME: pg_db", mirror_job)
+        self.assertIn("FILTER_OUTPUT: ${{ needs.changes.outputs.pg_db }}", mirror_job)
+        self.assertIn("UPSTREAM_JOB_NAME: test_fast", mirror_job)
+        self.assertIn("UPSTREAM_RESULT: ${{ needs.test_fast.result }}", mirror_job)
+
     def test_pr_cross_os_lane_is_compile_only(self) -> None:
         job = job_block(PR_WORKFLOW.read_text(encoding="utf-8"), "check_fast_cross_os")
 

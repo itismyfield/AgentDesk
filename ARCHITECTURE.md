@@ -576,6 +576,7 @@ src/
 │   │   │   ├── removal.rs
 │   │   │   ├── save_store.rs
 │   │   │   ├── store.rs
+│   │   │   ├── terminal_delivery_evidence_loss.rs
 │   │   │   └── watcher_state.rs
 │   │   ├── meeting_orchestrator/
 │   │   │   ├── lifecycle.rs
@@ -937,6 +938,7 @@ src/
 │   │   │   │   ├── cancel_prompt_replace.rs
 │   │   │   │   ├── contracts.rs
 │   │   │   │   ├── delivery_epilogue.rs
+│   │   │   │   ├── delivery_epilogue_tests.rs
 │   │   │   │   ├── empty_response_recovery.rs
 │   │   │   │   ├── prompt_too_long_guidance.rs
 │   │   │   │   ├── queue_retry_silence.rs

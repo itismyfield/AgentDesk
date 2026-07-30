@@ -12,6 +12,7 @@ mod finalizer_identity;
 #[cfg(test)]
 mod invariant_test_capture;
 mod model;
+pub(in crate::services::discord) mod terminal_delivery_evidence_loss;
 
 // #3479: the pure domain model moved to `model.rs`; re-export every public
 // item at its original visibility so existing `inflight::*` / `super::*`
@@ -1517,6 +1518,46 @@ mod stall_recovery_tests {
             persisted.response_sent_offset <= persisted.full_response.len(),
             "response_sent_offset must stay in bounds"
         );
+    }
+
+    /// A stale watcher terminal commit must exercise the real identity gate and
+    /// return `Skipped` without modifying the newer row. The separate outcome
+    /// routing tests verify the operator-visible WARN for this typed result.
+    #[test]
+    fn watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row() {
+        let temp = TempDir::new().unwrap();
+        let channel_id = 50_250_001;
+        let session = "AgentDesk-claude-5025";
+        let stale = seed_watcher_stream_state(temp.path(), channel_id, session, "old body", 100);
+        let stale_identity = InflightTurnIdentity::from_state(&stale);
+
+        let mut newer = stale.clone();
+        newer.user_msg_id = stale.user_msg_id + 1;
+        newer.current_msg_id = stale.current_msg_id + 1;
+        newer.full_response = "new turn body".to_string();
+        newer.response_sent_offset = 0;
+        newer.terminal_delivery_committed = false;
+        force_write_state(temp.path(), &newer);
+
+        let outcome = commit_watcher_terminal_delivery_locked_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            channel_id,
+            &stale_identity,
+            session,
+            WatcherTerminalCommitPatch {
+                full_response: "delivered old body".to_string(),
+                last_offset: 256,
+                last_watcher_relayed_offset: Some(64),
+                last_watcher_relayed_generation_mtime_ns: Some(9),
+            },
+        );
+
+        assert_eq!(outcome, WatcherTerminalCommitOutcome::Skipped);
+        let persisted = loaded_row(temp.path(), channel_id);
+        assert_eq!(persisted.user_msg_id, newer.user_msg_id);
+        assert_eq!(persisted.full_response, "new turn body");
+        assert!(!persisted.terminal_delivery_committed);
     }
 
     /// #3558: a forward commit (larger watermark than disk) advances normally —

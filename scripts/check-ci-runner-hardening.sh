@@ -100,12 +100,22 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.pg_db == 'true'",
     "runs_on" => "ubuntu-latest",
-    # #4913 re-pins after adding the trusted session-forwarding test to the
-    # existing toolchain-provisioned targeted lane.
-    "job_sha256" => "86804b84bc35aacdf93d9f12607ec2fdf43d5c0bf1c67bb136b9b373365c16a4",
+    # #5025 re-pins after adding the production bridge-epilogue routing test to
+    # the existing toolchain-provisioned targeted lane whose mirror is required.
+    "job_sha256" => "561114d54ad205a9e65f82c5ce27c79b03069e26c94af0d35b515fe6fce3f082",
     "cargo_steps" => {
       "Trusted session forwarding tests" => {
         "commands" => ["env -u AGENTDESK_ROOT_DIR cargo test --lib services::session_forwarding -- --skip _pg --skip pg_ --skip postgres"],
+        "continue_on_error" => nil,
+        "timeout_minutes" => 10,
+      },
+      "Terminal delivery evidence regressions" => {
+        "commands" => [
+          "env -u AGENTDESK_ROOT_DIR cargo test --lib inflight::terminal_delivery_evidence_loss::tests",
+          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests",
+          "env -u AGENTDESK_ROOT_DIR cargo test --lib watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row",
+          "env -u AGENTDESK_ROOT_DIR cargo test --lib identity_guarded_save_rejects_stale_write_against_newer_turn",
+        ],
         "continue_on_error" => nil,
         "timeout_minutes" => 10,
       },
