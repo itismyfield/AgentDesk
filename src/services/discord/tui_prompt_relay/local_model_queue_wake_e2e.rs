@@ -343,6 +343,7 @@ async fn completion_lifecycle_rejects_event_after_queue_eligible() {
 }
 
 #[tokio::test]
+#[should_panic(expected = "promoted B must publish MailboxReleased before QueueEligible")]
 async fn completion_lifecycle_rejects_queue_eligible_before_mailbox_release() {
     let channel_id = ChannelId::new(CHANNEL_ID);
     completion_guard_must_panic(vec![
