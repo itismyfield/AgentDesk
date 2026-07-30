@@ -296,6 +296,21 @@ async fn inject_claimed_intervention(
     })
 }
 
+async fn register_manual_steer_turn(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+    intervention: &crate::services::turn_orchestrator::Intervention,
+) {
+    shared
+        .mailbox(channel_id)
+        .restore_active_turn(
+            Arc::new(crate::services::provider::CancelToken::new()),
+            intervention.author_id,
+            intervention.message_id,
+        )
+        .await;
+}
+
 pub(super) async fn handle_manual_steer_interaction(
     ctx: &serenity::Context,
     component: &serenity::ComponentInteraction,
@@ -387,14 +402,7 @@ pub(super) async fn handle_manual_steer_interaction(
                 dispatch_lease,
             )
             .await;
-            data.shared
-                .mailbox(component.channel_id)
-                .restore_active_turn(
-                    Arc::new(crate::services::provider::CancelToken::new()),
-                    intervention.author_id,
-                    intervention.message_id,
-                )
-                .await;
+            register_manual_steer_turn(&data.shared, component.channel_id, &intervention).await;
             data.shared
                 .remove_queued_placeholder(component.channel_id, intervention.message_id)
                 .await;
@@ -426,14 +434,7 @@ pub(super) async fn handle_manual_steer_interaction(
                 dispatch_lease,
             )
             .await;
-            data.shared
-                .mailbox(component.channel_id)
-                .restore_active_turn(
-                    Arc::new(crate::services::provider::CancelToken::new()),
-                    intervention.author_id,
-                    intervention.message_id,
-                )
-                .await;
+            register_manual_steer_turn(&data.shared, component.channel_id, &intervention).await;
             data.shared
                 .remove_queued_placeholder(component.channel_id, intervention.message_id)
                 .await;
