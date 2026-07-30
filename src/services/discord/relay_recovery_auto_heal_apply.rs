@@ -355,8 +355,9 @@ mod tests {
     use poise::serenity_prelude::{ChannelId, Http, MessageId, UserId};
 
     use super::super::auto_heal_attempts::{
-        AUTO_HEAL_REFUND_BACKOFF_THRESHOLD, auto_heal_attempt_generation, auto_heal_key,
-        auto_heal_test_lock, clear_auto_heal_attempts_for_tests, reserve_auto_heal_attempt,
+        AUTO_HEAL_REFUND_BACKOFF_THRESHOLD, auto_heal_attempt_generation, auto_heal_attempt_state,
+        auto_heal_key, auto_heal_test_lock, clear_auto_heal_attempts_for_tests,
+        reserve_auto_heal_attempt,
     };
     use super::*;
     use crate::services::provider::CancelToken;
@@ -910,6 +911,12 @@ mod tests {
         );
 
         assert_eq!(apply_result.status, "reattach_confirm_startup_grace");
+        assert_eq!(
+            auto_heal_attempt_state(&key)
+                .map(|(_, refunds, retry_at, healed)| (refunds, retry_at, healed)),
+            Some((0, None, 0)),
+            "an inconclusive probe must neither commit healed state nor manufacture failure history"
+        );
         assert_eq!(
             reserve_auto_heal_attempt(&key, 3_000, 1).map(|(remaining, _)| remaining),
             Err("auto_heal_rate_limited"),

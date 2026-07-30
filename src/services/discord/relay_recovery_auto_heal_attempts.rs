@@ -41,6 +41,7 @@ struct AttemptWindow {
     consecutive_refunds: u32,
     retry_not_before_ms: Option<i64>,
     generation: u64,
+    healed_commits: u64,
 }
 
 impl AttemptWindow {
@@ -51,6 +52,7 @@ impl AttemptWindow {
             consecutive_refunds: 0,
             retry_not_before_ms: None,
             generation: 0,
+            healed_commits: 0,
         }
     }
 
@@ -143,12 +145,24 @@ pub(super) fn reserve_auto_heal_attempt(
 }
 
 #[cfg(test)]
-pub(super) fn auto_heal_attempt_generation(key: &str) -> Option<u64> {
+pub(super) fn auto_heal_attempt_state(key: &str) -> Option<(u64, u32, Option<i64>, u64)> {
     auto_heal_attempts()
         .lock()
         .expect("relay recovery attempt map poisoned")
         .get(key)
-        .map(|window| window.generation)
+        .map(|window| {
+            (
+                window.generation,
+                window.consecutive_refunds,
+                window.retry_not_before_ms,
+                window.healed_commits,
+            )
+        })
+}
+
+#[cfg(test)]
+pub(super) fn auto_heal_attempt_generation(key: &str) -> Option<u64> {
+    auto_heal_attempt_state(key).map(|(generation, _, _, _)| generation)
 }
 
 pub(super) fn refund_auto_heal_attempt_if_current(key: &str, generation: u64, now_ms: i64) {
@@ -258,6 +272,7 @@ pub(super) fn commit_auto_heal_attempt(key: &str) {
 }
 
 fn commit_auto_heal_attempt_in_window(window: &mut AttemptWindow) {
+    window.healed_commits = window.healed_commits.saturating_add(1);
     window.consecutive_refunds = 0;
     window.retry_not_before_ms = None;
 }
