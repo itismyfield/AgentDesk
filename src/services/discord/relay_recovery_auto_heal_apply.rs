@@ -281,10 +281,17 @@ fn settle_auto_heal_confirmation(
             record_auto_heal_confirm_failure(&key, now_ms);
         }
         ReattachConfirmation::NotRequired | ReattachConfirmation::Confirmed => {
+            // #5021: `NotRequired` is "confirmation was skipped", not
+            // "confirmation passed" — `classify_reattach_confirmation` returns it
+            // whenever no watcher was spawned, so a no-op reuse never proves that
+            // delivery recovered. Settling a round that repaired nothing as a
+            // healed round would clear the consecutive-refund counter and the
+            // retry window, leaving the escalating backoff unreachable forever.
             if matches!(
                 apply_result.status,
                 "rebind_failed" | "provider_unavailable" | "reattach_episode_changed"
-            ) {
+            ) || relay_recovery_status_repaired_nothing(apply_result.status)
+            {
                 refund_auto_heal_attempt(&key, now_ms);
             } else {
                 commit_auto_heal_attempt(&key);
@@ -300,8 +307,8 @@ mod tests {
     use poise::serenity_prelude::{ChannelId, Http, MessageId, UserId};
 
     use super::super::auto_heal_attempts::{
-        auto_heal_key, auto_heal_test_lock, clear_auto_heal_attempts_for_tests,
-        reserve_auto_heal_attempt,
+        AUTO_HEAL_REFUND_BACKOFF_THRESHOLD, auto_heal_key, auto_heal_test_lock,
+        clear_auto_heal_attempts_for_tests, reserve_auto_heal_attempt,
     };
     use super::*;
     use crate::services::provider::CancelToken;
@@ -396,6 +403,111 @@ mod tests {
             reserve_auto_heal_attempt(&key, 3_000, 1),
             Err("auto_heal_rate_limited"),
             "in-flight relay must not refund an automatic reattach reservation before confirmed frontier progress"
+        );
+    }
+
+    /// A window budget deliberately larger than `AUTO_HEAL_REFUND_BACKOFF_THRESHOLD`
+    /// so the plain per-window rate limiter cannot mask the escalating backoff
+    /// this test is about.
+    const NOOP_REUSE_WINDOW_BUDGET: u32 = 8;
+
+    fn noop_reuse_apply_result() -> RelayRecoveryApplyResult {
+        RelayRecoveryApplyResult {
+            status: "reuse_existing_live_watcher",
+            removed_thread_proofs: 0,
+            removed_mailbox_token: false,
+            post_mailbox_has_cancel_token: None,
+            post_mailbox_queue_depth: None,
+            // `reattach_apply_status(false)`: the claim found a live incumbent
+            // and changed nothing.
+            reattach_watcher_spawned: Some(false),
+            reattach_watcher_replaced: Some(false),
+            reattach_initial_offset: None,
+            reattach_error: None,
+        }
+    }
+
+    /// #5021 regression: `reuse_existing_live_watcher` repairs nothing, so it must
+    /// not settle as a healed round.
+    ///
+    /// If such a round commits, `commit_auto_heal_attempt` clears
+    /// `consecutive_refunds` and `retry_not_before_ms` on every cycle, so the
+    /// escalating failure backoff can never engage. A stall classification that
+    /// keeps re-firing (for example a false-positive `tmux_alive_relay_dead`) then
+    /// drives an unbounded reattach/redrive loop that never converges, never
+    /// escalates, and never surfaces as a failure — observed live on channel
+    /// 1479671298497183835 as 340 recovery decisions with zero convergence.
+    #[tokio::test]
+    async fn repeated_noop_reuse_rounds_escalate_into_failure_backoff() {
+        let _guard = auto_heal_test_lock().lock().await;
+        clear_auto_heal_attempts_for_tests();
+        let key = auto_heal_key(
+            "claude",
+            1_479_671_298_497_183_835,
+            RelayRecoveryActionKind::ReattachWatcher,
+            RelayRecoveryApplySource::StallWatchdog,
+        );
+
+        let mut now_ms = 1_000_i64;
+        for _ in 0..AUTO_HEAL_REFUND_BACKOFF_THRESHOLD {
+            let _ = reserve_auto_heal_attempt(&key, now_ms, NOOP_REUSE_WINDOW_BUDGET);
+            let mut apply_result = noop_reuse_apply_result();
+            settle_auto_heal_confirmation(
+                &mut apply_result,
+                ReattachConfirmation::NotRequired,
+                &key,
+                now_ms,
+            );
+            assert_eq!(apply_result.status, "reuse_existing_live_watcher");
+            now_ms += 1_000;
+        }
+
+        assert_eq!(
+            remaining_auto_heal_attempts(&key, now_ms, NOOP_REUSE_WINDOW_BUDGET),
+            0,
+            "consecutive rounds that repaired nothing must open the escalating retry window"
+        );
+        assert_eq!(
+            reserve_auto_heal_attempt(&key, now_ms, NOOP_REUSE_WINDOW_BUDGET),
+            Err("auto_heal_failure_backoff"),
+            "a reattach that repaired nothing must not keep resetting the failure backoff; \
+             otherwise a re-firing stall classification loops reattach/redrive forever"
+        );
+    }
+
+    /// Guards the opposite over-correction: a genuinely spawned and confirmed
+    /// reattach really did heal, so it must still commit and leave the retry
+    /// window closed.
+    #[tokio::test]
+    async fn confirmed_spawned_reattach_still_commits_without_opening_backoff() {
+        let _guard = auto_heal_test_lock().lock().await;
+        clear_auto_heal_attempts_for_tests();
+        let key = auto_heal_key(
+            "claude",
+            1_479_671_298_497_183_836,
+            RelayRecoveryActionKind::ReattachWatcher,
+            RelayRecoveryApplySource::StallWatchdog,
+        );
+
+        let mut now_ms = 1_000_i64;
+        for _ in 0..AUTO_HEAL_REFUND_BACKOFF_THRESHOLD {
+            let _ = reserve_auto_heal_attempt(&key, now_ms, NOOP_REUSE_WINDOW_BUDGET);
+            let mut apply_result = noop_reuse_apply_result();
+            apply_result.status = "reattached_watcher";
+            apply_result.reattach_watcher_spawned = Some(true);
+            settle_auto_heal_confirmation(
+                &mut apply_result,
+                ReattachConfirmation::Confirmed,
+                &key,
+                now_ms,
+            );
+            now_ms += 1_000;
+        }
+
+        assert!(
+            reserve_auto_heal_attempt(&key, now_ms, NOOP_REUSE_WINDOW_BUDGET).is_ok(),
+            "a confirmed reattach genuinely healed the relay, so it must not be \
+             penalised with the failure backoff"
         );
     }
 

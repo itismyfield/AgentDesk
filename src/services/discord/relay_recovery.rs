@@ -365,6 +365,24 @@ fn relay_recovery_status_counts_as_applied(status: &'static str) -> bool {
     )
 }
 
+/// #5021: statuses that report a successful *apply* while performing no actual
+/// repair.
+///
+/// `reuse_existing_live_watcher` means the claim found an already-live
+/// incumbent and changed nothing (`reattach_apply_status(false)`), so relay
+/// delivery is left exactly as healthy — or as stalled — as it was before the
+/// attempt. Such a round still counts as applied for tick sequencing (it
+/// legitimately suppresses the destructive watchdog branches downstream of
+/// `relay_dead_reattach::try_apply`), but it must NOT settle as a *healed*
+/// round: committing it clears `consecutive_refunds` and `retry_not_before_ms`,
+/// which makes the escalating failure backoff in `refund_auto_heal_attempt`
+/// permanently unreachable. A stall classification that keeps re-firing then
+/// drives an unbounded reattach/redrive loop that never converges, never
+/// escalates, and never surfaces as a failure.
+fn relay_recovery_status_repaired_nothing(status: &str) -> bool {
+    status == "reuse_existing_live_watcher"
+}
+
 /// #3277 verify-2: `rebind_inflight_for_channel` reports apply honestly through the claim
 /// (`claim_or_reuse_watcher`, source `"recovery_restore_inflight"`), which
 /// REPLACES a cancelled / heartbeat-stale / paused / output-path-changed
