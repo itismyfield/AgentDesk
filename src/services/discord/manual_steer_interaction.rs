@@ -89,6 +89,21 @@ async fn render_current_head_card(
         queued_card_components(head.message_id),
     )
     .await?;
+    let persist_lock = shared.queued_placeholders_persist_lock(channel_id);
+    let _persist_guard = persist_lock.lock().await;
+    let stale_owners: Vec<_> = shared
+        .queued
+        .queued_placeholders
+        .iter()
+        .filter_map(|entry| {
+            ((*entry.key()).0 == channel_id && *entry.value() == placeholder_message_id)
+                .then_some((*entry.key()).1)
+        })
+        .collect();
+    for owner in stale_owners {
+        shared.remove_queued_placeholder_locked(channel_id, owner);
+    }
+    shared.insert_queued_placeholder_locked(channel_id, head.message_id, placeholder_message_id);
     let key = crate::services::discord::placeholder_controller::PlaceholderKey {
         provider: provider.clone(),
         channel_id,
@@ -373,6 +388,14 @@ pub(super) async fn handle_manual_steer_interaction(
             )
             .await;
             data.shared
+                .mailbox(component.channel_id)
+                .restore_active_turn(
+                    Arc::new(crate::services::provider::CancelToken::new()),
+                    intervention.author_id,
+                    intervention.message_id,
+                )
+                .await;
+            data.shared
                 .remove_queued_placeholder(component.channel_id, intervention.message_id)
                 .await;
             render_current_head_response(ctx, component, data, "즉시 주입됨").await;
@@ -394,8 +417,34 @@ pub(super) async fn handle_manual_steer_interaction(
             };
             render_current_head_response(ctx, component, data, notice).await;
         }
-        crate::services::tui_steering::SteeringOutcome::PossiblyDelivered(_)
-        | crate::services::tui_steering::SteeringOutcome::Injected => unreachable!(),
+        crate::services::tui_steering::SteeringOutcome::PossiblyDelivered(_) => {
+            mailbox_abandon_unclaimed_dispatch_after_success(
+                &data.shared,
+                &data.provider,
+                component.channel_id,
+                intervention.message_id,
+                dispatch_lease,
+            )
+            .await;
+            data.shared
+                .mailbox(component.channel_id)
+                .restore_active_turn(
+                    Arc::new(crate::services::provider::CancelToken::new()),
+                    intervention.author_id,
+                    intervention.message_id,
+                )
+                .await;
+            data.shared
+                .remove_queued_placeholder(component.channel_id, intervention.message_id)
+                .await;
+            render_current_head_response(
+                ctx,
+                component,
+                data,
+                "주입됐을 수 있어 중복을 막기 위해 큐로 복원하지 않았습니다.",
+            )
+            .await;
+        }
         crate::services::tui_steering::SteeringOutcome::Unsafe(_)
         | crate::services::tui_steering::SteeringOutcome::ExistingMailbox => {
             let restored = mailbox_restore_manual_steer_claim(
