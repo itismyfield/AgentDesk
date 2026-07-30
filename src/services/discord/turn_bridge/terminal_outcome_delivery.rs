@@ -40,6 +40,8 @@ mod busy_followup_retry;
 mod cancel_prompt_replace;
 mod contracts;
 mod delivery_epilogue;
+#[cfg(test)]
+mod delivery_epilogue_tests;
 mod empty_response_recovery;
 mod prompt_too_long_guidance;
 mod queue_retry_silence;
