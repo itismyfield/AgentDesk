@@ -125,6 +125,13 @@ impl Intervention {
     }
 
     pub(crate) fn is_headless_runtime_mismatch_defer(&self) -> bool {
+        // This legacy marker is deliberately narrow but not typed: only the
+        // internal headless mismatch path currently creates bot-authored
+        // sentinel user 1 interventions, and voice items always carry metadata.
+        // Reusing either sentinel user 1 or this field combination for another
+        // synthetic producer would widen the #706 restore bypass. Replace this
+        // predicate with an explicit persisted intervention-origin enum before
+        // adding such a producer.
         self.author_id.get() == 1 && self.author_is_bot && self.voice_announcement.is_none()
     }
 

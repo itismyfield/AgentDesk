@@ -205,6 +205,10 @@ pub(super) fn reconcile_managed_tmux_runtime_kind_for_config(
     let revalidated_inflight = inflight_evidence();
     let pane_live_at_commit = live_pane(tmux_session_name);
     let owner_matches_at_commit = target_still_owned(tmux_session_name);
+    // A stale inflight row may classify the transcript as idle, but it remains
+    // durable ownership evidence until an existing identity-guarded recovery
+    // path clears it. Never kill while any open row remains; repeated calls will
+    // re-probe and proceed once that owner is actually gone.
     let target_unchanged = pane_live_at_commit
         && owner_matches_at_commit
         && revalidated_observed == Some(observed)
