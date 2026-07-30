@@ -191,45 +191,17 @@ async fn start_restart_seed_turn(ctx: &Context<'_>) -> RestartSeedStatus {
 }
 
 #[cfg(test)]
-mod restart_seed_retry_tests {
-    use super::*;
-    use std::sync::{Arc, Mutex};
-
-    #[tokio::test(start_paused = true)]
-    async fn restart_conflict_retries_reuse_one_logical_request_identity_5015() {
-        let reservations = Arc::new(Mutex::new(Vec::new()));
-        let seen = reservations.clone();
-        let mut attempts = 0_usize;
-
-        let status = retry_restart_seed_turn(move |reservation| {
-            attempts += 1;
-            seen.lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .push(reservation);
-            async move {
-                if attempts < 3 {
-                    Err(super::super::super::router::HeadlessTurnStartError::Conflict(
-                        "deferred mismatch".to_string(),
-                    ))
-                } else {
-                    Ok(super::super::super::router::HeadlessTurnStartOutcome {
-                        turn_id: "restart-seed".to_string(),
-                        status: super::super::super::router::HeadlessTurnStartStatus::Started,
-                    })
-                }
-            }
-        })
-        .await;
-
-        assert_eq!(status, RestartSeedStatus::Started);
-        let reservations = reservations
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        assert_eq!(reservations.len(), 3);
-        assert!(reservations
-            .windows(2)
-            .all(|pair| pair[0] == pair[1]));
-    }
+pub(super) async fn retry_restart_seed_turn_for_test<F, Fut>(start: F) -> RestartSeedStatus
+where
+    F: FnMut(super::super::router::HeadlessTurnReservation) -> Fut,
+    Fut: std::future::Future<
+        Output = Result<
+            super::super::router::HeadlessTurnStartOutcome,
+            super::super::router::HeadlessTurnStartError,
+        >,
+    >,
+{
+    retry_restart_seed_turn(start).await
 }
 
 async fn run_restart(ctx: Context<'_>, command_name: &'static str) -> Result<(), Error> {

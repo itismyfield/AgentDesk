@@ -162,6 +162,49 @@ pub(in crate::services::discord) use voice::{
 pub(super) use voice::{cmd_vc_join, cmd_vc_leave, cmd_voice};
 
 #[cfg(test)]
+mod restart_seed_retry_tests {
+    use super::restart::{RestartSeedStatus, retry_restart_seed_turn_for_test};
+    use crate::services::discord::router::{
+        HeadlessTurnStartError, HeadlessTurnStartOutcome, HeadlessTurnStartStatus,
+    };
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test(start_paused = true)]
+    async fn restart_conflict_retries_reuse_one_logical_request_identity_5015() {
+        let reservations = Arc::new(Mutex::new(Vec::new()));
+        let seen = reservations.clone();
+        let mut attempts = 0_usize;
+
+        let status = retry_restart_seed_turn_for_test(move |reservation| {
+            attempts += 1;
+            seen.lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .push(reservation);
+            async move {
+                if attempts < 3 {
+                    Err(HeadlessTurnStartError::Conflict(
+                        "deferred mismatch".to_string(),
+                    ))
+                } else {
+                    Ok(HeadlessTurnStartOutcome {
+                        turn_id: "restart-seed".to_string(),
+                        status: HeadlessTurnStartStatus::Started,
+                    })
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(status, RestartSeedStatus::Started);
+        let reservations = reservations
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        assert_eq!(reservations.len(), 3);
+        assert!(reservations.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+}
+
+#[cfg(test)]
 mod response_wording_tests {
     use super::{
         ALREADY_STOPPING_RESPONSE, NO_ACTIVE_TURN_RESPONSE, SESSION_CLEARED_RESPONSE,
