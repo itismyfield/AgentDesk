@@ -414,8 +414,7 @@ fn build_relay_health_snapshot(input: RelayHealthBuildInput) -> RelayHealthSnaps
         pending_thread_proof: input.thread_proof.parent_channel_id.is_some()
             || input.thread_proof.thread_channel_id.is_some(),
         parent_channel_id: input.thread_proof.parent_channel_id,
-        thread_channel_id: input.thread_proof.thread_channel_id,
-        last_relay_ts_ms: (input.last_relay_ts_ms > 0).then_some(input.last_relay_ts_ms),
+        thread_channel_id: input.thread_proof.thread_channel_id, last_relay_ts_ms: (input.last_relay_ts_ms > 0).then_some(input.last_relay_ts_ms),
         last_outbound_activity_ms: input.last_outbound_activity_ms,
         confirmed_delivery_since_turn_start: discord::outbound::delivery_evidence_store::confirmed_delivery_since_turn_start(ChannelId::new(input.channel_id)),
         last_capture_offset: input.last_capture_offset,
