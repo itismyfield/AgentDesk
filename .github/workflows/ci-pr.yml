@@ -356,10 +356,16 @@ jobs:
         run: npm run test:policies
 
       # `lint` owns fmt/clippy in its independent required mirror. Keep this
-      # required Ubuntu lane to compilation and policy tests; main and nightly
-      # retain the longer non-PG test coverage outside the PR critical path.
+      # required Ubuntu lane to compilation, policy tests, and the focused
+      # local-model queue-wake regression; main and nightly retain the longer
+      # non-PG test coverage outside the PR critical path.
       - name: cargo check
         run: just cargo-check
+
+      # #5003: this production-path E2E previously ran only in main's broad
+      # non-PG lane, so test-only fixes could merge without executing it on PRs.
+      - name: Local model durable queue wake regression
+        run: env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1
 
       - name: sccache stats
         if: always()

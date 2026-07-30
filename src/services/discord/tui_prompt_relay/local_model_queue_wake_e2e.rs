@@ -528,9 +528,10 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
         .insert(channel_id, test_watcher_handle(tmux, &transcript_path));
     super::spawn_tui_prompt_relay(shared.clone(), ProviderKind::Claude);
 
-    // Subscribe after draining A's release event. This excludes events published between that
-    // drain and this subscription from the local-only assertion. The relay spawn in that interval
-    // is a likely publisher, but its event source has not yet been characterized.
+    // Subscribe after draining A's release event. The local-only path must not emit the
+    // queue-eligible edge that drives another dequeue. A MailboxReleased edge for promoted B is
+    // allowed: it reports B's independent lifecycle and the queue listener explicitly withholds
+    // dispatch until a later QueueEligible admission edge.
     let mut local_only_completion_rx =
         super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
     let command_half = "<command-message>x</command-message>\n<command-name>/model</command-name>";
@@ -609,9 +610,17 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
     .await
     {
         Err(_) => {}
-        Ok(Ok(event)) => panic!(
-            "local-only halves must not publish completion events; received phase={:?}, turn_id={:?}, channel_id={}",
+        Ok(Ok(event)) if event.queue_is_eligible() => panic!(
+            "local-only halves must not make a turn queue-eligible; received phase={:?}, turn_id={:?}, channel_id={}",
             event.phase, event.turn_id, event.channel_id
+        ),
+        Ok(Ok(event)) => assert_eq!(
+            event,
+            super::super::turn_completion_events::TurnCompletionEvent::mailbox_released(
+                channel_id,
+                Some(B_MESSAGE_ID),
+            ),
+            "the only non-eligible edge admitted in this window is B's independent mailbox release"
         ),
         Ok(Err(error)) => {
             panic!("local-only completion receiver must remain open; recv error={error:?}")
