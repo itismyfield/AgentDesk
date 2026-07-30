@@ -206,97 +206,108 @@ pub(super) async fn apply_relay_recovery_decision(
                         )
                         .await;
                         if gate.is_allowed() {
-                            let current = super::inflight::load_inflight_state(
-                                provider,
-                                owner_channel_id.get(),
-                            );
+                            #[cfg(test)]
+                            super::run_destructive_cancel_post_gate_hook_for_tests();
                             let mailbox_active_user_msg_id =
                                 mailbox_snapshot(shared, owner_channel_id)
                                     .await
                                     .active_user_message_id
                                     .map(|id| id.get());
-                            let current_matches_probe = current.as_ref().is_some_and(|state| {
-                                probe.pin.matches_state(state)
-                                    && mailbox_active_user_msg_id
-                                        == probe.pin.mailbox_active_user_msg_id
-                                    && state.updated_at == probe.updated_at
-                                    && state.save_generation == probe.save_generation
-                            });
-                            if !current_matches_probe {
+                            if mailbox_active_user_msg_id != probe.pin.mailbox_active_user_msg_id {
                                 tracing::warn!(
                                     target: "agentdesk::discord::relay_recovery",
                                     provider = provider.as_str(),
                                     channel_id = decision.channel_id,
                                     watcher_owner_channel_id = owner_channel_id.get(),
                                     death_evidence = gate.allowed_reason().unwrap_or("unknown"),
-                                    expected_updated_at = %probe.updated_at,
-                                    current_updated_at = %current.as_ref().map(|state| state.updated_at.as_str()).unwrap_or("<missing>"),
-                                    expected_save_generation = probe.save_generation,
-                                    current_save_generation = current.as_ref().map(|state| state.save_generation).unwrap_or(0),
                                     expected_mailbox_active_user_msg_id = probe.pin.mailbox_active_user_msg_id.unwrap_or(0),
                                     mailbox_active_user_msg_id = mailbox_active_user_msg_id.unwrap_or(0),
-                                    "relay recovery skipped destructive watcher cancel after gate; owner row changed during death-evidence reprobe"
+                                    "relay recovery skipped destructive watcher cancel after gate; mailbox episode changed"
                                 );
                             } else if let Some((tmux_session_name, output_path, cancel)) =
                                 expected_watcher.as_ref()
                             {
-                                let watcher_removed =
-                                    shared.tmux_watchers.cancel_and_remove_channel_if_current(
-                                        &owner_channel_id,
-                                        tmux_session_name,
-                                        output_path,
-                                        cancel,
+                                let expected_identity = probe.inflight_identity.clone();
+                                let cancel_for_commit = cancel.clone();
+                                let commit_outcome =
+                                    super::inflight::commit_destructive_cancel_locked(
+                                        provider,
+                                        owner_channel_id.get(),
+                                        &expected_identity,
+                                        &probe.updated_at,
+                                        probe.save_generation,
+                                        move |_| {
+                                            cancel_for_commit.store(true, Ordering::Release);
+                                            Ok(super::inflight::CommitEvidence::CancelledWatcher)
+                                        },
                                     );
-                                if !watcher_removed {
+                                if commit_outcome
+                                    != super::inflight::DestructiveCancelCommitOutcome::CommittedCancelled
+                                {
                                     tracing::warn!(
                                         target: "agentdesk::discord::relay_recovery",
                                         provider = provider.as_str(),
                                         channel_id = decision.channel_id,
                                         watcher_owner_channel_id = owner_channel_id.get(),
                                         death_evidence = gate.allowed_reason().unwrap_or("unknown"),
-                                        "relay recovery skipped destructive watcher cancel after gate; expected watcher was not current"
+                                        ?commit_outcome,
+                                        "relay recovery skipped destructive watcher cancel after gate; flock-held pin commit failed"
                                     );
                                 } else {
-                                    let current =
-                                        current.expect("checked by current_matches_probe");
-                                    let lifecycle_identity =
-                                        super::inflight::InflightTurnIdentity::from_state(&current);
-                                    let lifecycle_updated_at = current.updated_at.clone();
-                                    let lifecycle_save_generation = current.save_generation;
-                                    let finalize_outcome = finalize_cancelled_watcher_owner_turn(
-                                        shared,
-                                        provider,
-                                        decision,
-                                        owner_channel_id,
-                                    )
-                                    .await;
-                                    let lifecycle_clear_outcome =
-                                        super::inflight::clear_lifecycle_inflight_state_if_matches_identity_after_death_evidence(
-                                            provider,
-                                            owner_channel_id.get(),
-                                            &lifecycle_identity,
-                                            &lifecycle_updated_at,
-                                            lifecycle_save_generation,
+                                    // The flock is released before registry CAS; the two lock domains never overlap.
+                                    let watcher_removed =
+                                        shared.tmux_watchers.cancel_and_remove_channel_if_current(
+                                            &owner_channel_id,
+                                            tmux_session_name,
+                                            output_path,
+                                            cancel,
                                         );
-                                    tracing::warn!(
-                                        target: "agentdesk::discord::relay_recovery",
-                                        provider = provider.as_str(),
-                                        channel_id = decision.channel_id,
-                                        watcher_owner_channel_id = owner_channel_id.get(),
-                                        last_relay_offset = decision.evidence.last_relay_offset,
-                                        last_capture_offset = ?decision.evidence.last_capture_offset,
-                                        unread_bytes = ?decision.evidence.unread_bytes,
-                                        death_evidence = gate.allowed_reason().unwrap_or("unknown"),
-                                        watcher_removed,
-                                        lifecycle_clear_outcome = ?lifecycle_clear_outcome,
-                                        finalizer_outcome = match finalize_outcome {
-                                            Some(super::turn_finalizer::FinalizeOutcome::Finalized { .. }) => "finalized",
-                                            Some(super::turn_finalizer::FinalizeOutcome::AlreadyFinalized) => "already_finalized",
-                                            Some(super::turn_finalizer::FinalizeOutcome::Deferred) => "deferred",
-                                            None => "missing_identity",
-                                        },
-                                        "relay recovery cancelled watcher with death evidence before reattach"
-                                    );
+                                    if !watcher_removed {
+                                        tracing::warn!(
+                                            target: "agentdesk::discord::relay_recovery",
+                                            provider = provider.as_str(),
+                                            channel_id = decision.channel_id,
+                                            watcher_owner_channel_id = owner_channel_id.get(),
+                                            death_evidence = gate.allowed_reason().unwrap_or("unknown"),
+                                            "relay recovery skipped finalizer after committed cancel; expected watcher was not current"
+                                        );
+                                    } else {
+                                        let finalize_outcome =
+                                            finalize_cancelled_watcher_owner_turn(
+                                                shared,
+                                                provider,
+                                                decision,
+                                                owner_channel_id,
+                                            )
+                                            .await;
+                                        let lifecycle_clear_outcome =
+                                            super::inflight::clear_lifecycle_inflight_state_if_matches_identity_after_death_evidence(
+                                                provider,
+                                                owner_channel_id.get(),
+                                                &expected_identity,
+                                                &probe.updated_at,
+                                                probe.save_generation,
+                                            );
+                                        tracing::warn!(
+                                            target: "agentdesk::discord::relay_recovery",
+                                            provider = provider.as_str(),
+                                            channel_id = decision.channel_id,
+                                            watcher_owner_channel_id = owner_channel_id.get(),
+                                            last_relay_offset = decision.evidence.last_relay_offset,
+                                            last_capture_offset = ?decision.evidence.last_capture_offset,
+                                            unread_bytes = ?decision.evidence.unread_bytes,
+                                            death_evidence = gate.allowed_reason().unwrap_or("unknown"),
+                                            watcher_removed,
+                                            lifecycle_clear_outcome = ?lifecycle_clear_outcome,
+                                            finalizer_outcome = match finalize_outcome {
+                                                Some(super::turn_finalizer::FinalizeOutcome::Finalized { .. }) => "finalized",
+                                                Some(super::turn_finalizer::FinalizeOutcome::AlreadyFinalized) => "already_finalized",
+                                                Some(super::turn_finalizer::FinalizeOutcome::Deferred) => "deferred",
+                                                None => "missing_identity",
+                                            },
+                                            "relay recovery cancelled watcher with death evidence before reattach"
+                                        );
+                                    }
                                 }
                             } else {
                                 tracing::warn!(

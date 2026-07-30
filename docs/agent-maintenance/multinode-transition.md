@@ -446,6 +446,13 @@
   before merging.
 
 ### Audited touches
+- 2026-07-30 — #5014 / PR #5020 destructive cancel commit: the inflight
+  sidecar flock, watcher cancel `AtomicBool`, and registry identity CAS remain
+  **worker-local** authority. The primitive adds no PostgreSQL lease, distributed
+  epoch, leader check, remote-owner RPC, durable cancel intent, worker placement,
+  or cross-node fencing; another node can independently verify the same channel
+  row. Gateway lease containment narrows that deployment condition but does not
+  turn the host-local commit into cluster authority.
 - 2026-07-26 — #4898 untrusted deploy-gate containment: PostgreSQL migration
   0100 adds a validated cluster-wide `CHECK` constraint that rejects normalized
   `deploy-gate` provenance. The `ALTER TABLE` lock serializes concurrent legacy

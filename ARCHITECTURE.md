@@ -565,6 +565,7 @@ src/
 │   │   │   │   └── flake_isolation_4422.rs
 │   │   │   ├── anchor_repost.rs
 │   │   │   ├── budget.rs
+│   │   │   ├── destructive_commit.rs
 │   │   │   ├── episode_guard.rs
 │   │   │   ├── finalizer_identity.rs
 │   │   │   ├── invariant_test_capture.rs
@@ -868,6 +869,8 @@ src/
 │   │   │   ├── store.rs
 │   │   │   ├── sweep.rs
 │   │   │   └── tombstone.rs
+│   │   ├── tui_direct_pending_start/
+│   │   │   └── watcher_cancel.rs
 │   │   ├── tui_prompt_relay/
 │   │   │   ├── synthetic_start/
 │   │   │   │   └── stale_reclaim.rs

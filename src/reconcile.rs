@@ -1829,6 +1829,19 @@ fn backfill_legacy_rebind_origin_turn_source(path: &std::path::Path) -> bool {
         "turn_source".to_string(),
         serde_json::Value::String("external_adopted".to_string()),
     );
+    let next_save_generation = object
+        .get("save_generation")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+        .saturating_add(1);
+    object.insert(
+        "save_generation".to_string(),
+        serde_json::Value::from(next_save_generation),
+    );
+    object.insert(
+        "updated_at".to_string(),
+        serde_json::Value::String(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+    );
     let Ok(updated) = serde_json::to_string_pretty(&value) else {
         return false;
     };
@@ -1883,9 +1896,16 @@ mod stale_inflight_sweep_tests {
     }
 
     #[test]
-    fn stale_sweep_preserves_legacy_rebind_origin_without_turn_source() {
+    fn stale_sweep_legacy_backfill_invalidates_prior_destructive_cancel_pin() {
         let root = tempfile::tempdir().expect("temp root");
-        let legacy = write_stale_inflight(root.path(), "legacy", r#"{"rebind_origin":true}"#);
+        let original_updated_at = "2026-07-30 12:00:00";
+        let legacy = write_stale_inflight(
+            root.path(),
+            "legacy",
+            &format!(
+                r#"{{"rebind_origin":true,"save_generation":14,"updated_at":"{original_updated_at}"}}"#
+            ),
+        );
 
         let removed = sweep_stale_inflight_files_at(root.path(), Duration::from_secs(60));
 
@@ -1898,6 +1918,8 @@ mod stale_inflight_sweep_tests {
             serde_json::from_str(&fs::read_to_string(&legacy).expect("legacy body"))
                 .expect("updated legacy json");
         assert_eq!(updated["turn_source"], "external_adopted");
+        assert_eq!(updated["save_generation"], 15);
+        assert_ne!(updated["updated_at"], original_updated_at);
     }
 
     #[test]

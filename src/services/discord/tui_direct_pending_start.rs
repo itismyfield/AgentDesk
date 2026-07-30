@@ -40,6 +40,48 @@ use serde::{Deserialize, Serialize};
 
 use super::SharedData;
 
+#[path = "tui_direct_pending_start/watcher_cancel.rs"]
+mod watcher_cancel;
+
+#[cfg(test)]
+type DestructiveCancelPostGateHook = Arc<dyn Fn() + Send + Sync + 'static>;
+#[cfg(test)]
+static DESTRUCTIVE_CANCEL_POST_GATE_HOOK: LazyLock<Mutex<Option<DestructiveCancelPostGateHook>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+#[cfg(test)]
+fn run_destructive_cancel_post_gate_hook_for_tests() {
+    let hook = DESTRUCTIVE_CANCEL_POST_GATE_HOOK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(test)]
+struct DestructiveCancelPostGateHookGuard;
+
+#[cfg(test)]
+impl Drop for DestructiveCancelPostGateHookGuard {
+    fn drop(&mut self) {
+        *DESTRUCTIVE_CANCEL_POST_GATE_HOOK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = None;
+    }
+}
+
+#[cfg(test)]
+fn set_destructive_cancel_post_gate_hook_for_tests(
+    hook: DestructiveCancelPostGateHook,
+) -> DestructiveCancelPostGateHookGuard {
+    *DESTRUCTIVE_CANCEL_POST_GATE_HOOK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = Some(hook);
+    DestructiveCancelPostGateHookGuard
+}
+
 /// Conservative poll interval for the wait predicate.
 pub(super) const PENDING_START_POLL: Duration = Duration::from_millis(100);
 
@@ -808,42 +850,76 @@ async fn submit_stale_foreign_inflight_cancel(
     if finalizer_turn_id == 0 {
         return false;
     }
-    let Some(current) = super::inflight::load_inflight_state(provider, channel_id.get()) else {
-        tracing::info!(
-            provider = %provider.as_str(),
-            channel_id = channel_id.get(),
-            finalizer_turn_id,
-            "tui_direct_pending_start: stale FOREIGN cancel no-op; inflight disappeared before finalizer submit"
-        );
-        return false;
-    };
     let mailbox_active_user_msg_id = super::mailbox_snapshot(shared, channel_id)
         .await
         .active_user_message_id
         .map(|id| id.get());
-    if !probe.pin.matches_state(&current)
-        || mailbox_active_user_msg_id != probe.pin.mailbox_active_user_msg_id
-        || current.updated_at != probe.updated_at
-        || current.save_generation != probe.save_generation
+    if mailbox_active_user_msg_id != probe.pin.mailbox_active_user_msg_id {
+        tracing::info!(
+            provider = %provider.as_str(),
+            channel_id = channel_id.get(),
+            expected_mailbox_active_user_msg_id = probe.pin.mailbox_active_user_msg_id.unwrap_or(0),
+            mailbox_active_user_msg_id = mailbox_active_user_msg_id.unwrap_or(0),
+            "tui_direct_pending_start: stale FOREIGN cancel no-op; mailbox episode changed"
+        );
+        return false;
+    }
+    let expected_cancel = probe
+        .pin
+        .tmux_session_name
+        .as_deref()
+        .and_then(|tmux_session| {
+            watcher_cancel::cancel_for_tmux_session(&shared.tmux_watchers, tmux_session)
+        });
+    let cancel_for_commit = expected_cancel.clone();
+    let commit_outcome = super::inflight::commit_destructive_cancel_locked(
+        provider,
+        channel_id.get(),
+        &probe.inflight_identity,
+        &probe.updated_at,
+        probe.save_generation,
+        move |_| match cancel_for_commit {
+            Some(cancel) => {
+                cancel.store(true, std::sync::atomic::Ordering::Release);
+                Ok(super::inflight::CommitEvidence::CancelledWatcher)
+            }
+            None => Ok(super::inflight::CommitEvidence::NoWatcher),
+        },
+    );
+    if !matches!(
+        commit_outcome,
+        super::inflight::DestructiveCancelCommitOutcome::CommittedCancelled
+            | super::inflight::DestructiveCancelCommitOutcome::CommittedNoWatcher
+    ) {
+        tracing::info!(
+            provider = %provider.as_str(),
+            channel_id = channel_id.get(),
+            ?commit_outcome,
+            "tui_direct_pending_start: stale FOREIGN cancel no-op; flock-held pin commit failed"
+        );
+        return false;
+    }
+    // The flock is released before registry CAS; the two lock domains never overlap.
+    if let (Some(tmux_session), Some(cancel)) = (
+        probe.pin.tmux_session_name.as_deref(),
+        expected_cancel.as_ref(),
+    ) && shared
+        .tmux_watchers
+        .remove_tmux_session_if_current(tmux_session, cancel)
+        .is_none()
     {
         tracing::info!(
             provider = %provider.as_str(),
             channel_id = channel_id.get(),
-            expected_finalizer_turn_id = finalizer_turn_id,
-            current_finalizer_turn_id = current.effective_finalizer_turn_id(),
-            expected_mailbox_active_user_msg_id = probe.pin.mailbox_active_user_msg_id.unwrap_or(0),
-            mailbox_active_user_msg_id = mailbox_active_user_msg_id.unwrap_or(0),
-            expected_tmux_session = ?probe.pin.tmux_session_name,
-            current_tmux_session = ?current.tmux_session_name,
-            expected_updated_at = %probe.updated_at,
-            current_updated_at = %current.updated_at,
-            expected_save_generation = probe.save_generation,
-            current_save_generation = current.save_generation,
-            "tui_direct_pending_start: stale FOREIGN cancel no-op; identity/death-evidence pin no longer matches"
+            tmux_session,
+            "tui_direct_pending_start: stale FOREIGN cancel committed but watcher incarnation changed; finalizer skipped"
         );
         return false;
     }
-    let stale_identity = super::inflight::InflightTurnIdentity::from_state(&current);
+    // E1 closes the watcher left behind at destruction time. It does not close a
+    // last pre-cancel self-heal iteration or later restoration/reclaim recreation
+    // (#5012/E3), nor durable observation of finalizer degradation (E2/E6).
+    let stale_identity = probe.inflight_identity.clone();
     let _ = shared
         .turn_finalizer
         .submit_terminal(
@@ -1100,6 +1176,8 @@ pub(in crate::services::discord) async fn demote_stale_foreign_inflight_if_curre
         return false;
     }
 
+    #[cfg(test)]
+    run_destructive_cancel_post_gate_hook_for_tests();
     let demoted = submit_stale_foreign_inflight_cancel(shared, &provider, channel, &probe).await;
     if demoted {
         tracing::warn!(
@@ -1633,6 +1711,31 @@ mod tests {
     fn worker_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
         LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    fn test_watcher_handle(
+        tmux_session_name: &str,
+        output_path: &std::path::Path,
+    ) -> (
+        super::super::TmuxWatcherHandle,
+        Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        (
+            super::super::TmuxWatcherHandle {
+                tmux_session_name: tmux_session_name.to_string(),
+                output_path: output_path.to_string_lossy().to_string(),
+                paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                resume_offset: Arc::new(std::sync::Mutex::new(None)),
+                cancel: cancel.clone(),
+                pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                    super::super::tmux_watcher_now_ms(),
+                )),
+            },
+            cancel,
+        )
     }
 
     struct EnvReset(Option<std::ffi::OsString>);
@@ -2716,6 +2819,178 @@ mod tests {
                 "frozen nonzero relay frontier with unchanged ready capture is death evidence"
             );
             assert!(token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+        });
+    }
+
+    #[test]
+    fn stale_foreign_gate_pass_then_generation_mismatch_preserves_turn() {
+        let _guard = worker_test_lock();
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::TempDir::new().expect("runtime root");
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
+        current_thread_rt().block_on(async {
+            let shared = super::super::make_shared_data_for_tests();
+            let provider = crate::services::provider::ProviderKind::Claude;
+            let channel_id = 4_030_118;
+            let channel = poise::serenity_prelude::ChannelId::new(channel_id);
+            let stale_msg = 4_030_218;
+            let tmux = "tmux-4030-generation-race";
+            let output_path = root.path().join("ready-generation-race.jsonl");
+            std::fs::write(
+                &output_path,
+                r#"{"type":"result","result":"done","session_id":"s"}"#,
+            )
+            .expect("write terminal output");
+            let token = Arc::new(crate::services::provider::CancelToken::new());
+            assert!(
+                super::super::mailbox_try_start_turn(
+                    &shared,
+                    channel,
+                    token.clone(),
+                    poise::serenity_prelude::UserId::new(1),
+                    poise::serenity_prelude::MessageId::new(stale_msg),
+                )
+                .await
+            );
+            shared
+                .restart
+                .global_active
+                .store(1, std::sync::atomic::Ordering::Relaxed);
+            let state =
+                stale_foreign_state(provider.clone(), channel_id, stale_msg, tmux, &output_path);
+            write_inflight_fixture(root.path(), &provider, &state);
+            let (watcher, watcher_cancel) = test_watcher_handle(tmux, &output_path);
+            watcher
+                .last_heartbeat_ts_ms
+                .store(1, std::sync::atomic::Ordering::Release);
+            shared.tmux_watchers.insert(channel, watcher);
+            let mut rec = record("claude", channel_id, 4_030_318);
+            rec.tmux_session_name = tmux.to_string();
+
+            let hook_root = root.path().to_path_buf();
+            let hook_provider = provider.clone();
+            let _hook = set_destructive_cancel_post_gate_hook_for_tests(Arc::new(move || {
+                let current =
+                    super::super::inflight::load_inflight_state(&hook_provider, channel_id)
+                        .expect("load post-gate inflight");
+                write_inflight_fixture(&hook_root, &hook_provider, &current);
+            }));
+
+            assert!(!demote_stale_foreign_inflight_if_current(&shared, &rec).await);
+            assert!(!watcher_cancel.load(std::sync::atomic::Ordering::Acquire));
+            assert!(shared.tmux_watchers.has_live_watcher_handle(tmux));
+            assert!(!token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+            assert!(super::super::inflight::load_inflight_state(&provider, channel_id).is_some());
+        });
+    }
+
+    #[test]
+    fn stale_foreign_demote_cancels_and_removes_current_watcher() {
+        let _guard = worker_test_lock();
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::TempDir::new().expect("runtime root");
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
+        current_thread_rt().block_on(async {
+            let shared = super::super::make_shared_data_for_tests();
+            let provider = crate::services::provider::ProviderKind::Claude;
+            let channel_id = 4_030_116;
+            let channel = poise::serenity_prelude::ChannelId::new(channel_id);
+            let stale_msg = 4_030_216;
+            let tmux = "tmux-4030-e1-watcher";
+            let output_path = root.path().join("ready-e1-watcher.jsonl");
+            std::fs::write(
+                &output_path,
+                r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+            )
+            .expect("write ready output");
+            let token = Arc::new(crate::services::provider::CancelToken::new());
+            assert!(
+                super::super::mailbox_try_start_turn(
+                    &shared,
+                    channel,
+                    token.clone(),
+                    poise::serenity_prelude::UserId::new(1),
+                    poise::serenity_prelude::MessageId::new(stale_msg),
+                )
+                .await
+            );
+            shared
+                .restart
+                .global_active
+                .store(1, std::sync::atomic::Ordering::Relaxed);
+            let mut state =
+                stale_foreign_state(provider.clone(), channel_id, stale_msg, tmux, &output_path);
+            stamp_claude_ready_for_input_evidence(&mut state, &output_path);
+            write_inflight_fixture(root.path(), &provider, &state);
+            let (watcher, watcher_cancel) = test_watcher_handle(tmux, &output_path);
+            watcher
+                .last_heartbeat_ts_ms
+                .store(1, std::sync::atomic::Ordering::Release);
+            shared.tmux_watchers.insert(channel, watcher);
+            let mut rec = record("claude", channel_id, 4_030_316);
+            rec.tmux_session_name = tmux.to_string();
+
+            assert!(demote_stale_foreign_inflight_if_current(&shared, &rec).await);
+            assert!(watcher_cancel.load(std::sync::atomic::Ordering::Acquire));
+            assert!(!shared.tmux_watchers.has_live_watcher_handle(tmux));
+            assert!(token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+        });
+    }
+
+    #[test]
+    fn stale_foreign_demote_without_watcher_still_commits_cancel() {
+        let _guard = worker_test_lock();
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::TempDir::new().expect("runtime root");
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
+        current_thread_rt().block_on(async {
+            let shared = super::super::make_shared_data_for_tests();
+            let provider = crate::services::provider::ProviderKind::Claude;
+            let channel_id = 4_030_117;
+            let channel = poise::serenity_prelude::ChannelId::new(channel_id);
+            let stale_msg = 4_030_217;
+            let tmux = "tmux-4030-e1-no-watcher";
+            let output_path = root.path().join("ready-e1-no-watcher.jsonl");
+            std::fs::write(
+                &output_path,
+                r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+            )
+            .expect("write ready output");
+            let token = Arc::new(crate::services::provider::CancelToken::new());
+            assert!(
+                super::super::mailbox_try_start_turn(
+                    &shared,
+                    channel,
+                    token.clone(),
+                    poise::serenity_prelude::UserId::new(1),
+                    poise::serenity_prelude::MessageId::new(stale_msg),
+                )
+                .await
+            );
+            shared
+                .restart
+                .global_active
+                .store(1, std::sync::atomic::Ordering::Relaxed);
+            let mut state =
+                stale_foreign_state(provider.clone(), channel_id, stale_msg, tmux, &output_path);
+            stamp_claude_ready_for_input_evidence(&mut state, &output_path);
+            write_inflight_fixture(root.path(), &provider, &state);
+            let mut rec = record("claude", channel_id, 4_030_317);
+            rec.tmux_session_name = tmux.to_string();
+
+            assert!(!shared.tmux_watchers.has_live_watcher_handle(tmux));
+            assert!(demote_stale_foreign_inflight_if_current(&shared, &rec).await);
+            assert!(token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+            assert!(super::super::inflight::load_inflight_state(&provider, channel_id).is_none());
         });
     }
 
