@@ -16,7 +16,7 @@ use super::{BotTokenReloadScopes, HealthRegistry, bot_token_reload_scopes};
 use crate::services::discord;
 use crate::services::discord::SharedData;
 use crate::services::discord::relay_health::{
-    RelayActiveTurn, RelayHealthSnapshot, RelayStallClassifier, RelayStallState,
+    RelayHealthSnapshot, RelayStallClassifier, RelayStallState,
 };
 use crate::services::provider::ProviderKind;
 
@@ -193,44 +193,6 @@ fn authoritative_tmux_session(
     enriched_session
         .or(mailbox_cancel_session)
         .map(str::to_string)
-}
-
-fn build_relay_health_snapshot(input: RelayHealthBuildInput) -> RelayHealthSnapshot {
-    RelayHealthSnapshot {
-        provider: input.provider,
-        channel_id: input.channel_id,
-        active_turn: input.active_turn,
-        tmux_session: input.tmux_session,
-        tmux_alive: input.tmux_alive,
-        watcher_attached: input.watcher_attached,
-        watcher_attached_stale: input.watcher_attached_stale,
-        watcher_owner_channel_id: input.watcher_owner_channel_id,
-        watcher_owns_live_relay: input.watcher_owns_live_relay,
-        bridge_inflight_present: input.bridge_inflight_present,
-        bridge_current_msg_id: input.bridge_current_msg_id,
-        mailbox_has_cancel_token: input.mailbox_has_cancel_token,
-        mailbox_active_user_msg_id: input.mailbox_active_user_msg_id,
-        mailbox_turn_started_at_ms: input.mailbox_turn_started_at_ms,
-        queue_depth: input.queue_depth,
-        pending_discord_callback_msg_id: input
-            .bridge_current_msg_id
-            .or(input.mailbox_active_user_msg_id),
-        pending_thread_proof: input.thread_proof.parent_channel_id.is_some()
-            || input.thread_proof.thread_channel_id.is_some(),
-        parent_channel_id: input.thread_proof.parent_channel_id,
-        thread_channel_id: input.thread_proof.thread_channel_id,
-        last_relay_ts_ms: (input.last_relay_ts_ms > 0).then_some(input.last_relay_ts_ms),
-        last_outbound_activity_ms: input.last_outbound_activity_ms,
-        confirmed_delivery_since_turn_start: input.relay_turn_key.as_ref().and_then(
-            discord::outbound::delivery_evidence_store::confirmed_relay_for_turn,
-        ),
-        last_capture_offset: input.last_capture_offset,
-        last_relay_offset: input.last_relay_offset,
-        last_relay_offset_recorded: input.last_relay_offset_recorded,
-        unread_bytes: input.unread_bytes,
-        desynced: input.desynced,
-        stale_thread_proof: input.thread_proof.stale_thread_proof,
-    }
 }
 
 impl HealthRegistry {

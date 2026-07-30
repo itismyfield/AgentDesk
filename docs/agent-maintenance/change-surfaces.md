@@ -248,7 +248,10 @@
     output policy, recovery marker, and test clusters moved verbatim into
     sub-1000-LoC `watchers/lifecycle/*.rs` modules. The root remains the
     canonical facade and preserves all prior call paths through re-exports.
-  - `src/services/discord/tmux.rs` (frozen giant surface; current generated inventory: 1677 production LoC; #4895 removes untyped auth/overload terminal variants and authority-bearing outcome fields; parser diagnostics now use a fixed redacted category while generic error results remain `HardResult`; test-only #4277 re-exports
+  - `src/services/discord/tmux.rs` (frozen giant surface; #5022 stamps the
+    explicit `confirmed_end_recorded` bit at the existing confirmed-frontier
+    writer, so coordination entry creation cannot masquerade as an offset write;
+    #4895 removes untyped auth/overload terminal variants and authority-bearing outcome fields; parser diagnostics now use a fixed redacted category while generic error results remain `HardResult`; test-only #4277 re-exports
     the watcher delivery-lease key helper so session-sink production-entry tests
     prove bidirectional contention on the same idle JSONL range; -9 from the #4804
     Windows-compile hotfix moving `footer_background_marker_session_key` into
@@ -1940,8 +1943,11 @@ these contextual numbers to match ordinary LoC churn.
   `resolve_claude_binary_sealed` (consumed only by `ClaudeBinary::resolve`) is
   fenced by the `sealed_claude_seam_confined_to_chokepoint` guard in
   `claude_command.rs`.
-- `src/services/discord/mod.rs` (frozen giant surface; formerly 4152 prod LoC after #4049 S4-a2 moved
-  queue-marker routing into `queue_marker.rs` and retired direct reaction
+- `src/services/discord/mod.rs` (frozen giant surface; #5022 extracts the
+  delivery-lease state machine and relay-evidence hook into
+  `delivery_lease_state.rs` / `delivery_lease_evidence.rs`, keeping turn-scoped
+  evidence at the lease boundary without root re-inflation; formerly 4152 prod
+  LoC after #4049 S4-a2 moved queue-marker routing into `queue_marker.rs` and retired direct reaction
   mutation call sites; 4157 prod LoC after #4048 S3 extracted
   the mailbox-release completion publish helper to `turn_completion_events.rs`
   and the post-enqueue idle-drain scheduler to `queue_io.rs` (-46 from 4204,
