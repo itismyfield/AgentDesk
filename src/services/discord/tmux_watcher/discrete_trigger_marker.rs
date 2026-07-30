@@ -6,9 +6,10 @@
 
 use super::*;
 use crate::services::discord::task_notification_delivery;
+// Reuse the canonical reason code rather than re-declaring the literal: it lives
+// next to its `.deferred` sibling in tmux_kill_policy, and two copies drift.
+use crate::services::discord::tmux::tmux_kill_policy::MONITOR_AUTO_TURN_REASON_CODE;
 use crate::services::message_outbox::enqueue_lifecycle_notification_best_effort;
-
-const MONITOR_AUTO_TURN_REASON_CODE: &str = "lifecycle.monitor_auto_turn";
 
 struct SuppressedTaskNotificationMarker<'a> {
     channel_id: ChannelId,
