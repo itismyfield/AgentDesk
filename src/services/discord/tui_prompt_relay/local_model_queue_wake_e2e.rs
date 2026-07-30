@@ -194,14 +194,17 @@ async fn gateway_socket(ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(|mut socket| async move { while socket.recv().await.is_some() {} })
 }
 
-async fn drain_promoted_b_completion_lifecycle(
-    rx: &mut tokio::sync::broadcast::Receiver<
-        super::super::turn_completion_events::TurnCompletionEvent,
-    >,
+#[derive(Debug, PartialEq, Eq)]
+enum PromotedBCompletionProgress {
+    AwaitingMailboxRelease,
+    AwaitingQueueEligible,
+    Complete,
+}
+
+fn validate_promoted_b_completion_lifecycle(
+    events: &[super::super::turn_completion_events::TurnCompletionEvent],
     channel_id: ChannelId,
-    timeout: std::time::Duration,
-) {
-    let deadline = tokio::time::Instant::now() + timeout;
+) -> Result<PromotedBCompletionProgress, String> {
     let expected_mailbox_release =
         super::super::turn_completion_events::TurnCompletionEvent::mailbox_released(
             channel_id,
@@ -212,34 +215,54 @@ async fn drain_promoted_b_completion_lifecycle(
             channel_id,
             Some(B_MESSAGE_ID),
         );
-    let mut mailbox_release_seen = false;
+    match events {
+        [] => Ok(PromotedBCompletionProgress::AwaitingMailboxRelease),
+        [event] if *event == expected_mailbox_release => {
+            Ok(PromotedBCompletionProgress::AwaitingQueueEligible)
+        }
+        [event] => Err(format!(
+            "promoted B must publish MailboxReleased first; received phase={:?}, turn_id={:?}, channel_id={}",
+            event.phase, event.turn_id, event.channel_id
+        )),
+        [mailbox_release, queue_eligible]
+            if *mailbox_release == expected_mailbox_release
+                && *queue_eligible == expected_queue_eligible =>
+        {
+            Ok(PromotedBCompletionProgress::Complete)
+        }
+        [_, event, ..] => Err(format!(
+            "promoted B must publish exactly one MailboxReleased followed by exactly one QueueEligible; received phase={:?}, turn_id={:?}, channel_id={}",
+            event.phase, event.turn_id, event.channel_id
+        )),
+    }
+}
+
+async fn drain_promoted_b_completion_lifecycle(
+    rx: &mut tokio::sync::broadcast::Receiver<
+        super::super::turn_completion_events::TurnCompletionEvent,
+    >,
+    channel_id: ChannelId,
+    timeout: std::time::Duration,
+) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut events = Vec::with_capacity(2);
 
     loop {
         let event = match tokio::time::timeout_at(deadline, rx.recv()).await {
             Err(_) => panic!(
-                "promoted B completion lifecycle did not reach QueueEligible before the deadline; mailbox_release_seen={mailbox_release_seen}"
+                "promoted B completion lifecycle did not reach QueueEligible before the deadline; observed_events={events:?}"
             ),
             Ok(Ok(event)) => event,
             Ok(Err(error)) => panic!(
                 "completion receiver must remain open while draining promoted B; recv error={error:?}"
             ),
         };
-        if event == expected_mailbox_release {
-            assert!(
-                !std::mem::replace(&mut mailbox_release_seen, true),
-                "promoted B must publish MailboxReleased exactly once"
-            );
-        } else if event == expected_queue_eligible {
-            assert!(
-                mailbox_release_seen,
-                "promoted B must publish MailboxReleased before QueueEligible"
-            );
-            return;
-        } else {
-            panic!(
-                "only promoted B's ordered completion lifecycle is allowed while draining; received phase={:?}, turn_id={:?}, channel_id={}",
-                event.phase, event.turn_id, event.channel_id
-            );
+        events.push(event);
+        match validate_promoted_b_completion_lifecycle(&events, channel_id) {
+            Ok(PromotedBCompletionProgress::Complete) => return,
+            Ok(PromotedBCompletionProgress::AwaitingMailboxRelease)
+            | Ok(PromotedBCompletionProgress::AwaitingQueueEligible) => {}
+            Err(error) => panic!("{error}"),
         }
     }
 }
@@ -299,6 +322,48 @@ async fn completion_guard_must_panic(
     assert!(
         error.is_panic(),
         "completion lifecycle rejection must terminate through its own assertion"
+    );
+}
+
+#[test]
+fn promoted_b_completion_lifecycle_validates_order_and_cardinality() {
+    let channel_id = ChannelId::new(CHANNEL_ID);
+    let mailbox_release =
+        super::super::turn_completion_events::TurnCompletionEvent::mailbox_released(
+            channel_id,
+            Some(B_MESSAGE_ID),
+        );
+    let queue_eligible = super::super::turn_completion_events::TurnCompletionEvent::queue_eligible(
+        channel_id,
+        Some(B_MESSAGE_ID),
+    );
+
+    assert_eq!(
+        validate_promoted_b_completion_lifecycle(
+            &[mailbox_release.clone(), queue_eligible.clone()],
+            channel_id,
+        ),
+        Ok(PromotedBCompletionProgress::Complete)
+    );
+    assert!(
+        validate_promoted_b_completion_lifecycle(
+            &[queue_eligible.clone(), mailbox_release.clone()],
+            channel_id,
+        )
+        .is_err(),
+        "QueueEligible before MailboxReleased must be rejected"
+    );
+    assert!(
+        validate_promoted_b_completion_lifecycle(
+            &[mailbox_release.clone(), mailbox_release],
+            channel_id,
+        )
+        .is_err(),
+        "duplicate MailboxReleased must be rejected"
+    );
+    assert!(
+        validate_promoted_b_completion_lifecycle(&[queue_eligible], channel_id).is_err(),
+        "QueueEligible without MailboxReleased must be rejected"
     );
 }
 
