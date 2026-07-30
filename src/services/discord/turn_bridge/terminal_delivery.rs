@@ -1099,7 +1099,7 @@ mod tests {
             "final response delivered via fallback after edit failure",
         ));
         assert!(!should_fail_dispatch_after_terminal_delivery(
-            true,
+            false,
             replace_outcome_commits_terminal_delivery(&outcome),
             false,
         ));
