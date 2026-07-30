@@ -19,6 +19,8 @@ pub(in crate::services::discord) enum DestructiveCancelCommitOutcome {
     PinMismatch { field: DestructiveCancelPinField },
     RowMissing,
     RowMalformed,
+    /// Lock setup or syscall failure. Lock contention blocks because the flock
+    /// uses `LOCK_EX` without `LOCK_NB` or a timeout; it does not return this.
     LockUnavailable,
     IoError,
 }
@@ -31,18 +33,44 @@ pub(in crate::services::discord) struct CommitError {
     pub message: String,
 }
 
-/// Commits a destructive cancel while holding the inflight row's sidecar flock.
+/// Verifies the inflight row under its sidecar flock and then runs a callback.
+///
+/// `Committed` means only that the row matched the identity plus
+/// `save_generation` pin at that instant and the callback returned success. It
+/// does not mean that destructive authority was acquired exclusively or durably.
+/// `updated_at` is checked as supplemental diagnostics, but its one-second local
+/// timestamp resolution means it is not an independent fencing dimension.
 ///
 /// Excluded writers: every resurrection that already completed a flock-held
-/// persist (the three watcher persists and both creation APIs). If such a writer
-/// advanced the row identity, `updated_at`, or `save_generation`, the commit
-/// aborts with `PinMismatch`.
+/// persist (the three watcher persists, both creation APIs, and the legacy
+/// rebind-origin backfill). Those writers advance `save_generation`; a different
+/// turn changes the identity, so either change aborts with `PinMismatch`.
 ///
-/// Not closed: delivery/persist from the last watcher iteration before it observes
-/// cancel; row recreation after destruction (#5012/E3); durable observation of a
-/// partially degraded finalizer commit (E2/E6).
+/// Not closed:
+/// - delivery/persist from the last watcher iteration before it observes cancel;
+/// - row recreation after destruction (#5012/E3);
+/// - durable observation of a partially degraded finalizer commit (E2/E6);
+/// - a committed in-memory cancel followed by registry CAS failure skips both the
+///   finalizer and row clear, leaving a partially destructive state;
+/// - the callback writes no durable intent/epoch, so a crash after `Committed`
+///   can erase the cancel decision before finalization starts;
+/// - the callback does not advance row version, so multiple serialized callers
+///   may receive `Committed`; downstream registry CAS and the finalizer's
+///   exact-key ledger prevent duplicate finalization, not duplicate commit claims;
+/// - the cancel `Arc` is captured outside the flock and may name a replaced
+///   watcher incarnation; registry CAS then fails closed, but `Committed` was
+///   already returned;
+/// - sidecar flock authority is host-local and does not fence another node's
+///   watcher, inflight row, or mailbox authority;
+/// - the age/lifecycle-qualified stale-row sweep in `reconcile.rs` removes rows
+///   without taking this sidecar flock.
 ///
-/// The callback must not acquire the watcher-registry mutex. E2 may prepare and
+/// # Safety
+///
+/// The callback must not acquire the watcher-registry mutex. This is a caller
+/// contract rather than a type-level guarantee: violating it can create an ABBA
+/// deadlock with a registry holder waiting for the sidecar flock, causing a
+/// permanent hang rather than a recoverable commit failure. E2 may prepare and
 /// fsync a temporary intent before this call, but while the flock is held its
 /// callback may only rename that prepared file; directory fsync belongs after
 /// this function returns and before destruction proceeds.

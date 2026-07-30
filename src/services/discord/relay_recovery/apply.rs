@@ -206,6 +206,8 @@ pub(super) async fn apply_relay_recovery_decision(
                         )
                         .await;
                         if gate.is_allowed() {
+                            #[cfg(test)]
+                            super::run_destructive_cancel_post_gate_hook_for_tests();
                             let mailbox_active_user_msg_id =
                                 mailbox_snapshot(shared, owner_channel_id)
                                     .await
