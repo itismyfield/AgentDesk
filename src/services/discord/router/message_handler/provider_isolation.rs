@@ -372,7 +372,10 @@ pub(super) fn runtime_mismatch_verdict(
 ) -> RuntimeMismatchVerdict {
     if expected.runtime_kind == observed.runtime_kind {
         RuntimeMismatchVerdict::Match
-    } else if expected.evidence_strength == RuntimeKindEvidenceStrength::Weak || live_turn {
+    } else if expected.evidence_strength != RuntimeKindEvidenceStrength::Strong
+        || observed.evidence_strength != RuntimeKindEvidenceStrength::Strong
+        || live_turn
+    {
         RuntimeMismatchVerdict::Defer
     } else {
         RuntimeMismatchVerdict::Recreate
@@ -380,7 +383,7 @@ pub(super) fn runtime_mismatch_verdict(
 }
 
 #[cfg(unix)]
-fn managed_runtime_transcript_busy_using(
+fn managed_runtime_transcript_state_using(
     provider: &ProviderKind,
     current_path: Option<&str>,
     session_id: Option<&str>,
@@ -395,24 +398,22 @@ fn managed_runtime_transcript_busy_using(
         Option<&str>,
         Option<&str>,
     ) -> crate::services::tui_turn_state::TuiTurnState,
-) -> bool {
+) -> crate::services::tui_turn_state::TuiTurnState {
     match provider {
-        ProviderKind::Claude => {
-            observe_claude(current_path, session_id, tmux_session_name).is_busy()
-        }
-        ProviderKind::Codex => observe_codex(current_path, tmux_session_name, session_id).is_busy(),
-        _ => false,
+        ProviderKind::Claude => observe_claude(current_path, session_id, tmux_session_name),
+        ProviderKind::Codex => observe_codex(current_path, tmux_session_name, session_id),
+        _ => crate::services::tui_turn_state::TuiTurnState::Unknown,
     }
 }
 
 #[cfg(unix)]
-fn managed_runtime_transcript_busy(
+fn managed_runtime_transcript_state(
     provider: &ProviderKind,
     current_path: Option<&str>,
     session_id: Option<&str>,
     tmux_session_name: Option<&str>,
-) -> bool {
-    managed_runtime_transcript_busy_using(
+) -> crate::services::tui_turn_state::TuiTurnState {
+    managed_runtime_transcript_state_using(
         provider,
         current_path,
         session_id,
@@ -420,6 +421,35 @@ fn managed_runtime_transcript_busy(
         observe_claude_tui_transcript_state_for_session,
         observe_codex_tui_rollout_state_for_cwd,
     )
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RuntimeMismatchTarget {
+    provider: String,
+    channel_id: u64,
+    tmux_session_name: String,
+    expected_kind: RuntimeHandoffKind,
+    observed_kind: RuntimeHandoffKind,
+}
+
+#[cfg(unix)]
+impl RuntimeMismatchTarget {
+    fn new(
+        provider: &ProviderKind,
+        channel_id: serenity::ChannelId,
+        tmux_session_name: &str,
+        expected: ManagedRuntimeExpectation,
+        observed: ObservedManagedRuntimeKind,
+    ) -> Self {
+        Self {
+            provider: provider.as_str().to_string(),
+            channel_id: channel_id.get(),
+            tmux_session_name: tmux_session_name.to_string(),
+            expected_kind: expected.runtime_kind,
+            observed_kind: observed.runtime_kind,
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -432,14 +462,16 @@ struct RuntimeMismatchDeferState {
 
 #[cfg(unix)]
 static RUNTIME_MISMATCH_DEFERS: std::sync::LazyLock<
-    dashmap::DashMap<(String, u64), RuntimeMismatchDeferState>,
+    dashmap::DashMap<RuntimeMismatchTarget, RuntimeMismatchDeferState>,
 > = std::sync::LazyLock::new(dashmap::DashMap::new);
 #[cfg(unix)]
 const RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT: u32 = 3;
 
 fn clear_runtime_mismatch_defer(provider: &ProviderKind, channel_id: serenity::ChannelId) {
     #[cfg(unix)]
-    RUNTIME_MISMATCH_DEFERS.remove(&(provider.as_str().to_string(), channel_id.get()));
+    RUNTIME_MISMATCH_DEFERS.retain(|target, _| {
+        target.provider != provider.as_str() || target.channel_id != channel_id.get()
+    });
     #[cfg(not(unix))]
     let _ = (provider, channel_id);
 }
@@ -448,13 +480,18 @@ fn clear_runtime_mismatch_defer(provider: &ProviderKind, channel_id: serenity::C
 fn record_runtime_mismatch_defer(
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
+    tmux_session_name: &str,
     expected: ManagedRuntimeExpectation,
     observed: ObservedManagedRuntimeKind,
     open_inflight: bool,
-    transcript_busy: Option<bool>,
+    transcript_state: Option<crate::services::tui_turn_state::TuiTurnState>,
     defer_reason: &'static str,
 ) -> u32 {
-    let key = (provider.as_str().to_string(), channel_id.get());
+    let key =
+        RuntimeMismatchTarget::new(provider, channel_id, tmux_session_name, expected, observed);
+    RUNTIME_MISMATCH_DEFERS.retain(|target, _| {
+        target.provider != key.provider || target.channel_id != key.channel_id || target == &key
+    });
     let mut state =
         RUNTIME_MISMATCH_DEFERS
             .entry(key)
@@ -487,18 +524,14 @@ fn record_runtime_mismatch_defer(
             "consecutive_defer_count": count,
             "elapsed_secs": elapsed_secs,
             "escalation_threshold": RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT,
-            "action": if defer_reason != "live_turn"
-                && count >= RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT
-            {
-                "fallback_recreate"
-            } else {
-                "continue_defer_without_kill"
-            },
+            "action": "continue_defer_without_kill",
             "defer_reason": defer_reason,
             "expected_runtime_kind": expected.runtime_kind.as_str(),
+            "expected_evidence_strength": format!("{:?}", expected.evidence_strength),
             "observed_runtime_kind": observed.runtime_kind.as_str(),
+            "observed_evidence_strength": format!("{:?}", observed.evidence_strength),
             "open_inflight": open_inflight,
-            "transcript_busy": transcript_busy,
+            "transcript_state": transcript_state.map(|state| state.as_str()),
         }),
     );
     if count == 1 || escalating {
@@ -527,10 +560,11 @@ fn reconcile_managed_tmux_runtime_kind_for_config(
     channel_id: serenity::ChannelId,
     tmux_session_name: Option<&str>,
     expected: Option<ManagedRuntimeExpectation>,
-    live_pane: impl FnOnce(&str) -> bool,
-    observe: impl FnOnce(&ProviderKind, &str) -> Option<ObservedManagedRuntimeKind>,
-    inflight_evidence: impl FnOnce() -> RuntimeInflightEvidence,
-    transcript_busy: impl FnOnce() -> bool,
+    live_pane: impl Fn(&str) -> bool,
+    observe: impl Fn(&ProviderKind, &str) -> Option<ObservedManagedRuntimeKind>,
+    inflight_evidence: impl Fn() -> RuntimeInflightEvidence,
+    transcript_state: impl Fn() -> crate::services::tui_turn_state::TuiTurnState,
+    target_still_owned: impl Fn(&str) -> bool,
     recreate: impl FnOnce(&str, ManagedRuntimeExpectation, ObservedManagedRuntimeKind),
 ) -> RuntimeMismatchVerdict {
     let (Some(tmux_session_name), Some(expected)) = (tmux_session_name, expected) else {
@@ -551,54 +585,72 @@ fn reconcile_managed_tmux_runtime_kind_for_config(
     }
 
     let inflight = inflight_evidence();
-    let transcript_busy = (!inflight.open).then(transcript_busy);
-    let live_turn = (inflight.open && !inflight.stale) || transcript_busy.unwrap_or(false);
+    let transcript_state = (!inflight.open || inflight.stale).then(transcript_state);
+    let transcript_live = transcript_state.is_some_and(|state| state.is_busy());
+    let transcript_unknown = transcript_state
+        .is_some_and(|state| state == crate::services::tui_turn_state::TuiTurnState::Unknown);
+    let live_turn = (inflight.open && !inflight.stale) || transcript_live;
+    let destructive_evidence_unknown = inflight.open && inflight.stale && transcript_unknown;
     let verdict = runtime_mismatch_verdict(
         expected,
         observed,
-        inflight.open || transcript_busy.unwrap_or(false),
+        live_turn || destructive_evidence_unknown,
     );
     if verdict.should_defer() {
         let defer_reason = if live_turn {
             "live_turn"
+        } else if destructive_evidence_unknown {
+            "transcript_state_unknown"
+        } else if expected.evidence_strength != RuntimeKindEvidenceStrength::Strong {
+            "weak_expected_evidence"
+        } else if observed.evidence_strength != RuntimeKindEvidenceStrength::Strong {
+            "weak_observed_evidence"
         } else if inflight.open {
             "stale_inflight"
         } else {
-            "weak_expected_evidence"
+            "runtime_kind_mismatch"
         };
-        let count = record_runtime_mismatch_defer(
+        record_runtime_mismatch_defer(
             provider,
             channel_id,
+            tmux_session_name,
             expected,
             observed,
             inflight.open,
-            transcript_busy,
+            transcript_state,
             defer_reason,
         );
-        if live_turn || count < RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT {
-            return verdict;
-        }
-        crate::services::observability::emit_inflight_lifecycle_event(
-            provider.as_str(),
-            channel_id.get(),
+        return verdict;
+    }
+    let revalidated_observed = observe(provider, tmux_session_name);
+    let revalidated_inflight = inflight_evidence();
+    let pane_live_at_commit = live_pane(tmux_session_name);
+    let owner_matches_at_commit = target_still_owned(tmux_session_name);
+    let target_unchanged = pane_live_at_commit
+        && owner_matches_at_commit
+        && revalidated_observed == Some(observed)
+        && !revalidated_inflight.open;
+    if !target_unchanged {
+        let defer_reason = "destructive_target_revalidation_failed";
+        record_runtime_mismatch_defer(
+            provider,
+            channel_id,
+            tmux_session_name,
+            expected,
+            revalidated_observed.unwrap_or(observed),
+            revalidated_inflight.open,
             None,
-            None,
-            None,
-            "runtime_kind_mismatch_defer_fallback_recreate",
-            serde_json::json!({
-                "consecutive_defer_count": count,
-                "defer_reason": defer_reason,
-                "expected_runtime_kind": expected.runtime_kind.as_str(),
-                "observed_runtime_kind": observed.runtime_kind.as_str(),
-            }),
+            defer_reason,
         );
         tracing::warn!(
             provider = provider.as_str(),
             channel_id = channel_id.get(),
-            consecutive_defer_count = count,
-            defer_reason,
-            "bounded runtime mismatch defer fell back to recreation"
+            tmux_session_name,
+            owner_matches = owner_matches_at_commit,
+            pane_live = pane_live_at_commit,
+            "managed tmux mismatch cleanup skipped because target identity changed before kill"
         );
+        return RuntimeMismatchVerdict::Defer;
     }
     clear_runtime_mismatch_defer(provider, channel_id);
     recreate(tmux_session_name, expected, observed);
@@ -607,6 +659,7 @@ fn reconcile_managed_tmux_runtime_kind_for_config(
 
 #[cfg(unix)]
 pub(super) fn reconcile_managed_tmux_runtime_kind_using_runtime(
+    shared: &SharedData,
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
     tmux_session_name: Option<&str>,
@@ -637,7 +690,13 @@ pub(super) fn reconcile_managed_tmux_runtime_kind_using_runtime(
                 }),
             }
         },
-        || managed_runtime_transcript_busy(provider, current_path, session_id, tmux_session_name),
+        || managed_runtime_transcript_state(provider, current_path, session_id, tmux_session_name),
+        |tmux_session_name| {
+            shared
+                .tmux_watchers
+                .owner_channel_for_tmux_session(tmux_session_name)
+                == Some(channel_id)
+        },
         |tmux_session_name, expected, observed| {
             let reason = format!(
                 "tui_hosting config changed: expected {}, found {}; recreating tmux session",
@@ -1041,8 +1100,15 @@ mod thread_role_inheritance_tests {
                 RuntimeKindEvidenceStrength::Strong,
                 RuntimeKindEvidenceStrength::Moderate,
                 false,
-                RuntimeMismatchVerdict::Recreate,
-                "moderate observed evidence preserves strong idle config transition",
+                RuntimeMismatchVerdict::Defer,
+                "moderate observed evidence cannot authorize destructive cleanup",
+            ),
+            (
+                RuntimeKindEvidenceStrength::Strong,
+                RuntimeKindEvidenceStrength::Weak,
+                false,
+                RuntimeMismatchVerdict::Defer,
+                "provider-only observed fallback cannot authorize destructive cleanup",
             ),
         ];
         for (expected_strength, observed_strength, live_turn, want, label) in cases {
@@ -1100,7 +1166,8 @@ mod thread_role_inheritance_tests {
                 open: live_turn,
                 stale: false,
             },
-            || false,
+            || crate::services::tui_turn_state::TuiTurnState::Idle,
+            |_| true,
             |name, _, _| sink.push(name.to_string()),
         )
     }
@@ -1155,11 +1222,11 @@ mod thread_role_inheritance_tests {
 
     #[cfg(unix)]
     #[test]
-    fn weak_idle_mismatch_falls_back_at_escalation_threshold() {
+    fn weak_idle_mismatch_never_escalates_to_cleanup() {
         let channel_id = ChannelId::new(50_150_010);
         clear_test_defer(channel_id);
         let mut calls = Vec::new();
-        for attempt in 1..=RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT {
+        for _ in 0..(RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT + 3) {
             let verdict = reconcile_managed_tmux_runtime_kind_for_config(
                 &ProviderKind::Claude,
                 channel_id,
@@ -1179,80 +1246,129 @@ mod thread_role_inheritance_tests {
                     open: false,
                     stale: false,
                 },
-                || false,
+                || crate::services::tui_turn_state::TuiTurnState::Idle,
+                |_| true,
                 |name, _, _| calls.push(name.to_string()),
             );
-            let expected = if attempt < RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT {
-                RuntimeMismatchVerdict::Defer
-            } else {
-                RuntimeMismatchVerdict::Recreate
-            };
-            assert_eq!(verdict, expected);
+            assert_eq!(verdict, RuntimeMismatchVerdict::Defer);
         }
-        assert_eq!(calls, ["AgentDesk-5015-weak-idle"]);
+        assert!(calls.is_empty());
         clear_test_defer(channel_id);
     }
 
     #[cfg(unix)]
     #[test]
-    fn stale_inflight_falls_back_but_live_turn_never_recreates() {
-        let expected = ManagedRuntimeExpectation {
-            runtime_kind: RuntimeHandoffKind::LegacyTmuxWrapper,
-            evidence_strength: RuntimeKindEvidenceStrength::Strong,
-        };
-        let observed = ObservedManagedRuntimeKind {
-            runtime_kind: RuntimeHandoffKind::ClaudeTui,
-            evidence_strength: RuntimeKindEvidenceStrength::Strong,
-        };
-        for (channel_raw, evidence, should_recreate) in [
-            (
-                50_150_011,
-                RuntimeInflightEvidence {
+    fn stale_inflight_with_busy_transcript_never_cleans_up() {
+        let channel_id = ChannelId::new(50_150_011);
+        clear_test_defer(channel_id);
+        let mut calls = Vec::new();
+        for _ in 0..(RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT + 3) {
+            let verdict = reconcile_managed_tmux_runtime_kind_for_config(
+                &ProviderKind::Claude,
+                channel_id,
+                Some("AgentDesk-5015-stale-busy"),
+                Some(ManagedRuntimeExpectation {
+                    runtime_kind: RuntimeHandoffKind::LegacyTmuxWrapper,
+                    evidence_strength: RuntimeKindEvidenceStrength::Strong,
+                }),
+                |_| true,
+                |_, _| {
+                    Some(ObservedManagedRuntimeKind {
+                        runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                        evidence_strength: RuntimeKindEvidenceStrength::Strong,
+                    })
+                },
+                || RuntimeInflightEvidence {
                     open: true,
                     stale: true,
                 },
-                true,
-            ),
-            (
-                50_150_012,
-                RuntimeInflightEvidence {
-                    open: true,
-                    stale: false,
-                },
-                false,
-            ),
-        ] {
-            let channel_id = ChannelId::new(channel_raw);
-            clear_test_defer(channel_id);
-            let mut calls = Vec::new();
-            for _ in 0..(RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT + 3) {
-                let verdict = reconcile_managed_tmux_runtime_kind_for_config(
-                    &ProviderKind::Claude,
-                    channel_id,
-                    Some("AgentDesk-5015-inflight"),
-                    Some(expected),
-                    |_| true,
-                    |_, _| Some(observed),
-                    || evidence,
-                    || false,
-                    |name, _, _| calls.push(name.to_string()),
-                );
-                if !should_recreate {
-                    assert_eq!(verdict, RuntimeMismatchVerdict::Defer);
-                }
-            }
-            if should_recreate {
-                assert_eq!(calls.len(), 2, "fallback resets the consecutive counter");
-            } else {
-                assert!(calls.is_empty(), "live turns must defer without a bound");
-            }
-            clear_test_defer(channel_id);
+                || crate::services::tui_turn_state::TuiTurnState::Streaming,
+                |_| true,
+                |name, _, _| calls.push(name.to_string()),
+            );
+            assert_eq!(verdict, RuntimeMismatchVerdict::Defer);
         }
+        assert!(
+            calls.is_empty(),
+            "busy transcript must veto destructive cleanup"
+        );
+        clear_test_defer(channel_id);
     }
 
     #[cfg(unix)]
     #[test]
-    fn transcript_busy_probe_preserves_provider_argument_order() {
+    fn stale_inflight_with_unknown_transcript_fails_closed() {
+        let channel_id = ChannelId::new(50_150_012);
+        clear_test_defer(channel_id);
+        let mut calls = Vec::new();
+        let verdict = reconcile_managed_tmux_runtime_kind_for_config(
+            &ProviderKind::Claude,
+            channel_id,
+            Some("AgentDesk-5015-stale-unknown"),
+            Some(ManagedRuntimeExpectation {
+                runtime_kind: RuntimeHandoffKind::LegacyTmuxWrapper,
+                evidence_strength: RuntimeKindEvidenceStrength::Strong,
+            }),
+            |_| true,
+            |_, _| {
+                Some(ObservedManagedRuntimeKind {
+                    runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                    evidence_strength: RuntimeKindEvidenceStrength::Strong,
+                })
+            },
+            || RuntimeInflightEvidence {
+                open: true,
+                stale: true,
+            },
+            || crate::services::tui_turn_state::TuiTurnState::Unknown,
+            |_| true,
+            |name, _, _| calls.push(name.to_string()),
+        );
+        assert_eq!(verdict, RuntimeMismatchVerdict::Defer);
+        assert!(
+            calls.is_empty(),
+            "unknown transcript evidence must fail closed"
+        );
+        clear_test_defer(channel_id);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_revalidation_rejects_owner_change() {
+        let channel_id = ChannelId::new(50_150_013);
+        clear_test_defer(channel_id);
+        let mut calls = Vec::new();
+        let verdict = reconcile_managed_tmux_runtime_kind_for_config(
+            &ProviderKind::Claude,
+            channel_id,
+            Some("AgentDesk-5015-owner-change"),
+            Some(ManagedRuntimeExpectation {
+                runtime_kind: RuntimeHandoffKind::LegacyTmuxWrapper,
+                evidence_strength: RuntimeKindEvidenceStrength::Strong,
+            }),
+            |_| true,
+            |_, _| {
+                Some(ObservedManagedRuntimeKind {
+                    runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                    evidence_strength: RuntimeKindEvidenceStrength::Strong,
+                })
+            },
+            || RuntimeInflightEvidence {
+                open: false,
+                stale: false,
+            },
+            || crate::services::tui_turn_state::TuiTurnState::Idle,
+            |_| false,
+            |name, _, _| calls.push(name.to_string()),
+        );
+        assert_eq!(verdict, RuntimeMismatchVerdict::Defer);
+        assert!(calls.is_empty());
+        clear_test_defer(channel_id);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transcript_state_probe_preserves_provider_argument_order() {
         fn claude(
             current_path: Option<&str>,
             session_id: Option<&str>,
@@ -1273,22 +1389,28 @@ mod thread_role_inheritance_tests {
             assert_eq!(provider_session_id, Some("codex-session"));
             crate::services::tui_turn_state::TuiTurnState::Streaming
         }
-        assert!(managed_runtime_transcript_busy_using(
-            &ProviderKind::Claude,
-            Some("/worktree/claude"),
-            Some("claude-session"),
-            Some("AgentDesk-claude"),
-            claude,
-            codex,
-        ));
-        assert!(managed_runtime_transcript_busy_using(
-            &ProviderKind::Codex,
-            Some("/worktree/codex"),
-            Some("codex-session"),
-            Some("AgentDesk-codex"),
-            claude,
-            codex,
-        ));
+        assert_eq!(
+            managed_runtime_transcript_state_using(
+                &ProviderKind::Claude,
+                Some("/worktree/claude"),
+                Some("claude-session"),
+                Some("AgentDesk-claude"),
+                claude,
+                codex,
+            ),
+            crate::services::tui_turn_state::TuiTurnState::Streaming
+        );
+        assert_eq!(
+            managed_runtime_transcript_state_using(
+                &ProviderKind::Codex,
+                Some("/worktree/codex"),
+                Some("codex-session"),
+                Some("AgentDesk-codex"),
+                claude,
+                codex,
+            ),
+            crate::services::tui_turn_state::TuiTurnState::Streaming
+        );
     }
 
     #[cfg(unix)]

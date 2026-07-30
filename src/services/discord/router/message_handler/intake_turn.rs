@@ -1772,6 +1772,7 @@ pub(super) async fn handle_text_message(
     );
     #[cfg(unix)]
     let runtime_mismatch_verdict = reconcile_managed_tmux_runtime_kind_using_runtime(
+        shared,
         &provider,
         channel_id,
         tmux_session_name.as_deref(),
