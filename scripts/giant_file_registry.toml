@@ -712,18 +712,6 @@ deadline = "2026-08-31"
 decompose_issue = "#4712"
 
 [[entry]]
-# Crossed the 1000-prod-LoC threshold in #4992 when the persisted watcher
-# relay-progress timestamp was added to distinguish consumer liveness from
-# producer-side stream writes. Net-zero was possible only by compressing
-# compatibility comments, a worse maintenance tradeoff than explicit admission.
-# Decompose model helpers without splitting the serialized InflightTurnState
-# compatibility surface.
-file = "src/services/discord/inflight/model.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#4712"
-
-[[entry]]
 # Crossed the 1000-prod-LoC threshold in #3998 E13 when the turn-output
 # controller lease guard moved from `TurnKey` to `DeliveryLeaseKey` so id-0
 # delivery leases can use inflight disambiguators. Keep future controller growth

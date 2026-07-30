@@ -304,9 +304,8 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// (#1270). `None` for offsets persisted before this field existed.
     #[serde(default)]
     pub last_watcher_relayed_generation_mtime_ns: Option<i64>,
-    /// Unix seconds of the last confirmed relay advance. Watcher-success and
-    /// bridge-owned confirmed streaming delivery stamp this monotonic clock;
-    /// legacy or invalid values make destructive recovery abstain.
+    /// Watcher-confirmed relay wall-clock Unix seconds; legacy/old-binary rewrites
+    /// default to `None` and force abstention (#2235 additive-field convention).
     #[serde(default)]
     pub last_watcher_relayed_at_unix: Option<i64>,
     /// Lifecycle-aware restart/handoff mode for recovery semantics.

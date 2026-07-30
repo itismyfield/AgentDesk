@@ -243,9 +243,6 @@
   store-side CAS paths).
 - legacy_modules: none — relay routes are being consolidated, not replaced.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/services/discord/inflight/model.rs` (frozen giant surface; #4992 adds the
-    additive watcher-relay timestamp used to distinguish consumer progress from
-    producer-side stream persistence; tracked for decomposition under #4712).
   - `src/services/discord/watchers/lifecycle.rs` retired as a frozen giant in
     #4712: restore scan, liveness, dispatch failure, claim/reuse ownership,
     output policy, recovery marker, and test clusters moved verbatim into

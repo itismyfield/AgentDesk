@@ -19,10 +19,29 @@ pub(super) struct WatcherRelayLivenessEvidence<'a> {
     pub(super) now_unix: i64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RelayForfeitArm {
+    ZeroDelivery,
+    StalledDelivery,
+}
+
+pub(super) fn relay_forfeit_arm(prior_delivery_evidence: bool) -> RelayForfeitArm {
+    if prior_delivery_evidence {
+        RelayForfeitArm::StalledDelivery
+    } else {
+        RelayForfeitArm::ZeroDelivery
+    }
+}
+
+fn unsent_response_payload_exists(evidence: WatcherRelayLivenessEvidence<'_>) -> bool {
+    !evidence.full_response.trim().is_empty() && evidence.response_sent_offset == 0
+}
+
 pub(super) fn fresh_watcher_heartbeat_blocks_rebind(
     evidence: WatcherRelayLivenessEvidence<'_>,
 ) -> bool {
-    watcher_relay_progress_recent(evidence) || !relay_liveness_forfeited(evidence)
+    watcher_relay_progress_recent(evidence)
+        || (unsent_response_payload_exists(evidence) && !relay_liveness_forfeited(evidence))
 }
 
 pub(super) fn relay_liveness_forfeited(evidence: WatcherRelayLivenessEvidence<'_>) -> bool {
@@ -30,35 +49,37 @@ pub(super) fn relay_liveness_forfeited(evidence: WatcherRelayLivenessEvidence<'_
         evidence.output_len_at_snapshot,
         evidence.output_mtime_age_secs,
     );
-    let unsent_response_payload_exists =
-        !evidence.full_response.trim().is_empty() && evidence.response_sent_offset == 0;
-    if !unsent_response_payload_exists {
+    if !unsent_response_payload_exists(evidence) {
         return false;
     }
 
-    // Zero-delivery arm: prior delivery must be absent; turn age supplies grace.
-    let zero_delivery_forfeited = evidence.last_watcher_relayed_offset.is_none()
+    let zero_delivery_forfeited = relay_forfeit_arm(evidence.prior_delivery_evidence)
+        == RelayForfeitArm::ZeroDelivery
+        && evidence.last_watcher_relayed_offset.is_none()
         && !evidence.terminal_delivery_committed
-        && !evidence.prior_delivery_evidence
         && evidence
             .turn_age_secs
             .is_some_and(|age| age >= ZERO_DELIVERY_FORFEIT_MIN_AGE_SECS);
 
-    // Stalled-delivery arm: prior delivery is expected; its valid timestamp is
-    // the grace anchor, so the zero-delivery exclusion must not gate this arm.
-    let stalled_relay_forfeited = match (
-        evidence.last_watcher_relayed_offset,
-        valid_elapsed_secs(evidence.last_watcher_relayed_at_unix, evidence.now_unix),
-    ) {
-        (Some(_), Some(stall_age_secs)) => {
-            !relay_frontier_advanced(
-                evidence.relay_frontier_at_snapshot,
-                evidence.relay_frontier_now,
-            ) && evidence.output_len_now.unwrap_or(0) > evidence.relay_frontier_now.unwrap_or(0)
-                && stall_age_secs >= ZERO_DELIVERY_FORFEIT_MIN_AGE_SECS
-        }
-        _ => false,
-    };
+    // The complementary prior-delivery arm still requires a valid watcher clock
+    // and stalled consumer frontier before destructive recovery may proceed.
+    let stalled_relay_forfeited = relay_forfeit_arm(evidence.prior_delivery_evidence)
+        == RelayForfeitArm::StalledDelivery
+        && match (
+            valid_elapsed_secs(evidence.last_watcher_relayed_at_unix, evidence.now_unix),
+            evidence.turn_age_secs,
+        ) {
+            (Some(stall_age_secs), Some(turn_age_secs)) => {
+                !relay_frontier_advanced(
+                    evidence.relay_frontier_at_snapshot,
+                    evidence.relay_frontier_now,
+                ) && evidence.output_len_now.unwrap_or(0)
+                    > evidence.relay_frontier_now.unwrap_or(0)
+                    && stall_age_secs >= ZERO_DELIVERY_FORFEIT_MIN_AGE_SECS
+                    && stall_age_secs <= turn_age_secs
+            }
+            _ => false,
+        };
 
     zero_delivery_forfeited || stalled_relay_forfeited
 }
@@ -180,6 +201,7 @@ mod tests {
             relay_frontier_at_snapshot: Some(6_281_996),
             relay_frontier_now: Some(6_281_996),
             prior_delivery_evidence: true,
+            turn_age_secs: Some(20_000),
             now_unix: 100_000,
             ..evidence()
         };
@@ -188,14 +210,78 @@ mod tests {
     }
 
     #[test]
-    fn destructive_cancel_rewound_offset_with_prior_delivery_abstains() {
+    fn destructive_cancel_delivery_signals_partition_all_combinations() {
+        for bits in 0_u8..32 {
+            let signals = [
+                bits & 1 != 0,
+                bits & 2 != 0,
+                bits & 4 != 0,
+                bits & 8 != 0,
+                bits & 16 != 0,
+            ];
+            let prior_delivery_evidence = signals.into_iter().any(|signal| signal);
+            let arm = relay_forfeit_arm(prior_delivery_evidence);
+            assert_eq!(
+                matches!(arm, RelayForfeitArm::ZeroDelivery) as u8
+                    + matches!(arm, RelayForfeitArm::StalledDelivery) as u8,
+                1,
+                "signals={signals:?} must select exactly one arm"
+            );
+            assert_eq!(
+                arm,
+                if prior_delivery_evidence {
+                    RelayForfeitArm::StalledDelivery
+                } else {
+                    RelayForfeitArm::ZeroDelivery
+                },
+                "signals={signals:?} selected the wrong arm"
+            );
+        }
+    }
+
+    #[test]
+    fn destructive_cancel_rewound_offset_with_prior_delivery_uses_stalled_arm() {
         let rewound = WatcherRelayLivenessEvidence {
-            response_sent_offset: 0,
+            last_watcher_relayed_at_unix: Some(90_000),
+            output_len_now: Some(6_282_100),
+            relay_frontier_at_snapshot: Some(6_281_996),
+            relay_frontier_now: Some(6_281_996),
             prior_delivery_evidence: true,
+            turn_age_secs: Some(20_000),
+            now_unix: 100_000,
             ..evidence()
         };
-        assert!(!relay_liveness_forfeited(rewound));
-        assert!(fresh_watcher_heartbeat_blocks_rebind(rewound));
+        assert_eq!(
+            relay_forfeit_arm(rewound.prior_delivery_evidence),
+            RelayForfeitArm::StalledDelivery
+        );
+        assert!(relay_liveness_forfeited(rewound));
+        assert!(!fresh_watcher_heartbeat_blocks_rebind(rewound));
+    }
+
+    #[test]
+    fn destructive_cancel_relay_timestamp_cannot_predate_turn() {
+        let clock_failure_stamp = WatcherRelayLivenessEvidence {
+            last_watcher_relayed_at_unix: Some(0),
+            output_len_now: Some(6_282_100),
+            relay_frontier_at_snapshot: Some(6_281_996),
+            relay_frontier_now: Some(6_281_996),
+            prior_delivery_evidence: true,
+            turn_age_secs: Some(3_600),
+            now_unix: 1_800_000_000,
+            ..evidence()
+        };
+        assert!(!relay_liveness_forfeited(clock_failure_stamp));
+        assert!(fresh_watcher_heartbeat_blocks_rebind(clock_failure_stamp));
+    }
+
+    #[test]
+    fn destructive_cancel_without_unsent_payload_preserves_halted_recovery() {
+        let no_payload = WatcherRelayLivenessEvidence {
+            full_response: "",
+            ..evidence()
+        };
+        assert!(!fresh_watcher_heartbeat_blocks_rebind(no_payload));
     }
 
     #[test]

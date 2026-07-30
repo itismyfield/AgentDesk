@@ -948,9 +948,9 @@ mod tests {
             let gate = evaluate(&shared, &provider, channel, channel, &snapshot).await;
 
             assert_eq!(
-                gate.denied_reason(),
-                Some("fresh_watcher_heartbeat"),
-                "producer inactivity alone cannot forfeit a fresh watcher without an unsent payload"
+                gate.allowed_reason(),
+                Some("capture_and_jsonl_halted"),
+                "a turn without an unsent payload keeps the bounded halted-recovery path"
             );
         });
     }
