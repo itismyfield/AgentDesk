@@ -23,10 +23,7 @@ pub enum HealthStatus {
     Unhealthy,
 }
 
-/// #964 / #1133: per-channel watcher + relay state surfaced via
-/// `GET /api/channels/:id/watcher-state`.
-///
-/// #1133 fields are scalar and safe for non-privileged operator dashboards.
+/// Per-channel watcher and relay state for `GET /api/channels/:id/watcher-state`.
 #[derive(Clone, Debug, Serialize)]
 pub struct WatcherStateSnapshot {
     pub provider: String,
