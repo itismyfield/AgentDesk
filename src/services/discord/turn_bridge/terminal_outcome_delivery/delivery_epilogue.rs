@@ -60,6 +60,15 @@ pub(super) struct DeliveryEpilogueState<'a> {
     pub(super) busy_requeue_outcome: &'a mut Option<followup_requeue::FollowupRequeueOutcome>,
 }
 
+fn bridge_terminal_delivery_evidence_loss_should_warn(
+    outcome: crate::services::discord::inflight::GuardedSaveOutcome,
+) -> bool {
+    matches!(
+        outcome,
+        crate::services::discord::inflight::GuardedSaveOutcome::IdentityMismatch
+    )
+}
+
 #[rustfmt::skip]
 pub(super) async fn handle_delivery_epilogue(
     message: DeliveryEpilogueMessage,
@@ -111,10 +120,25 @@ pub(super) async fn handle_delivery_epilogue(
             inflight_state.response_sent_offset = response_sent_offset;
             inflight_state.terminal_delivery_committed = true;
             inflight_state.full_response = full_response.clone();
-            match crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
-                &mut *inflight_state,
-                "turn_bridge::terminal_delivery_committed_mirror@5536",
-            ) {
+            let mirror_outcome =
+                crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
+                    &mut *inflight_state,
+                    "turn_bridge::terminal_delivery_committed_mirror@5536",
+                );
+            // #5025: the terminal answer WAS delivered, but the row that would
+            // record it may now be owned by another turn identity. Keep the
+            // identity gate's non-clobber behavior and make the lost mirror
+            // evidence observable instead of silently reporting "undelivered".
+            if bridge_terminal_delivery_evidence_loss_should_warn(mirror_outcome) {
+                tracing::warn!(
+                    provider = %provider.as_str(),
+                    channel_id = channel_id.get(),
+                    current_msg_id = current_msg_id.get(),
+                    response_sent_offset,
+                    "turn bridge delivered the terminal answer but could not mirror terminal_delivery_committed: the inflight row is owned by a different turn identity, so this turn's delivery evidence is lost (row will read as undelivered)"
+                );
+            }
+            match mirror_outcome {
                 crate::services::discord::inflight::GuardedSaveOutcome::IoError => {
                     tracing::warn!(
                         provider = %provider.as_str(),
@@ -123,27 +147,8 @@ pub(super) async fn handle_delivery_epilogue(
                     );
                 }
                 crate::services::discord::inflight::GuardedSaveOutcome::Saved
-                | crate::services::discord::inflight::GuardedSaveOutcome::Missing => {}
-                // #5025: the terminal answer WAS delivered, but the row that
-                // would record it is now owned by another turn identity, so the
-                // mirror is (correctly) not clobbered — see the identity-gate
-                // invariant. Dropping it silently is what is wrong: the row then
-                // reads `terminal_delivery_committed = false` forever even though
-                // delivery succeeded, and every downstream consumer reads that as
-                // "never delivered". That drives the #4030 stale-demotion gate
-                // into an unbounded ~32s retry it can never satisfy, and feeds the
-                // out-of-band watchdog false RELAY-WEDGE alerts for a finished
-                // turn. Keep the non-clobber behaviour; make the evidence loss
-                // observable.
-                crate::services::discord::inflight::GuardedSaveOutcome::IdentityMismatch => {
-                    tracing::warn!(
-                        provider = %provider.as_str(),
-                        channel_id = channel_id.get(),
-                        current_msg_id = current_msg_id.get(),
-                        response_sent_offset,
-                        "turn bridge delivered the terminal answer but could not mirror terminal_delivery_committed: the inflight row is owned by a different turn identity, so this turn's delivery evidence is lost (row will read as undelivered)"
-                    );
-                }
+                | crate::services::discord::inflight::GuardedSaveOutcome::Missing
+                | crate::services::discord::inflight::GuardedSaveOutcome::IdentityMismatch => {}
             }
             for frozen_msg_id in terminal_full_replay_cleanup_msg_ids.drain(..) {
                 // #5413/#3607: current_msg_id is the terminal answer and is
@@ -448,4 +453,16 @@ pub(super) async fn handle_delivery_epilogue(
     *state.status_panel_terminal_committed = status_panel_terminal_committed;
 
     DeliveryEpilogueOutcome::Continue
+}
+
+#[cfg(test)]
+mod terminal_delivery_evidence_loss_tests {
+    use super::*;
+
+    #[test]
+    fn identity_mismatch_bridge_mirror_warns_about_lost_delivery_evidence() {
+        assert!(bridge_terminal_delivery_evidence_loss_should_warn(
+            crate::services::discord::inflight::GuardedSaveOutcome::IdentityMismatch
+        ));
+    }
 }

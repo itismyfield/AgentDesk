@@ -19,6 +19,15 @@ pub(super) fn watcher_commit_should_advance_runtime_binding(
         && !watcher_tui_gate_blocks_lifecycle(gate_outcome, terminal_delivery_committed)
 }
 
+fn watcher_terminal_delivery_evidence_loss_should_warn(
+    outcome: crate::services::discord::inflight::WatcherTerminalCommitOutcome,
+) -> bool {
+    matches!(
+        outcome,
+        crate::services::discord::inflight::WatcherTerminalCommitOutcome::Skipped
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn mark_watcher_terminal_delivery_committed(
     provider: &ProviderKind,
@@ -75,28 +84,26 @@ pub(super) fn mark_watcher_terminal_delivery_committed(
             last_watcher_relayed_generation_mtime_ns: generation_mtime_ns,
         },
     );
+    // #5025: the watcher relayed a terminal answer, but the identity guard may
+    // refuse the commit (a newer turn owns the row, or the pinned identity no
+    // longer matches). Not committing is correct — clobbering another turn's row
+    // is the thing the guard exists to prevent — but returning `false` with no
+    // trace made a delivered turn indistinguishable from a turn that never
+    // delivered. Keep the non-clobber behavior and make that evidence loss loud.
+    if watcher_terminal_delivery_evidence_loss_should_warn(outcome) {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = channel_id.get(),
+            tmux_session = %tmux_session_name,
+            expected_user_msg_id = expected_identity.user_msg_id,
+            last_offset,
+            turn_data_start_offset,
+            "watcher relayed a terminal answer but the inflight identity guard refused the commit; this turn's delivery evidence is lost (row will read as undelivered)"
+        );
+    }
     match outcome {
         crate::services::discord::inflight::WatcherTerminalCommitOutcome::Committed => true,
-        // #5025: the watcher relayed a terminal answer, but the identity guard
-        // refused the commit (a newer turn owns the row, or the pinned identity
-        // no longer matches). Not committing is correct — clobbering another
-        // turn's row is the thing the guard exists to prevent — but returning
-        // `false` with no trace made a delivered turn indistinguishable from a
-        // turn that never delivered, with nothing in the log to say which. That
-        // is what leaves `terminal_delivery_committed = false` on a finished
-        // turn and keeps the #4030 stale-demotion gate retrying forever.
-        crate::services::discord::inflight::WatcherTerminalCommitOutcome::Skipped => {
-            tracing::warn!(
-                provider = %provider.as_str(),
-                channel_id = channel_id.get(),
-                tmux_session = %tmux_session_name,
-                expected_user_msg_id = expected_identity.user_msg_id,
-                last_offset,
-                turn_data_start_offset,
-                "watcher relayed a terminal answer but the inflight identity guard refused the commit; this turn's delivery evidence is lost (row will read as undelivered)"
-            );
-            false
-        }
+        crate::services::discord::inflight::WatcherTerminalCommitOutcome::Skipped => false,
         crate::services::discord::inflight::WatcherTerminalCommitOutcome::IoError => {
             tracing::warn!(
                 provider = %provider.as_str(),
@@ -106,6 +113,18 @@ pub(super) fn mark_watcher_terminal_delivery_committed(
             );
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod terminal_delivery_evidence_loss_tests {
+    use super::*;
+
+    #[test]
+    fn skipped_watcher_terminal_commit_warns_about_lost_delivery_evidence() {
+        assert!(watcher_terminal_delivery_evidence_loss_should_warn(
+            crate::services::discord::inflight::WatcherTerminalCommitOutcome::Skipped
+        ));
     }
 }
 
