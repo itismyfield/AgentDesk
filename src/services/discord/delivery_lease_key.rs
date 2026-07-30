@@ -8,7 +8,9 @@ use super::{inflight, turn_finalizer};
 /// user_msg_id)` identity. Synthetic / recovery / TUI-direct turns with
 /// `user_msg_id == 0` should carry the turn's persisted `started_at` and
 /// `turn_start_offset`; when either disambiguator is absent, the residual legacy
-/// class falls back to the pre-E13 degenerate `(channel, generation, 0)` key.
+/// class still contends on the pre-E13 degenerate `(channel, generation, 0)` key
+/// for duplicate suppression, but that key is never accepted as per-turn health
+/// evidence because distinct semantic turns can alias it.
 #[allow(dead_code)] // #3041 P1-0: dormant in some lease-owner paths.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub(in crate::services::discord) struct DeliveryLeaseKey {
@@ -110,9 +112,9 @@ impl DeliveryLeaseKey {
                 caller_line = caller.line(),
                 "delivery lease id-0 turn missing disambiguators; using degenerate legacy key"
             );
-            // Residual legacy fallback: all sites derive id-0 disambiguators from
-            // the same origin (inflight state / frame fence stamped from it), so a
-            // same-turn miss degrades everywhere together and dedup still holds.
+            // Residual legacy fallback retained only for lease contention. It is
+            // not exact-turn authority: different semantic id-0 turns can alias
+            // this key, so the health evidence store classifies it as Unknown.
             return Self {
                 channel_id,
                 generation,

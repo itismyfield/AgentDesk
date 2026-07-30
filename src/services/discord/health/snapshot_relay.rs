@@ -1,6 +1,7 @@
 use poise::serenity_prelude::ChannelId;
 
 use crate::services::discord::{self as discord, DeliveryLeaseKey, SharedData};
+use discord::outbound::delivery_evidence_store::RelayDeliveryEvidence;
 use crate::services::provider::ProviderKind;
 
 use super::super::relay_health::{RelayActiveTurn, RelayHealthSnapshot, RelayStallState};
@@ -170,6 +171,40 @@ pub(super) struct RelayHealthBuildInput {
     pub(super) last_outbound_activity_ms: Option<i64>,
 }
 
+fn relay_delivery_evidence(key: Option<&DeliveryLeaseKey>) -> RelayDeliveryEvidence {
+    let Some(key) = key else {
+        // NoLease recovery/standby transports and health rows without an exact
+        // lease identity are outside this process-local evidence boundary.
+        return RelayDeliveryEvidence::Unknown;
+    };
+    discord::outbound::delivery_evidence_store::relay_evidence_for_turn(key)
+}
+
+pub(super) fn relay_turn_key_for_health(
+    channel_id: ChannelId,
+    generation: u64,
+    inflight: Option<&discord::inflight::InflightTurnState>,
+) -> Option<DeliveryLeaseKey> {
+    let state = inflight?;
+    // TUI-direct/external-input delivery has transport paths that never acquire a
+    // terminal lease, and its placeholder makes generic outbound activity look
+    // live from turn start. Treat the entire class as unobservable here rather
+    // than letting a partial lease observation arm destructive recovery.
+    if matches!(
+        state.turn_source,
+        discord::inflight::TurnSource::ExternalInput
+            | discord::inflight::TurnSource::ExternalAdopted
+    ) {
+        return None;
+    }
+    Some(DeliveryLeaseKey::from_inflight_state_for_site(
+        channel_id,
+        generation,
+        state,
+        "relay_health",
+    ))
+}
+
 pub(super) fn build_relay_health_snapshot(input: RelayHealthBuildInput) -> RelayHealthSnapshot {
     RelayHealthSnapshot {
         provider: input.provider,
@@ -196,10 +231,7 @@ pub(super) fn build_relay_health_snapshot(input: RelayHealthBuildInput) -> Relay
         thread_channel_id: input.thread_proof.thread_channel_id,
         last_relay_ts_ms: (input.last_relay_ts_ms > 0).then_some(input.last_relay_ts_ms),
         last_outbound_activity_ms: input.last_outbound_activity_ms,
-        confirmed_delivery_since_turn_start: input
-            .relay_turn_key
-            .as_ref()
-            .and_then(discord::outbound::delivery_evidence_store::confirmed_relay_for_turn),
+        delivery_evidence: relay_delivery_evidence(input.relay_turn_key.as_ref()),
         last_capture_offset: input.last_capture_offset,
         last_relay_offset: input.last_relay_offset,
         last_relay_offset_recorded: input.last_relay_offset_recorded,

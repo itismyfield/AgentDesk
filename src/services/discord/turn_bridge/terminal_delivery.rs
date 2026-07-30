@@ -380,9 +380,6 @@ pub(super) fn advance_tmux_relay_confirmed_end(
         .map(tmux_generation_file_mtime_ns)
         .filter(|m| *m != 0);
 
-    relay_coord
-        .confirmed_end_recorded
-        .store(true, std::sync::atomic::Ordering::Release);
     let mut current = relay_coord
         .confirmed_end_offset
         .load(std::sync::atomic::Ordering::Acquire);

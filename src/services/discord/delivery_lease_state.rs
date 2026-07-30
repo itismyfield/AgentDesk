@@ -354,6 +354,13 @@ impl DeliveryLeaseCell {
             .payload
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let abandoned_without_outcome = matches!(&*guard, LeaseState::Leased {
+            holder: cur,
+            key: cur_key,
+            start: cur_start,
+            end: cur_end,
+            ..
+        } if *cur == holder && cur_key == &key && *cur_start == start && *cur_end == end);
         let matches = match &*guard {
             LeaseState::Leased {
                 holder: cur,
@@ -373,6 +380,11 @@ impl DeliveryLeaseCell {
         };
         if !matches {
             return false;
+        }
+        if abandoned_without_outcome {
+            // A cancellation or panic can drop a holder after Discord accepted
+            // bytes but before an outcome commit. Preserve that as Unknown.
+            delivery_lease_evidence::record_relay_unknown(&key);
         }
         *guard = LeaseState::Unleased;
         self.state_tag.store(TAG_UNLEASED, Ordering::Release);
@@ -434,14 +446,30 @@ impl DeliveryLeaseCell {
             .payload
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let LeaseState::Leased { deadline_ms, .. } = &*guard {
+        if let LeaseState::Leased {
+            key, deadline_ms, ..
+        } = &*guard
+        {
             if now_ms >= *deadline_ms {
+                // The holder disappeared without a terminal outcome. A transport
+                // may have landed before the task died, so the retained attempt
+                // is ambiguous rather than proven non-delivery.
+                delivery_lease_evidence::record_relay_unknown(key);
                 *guard = LeaseState::Unleased;
                 self.state_tag.store(TAG_UNLEASED, Ordering::Release);
                 return true;
             }
         }
         false
+    }
+
+    /// True while this channel has any active terminal delivery lease.
+    ///
+    /// This is the bridge/sink/watcher shared boundary. Health blockers must not
+    /// consult only the watcher-specific `relay_slot` or they can race a slow
+    /// bridge or session-bound Discord transport.
+    pub(in crate::services::discord) fn is_active(&self) -> bool {
+        matches!(self.read(), LeaseSnapshot::Leased { .. })
     }
 }
 

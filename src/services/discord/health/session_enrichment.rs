@@ -85,15 +85,12 @@ impl SessionEnrichment {
             watcher_binding_tmux_session.as_deref(),
         );
         let relay_coord = shared.tmux_relay_coords.get(&channel);
-        let last_relay_offset_recorded =
-            relay_offset_was_recorded(relay_coord.as_ref().map(|coord| coord.value().as_ref()));
-        let (last_relay_offset, last_relay_ts_ms, reconnect_count) = relay_coord
+        let (last_relay_offset_recorded, last_relay_offset) =
+            published_relay_frontier(relay_coord.as_ref().map(|coord| coord.value().as_ref()));
+        let (last_relay_ts_ms, reconnect_count) = relay_coord
             .as_ref()
             .map(|coord| {
                 (
-                    coord
-                        .confirmed_end_offset
-                        .load(std::sync::atomic::Ordering::Acquire),
                     coord
                         .last_relay_ts_ms
                         .load(std::sync::atomic::Ordering::Acquire),
@@ -102,7 +99,7 @@ impl SessionEnrichment {
                         .load(std::sync::atomic::Ordering::Acquire),
                 )
             })
-            .unwrap_or((0, 0, 0));
+            .unwrap_or((0, 0));
         let output_path_for_metadata = inflight
             .as_ref()
             .and_then(|state| state.output_path.as_deref())
@@ -268,12 +265,16 @@ fn liveness_probe_session(inflight: Option<&str>, watcher: Option<&str>) -> Opti
     inflight.or(watcher).map(str::to_string)
 }
 
-fn relay_offset_was_recorded(coord: Option<&crate::services::discord::TmuxRelayCoord>) -> bool {
-    coord.is_some_and(|coord| {
-        coord
-            .confirmed_end_recorded
-            .load(std::sync::atomic::Ordering::Acquire)
-    })
+fn published_relay_frontier(coord: Option<&crate::services::discord::TmuxRelayCoord>) -> (bool, u64) {
+    match coord {
+        Some(coord) => (
+            true,
+            coord
+                .confirmed_end_offset
+                .load(std::sync::atomic::Ordering::Acquire),
+        ),
+        None => (false, 0),
+    }
 }
 
 fn liveness_as_alive(liveness: PaneLiveness) -> Option<bool> {
@@ -307,13 +308,22 @@ mod tests {
     }
 
     #[test]
-    fn coordination_entry_creation_is_not_offset_write_evidence() {
+    fn frontier_publication_reads_recorded_and_offset_from_one_atomic_authority() {
         let coord = crate::services::discord::TmuxRelayCoord::new(ChannelId::new(50_220_003));
-        assert!(!relay_offset_was_recorded(Some(&coord)));
+        assert_eq!(published_relay_frontier(None), (false, 0));
+        assert_eq!(published_relay_frontier(Some(&coord)), (true, 0));
 
         coord
-            .confirmed_end_recorded
-            .store(true, std::sync::atomic::Ordering::Release);
-        assert!(relay_offset_was_recorded(Some(&coord)));
+            .confirmed_end_offset
+            .store(128, std::sync::atomic::Ordering::Release);
+        assert_eq!(published_relay_frontier(Some(&coord)), (true, 128));
+
+        assert!(coord.reset_confirmed_frontier(128, 0));
+        assert_eq!(
+            published_relay_frontier(Some(&coord)),
+            (true, 0),
+            "an intentional reset retains recorded-zero without a separate publication bit"
+        );
     }
+
 }

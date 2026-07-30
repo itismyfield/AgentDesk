@@ -815,10 +815,13 @@ where
         }
         TransportResult::Transient => {
             // I2: ambiguous-but-retriable. Do NOT commit/advance — release the
-            // (held) lease so a retry can re-acquire from `start`. No commit
-            // happens on this arm: it never calls `commit_and_finalize`.
+            // (held) lease so a retry can re-acquire from `start`. Health must
+            // retain the ambiguity rather than reinterpret it as non-delivery.
             drop(heartbeat_guard);
             if let Some(guard) = lease_guard.as_mut() {
+                crate::services::discord::delivery_lease_evidence::record_relay_unknown(
+                    &guard.lease_key(),
+                );
                 guard.release_and_disarm();
             }
             DeliveryOutcome::Transient {
@@ -826,18 +829,30 @@ where
             }
         }
         TransportResult::PermanentFailure => {
-            // Permanent watcher transport failure: release without commit/advance
-            // and return the owner's no-op/no-retry outcome.
+            // Transport failed before confirmed delivery. Preserve explicit
+            // non-delivery evidence without advancing the frontier.
             drop(heartbeat_guard);
             if let Some(guard) = lease_guard.as_mut() {
+                let committed = ctx.lease.commit(
+                    ctx.holder,
+                    guard.lease_key(),
+                    start,
+                    end,
+                    LeaseOutcome::NotDelivered,
+                );
+                debug_assert!(committed, "permanent failure must match the acquired lease");
                 guard.release_and_disarm();
             }
             DeliveryOutcome::Skipped
         }
         TransportResult::Unknown { fell_back } => {
-            // I2: ambiguous — release WITHOUT commit; carry `fell_back` (#3089 A5).
+            // I2: ambiguous — record Unknown and release without advancing;
+            // carry `fell_back` (#3089 A5).
             drop(heartbeat_guard);
             if let Some(guard) = lease_guard.as_mut() {
+                crate::services::discord::delivery_lease_evidence::record_relay_unknown(
+                    &guard.lease_key(),
+                );
                 guard.release_and_disarm();
             }
             DeliveryOutcome::Unknown { fell_back }

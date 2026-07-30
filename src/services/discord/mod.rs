@@ -1596,7 +1596,6 @@ pub(super) struct TmuxRelayCoord {
     /// For a normal Discord-origin turn (inflight present) the watcher remains
     /// sole relay owner; only no-inflight wake/idle paths gate on this watermark.
     pub(super) confirmed_end_offset: Arc<std::sync::atomic::AtomicU64>,
-    pub(super) confirmed_end_recorded: Arc<std::sync::atomic::AtomicBool>,
     pub(in crate::services::discord) reset_state:
         std::sync::Mutex<relay_health::FrontierResetState>,
     /// Wall-clock timestamp (ms since epoch) of the most recent confirmed
@@ -1640,7 +1639,6 @@ impl TmuxRelayCoord {
         Self {
             relay_slot: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             confirmed_end_offset: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            confirmed_end_recorded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reset_state: std::sync::Mutex::new(relay_health::FrontierResetState::default()),
             last_relay_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             reconnect_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1986,18 +1984,13 @@ impl SharedData {
             .load(Ordering::Acquire)
     }
 
-    /// #4181: `true` while some watcher is actively emitting a relay for this
-    /// channel — the `relay_slot` holds the in-progress emission's
-    /// `data_start_offset` (non-zero). A single relay POST can be in-flight for
-    /// longer than the stall grace under extreme rate-limiting, freezing the
-    /// committed offset without the turn being stalled. Redrive consults this so
-    /// it does not re-drive an already-in-flight emission (a duplicate, not a
-    /// loss).
+    /// #4181/#5022: `true` while a watcher emission slot OR any shared terminal
+    /// delivery lease is active for this channel. Bridge and session-bound sends
+    /// do not set `relay_slot`; consulting only that watcher-specific marker can
+    /// misclassify a slow, healthy Discord POST as a dead relay.
     pub(super) fn relay_emission_in_flight(&self, channel_id: ChannelId) -> bool {
-        self.tmux_relay_coord(channel_id)
-            .relay_slot
-            .load(Ordering::Acquire)
-            != 0
+        let coord = self.tmux_relay_coord(channel_id);
+        coord.relay_slot.load(Ordering::Acquire) != 0 || coord.delivery_lease.is_active()
     }
 
     /// Record a recovery/reattach watcher spawn and purge the channel footer so the

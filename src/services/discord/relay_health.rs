@@ -6,6 +6,8 @@
 
 use serde::Serialize;
 
+use super::outbound::delivery_evidence_store::RelayDeliveryEvidence;
+
 mod frontier;
 pub(in crate::services::discord) use frontier::{
     FrontierResetState, RelayFrontierMutationGuard, RelayFrontierToken,
@@ -84,7 +86,7 @@ pub(in crate::services::discord) struct RelayHealthSnapshot {
     pub thread_channel_id: Option<u64>,
     pub last_relay_ts_ms: Option<i64>,
     pub last_outbound_activity_ms: Option<i64>,
-    pub confirmed_delivery_since_turn_start: Option<bool>,
+    pub delivery_evidence: RelayDeliveryEvidence,
     pub last_capture_offset: Option<u64>,
     pub last_relay_offset: u64,
     pub last_relay_offset_recorded: bool,
@@ -118,7 +120,7 @@ impl RelayHealthSnapshot {
             thread_channel_id: None,
             last_relay_ts_ms: None,
             last_outbound_activity_ms: None,
-            confirmed_delivery_since_turn_start: Some(false),
+            delivery_evidence: RelayDeliveryEvidence::NotDelivered,
             last_capture_offset: None,
             last_relay_offset: 0,
             last_relay_offset_recorded: true,
@@ -145,7 +147,7 @@ impl RelayHealthSnapshot {
             && self.tmux_alive == Some(true)
             && self.last_relay_ts_ms.is_none()
             && self.last_outbound_activity_ms.is_none()
-            && self.confirmed_delivery_since_turn_start == Some(false)
+            && self.delivery_evidence == RelayDeliveryEvidence::NotDelivered
             && self.last_relay_offset_recorded
             && self.last_relay_offset == 0
             && self
@@ -214,7 +216,7 @@ mod tests {
             bridge_inflight_present: true,
             last_relay_ts_ms: None,
             last_outbound_activity_ms: None,
-            confirmed_delivery_since_turn_start: Some(true),
+            delivery_evidence: RelayDeliveryEvidence::Delivered,
             last_capture_offset: Some(19_525_394),
             last_relay_offset: 0,
             last_relay_offset_recorded: true,
@@ -231,14 +233,14 @@ mod tests {
     }
 
     #[test]
-    fn recorded_zero_frontier_without_delivery_evidence_is_still_relay_dead() {
+    fn recorded_zero_frontier_with_proven_non_delivery_is_relay_dead() {
         let snapshot = RelayHealthSnapshot {
             active_turn: RelayActiveTurn::Foreground,
             tmux_alive: Some(true),
             watcher_attached: true,
             watcher_owns_live_relay: true,
             bridge_inflight_present: true,
-            confirmed_delivery_since_turn_start: Some(false),
+            delivery_evidence: RelayDeliveryEvidence::NotDelivered,
             last_capture_offset: Some(128),
             last_relay_offset: 0,
             last_relay_offset_recorded: true,
@@ -255,10 +257,10 @@ mod tests {
     }
 
     #[test]
-    fn unknown_or_unrecorded_frontier_fails_closed_against_relay_dead_claim() {
+    fn unknown_attempted_not_attempted_or_unrecorded_frontier_fails_closed() {
         for snapshot in [
             RelayHealthSnapshot {
-                confirmed_delivery_since_turn_start: None,
+                delivery_evidence: RelayDeliveryEvidence::AttemptedUnconfirmed,
                 last_capture_offset: Some(128),
                 last_relay_offset: 0,
                 last_relay_offset_recorded: true,
@@ -268,7 +270,27 @@ mod tests {
                 ..RelayHealthSnapshot::test_snapshot()
             },
             RelayHealthSnapshot {
-                confirmed_delivery_since_turn_start: Some(false),
+                delivery_evidence: RelayDeliveryEvidence::Unknown,
+                last_capture_offset: Some(128),
+                last_relay_offset: 0,
+                last_relay_offset_recorded: true,
+                unread_bytes: Some(128),
+                desynced: true,
+                tmux_alive: Some(true),
+                ..RelayHealthSnapshot::test_snapshot()
+            },
+            RelayHealthSnapshot {
+                delivery_evidence: RelayDeliveryEvidence::NotAttempted,
+                last_capture_offset: Some(128),
+                last_relay_offset: 0,
+                last_relay_offset_recorded: true,
+                unread_bytes: Some(128),
+                desynced: true,
+                tmux_alive: Some(true),
+                ..RelayHealthSnapshot::test_snapshot()
+            },
+            RelayHealthSnapshot {
+                delivery_evidence: RelayDeliveryEvidence::NotDelivered,
                 last_capture_offset: Some(128),
                 last_relay_offset: 0,
                 last_relay_offset_recorded: false,

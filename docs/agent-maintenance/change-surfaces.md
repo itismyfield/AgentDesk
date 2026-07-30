@@ -248,9 +248,9 @@
     output policy, recovery marker, and test clusters moved verbatim into
     sub-1000-LoC `watchers/lifecycle/*.rs` modules. The root remains the
     canonical facade and preserves all prior call paths through re-exports.
-  - `src/services/discord/tmux.rs` (frozen giant surface; #5022 stamps the
-    explicit `confirmed_end_recorded` bit at the existing confirmed-frontier
-    writer, so coordination entry creation cannot masquerade as an offset write;
+  - `src/services/discord/tmux.rs` (frozen giant surface; #5022 keeps the
+    confirmed frontier in one `AtomicU64` publication unit and treats a present
+    coordination entry plus offset `0` as the intentional recorded-zero state;
     #4895 removes untyped auth/overload terminal variants and authority-bearing outcome fields; parser diagnostics now use a fixed redacted category while generic error results remain `HardResult`; test-only #4277 re-exports
     the watcher delivery-lease key helper so session-sink production-entry tests
     prove bidirectional contention on the same idle JSONL range; -9 from the #4804

@@ -381,7 +381,7 @@ mod thread_guard_stale_pure_tests {
             thread_channel_id: None,
             last_relay_ts_ms: None,
             last_outbound_activity_ms: None,
-            confirmed_delivery_since_turn_start: Some(false),
+            delivery_evidence: crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered,
             last_capture_offset: None,
             last_relay_offset: 0,
             last_relay_offset_recorded: true,

@@ -8,7 +8,7 @@ use super::redaction;
 use super::session_enrichment::SessionEnrichment;
 use super::snapshot_relay::{
     RelayHealthBuildInput, build_relay_health_snapshot, last_outbound_activity_ms,
-    relay_active_turn_from_inflight, relay_thread_proof_for_channel,
+    relay_active_turn_from_inflight, relay_thread_proof_for_channel, relay_turn_key_for_health,
     trace_relay_health_classification,
 };
 use super::stall_verdict;
@@ -186,6 +186,20 @@ impl DiscordHealthSnapshot {
     }
 }
 
+/// #4408 phase-2 (I1): resolve the transcript path / provider session the relay
+/// tail is bound to, surfaced on `watcher-state` so the out-of-band watchdog can
+/// compare the server's asserted selector (B) against its own growth-aware
+/// transcript pick (F).
+///
+/// Precedence is per field: a live inflight row's persisted `output_path` /
+/// `session_id` win because they are the authoritative binding; when the inflight
+/// row is absent — or leaves a field blank — we fall back to the in-memory tmux
+/// runtime binding's `relay_output_path` / `session_id`. Both inputs come from
+/// sync single-shot lookups that never straddle an await (so no
+/// `await_holding_lock` allow is introduced), and the side-effecting
+/// claude-session-id GET path is intentionally NOT consulted. A field is `None`
+/// when neither source knows it, so serialization omits it and the watchdog fails
+/// closed instead of alarming on an unknown bind.
 fn resolve_bound_selector(
     inflight_output_path: Option<&str>,
     inflight_session_id: Option<&str>,
@@ -382,14 +396,11 @@ async fn watcher_state_snapshot_for_shared(
         mailbox_turn_started_at_ms: mailbox_snapshot
             .turn_started_at
             .map(|started_at| started_at.timestamp_millis()),
-        relay_turn_key: session.inflight.as_ref().map(|state| {
-            discord::DeliveryLeaseKey::from_inflight_state_for_site(
-                ChannelId::new(session.watcher_owner_channel_id.unwrap_or(channel.get())),
-                shared.restart.current_generation,
-                state,
-                "relay_health",
-            )
-        }),
+        relay_turn_key: relay_turn_key_for_health(
+            ChannelId::new(session.watcher_owner_channel_id.unwrap_or(channel.get())),
+            shared.restart.current_generation,
+            session.inflight.as_ref(),
+        ),
         queue_depth: mailbox_snapshot.intervention_queue.len(),
         watcher_attached: session.attached,
         watcher_attached_stale: session.watcher_attached_stale,
@@ -573,16 +584,13 @@ async fn build_health_snapshot_with_options(
                     mailbox_turn_started_at_ms: snapshot
                         .turn_started_at
                         .map(|started_at| started_at.timestamp_millis()),
-                    relay_turn_key: session.inflight.as_ref().map(|state| {
-                        discord::DeliveryLeaseKey::from_inflight_state_for_site(
-                            ChannelId::new(
-                                session.watcher_owner_channel_id.unwrap_or(channel.get()),
-                            ),
-                            entry.shared.restart.current_generation,
-                            state,
-                            "relay_health",
-                        )
-                    }),
+                    relay_turn_key: relay_turn_key_for_health(
+                        ChannelId::new(
+                            session.watcher_owner_channel_id.unwrap_or(channel.get()),
+                        ),
+                        entry.shared.restart.current_generation,
+                        session.inflight.as_ref(),
+                    ),
                     queue_depth,
                     watcher_attached: session.watcher_attached,
                     watcher_attached_stale: session.watcher_attached_stale,

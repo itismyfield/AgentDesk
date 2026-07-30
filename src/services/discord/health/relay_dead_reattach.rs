@@ -175,7 +175,7 @@ mod tests {
                 thread_channel_id: None,
                 last_relay_ts_ms: None,
                 last_outbound_activity_ms: None,
-                confirmed_delivery_since_turn_start: Some(false),
+                delivery_evidence: crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered,
                 last_capture_offset: Some(128),
                 last_relay_offset: 0,
                 last_relay_offset_recorded: true,
@@ -195,6 +195,38 @@ mod tests {
             .relay_slot
             .store(1, Ordering::Release);
         assert!(shared.relay_emission_in_flight(channel));
+    }
+
+    #[test]
+    fn relay_dead_reattach_yields_while_bridge_or_sink_lease_is_active() {
+        for (index, holder) in [
+            crate::services::discord::LeaseHolder::Bridge,
+            crate::services::discord::LeaseHolder::Sink,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let channel = ChannelId::new(50_220_010 + index as u64);
+            let key = crate::services::discord::DeliveryLeaseKey::new(
+                channel,
+                7,
+                100 + index as u64,
+                None,
+                None,
+            );
+            assert!(shared.delivery_lease(channel).try_acquire(
+                key,
+                holder,
+                0,
+                128,
+                crate::services::discord::lease_now_ms().saturating_add(1_000),
+            ));
+            assert!(
+                shared.relay_emission_in_flight(channel),
+                "an active {holder:?} lease must block relay-dead recovery"
+            );
+        }
     }
 
     #[test]
@@ -232,9 +264,8 @@ mod tests {
         let mut fresh_outbound = snapshot(&stale);
         fresh_outbound.relay_health.last_outbound_activity_ms = Some((now - 5) * 1000);
         let mut delivered_live_fingerprint = snapshot(&stale);
-        delivered_live_fingerprint
-            .relay_health
-            .confirmed_delivery_since_turn_start = Some(true);
+        delivered_live_fingerprint.relay_health.delivery_evidence =
+            crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::Delivered;
         let mut advanced_frontier = snapshot(&stale);
         advanced_frontier.last_relay_ts_ms = (now - 30) * 1000;
         advanced_frontier.last_relay_offset = 64;
