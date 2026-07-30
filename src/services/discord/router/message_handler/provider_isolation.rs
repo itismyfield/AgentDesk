@@ -485,7 +485,7 @@ fn record_runtime_mismatch_defer(
 }
 
 #[cfg(unix)]
-fn reconcile_managed_tmux_runtime_kind_with(
+fn reconcile_managed_tmux_runtime_kind_for_config(
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
     tmux_session_name: Option<&str>,
@@ -542,7 +542,7 @@ fn reconcile_managed_tmux_runtime_kind_with(
 }
 
 #[cfg(unix)]
-pub(super) fn reconcile_managed_tmux_runtime_kind_for_config(
+pub(super) fn reconcile_managed_tmux_runtime_kind_using_runtime(
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
     tmux_session_name: Option<&str>,
@@ -550,7 +550,7 @@ pub(super) fn reconcile_managed_tmux_runtime_kind_for_config(
     current_path: Option<&str>,
     session_id: Option<&str>,
 ) -> RuntimeMismatchVerdict {
-    reconcile_managed_tmux_runtime_kind_with(
+    reconcile_managed_tmux_runtime_kind_for_config(
         provider,
         channel_id,
         tmux_session_name,
@@ -1009,7 +1009,7 @@ mod thread_role_inheritance_tests {
         live_turn: bool,
         sink: &mut Vec<String>,
     ) -> RuntimeMismatchVerdict {
-        reconcile_managed_tmux_runtime_kind_with(
+        reconcile_managed_tmux_runtime_kind_for_config(
             &ProviderKind::Claude,
             ChannelId::new(50_150_001),
             Some("AgentDesk-5015-runtime"),
