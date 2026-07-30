@@ -268,15 +268,15 @@ fn liveness_probe_session(inflight: Option<&str>, watcher: Option<&str>) -> Opti
 fn published_relay_frontier(
     coord: Option<&crate::services::discord::TmuxRelayCoord>,
 ) -> (bool, u64) {
-    match coord {
-        Some(coord) => (
-            true,
-            coord
-                .confirmed_end_offset
-                .load(std::sync::atomic::Ordering::Acquire),
-        ),
-        None => (false, 0),
-    }
+    coord
+        .and_then(|coord| {
+            crate::services::discord::published_relay_offset(
+                coord
+                    .confirmed_end_offset
+                    .load(std::sync::atomic::Ordering::Acquire),
+            )
+        })
+        .map_or((false, 0), |offset| (true, offset))
 }
 
 fn liveness_as_alive(liveness: PaneLiveness) -> Option<bool> {
@@ -311,20 +311,26 @@ mod tests {
 
     #[test]
     fn frontier_publication_reads_recorded_and_offset_from_one_atomic_authority() {
-        let coord = crate::services::discord::TmuxRelayCoord::new(ChannelId::new(50_220_003));
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(50_220_003);
         assert_eq!(published_relay_frontier(None), (false, 0));
-        assert_eq!(published_relay_frontier(Some(&coord)), (true, 0));
+
+        let coord = shared.tmux_relay_coord(channel);
+        assert_eq!(published_relay_frontier(Some(&coord)), (false, 0));
+        assert_eq!(shared.committed_relay_offset_publication(channel), None);
 
         coord
             .confirmed_end_offset
             .store(128, std::sync::atomic::Ordering::Release);
         assert_eq!(published_relay_frontier(Some(&coord)), (true, 128));
+        assert_eq!(shared.committed_relay_offset_publication(channel), Some(128));
 
         assert!(coord.reset_confirmed_frontier(128, 0));
         assert_eq!(
             published_relay_frontier(Some(&coord)),
             (true, 0),
-            "an intentional reset retains recorded-zero without a separate publication bit"
+            "an intentional reset publishes a real zero rather than the unrecorded sentinel"
         );
+        assert_eq!(shared.committed_relay_offset_publication(channel), Some(0));
     }
 }

@@ -43,7 +43,11 @@ pub(super) fn record_turn_bridge_terminal_replace_cleanup(
 // live path matches the outcome inline. Test contract.
 #[allow(dead_code)]
 fn replace_outcome_commits_terminal_delivery(outcome: &ReplaceLongMessageOutcome) -> bool {
-    matches!(outcome, ReplaceLongMessageOutcome::EditedOriginal)
+    matches!(
+        outcome,
+        ReplaceLongMessageOutcome::EditedOriginal
+            | ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. }
+    )
 }
 
 pub(super) fn terminal_delivery_should_send_new_chunks(
@@ -202,7 +206,7 @@ pub(super) fn turn_bridge_replace_outcome_committed(
                 super::super::placeholder_cleanup::PlaceholderCleanupOutcome::failed(edit_error),
                 source,
             );
-            false
+            true
         }
         Ok(ReplaceLongMessageOutcome::PartialContinuationFailure {
             sent_chunks,
@@ -384,6 +388,20 @@ pub(super) fn advance_tmux_relay_confirmed_end(
         .confirmed_end_offset
         .load(std::sync::atomic::Ordering::Acquire);
     let mut won_advance = false;
+    if current == super::super::UNRECORDED_RELAY_OFFSET {
+        current = match relay_coord.confirmed_end_offset.compare_exchange(
+            super::super::UNRECORDED_RELAY_OFFSET,
+            target_end,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                won_advance = true;
+                target_end
+            }
+            Err(observed) => observed,
+        };
+    }
 
     while current < target_end {
         match relay_coord.confirmed_end_offset.compare_exchange(
@@ -1061,28 +1079,18 @@ mod tests {
         assert!(!bridge_epilogue_marks_watcher_delivered(false, true));
     }
 
-    /// #3089 A1 r3 pin — terminal_delivery does NOT commit a fallback-after-
-    /// edit-failure. The commit predicate matches `EditedOriginal` only
-    /// (`replace_outcome_commits_terminal_delivery`, this file `:42`), and the
-    /// live path records the cleanup failure and returns `committed = false`
-    /// (this file `:143`). This characterization pins that non-commit branch
-    /// BEFORE A5 cuts turn_bridge over to the unified controller: the controller
-    /// must pass `FallbackCommitPolicy::NoCommitOnFallback` for this owner to
-    /// preserve the behavior pinned here (sink/standby pass `CommitOnFallback`).
-    /// If the predicate ever started committing the fallback variant, this test
-    /// fails and the A5 cutover would be caught.
+    /// A confirmed fresh fallback POST delivered the complete terminal body even
+    /// though the placeholder edit failed. The bridge therefore classifies this
+    /// transport as delivered; cleanup failure remains separately observable.
     #[test]
-    fn sent_fallback_after_edit_failure_does_not_commit_terminal_delivery() {
+    fn sent_fallback_after_edit_failure_commits_terminal_delivery() {
         let outcome = ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
             edit_error: "edit 500; fallback POST succeeded".to_string(),
             replacement_anchor: None,
         };
 
-        // The commit predicate: a fallback-after-edit-failure is NOT a commit.
-        assert!(!replace_outcome_commits_terminal_delivery(&outcome));
-        // And so the downstream dispatch gates do not complete the work
-        // dispatch on a non-committed terminal delivery.
-        assert!(!should_complete_work_dispatch_after_terminal_delivery(
+        assert!(replace_outcome_commits_terminal_delivery(&outcome));
+        assert!(should_complete_work_dispatch_after_terminal_delivery(
             true,
             replace_outcome_commits_terminal_delivery(&outcome),
             false,
@@ -1095,8 +1103,6 @@ mod tests {
             replace_outcome_commits_terminal_delivery(&outcome),
             false,
         ));
-
-        // Contrast: an actual edit IS a commit (the only committing variant).
         assert!(replace_outcome_commits_terminal_delivery(
             &ReplaceLongMessageOutcome::EditedOriginal
         ));

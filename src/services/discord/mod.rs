@@ -1576,6 +1576,12 @@ mod tmux_watcher_registry_restore_tests {
 /// outgoing/successor relay emission and exposes the confirmed-output watermark.
 /// Scope: intra-process only; restart-persistent dedupe remains in
 /// `InflightTurnState::last_watcher_relayed_offset`.
+pub(super) const UNRECORDED_RELAY_OFFSET: u64 = u64::MAX;
+
+pub(super) fn published_relay_offset(raw_offset: u64) -> Option<u64> {
+    (raw_offset != UNRECORDED_RELAY_OFFSET).then_some(raw_offset)
+}
+
 pub(super) struct TmuxRelayCoord {
     /// Non-zero while some watcher instance is actively emitting a relay for
     /// this channel. Holds the `data_start_offset` of the in-progress emission.
@@ -1584,7 +1590,8 @@ pub(super) struct TmuxRelayCoord {
     /// serialize rather than double-fire.
     pub(super) relay_slot: Arc<std::sync::atomic::AtomicU64>,
     /// End offset (exclusive) of the last relay this process has confirmed
-    /// delivery for. 0 = no confirmed delivery yet this process lifetime.
+    /// delivery for. `UNRECORDED_RELAY_OFFSET` means no frontier writer has
+    /// published yet; 0 is an intentionally published zero frontier.
     ///
     /// #3017: this is the single output-offset authority for the relay-dedup
     /// paths (read via `SharedData::committed_relay_offset`, advanced by the
@@ -1638,7 +1645,9 @@ impl TmuxRelayCoord {
     pub(super) fn new(channel_id: ChannelId) -> Self {
         Self {
             relay_slot: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            confirmed_end_offset: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            confirmed_end_offset: Arc::new(std::sync::atomic::AtomicU64::new(
+                UNRECORDED_RELAY_OFFSET,
+            )),
             reset_state: std::sync::Mutex::new(relay_health::FrontierResetState::default()),
             last_relay_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             reconnect_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1665,7 +1674,10 @@ mod relay_coord_tests {
 
         coord.note_relay_progress_heartbeat(1_500);
         assert_eq!(coord.last_relay_ts_ms.load(Ordering::Acquire), 1_500);
-        assert_eq!(coord.confirmed_end_offset.load(Ordering::Acquire), 0);
+        assert_eq!(
+            coord.confirmed_end_offset.load(Ordering::Acquire),
+            UNRECORDED_RELAY_OFFSET
+        );
     }
 }
 
@@ -1979,9 +1991,23 @@ impl SharedData {
     /// cross-actor generalization of the watcher's process-local
     /// `last_relayed_offset`.
     pub(super) fn committed_relay_offset(&self, channel_id: ChannelId) -> u64 {
-        self.tmux_relay_coord(channel_id)
-            .confirmed_end_offset
-            .load(Ordering::Acquire)
+        published_relay_offset(
+            self.tmux_relay_coord(channel_id)
+                .confirmed_end_offset
+                .load(Ordering::Acquire),
+        )
+        .unwrap_or(0)
+    }
+
+    pub(super) fn committed_relay_offset_publication(
+        &self,
+        channel_id: ChannelId,
+    ) -> Option<u64> {
+        published_relay_offset(
+            self.tmux_relay_coord(channel_id)
+                .confirmed_end_offset
+                .load(Ordering::Acquire),
+        )
     }
 
     /// #4181/#5022: `true` while a watcher emission slot OR any shared terminal

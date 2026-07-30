@@ -1346,6 +1346,20 @@ fn advance_watcher_confirmed_end_inner(
         .confirmed_end_offset
         .load(std::sync::atomic::Ordering::Acquire);
     let mut won_advance = false;
+    if cur == super::UNRECORDED_RELAY_OFFSET {
+        cur = match relay_coord.confirmed_end_offset.compare_exchange(
+            super::UNRECORDED_RELAY_OFFSET,
+            committed_end_offset,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                won_advance = true;
+                committed_end_offset
+            }
+            Err(observed) => observed,
+        };
+    }
     while cur < committed_end_offset {
         match relay_coord.confirmed_end_offset.compare_exchange(
             cur,

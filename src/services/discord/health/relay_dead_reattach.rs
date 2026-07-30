@@ -38,10 +38,16 @@ fn should_reattach_relay_dead_watcher(
     }
     // Fresh runtime activity is a blocker for destructive cleanup, but for a
     // relay frontier that never moved it is evidence that a non-destructive
-    // watcher reattach can recover live output.
+    // watcher reattach can recover live output. After restart the process-local
+    // terminal evidence can be NotAttempted/Unknown; bounded observation above
+    // still permits only reattach, while the manual destructive predicate stays
+    // restricted to exact NotDelivered evidence.
     if snapshot
         .relay_health
         .relay_frontier_never_advanced_with_unread_tail()
+        || snapshot
+            .relay_health
+            .relay_frontier_unobserved_with_unread_tail()
     {
         return true;
     }
@@ -329,6 +335,28 @@ mod tests {
             ),
             "advanced relay frontiers still require stale runtime activity before reattach"
         );
+        for evidence in [
+            crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotAttempted,
+            crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::Unknown,
+        ] {
+            let mut post_restart = snapshot(&stale);
+            post_restart.relay_health.delivery_evidence = evidence;
+            post_restart.relay_stall_state =
+                crate::services::discord::relay_health::RelayStallClassifier::classify(
+                    &post_restart.relay_health,
+                );
+            assert!(
+                should_reattach_relay_dead_watcher(
+                    &post_restart,
+                    ChannelId::new(42),
+                    false,
+                    stale_activity,
+                    now,
+                    boot,
+                ),
+                "bounded observation must allow non-destructive post-restart reattach for {evidence:?}"
+            );
+        }
         assert!(
             !should_reattach_relay_dead_watcher(
                 &fresh_outbound,
