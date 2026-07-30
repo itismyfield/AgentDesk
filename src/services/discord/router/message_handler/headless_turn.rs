@@ -1073,12 +1073,29 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         Some(channel_id.get()),
     );
     #[cfg(unix)]
-    reconcile_managed_tmux_runtime_kind_for_config(
+    let runtime_mismatch_verdict = reconcile_managed_tmux_runtime_kind_for_config(
         &provider,
         channel_id,
         tmux_session_name.as_deref(),
         prelaunch_runtime_kind,
+        Some(&current_path),
+        session_id.as_deref(),
     );
+    #[cfg(unix)]
+    if runtime_mismatch_verdict.should_defer() {
+        let _ = release_mailbox_after_placeholder_post_failure(shared, &provider, channel_id).await;
+        crate::services::discord::saturating_decrement_global_active(shared);
+        shared.turn_start_times.remove(&channel_id);
+        cancel_token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        super::super::super::clear_watchdog_deadline_override(channel_id.get()).await;
+        return Err(HeadlessTurnStartError::Conflict(format!(
+            "managed runtime mismatch deferred for channel {}",
+            channel_id.get()
+        )));
+    }
+    let effective_runtime_kind = prelaunch_runtime_kind.map(|expectation| expectation.runtime_kind);
 
     let model_for_turn =
         super::super::super::commands::resolve_model_for_turn(shared, channel_id, &provider).await;
@@ -1114,7 +1131,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             &provider,
             remote_profile.is_none(),
             tmux_session_name.as_deref(),
-            prelaunch_runtime_kind,
+            effective_runtime_kind,
         );
     let watcher_tmux_name = inflight_tmux_name.clone();
     let watcher_output_path = inflight_output_path.clone();
@@ -1134,7 +1151,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         inflight_offset,
     );
     inflight_state.turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
-    apply_prelaunch_runtime_kind(&mut inflight_state, prelaunch_runtime_kind);
+    apply_prelaunch_runtime_kind(&mut inflight_state, effective_runtime_kind);
     let (worktree_path, worktree_branch, base_commit) = {
         let data = shared.core.lock().await;
         data.sessions
@@ -1463,6 +1480,41 @@ mod recovery_context_take_order_tests {
             !post_spawn.contains("HeadlessTurnStartError::"),
             "post-spawn failures must flow through the bridge, never a retryable start error"
         );
+    }
+
+    #[test]
+    fn runtime_mismatch_defer_balances_headless_turn_lifecycle_before_conflict() {
+        let module_src = include_str!("headless_turn.rs");
+        let branch_start = module_src
+            .find("if runtime_mismatch_verdict.should_defer()")
+            .expect("headless runtime mismatch defer branch exists");
+        let branch_end = branch_start
+            + module_src[branch_start..]
+                .find("let effective_runtime_kind")
+                .expect("headless mismatch branch ends before runtime seed");
+        let branch = &module_src[branch_start..branch_end];
+        for required in [
+            "release_mailbox_after_placeholder_post_failure",
+            "saturating_decrement_global_active(shared)",
+            "turn_start_times.remove(&channel_id)",
+            ".cancelled",
+            ".store(true, std::sync::atomic::Ordering::Relaxed)",
+            "clear_watchdog_deadline_override(channel_id.get()).await",
+            "HeadlessTurnStartError::Conflict",
+        ] {
+            assert!(
+                branch.contains(required),
+                "missing defer cleanup: {required}"
+            );
+        }
+        let release = branch.find("release_mailbox").unwrap();
+        let decrement = branch.find("saturating_decrement_global_active").unwrap();
+        let remove = branch.find("turn_start_times.remove").unwrap();
+        let cancel = branch.find(".cancelled").unwrap();
+        let watchdog = branch.find("clear_watchdog_deadline_override").unwrap();
+        let conflict = branch.find("HeadlessTurnStartError::Conflict").unwrap();
+        assert!(release < decrement && decrement < remove && remove < cancel);
+        assert!(cancel < watchdog && watchdog < conflict);
     }
 
     #[test]
