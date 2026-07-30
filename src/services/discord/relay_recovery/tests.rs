@@ -658,10 +658,23 @@ async fn dead_frontier_gate_pass_then_generation_mismatch_preserves_turn() {
 
     let hook_provider = provider.clone();
     let _hook = set_destructive_cancel_post_gate_hook_for_tests(Arc::new(move || {
-        let current = super::super::inflight::load_inflight_state(&hook_provider, channel.get())
-            .expect("load post-gate inflight");
-        super::super::inflight::save_inflight_state(&current)
-            .expect("advance save generation after gate");
+        let root = super::super::inflight::inflight_runtime_root().expect("inflight root");
+        let path =
+            super::super::inflight::inflight_state_path(&root, &hook_provider, channel.get());
+        let _lock = super::super::lock_inflight_state_path(&path).expect("lock post-gate row");
+        let body = std::fs::read_to_string(&path).expect("read post-gate inflight");
+        let mut value: serde_json::Value =
+            serde_json::from_str(&body).expect("parse post-gate inflight");
+        let next = value["save_generation"]
+            .as_u64()
+            .expect("save generation")
+            .saturating_add(1);
+        value["save_generation"] = serde_json::Value::from(next);
+        super::super::runtime_store::atomic_write(
+            &path,
+            &serde_json::to_string_pretty(&value).expect("serialize post-gate inflight"),
+        )
+        .expect("advance save generation after gate");
     }));
     let snapshot = RelayHealthSnapshot {
         provider: provider.as_str().to_string(),
