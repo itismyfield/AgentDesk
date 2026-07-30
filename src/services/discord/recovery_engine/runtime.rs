@@ -206,6 +206,7 @@ async fn reregister_active_turn_from_inflight_inner(
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
     persist_durable_marker: bool,
+    clear_durable_state: fn(&ProviderKind, u64) -> bool,
 ) -> ActiveTurnReregisterOutcome {
     let Some(finalizer_msg_id) =
         super::inflight::opt_message_id(state.effective_finalizer_turn_id())
@@ -246,8 +247,7 @@ async fn reregister_active_turn_from_inflight_inner(
         )
         .await;
         let durable_state_changed = if persist_durable_marker {
-            clear_inflight_state(&provider, state.channel_id);
-            true
+            clear_durable_state(&provider, state.channel_id)
         } else {
             tracing::warn!(
                 provider = %provider.as_str(),
@@ -380,7 +380,7 @@ pub(in crate::services::discord) async fn reregister_active_turn_from_inflight(
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
 ) -> ActiveTurnReregisterOutcome {
-    reregister_active_turn_from_inflight_inner(shared, state, true).await
+    reregister_active_turn_from_inflight_inner(shared, state, true, clear_inflight_state).await
 }
 
 /// Automatic reattach holds the canonical episode flock across mailbox and
@@ -392,7 +392,7 @@ pub(in crate::services::discord) async fn reregister_active_turn_from_inflight_u
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
 ) -> ActiveTurnReregisterOutcome {
-    reregister_active_turn_from_inflight_inner(shared, state, false).await
+    reregister_active_turn_from_inflight_inner(shared, state, false, clear_inflight_state).await
 }
 
 #[cfg(test)]
@@ -453,8 +453,13 @@ mod delivered_inflight_reregister_tests {
             .restore_active_turn(token, UserId::new(7), MessageId::new(state.user_msg_id))
             .await;
 
-        let outcome =
-            super::reregister_active_turn_from_inflight_inner(&shared, &state, false).await;
+        let outcome = super::reregister_active_turn_from_inflight_inner(
+            &shared,
+            &state,
+            false,
+            super::clear_inflight_state,
+        )
+        .await;
         assert!(!outcome.finish_mailbox_on_completion);
         assert!(
             outcome.mailbox_binding_changed,
@@ -465,6 +470,40 @@ mod delivered_inflight_reregister_tests {
                 .await
                 .cancel_token
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn committed_terminal_cleanup_does_not_report_failed_durable_clear() {
+        let shared = super::super::make_shared_data_for_tests_with_storage(None);
+        let mut state = inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            4_247,
+            Some("adk-cc".to_string()),
+            7,
+            9_303,
+            9_304,
+            "already delivered".to_string(),
+            Some("session-5".to_string()),
+            Some("AgentDesk-claude-adk-cc".to_string()),
+            Some("/tmp/claude-transcript.jsonl".to_string()),
+            None,
+            256,
+        );
+        state.terminal_delivery_committed = true;
+
+        let outcome = super::reregister_active_turn_from_inflight_inner(
+            &shared,
+            &state,
+            true,
+            |_provider, _channel_id| false,
+        )
+        .await;
+
+        assert!(!outcome.finish_mailbox_on_completion);
+        assert!(
+            !outcome.mailbox_binding_changed,
+            "a failed durable clear must not be reported as repaired state"
         );
     }
 
