@@ -5,16 +5,16 @@ use serenity::all::{ChannelId, MessageId};
 use super::{GuardedSaveOutcome, WatcherTerminalCommitOutcome};
 use crate::services::provider::ProviderKind;
 
-pub(super) struct WatcherEvidenceLossContext<'a> {
-    pub(super) provider: &'a ProviderKind,
-    pub(super) channel_id: ChannelId,
-    pub(super) tmux_session_name: &'a str,
-    pub(super) expected_user_msg_id: u64,
-    pub(super) last_offset: u64,
-    pub(super) turn_data_start_offset: u64,
+pub(in crate::services::discord) struct WatcherEvidenceLossContext<'a> {
+    pub(in crate::services::discord) provider: &'a ProviderKind,
+    pub(in crate::services::discord) channel_id: ChannelId,
+    pub(in crate::services::discord) tmux_session_name: &'a str,
+    pub(in crate::services::discord) expected_user_msg_id: u64,
+    pub(in crate::services::discord) last_offset: u64,
+    pub(in crate::services::discord) turn_data_start_offset: u64,
 }
 
-pub(super) fn warn_for_watcher_terminal_commit_outcome(
+pub(in crate::services::discord) fn warn_for_watcher_terminal_commit_outcome(
     outcome: WatcherTerminalCommitOutcome,
     ctx: WatcherEvidenceLossContext<'_>,
 ) -> bool {
@@ -44,14 +44,14 @@ pub(super) fn warn_for_watcher_terminal_commit_outcome(
     }
 }
 
-pub(super) struct BridgeEvidenceLossContext<'a> {
-    pub(super) provider: &'a ProviderKind,
-    pub(super) channel_id: ChannelId,
-    pub(super) current_msg_id: MessageId,
-    pub(super) response_sent_offset: usize,
+pub(in crate::services::discord) struct BridgeEvidenceLossContext<'a> {
+    pub(in crate::services::discord) provider: &'a ProviderKind,
+    pub(in crate::services::discord) channel_id: ChannelId,
+    pub(in crate::services::discord) current_msg_id: MessageId,
+    pub(in crate::services::discord) response_sent_offset: usize,
 }
 
-pub(super) fn warn_for_bridge_terminal_mirror_outcome(
+pub(in crate::services::discord) fn warn_for_bridge_terminal_mirror_outcome(
     outcome: GuardedSaveOutcome,
     ctx: BridgeEvidenceLossContext<'_>,
 ) {
