@@ -1520,12 +1520,9 @@ mod runtime_mismatch_defer_outcome_tests {
 
     #[test]
     fn unpreserved_runtime_mismatch_defer_remains_internal_5015() {
-        let error = preserved_headless_defer_result(
-            ChannelId::new(50_150_300),
-            reservation(),
-            false,
-        )
-        .expect_err("unpreserved defer must remain a real failure");
+        let error =
+            preserved_headless_defer_result(ChannelId::new(50_150_300), reservation(), false)
+                .expect_err("unpreserved defer must remain a real failure");
 
         assert!(matches!(error, HeadlessTurnStartError::Internal(_)));
     }
