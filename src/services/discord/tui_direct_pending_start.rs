@@ -878,14 +878,19 @@ async fn submit_stale_foreign_inflight_cancel(
         &probe.inflight_identity,
         &probe.updated_at,
         probe.save_generation,
-        move |_| {
-            if let Some(cancel) = cancel_for_commit {
+        move |_| match cancel_for_commit {
+            Some(cancel) => {
                 cancel.store(true, std::sync::atomic::Ordering::Release);
+                Ok(super::inflight::CommitEvidence::CancelledWatcher)
             }
-            Ok(super::inflight::CommitEvidence)
+            None => Ok(super::inflight::CommitEvidence::NoWatcher),
         },
     );
-    if commit_outcome != super::inflight::DestructiveCancelCommitOutcome::Committed {
+    if !matches!(
+        commit_outcome,
+        super::inflight::DestructiveCancelCommitOutcome::CommittedCancelled
+            | super::inflight::DestructiveCancelCommitOutcome::CommittedNoWatcher
+    ) {
         tracing::info!(
             provider = %provider.as_str(),
             channel_id = channel_id.get(),

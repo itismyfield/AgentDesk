@@ -15,7 +15,10 @@ pub(in crate::services::discord) enum DestructiveCancelPinField {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum DestructiveCancelCommitOutcome {
-    Committed,
+    /// The pin matched and the callback actually signalled a watcher cancel.
+    CommittedCancelled,
+    /// The pin matched, but no watcher existed for the callback to cancel.
+    CommittedNoWatcher,
     PinMismatch {
         field: DestructiveCancelPinField,
     },
@@ -28,7 +31,10 @@ pub(in crate::services::discord) enum DestructiveCancelCommitOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::services::discord) struct CommitEvidence;
+pub(in crate::services::discord) enum CommitEvidence {
+    CancelledWatcher,
+    NoWatcher,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) struct CommitError {
@@ -37,9 +43,11 @@ pub(in crate::services::discord) struct CommitError {
 
 /// Verifies the inflight row under its sidecar flock and then runs a callback.
 ///
-/// `Committed` means only that the row matched the identity plus
-/// `save_generation` pin at that instant and the callback returned success. It
-/// does not mean that destructive authority was acquired exclusively or durably.
+/// A `Committed*` outcome means only that the row matched the identity plus
+/// `save_generation` pin at that instant and the callback returned typed evidence.
+/// `CommittedCancelled` distinguishes an actual watcher cancel from
+/// `CommittedNoWatcher`. Neither means that destructive authority was acquired
+/// exclusively or durably.
 /// `updated_at` is checked as supplemental diagnostics, but its one-second local
 /// timestamp resolution means it is not an independent fencing dimension.
 ///
@@ -54,13 +62,13 @@ pub(in crate::services::discord) struct CommitError {
 /// - durable observation of a partially degraded finalizer commit (E2/E6);
 /// - a committed in-memory cancel followed by registry CAS failure skips both the
 ///   finalizer and row clear, leaving a partially destructive state;
-/// - the callback writes no durable intent/epoch, so a crash after `Committed`
+/// - the callback writes no durable intent/epoch, so a crash after a `Committed*` outcome
 ///   can erase the cancel decision before finalization starts;
 /// - the callback does not advance row version, so multiple serialized callers
-///   may receive `Committed`; downstream registry CAS and the finalizer's
+///   may receive a `Committed*` outcome; downstream registry CAS and the finalizer's
 ///   exact-key ledger prevent duplicate finalization, not duplicate commit claims;
 /// - the cancel `Arc` is captured outside the flock and may name a replaced
-///   watcher incarnation; registry CAS then fails closed, but `Committed` was
+///   watcher incarnation; registry CAS then fails closed, but a `Committed*` outcome was
 ///   already returned;
 /// - sidecar flock authority is host-local and does not fence another node's
 ///   watcher, inflight row, or mailbox authority;
@@ -134,7 +142,8 @@ fn commit_destructive_cancel_locked_at_path(
         };
     }
     match on_verified(&current) {
-        Ok(_) => DestructiveCancelCommitOutcome::Committed,
+        Ok(CommitEvidence::CancelledWatcher) => DestructiveCancelCommitOutcome::CommittedCancelled,
+        Ok(CommitEvidence::NoWatcher) => DestructiveCancelCommitOutcome::CommittedNoWatcher,
         Err(_) => DestructiveCancelCommitOutcome::IoError,
     }
 }
@@ -198,15 +207,19 @@ mod tests {
         let baseline = state();
         write(&path, &baseline);
         assert_eq!(
-            commit(&path, &baseline, |_| Ok(CommitEvidence)),
-            DestructiveCancelCommitOutcome::Committed
+            commit(&path, &baseline, |_| Ok(CommitEvidence::CancelledWatcher)),
+            DestructiveCancelCommitOutcome::CommittedCancelled
+        );
+        assert_eq!(
+            commit(&path, &baseline, |_| Ok(CommitEvidence::NoWatcher)),
+            DestructiveCancelCommitOutcome::CommittedNoWatcher
         );
 
         let mut changed = baseline.clone();
         changed.user_msg_id += 1;
         write(&path, &changed);
         assert_eq!(
-            commit(&path, &baseline, |_| Ok(CommitEvidence)),
+            commit(&path, &baseline, |_| Ok(CommitEvidence::CancelledWatcher)),
             DestructiveCancelCommitOutcome::PinMismatch {
                 field: DestructiveCancelPinField::Identity
             }
@@ -216,7 +229,7 @@ mod tests {
         changed.updated_at.push('1');
         write(&path, &changed);
         assert_eq!(
-            commit(&path, &baseline, |_| Ok(CommitEvidence)),
+            commit(&path, &baseline, |_| Ok(CommitEvidence::CancelledWatcher)),
             DestructiveCancelCommitOutcome::PinMismatch {
                 field: DestructiveCancelPinField::UpdatedAt
             }
@@ -226,7 +239,7 @@ mod tests {
         changed.save_generation += 1;
         write(&path, &changed);
         assert_eq!(
-            commit(&path, &baseline, |_| Ok(CommitEvidence)),
+            commit(&path, &baseline, |_| Ok(CommitEvidence::CancelledWatcher)),
             DestructiveCancelCommitOutcome::PinMismatch {
                 field: DestructiveCancelPinField::SaveGeneration
             }
@@ -239,14 +252,18 @@ mod tests {
         let baseline = state();
         let missing = root.path().join("missing.json");
         assert_eq!(
-            commit(&missing, &baseline, |_| Ok(CommitEvidence)),
+            commit(&missing, &baseline, |_| Ok(
+                CommitEvidence::CancelledWatcher
+            )),
             DestructiveCancelCommitOutcome::RowMissing
         );
 
         let malformed = root.path().join("malformed.json");
         std::fs::write(&malformed, "{").expect("write malformed");
         assert_eq!(
-            commit(&malformed, &baseline, |_| Ok(CommitEvidence)),
+            commit(&malformed, &baseline, |_| Ok(
+                CommitEvidence::CancelledWatcher
+            )),
             DestructiveCancelCommitOutcome::RowMalformed
         );
 
@@ -254,7 +271,7 @@ mod tests {
         std::fs::write(&blocked_parent, "file").expect("write blocking file");
         assert_eq!(
             commit(&blocked_parent.join("row.json"), &baseline, |_| Ok(
-                CommitEvidence
+                CommitEvidence::CancelledWatcher
             )),
             DestructiveCancelCommitOutcome::LockUnavailable
         );
@@ -262,7 +279,9 @@ mod tests {
         let directory_row = root.path().join("directory-row.json");
         std::fs::create_dir(&directory_row).expect("create directory row");
         assert_eq!(
-            commit(&directory_row, &baseline, |_| Ok(CommitEvidence)),
+            commit(&directory_row, &baseline, |_| Ok(
+                CommitEvidence::CancelledWatcher
+            )),
             DestructiveCancelCommitOutcome::IoError
         );
 
@@ -291,7 +310,7 @@ mod tests {
         assert_eq!(
             commit(&path, &baseline, move |_| {
                 cancel_for_commit.store(true, Ordering::Release);
-                Ok(CommitEvidence)
+                Ok(CommitEvidence::CancelledWatcher)
             }),
             DestructiveCancelCommitOutcome::PinMismatch {
                 field: DestructiveCancelPinField::SaveGeneration

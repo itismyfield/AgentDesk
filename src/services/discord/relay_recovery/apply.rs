@@ -238,11 +238,11 @@ pub(super) async fn apply_relay_recovery_decision(
                                         probe.save_generation,
                                         move |_| {
                                             cancel_for_commit.store(true, Ordering::Release);
-                                            Ok(super::inflight::CommitEvidence)
+                                            Ok(super::inflight::CommitEvidence::CancelledWatcher)
                                         },
                                     );
                                 if commit_outcome
-                                    != super::inflight::DestructiveCancelCommitOutcome::Committed
+                                    != super::inflight::DestructiveCancelCommitOutcome::CommittedCancelled
                                 {
                                     tracing::warn!(
                                         target: "agentdesk::discord::relay_recovery",
