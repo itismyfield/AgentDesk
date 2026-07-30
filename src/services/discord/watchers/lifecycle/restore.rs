@@ -144,7 +144,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         session_name: String,
         initial_offset: u64,
         restored_turn: Option<RestoredWatcherTurn>,
-        thread_parent_channel_id: Option<ChannelId>,
+        thread_parent: Option<ThreadFollowUpParent>,
         codex_direct_resume_fallback: Option<codex_restore::DirectResumeFallback>,
     }
 
@@ -457,11 +457,11 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             .or_insert_with(|| channel_name.clone());
 
         let mut restored_turn = None;
-        let mut thread_parent_channel_id = None;
+        let mut thread_parent = None;
         let initial_offset = if let Some(state) =
             super::super::super::inflight::load_inflight_state(&provider, channel_id.get())
         {
-            thread_parent_channel_id = thread_follow_up_parent_channel_id(
+            thread_parent = thread_follow_up_parent_channel_id(
                 *channel_id,
                 state.logical_channel_id,
                 state.thread_id,
@@ -515,7 +515,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             session_name: session_name.to_string(),
             initial_offset,
             restored_turn,
-            thread_parent_channel_id,
+            thread_parent,
             codex_direct_resume_fallback,
         });
         if let Some(path) = selected_claude_tui_fallback_transcript {
@@ -670,7 +670,8 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             &shared.tmux_watchers,
             pw.channel_id,
             handle,
-            pw.thread_parent_channel_id,
+            Some(&provider),
+            pw.thread_parent,
         ) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(

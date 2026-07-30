@@ -356,14 +356,20 @@ async fn thread_follow_up_tmux_ready_claim_does_not_record_cross_channel_observa
 
     assert_eq!(observed.outcome, Some(GuardedSaveOutcome::Saved));
     assert_eq!(observed.watcher_owner_channel_id, parent_channel_id);
-    assert!(
-        crate::services::observability::events::recent(20)
-            .into_iter()
-            .all(|event| {
-                !(event.event_type == "invariant_violation"
-                    && event.payload["invariant"] == "watcher_cross_channel_tmux_claim_observed")
-            }),
-        "runtime handoff for an intended thread follow-up must not persist a cross-channel claim observation"
+    let classification = crate::services::observability::events::recent(20)
+        .into_iter()
+        .find(|event| {
+            event.event_type == "invariant_violation"
+                && event.payload["invariant"] == "watcher_cross_channel_tmux_claim_observed"
+        })
+        .expect("runtime handoff must persist the intended thread follow-up classification");
+    assert_eq!(
+        classification.payload["details"]["claim_classification"],
+        "intended_thread_follow_up"
+    );
+    assert_eq!(
+        classification.payload["details"]["thread_parent_provenance"],
+        "persisted_inflight"
     );
 }
 
