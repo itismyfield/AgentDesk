@@ -437,9 +437,11 @@ static RUNTIME_MISMATCH_DEFERS: std::sync::LazyLock<
 #[cfg(unix)]
 const RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT: u32 = 3;
 
-#[cfg(unix)]
 fn clear_runtime_mismatch_defer(provider: &ProviderKind, channel_id: serenity::ChannelId) {
+    #[cfg(unix)]
     RUNTIME_MISMATCH_DEFERS.remove(&(provider.as_str().to_string(), channel_id.get()));
+    #[cfg(not(unix))]
+    let _ = (provider, channel_id);
 }
 
 #[cfg(unix)]
