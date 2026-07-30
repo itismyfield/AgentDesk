@@ -750,11 +750,9 @@ pub(super) async fn reset_provider_session_after_worktree_isolation(
 }
 #[cfg(test)]
 mod thread_role_inheritance_tests {
-    #[cfg(unix)]
-    use super::runtime_mismatch::{
-        RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT, managed_runtime_transcript_state_using,
-    };
     use super::*;
+    #[cfg(unix)]
+    const RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT: u32 = 3;
 
     fn clear_test_defer(channel_id: ChannelId) {
         clear_runtime_mismatch_defer(&ProviderKind::Claude, channel_id);
