@@ -2,10 +2,10 @@
 //!
 //! The ordinary auto-heal limiter is intentionally process-local and windowed.
 //! That is useful for burst control, but it cannot bound a dead relay frontier
-//! across dcserver restarts or successive windows. This sidecar records a
-//! lifetime budget for one exact inflight episode without writing the inflight
-//! row itself: circuit bookkeeping must not advance `updated_at` or
-//! `save_generation` and masquerade as producer liveness.
+//! across successive windows within one process lifetime. This sidecar records
+//! a budget for one exact inflight episode without writing the inflight row
+//! itself: circuit bookkeeping must not advance `updated_at` or `save_generation`
+//! and masquerade as producer liveness. Crash-orphan recovery is tracked in #5045.
 
 use std::fs;
 use std::path::{Path, PathBuf};

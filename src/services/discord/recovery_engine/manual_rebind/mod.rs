@@ -574,7 +574,9 @@ async fn rebind_inflight_for_channel_inner(
     if expected_episode.is_some() {
         await_post_adoption_claim_barrier().await;
     }
-    let mut adoption_changed = existing_inflight.is_none();
+    // The no-inflight branch below durably creates a watcher-owned rebind row;
+    // that is an authoritative repair even if an incumbent watcher is reused.
+    let mut durable_inflight_changed = existing_inflight.is_none();
     let recovered_state_for_session = if let Some(mut existing) = existing_inflight.clone() {
         let rollback_state = existing.clone();
         let expected = super::inflight::InflightTurnIdentity::from_state(&existing);
@@ -639,7 +641,7 @@ async fn rebind_inflight_for_channel_inner(
                 expected_turn_start_offset,
             )
         };
-        adoption_changed = rebind_adoption_repaired_state(&rollback_state, &existing);
+        durable_inflight_changed = rebind_adoption_repaired_state(&rollback_state, &existing);
         if !matches!(save_outcome, super::inflight::GuardedSaveOutcome::Saved) {
             tracing::warn!(
                 channel_id,
@@ -908,7 +910,7 @@ async fn rebind_inflight_for_channel_inner(
         watcher_spawned,
         watcher_replaced,
         repaired_state: rebind_repaired_state(
-            adoption_changed,
+            durable_inflight_changed,
             episode_side_effects.repaired_state,
             watcher_spawned,
             watcher_replaced,
@@ -935,12 +937,12 @@ fn rebind_adoption_repaired_state(
 }
 
 fn rebind_repaired_state(
-    adoption_changed: bool,
+    durable_inflight_changed: bool,
     episode_side_effects_changed: bool,
     watcher_spawned: bool,
     watcher_replaced: bool,
 ) -> bool {
-    adoption_changed || episode_side_effects_changed || watcher_spawned || watcher_replaced
+    durable_inflight_changed || episode_side_effects_changed || watcher_spawned || watcher_replaced
 }
 
 #[cfg(test)]
