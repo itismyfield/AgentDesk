@@ -353,7 +353,6 @@ services::discord::router::message_handler::intake_turn::steering_hook::tests
 services::discord::router::message_handler::intake_turn::tui_busy_pre_submit_queue_reaction_tests
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests
 services::discord::router::message_handler::latency_spans::tests
-services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests
 services::discord::router::message_handler::session_strategy_lifecycle_tests
 services::discord::router::message_handler::typing_indicator::tests
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests

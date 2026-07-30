@@ -76,6 +76,7 @@ test-non-pg:
     env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::gateway::outbound_messages::classified_edit_tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1
     env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::intake_dispatch::queued::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1
     env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::turn_start::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1
+    env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1
     env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::intake_turn::placeholder_handoff::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1
     env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::tui_followup_retry_tests -- --test-threads=1
     env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::completion_admission::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1
