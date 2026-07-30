@@ -808,6 +808,47 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn relay_recovery_missing_writer_records_failure_instead_of_startup_grace() {
+        let _guard = auto_heal_test_lock().lock().await;
+        clear_auto_heal_attempts_for_tests();
+        let key = auto_heal_key(
+            "codex",
+            4_423_304,
+            RelayRecoveryActionKind::ReattachWatcher,
+            RelayRecoveryApplySource::ProbeAutoHeal,
+        );
+        let (_, generation) = reserve_auto_heal_attempt(&key, 1_000, 1)
+            .expect("reserve missing-writer confirmation attempt");
+        let mut apply_result = RelayRecoveryApplyResult {
+            status: "reattached_watcher",
+            removed_thread_proofs: 0,
+            removed_mailbox_token: false,
+            post_mailbox_has_cancel_token: None,
+            post_mailbox_queue_depth: None,
+            reattach_watcher_spawned: Some(true),
+            reattach_watcher_replaced: Some(false),
+            reattach_initial_offset: Some(0),
+            reattach_error: None,
+        };
+
+        settle_auto_heal_confirmation(
+            &mut apply_result,
+            ReattachConfirmation::Failed,
+            &key,
+            generation,
+            2_000,
+        );
+
+        assert_eq!(apply_result.status, "reattach_confirm_failed");
+        assert_eq!(
+            auto_heal_attempt_state(&key)
+                .map(|(_, refunds, retry_at, healed)| (refunds, retry_at, healed)),
+            Some((0, Some(2_000 + AUTO_HEAL_WINDOW_SECS * 1000), 0)),
+            "a disappeared writer must enter confirmation-failure backoff, not consume startup grace"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reserved_episode_replacement_at_apply_barrier_is_untouched() {
         let _guard = auto_heal_test_lock().lock().await;

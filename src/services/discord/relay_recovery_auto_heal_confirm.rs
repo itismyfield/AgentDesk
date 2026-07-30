@@ -24,7 +24,8 @@ pub(super) enum ReattachConfirmation {
 enum SpawnedWatcherConfirmation {
     Confirmed,
     RelayEmissionInFlight,
-    Failed,
+    Unconfirmed,
+    WatcherGone,
 }
 
 #[derive(Clone)]
@@ -57,7 +58,7 @@ pub(super) async fn classify_reattach_confirmation(
             confirm_spawned_watcher(shared, decision.channel_id, tmux_session, baseline_frontier)
                 .await
         }
-        _ => SpawnedWatcherConfirmation::Failed,
+        _ => SpawnedWatcherConfirmation::WatcherGone,
     };
     confirmation_after_probe(probe_result, process_started_at_unix, now_unix)
 }
@@ -72,12 +73,14 @@ fn confirmation_after_probe(
         SpawnedWatcherConfirmation::RelayEmissionInFlight => {
             ReattachConfirmation::RelayEmissionInFlight
         }
-        SpawnedWatcherConfirmation::Failed
+        SpawnedWatcherConfirmation::Unconfirmed
             if startup_confirm_grace_active(process_started_at_unix, now_unix) =>
         {
             ReattachConfirmation::StartupGrace
         }
-        SpawnedWatcherConfirmation::Failed => ReattachConfirmation::Failed,
+        SpawnedWatcherConfirmation::Unconfirmed | SpawnedWatcherConfirmation::WatcherGone => {
+            ReattachConfirmation::Failed
+        }
     }
 }
 
@@ -93,16 +96,20 @@ async fn confirm_spawned_watcher(
 ) -> SpawnedWatcherConfirmation {
     let Some(probe) = spawned_watcher_probe(shared, ChannelId::new(channel_id), tmux_session)
     else {
-        return SpawnedWatcherConfirmation::Failed;
+        return SpawnedWatcherConfirmation::WatcherGone;
     };
     let deadline = Instant::now() + AUTO_HEAL_CONFIRM_TIMEOUT;
     let mut heartbeat_stable_since = None;
     loop {
+        if !spawned_watcher_still_current(shared, &probe) {
+            return SpawnedWatcherConfirmation::WatcherGone;
+        }
+        // The frontier is channel-scoped rather than watcher/episode-scoped. The
+        // current check prevents an already replaced watcher from taking credit,
+        // but another relay actor can still advance it while this watcher remains
+        // current. Exact attribution belongs to #5022.
         if shared.committed_relay_offset(ChannelId::new(channel_id)) > baseline_frontier {
             return SpawnedWatcherConfirmation::Confirmed;
-        }
-        if !spawned_watcher_still_current(shared, &probe) {
-            return SpawnedWatcherConfirmation::Failed;
         }
         if probe.heartbeat.load(Ordering::Acquire) > probe.baseline_heartbeat_ms {
             let stable_since = heartbeat_stable_since.get_or_insert_with(Instant::now);
@@ -122,10 +129,12 @@ fn confirmation_at_deadline(
     channel_id: ChannelId,
     probe: &SpawnedWatcherProbe,
 ) -> SpawnedWatcherConfirmation {
-    if spawned_watcher_still_current(shared, probe) && shared.relay_emission_in_flight(channel_id) {
+    if !spawned_watcher_still_current(shared, probe) {
+        SpawnedWatcherConfirmation::WatcherGone
+    } else if shared.relay_emission_in_flight(channel_id) {
         SpawnedWatcherConfirmation::RelayEmissionInFlight
     } else {
-        SpawnedWatcherConfirmation::Failed
+        SpawnedWatcherConfirmation::Unconfirmed
     }
 }
 
@@ -359,7 +368,7 @@ mod tests {
 
         assert_eq!(
             confirmation_at_deadline(&shared, channel, &probe),
-            SpawnedWatcherConfirmation::Failed
+            SpawnedWatcherConfirmation::Unconfirmed
         );
     }
 
@@ -381,7 +390,12 @@ mod tests {
 
         assert_eq!(
             confirmation_at_deadline(&shared, channel, &probe),
-            SpawnedWatcherConfirmation::Failed
+            SpawnedWatcherConfirmation::WatcherGone
+        );
+        assert_eq!(
+            confirmation_after_probe(SpawnedWatcherConfirmation::WatcherGone, 10_000, 10_001),
+            ReattachConfirmation::Failed,
+            "startup grace must not consume a round after the writer disappeared"
         );
     }
 
@@ -406,7 +420,7 @@ mod tests {
 
         assert_eq!(
             confirmation_at_deadline(&shared, channel, &probe),
-            SpawnedWatcherConfirmation::Failed
+            SpawnedWatcherConfirmation::WatcherGone
         );
     }
 
@@ -415,7 +429,7 @@ mod tests {
         let started_at = 10_000;
         assert_eq!(
             confirmation_after_probe(
-                SpawnedWatcherConfirmation::Failed,
+                SpawnedWatcherConfirmation::Unconfirmed,
                 started_at,
                 started_at + 119
             ),
@@ -423,7 +437,7 @@ mod tests {
         );
         assert_eq!(
             confirmation_after_probe(
-                SpawnedWatcherConfirmation::Failed,
+                SpawnedWatcherConfirmation::Unconfirmed,
                 started_at,
                 started_at + 120
             ),
