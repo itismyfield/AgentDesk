@@ -34,6 +34,7 @@ mod relay_progress;
 mod runtime_resolve;
 mod session_enrichment;
 mod snapshot;
+mod snapshot_relay;
 mod stall_liveness;
 mod stall_verdict;
 mod watcher_respawn;
