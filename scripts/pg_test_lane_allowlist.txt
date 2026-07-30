@@ -1,0 +1,4 @@
+# PostgreSQL lane classifier false-positive exemptions only.
+# Format: test:<fully-qualified-test> # reason and tracking issue
+#     or: file:<repository-relative-path> # reason and tracking issue
+# Every active entry requires an inline reason. Prefer fixing the classifier.
