@@ -924,6 +924,29 @@ pub(super) async fn enqueue_busy_tui_followup_for_retry(
     .await
 }
 
+pub(super) async fn enqueue_headless_runtime_mismatch_defer(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    user_msg_id: serenity::MessageId,
+    user_text: &str,
+) -> MailboxEnqueueOutcome {
+    let mut intervention = build_race_requeued_intervention(
+        serenity::UserId::new(1),
+        user_msg_id,
+        user_text,
+        false,
+        None,
+        false,
+        false,
+        Vec::new(),
+        None,
+    );
+    intervention.author_is_bot = true;
+    super::super::super::mailbox_enqueue_intervention(shared, provider, channel_id, intervention)
+        .await
+}
+
 #[cfg(test)]
 mod busy_retry_fifo_tests {
     use super::*;
@@ -955,6 +978,55 @@ mod busy_retry_fifo_tests {
         );
         intervention.author_is_bot = author_is_bot;
         intervention
+    }
+
+    // SAFETY: holds shared_test_env_lock across await to serialize the
+    // AGENTDESK_ROOT_DIR mutation (RuntimeRootGuard tempdir) against parallel
+    // tests. Test-only; the guard is a process-wide test serializer that cannot
+    // deadlock a live task. Releasing it before the mailbox awaits would let a
+    // concurrent test stomp the runtime root while this one is mid-flight.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_runtime_mismatch_defer_is_bounded_and_appended_5015() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::tempdir().expect("temporary runtime root");
+        let _root_guard = RuntimeRootGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = serenity::ChannelId::new(50_150_200);
+        let human = intervention(50_150_201, 50_150_211, "human first", false);
+        let persistence =
+            crate::services::discord::queue_persistence_context(&shared, &provider, channel_id);
+        shared
+            .mailbox(channel_id)
+            .replace_queue(vec![human.clone()], persistence)
+            .await;
+
+        for attempt in 0..6 {
+            let retry = enqueue_headless_runtime_mismatch_defer(
+                &shared,
+                &provider,
+                channel_id,
+                serenity::MessageId::new(50_150_220 + attempt),
+                "headless retry",
+            )
+            .await;
+            assert_eq!(retry.enqueued, attempt == 0);
+            if attempt > 0 {
+                assert_eq!(
+                    retry.refusal_reason,
+                    Some(crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued)
+                );
+            }
+            let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
+            assert_eq!(snapshot.intervention_queue.len(), 2);
+            assert_eq!(snapshot.intervention_queue[0].message_id, human.message_id);
+            assert!(snapshot.intervention_queue[1].is_headless_runtime_mismatch_defer());
+        }
     }
 
     // SAFETY: holds shared_test_env_lock across await to serialize the

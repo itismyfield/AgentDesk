@@ -1083,32 +1083,27 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     );
     #[cfg(unix)]
     if runtime_mismatch_verdict.should_defer() {
-        // `mailbox_finish_turn` consumes the claimed active request (see
-        // `turn_orchestrator::finalize_turn_state`), so preserve this headless
-        // request explicitly after releasing the claim. Front requeue keeps its
-        // original identity and FIFO position; the slow backstop below plus the
-        // watcher-idle edge will retry it without the #4270 fast-kick spin.
-        let _ = release_mailbox_after_busy_pre_submit_defer(shared, &provider, channel_id).await;
-        let retry = enqueue_busy_tui_followup_for_retry(
+        // Releasing the mailbox consumes this claimed request, so retain one
+        // headless mismatch retry behind existing user work. The synthetic id
+        // changes on every caller retry; the queue therefore deduplicates this
+        // marked class per channel instead of relying on source identity.
+        let bot_owner_provider = super::super::super::resolve_discord_bot_provider(token);
+        let _ =
+            release_mailbox_after_busy_pre_submit_defer(shared, &bot_owner_provider, channel_id)
+                .await;
+        let retry = enqueue_headless_runtime_mismatch_defer(
             shared,
-            &provider,
+            &bot_owner_provider,
             channel_id,
-            request_owner,
             user_msg_id,
             prompt,
-            false,
-            None,
-            false,
-            false,
-            Vec::new(),
-            None,
         )
         .await;
         let retry_preserved = busy_retry::present_or_accepted(&retry);
         if retry_preserved {
             super::super::super::arm_slow_idle_queue_backstop_if_queue_nonempty(
                 shared,
-                &provider,
+                &bot_owner_provider,
                 channel_id,
                 "headless_runtime_mismatch_defer_pending",
             )
