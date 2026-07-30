@@ -184,8 +184,6 @@ pub(super) fn reconcile_managed_tmux_runtime_kind_for_config(
             "weak_expected_evidence"
         } else if observed.evidence_strength != RuntimeKindEvidenceStrength::Strong {
             "weak_observed_evidence"
-        } else if inflight.open {
-            "stale_inflight"
         } else {
             "runtime_kind_mismatch"
         };
