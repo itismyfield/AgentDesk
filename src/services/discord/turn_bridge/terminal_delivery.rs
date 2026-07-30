@@ -769,6 +769,7 @@ mod tests {
         bridge_epilogue_skip_save_is_identity_guarded, empty_sink_commits_fully_consumed_response,
         empty_sink_preserves_retry, mirror_frozen_prefix_ids,
         record_stopped_turn_terminal_replace_delivery, replace_outcome_commits_terminal_delivery,
+        turn_bridge_replace_outcome_committed,
         send_ordered_long_terminal_chunks, should_complete_work_dispatch_after_terminal_delivery,
         should_fail_dispatch_after_terminal_delivery, terminal_delivery_should_send_new_chunks,
     };
@@ -1105,6 +1106,20 @@ mod tests {
         ));
         assert!(replace_outcome_commits_terminal_delivery(
             &ReplaceLongMessageOutcome::EditedOriginal
+        ));
+
+        let shared = make_shared_data_for_tests();
+        assert!(turn_bridge_replace_outcome_committed(
+            &shared,
+            &ProviderKind::Codex,
+            ChannelId::new(50_220_020),
+            MessageId::new(50_220_021),
+            Some("AgentDesk-codex-fallback"),
+            Ok(outcome),
+            None,
+            None,
+            None,
+            "fallback_mutation_proof",
         ));
     }
 
