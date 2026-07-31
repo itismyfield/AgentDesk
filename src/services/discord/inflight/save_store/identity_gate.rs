@@ -888,12 +888,20 @@ pub(in crate::services::discord::inflight) fn lock_and_save_existing_inflight_re
         updated.last_watcher_relayed_offset = state.last_watcher_relayed_offset;
         updated.last_watcher_relayed_generation_mtime_ns =
             state.last_watcher_relayed_generation_mtime_ns;
-        updated.last_watcher_relayed_at_unix = match (
-            updated.last_watcher_relayed_at_unix,
-            state.last_watcher_relayed_at_unix,
-        ) {
-            (Some(durable), Some(snapshot)) => Some(durable.max(snapshot)),
-            (durable, snapshot) => durable.or(snapshot),
+        // An offset rebase starts a new relay coordinate space. Preserve the
+        // durable timestamp only when the rebased snapshot carries a relay
+        // watermark too; an explicit `None` is the rebind reset signal and must
+        // not be resurrected by the older on-disk timestamp.
+        updated.last_watcher_relayed_at_unix = if state.last_watcher_relayed_offset.is_some() {
+            match (
+                updated.last_watcher_relayed_at_unix,
+                state.last_watcher_relayed_at_unix,
+            ) {
+                (Some(durable), Some(snapshot)) => Some(durable.max(snapshot)),
+                (durable, snapshot) => durable.or(snapshot),
+            }
+        } else {
+            None
         };
     }
     updated.ensure_finalizer_turn_id();
@@ -978,6 +986,50 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(path).expect("read rebound row"))
                 .expect("parse rebound row");
         assert_eq!(persisted.last_watcher_relayed_at_unix, Some(200));
+    }
+
+    #[test]
+    fn rebind_rebase_none_snapshot_clears_durable_relay_timestamp() {
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let mut snapshot = drain_restart_seed(49_920_202, "AgentDesk-codex-4992-rebind-clear");
+        snapshot.last_offset = 512;
+        snapshot.turn_start_offset = Some(512);
+        snapshot.last_watcher_relayed_offset = None;
+        snapshot.last_watcher_relayed_generation_mtime_ns = None;
+        snapshot.last_watcher_relayed_at_unix = None;
+        save_inflight_state_in_root(temp.path(), &snapshot).expect("seed snapshot row");
+        let expected = InflightTurnIdentity::from_state(&snapshot);
+
+        let path = inflight_state_path(temp.path(), &ProviderKind::Codex, snapshot.channel_id);
+        let mut durable: InflightTurnState =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read snapshot row"))
+                .expect("parse snapshot row");
+        durable.last_watcher_relayed_offset = Some(256);
+        durable.last_watcher_relayed_generation_mtime_ns = Some(7);
+        durable.last_watcher_relayed_at_unix = Some(200);
+        atomic_write(
+            &path,
+            &serde_json::to_string_pretty(&durable).expect("serialize durable row"),
+        )
+        .expect("write newer durable relay evidence");
+
+        snapshot.output_path = Some("/tmp/rebound-clear.jsonl".to_string());
+        assert_eq!(
+            save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_identity_in_root(
+                temp.path(),
+                &snapshot,
+                &expected,
+                Some(512),
+                512,
+            ),
+            GuardedSaveOutcome::Saved,
+        );
+        let persisted: InflightTurnState =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("read rebound row"))
+                .expect("parse rebound row");
+        assert_eq!(persisted.last_watcher_relayed_offset, None);
+        assert_eq!(persisted.last_watcher_relayed_generation_mtime_ns, None);
+        assert_eq!(persisted.last_watcher_relayed_at_unix, None);
     }
 
     #[test]
