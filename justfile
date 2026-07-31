@@ -117,5 +117,6 @@ test-non-pg:
 # are intentionally excluded; add a separate PG lane command if either gains PG coverage.
 test-postgres:
     cargo test --lib -- _pg pg_ postgres --nocapture --test-threads=1
+    cargo test --lib services::discord::outbound::delivery_evidence_store::tests -- --test-threads=1
 
 check: fmt-check lint cargo-check test

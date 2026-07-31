@@ -702,6 +702,10 @@ jobs:
         run: |
           cargo test --lib high_risk_recovery:: -- --test-threads=1
           cargo test --lib services::discord::recovery_engine::state_extractors::tests -- --test-threads=1
+          cargo test --lib services::discord::outbound::delivery_evidence_store::tests -- --test-threads=1
+          cargo test --lib services::discord::relay_health::tests -- --test-threads=1
+          cargo test --lib services::discord::health::session_enrichment::tests -- --test-threads=1
+          cargo test --lib services::discord::health::relay_dead_reattach::tests -- --test-threads=1
           cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1
           cargo test --lib services::discord::terminal_ui_obligation::tests -- --test-threads=1
 
