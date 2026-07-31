@@ -3834,6 +3834,34 @@ mod tests {
         }
     }
 
+    fn install_confirmed_backstop_state(
+        shared: &Arc<SharedData>,
+        channel: ChannelId,
+        session: &str,
+        transcript: &str,
+    ) {
+        let mut state = super::super::inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            channel.get(),
+            None,
+            7,
+            110,
+            111,
+            "done and delivery-confirmed".to_string(),
+            None,
+            Some(session.to_string()),
+            Some(transcript.to_string()),
+            None,
+            64,
+        );
+        state.turn_start_offset = Some(0);
+        super::super::inflight::save_inflight_state(&state).unwrap();
+        shared
+            .tmux_relay_coord(channel)
+            .confirmed_end_offset
+            .store(64, Ordering::Release);
+    }
+
     /// The reconciler runs off the actor's cached `Weak<SharedData>`, which the
     /// production finalizer populates from its continuous stream of `Terminal`
     /// submissions (a `Start` carries no `SharedData`). A test exercising the
@@ -4014,30 +4042,10 @@ mod tests {
                 "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"working…\"}]}}\n",
             )
             .unwrap();
-            let transcript_str = transcript.to_str().unwrap().to_string();
-            shared
-                .tmux_watchers
-                .insert(ch, backstop_watcher_handle(&session, &transcript_str));
-            let mut state = super::super::inflight::InflightTurnState::new(
-                ProviderKind::Claude,
-                ch.get(),
-                None,
-                7,
-                110,
-                111,
-                "done and delivery-confirmed".to_string(),
-                None,
-                Some(session.clone()),
-                Some(transcript_str),
-                None,
-                64,
+            shared.tmux_watchers.insert(
+                ch,
+                backstop_watcher_handle(&session, transcript.to_str().unwrap()),
             );
-            state.turn_start_offset = Some(0);
-            super::super::inflight::save_inflight_state(&state).unwrap();
-            shared
-                .tmux_relay_coord(ch)
-                .confirmed_end_offset
-                .store(64, Ordering::Release);
 
             let fin = TurnFinalizer::spawn();
             prime_reconcile_shared(&fin, &shared).await;
@@ -4544,30 +4552,10 @@ mod tests {
                 "{\"type\":\"result\",\"result\":\"done\",\"session_id\":\"s\"}\n",
             )
             .unwrap();
-            let transcript_str = transcript.to_str().unwrap().to_string();
-            shared
-                .tmux_watchers
-                .insert(ch, backstop_watcher_handle(&session, &transcript_str));
-            let mut state = super::super::inflight::InflightTurnState::new(
-                ProviderKind::Claude,
-                ch.get(),
-                None,
-                7,
-                110,
-                111,
-                "done and delivery-confirmed".to_string(),
-                None,
-                Some(session.clone()),
-                Some(transcript_str),
-                None,
-                64,
+            shared.tmux_watchers.insert(
+                ch,
+                backstop_watcher_handle(&session, transcript.to_str().unwrap()),
             );
-            state.turn_start_offset = Some(0);
-            super::super::inflight::save_inflight_state(&state).unwrap();
-            shared
-                .tmux_relay_coord(ch)
-                .confirmed_end_offset
-                .store(64, Ordering::Release);
 
             let fin = TurnFinalizer::spawn();
             let k = TurnKey::new(ch, 110, 0);

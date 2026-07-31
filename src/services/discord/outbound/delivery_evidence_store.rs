@@ -106,6 +106,21 @@ mod tests {
     }
 
     #[test]
+    fn pg_relay_delivery_evidence_contract() {
+        let turn = key(50_220_007, 70);
+        begin_relay_attempt(&turn);
+        assert_eq!(
+            relay_evidence_for_turn(&turn),
+            RelayDeliveryEvidence::AttemptedUnconfirmed
+        );
+        record_confirmed_relay(&turn);
+        assert_eq!(
+            relay_evidence_for_turn(&turn),
+            RelayDeliveryEvidence::Delivered
+        );
+    }
+
+    #[test]
     fn relay_evidence_is_scoped_to_the_exact_turn_key() {
         let first = key(50_220_001, 10);
         let second = key(50_220_001, 11);
