@@ -237,10 +237,18 @@ mod tests {
             .unwrap();
             shared.tmux_watchers.insert(
                 channel,
-                super::super::tests::backstop_watcher_handle(
-                    &session,
-                    transcript.to_str().unwrap(),
-                ),
+                crate::services::discord::TmuxWatcherHandle {
+                    tmux_session_name: session.clone(),
+                    output_path: transcript.to_str().unwrap().to_string(),
+                    paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    resume_offset: Arc::new(std::sync::Mutex::new(None)),
+                    cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                    turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                        crate::services::discord::tmux_watcher_now_ms(),
+                    )),
+                },
             );
 
             assert!(!watcher_backstop_turn_is_terminal(

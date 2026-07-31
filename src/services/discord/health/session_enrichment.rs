@@ -316,9 +316,11 @@ mod tests {
 
         let coord = shared.tmux_relay_coord(channel);
         assert_eq!(published_relay_frontier(Some(&coord)), (false, 0));
-        assert_eq!(shared.committed_relay_offset_publication(channel), None);
+        assert_eq!(Some(shared.committed_relay_offset(channel)), None);
 
-        coord.publish_confirmed_end_for_test(128);
+        coord
+            .confirmed_end_offset
+            .store(128, std::sync::atomic::Ordering::Release);
         assert_eq!(published_relay_frontier(Some(&coord)), (true, 128));
         assert_eq!(
             shared.committed_relay_offset_publication(channel),
@@ -331,6 +333,6 @@ mod tests {
             (true, 0),
             "an intentional reset publishes a real zero rather than the unrecorded sentinel"
         );
-        assert_eq!(shared.committed_relay_offset_publication(channel), Some(0));
+        assert_eq!(Some(shared.committed_relay_offset(channel)), Some(0));
     }
 }

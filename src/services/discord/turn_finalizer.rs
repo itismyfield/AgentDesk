@@ -4014,10 +4014,30 @@ mod tests {
                 "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"working…\"}]}}\n",
             )
             .unwrap();
-            shared.tmux_watchers.insert(
-                ch,
-                backstop_watcher_handle(&session, transcript.to_str().unwrap()),
+            let transcript_str = transcript.to_str().unwrap().to_string();
+            shared
+                .tmux_watchers
+                .insert(ch, backstop_watcher_handle(&session, &transcript_str));
+            let mut state = super::super::inflight::InflightTurnState::new(
+                ProviderKind::Claude,
+                ch.get(),
+                None,
+                7,
+                110,
+                111,
+                "done and delivery-confirmed".to_string(),
+                None,
+                Some(session.clone()),
+                Some(transcript_str),
+                None,
+                64,
             );
+            state.turn_start_offset = Some(0);
+            super::super::inflight::save_inflight_state(&state).unwrap();
+            shared
+                .tmux_relay_coord(ch)
+                .confirmed_end_offset
+                .store(64, Ordering::Release);
 
             let fin = TurnFinalizer::spawn();
             prime_reconcile_shared(&fin, &shared).await;
@@ -4390,37 +4410,6 @@ mod tests {
         .await;
     }
 
-    /// #4187 follow-up: when neither an inflight row nor a delivery lease can
-    /// produce a relay-space terminal end, the helper intentionally falls back to
-    /// the current confirmed frontier. A live watcher over Done is therefore
-    /// strict-terminal even away from the natural far-backstop deadline.
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn watcher_backstop_done_without_inflight_or_lease_is_strict_terminal() {
-        with_isolated_runtime_root(|| async move {
-            let shared = super::super::make_shared_data_for_tests_with_storage(None);
-            let ch = ChannelId::new(5411);
-            let session = format!("4187-no-inflight-{}", std::process::id());
-            let transcript = std::env::temp_dir().join(format!("{session}.jsonl"));
-            std::fs::write(
-                &transcript,
-                "{\"type\":\"result\",\"result\":\"done\",\"session_id\":\"s\"}\n",
-            )
-            .unwrap();
-            let transcript_str = transcript.to_str().unwrap().to_string();
-            shared
-                .tmux_watchers
-                .insert(ch, backstop_watcher_handle(&session, &transcript_str));
-
-            assert!(
-                watcher_backstop_turn_is_terminal(&shared, ch, &ProviderKind::Claude, false),
-                "strict Done falls back to confirmed_end when no inflight row or lease exists"
-            );
-
-            let _ = std::fs::remove_file(&transcript);
-        })
-        .await;
-    }
-
     /// With the watcher far-backstop ARMED at `register_start`, a JSONL Done
     /// terminal still finalizes PROMPTLY (the backstop only catches turns that
     /// never terminate; it must never delay a real terminal). Exactly once.
@@ -4555,10 +4544,30 @@ mod tests {
                 "{\"type\":\"result\",\"result\":\"done\",\"session_id\":\"s\"}\n",
             )
             .unwrap();
-            shared.tmux_watchers.insert(
-                ch,
-                backstop_watcher_handle(&session, transcript.to_str().unwrap()),
+            let transcript_str = transcript.to_str().unwrap().to_string();
+            shared
+                .tmux_watchers
+                .insert(ch, backstop_watcher_handle(&session, &transcript_str));
+            let mut state = super::super::inflight::InflightTurnState::new(
+                ProviderKind::Claude,
+                ch.get(),
+                None,
+                7,
+                110,
+                111,
+                "done and delivery-confirmed".to_string(),
+                None,
+                Some(session.clone()),
+                Some(transcript_str),
+                None,
+                64,
             );
+            state.turn_start_offset = Some(0);
+            super::super::inflight::save_inflight_state(&state).unwrap();
+            shared
+                .tmux_relay_coord(ch)
+                .confirmed_end_offset
+                .store(64, Ordering::Release);
 
             let fin = TurnFinalizer::spawn();
             let k = TurnKey::new(ch, 110, 0);
