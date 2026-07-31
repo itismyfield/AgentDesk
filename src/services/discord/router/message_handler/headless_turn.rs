@@ -45,6 +45,22 @@ fn fresh_routine_turn(metadata: Option<&serde_json::Value>) -> bool {
         != Some("persistent")
 }
 
+/// Defer replay currently transports only the readable prompt and source id.
+/// Snapshot and fresh-routine turns carry isolation semantics that cannot be
+/// reconstructed from that payload, so they must fail closed and let their
+/// durable caller retry the original request instead.
+pub(super) fn runtime_mismatch_defer_requires_fail_closed(
+    metadata: Option<&serde_json::Value>,
+    source: Option<&str>,
+    channel_name_hint: Option<&str>,
+    tmux_session_label: Option<&str>,
+) -> bool {
+    metadata.is_some()
+        || source.is_some()
+        || channel_name_hint.is_some()
+        || tmux_session_label.is_some()
+}
+
 pub(super) fn preserved_headless_defer_result(
     channel_id: ChannelId,
     reservation: HeadlessTurnReservation,
@@ -1101,6 +1117,19 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     );
     #[cfg(unix)]
     if runtime_mismatch_verdict.should_defer() {
+        if runtime_mismatch_defer_requires_fail_closed(
+            metadata.as_ref(),
+            source,
+            channel_name_hint.as_deref(),
+            tmux_session_label.as_deref(),
+        ) {
+            let _ =
+                release_mailbox_after_placeholder_post_failure(shared, &provider, channel_id).await;
+            return Err(HeadlessTurnStartError::Conflict(format!(
+                "runtime mismatch defer cannot preserve isolation metadata for channel {}",
+                channel_id.get()
+            )));
+        }
         // Releasing the mailbox consumes this claimed request, so retain the
         // headless mismatch retry behind existing user work. Queue identity is
         // the synthetic source id. Callers retrying one logical request must

@@ -47,10 +47,26 @@ impl HeadlessAgentTurnReservation {
     pub fn turn_id(&self) -> &str {
         &self.turn_id
     }
+
+    pub(crate) fn user_msg_id(&self) -> serenity::MessageId {
+        self.inner.user_msg_id()
+    }
 }
 
 pub fn reserve_headless_agent_turn(channel_id: ChannelId) -> HeadlessAgentTurnReservation {
     let inner = router::reserve_headless_turn();
+    HeadlessAgentTurnReservation {
+        channel_id,
+        turn_id: inner.turn_id(channel_id),
+        inner,
+    }
+}
+
+pub(crate) fn reserve_headless_agent_turn_with_user_msg_id(
+    channel_id: ChannelId,
+    user_msg_id: serenity::MessageId,
+) -> HeadlessAgentTurnReservation {
+    let inner = router::reserve_headless_turn_with_user_msg_id(user_msg_id);
     HeadlessAgentTurnReservation {
         channel_id,
         turn_id: inner.turn_id(channel_id),

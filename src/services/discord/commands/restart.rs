@@ -153,7 +153,10 @@ where
                         RestartSeedStatus::Queued
                     }
                     super::super::router::HeadlessTurnStartStatus::Consumed => {
-                        RestartSeedStatus::Started
+                        RestartSeedStatus::Failed(
+                            "인사말 turn이 lifecycle 명령으로 소비되어 실행되지 않았습니다."
+                                .to_string(),
+                        )
                     }
                 };
             }

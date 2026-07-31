@@ -54,6 +54,50 @@ mod busy_retry_fifo_tests {
     }
 
     #[test]
+    fn mismatch_defer_rejects_isolation_metadata_without_queue_replay_5015() {
+        use serde_json::json;
+        assert!(runtime_mismatch_defer_requires_fail_closed(
+            Some(&json!({ "scheduled_snapshot_session_label": "scheduled:snapshot" })),
+            None,
+            None,
+            None,
+        ));
+        assert!(runtime_mismatch_defer_requires_fail_closed(
+            Some(&json!({ "routine_id": "routine-1", "execution_strategy": "fresh" })),
+            None,
+            None,
+            None,
+        ));
+        assert!(runtime_mismatch_defer_requires_fail_closed(
+            Some(&json!({ "routine_id": "routine-1", "execution_strategy": "persistent" })),
+            None,
+            None,
+            None,
+        ));
+        assert!(!runtime_mismatch_defer_requires_fail_closed(
+            None, None, None, None
+        ));
+        assert!(runtime_mismatch_defer_requires_fail_closed(
+            None,
+            Some("routine"),
+            None,
+            None
+        ));
+        assert!(runtime_mismatch_defer_requires_fail_closed(
+            None,
+            None,
+            Some("channel"),
+            None
+        ));
+        assert!(runtime_mismatch_defer_requires_fail_closed(
+            None,
+            None,
+            None,
+            Some("synthetic")
+        ));
+    }
+
+    #[test]
     fn unpreserved_runtime_mismatch_defer_remains_internal_5015() {
         let error = preserved_headless_defer_result(
             serenity::ChannelId::new(50_150_300),

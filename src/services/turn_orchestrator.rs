@@ -1385,6 +1385,18 @@ impl ChannelMailboxHandle {
             .await;
     }
 
+    pub(crate) async fn clear_timeout_override_if_current(&self, expected_token: Arc<CancelToken>) {
+        let _ = self
+            .request(
+                |reply| ChannelMailboxMsg::ClearTimeoutOverrideIfCurrent {
+                    expected_token,
+                    reply,
+                },
+                (),
+            )
+            .await;
+    }
+
     #[cfg(test)]
     pub(crate) async fn age_active_turn_for_test(&self, age: Duration) {
         let _ = self
@@ -1872,6 +1884,10 @@ enum ChannelMailboxMsg {
         reply: oneshot::Sender<Option<WatchdogDeadlineExtension>>,
     },
     ClearTimeoutOverride {
+        reply: oneshot::Sender<()>,
+    },
+    ClearTimeoutOverrideIfCurrent {
+        expected_token: Arc<CancelToken>,
         reply: oneshot::Sender<()>,
     },
     #[cfg(test)]
@@ -3269,6 +3285,19 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 }
                 ChannelMailboxMsg::ClearTimeoutOverride { reply } => {
                     state.watchdog_deadline_override = None;
+                    let _ = reply.send(());
+                }
+                ChannelMailboxMsg::ClearTimeoutOverrideIfCurrent {
+                    expected_token,
+                    reply,
+                } => {
+                    if state
+                        .cancel_token
+                        .as_ref()
+                        .is_some_and(|current| Arc::ptr_eq(current, &expected_token))
+                    {
+                        state.watchdog_deadline_override = None;
+                    }
                     let _ = reply.send(());
                 }
                 #[cfg(test)]

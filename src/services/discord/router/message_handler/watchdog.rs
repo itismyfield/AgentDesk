@@ -264,8 +264,11 @@ pub(super) fn spawn_headless_turn_watchdog(
                 .cancelled
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
-                super::super::super::clear_watchdog_deadline_override(watchdog_channel_id_num)
-                    .await;
+                super::super::super::clear_watchdog_deadline_override_if_current(
+                    watchdog_channel_id_num,
+                    watchdog_token.clone(),
+                )
+                .await;
                 return;
             }
             if let Some(extension) =
@@ -341,8 +344,11 @@ pub(super) fn spawn_headless_turn_watchdog(
                         .await
                         .is_some_and(|current| Arc::ptr_eq(&watchdog_token, &current));
                 if !is_current_token {
-                    super::super::super::clear_watchdog_deadline_override(watchdog_channel_id_num)
-                        .await;
+                    super::super::super::clear_watchdog_deadline_override_if_current(
+                        watchdog_channel_id_num,
+                        watchdog_token.clone(),
+                    )
+                    .await;
                     return;
                 }
                 let current_max_deadline = watchdog_token
@@ -538,7 +544,11 @@ pub(super) async fn reconcile_watchdog_timeout(
         WATCHDOG_TIMEOUT_CANCEL_SOURCE,
     )
     .await;
-    super::super::super::clear_watchdog_deadline_override(channel_id.get()).await;
+    super::super::super::clear_watchdog_deadline_override_if_current(
+        channel_id.get(),
+        watchdog_token.clone(),
+    )
+    .await;
 
     let Some(token) = result.token else {
         return WatchdogTimeoutCancelDisposition::StaleToken;

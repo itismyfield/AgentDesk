@@ -630,6 +630,17 @@ pub(super) async fn clear_watchdog_deadline_override(channel_id: u64) {
     }
 }
 
+pub(super) async fn clear_watchdog_deadline_override_if_current(
+    channel_id: u64,
+    expected_token: Arc<CancelToken>,
+) {
+    if let Some(handle) = ChannelMailboxRegistry::global_handle(ChannelId::new(channel_id)) {
+        handle
+            .clear_timeout_override_if_current(expected_token)
+            .await;
+    }
+}
+
 pub(crate) fn clear_inflight_by_tmux_name(provider: &ProviderKind, tmux_name: &str) -> bool {
     inflight::clear_inflight_by_tmux_name(provider, tmux_name)
 }
