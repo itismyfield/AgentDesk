@@ -357,6 +357,91 @@ fn cleanup_revalidation_rejects_owner_change() {
 
 #[cfg(unix)]
 #[test]
+fn defer_escalation_rechecks_ownership_before_notice() {
+    let channel_id = ChannelId::new(50_150_014);
+    clear_test_defer(channel_id);
+    let ownership_checks = std::cell::Cell::new(0_u32);
+    let escalation_events = std::cell::Cell::new(0_u32);
+    for _ in 0..RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT {
+        let verdict = reconcile_managed_tmux_runtime_kind_for_config(
+            &ProviderKind::Claude,
+            channel_id,
+            Some("AgentDesk-5015-defer-owner-loss"),
+            Some(ManagedRuntimeExpectation {
+                runtime_kind: RuntimeHandoffKind::LegacyTmuxWrapper,
+                evidence_strength: RuntimeKindEvidenceStrength::Weak,
+            }),
+            |_| true,
+            |_, _| {
+                Some(ObservedManagedRuntimeKind {
+                    runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                    evidence_strength: RuntimeKindEvidenceStrength::Strong,
+                })
+            },
+            || RuntimeInflightEvidence {
+                open: false,
+                stale: false,
+            },
+            || crate::services::tui_turn_state::TuiTurnState::Idle,
+            |_| {
+                ownership_checks.set(ownership_checks.get() + 1);
+                false
+            },
+            |_, _, _, _, _| escalation_events.set(escalation_events.get() + 1),
+            |_, _, _| {},
+        );
+        assert_eq!(verdict, RuntimeMismatchVerdict::Defer);
+    }
+    assert_eq!(ownership_checks.get(), 1);
+    assert_eq!(escalation_events.get(), 0);
+    clear_test_defer(channel_id);
+}
+
+#[cfg(unix)]
+#[test]
+fn new_live_incident_rearms_mismatch_escalation() {
+    let channel_id = ChannelId::new(50_150_015);
+    clear_test_defer(channel_id);
+    let escalation_events = std::cell::Cell::new(0_u32);
+    let expected = ManagedRuntimeExpectation {
+        runtime_kind: RuntimeHandoffKind::LegacyTmuxWrapper,
+        evidence_strength: RuntimeKindEvidenceStrength::Weak,
+    };
+    let observed = ObservedManagedRuntimeKind {
+        runtime_kind: RuntimeHandoffKind::ClaudeTui,
+        evidence_strength: RuntimeKindEvidenceStrength::Strong,
+    };
+    for live_turn in [false, false, false, true, true, true] {
+        let verdict = reconcile_managed_tmux_runtime_kind_for_config(
+            &ProviderKind::Claude,
+            channel_id,
+            Some("AgentDesk-5015-second-incident"),
+            Some(expected),
+            |_| true,
+            |_, _| Some(observed),
+            || RuntimeInflightEvidence {
+                open: false,
+                stale: false,
+            },
+            || {
+                if live_turn {
+                    crate::services::tui_turn_state::TuiTurnState::Streaming
+                } else {
+                    crate::services::tui_turn_state::TuiTurnState::Idle
+                }
+            },
+            |_| true,
+            |_, _, _, _, _| escalation_events.set(escalation_events.get() + 1),
+            |_, _, _| {},
+        );
+        assert_eq!(verdict, RuntimeMismatchVerdict::Defer);
+    }
+    assert_eq!(escalation_events.get(), 2);
+    clear_test_defer(channel_id);
+}
+
+#[cfg(unix)]
+#[test]
 fn transcript_state_probe_preserves_provider_argument_order() {
     fn claude(
         current_path: Option<&str>,

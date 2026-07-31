@@ -35,6 +35,8 @@ struct RuntimeMismatchDeferState {
     count: u32,
     first_seen: std::time::Instant,
     escalated: bool,
+    incident_generation: u64,
+    last_live_turn: bool,
 }
 
 #[cfg(unix)]
@@ -66,6 +68,7 @@ fn record_runtime_mismatch_defer(
     open_inflight: bool,
     transcript_state: Option<crate::services::tui_turn_state::TuiTurnState>,
     defer_reason: &'static str,
+    live_turn: bool,
 ) -> (u32, bool) {
     let key =
         RuntimeMismatchTarget::new(provider, channel_id, tmux_session_name, expected, observed);
@@ -79,14 +82,26 @@ fn record_runtime_mismatch_defer(
                 count: 0,
                 first_seen: std::time::Instant::now(),
                 escalated: false,
+                incident_generation: 0,
+                last_live_turn: live_turn,
             });
-    state.count = state.count.saturating_add(1);
+    // A new live turn is an observable incident boundary: a later mismatch
+    // after that transition is a new incident even if no clear observation ran.
+    if !state.last_live_turn && live_turn {
+        state.incident_generation = state.incident_generation.saturating_add(1);
+        state.count = 0;
+        state.first_seen = std::time::Instant::now();
+        state.escalated = false;
+    }
+    state.last_live_turn = live_turn;
+    state.count = state.count.saturating_add(1); // Count defers within the current incident.
     let elapsed_secs = state.first_seen.elapsed().as_secs();
     let escalating = !state.escalated && state.count >= RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT;
     if escalating {
         state.escalated = true;
     }
     let count = state.count;
+    let incident_generation = state.incident_generation;
     drop(state);
 
     crate::services::observability::emit_inflight_lifecycle_event(
@@ -102,6 +117,7 @@ fn record_runtime_mismatch_defer(
         },
         serde_json::json!({
             "consecutive_defer_count": count,
+            "incident_generation": incident_generation,
             "elapsed_secs": elapsed_secs,
             "escalation_threshold": RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT,
             "action": "continue_defer_without_kill",
@@ -223,9 +239,17 @@ pub(super) fn reconcile_managed_tmux_runtime_kind_for_config(
             inflight.open,
             transcript_state,
             defer_reason,
+            live_turn,
         );
-        if escalated {
+        if escalated && target_still_owned(tmux_session_name) {
             on_escalation(provider, channel_id, tmux_session_name, expected, observed);
+        } else if escalated {
+            tracing::warn!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                tmux_session_name,
+                "runtime mismatch escalation skipped because tmux ownership was lost"
+            );
         }
         return verdict;
     }
@@ -252,14 +276,22 @@ pub(super) fn reconcile_managed_tmux_runtime_kind_for_config(
             revalidated_inflight.open,
             None,
             defer_reason,
+            false,
         );
-        if escalated {
+        if escalated && owner_matches_at_commit {
             on_escalation(
                 provider,
                 channel_id,
                 tmux_session_name,
                 expected,
                 revalidated_observed.unwrap_or(observed),
+            );
+        } else if escalated {
+            tracing::warn!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                tmux_session_name,
+                "runtime mismatch escalation skipped because tmux ownership was lost"
             );
         }
         tracing::warn!(
