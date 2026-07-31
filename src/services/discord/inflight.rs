@@ -1327,6 +1327,7 @@ mod stall_recovery_tests {
         let channel_id = 49_920_010;
         let session = "AgentDesk-claude-4992-producer";
         let mut state = seed_watcher_stream_state(temp.path(), channel_id, session, "before", 100);
+        state.response_sent_offset = 0;
         state.last_watcher_relayed_at_unix = None;
         force_write_state(temp.path(), &state);
         let identity = InflightTurnIdentity::from_state(&state);
@@ -1356,6 +1357,110 @@ mod stall_recovery_tests {
         )
         .expect("parse persisted producer row");
         assert_eq!(persisted.last_watcher_relayed_at_unix, None);
+    }
+
+    #[test]
+    fn watcher_stream_progress_rejects_prefix_mismatch_without_partial_update() {
+        let temp = TempDir::new().unwrap();
+        let channel_id = 49_920_013;
+        let session = "AgentDesk-claude-4992-prefix-mismatch";
+        let mut state = seed_watcher_stream_state(
+            temp.path(),
+            channel_id,
+            session,
+            "durable delivered prefix",
+            100,
+        );
+        state.current_msg_id = 43;
+        state.current_tool_line = Some("old tool".to_string());
+        state.any_tool_used = false;
+        state.streaming_rollover_frozen_msg_ids = vec![7];
+        force_write_state(temp.path(), &state);
+        let identity = InflightTurnIdentity::from_state(&state);
+
+        let outcome = persist_watcher_stream_progress_locked_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            channel_id,
+            Some(&identity),
+            session,
+            WatcherStreamProgressPatch {
+                current_msg_id: Some(99),
+                full_response: "rewound fresh response".to_string(),
+                response_sent_offset: 0,
+                current_tool_line: Some("new tool".to_string()),
+                prev_tool_status: Some("new status".to_string()),
+                task_notification_kind: None,
+                any_tool_used: true,
+                has_post_tool_text: true,
+                streaming_rollover_frozen_msg_ids: vec![8],
+            },
+        );
+        assert_eq!(
+            outcome,
+            WatcherProgressOutcome::RejectedDeliveredPrefix {
+                durable_full_response_len: "durable delivered prefix".len(),
+                durable_response_sent_offset: "durable delivered prefix".len(),
+                incoming_full_response_len: "rewound fresh response".len(),
+                incoming_response_sent_offset: 0,
+            }
+        );
+
+        let persisted = loaded_row(temp.path(), channel_id);
+        assert_eq!(persisted.full_response, "durable delivered prefix");
+        assert_eq!(
+            persisted.response_sent_offset,
+            "durable delivered prefix".len()
+        );
+        assert_eq!(persisted.current_msg_id, 43);
+        assert_eq!(persisted.current_tool_line.as_deref(), Some("old tool"));
+        assert!(!persisted.any_tool_used);
+        assert_eq!(persisted.streaming_rollover_frozen_msg_ids, vec![7]);
+    }
+
+    #[test]
+    fn watcher_stream_progress_accepts_matching_prefix_and_applies_complete_patch() {
+        let temp = TempDir::new().unwrap();
+        let channel_id = 49_920_014;
+        let session = "AgentDesk-claude-4992-prefix-match";
+        let state = seed_watcher_stream_state(
+            temp.path(),
+            channel_id,
+            session,
+            "durable delivered prefix",
+            100,
+        );
+        let identity = InflightTurnIdentity::from_state(&state);
+
+        let outcome = persist_watcher_stream_progress_locked_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            channel_id,
+            Some(&identity),
+            session,
+            WatcherStreamProgressPatch {
+                current_msg_id: Some(99),
+                full_response: "durable delivered prefix plus suffix".to_string(),
+                response_sent_offset: "durable delivered prefix plus suffix".len(),
+                current_tool_line: Some("new tool".to_string()),
+                prev_tool_status: Some("new status".to_string()),
+                task_notification_kind: None,
+                any_tool_used: true,
+                has_post_tool_text: true,
+                streaming_rollover_frozen_msg_ids: vec![8],
+            },
+        );
+        assert_eq!(outcome, WatcherProgressOutcome::Saved);
+
+        let persisted = loaded_row(temp.path(), channel_id);
+        assert_eq!(
+            persisted.full_response,
+            "durable delivered prefix plus suffix"
+        );
+        assert_eq!(persisted.current_msg_id, 99);
+        assert_eq!(persisted.current_tool_line.as_deref(), Some("new tool"));
+        assert!(persisted.any_tool_used);
+        assert_eq!(persisted.streaming_rollover_frozen_msg_ids, vec![8]);
     }
 
     #[test]

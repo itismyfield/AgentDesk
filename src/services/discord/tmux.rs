@@ -2281,19 +2281,12 @@ fn persist_watcher_stream_progress(
     // persisted so a later-iteration / post-restart terminal fallback can delete them.
     streaming_rollover_frozen_msg_ids: &[MessageId],
 ) {
-    if full_response.len() < response_sent_offset {
-        tracing::debug!(
-            provider = %provider.as_str(),
-            channel_id = channel_id.get(),
-            tmux_session = %tmux_session_name,
-            response_sent_offset,
-            full_response_len = full_response.len(),
-            "watcher: skipping stream-progress persistence until parsed body catches up"
-        );
-        return;
-    }
-
-    // #3558: pre-emit the in-bounds telemetry against the caller's snapshot for
+    // #3558: even a body that temporarily trails the caller's offset must reach
+    // the locked writer. A restored-seed rewind is one such snapshot: dropping it
+    // here would hide a delivered-prefix mismatch and leave the caller unable to
+    // distinguish a rejected body from a saved progress update. The locked helper
+    // remains the authority and rejects the patch without mutating the row.
+    // Pre-emit the in-bounds telemetry against the caller's snapshot for
     // continuity; the helper re-clamps `response_sent_offset` against the
     // freshly reloaded `full_response` under the lock, so the persisted value is
     // always in-bounds regardless of this advisory check.
@@ -2323,7 +2316,7 @@ fn persist_watcher_stream_progress(
     // — the helper preserves whatever the in-lock disk reload carries, so a
     // concurrent owner-gated `refresh_inflight_last_offset_*` advance can no
     // longer be clobbered backward by this previously-unlocked load→save TOCTOU.
-    let _ = super::inflight::persist_watcher_stream_progress_locked(
+    let progress_outcome = super::inflight::persist_watcher_stream_progress_locked(
         provider,
         channel_id.get(),
         require_identity,
@@ -2343,6 +2336,29 @@ fn persist_watcher_stream_progress(
                 .collect(),
         },
     );
+    if let super::inflight::WatcherProgressOutcome::RejectedDeliveredPrefix {
+        durable_full_response_len,
+        durable_response_sent_offset,
+        incoming_full_response_len,
+        incoming_response_sent_offset,
+    } = progress_outcome
+    {
+        let _ = record_watcher_invariant(
+            false,
+            Some(provider),
+            channel_id,
+            "watcher_stream_delivered_prefix_preserved",
+            "src/services/discord/tmux.rs:persist_watcher_stream_progress",
+            "watcher stream patch rejected because its delivered prefix differed from durable state",
+            serde_json::json!({
+                "tmux_session_name": tmux_session_name,
+                "durable_full_response_len": durable_full_response_len,
+                "durable_response_sent_offset": durable_response_sent_offset,
+                "incoming_full_response_len": incoming_full_response_len,
+                "incoming_response_sent_offset": incoming_response_sent_offset,
+            }),
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2619,6 +2635,7 @@ mod watcher_placeholder_status_tests {
 #[cfg(test)]
 mod watcher_stream_progress_tests {
     use super::persist_watcher_stream_progress;
+    use super::tmux_watcher::discard_restored_response_seed_before_no_inflight_terminal_relay;
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::ProviderKind;
     use poise::serenity_prelude::{ChannelId, MessageId};
@@ -2790,6 +2807,96 @@ mod watcher_stream_progress_tests {
             .expect("reload row");
         assert_eq!(reloaded.full_response, "already persisted prefix");
         assert_eq!(reloaded.response_sent_offset, state.response_sent_offset);
+        assert_eq!(
+            reloaded.current_msg_id, state.current_msg_id,
+            "rewind seed must not partially apply the incoming message id"
+        );
+        assert!(
+            reloaded.current_tool_line.is_none(),
+            "rewind seed must not partially apply tool metadata"
+        );
+        assert!(
+            reloaded.streaming_rollover_frozen_msg_ids.is_empty(),
+            "rewind seed must not partially apply rollover ids"
+        );
+    }
+
+    #[test]
+    fn persist_watcher_stream_progress_preserves_prefix_after_seed_rewind() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(1509350490461180416);
+        let tmux_session_name = "AgentDesk-claude-adk-issue-4115-rewind-accepted";
+        let mut state = InflightTurnState::new(
+            provider.clone(),
+            channel_id.get(),
+            Some("claude-pipe".to_string()),
+            4155,
+            9_415,
+            9_416,
+            "prompt".to_string(),
+            Some("session-4115".to_string()),
+            Some(tmux_session_name.to_string()),
+            Some("/tmp/agentdesk-4115-accepted.jsonl".to_string()),
+            None,
+            128,
+        );
+        state.full_response = "already persisted prefix".to_string();
+        state.response_sent_offset = state.full_response.len();
+        super::super::inflight::save_inflight_state(&state).expect("save inflight");
+
+        // Exercise the actual stale-seed discard helper: it rewinds both body
+        // and offset before the watcher sees this snapshot. The incoming body is
+        // therefore a new turn-relative body must not be persisted over the
+        // durable delivered prefix. The local seed-discard helper is exercised
+        // before handing the rewound snapshot to the durable writer; its
+        // persisted row remains the prior owner's authority.
+        let mut reset = super::super::inflight::load_inflight_state(&provider, channel_id.get())
+            .expect("reload row");
+        let mut last_edit_text = String::new();
+        assert!(
+            discard_restored_response_seed_before_no_inflight_terminal_relay(
+                &mut reset.full_response,
+                &mut reset.response_sent_offset,
+                &mut last_edit_text,
+                "already persisted prefix",
+                false,
+                true,
+                false,
+                false,
+            )
+        );
+        assert!(reset.full_response.is_empty());
+        assert_eq!(reset.response_sent_offset, 0);
+
+        persist_watcher_stream_progress(
+            &provider,
+            channel_id,
+            tmux_session_name,
+            None,
+            Some(MessageId::new(9_417)),
+            "new turn response",
+            0,
+            Some("Bash: echo retry"),
+            None,
+            None,
+            false,
+            false,
+            &[],
+        );
+
+        let reloaded = super::super::inflight::load_inflight_state(&provider, channel_id.get())
+            .expect("reload durable row");
+        assert_eq!(reloaded.full_response, "already persisted prefix");
+        assert_eq!(reloaded.response_sent_offset, state.full_response.len());
+        assert_eq!(reloaded.current_msg_id, state.current_msg_id);
+        assert!(reloaded.current_tool_line.is_none());
+        assert!(reloaded.streaming_rollover_frozen_msg_ids.is_empty());
 
         unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
     }

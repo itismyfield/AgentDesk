@@ -38,6 +38,15 @@ pub(in crate::services::discord) struct WatcherStreamProgressPatch {
 pub(in crate::services::discord) enum WatcherProgressOutcome {
     /// The watcher-owned fields were patched and persisted.
     Saved,
+    /// The incoming body did not preserve the durable delivered prefix, so the
+    /// complete patch was rejected without applying any fields. The payload
+    /// carries both body/offset pairs for the caller's invariant event.
+    RejectedDeliveredPrefix {
+        durable_full_response_len: usize,
+        durable_response_sent_offset: usize,
+        incoming_full_response_len: usize,
+        incoming_response_sent_offset: usize,
+    },
     /// Either no row exists, or the in-lock reload no longer matches the
     /// expected identity / tmux session (a fresh turn replaced it, or a
     /// restart/rebind marker is now pinned). The write was skipped.
@@ -117,9 +126,6 @@ pub(super) fn persist_watcher_stream_progress_locked_in_root(
         return WatcherProgressOutcome::Skipped;
     }
 
-    if let Some(msg_id) = patch.current_msg_id {
-        state.current_msg_id = msg_id;
-    }
     let patch_response_sent_offset =
         normalize_response_sent_offset(&patch.full_response, patch.response_sent_offset);
     let preserves_delivered_prefix = state
@@ -127,13 +133,27 @@ pub(super) fn persist_watcher_stream_progress_locked_in_root(
         .get(..state.response_sent_offset)
         .zip(patch.full_response.get(..state.response_sent_offset))
         .is_some_and(|(durable, incoming)| durable == incoming);
-    if preserves_delivered_prefix {
-        state.full_response = patch.full_response;
-        state.response_sent_offset = normalize_response_sent_offset(
-            &state.full_response,
-            state.response_sent_offset.max(patch_response_sent_offset),
-        );
+    if !preserves_delivered_prefix {
+        return WatcherProgressOutcome::RejectedDeliveredPrefix {
+            durable_full_response_len: state.full_response.len(),
+            durable_response_sent_offset: state.response_sent_offset,
+            incoming_full_response_len: patch.full_response.len(),
+            incoming_response_sent_offset: patch_response_sent_offset,
+        };
     }
+
+    // The body and its offset are one ownership unit. Apply the complete patch
+    // only after the delivered-prefix fence passes; otherwise a rejected body
+    // cannot leave tool metadata or rollover IDs from a different snapshot
+    // partially applied to the durable row.
+    if let Some(msg_id) = patch.current_msg_id {
+        state.current_msg_id = msg_id;
+    }
+    state.full_response = patch.full_response;
+    state.response_sent_offset = normalize_response_sent_offset(
+        &state.full_response,
+        state.response_sent_offset.max(patch_response_sent_offset),
+    );
     state.current_tool_line = patch.current_tool_line;
     state.prev_tool_status = patch.prev_tool_status;
     state.any_tool_used = patch.any_tool_used;
