@@ -1310,7 +1310,7 @@ mod tests {
 
         assert!(matches!(
             disposition,
-            AgentTurnStartDisposition::Queued(turn_id) if turn_id == "discord:50:15"
+            AgentTurnStartDisposition::Queued(ref turn_id) if turn_id == "discord:50:15"
         ));
         assert!(!matches!(
             disposition,
