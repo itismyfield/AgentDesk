@@ -648,8 +648,12 @@ pub(in crate::services::discord) async fn release_mailbox_after_busy_pre_submit_
     channel_id: ChannelId,
 ) -> bool {
     // #4270 B — edge-trigger conversion: do NOT re-arm the fast ~2s deferred
-    // kickoff for a busy-defer release. Arm ONLY the slow (60s) fail-open
-    // backstop; the watcher-idle re-drain supplies the fast edge.
+    // kickoff for a hosted-TUI busy-defer release (that fixed-delay re-kick,
+    // combined with the mailbox-only kickoff gate, was the ~2s promote spin).
+    // Arm ONLY the slow (60s) fail-open backstop; the fast wakeup is delegated
+    // to the watcher-idle re-drain when the TUI reaches Idle, and the pre-claim
+    // readiness gate (#4270 A) absorbs any interim kick without re-claiming the
+    // mailbox.
     release_mailbox_after_turn_start_failure(
         shared,
         provider,
