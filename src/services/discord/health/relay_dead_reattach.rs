@@ -38,19 +38,10 @@ fn should_reattach_relay_dead_watcher(
     }
     // Fresh runtime activity is a blocker for destructive cleanup, but for a
     // relay frontier that never moved it is evidence that a non-destructive
-    // watcher reattach can recover live output. This predicate expands only the
-    // watcher registry: `auto_apply_relay_recovery_for_shared` reserves the exact
-    // inflight episode and `apply_relay_recovery_decision` passes that reservation
-    // to `rebind_inflight`, whose automatic arm cannot enter the manual
-    // mailbox/inflight/session cleanup branches. After restart, NotAttempted or
-    // Unknown therefore authorizes only pinned adoption; destructive repair stays
-    // restricted to exact NotDelivered evidence.
+    // watcher reattach can recover live output.
     if snapshot
         .relay_health
         .relay_frontier_never_advanced_with_unread_tail()
-        || snapshot
-            .relay_health
-            .relay_frontier_unobserved_with_unread_tail()
     {
         return true;
     }
@@ -184,10 +175,8 @@ mod tests {
                 thread_channel_id: None,
                 last_relay_ts_ms: None,
                 last_outbound_activity_ms: None,
-                delivery_evidence: crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered,
                 last_capture_offset: Some(128),
                 last_relay_offset: 0,
-                last_relay_offset_recorded: true,
                 unread_bytes: Some(128),
                 desynced: true,
                 stale_thread_proof: false,
@@ -272,9 +261,6 @@ mod tests {
         committed.inflight_terminal_delivery_committed = true;
         let mut fresh_outbound = snapshot(&stale);
         fresh_outbound.relay_health.last_outbound_activity_ms = Some((now - 5) * 1000);
-        let mut delivered_live_fingerprint = snapshot(&stale);
-        delivered_live_fingerprint.relay_health.delivery_evidence =
-            crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::Delivered;
         let mut advanced_frontier = snapshot(&stale);
         advanced_frontier.last_relay_ts_ms = (now - 30) * 1000;
         advanced_frontier.last_relay_offset = 64;
@@ -338,49 +324,16 @@ mod tests {
             ),
             "advanced relay frontiers still require stale runtime activity before reattach"
         );
-        for evidence in [
-            crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotAttempted,
-            crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::Unknown,
-        ] {
-            let mut post_restart = snapshot(&stale);
-            post_restart.relay_health.delivery_evidence = evidence;
-            post_restart.relay_stall_state =
-                crate::services::discord::relay_health::RelayStallClassifier::classify(
-                    &post_restart.relay_health,
-                );
-            assert!(
-                should_reattach_relay_dead_watcher(
-                    &post_restart,
-                    ChannelId::new(42),
-                    false,
-                    stale_activity,
-                    now,
-                    boot,
-                ),
-                "bounded observation must allow non-destructive post-restart reattach for {evidence:?}"
-            );
-        }
         assert!(
-            !should_reattach_relay_dead_watcher(
+            should_reattach_relay_dead_watcher(
                 &fresh_outbound,
                 ChannelId::new(42),
                 false,
-                fresh_activity,
+                stale_activity,
                 now,
                 boot,
             ),
-            "fresh outbound and runtime activity must restore the destructive-cleanup blocker"
-        );
-        assert!(
-            !should_reattach_relay_dead_watcher(
-                &delivered_live_fingerprint,
-                ChannelId::new(42),
-                false,
-                fresh_activity,
-                now,
-                boot,
-            ),
-            "confirmed Discord delivery must not bypass the fresh-runtime-activity guard"
+            "recent outbound activity must not block non-destructive watcher reattach"
         );
     }
 }

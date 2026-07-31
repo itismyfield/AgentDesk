@@ -96,10 +96,8 @@ fn snapshot() -> RelayHealthSnapshot {
         thread_channel_id: None,
         last_relay_ts_ms: None,
         last_outbound_activity_ms: None,
-        delivery_evidence: crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered,
         last_capture_offset: None,
         last_relay_offset: 0,
-        last_relay_offset_recorded: true,
         unread_bytes: None,
         desynced: false,
         stale_thread_proof: false,
@@ -311,10 +309,8 @@ fn watcher_owned_live_relay_with_unread_bytes_and_zero_relay_offset_is_actionabl
         mailbox_active_user_msg_id: Some(9001),
         mailbox_turn_started_at_ms: None,
         bridge_current_msg_id: Some(9002),
-        delivery_evidence: crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered,
         last_capture_offset: Some(7968),
         last_relay_offset: 0,
-        last_relay_offset_recorded: true,
         unread_bytes: Some(7968),
         desynced: true,
         ..snapshot()
@@ -372,10 +368,8 @@ fn watcher_owned_live_relay_with_relay_progress_is_not_destructive_cancel_candid
         mailbox_turn_started_at_ms: None,
         bridge_current_msg_id: Some(9002),
         last_relay_ts_ms: Some(1_777_001_234_000),
-        delivery_evidence: crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered,
         last_capture_offset: Some(7968),
         last_relay_offset: 4096,
-        last_relay_offset_recorded: true,
         unread_bytes: Some(3872),
         desynced: true,
         ..snapshot()
@@ -555,13 +549,6 @@ async fn dead_frontier_watcher_cancel_finalizes_owner_and_releases_inflight() {
     let (watcher, watcher_cancel) = test_watcher_handle(tmux, &output_path);
     watcher.last_heartbeat_ts_ms.store(1, Ordering::Release);
     shared.tmux_watchers.insert(channel, watcher);
-    let lease_key = super::super::DeliveryLeaseKey::from_inflight_state_for_site(
-        channel,
-        shared.restart.current_generation,
-        &state,
-        "relay_recovery_dead_frontier_test",
-    );
-    super::super::outbound::delivery_evidence_store::record_not_delivered(&lease_key);
 
     let snapshot = RelayHealthSnapshot {
         provider: provider.as_str().to_string(),
@@ -576,10 +563,8 @@ async fn dead_frontier_watcher_cancel_finalizes_owner_and_releases_inflight() {
         mailbox_has_cancel_token: true,
         mailbox_active_user_msg_id: Some(user_msg.get()),
         mailbox_turn_started_at_ms: None,
-        delivery_evidence: crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered,
         last_capture_offset: Some(128),
         last_relay_offset: 0,
-        last_relay_offset_recorded: true,
         unread_bytes: Some(128),
         desynced: true,
         ..snapshot()
@@ -704,10 +689,8 @@ async fn dead_frontier_gate_pass_then_generation_mismatch_preserves_turn() {
         bridge_inflight_present: true,
         mailbox_has_cancel_token: true,
         mailbox_active_user_msg_id: Some(user_msg.get()),
-        delivery_evidence: crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered,
         last_capture_offset: Some(1),
         last_relay_offset: 0,
-        last_relay_offset_recorded: true,
         unread_bytes: Some(1),
         desynced: true,
         ..snapshot()
@@ -795,7 +778,6 @@ async fn destructive_cancel_stops_when_terminal_lease_starts_after_gate() {
         &persisted,
         "relay_recovery_post_gate_test",
     );
-    super::super::outbound::delivery_evidence_store::record_not_delivered(&lease_key);
     let hook_shared = Arc::clone(&shared);
     let hook_key = lease_key.clone();
     let _hook = set_destructive_cancel_post_gate_hook_for_tests(Arc::new(move || {
@@ -804,8 +786,12 @@ async fn destructive_cancel_stops_when_terminal_lease_starts_after_gate() {
             super::super::LeaseHolder::Bridge,
             0,
             1,
-            super::super::lease_now_ms().saturating_add(1_000),
+            u64::MAX,
         ));
+        hook_shared
+            .tmux_relay_coord(channel)
+            .relay_slot
+            .store(1, Ordering::Release);
     }));
     let snapshot = RelayHealthSnapshot {
         provider: provider.as_str().to_string(),
@@ -820,10 +806,8 @@ async fn destructive_cancel_stops_when_terminal_lease_starts_after_gate() {
         bridge_inflight_present: true,
         mailbox_has_cancel_token: true,
         mailbox_active_user_msg_id: Some(user_msg.get()),
-        delivery_evidence: crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered,
         last_capture_offset: Some(1),
         last_relay_offset: 0,
-        last_relay_offset_recorded: true,
         unread_bytes: Some(1),
         desynced: true,
         ..snapshot()
@@ -894,10 +878,8 @@ async fn reattach_idle_tmux_clear_release_publishes_completion_event() {
         mailbox_has_cancel_token: true,
         mailbox_active_user_msg_id: Some(user_msg.get()),
         mailbox_turn_started_at_ms: None,
-        delivery_evidence: crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered,
         last_capture_offset: Some(output_len),
         last_relay_offset: output_len,
-        last_relay_offset_recorded: true,
         unread_bytes: Some(0),
         desynced: true,
         ..snapshot()
@@ -1096,10 +1078,8 @@ async fn reattach_idle_tmux_clear_refuses_newer_idle_row_between_predicate_and_p
         mailbox_active_user_msg_id: Some(stale_user_msg_id),
         mailbox_turn_started_at_ms: None,
         bridge_current_msg_id: Some(footer_msg.get()),
-        delivery_evidence: crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered,
         last_capture_offset: Some(output_len),
         last_relay_offset: output_len,
-        last_relay_offset_recorded: true,
         unread_bytes: Some(0),
         desynced: true,
         ..snapshot()
@@ -1218,10 +1198,8 @@ async fn reattach_idle_tmux_clear_success_tears_down_after_guarded_clear() {
         mailbox_has_cancel_token: true,
         mailbox_active_user_msg_id: Some(user_msg.get()),
         mailbox_turn_started_at_ms: None,
-        delivery_evidence: crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered,
         last_capture_offset: Some(output_len),
         last_relay_offset: output_len,
-        last_relay_offset_recorded: true,
         unread_bytes: Some(0),
         desynced: true,
         ..snapshot()
@@ -1322,10 +1300,8 @@ async fn stale_watcher_with_jsonl_progress_rebinds_without_canceling_turn() {
         mailbox_has_cancel_token: true,
         mailbox_active_user_msg_id: Some(user_msg.get()),
         mailbox_turn_started_at_ms: None,
-        delivery_evidence: crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered,
         last_capture_offset: Some(128),
         last_relay_offset: 0,
-        last_relay_offset_recorded: true,
         unread_bytes: Some(128),
         desynced: true,
         ..snapshot()
@@ -1415,10 +1391,8 @@ async fn fresh_watcher_heartbeat_blocks_destructive_cancel_before_reattach() {
         mailbox_has_cancel_token: true,
         mailbox_active_user_msg_id: Some(user_msg.get()),
         mailbox_turn_started_at_ms: None,
-        delivery_evidence: crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered,
         last_capture_offset: Some(128),
         last_relay_offset: 0,
-        last_relay_offset_recorded: true,
         unread_bytes: Some(128),
         desynced: true,
         ..snapshot()
@@ -1510,10 +1484,8 @@ async fn relay_recovery_identity_pin_preserves_t2_started_after_t1_snapshot() {
         mailbox_has_cancel_token: true,
         mailbox_active_user_msg_id: Some(t1_msg.get()),
         mailbox_turn_started_at_ms: None,
-        delivery_evidence: crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered,
         last_capture_offset: Some(64),
         last_relay_offset: 0,
-        last_relay_offset_recorded: true,
         unread_bytes: Some(64),
         desynced: true,
         ..snapshot()
@@ -1717,7 +1689,6 @@ async fn auto_heal_attempts_are_rate_limited_per_window() {
         42,
         RelayRecoveryActionKind::ClearOrphanPendingToken,
         RelayRecoveryApplySource::ProbeAutoHeal,
-        crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered,
     );
 
     assert_eq!(
@@ -1755,10 +1726,8 @@ async fn dead_frontier_reattach_gets_one_bounded_retry_only() {
         mailbox_has_cancel_token: true,
         mailbox_active_user_msg_id: Some(3_779_101),
         mailbox_turn_started_at_ms: None,
-        delivery_evidence: crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered,
         last_capture_offset: Some(2_048),
         last_relay_offset: 0,
-        last_relay_offset_recorded: true,
         unread_bytes: Some(2_048),
         desynced: true,
         ..snapshot()
@@ -1769,7 +1738,6 @@ async fn dead_frontier_reattach_gets_one_bounded_retry_only() {
         decision.channel_id,
         decision.action,
         RelayRecoveryApplySource::Manual,
-        decision.evidence.delivery_evidence,
     );
 
     assert_eq!(decision.action, RelayRecoveryActionKind::ReattachWatcher);
@@ -1779,42 +1747,6 @@ async fn dead_frontier_reattach_gets_one_bounded_retry_only() {
         AUTO_HEAL_DEAD_FRONTIER_REATTACH_MAX_ATTEMPTS_PER_WINDOW
     );
     assert_eq!(decision.auto_heal.remaining_attempts, 2);
-    let unobserved = plan_relay_recovery(
-        &RelayHealthSnapshot {
-            delivery_evidence: crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::Unknown,
-            ..snapshot.clone()
-        },
-        RelayStallState::TmuxAliveRelayDead,
-        1_000,
-    );
-    assert_eq!(
-        unobserved.auto_heal.max_attempts_per_window,
-        AUTO_HEAL_DEAD_FRONTIER_REATTACH_MAX_ATTEMPTS_PER_WINDOW,
-        "post-restart unobserved evidence has an equally bounded but separate budget"
-    );
-    assert_eq!(
-        unobserved.auto_heal.window_secs, AUTO_HEAL_WINDOW_SECS,
-        "the relaxed non-destructive lane permits at most two non-refunded reservations per ten-minute window"
-    );
-    let unobserved_key = auto_heal_key(
-        &unobserved.provider,
-        unobserved.channel_id,
-        unobserved.action,
-        RelayRecoveryApplySource::Manual,
-        unobserved.evidence.delivery_evidence,
-    );
-    assert_ne!(
-        key, unobserved_key,
-        "Unknown evidence must not consume exact NotDelivered recovery budget"
-    );
-    assert_eq!(
-        reserve_auto_heal_attempt(
-            &unobserved_key,
-            1_000,
-            unobserved.auto_heal.max_attempts_per_window
-        ),
-        Ok(1)
-    );
     assert_eq!(
         reserve_auto_heal_attempt(&key, 1_000, decision.auto_heal.max_attempts_per_window),
         Ok(1)
@@ -1833,7 +1765,6 @@ async fn dead_frontier_reattach_gets_one_bounded_retry_only() {
         &RelayHealthSnapshot {
             last_relay_ts_ms: Some(2_500),
             last_relay_offset: 512,
-            last_relay_offset_recorded: true,
             unread_bytes: Some(1_536),
             ..snapshot
         },

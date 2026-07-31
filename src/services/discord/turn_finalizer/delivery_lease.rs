@@ -8,28 +8,6 @@
 
 use super::*;
 
-pub(super) fn begin_relay_attempt(key: &DeliveryLeaseKey) {
-    super::super::outbound::delivery_evidence_store::begin_relay_attempt(key);
-}
-
-pub(super) fn record_relay_commit(key: &DeliveryLeaseKey, outcome: LeaseOutcome) {
-    match outcome {
-        LeaseOutcome::Delivered => {
-            super::super::outbound::delivery_evidence_store::record_confirmed_relay(key);
-        }
-        LeaseOutcome::NotDelivered => {
-            super::super::outbound::delivery_evidence_store::record_not_delivered(key);
-        }
-        LeaseOutcome::Unknown => {
-            super::super::outbound::delivery_evidence_store::record_unknown_relay(key);
-        }
-    }
-}
-
-pub(super) fn record_relay_unknown(key: &DeliveryLeaseKey) {
-    super::super::outbound::delivery_evidence_store::record_unknown_relay(key);
-}
-
 // #3041 §2-§3 — delivery-lease handlers: thin wrappers over the
 // `DeliveryLeaseCell` state machine (mod.rs), run in the actor task. DORMANT
 // after the R2 revert (the watcher works the cell INLINE); kept + unit-tested

@@ -394,8 +394,6 @@ fn relay_frontier_dead_reattach_owner(decision: &RelayRecoveryDecision) -> Optio
         || evidence.tmux_alive != Some(true)
         || !evidence.watcher_attached
         || !evidence.watcher_owns_live_relay
-        || evidence.delivery_evidence
-            != super::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered
         || evidence.last_relay_offset != 0
     {
         return None;

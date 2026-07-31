@@ -213,39 +213,14 @@ pub(super) async fn apply_relay_recovery_decision(
                                     .await
                                     .active_user_message_id
                                     .map(|id| id.get());
-                            let latest_evidence = super::inflight::load_inflight_state(
-                                provider,
-                                owner_channel_id.get(),
-                            )
-                            .filter(|state| {
-                                probe.pin.matches_state(state)
-                                    && super::inflight::InflightTurnIdentity::from_state(state)
-                                        == probe.inflight_identity.clone()
-                            })
-                            .map(|state| {
-                                crate::services::discord::DeliveryLeaseKey::from_inflight_state_for_site(
-                                    owner_channel_id,
-                                    shared.restart.current_generation,
-                                    &state,
-                                    "relay_recovery_post_gate",
-                                )
-                            })
-                            .as_ref()
-                            .map(
-                                crate::services::discord::outbound::delivery_evidence_store::relay_evidence_for_turn,
-                            );
-                            let post_gate_blocked = shared.relay_emission_in_flight(owner_channel_id)
-                                || latest_evidence
-                                    != Some(crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered);
-                            if post_gate_blocked {
+                            if shared.relay_emission_in_flight(owner_channel_id) {
                                 tracing::warn!(
                                     target: "agentdesk::discord::relay_recovery",
                                     provider = provider.as_str(),
                                     channel_id = decision.channel_id,
                                     watcher_owner_channel_id = owner_channel_id.get(),
                                     death_evidence = gate.allowed_reason().unwrap_or("unknown"),
-                                    ?latest_evidence,
-                                    "relay recovery skipped destructive watcher cancel after gate; terminal delivery became active or was no longer proven undelivered"
+                                    "relay recovery skipped destructive watcher cancel after gate; terminal delivery became active"
                                 );
                             } else if mailbox_active_user_msg_id
                                 != probe.pin.mailbox_active_user_msg_id

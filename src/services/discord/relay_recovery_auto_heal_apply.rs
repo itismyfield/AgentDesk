@@ -69,7 +69,6 @@ pub(super) async fn apply_relay_recovery_plan_with_seams(
         decision.channel_id,
         decision.action,
         source,
-        decision.evidence.delivery_evidence,
     );
     decision.auto_heal.remaining_attempts =
         remaining_auto_heal_attempts(&key, now_ms, decision.auto_heal.max_attempts_per_window);
@@ -369,7 +368,6 @@ mod tests {
             4_423_302,
             RelayRecoveryActionKind::ReattachWatcher,
             RelayRecoveryApplySource::ProbeAutoHeal,
-            crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered,
         );
         assert_eq!(reserve_auto_heal_attempt(&key, 1_000, 1), Ok(0));
         let mut apply_result = RelayRecoveryApplyResult {
@@ -410,7 +408,6 @@ mod tests {
             4_423_303,
             RelayRecoveryActionKind::ReattachWatcher,
             RelayRecoveryApplySource::ProbeAutoHeal,
-            crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered,
         );
         assert_eq!(reserve_auto_heal_attempt(&key, 1_000, 1), Ok(0));
         let mut apply_result = RelayRecoveryApplyResult {
@@ -538,10 +535,8 @@ mod tests {
             thread_channel_id: None,
             last_relay_ts_ms: None,
             last_outbound_activity_ms: None,
-            delivery_evidence: crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered,
             last_capture_offset: Some(128),
             last_relay_offset: 0,
-            last_relay_offset_recorded: true,
             unread_bytes: Some(128),
             desynced: true,
             stale_thread_proof: false,

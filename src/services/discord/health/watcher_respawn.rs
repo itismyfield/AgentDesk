@@ -707,10 +707,8 @@ mod tests {
                 thread_channel_id: None,
                 last_relay_ts_ms: Some(1_700_000_000_000),
                 last_outbound_activity_ms: None,
-                delivery_evidence: crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered,
                 last_capture_offset: Some(20),
                 last_relay_offset: 10,
-                last_relay_offset_recorded: true,
                 unread_bytes: Some(10),
                 desynced: true,
                 stale_thread_proof: false,
@@ -796,7 +794,7 @@ mod tests {
         let coord = shared.tmux_relay_coord(channel);
         coord
             .confirmed_end_offset
-            .store(13_400_000, std::sync::atomic::Ordering::Release);
+            .store(13_400_000, Ordering::Release);
         coord
             .confirmed_end_generation_mtime_ns
             .store(current_generation.saturating_sub(1), Ordering::Release);

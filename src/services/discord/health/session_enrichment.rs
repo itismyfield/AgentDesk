@@ -25,7 +25,6 @@ pub(super) struct SessionEnrichment {
     pub inflight_state_present: bool,
     pub tmux_session_mismatch: bool,
     pub last_relay_offset: u64,
-    pub last_relay_offset_recorded: bool,
     pub last_relay_ts_ms: i64,
     pub reconnect_count: u64,
     pub last_capture_offset: Option<u64>,
@@ -84,13 +83,14 @@ impl SessionEnrichment {
             inflight_tmux_session.as_deref(),
             watcher_binding_tmux_session.as_deref(),
         );
-        let relay_coord = shared.tmux_relay_coords.get(&channel);
-        let (last_relay_offset_recorded, last_relay_offset) =
-            published_relay_frontier(relay_coord.as_ref().map(|coord| coord.value().as_ref()));
-        let (last_relay_ts_ms, reconnect_count) = relay_coord
-            .as_ref()
+        let (last_relay_offset, last_relay_ts_ms, reconnect_count) = shared
+            .tmux_relay_coords
+            .get(&channel)
             .map(|coord| {
                 (
+                    coord
+                        .confirmed_end_offset
+                        .load(std::sync::atomic::Ordering::Acquire),
                     coord
                         .last_relay_ts_ms
                         .load(std::sync::atomic::Ordering::Acquire),
@@ -99,7 +99,7 @@ impl SessionEnrichment {
                         .load(std::sync::atomic::Ordering::Acquire),
                 )
             })
-            .unwrap_or((0, 0));
+            .unwrap_or((0, 0, 0));
         let output_path_for_metadata = inflight
             .as_ref()
             .and_then(|state| state.output_path.as_deref())
@@ -146,7 +146,6 @@ impl SessionEnrichment {
             inflight_state_present,
             tmux_session_mismatch,
             last_relay_offset,
-            last_relay_offset_recorded,
             last_relay_ts_ms,
             reconnect_count,
             last_capture_offset,
@@ -265,19 +264,6 @@ fn liveness_probe_session(inflight: Option<&str>, watcher: Option<&str>) -> Opti
     inflight.or(watcher).map(str::to_string)
 }
 
-fn published_relay_frontier(
-    coord: Option<&crate::services::discord::TmuxRelayCoord>,
-) -> (bool, u64) {
-    coord.map_or((false, 0), |coord| {
-        (
-            true,
-            coord
-                .confirmed_end_offset
-                .load(std::sync::atomic::Ordering::Acquire),
-        )
-    })
-}
-
 fn liveness_as_alive(liveness: PaneLiveness) -> Option<bool> {
     match liveness {
         PaneLiveness::Live => Some(true),
@@ -306,30 +292,5 @@ mod tests {
     fn only_exact_dead_or_absent_maps_to_dead() {
         assert_eq!(liveness_as_alive(PaneLiveness::DeadOrAbsent), Some(false));
         assert_eq!(liveness_as_alive(PaneLiveness::ProbeError), None);
-    }
-
-    #[test]
-    fn frontier_publication_reads_recorded_and_offset_from_one_atomic_authority() {
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let channel = ChannelId::new(50_220_003);
-        assert_eq!(published_relay_frontier(None), (false, 0));
-
-        let coord = shared.tmux_relay_coord(channel);
-        assert_eq!(published_relay_frontier(Some(&coord)), (false, 0));
-        assert_eq!(Some(shared.committed_relay_offset(channel)), None);
-
-        coord
-            .confirmed_end_offset
-            .store(128, std::sync::atomic::Ordering::Release);
-        assert_eq!(published_relay_frontier(Some(&coord)), (true, 128));
-        assert_eq!(Some(shared.committed_relay_offset(channel)), Some(128));
-
-        assert!(coord.reset_confirmed_frontier(128, 0));
-        assert_eq!(
-            published_relay_frontier(Some(&coord)),
-            (true, 0),
-            "an intentional reset publishes a real zero rather than the unrecorded sentinel"
-        );
-        assert_eq!(Some(shared.committed_relay_offset(channel)), Some(0));
     }
 }

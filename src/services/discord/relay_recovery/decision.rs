@@ -71,7 +71,6 @@ pub(in crate::services::discord) struct RelayRecoveryEvidence {
     pub last_relay_ts_ms: Option<i64>,
     pub unread_bytes: Option<u64>,
     pub last_outbound_activity_ms: Option<i64>,
-    pub delivery_evidence: super::super::outbound::delivery_evidence_store::RelayDeliveryEvidence,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -206,7 +205,6 @@ fn evidence_from_snapshot(snapshot: &RelayHealthSnapshot) -> RelayRecoveryEviden
         last_relay_ts_ms: snapshot.last_relay_ts_ms,
         unread_bytes: snapshot.unread_bytes,
         last_outbound_activity_ms: snapshot.last_outbound_activity_ms,
-        delivery_evidence: snapshot.delivery_evidence,
     }
 }
 
@@ -284,8 +282,7 @@ fn eligible_reattach_watcher(snapshot: &RelayHealthSnapshot) -> bool {
         && (!snapshot.watcher_attached
             || snapshot.watcher_attached_stale
             || !snapshot.watcher_owns_live_relay
-            || snapshot.relay_frontier_never_advanced_with_unread_tail()
-            || snapshot.relay_frontier_unobserved_with_unread_tail())
+            || snapshot.relay_frontier_never_advanced_with_unread_tail())
         && snapshot.desynced
         && is_agentdesk_tmux_session(snapshot.tmux_session.as_deref())
 }
@@ -302,7 +299,6 @@ fn auto_heal_metadata(
         snapshot.channel_id,
         action,
         RelayRecoveryApplySource::Manual,
-        snapshot.delivery_evidence,
     );
     let max_attempts_per_window = max_attempts_per_window_for_snapshot(snapshot, action);
     RelayRecoveryAutoHeal {

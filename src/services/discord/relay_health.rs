@@ -6,8 +6,6 @@
 
 use serde::Serialize;
 
-use super::outbound::delivery_evidence_store::RelayDeliveryEvidence;
-
 mod frontier;
 pub(in crate::services::discord) use frontier::{
     FrontierResetState, RelayFrontierMutationGuard, RelayFrontierToken,
@@ -86,10 +84,8 @@ pub(in crate::services::discord) struct RelayHealthSnapshot {
     pub thread_channel_id: Option<u64>,
     pub last_relay_ts_ms: Option<i64>,
     pub last_outbound_activity_ms: Option<i64>,
-    pub delivery_evidence: RelayDeliveryEvidence,
     pub last_capture_offset: Option<u64>,
     pub last_relay_offset: u64,
-    pub last_relay_offset_recorded: bool,
     pub unread_bytes: Option<u64>,
     pub desynced: bool,
     pub stale_thread_proof: bool,
@@ -120,10 +116,8 @@ impl RelayHealthSnapshot {
             thread_channel_id: None,
             last_relay_ts_ms: None,
             last_outbound_activity_ms: None,
-            delivery_evidence: RelayDeliveryEvidence::NotDelivered,
             last_capture_offset: None,
             last_relay_offset: 0,
-            last_relay_offset_recorded: true,
             unread_bytes: None,
             desynced: false,
             stale_thread_proof: false,
@@ -137,37 +131,20 @@ impl RelayHealthSnapshot {
             || self.bridge_inflight_present
     }
 
-    fn dead_frontier_shape(&self) -> bool {
+    /// True for the restart/desync signature where a watcher handle still looks
+    /// live and may even own the tmux session, but the relay frontier never
+    /// advanced while the transcript/capture accumulated bytes.
+    pub(in crate::services::discord) fn relay_frontier_never_advanced_with_unread_tail(
+        &self,
+    ) -> bool {
         self.desynced
             && self.tmux_alive == Some(true)
             && self.last_relay_ts_ms.is_none()
-            && self.last_outbound_activity_ms.is_none()
-            && self.last_relay_offset_recorded
             && self.last_relay_offset == 0
             && self
                 .last_capture_offset
                 .is_some_and(|capture| capture > self.last_relay_offset)
             && self.unread_bytes.is_some_and(|bytes| bytes > 0)
-    }
-
-    /// True only when exact process-local evidence proves that the dead-frontier
-    /// shape followed a terminal non-delivery. This predicate may authorize the
-    /// destructive manual repair lane.
-    pub(in crate::services::discord) fn relay_frontier_never_advanced_with_unread_tail(
-        &self,
-    ) -> bool {
-        self.dead_frontier_shape() && self.delivery_evidence == RelayDeliveryEvidence::NotDelivered
-    }
-
-    /// True for a post-restart dead-frontier shape whose process-local evidence
-    /// is absent or ambiguous. Bounded recovery may reattach a watcher for this
-    /// shape, but it must never authorize cancellation or finalization.
-    pub(in crate::services::discord) fn relay_frontier_unobserved_with_unread_tail(&self) -> bool {
-        self.dead_frontier_shape()
-            && matches!(
-                self.delivery_evidence,
-                RelayDeliveryEvidence::NotAttempted | RelayDeliveryEvidence::Unknown
-            )
     }
 }
 
@@ -183,8 +160,7 @@ impl RelayStallClassifier {
         if snapshot.tmux_alive == Some(true)
             && snapshot.desynced
             && (!live_watcher_owns_relay
-                || snapshot.relay_frontier_never_advanced_with_unread_tail()
-                || snapshot.relay_frontier_unobserved_with_unread_tail())
+                || snapshot.relay_frontier_never_advanced_with_unread_tail())
         {
             return RelayStallState::TmuxAliveRelayDead;
         }
@@ -217,110 +193,6 @@ impl RelayStallClassifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn delivered_live_fingerprint_does_not_claim_the_relay_frontier_never_advanced() {
-        let snapshot = RelayHealthSnapshot {
-            provider: "claude".to_string(),
-            channel_id: 1_479_671_298_497_183_835,
-            active_turn: RelayActiveTurn::Foreground,
-            tmux_alive: Some(true),
-            watcher_attached: true,
-            watcher_owner_channel_id: Some(1_479_671_298_497_183_835),
-            watcher_owns_live_relay: true,
-            bridge_inflight_present: true,
-            last_relay_ts_ms: None,
-            last_outbound_activity_ms: None,
-            delivery_evidence: RelayDeliveryEvidence::Delivered,
-            last_capture_offset: Some(19_525_394),
-            last_relay_offset: 0,
-            last_relay_offset_recorded: true,
-            unread_bytes: Some(19_525_394),
-            desynced: true,
-            ..RelayHealthSnapshot::test_snapshot()
-        };
-
-        assert!(!snapshot.relay_frontier_never_advanced_with_unread_tail());
-        assert_eq!(
-            RelayStallClassifier::classify(&snapshot),
-            RelayStallState::ActiveForegroundStream
-        );
-    }
-
-    #[test]
-    fn recorded_zero_frontier_with_proven_non_delivery_is_relay_dead() {
-        let snapshot = RelayHealthSnapshot {
-            active_turn: RelayActiveTurn::Foreground,
-            tmux_alive: Some(true),
-            watcher_attached: true,
-            watcher_owns_live_relay: true,
-            bridge_inflight_present: true,
-            delivery_evidence: RelayDeliveryEvidence::NotDelivered,
-            last_capture_offset: Some(128),
-            last_relay_offset: 0,
-            last_relay_offset_recorded: true,
-            unread_bytes: Some(128),
-            desynced: true,
-            ..RelayHealthSnapshot::test_snapshot()
-        };
-
-        assert!(snapshot.relay_frontier_never_advanced_with_unread_tail());
-        assert_eq!(
-            RelayStallClassifier::classify(&snapshot),
-            RelayStallState::TmuxAliveRelayDead
-        );
-    }
-
-    #[test]
-    fn ambiguous_or_unrecorded_evidence_never_opens_destructive_predicate() {
-        let attempted = RelayHealthSnapshot {
-            delivery_evidence: RelayDeliveryEvidence::AttemptedUnconfirmed,
-            last_capture_offset: Some(128),
-            last_relay_offset: 0,
-            last_relay_offset_recorded: true,
-            unread_bytes: Some(128),
-            desynced: true,
-            tmux_alive: Some(true),
-            ..RelayHealthSnapshot::test_snapshot()
-        };
-        assert!(!attempted.relay_frontier_never_advanced_with_unread_tail());
-        assert!(!attempted.relay_frontier_unobserved_with_unread_tail());
-
-        for evidence in [
-            RelayDeliveryEvidence::Unknown,
-            RelayDeliveryEvidence::NotAttempted,
-        ] {
-            let snapshot = RelayHealthSnapshot {
-                delivery_evidence: evidence,
-                last_capture_offset: Some(128),
-                last_relay_offset: 0,
-                last_relay_offset_recorded: true,
-                unread_bytes: Some(128),
-                desynced: true,
-                tmux_alive: Some(true),
-                ..RelayHealthSnapshot::test_snapshot()
-            };
-            assert!(!snapshot.relay_frontier_never_advanced_with_unread_tail());
-            assert!(snapshot.relay_frontier_unobserved_with_unread_tail());
-            assert_eq!(
-                RelayStallClassifier::classify(&snapshot),
-                RelayStallState::TmuxAliveRelayDead
-            );
-        }
-
-        let unrecorded = RelayHealthSnapshot {
-            delivery_evidence: RelayDeliveryEvidence::NotDelivered,
-            last_capture_offset: Some(128),
-            last_relay_offset: 0,
-            last_relay_offset_recorded: false,
-            unread_bytes: Some(128),
-            desynced: true,
-            tmux_alive: Some(true),
-            ..RelayHealthSnapshot::test_snapshot()
-        };
-        assert!(!unrecorded.relay_frontier_never_advanced_with_unread_tail());
-        assert!(!unrecorded.relay_frontier_unobserved_with_unread_tail());
-    }
 
     #[test]
     fn relay_stall_classifier_is_table_driven() {
