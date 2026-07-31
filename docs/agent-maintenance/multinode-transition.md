@@ -903,12 +903,13 @@
   teardown. Worker execution remains instance-local and is the one intentional
   admission bypass after an outbox claim. No new lease or migration.
 
-- #5040 telemetry-only authority fence correction: `owner_authority_channel_ids`
-  remains planner telemetry only. For an unlisted channel whose existing session
-  owner resolves to the current instance, a distinct open-route observation no
-  longer fences local admission; a live foreign owner still forwards and fences
-  local execution. Classification: leader intake admission bugfix only; no owner
-  transfer, worker claim, lease, migration, or gateway ownership change.
+- #5040 owner-authority admission fence correction: `owner_authority_channel_ids`
+  now distinguishes `opted_in`, `not_opted_in`, and `unknown` at the admission
+  boundary. Only a confirmed local target with a still-`pending` predecessor on
+  an explicitly unlisted, known channel may use the narrow stale-route
+  recovery exception; unknown config and `claimed`/`accepted`/`spawned` routes
+  remain fenced. Foreign-owner routing, worker claim, lease, migration, and
+  gateway ownership remain unchanged.
 
 - #3630 frontier mirror for cancel/stop + prompt_too_long terminal arms:
   turn_bridge now mirrors only Delivered+committed terminal-replace lease ranges

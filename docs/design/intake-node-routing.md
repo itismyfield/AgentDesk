@@ -604,8 +604,8 @@ cluster:
     # enforce: actually forward.
     mode: "observe"
     # Raw top-level Discord channel IDs selected for owner-authority rollout.
-    # PR-1 records this scope in planner telemetry only; authority behavior is
-    # unchanged until a later rollout PR consumes the allowlist.
+    # A known-empty list is an explicit opt-out; a missing or unloadable routing
+    # scope is unknown and keeps the admission fence fail-safe.
     owner_authority_channel_ids:
       - "123456789012345678"
     # Pre-claim takeover threshold. After this many seconds without
@@ -628,11 +628,10 @@ planner-decision count, YAML values, and warning count through `/api/health` or
 
 Every Disabled, Observe, and Enforce planner result emits an info-level structured
 `intake_routing_decision` event with stable `reason_code`, `would_assign_target`,
-`preferred_label_match`, `owner_resolution`, and `authority_channel_opted_in`
-fields. The allowlist tag is telemetry-only in PR-1. In particular,
-`ADK_INTAKE_ROUTING_MODE=enforce` can change the effective planner mode but cannot
+`preferred_label_match`, `owner_resolution`, and the tri-state
+`authority_channel_opt_in` field. `ADK_INTAKE_ROUTING_MODE=enforce` can change the effective planner mode but cannot
 opt a channel into owner authority; only `owner_authority_channel_ids` controls
-that tag.
+that state. Unknown configuration is fail-safe at the admission boundary.
 
 Operational reload note: `owner_authority_channel_ids` is read from the runtime
 config snapshot for every intake decision, so allowlist edits are reflected by

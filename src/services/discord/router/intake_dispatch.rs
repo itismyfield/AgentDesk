@@ -3,6 +3,7 @@ use crate::services::cluster::intake_router_hook::{
     IntakeBlockedReason, IntakeRouterContext, IntakeRouterDecision, ResolvedSessionOwner,
     try_route_intake,
 };
+use crate::services::cluster::intake_routing_config::OwnerAuthorityChannelOptIn;
 use crate::services::provider::ProviderKind;
 use poise::serenity_prelude as serenity;
 
@@ -96,7 +97,7 @@ pub(crate) async fn admit_text_intake(
     let mode = effective_config.mode;
     let channel_id = submission.request.channel_id.get().to_string();
     let user_msg_id = submission.request.user_msg_id.get().to_string();
-    let authority_channel_opted_in = effective_config.owner_authority_channel_opted_in(&channel_id);
+    let authority_channel_opt_in = effective_config.owner_authority_channel_opt_in(&channel_id);
     let Some(pool) = deps.shared.pg_pool.as_ref() else {
         let decision = if matches!(
             mode,
@@ -125,7 +126,7 @@ pub(crate) async fn admit_text_intake(
             mode,
             &channel_id,
             &user_msg_id,
-            authority_channel_opted_in,
+            authority_channel_opt_in,
             &decision,
         );
         return match decision {
@@ -176,16 +177,23 @@ pub(crate) async fn admit_text_intake(
         mode,
         &channel_id,
         &user_msg_id,
-        authority_channel_opted_in,
+        authority_channel_opt_in,
         &decision,
     );
-    let admission = admission_for_decision(authority_channel_opted_in, decision, submission);
+    let admission = admission_for_decision(
+        authority_channel_opt_in,
+        &leader_instance_id,
+        decision,
+        submission,
+    );
+
     log_nonlocal_admission(&admission, &channel_id, &user_msg_id);
     admission
 }
 
 fn admission_for_decision(
-    authority_channel_opted_in: bool,
+    authority_channel_opt_in: OwnerAuthorityChannelOptIn,
+    leader_instance_id: &str,
     decision: IntakeRouterDecision,
     submission: &IntakeSubmission,
 ) -> IntakeAdmission {
@@ -202,10 +210,27 @@ fn admission_for_decision(
             outbox_id,
         },
         IntakeRouterDecision::SkippedDuplicate { .. } => IntakeAdmission::SkippedDuplicate,
+        // A pending row has not crossed the worker claim boundary; claimed,
+        // accepted, and spawned rows may already be executing and remain
+        // fenced. This status is a snapshot, so the existing DB unique-route
+        // serialization still governs the concurrent claim/insert race.
         IntakeRouterDecision::DeferredOpenRoute {
+            target_instance_id,
+            open_route_status,
             resolved_owner: ResolvedSessionOwner::LiveLocal,
-            ..
-        } if !authority_channel_opted_in => {
+        } if target_instance_id == leader_instance_id
+            && matches!(
+                authority_channel_opt_in,
+                OwnerAuthorityChannelOptIn::NotOptedIn
+            )
+            && open_route_status == "pending" =>
+        {
+            tracing::warn!(
+                %target_instance_id,
+                open_route_status,
+                authority_channel_opt_in = authority_channel_opt_in.as_str(),
+                "[intake_dispatch] admitted local live owner despite pending open route; stale-route recovery exception"
+            );
             IntakeAdmission::Local(LocalAdmissionPermit::for_submission(submission))
         }
         IntakeRouterDecision::DeferredOpenRoute {

@@ -4,6 +4,7 @@ use super::intake_router_hook::{
     IntakeBlockedReason, IntakeRouterDecision, IntakeRoutingBasis, IntakeRoutingMode,
     ObservedIntakeOutcome, RanLocalReason, ResolvedSessionOwner,
 };
+use super::intake_routing_config::OwnerAuthorityChannelOptIn;
 
 static RECENT_DECISION_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -297,6 +298,7 @@ pub(crate) fn telemetry_for_decision(
         IntakeRouterDecision::DeferredOpenRoute {
             target_instance_id,
             resolved_owner,
+            ..
         } => IntakeRoutingTelemetry {
             reason_code: IntakeRoutingReasonCode::OpenRouteDeferred,
             would_assign_target: Some(target_instance_id),
@@ -343,7 +345,7 @@ pub(crate) fn record_decision(
     mode: IntakeRoutingMode,
     channel_id: &str,
     user_msg_id: &str,
-    authority_channel_opted_in: bool,
+    authority_channel_opt_in: OwnerAuthorityChannelOptIn,
     decision: &IntakeRouterDecision,
 ) {
     let telemetry = telemetry_for_decision(decision);
@@ -353,8 +355,8 @@ pub(crate) fn record_decision(
         mode = mode.as_str(),
         channel_id,
         user_msg_id,
-        authority_channel_opted_in,
-        authority_scope = "telemetry_only",
+        authority_channel_opt_in = authority_channel_opt_in.as_str(),
+        authority_scope = "telemetry_and_admission",
         would_assign_target = telemetry.would_assign_target,
         owner_resolution = telemetry.owner_resolution.as_str(),
         preferred_label_match = telemetry.preferred_label_match.as_str(),
@@ -434,14 +436,21 @@ mod tests {
         };
 
         tracing::subscriber::with_default(subscriber, || {
-            record_decision(IntakeRoutingMode::Observe, "123", "456", true, &decision);
+            record_decision(
+                IntakeRoutingMode::Observe,
+                "123",
+                "456",
+                OwnerAuthorityChannelOptIn::OptedIn,
+                &decision,
+            );
         });
 
         let logs = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
         for field in [
             "event=\"intake_routing_decision\"",
             "mode=\"observe\"",
-            "authority_channel_opted_in=true",
+            "authority_channel_opt_in=\"opted_in\"",
+            "authority_scope=\"telemetry_and_admission\"",
             "would_assign_target=\"worker-mac\"",
             "owner_resolution=\"no_owner\"",
             "preferred_label_match=\"matched_worker\"",

@@ -130,6 +130,7 @@ use super::{
 };
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::cluster::intake_router_hook::{IntakeRouterDecision, ResolvedSessionOwner};
+use crate::services::cluster::intake_routing_config::OwnerAuthorityChannelOptIn;
 use crate::services::discord::router::message_handler::{IntakeDeps, IntakeRequest};
 use crate::services::discord::router::{TurnKind, admit_queued_intake};
 use crate::services::provider::ProviderKind;
@@ -290,12 +291,14 @@ fn submission_for_admission(channel_id: ChannelId, message_id: u64) -> IntakeSub
 }
 
 #[test]
-fn telemetry_only_unopted_live_local_open_route_runs_locally_5040() {
+fn unopted_live_local_pending_open_route_runs_locally_5040() {
     let submission = submission_for_admission(ChannelId::new(4_350_351), 4_350_361);
     let admission = admission_for_decision(
-        false,
+        OwnerAuthorityChannelOptIn::NotOptedIn,
+        "local-instance",
         IntakeRouterDecision::DeferredOpenRoute {
             target_instance_id: "local-instance".to_string(),
+            open_route_status: "pending".to_string(),
             resolved_owner: ResolvedSessionOwner::LiveLocal,
         },
         &submission,
@@ -308,12 +311,14 @@ fn telemetry_only_unopted_live_local_open_route_runs_locally_5040() {
 }
 
 #[test]
-fn telemetry_only_unopted_live_foreign_owner_stays_fenced_5040() {
+fn unopted_live_foreign_owner_stays_fenced_5040() {
     let submission = submission_for_admission(ChannelId::new(4_350_371), 4_350_381);
     let admission = admission_for_decision(
-        false,
+        OwnerAuthorityChannelOptIn::NotOptedIn,
+        "local-instance",
         IntakeRouterDecision::DeferredOpenRoute {
             target_instance_id: "foreign-instance".to_string(),
+            open_route_status: "pending".to_string(),
             resolved_owner: ResolvedSessionOwner::LiveForeign,
         },
         &submission,
@@ -328,6 +333,50 @@ fn telemetry_only_unopted_live_foreign_owner_stays_fenced_5040() {
         ),
         "a live foreign owner must retain the open-route fence"
     );
+}
+
+#[test]
+fn unknown_owner_authority_keeps_local_fence_5040() {
+    let submission = submission_for_admission(ChannelId::new(4_350_391), 4_350_401);
+    let admission = admission_for_decision(
+        OwnerAuthorityChannelOptIn::Unknown,
+        "local-instance",
+        IntakeRouterDecision::DeferredOpenRoute {
+            target_instance_id: "local-instance".to_string(),
+            open_route_status: "pending".to_string(),
+            resolved_owner: ResolvedSessionOwner::LiveLocal,
+        },
+        &submission,
+    );
+
+    assert!(matches!(
+        admission,
+        IntakeAdmission::DeferredOpenRoute {
+            ref target_instance_id,
+        } if target_instance_id == "local-instance"
+    ));
+}
+
+#[test]
+fn local_accepted_route_stays_fenced_5040() {
+    let submission = submission_for_admission(ChannelId::new(4_350_411), 4_350_421);
+    let admission = admission_for_decision(
+        OwnerAuthorityChannelOptIn::NotOptedIn,
+        "local-instance",
+        IntakeRouterDecision::DeferredOpenRoute {
+            target_instance_id: "local-instance".to_string(),
+            open_route_status: "accepted".to_string(),
+            resolved_owner: ResolvedSessionOwner::LiveLocal,
+        },
+        &submission,
+    );
+
+    assert!(matches!(
+        admission,
+        IntakeAdmission::DeferredOpenRoute {
+            ref target_instance_id,
+        } if target_instance_id == "local-instance"
+    ));
 }
 
 fn deps<'a>(
