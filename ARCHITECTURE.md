@@ -724,7 +724,8 @@ src/
 │   │   │   │   │   ├── voice_intake.rs
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_isolation/
-│   │   │   │   │   └── runtime_mismatch.rs
+│   │   │   │   │   ├── runtime_mismatch.rs
+│   │   │   │   │   └── thread_role_inheritance_tests.rs
 │   │   │   │   ├── attachments.rs
 │   │   │   │   ├── busy_retry.rs
 │   │   │   │   ├── control.rs

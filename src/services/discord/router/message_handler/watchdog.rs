@@ -1,5 +1,4 @@
 use super::*;
-
 pub(super) const WATCHDOG_DEADLOCK_PREALERT_MS: i64 = 5 * 60 * 1000;
 pub(super) const WATCHDOG_DEADLOCK_PREALERT_BOT: &str =
     crate::services::discord::bot_role::UtilityBotRole::Announce.alias();
@@ -24,7 +23,6 @@ async fn watchdog_token_is_current(
         .await
         .is_some_and(|current| Arc::ptr_eq(token, &current))
 }
-
 pub(super) fn parse_watchdog_alert_channel_id(raw: &str) -> Option<serenity::ChannelId> {
     let trimmed = raw.trim();
     let normalized = trimmed
@@ -39,7 +37,6 @@ pub(super) fn parse_watchdog_alert_channel_id(raw: &str) -> Option<serenity::Cha
         .filter(|id| *id > 0)
         .map(serenity::ChannelId::new)
 }
-
 pub(super) fn configured_watchdog_alert_channel_id() -> Option<serenity::ChannelId> {
     for key in [
         "deadlock_manager_channel_id",
@@ -51,7 +48,6 @@ pub(super) fn configured_watchdog_alert_channel_id() -> Option<serenity::Channel
             return Some(channel_id);
         }
     }
-
     crate::config::load().ok().and_then(|config| {
         config
             .kanban
@@ -67,7 +63,6 @@ pub(super) fn configured_watchdog_alert_channel_id() -> Option<serenity::Channel
             })
     })
 }
-
 pub(super) fn should_send_watchdog_deadlock_prealert(
     now_ms: i64,
     deadline_ms: i64,
@@ -77,7 +72,6 @@ pub(super) fn should_send_watchdog_deadlock_prealert(
         && now_ms >= deadline_ms - WATCHDOG_DEADLOCK_PREALERT_MS
         && last_notified_deadline_ms != Some(deadline_ms)
 }
-
 pub(super) fn apply_watchdog_deadline_extension(
     watchdog_token: &CancelToken,
     extension: crate::services::turn_orchestrator::WatchdogDeadlineExtension,
@@ -92,7 +86,6 @@ pub(super) fn apply_watchdog_deadline_extension(
     );
     extension.new_deadline_ms
 }
-
 pub(super) fn build_watchdog_deadlock_prealert_message(
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
@@ -117,7 +110,6 @@ pub(super) fn build_watchdog_deadlock_prealert_message(
     let updated_at = inflight
         .map(|state| state.updated_at.as_str())
         .unwrap_or("?");
-
     let provider = provider.as_str();
     format!(
         "⚠️ [Watchdog pre-timeout]\n\
@@ -133,7 +125,6 @@ inflight_updated_at: {updated_at}\n\
 정상 진행이면 `POST /api/turns/{channel_id}/extend-timeout`로 연장하세요."
     )
 }
-
 pub(super) fn build_watchdog_timeout_notice_message(elapsed_mins: i64, has_queued: bool) -> String {
     if has_queued {
         format!(
@@ -164,7 +155,6 @@ pub(super) async fn send_watchdog_timeout_notice(
         );
     }
 }
-
 fn headless_inflight_has_watchdog_visible_surface(inflight: &InflightTurnState) -> bool {
     if inflight.rebind_origin || inflight.relay_ownership_only {
         return false;
