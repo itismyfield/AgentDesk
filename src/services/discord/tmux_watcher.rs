@@ -13,7 +13,6 @@ pub(in crate::services::discord) use self::entry::tmux_output_watcher;
 
 #[path = "tmux_watcher/liveness.rs"]
 mod liveness;
-
 pub(in crate::services::discord::tmux) use self::liveness::discard_restored_response_seed_before_no_inflight_terminal_relay;
 pub(super) use self::liveness::watcher_lifecycle_terminal_delivery_observed;
 use self::liveness::*;

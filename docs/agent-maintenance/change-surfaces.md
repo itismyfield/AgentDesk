@@ -10,6 +10,8 @@
 >
 > Last refreshed: 2026-07-21 (against #4706 acceptance repair: structural lint allow baseline, giant-registry issue validation, and production-count sync).
 >
+> Last refreshed: 2026-07-31 (#4992 / PR #5005 relay liveness rework: `tmux.rs` routes watcher stream progress through the locked inflight writer, which rejects delivered-prefix mismatches as an observable invariant event and prevents partial metadata updates. No distributed authority, migration, or worker-ownership surface changed).
+>
 > Last refreshed: 2026-07-30 (#4984 S1 records unintended cross-channel tmux
 > watcher claims through the existing WARN-level `invariant_violation` event
 > surface. Every cross-channel claim persists either an intended follow-up or an
