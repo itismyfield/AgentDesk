@@ -72,6 +72,11 @@ const CURATED_ALIASES: &[CuratedAlias] = &[
         metadata_fallback_id: "claude-haiku-4-5-20251001",
     },
     CuratedAlias {
+        selector: "fable[1m]",
+        label: "Fable 1M",
+        metadata_fallback_id: "claude-fable-5",
+    },
+    CuratedAlias {
         selector: "sonnet[1m]",
         label: "Sonnet 1M",
         metadata_fallback_id: "claude-sonnet-5",
@@ -880,7 +885,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(&values[..4], ["fable", "opus", "sonnet", "haiku"]);
-        for selector in ["sonnet[1m]", "opus[1m]", "opusplan"] {
+        for selector in ["fable[1m]", "sonnet[1m]", "opus[1m]", "opusplan"] {
             assert!(
                 values.contains(&selector),
                 "runtime-only selector {selector} must survive without caches"
