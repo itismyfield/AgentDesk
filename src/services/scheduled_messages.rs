@@ -359,10 +359,10 @@ enum AgentTurnStartDisposition {
 }
 
 fn classify_agent_turn_start(
-    status: crate::services::discord::HeadlessTurnStartStatus,
+    status: crate::services::discord::router::HeadlessTurnStartStatus,
     turn_id: String,
 ) -> AgentTurnStartDisposition {
-    use crate::services::discord::HeadlessTurnStartStatus::{Consumed, Queued, Started};
+    use crate::services::discord::router::HeadlessTurnStartStatus::{Consumed, Queued, Started};
     match status {
         Started => AgentTurnStartDisposition::Started,
         Queued => AgentTurnStartDisposition::Queued(turn_id),
@@ -1295,7 +1295,7 @@ mod tests {
     #[test]
     fn queued_agent_turn_is_rearmed_not_terminalized_5015() {
         let disposition = classify_agent_turn_start(
-            crate::services::discord::HeadlessTurnStartStatus::Queued,
+            crate::services::discord::router::HeadlessTurnStartStatus::Queued,
             "discord:50:15".to_string(),
         );
 

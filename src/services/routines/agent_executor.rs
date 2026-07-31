@@ -1480,11 +1480,11 @@ enum AgentTurnStartStatus {
 }
 
 impl AgentTurnStartStatus {
-    fn from_headless(status: crate::services::discord::HeadlessTurnStartStatus) -> Self {
+    fn from_headless(status: crate::services::discord::router::HeadlessTurnStartStatus) -> Self {
         match status {
-            crate::services::discord::HeadlessTurnStartStatus::Started => Self::Started,
-            crate::services::discord::HeadlessTurnStartStatus::Queued => Self::Queued,
-            crate::services::discord::HeadlessTurnStartStatus::Consumed => Self::Consumed,
+            crate::services::discord::router::HeadlessTurnStartStatus::Started => Self::Started,
+            crate::services::discord::router::HeadlessTurnStartStatus::Queued => Self::Queued,
+            crate::services::discord::router::HeadlessTurnStartStatus::Consumed => Self::Consumed,
         }
     }
 
@@ -2529,7 +2529,7 @@ mod tests {
     #[test]
     fn queued_start_remains_pending_without_terminal_evidence_5015() {
         let status = AgentTurnStartStatus::from_headless(
-            crate::services::discord::HeadlessTurnStartStatus::Queued,
+            crate::services::discord::router::HeadlessTurnStartStatus::Queued,
         );
         let mut result = json!({
             "status": status.as_str(),
