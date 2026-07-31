@@ -220,6 +220,37 @@ mod tests {
     /// runtime) as terminal — and must not even RUN the pane capture — while
     /// the at-deadline re-check keeps the pane-ready fallback. `Done` /
     /// `PausedLive` verdicts are identical in both modes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn done_without_inflight_or_lease_defers_strict_finalize() {
+        super::super::tests::with_isolated_runtime_root(|| async move {
+            let shared = Arc::new(crate::services::discord::make_shared_data_for_tests());
+            let channel = ChannelId::new(50_220_023);
+            let session = format!("backstop-no-inflight-{}", std::process::id());
+            let transcript = std::env::temp_dir().join(format!("{session}.jsonl"));
+            std::fs::write(
+                &transcript,
+                "{\"type\":\"result\",\"result\":\"done\",\"session_id\":\"s\"}\n",
+            )
+            .unwrap();
+            shared.tmux_watchers.insert(
+                channel,
+                super::super::tests::backstop_watcher_handle(
+                    &session,
+                    transcript.to_str().unwrap(),
+                ),
+            );
+
+            assert!(!watcher_backstop_turn_is_terminal(
+                &shared,
+                channel,
+                &ProviderKind::Claude,
+                false,
+            ));
+            let _ = std::fs::remove_file(transcript);
+        })
+        .await;
+    }
+
     #[test]
     fn non_jsonl_signal_never_terminal_on_fast_path_probe() {
         use std::cell::Cell;

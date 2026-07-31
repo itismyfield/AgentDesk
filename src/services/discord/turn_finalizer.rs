@@ -3816,7 +3816,7 @@ mod tests {
     /// A live, non-stale watcher handle so the reconciler liveness re-check
     /// resolves a real `tmux_session_name` + transcript `output_path` for the
     /// channel. Mirrors `tmux_watcher::tests::test_watcher_handle`.
-    fn backstop_watcher_handle(
+    pub(super) fn backstop_watcher_handle(
         tmux_session_name: &str,
         output_path: &str,
     ) -> crate::services::discord::TmuxWatcherHandle {
@@ -4377,36 +4377,6 @@ mod tests {
             assert!(
                 watcher_backstop_turn_is_terminal(&shared, ch, &ProviderKind::Claude, false),
                 "strict Done may finalize once confirmation reaches the matching lease end"
-            );
-
-            let _ = std::fs::remove_file(&transcript);
-        })
-        .await;
-    }
-
-    /// A fresh publication with no inflight row or matching delivery lease has
-    /// neither a published confirmed frontier nor a produced terminal end. `Done`
-    /// alone must not grant the strict fast path destructive finalization authority.
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn watcher_backstop_done_without_inflight_or_lease_defers_strict_finalize() {
-        with_isolated_runtime_root(|| async move {
-            let shared = super::super::make_shared_data_for_tests_with_storage(None);
-            let ch = ChannelId::new(5411);
-            let session = format!("4187-no-inflight-{}", std::process::id());
-            let transcript = std::env::temp_dir().join(format!("{session}.jsonl"));
-            std::fs::write(
-                &transcript,
-                "{\"type\":\"result\",\"result\":\"done\",\"session_id\":\"s\"}\n",
-            )
-            .unwrap();
-            let transcript_str = transcript.to_str().unwrap().to_string();
-            shared
-                .tmux_watchers
-                .insert(ch, backstop_watcher_handle(&session, &transcript_str));
-
-            assert!(
-                !watcher_backstop_turn_is_terminal(&shared, ch, &ProviderKind::Claude, false),
-                "strict Done must defer without published confirmation and a produced terminal end"
             );
 
             let _ = std::fs::remove_file(&transcript);
