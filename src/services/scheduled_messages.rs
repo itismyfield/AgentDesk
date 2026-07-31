@@ -296,9 +296,7 @@ async fn fire_agent(pool: &PgPool, health_registry: Option<&HealthRegistry>, fir
         return;
     };
     match start_agent_turn(pool, health_registry, fire).await {
-        Ok(AgentTurnStartDisposition::Started) => {
-            // Delivery stays running; poll_agent_delivery owns completion.
-        }
+        Ok(AgentTurnStartDisposition::Started) => {}
         Ok(AgentTurnStartDisposition::Queued(turn_id)) => {
             interrupt_for_retry(
                 pool,
@@ -350,8 +348,6 @@ async fn fire_agent(pool: &PgPool, health_registry: Option<&HealthRegistry>, fir
 
 enum AgentTurnStartDisposition {
     Started,
-    /// The exact reserved request remains durable in the mailbox queue and may
-    /// start later. Re-arm the scheduled fire without terminalizing it.
     Queued(String),
     /// A lifecycle command was consumed before provider/bridge spawn. Repeating
     /// it could repeat the lifecycle side effect, so terminalize instead.
@@ -366,16 +362,11 @@ fn classify_agent_turn_start(
     status: crate::services::discord::HeadlessTurnStartStatus,
     turn_id: String,
 ) -> AgentTurnStartDisposition {
+    use crate::services::discord::HeadlessTurnStartStatus::{Consumed, Queued, Started};
     match status {
-        crate::services::discord::HeadlessTurnStartStatus::Started => {
-            AgentTurnStartDisposition::Started
-        }
-        crate::services::discord::HeadlessTurnStartStatus::Queued => {
-            AgentTurnStartDisposition::Queued(turn_id)
-        }
-        crate::services::discord::HeadlessTurnStartStatus::Consumed => {
-            AgentTurnStartDisposition::Consumed(turn_id)
-        }
+        Started => AgentTurnStartDisposition::Started,
+        Queued => AgentTurnStartDisposition::Queued(turn_id),
+        Consumed => AgentTurnStartDisposition::Consumed(turn_id),
     }
 }
 
