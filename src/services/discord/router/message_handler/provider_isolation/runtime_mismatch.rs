@@ -66,7 +66,7 @@ fn record_runtime_mismatch_defer(
     open_inflight: bool,
     transcript_state: Option<crate::services::tui_turn_state::TuiTurnState>,
     defer_reason: &'static str,
-) -> u32 {
+) -> (u32, bool) {
     let key =
         RuntimeMismatchTarget::new(provider, channel_id, tmux_session_name, expected, observed);
     RUNTIME_MISMATCH_DEFERS.retain(|target, _| {
@@ -124,7 +124,23 @@ fn record_runtime_mismatch_defer(
             "managed tmux runtime mismatch deferred without killing the session"
         );
     }
-    count
+    (count, escalating)
+}
+
+#[cfg(unix)]
+pub(super) fn build_runtime_mismatch_escalation_notice(
+    channel_id: serenity::ChannelId,
+    tmux_session_name: &str,
+    expected: ManagedRuntimeExpectation,
+    observed: ObservedManagedRuntimeKind,
+) -> String {
+    format!(
+        "⚠️ Runtime mismatch deferred\nchannel_id: {}\nsession: {}\nobserved runtime: {}\nexpected runtime: {}\nThe session continues without kill/recreate.",
+        channel_id.get(),
+        tmux_session_name,
+        observed.runtime_kind.as_str(),
+        expected.runtime_kind.as_str(),
+    )
 }
 
 #[cfg(unix)]
@@ -145,6 +161,13 @@ pub(super) fn reconcile_managed_tmux_runtime_kind_for_config(
     inflight_evidence: impl Fn() -> RuntimeInflightEvidence,
     transcript_state: impl Fn() -> crate::services::tui_turn_state::TuiTurnState,
     target_still_owned: impl Fn(&str) -> bool,
+    on_escalation: impl Fn(
+        &ProviderKind,
+        serenity::ChannelId,
+        &str,
+        ManagedRuntimeExpectation,
+        ObservedManagedRuntimeKind,
+    ),
     recreate: impl FnOnce(&str, ManagedRuntimeExpectation, ObservedManagedRuntimeKind),
 ) -> RuntimeMismatchVerdict {
     let (Some(tmux_session_name), Some(expected)) = (tmux_session_name, expected) else {
@@ -179,7 +202,7 @@ pub(super) fn reconcile_managed_tmux_runtime_kind_for_config(
         // Moderate observed evidence is intentionally a permanent defer here:
         // no exact-identity repair/reattach path can safely promote this legacy
         // session, and the downstream relay watcher does not revisit this
-        // verdict. Exact-identity kill/recreate remains a separate follow-up.
+        // verdict. Exact-identity kill/recreate remains a separate follow-up (#5062).
         let defer_reason = if live_turn {
             "live_turn"
         } else if destructive_evidence_unknown {
@@ -191,7 +214,7 @@ pub(super) fn reconcile_managed_tmux_runtime_kind_for_config(
         } else {
             "runtime_kind_mismatch"
         };
-        record_runtime_mismatch_defer(
+        let (_defer_count, escalated) = record_runtime_mismatch_defer(
             provider,
             channel_id,
             tmux_session_name,
@@ -201,6 +224,9 @@ pub(super) fn reconcile_managed_tmux_runtime_kind_for_config(
             transcript_state,
             defer_reason,
         );
+        if escalated {
+            on_escalation(provider, channel_id, tmux_session_name, expected, observed);
+        }
         return verdict;
     }
     let revalidated_observed = observe(provider, tmux_session_name);
@@ -217,7 +243,7 @@ pub(super) fn reconcile_managed_tmux_runtime_kind_for_config(
         && !revalidated_inflight.open;
     if !target_unchanged {
         let defer_reason = "destructive_target_revalidation_failed";
-        record_runtime_mismatch_defer(
+        let (_defer_count, escalated) = record_runtime_mismatch_defer(
             provider,
             channel_id,
             tmux_session_name,
@@ -227,6 +253,15 @@ pub(super) fn reconcile_managed_tmux_runtime_kind_for_config(
             None,
             defer_reason,
         );
+        if escalated {
+            on_escalation(
+                provider,
+                channel_id,
+                tmux_session_name,
+                expected,
+                revalidated_observed.unwrap_or(observed),
+            );
+        }
         tracing::warn!(
             provider = provider.as_str(),
             channel_id = channel_id.get(),
@@ -281,6 +316,36 @@ pub(in crate::services::discord) fn reconcile_managed_tmux_runtime_kind_using_ru
                 .tmux_watchers
                 .owner_channel_for_tmux_session(tmux_session_name)
                 == Some(channel_id)
+        },
+        |provider, channel_id, tmux_session_name, expected, observed| {
+            let Some(http) = shared.serenity_http_or_token_fallback() else {
+                tracing::warn!(
+                    provider = provider.as_str(),
+                    channel_id = channel_id.get(),
+                    tmux_session_name,
+                    "skipping runtime mismatch escalation notice; provider serenity http unavailable"
+                );
+                return;
+            };
+            let session_name = tmux_session_name.to_string();
+            let message = build_runtime_mismatch_escalation_notice(
+                channel_id,
+                &session_name,
+                expected,
+                observed,
+            );
+            let provider_name = provider.as_str().to_string();
+            tokio::spawn(async move {
+                if let Err(error) = channel_id.say(&*http, message).await {
+                    tracing::warn!(
+                        provider = %provider_name,
+                        channel_id = channel_id.get(),
+                        tmux_session_name = %session_name,
+                        error = %error,
+                        "failed to send runtime mismatch escalation notice"
+                    );
+                }
+            });
         },
         |tmux_session_name, expected, observed| {
             let reason = format!(

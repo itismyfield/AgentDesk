@@ -117,6 +117,7 @@ fn reconcile_with_observation(
         },
         || crate::services::tui_turn_state::TuiTurnState::Idle,
         |_| true,
+        |_, _, _, _, _| {},
         |name, _, _| sink.push(name.to_string()),
     )
 }
@@ -171,10 +172,33 @@ fn reconcile_defer_does_not_call_recreate_sink() {
 
 #[cfg(unix)]
 #[test]
+fn escalation_notice_contains_identity_and_runtime_facts() {
+    let message = super::runtime_mismatch::build_runtime_mismatch_escalation_notice(
+        ChannelId::new(50_150_009),
+        "AgentDesk-5015-escalation",
+        ManagedRuntimeExpectation {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            evidence_strength: RuntimeKindEvidenceStrength::Strong,
+        },
+        ObservedManagedRuntimeKind {
+            runtime_kind: RuntimeHandoffKind::LegacyTmuxWrapper,
+            evidence_strength: RuntimeKindEvidenceStrength::Moderate,
+        },
+    );
+    assert!(message.contains("channel_id: 50150009"));
+    assert!(message.contains("session: AgentDesk-5015-escalation"));
+    assert!(message.contains("observed runtime: legacy_tmux_wrapper"));
+    assert!(message.contains("expected runtime: claude_tui"));
+    assert!(message.contains("continues without kill/recreate"));
+}
+
+#[cfg(unix)]
+#[test]
 fn weak_idle_mismatch_never_escalates_to_cleanup() {
     let channel_id = ChannelId::new(50_150_010);
     clear_test_defer(channel_id);
     let mut calls = Vec::new();
+    let escalation_events = std::cell::Cell::new(0_u32);
     for _ in 0..(RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT + 3) {
         let verdict = reconcile_managed_tmux_runtime_kind_for_config(
             &ProviderKind::Claude,
@@ -197,11 +221,13 @@ fn weak_idle_mismatch_never_escalates_to_cleanup() {
             },
             || crate::services::tui_turn_state::TuiTurnState::Idle,
             |_| true,
+            |_, _, _, _, _| escalation_events.set(escalation_events.get() + 1),
             |name, _, _| calls.push(name.to_string()),
         );
         assert_eq!(verdict, RuntimeMismatchVerdict::Defer);
     }
     assert!(calls.is_empty());
+    assert_eq!(escalation_events.get(), 1);
     clear_test_defer(channel_id);
 }
 
@@ -212,6 +238,7 @@ fn stale_inflight_with_busy_transcript_never_cleans_up() {
     clear_test_defer(channel_id);
     let mut calls = Vec::new();
     let probe_calls = std::cell::Cell::new(0_u32);
+    let escalation_events = std::cell::Cell::new(0_u32);
     for _ in 0..(RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT + 3) {
         let verdict = reconcile_managed_tmux_runtime_kind_for_config(
             &ProviderKind::Claude,
@@ -237,6 +264,7 @@ fn stale_inflight_with_busy_transcript_never_cleans_up() {
                 crate::services::tui_turn_state::TuiTurnState::Streaming
             },
             |_| true,
+            |_, _, _, _, _| escalation_events.set(escalation_events.get() + 1),
             |name, _, _| calls.push(name.to_string()),
         );
         assert_eq!(verdict, RuntimeMismatchVerdict::Defer);
@@ -246,6 +274,7 @@ fn stale_inflight_with_busy_transcript_never_cleans_up() {
         RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT + 3,
         "every stale inflight decision must query the transcript"
     );
+    assert_eq!(escalation_events.get(), 1);
     assert!(
         calls.is_empty(),
         "busy transcript must veto destructive cleanup"
@@ -280,6 +309,7 @@ fn stale_inflight_with_unknown_transcript_fails_closed() {
         },
         || crate::services::tui_turn_state::TuiTurnState::Unknown,
         |_| true,
+        |_, _, _, _, _| {},
         |name, _, _| calls.push(name.to_string()),
     );
     assert_eq!(verdict, RuntimeMismatchVerdict::Defer);
@@ -317,6 +347,7 @@ fn cleanup_revalidation_rejects_owner_change() {
         },
         || crate::services::tui_turn_state::TuiTurnState::Idle,
         |_| false,
+        |_, _, _, _, _| {},
         |name, _, _| calls.push(name.to_string()),
     );
     assert_eq!(verdict, RuntimeMismatchVerdict::Defer);
