@@ -15,6 +15,15 @@ const PAUSED_WATCHER_COLD_START_RETRY_DELAY: std::time::Duration =
 #[cfg(test)]
 const PAUSED_WATCHER_COLD_START_RETRY_DELAY: std::time::Duration =
     std::time::Duration::from_millis(10);
+async fn watchdog_token_is_current(
+    shared: &SharedData,
+    channel_id: serenity::ChannelId,
+    token: &Arc<CancelToken>,
+) -> bool {
+    super::super::super::mailbox_cancel_token(shared, channel_id)
+        .await
+        .is_some_and(|current| Arc::ptr_eq(token, &current))
+}
 
 pub(super) fn parse_watchdog_alert_channel_id(raw: &str) -> Option<serenity::ChannelId> {
     let trimmed = raw.trim();
@@ -108,9 +117,7 @@ pub(super) fn build_watchdog_deadlock_prealert_message(
     let updated_at = inflight
         .map(|state| state.updated_at.as_str())
         .unwrap_or("?");
-
     let provider = provider.as_str();
-
     format!(
         "⚠️ [Watchdog pre-timeout]\n\
 channel_id: {channel_id}\n\
@@ -125,7 +132,6 @@ inflight_updated_at: {updated_at}\n\
 정상 진행이면 `POST /api/turns/{channel_id}/extend-timeout`로 연장하세요."
     )
 }
-
 pub(super) fn build_watchdog_timeout_notice_message(elapsed_mins: i64, has_queued: bool) -> String {
     if has_queued {
         format!(
@@ -135,7 +141,6 @@ pub(super) fn build_watchdog_timeout_notice_message(elapsed_mins: i64, has_queue
         format!("⚠️ 턴이 {elapsed_mins}분 타임아웃으로 자동 중단되었습니다.",)
     }
 }
-
 pub(super) async fn send_watchdog_timeout_notice(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -157,7 +162,6 @@ pub(super) async fn send_watchdog_timeout_notice(
         );
     }
 }
-
 fn headless_inflight_has_watchdog_visible_surface(inflight: &InflightTurnState) -> bool {
     if inflight.rebind_origin || inflight.relay_ownership_only {
         return false;
@@ -264,23 +268,16 @@ pub(super) fn spawn_headless_turn_watchdog(
                 .cancelled
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
-                super::super::super::clear_watchdog_deadline_override_if_current(
-                    watchdog_channel_id_num,
-                    watchdog_token.clone(),
-                )
-                .await;
+                if let Some(handle) = super::super::super::ChannelMailboxRegistry::global_handle(
+                    serenity::ChannelId::new(watchdog_channel_id_num),
+                ) {
+                    handle
+                        .clear_timeout_override_if_current(watchdog_token.clone())
+                        .await;
+                }
                 return;
             }
-            let is_current_token =
-                super::super::super::mailbox_cancel_token(&watchdog_shared, channel_id)
-                    .await
-                    .is_some_and(|current| Arc::ptr_eq(&watchdog_token, &current));
-            if !is_current_token {
-                super::super::super::clear_watchdog_deadline_override_if_current(
-                    watchdog_channel_id_num,
-                    watchdog_token.clone(),
-                )
-                .await;
+            if !watchdog_token_is_current(&watchdog_shared, channel_id, &watchdog_token).await {
                 return;
             }
             if let Some(extension) =
@@ -341,7 +338,6 @@ pub(super) fn spawn_headless_turn_watchdog(
                     }
                 }
             }
-
             let current_deadline = watchdog_token
                 .watchdog_deadline_ms
                 .load(std::sync::atomic::Ordering::Relaxed);
@@ -356,11 +352,13 @@ pub(super) fn spawn_headless_turn_watchdog(
                         .await
                         .is_some_and(|current| Arc::ptr_eq(&watchdog_token, &current));
                 if !is_current_token {
-                    super::super::super::clear_watchdog_deadline_override_if_current(
-                        watchdog_channel_id_num,
-                        watchdog_token.clone(),
-                    )
-                    .await;
+                    if let Some(handle) = super::super::super::ChannelMailboxRegistry::global_handle(
+                        serenity::ChannelId::new(watchdog_channel_id_num),
+                    ) {
+                        handle
+                            .clear_timeout_override_if_current(watchdog_token.clone())
+                            .await;
+                    }
                     return;
                 }
                 let current_max_deadline = watchdog_token
@@ -380,16 +378,7 @@ pub(super) fn spawn_headless_turn_watchdog(
                     last_deadlock_prealert_deadline_ms = Some(current_deadline);
                 }
             }
-            let is_current_token =
-                super::super::super::mailbox_cancel_token(&watchdog_shared, channel_id)
-                    .await
-                    .is_some_and(|current| Arc::ptr_eq(&watchdog_token, &current));
-            if !is_current_token {
-                super::super::super::clear_watchdog_deadline_override_if_current(
-                    watchdog_channel_id_num,
-                    watchdog_token.clone(),
-                )
-                .await;
+            if !watchdog_token_is_current(&watchdog_shared, channel_id, &watchdog_token).await {
                 return;
             }
             if let Some(extension) =
@@ -405,9 +394,6 @@ pub(super) fn spawn_headless_turn_watchdog(
             if now < current_deadline {
                 continue;
             }
-
-            // Must be computed BEFORE reconcile_watchdog_timeout: reconcile
-            // clears the inflight row, and the visibility surfaces live on it.
             let should_emit_timeout_notice = headless_watchdog_timeout_notice_visible(
                 watchdog_shared.as_ref(),
                 &watchdog_provider,
@@ -568,12 +554,11 @@ pub(super) async fn reconcile_watchdog_timeout(
         WATCHDOG_TIMEOUT_CANCEL_SOURCE,
     )
     .await;
-    super::super::super::clear_watchdog_deadline_override_if_current(
-        channel_id.get(),
-        watchdog_token.clone(),
-    )
-    .await;
-
+    if let Some(handle) = super::super::super::ChannelMailboxRegistry::global_handle(channel_id) {
+        handle
+            .clear_timeout_override_if_current(watchdog_token.clone())
+            .await;
+    }
     let Some(token) = result.token else {
         return WatchdogTimeoutCancelDisposition::StaleToken;
     };
