@@ -2822,6 +2822,58 @@ mod watcher_stream_progress_tests {
     }
 
     #[test]
+    fn persist_watcher_stream_progress_accepts_matching_prefix() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(1509350490461180417);
+        let session = "AgentDesk-claude-adk-issue-4115-match";
+        let mut state = InflightTurnState::new(
+            provider.clone(),
+            channel_id.get(),
+            Some("claude-pipe".into()),
+            4156,
+            9415,
+            9416,
+            "prompt".into(),
+            Some("session-4115".into()),
+            Some(session.into()),
+            Some("/tmp/agentdesk-4115-match.jsonl".into()),
+            None,
+            128,
+        );
+        state.full_response = "already persisted prefix".into();
+        state.response_sent_offset = state.full_response.len();
+        super::super::inflight::save_inflight_state(&state).expect("save inflight");
+        persist_watcher_stream_progress(
+            &provider,
+            channel_id,
+            session,
+            None,
+            Some(MessageId::new(9417)),
+            "already persisted prefix plus suffix",
+            36,
+            Some("Bash: echo retry"),
+            None,
+            None,
+            true,
+            true,
+            &[],
+        );
+        let reloaded = super::super::inflight::load_inflight_state(&provider, channel_id.get())
+            .expect("reload row");
+        assert_eq!(
+            reloaded.full_response,
+            "already persisted prefix plus suffix"
+        );
+        assert_eq!(reloaded.current_msg_id, 9417);
+        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+    }
+
+    #[test]
     fn persist_watcher_stream_progress_preserves_prefix_after_seed_rewind() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
