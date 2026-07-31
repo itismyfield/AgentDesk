@@ -400,7 +400,6 @@ src/services/discord/idle_recap_interaction.rs
 src/services/discord/mod.rs
 src/services/discord/relay_recovery_circuit_alert_producer.rs
 src/services/discord/relay_recovery_circuit_breaker.rs
-src/services/discord/router/message_handler/voice_announcement_route.rs
 src/services/discord/session_runtime.rs
 src/services/discord/turn_bridge/completion_guard/completion_postgres.rs
 src/services/discord/turn_bridge/recovery_text.rs

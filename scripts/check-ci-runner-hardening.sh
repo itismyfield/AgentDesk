@@ -104,8 +104,9 @@ targets = {
     # to this existing toolchain-provisioned lane whose mirror is required.
     # #5025 and #4985 retain their production bridge and footer-marker coverage
     # in the same job block, so the pin covers the merged command inventory.
-    # #5001 adds the runtime-mismatch verdict lane to the same job block; the pin
-    # is recomputed once for the merged content rather than per contributor.
+    # #5001 curates the runtime-mismatch verdict tests into `just test-postgres`,
+    # which this job already runs, so the job block itself is unchanged and the
+    # pin above still holds.
     "job_sha256" => "af225f069f93ce21e5029a65dc5ffea9b17ce0f25ed5262cb6aae20ed2e4615b",
     "cargo_steps" => {
       "Footer-only marker regressions" => {
@@ -132,15 +133,6 @@ targets = {
           "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests",
           "env -u AGENTDESK_ROOT_DIR cargo test --lib watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row",
           "env -u AGENTDESK_ROOT_DIR cargo test --lib identity_guarded_save_rejects_stale_write_against_newer_turn",
-        ],
-        "continue_on_error" => nil,
-        "timeout_minutes" => 10,
-      },
-      "Runtime mismatch and headless defer regressions" => {
-        "commands" => [
-          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::turn_start::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::tui_followup_retry_tests -- --test-threads=1",
         ],
         "continue_on_error" => nil,
         "timeout_minutes" => 10,
