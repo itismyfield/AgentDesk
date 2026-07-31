@@ -2605,16 +2605,32 @@ mod pg_tests {
             &ctx_for_channel(IntakeRoutingMode::Enforce, "ch-conflict"),
         )
         .await;
-        assert_eq!(
-            decision,
+        // The seeded row is a real pending route, so the decision must carry its
+        // identity and age: those are exactly what the admission boundary needs to
+        // decide whether the route is stale. Match instead of comparing a literal so
+        // the assertion does not depend on the serial id or on wall-clock age.
+        match decision {
             IntakeRouterDecision::DeferredOpenRoute {
-                target_instance_id: "worker-conflict".to_string(),
-                open_route_id: None,
-                open_route_status: "pending".to_string(),
-                open_route_age_secs: None,
-                resolved_owner: ResolvedSessionOwner::NoOwner,
+                target_instance_id,
+                open_route_id,
+                open_route_status,
+                open_route_age_secs,
+                resolved_owner,
+            } => {
+                assert_eq!(target_instance_id, "worker-conflict");
+                assert_eq!(open_route_status, "pending");
+                assert_eq!(resolved_owner, ResolvedSessionOwner::NoOwner);
+                assert!(
+                    open_route_id.is_some(),
+                    "a pending open route must carry its row id for stale admission"
+                );
+                assert!(
+                    open_route_age_secs.is_some(),
+                    "a pending open route must carry its age for stale admission"
+                );
             }
-        );
+            other => panic!("expected DeferredOpenRoute, got {other:?}"),
+        }
 
         pool.close().await;
         pg_db.drop().await;
