@@ -1451,15 +1451,12 @@ mod tests {
                 "fallback must not register the stale original as the footer target"
             );
             assert!(
-                shared
-                    .ui
-                    .placeholder_cleanup
-                    .terminal_cleanup_retry_pending(
-                        &ProviderKind::Claude,
-                        ch(),
-                        MessageId::new(MSG)
-                    ),
-                "committed fallback body must retain failed-edit cleanup evidence"
+                !shared.ui.placeholder_cleanup.terminal_cleanup_committed(
+                    &ProviderKind::Claude,
+                    ch(),
+                    MessageId::new(MSG)
+                ),
+                "failed original edit must remain distinct from committed fallback transport"
             );
         }
 
