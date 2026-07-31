@@ -494,7 +494,8 @@ fn resolve_agent_handoff_turn_target(
 }
 
 /// Map a headless turn-start result to the handoff API contract (#3556):
-/// `started`/`consumed` → 200 with `turn_id`, `Conflict` → 409 (mailbox busy —
+/// `started`/`queued`/`consumed` → 200 with `turn_id` and the exact status,
+/// `Conflict` → 409 (mailbox busy —
 /// a semantic the announce-only path never had), `Internal` → 503.
 fn map_turn_start_result(
     target: &AgentHandoffTurnTarget,
