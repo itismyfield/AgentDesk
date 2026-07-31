@@ -89,7 +89,7 @@ class DiscordClientSendPrompt(unittest.TestCase):
 
         def fake_urlopen(request, timeout):  # noqa: ANN001
             captured["body"] = json.loads(request.data.decode("utf-8"))
-            return _Response({"ok": True})
+            return _Response({"ok": True, "turn_id": "turn-cc-1", "status": "started"})
 
         client = DiscordClient(
             base_url="http://127.0.0.1:8791",
@@ -118,7 +118,7 @@ class DiscordClientSendPrompt(unittest.TestCase):
             attempts.append(1)
             if len(attempts) == 1:
                 raise busy_error()
-            return _Response({"ok": True, "turn_id": "turn-2"})
+            return _Response({"ok": True, "turn_id": "turn-2", "status": "started"})
 
         client = DiscordClient(
             base_url="http://127.0.0.1:8791",
@@ -136,6 +136,39 @@ class DiscordClientSendPrompt(unittest.TestCase):
         self.assertEqual(response["turn_id"], "turn-2")
         self.assertEqual(len(attempts), 2)
         sleep.assert_called_once_with(1.0)
+
+    def test_handoff_prompt_accepts_explicit_queued_status(self):
+        client = DiscordClient(
+            base_url="http://127.0.0.1:8791",
+            handoff_to_agent="adk-claude-pipe-e2e",
+            handoff_from_agent="adk-e2e-orchestrator",
+        )
+
+        with mock.patch(
+            "urllib.request.urlopen",
+            return_value=_Response({"ok": True, "turn_id": "turn-queued", "status": "queued"}),
+        ):
+            response = client.send_prompt("1509350393350459434", "hello", channel_kind="cc")
+
+        self.assertEqual(response["status"], "queued")
+
+    def test_handoff_prompt_rejects_consumed_status(self):
+        client = DiscordClient(
+            base_url="http://127.0.0.1:8791",
+            handoff_to_agent="adk-claude-pipe-e2e",
+            handoff_from_agent="adk-e2e-orchestrator",
+        )
+
+        with (
+            mock.patch(
+                "urllib.request.urlopen",
+                return_value=_Response(
+                    {"ok": True, "turn_id": "turn-consumed", "status": "consumed"}
+                ),
+            ),
+            self.assertRaisesRegex(RuntimeError, "consumed without a provider start"),
+        ):
+            client.send_prompt("1509350393350459434", "hello", channel_kind="cc")
 
     def test_wait_for_message_evaluates_same_id_edits(self):
         class EditingClient(DiscordClient):

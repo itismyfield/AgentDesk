@@ -202,7 +202,13 @@ class DiscordClient:
                 raise RuntimeError(f"turn/start HTTP {error.code}: {error_body}") from error
         if not payload:
             return {}
-        return json.loads(payload)
+        result = json.loads(payload)
+        status = result.get("status") if isinstance(result, dict) else None
+        if status == "consumed":
+            raise RuntimeError("turn/start was consumed without a provider start")
+        if status not in ("started", "queued"):
+            raise RuntimeError(f"turn/start returned unknown status: {status!r}")
+        return result
 
     def fetch_messages(
         self,
