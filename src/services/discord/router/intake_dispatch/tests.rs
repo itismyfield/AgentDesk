@@ -291,14 +291,15 @@ fn submission_for_admission(channel_id: ChannelId, message_id: u64) -> IntakeSub
 }
 
 #[test]
-fn unopted_live_local_pending_open_route_runs_locally_5040() {
+fn telemetry_only_unopted_live_local_pending_open_route_runs_locally_5040() {
     let submission = submission_for_admission(ChannelId::new(4_350_351), 4_350_361);
     let admission = admission_for_decision(
         OwnerAuthorityChannelOptIn::NotOptedIn,
-        "local-instance",
         IntakeRouterDecision::DeferredOpenRoute {
-            target_instance_id: "local-instance".to_string(),
+            target_instance_id: "mac-mini-release".to_string(),
+            open_route_id: None,
             open_route_status: "pending".to_string(),
+            open_route_age_secs: Some(60),
             resolved_owner: ResolvedSessionOwner::LiveLocal,
         },
         &submission,
@@ -311,37 +312,36 @@ fn unopted_live_local_pending_open_route_runs_locally_5040() {
 }
 
 #[test]
-fn unopted_live_local_pending_route_allows_raw_attachment_5040() {
-    let mut submission = submission_for_admission(ChannelId::new(4_350_361), 4_350_371);
-    submission.origin = IntakeOrigin::RawAttachment;
-    submission.has_nonportable_uploads = true;
-    submission.attachments = vec![super::super::message_handler::AttachmentDescriptor {
-        filename: "report.txt".to_string(),
-        url: "https://cdn.discordapp.com/attachments/1/2/report.txt".to_string(),
-    }];
+fn telemetry_only_unopted_live_local_fresh_pending_route_stays_fenced_5040() {
+    let submission = submission_for_admission(ChannelId::new(4_350_365), 4_350_375);
     let admission = admission_for_decision(
         OwnerAuthorityChannelOptIn::NotOptedIn,
-        "local-instance",
         IntakeRouterDecision::DeferredOpenRoute {
-            target_instance_id: "local-instance".to_string(),
+            target_instance_id: "mac-mini-release".to_string(),
+            open_route_id: None,
             open_route_status: "pending".to_string(),
+            open_route_age_secs: Some(1),
             resolved_owner: ResolvedSessionOwner::LiveLocal,
         },
         &submission,
     );
 
-    assert!(matches!(admission, IntakeAdmission::Local(_)));
+    assert!(matches!(
+        admission,
+        IntakeAdmission::DeferredOpenRoute { .. }
+    ));
 }
 
 #[test]
-fn unopted_live_foreign_owner_stays_fenced_5040() {
+fn telemetry_only_unopted_live_foreign_owner_stays_fenced_5040() {
     let submission = submission_for_admission(ChannelId::new(4_350_371), 4_350_381);
     let admission = admission_for_decision(
         OwnerAuthorityChannelOptIn::NotOptedIn,
-        "local-instance",
         IntakeRouterDecision::DeferredOpenRoute {
             target_instance_id: "foreign-instance".to_string(),
+            open_route_id: None,
             open_route_status: "pending".to_string(),
+            open_route_age_secs: Some(60),
             resolved_owner: ResolvedSessionOwner::LiveForeign,
         },
         &submission,
@@ -359,14 +359,15 @@ fn unopted_live_foreign_owner_stays_fenced_5040() {
 }
 
 #[test]
-fn unknown_owner_authority_keeps_local_fence_5040() {
+fn telemetry_only_unopted_unknown_owner_authority_keeps_local_fence_5040() {
     let submission = submission_for_admission(ChannelId::new(4_350_391), 4_350_401);
     let admission = admission_for_decision(
         OwnerAuthorityChannelOptIn::Unknown,
-        "local-instance",
         IntakeRouterDecision::DeferredOpenRoute {
             target_instance_id: "local-instance".to_string(),
+            open_route_id: None,
             open_route_status: "pending".to_string(),
+            open_route_age_secs: Some(60),
             resolved_owner: ResolvedSessionOwner::LiveLocal,
         },
         &submission,
@@ -381,14 +382,15 @@ fn unknown_owner_authority_keeps_local_fence_5040() {
 }
 
 #[test]
-fn local_accepted_route_stays_fenced_5040() {
+fn telemetry_only_unopted_local_accepted_route_stays_fenced_5040() {
     let submission = submission_for_admission(ChannelId::new(4_350_411), 4_350_421);
     let admission = admission_for_decision(
         OwnerAuthorityChannelOptIn::NotOptedIn,
-        "local-instance",
         IntakeRouterDecision::DeferredOpenRoute {
             target_instance_id: "local-instance".to_string(),
+            open_route_id: None,
             open_route_status: "accepted".to_string(),
+            open_route_age_secs: Some(60),
             resolved_owner: ResolvedSessionOwner::LiveLocal,
         },
         &submission,

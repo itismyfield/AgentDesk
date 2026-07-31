@@ -139,7 +139,7 @@ pub(crate) async fn admit_text_intake(
     };
 
     let request = &submission.request;
-    let leader_instance_id =
+    let self_instance_id =
         crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
     let request_owner_id = request.request_owner.get().to_string();
     let node_override =
@@ -150,7 +150,7 @@ pub(crate) async fn admit_text_intake(
     };
     let ctx = IntakeRouterContext {
         mode,
-        leader_instance_id: &leader_instance_id,
+        leader_instance_id: &self_instance_id,
         provider: submission.provider.as_str(),
         channel_id: &channel_id,
         user_msg_id: &user_msg_id,
@@ -180,12 +180,46 @@ pub(crate) async fn admit_text_intake(
         authority_channel_opt_in,
         &decision,
     );
-    let admission = admission_for_decision(
-        authority_channel_opt_in,
-        &leader_instance_id,
-        decision,
-        submission,
-    );
+    let stale_recovery = match &decision {
+        IntakeRouterDecision::DeferredOpenRoute {
+            open_route_id: Some(route_id),
+            open_route_status,
+            open_route_age_secs: Some(age_secs),
+            resolved_owner: ResolvedSessionOwner::LiveLocal,
+            ..
+        } if matches!(authority_channel_opt_in, OwnerAuthorityChannelOptIn::NotOptedIn)
+            && open_route_status == "pending"
+            && *age_secs as u64 >= effective_config.forward_pre_claim_timeout_secs =>
+        {
+            match crate::services::cluster::intake_router_hook::owner_record::
+                retire_stale_pending_route_for_local(
+                    pool,
+                    submission.provider.as_str(),
+                    &channel_id,
+                    *route_id,
+                    effective_config.forward_pre_claim_timeout_secs,
+                )
+                .await
+            {
+                Ok(retired) => retired,
+                Err(error) => {
+                    tracing::warn!(%error, route_id, "[intake_dispatch] stale route retirement failed; retaining fence");
+                    false
+                }
+            }
+        }
+        _ => true,
+    };
+    let admission = if !stale_recovery {
+        match decision {
+            IntakeRouterDecision::DeferredOpenRoute {
+                target_instance_id, ..
+            } => IntakeAdmission::DeferredOpenRoute { target_instance_id },
+            other => admission_for_decision(authority_channel_opt_in, other, submission),
+        }
+    } else {
+        admission_for_decision(authority_channel_opt_in, decision, submission)
+    };
 
     log_nonlocal_admission(&admission, &channel_id, &user_msg_id);
     admission
@@ -193,7 +227,6 @@ pub(crate) async fn admit_text_intake(
 
 fn admission_for_decision(
     authority_channel_opt_in: OwnerAuthorityChannelOptIn,
-    leader_instance_id: &str,
     decision: IntakeRouterDecision,
     submission: &IntakeSubmission,
 ) -> IntakeAdmission {
@@ -212,18 +245,23 @@ fn admission_for_decision(
         IntakeRouterDecision::SkippedDuplicate { .. } => IntakeAdmission::SkippedDuplicate,
         // A pending row has not crossed the worker claim boundary; claimed,
         // accepted, and spawned rows may already be executing and remain
-        // fenced. This status is a snapshot, so the existing DB unique-route
-        // serialization still governs the concurrent claim/insert race.
+        // fenced. Local recovery retires a stale pending row under the same
+        // channel advisory lock used by worker claims before execution begins.
         IntakeRouterDecision::DeferredOpenRoute {
             target_instance_id,
             open_route_status,
+            open_route_age_secs,
             resolved_owner: ResolvedSessionOwner::LiveLocal,
-        } if target_instance_id == leader_instance_id
+            ..
+        } if open_route_status == "pending" && open_route_age_secs.is_some_and(|age| {
+            age >= crate::services::cluster::intake_routing_config::effective_intake_routing_config(
+            )
+            .forward_pre_claim_timeout_secs
+        })
             && matches!(
                 authority_channel_opt_in,
                 OwnerAuthorityChannelOptIn::NotOptedIn
-            )
-            && open_route_status == "pending" =>
+            ) =>
         {
             tracing::warn!(
                 %target_instance_id,

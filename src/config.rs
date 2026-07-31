@@ -936,7 +936,7 @@ impl Default for DatabaseConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct ClusterConfig {
     #[serde(default)]
     pub enabled: bool,

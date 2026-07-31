@@ -900,6 +900,38 @@ pub(crate) async fn sweep_stale_pre_accept_claims_fenced(
     Ok(result.rows_affected())
 }
 
+/// Atomically retire a stale pending forwarded route before local recovery.
+/// The channel advisory lock serializes this transition with admission inserts
+/// and worker claims; a zero-row result means another actor won the race.
+pub(crate) async fn retire_stale_pending_route_for_local(
+    pool: &PgPool,
+    provider: &str,
+    channel_id: &str,
+    route_id: i64,
+    stale_after_secs: u64,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let advisory_key = OwnerIdentity::new(provider, channel_id).advisory_key();
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(advisory_key)
+        .execute(&mut *tx)
+        .await?;
+    let result = sqlx::query(
+        "UPDATE intake_outbox
+            SET status = 'done', completed_at = NOW(),
+                last_error = 'stale route retired for local recovery'
+          WHERE id = $1 AND channel_id = $2 AND status = 'pending'
+            AND created_at <= NOW() - ($3::BIGINT * INTERVAL '1 second')",
+    )
+    .bind(route_id)
+    .bind(channel_id)
+    .bind(stale_after_secs.max(1) as i64)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(result.rows_affected() == 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

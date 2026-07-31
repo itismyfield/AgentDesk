@@ -609,8 +609,9 @@ cluster:
     owner_authority_channel_ids:
       - "123456789012345678"
     # Pre-claim takeover threshold. After this many seconds without
-    # reaching `claimed` (= worker SELECT FOR UPDATE), leader steals
-    # and runs locally. Spawned/accepted rows are NEVER stolen.
+    # reaching `claimed` (= worker SELECT FOR UPDATE), leader atomically
+    # retires the pending row under the channel advisory lock, then runs
+    # locally. Fresh pending and spawned/accepted rows are NEVER stolen.
     forward_pre_claim_timeout_secs: 12
     # Stale claim recovery. After this many seconds in 'claimed'
     # without reaching 'accepted', re-mark pending so another node

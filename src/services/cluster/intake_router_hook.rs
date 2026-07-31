@@ -82,6 +82,8 @@ pub(crate) enum IntakeRouterDecision {
     DeferredOpenRoute {
         target_instance_id: String,
         open_route_status: String,
+        open_route_id: Option<i64>,
+        open_route_age_secs: Option<u64>,
         resolved_owner: ResolvedSessionOwner,
     },
     /// Ownership or placement could not be proven safe. Caller MUST NOT run
@@ -301,8 +303,8 @@ pub(crate) async fn try_route_intake(
 
     // The durable single-open-route fence surrounds every placement branch,
     // including a local live owner and attachment-first placement. Preserve the
-    // resolved owner classification and the existing route status for the
-    // admission boundary's narrowly scoped local stale-route recovery.
+    // resolved owner classification, row identity, status, and age so the
+    // admission boundary can atomically retire only a stale pending route.
     let resolved_owner = match &owner {
         SessionOwnerResolution::NoOwner => ResolvedSessionOwner::NoOwner,
         SessionOwnerResolution::LiveLocal { .. } => ResolvedSessionOwner::LiveLocal,
@@ -314,18 +316,26 @@ pub(crate) async fn try_route_intake(
         }
     };
     match existing_open_route(pool, ctx.channel_id).await {
-        Ok(Some((_, existing_user_msg_id, _))) if existing_user_msg_id == ctx.user_msg_id => {
+        Ok(Some((_, _, existing_user_msg_id, _, _))) if existing_user_msg_id == ctx.user_msg_id => {
             return apply_observe_mode(
                 ctx.mode,
                 IntakeRouterDecision::SkippedDuplicate { resolved_owner },
             );
         }
-        Ok(Some((target_instance_id, _, open_route_status))) => {
+        Ok(Some((
+            open_route_id,
+            target_instance_id,
+            _,
+            open_route_status,
+            open_route_age_secs,
+        ))) => {
             return apply_observe_mode(
                 ctx.mode,
                 IntakeRouterDecision::DeferredOpenRoute {
                     target_instance_id,
+                    open_route_id: Some(open_route_id),
                     open_route_status,
+                    open_route_age_secs: open_route_age_secs.map(|age| age as u64),
                     resolved_owner,
                 },
             );
@@ -680,13 +690,15 @@ fn apply_observe_mode(
 async fn existing_open_route(
     pool: &PgPool,
     channel_id: &str,
-) -> Result<Option<(String, String, String)>, sqlx::Error> {
+) -> Result<Option<(i64, String, String, String, Option<i64>)>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT target_instance_id, user_msg_id, status
+        "SELECT id, target_instance_id, user_msg_id, status,
+                GREATEST(0, EXTRACT(EPOCH FROM (NOW() - created_at)))::BIGINT
+                   AS open_route_age_secs
            FROM intake_outbox
           WHERE channel_id = $1
             AND status IN ('pending', 'claimed', 'accepted', 'spawned')
-          ORDER BY id
+          ORDER BY created_at ASC
           LIMIT 1",
     )
     .bind(channel_id)
@@ -709,18 +721,20 @@ async fn route_to_instance(
         }
     };
     match existing_open_route(pool, ctx.channel_id).await {
-        Ok(Some((_, existing_user_msg_id, _))) if existing_user_msg_id == ctx.user_msg_id => {
+        Ok(Some((_, _, existing_user_msg_id, _, _))) if existing_user_msg_id == ctx.user_msg_id => {
             return apply_observe_mode(
                 ctx.mode,
                 IntakeRouterDecision::SkippedDuplicate { resolved_owner },
             );
         }
-        Ok(Some((existing_target, _, open_route_status))) => {
+        Ok(Some((open_route_id, existing_target, _, open_route_status, open_route_age_secs))) => {
             return apply_observe_mode(
                 ctx.mode,
                 IntakeRouterDecision::DeferredOpenRoute {
                     target_instance_id: existing_target,
+                    open_route_id: Some(open_route_id),
                     open_route_status,
+                    open_route_age_secs: open_route_age_secs.map(|age| age as u64),
                     resolved_owner,
                 },
             );
@@ -777,21 +791,29 @@ async fn route_to_instance(
         Err(error) => match classify_insert_pending_error(&error) {
             Some(IntakeInsertConflict::OpenRoutePerChannel) => {
                 match existing_open_route(pool, ctx.channel_id).await {
-                    Ok(Some((_, existing_user_msg_id, _)))
+                    Ok(Some((_, _, existing_user_msg_id, _, _)))
                         if existing_user_msg_id == ctx.user_msg_id =>
                     {
                         IntakeRouterDecision::SkippedDuplicate { resolved_owner }
                     }
-                    Ok(Some((existing_target, _, open_route_status))) => {
-                        IntakeRouterDecision::DeferredOpenRoute {
-                            target_instance_id: existing_target,
-                            open_route_status,
-                            resolved_owner,
-                        }
-                    }
+                    Ok(Some((
+                        open_route_id,
+                        existing_target,
+                        _,
+                        open_route_status,
+                        open_route_age_secs,
+                    ))) => IntakeRouterDecision::DeferredOpenRoute {
+                        target_instance_id: existing_target,
+                        open_route_id: Some(open_route_id),
+                        open_route_status,
+                        open_route_age_secs: open_route_age_secs.map(|age| age as u64),
+                        resolved_owner,
+                    },
                     Ok(None) | Err(_) => IntakeRouterDecision::DeferredOpenRoute {
                         target_instance_id: target.to_string(),
+                        open_route_id: None,
                         open_route_status: "unknown".to_string(),
+                        open_route_age_secs: None,
                         resolved_owner,
                     },
                 }
@@ -2587,7 +2609,9 @@ mod pg_tests {
             decision,
             IntakeRouterDecision::DeferredOpenRoute {
                 target_instance_id: "worker-conflict".to_string(),
+                open_route_id: None,
                 open_route_status: "pending".to_string(),
+                open_route_age_secs: None,
                 resolved_owner: ResolvedSessionOwner::NoOwner,
             }
         );
