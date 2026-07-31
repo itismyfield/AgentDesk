@@ -50,7 +50,7 @@ mod busy_retry_fifo_tests {
             .expect("durably preserved defer must be accepted");
 
         assert_eq!(outcome.turn_id, reservation.turn_id(channel_id));
-        assert_eq!(outcome.status, HeadlessTurnStartStatus::Consumed);
+        assert_eq!(outcome.status, HeadlessTurnStartStatus::Queued);
     }
 
     #[test]

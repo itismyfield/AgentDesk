@@ -58,7 +58,7 @@ pub(super) fn preserved_headless_defer_result(
     }
     Ok(HeadlessTurnStartOutcome {
         turn_id: reservation.turn_id(channel_id),
-        status: HeadlessTurnStartStatus::Consumed,
+        status: HeadlessTurnStartStatus::Queued,
     })
 }
 
@@ -1134,11 +1134,11 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             .await;
         }
         crate::services::discord::saturating_decrement_global_active(shared);
-        shared.turn_start_times.remove(&channel_id);
+        // The queue may have already started a successor on this channel. Leave
+        // channel-scoped timing and watchdog state to that current owner.
         cancel_token
             .cancelled
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        super::super::super::clear_watchdog_deadline_override(channel_id.get()).await;
         return preserved_headless_defer_result(channel_id, reservation, retry_preserved);
     }
     let effective_runtime_kind = prelaunch_runtime_kind.map(|expectation| expectation.runtime_kind);

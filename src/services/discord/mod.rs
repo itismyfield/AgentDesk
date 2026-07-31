@@ -177,7 +177,8 @@ pub(in crate::services::discord) use recovery_engine as recovery;
 // path (surface freeze, #3294/#3295 pattern).
 pub(crate) use restart_mode::InflightRestartMode;
 pub(crate) use router::{
-    HeadlessTurnStartError, IntakeRequest, TurnKind, execute_intake_turn_core,
+    HeadlessTurnStartError, HeadlessTurnStartStatus, IntakeRequest, TurnKind,
+    execute_intake_turn_core,
 };
 #[cfg(unix)]
 pub(crate) use session_relay_sink::run_session_bound_discord_relay_supervisor;

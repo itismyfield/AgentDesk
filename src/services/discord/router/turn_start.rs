@@ -18,6 +18,7 @@ pub(crate) struct HeadlessTurnStartOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HeadlessTurnStartStatus {
     Started,
+    Queued,
     Consumed,
 }
 
@@ -25,6 +26,7 @@ impl HeadlessTurnStartStatus {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Started => "started",
+            Self::Queued => "queued",
             Self::Consumed => "consumed",
         }
     }

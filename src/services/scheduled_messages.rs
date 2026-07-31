@@ -299,6 +299,14 @@ async fn fire_agent(pool: &PgPool, health_registry: Option<&HealthRegistry>, fir
         Ok(AgentTurnStartDisposition::Started) => {
             // Delivery stays running; poll_agent_delivery owns completion.
         }
+        Ok(AgentTurnStartDisposition::Queued(turn_id)) => {
+            interrupt_for_retry(
+                pool,
+                fire,
+                &format!("scheduled message turn {turn_id} is queued behind existing work"),
+            )
+            .await;
+        }
         Ok(AgentTurnStartDisposition::Consumed(turn_id)) => {
             finish_terminal_failure(
                 pool,
@@ -342,6 +350,9 @@ async fn fire_agent(pool: &PgPool, health_registry: Option<&HealthRegistry>, fir
 
 enum AgentTurnStartDisposition {
     Started,
+    /// The exact reserved request remains durable in the mailbox queue and may
+    /// start later. Re-arm the scheduled fire without terminalizing it.
+    Queued(String),
     /// A lifecycle command was consumed before provider/bridge spawn. Repeating
     /// it could repeat the lifecycle side effect, so terminalize instead.
     Consumed(String),
@@ -349,6 +360,23 @@ enum AgentTurnStartDisposition {
     /// (missing/digest mismatch) and `on_context_failure='fail'`. Deterministic —
     /// no re-arm; terminalize the delivery with the recorded reason.
     SnapshotInvalid(String),
+}
+
+fn classify_agent_turn_start(
+    status: crate::services::discord::HeadlessTurnStartStatus,
+    turn_id: String,
+) -> AgentTurnStartDisposition {
+    match status {
+        crate::services::discord::HeadlessTurnStartStatus::Started => {
+            AgentTurnStartDisposition::Started
+        }
+        crate::services::discord::HeadlessTurnStartStatus::Queued => {
+            AgentTurnStartDisposition::Queued(turn_id)
+        }
+        crate::services::discord::HeadlessTurnStartStatus::Consumed => {
+            AgentTurnStartDisposition::Consumed(turn_id)
+        }
+    }
 }
 
 fn runtime_defer_until(now: DateTime<Utc>) -> DateTime<Utc> {
@@ -497,8 +525,9 @@ async fn start_agent_turn(
     .await
     .map_err(|error| anyhow!("start scheduled message turn for {agent_id}: {error}"))?;
 
-    if outcome.status.as_str() != "started" {
-        return Ok(AgentTurnStartDisposition::Consumed(turn_id));
+    match classify_agent_turn_start(outcome.status, turn_id.clone()) {
+        AgentTurnStartDisposition::Started => {}
+        disposition => return Ok(disposition),
     }
 
     // `HeadlessTurnStartError` is a pre-spawn contract. After `Started`, never
@@ -1270,6 +1299,23 @@ mod tests {
         assert!(prompt.contains("3줄로 요약"));
         assert!(prompt.contains("내일 배포 예정"));
         assert!(prompt.contains("배포 공지"));
+    }
+
+    #[test]
+    fn queued_agent_turn_is_rearmed_not_terminalized_5015() {
+        let disposition = classify_agent_turn_start(
+            crate::services::discord::HeadlessTurnStartStatus::Queued,
+            "discord:50:15".to_string(),
+        );
+
+        assert!(matches!(
+            disposition,
+            AgentTurnStartDisposition::Queued(turn_id) if turn_id == "discord:50:15"
+        ));
+        assert!(!matches!(
+            disposition,
+            AgentTurnStartDisposition::Consumed(_)
+        ));
     }
 
     #[test]

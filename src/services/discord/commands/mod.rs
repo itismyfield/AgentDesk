@@ -163,7 +163,9 @@ pub(super) use voice::{cmd_vc_join, cmd_vc_leave, cmd_voice};
 
 #[cfg(test)]
 mod restart_seed_retry_tests {
-    use super::restart::{RestartSeedStatus, retry_restart_seed_turn_for_test};
+    use super::restart::{
+        RestartSeedStatus, restart_seed_note_for_test, retry_restart_seed_turn_for_test,
+    };
     use crate::services::discord::router::{
         HeadlessTurnStartError, HeadlessTurnStartOutcome, HeadlessTurnStartStatus,
     };
@@ -179,14 +181,15 @@ mod restart_seed_retry_tests {
             async move {
                 Ok(HeadlessTurnStartOutcome {
                     turn_id: reservation.turn_id(poise::serenity_prelude::ChannelId::new(50_15)),
-                    status: HeadlessTurnStartStatus::Consumed,
+                    status: HeadlessTurnStartStatus::Queued,
                 })
             }
         })
         .await;
 
-        assert_eq!(status, RestartSeedStatus::Started);
+        assert_eq!(status, RestartSeedStatus::Queued);
         assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(restart_seed_note_for_test(&status).contains("durable queue"));
     }
 
     #[tokio::test(start_paused = true)]

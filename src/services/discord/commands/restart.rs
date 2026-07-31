@@ -48,6 +48,7 @@ pub(super) fn classify_restart_action(session_snapshot: Option<Option<String>>) 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum RestartSeedStatus {
     Started,
+    Queued,
     Busy,
     Failed(String),
 }
@@ -88,6 +89,9 @@ fn restart_seed_note(status: &RestartSeedStatus) -> String {
         // Successful seed turn needs no narration — the agent's own greeting
         // turn follows immediately and speaks for itself.
         RestartSeedStatus::Started => String::new(),
+        RestartSeedStatus::Queued => {
+            "인사말 turn은 durable queue에 접수되어 기존 작업 뒤에 실행됩니다.".to_string()
+        }
         RestartSeedStatus::Busy => {
             "기존 턴 정리가 아직 끝나지 않아 인사말 turn은 시작하지 못했습니다.".to_string()
         }
@@ -140,7 +144,19 @@ where
     let reservation = super::super::router::reserve_headless_turn();
     for attempt in 0..MAX_ATTEMPTS {
         match start(reservation).await {
-            Ok(_) => return RestartSeedStatus::Started,
+            Ok(outcome) => {
+                return match outcome.status {
+                    super::super::router::HeadlessTurnStartStatus::Started => {
+                        RestartSeedStatus::Started
+                    }
+                    super::super::router::HeadlessTurnStartStatus::Queued => {
+                        RestartSeedStatus::Queued
+                    }
+                    super::super::router::HeadlessTurnStartStatus::Consumed => {
+                        RestartSeedStatus::Started
+                    }
+                };
+            }
             Err(super::super::router::HeadlessTurnStartError::Conflict(_))
                 if attempt + 1 < MAX_ATTEMPTS =>
             {
@@ -188,6 +204,11 @@ async fn start_restart_seed_turn(ctx: &Context<'_>) -> RestartSeedStatus {
         )
     })
     .await
+}
+
+#[cfg(test)]
+pub(super) fn restart_seed_note_for_test(status: &RestartSeedStatus) -> String {
+    restart_seed_note(status)
 }
 
 #[cfg(test)]
