@@ -157,7 +157,8 @@ fn watcher_backstop_produced_terminal_end(
             state.tmux_session_name.as_deref() == Some(tmux_session_name)
                 && state.output_path.as_deref() == Some(output_path)
         })
-        .map(|state| state.last_offset);
+        .map(|state| state.last_offset)
+        .filter(|offset| *offset > 0);
 
     if let Some(state) = inflight_state {
         let expected_key = DeliveryLeaseKey::from_inflight_state_for_site(
