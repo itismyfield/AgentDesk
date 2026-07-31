@@ -167,6 +167,16 @@ jobs:
               - 'src/services/cluster/intake_router_hook/**'
               - 'src/services/discord/router/intake_dispatch.rs'
               - 'src/services/discord/router/intake_dispatch/**'
+              # #5001: the runtime-mismatch verdict tests are curated into
+              # `just test-postgres`, which is the only targeted cargo lane that
+              # runs at PR time (`just test-non-pg` runs post-merge in ci-main
+              # only). Without this trigger a PR touching just the verdict
+              # producers would skip the lane while the coverage baseline still
+              # reports the module as covered -- the gate would exist and
+              # silently not run. Glob rather than a file list so newly
+              # extracted verdict modules cannot be dropped silently (#4985).
+              - 'src/services/discord/router/message_handler.rs'
+              - 'src/services/discord/router/message_handler/**'
               - 'src/services/observability/**'
               - 'src/config.rs'
               - 'Cargo.toml'

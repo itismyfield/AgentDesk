@@ -171,6 +171,46 @@ class FastCheckCiWiringTests(unittest.TestCase):
             lint_job,
         )
 
+    def test_pg_db_filter_triggers_every_curated_test_postgres_module(self) -> None:
+        """A curated module whose paths never set pg_db is coverage on paper only.
+
+        `just test-postgres` is the only targeted cargo lane that runs at PR
+        time, and it runs behind the pg_db path filter. When a module is added
+        to that recipe and removed from the coverage debt baseline, but no path
+        in the filter matches where the module lives, the gate reports the
+        module as covered while the lane never runs for changes to it (#5001).
+        """
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        justfile = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
+        pg_db_filter = re.search(
+            r"(?ms)^            pg_db:\n(.*?)^            \w+:", workflow
+        )
+        self.assertIsNotNone(pg_db_filter, "pg_db filter block not found")
+        filter_block = pg_db_filter.group(1)
+
+        # Rust module paths curated into the PR-time lane, mapped to the source
+        # path that must appear in the filter. Extend deliberately: an entry
+        # here is the contract that the lane actually runs for that surface.
+        curated_module_paths = {
+            "services::discord::router::message_handler::provider_isolation"
+            "::thread_role_inheritance_tests": (
+                "src/services/discord/router/message_handler/**"
+            ),
+        }
+        recipe = just_recipe_commands(justfile, "test-postgres")
+        recipe_text = "\n".join(recipe)
+        for module, required_path in curated_module_paths.items():
+            self.assertIn(
+                module,
+                recipe_text,
+                f"{module} must stay curated into just test-postgres",
+            )
+            self.assertIn(
+                f"- '{required_path}'",
+                filter_block,
+                f"pg_db must trigger on {required_path} so {module} actually runs",
+            )
+
     def test_required_targeted_context_mirrors_test_fast_pg_db_gate(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         job = job_block(workflow, "fast_targeted_tests_required_context")
