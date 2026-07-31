@@ -4552,10 +4552,11 @@ mod tests {
                 "{\"type\":\"result\",\"result\":\"done\",\"session_id\":\"s\"}\n",
             )
             .unwrap();
-            shared.tmux_watchers.insert(
-                ch,
-                backstop_watcher_handle(&session, transcript.to_str().unwrap()),
-            );
+            let transcript_str = transcript.to_str().unwrap().to_string();
+            shared
+                .tmux_watchers
+                .insert(ch, backstop_watcher_handle(&session, &transcript_str));
+            install_confirmed_backstop_state(&shared, ch, &session, &transcript_str);
 
             let fin = TurnFinalizer::spawn();
             let k = TurnKey::new(ch, 110, 0);
