@@ -215,10 +215,20 @@ pub(crate) async fn admit_text_intake(
             IntakeRouterDecision::DeferredOpenRoute {
                 target_instance_id, ..
             } => IntakeAdmission::DeferredOpenRoute { target_instance_id },
-            other => admission_for_decision(authority_channel_opt_in, other, submission),
+            other => admission_for_decision(
+                authority_channel_opt_in,
+                effective_config.forward_pre_claim_timeout_secs,
+                other,
+                submission,
+            ),
         }
     } else {
-        admission_for_decision(authority_channel_opt_in, decision, submission)
+        admission_for_decision(
+            authority_channel_opt_in,
+            effective_config.forward_pre_claim_timeout_secs,
+            decision,
+            submission,
+        )
     };
 
     log_nonlocal_admission(&admission, &channel_id, &user_msg_id);
@@ -227,6 +237,7 @@ pub(crate) async fn admit_text_intake(
 
 fn admission_for_decision(
     authority_channel_opt_in: OwnerAuthorityChannelOptIn,
+    forward_pre_claim_timeout_secs: u64,
     decision: IntakeRouterDecision,
     submission: &IntakeSubmission,
 ) -> IntakeAdmission {
@@ -245,19 +256,17 @@ fn admission_for_decision(
         IntakeRouterDecision::SkippedDuplicate { .. } => IntakeAdmission::SkippedDuplicate,
         // A pending row has not crossed the worker claim boundary; claimed,
         // accepted, and spawned rows may already be executing and remain
-        // fenced. Local recovery retires a stale pending row under the same
-        // channel advisory lock used by worker claims before execution begins.
+        // fenced. Local recovery retires only a stale pending row before
+        // execution begins. The retirement CAS relies on the pending status
+        // predicate and PostgreSQL row lock, not advisory-lock coverage.
         IntakeRouterDecision::DeferredOpenRoute {
             target_instance_id,
             open_route_status,
             open_route_age_secs,
             resolved_owner: ResolvedSessionOwner::LiveLocal,
             ..
-        } if open_route_status == "pending" && open_route_age_secs.is_some_and(|age| {
-            age >= crate::services::cluster::intake_routing_config::effective_intake_routing_config(
-            )
-            .forward_pre_claim_timeout_secs
-        })
+        } if open_route_status == "pending"
+            && open_route_age_secs.is_some_and(|age| age >= forward_pre_claim_timeout_secs)
             && matches!(
                 authority_channel_opt_in,
                 OwnerAuthorityChannelOptIn::NotOptedIn

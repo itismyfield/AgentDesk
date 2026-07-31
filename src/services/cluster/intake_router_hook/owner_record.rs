@@ -901,8 +901,10 @@ pub(crate) async fn sweep_stale_pre_accept_claims_fenced(
 }
 
 /// Atomically retire a stale pending forwarded route before local recovery.
-/// The channel advisory lock serializes this transition with admission inserts
-/// and worker claims; a zero-row result means another actor won the race.
+/// The UPDATE's `status = 'pending'` predicate and PostgreSQL row lock
+/// serialize this transition with concurrent claims; the advisory lock is not
+/// relied on for legacy admission inserts or worker claims. A zero-row result
+/// means another actor won the race.
 pub(crate) async fn retire_stale_pending_route_for_local(
     pool: &PgPool,
     provider: &str,
@@ -918,7 +920,7 @@ pub(crate) async fn retire_stale_pending_route_for_local(
         .await?;
     let result = sqlx::query(
         "UPDATE intake_outbox
-            SET status = 'done', completed_at = NOW(),
+            SET status = 'failed_pre_accept', completed_at = NOW(),
                 last_error = 'stale route retired for local recovery'
           WHERE id = $1 AND channel_id = $2 AND status = 'pending'
             AND created_at <= NOW() - ($3::BIGINT * INTERVAL '1 second')",
@@ -1042,6 +1044,61 @@ mod tests {
             .fetch_one(pool)
             .await
             .expect("read outbox status")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_pending_retirement_preserves_payload_and_marks_pre_accept_failure() {
+        let pg = TestPostgresDb::create().await;
+        let pool = pg.connect_and_migrate().await;
+        let route_id = insert_outbox(
+            &pool,
+            "stale-payload-channel",
+            "stale-payload-message",
+            "claude",
+            "pending",
+            "forwarded",
+            Some("worker-1"),
+            Some(0),
+            None,
+            None,
+        )
+        .await;
+        sqlx::query(
+            "UPDATE intake_outbox
+                SET created_at = NOW() - INTERVAL '60 seconds'
+              WHERE id = $1",
+        )
+        .bind(route_id)
+        .execute(&pool)
+        .await
+        .expect("age stale route");
+
+        assert!(
+            retire_stale_pending_route_for_local(
+                &pool,
+                "claude",
+                "stale-payload-channel",
+                route_id,
+                12,
+            )
+            .await
+            .expect("retire stale route")
+        );
+
+        let row: (String, String, i32) = sqlx::query_as(
+            "SELECT status, user_text, retry_count
+               FROM intake_outbox WHERE id = $1",
+        )
+        .bind(route_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read retired route");
+        assert_eq!(row.0, "failed_pre_accept");
+        assert_eq!(row.1, "hi", "retirement must preserve the user payload");
+        assert_eq!(row.2, 0, "stale retirement leaves retry budget for sweep");
+
+        pool.close().await;
+        pg.drop().await;
     }
 
     fn admission_payload(channel: &str, msg: &str, provider: &str) -> InsertPendingPayload {

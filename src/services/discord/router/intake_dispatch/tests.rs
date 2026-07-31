@@ -295,6 +295,7 @@ fn telemetry_only_unopted_live_local_pending_open_route_runs_locally_5040() {
     let submission = submission_for_admission(ChannelId::new(4_350_351), 4_350_361);
     let admission = admission_for_decision(
         OwnerAuthorityChannelOptIn::NotOptedIn,
+        12,
         IntakeRouterDecision::DeferredOpenRoute {
             target_instance_id: "mac-mini-release".to_string(),
             open_route_id: None,
@@ -316,6 +317,7 @@ fn telemetry_only_unopted_live_local_fresh_pending_route_stays_fenced_5040() {
     let submission = submission_for_admission(ChannelId::new(4_350_365), 4_350_375);
     let admission = admission_for_decision(
         OwnerAuthorityChannelOptIn::NotOptedIn,
+        12,
         IntakeRouterDecision::DeferredOpenRoute {
             target_instance_id: "mac-mini-release".to_string(),
             open_route_id: None,
@@ -337,6 +339,7 @@ fn telemetry_only_unopted_live_foreign_owner_stays_fenced_5040() {
     let submission = submission_for_admission(ChannelId::new(4_350_371), 4_350_381);
     let admission = admission_for_decision(
         OwnerAuthorityChannelOptIn::NotOptedIn,
+        12,
         IntakeRouterDecision::DeferredOpenRoute {
             target_instance_id: "foreign-instance".to_string(),
             open_route_id: None,
@@ -363,6 +366,7 @@ fn telemetry_only_unopted_unknown_owner_authority_keeps_local_fence_5040() {
     let submission = submission_for_admission(ChannelId::new(4_350_391), 4_350_401);
     let admission = admission_for_decision(
         OwnerAuthorityChannelOptIn::Unknown,
+        12,
         IntakeRouterDecision::DeferredOpenRoute {
             target_instance_id: "local-instance".to_string(),
             open_route_id: None,
@@ -386,6 +390,7 @@ fn telemetry_only_unopted_local_accepted_route_stays_fenced_5040() {
     let submission = submission_for_admission(ChannelId::new(4_350_411), 4_350_421);
     let admission = admission_for_decision(
         OwnerAuthorityChannelOptIn::NotOptedIn,
+        12,
         IntakeRouterDecision::DeferredOpenRoute {
             target_instance_id: "local-instance".to_string(),
             open_route_id: None,
