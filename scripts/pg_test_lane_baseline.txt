@@ -47,6 +47,7 @@ services::cluster::intake_router_hook::owner_record::tests::claim_promote_fence_
 services::cluster::intake_router_hook::owner_record::tests::claim_promotes_fence_valid_pending_row
 services::cluster::intake_router_hook::owner_record::tests::concurrent_acquire_yields_single_owner
 services::cluster::intake_router_hook::owner_record::tests::iso_unique_active_forbids_two_active_owners
+services::cluster::intake_router_hook::owner_record::tests::stale_pending_retirement_preserves_payload_and_marks_pre_accept_failure
 services::cluster::intake_router_hook::owner_record::tests::sweep_fence_does_not_resurrect_cross_provider_orphan
 services::cluster::intake_router_hook::owner_record::tests::transfer_cas_conflict_on_mismatch
 services::cluster::intake_router_hook::owner_record::tests::transfer_channel_closed_when_absent_or_released
@@ -227,6 +228,7 @@ services::cluster::intake_router_hook::owner_record::tests::claim_promote_fence_
 services::cluster::intake_router_hook::owner_record::tests::claim_promotes_fence_valid_pending_row
 services::cluster::intake_router_hook::owner_record::tests::concurrent_acquire_yields_single_owner
 services::cluster::intake_router_hook::owner_record::tests::iso_unique_active_forbids_two_active_owners
+services::cluster::intake_router_hook::owner_record::tests::stale_pending_retirement_preserves_payload_and_marks_pre_accept_failure
 services::cluster::intake_router_hook::owner_record::tests::sweep_fence_does_not_resurrect_cross_provider_orphan
 services::cluster::intake_router_hook::owner_record::tests::transfer_cas_conflict_on_mismatch
 services::cluster::intake_router_hook::owner_record::tests::transfer_channel_closed_when_absent_or_released
