@@ -1107,6 +1107,11 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         // therefore reuse their HeadlessTurnReservation; distinct prompts keep
         // distinct reservations and remain separate FIFO entries.
         let bot_owner_provider = super::super::super::resolve_discord_bot_provider(token);
+        // Retire this turn's channel-scoped state while it still owns the mailbox.
+        // After release, a queued successor may install fresh state under the same
+        // channel key, which this defer must not remove.
+        shared.turn_start_times.remove(&channel_id);
+        super::super::super::clear_watchdog_deadline_override(channel_id.get()).await;
         let _ =
             release_mailbox_after_busy_pre_submit_defer(shared, &bot_owner_provider, channel_id)
                 .await;
@@ -1134,8 +1139,6 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             .await;
         }
         crate::services::discord::saturating_decrement_global_active(shared);
-        // The queue may have already started a successor on this channel. Leave
-        // channel-scoped timing and watchdog state to that current owner.
         cancel_token
             .cancelled
             .store(true, std::sync::atomic::Ordering::Relaxed);
