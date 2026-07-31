@@ -629,9 +629,10 @@ planner-decision count, YAML values, and warning count through `/api/health` or
 Every Disabled, Observe, and Enforce planner result emits an info-level structured
 `intake_routing_decision` event with stable `reason_code`, `would_assign_target`,
 `preferred_label_match`, `owner_resolution`, and the tri-state
-`authority_channel_opt_in` field. `ADK_INTAKE_ROUTING_MODE=enforce` can change the effective planner mode but cannot
-opt a channel into owner authority; only `owner_authority_channel_ids` controls
-that state. Unknown configuration is fail-safe at the admission boundary.
+`authority_channel_opt_in` field. `ADK_INTAKE_ROUTING_MODE=enforce` can change the
+effective planner mode but cannot opt a channel into owner authority; only
+`owner_authority_channel_ids` controls that state. Unknown configuration is
+fail-safe at the admission boundary.
 
 Operational reload note: `owner_authority_channel_ids` is read from the runtime
 config snapshot for every intake decision, so allowlist edits are reflected by

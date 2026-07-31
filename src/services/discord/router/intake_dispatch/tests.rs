@@ -306,7 +306,7 @@ fn unopted_live_local_pending_open_route_runs_locally_5040() {
 
     assert!(
         matches!(admission, IntakeAdmission::Local(_)),
-        "telemetry-only owner planning must not fence an unopted live-local channel"
+        "an explicitly unlisted local pending route may use the stale-route recovery exception"
     );
 }
 

@@ -936,7 +936,7 @@ impl Default for DatabaseConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ClusterConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -1380,6 +1380,14 @@ intake_routing:
 "#,
         );
         assert!(invalid.is_err());
+
+        let unknown_scope_key: Result<ClusterConfig, _> = serde_yaml::from_str(
+            r#"
+intake_routing:
+  owner_authority_channel_idz: ["123"]
+"#,
+        );
+        assert!(unknown_scope_key.is_err());
     }
 }
 
