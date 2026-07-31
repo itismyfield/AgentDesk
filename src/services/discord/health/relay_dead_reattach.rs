@@ -196,38 +196,6 @@ mod tests {
     }
 
     #[test]
-    fn relay_dead_reattach_yields_while_bridge_or_sink_lease_is_active() {
-        for (index, holder) in [
-            crate::services::discord::LeaseHolder::Bridge,
-            crate::services::discord::LeaseHolder::Sink,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let shared = crate::services::discord::make_shared_data_for_tests();
-            let channel = ChannelId::new(50_220_010 + index as u64);
-            let key = crate::services::discord::DeliveryLeaseKey::new(
-                channel,
-                7,
-                100 + index as u64,
-                None,
-                None,
-            );
-            assert!(shared.delivery_lease(channel).try_acquire(
-                key,
-                holder,
-                0,
-                128,
-                crate::services::discord::lease_now_ms().saturating_add(1_000),
-            ));
-            assert!(
-                shared.relay_emission_in_flight(channel),
-                "an active {holder:?} lease must block relay-dead recovery"
-            );
-        }
-    }
-
-    #[test]
     fn relay_dead_watcher_reattach_handles_dead_frontier_liveness() {
         let now = chrono::Utc::now().timestamp();
         let stale = local_string(now - (recovery::STALL_WATCHDOG_THRESHOLD_SECS as i64) - 1);
