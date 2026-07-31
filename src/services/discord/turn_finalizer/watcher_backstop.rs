@@ -228,7 +228,15 @@ mod tests {
     async fn done_without_inflight_or_lease_defers_strict_finalize() {
         super::super::tests::with_isolated_runtime_root(|| async move {
             let shared = Arc::new(crate::services::discord::make_shared_data_for_tests());
-            let channel = ChannelId::new(50_220_023 + std::process::id() as u64);
+            let channel = ChannelId::new(
+                50_220_023u64.saturating_add(
+                    chrono::Utc::now()
+                        .timestamp_nanos_opt()
+                        .unwrap_or_default()
+                        .unsigned_abs()
+                        % 100_000,
+                ),
+            );
             let session = format!("backstop-no-inflight-{}", std::process::id());
             let transcript = std::env::temp_dir().join(format!("{session}.jsonl"));
             std::fs::write(
