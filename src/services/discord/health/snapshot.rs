@@ -6,12 +6,17 @@ use super::mailbox::MailboxHealthSnapshot;
 use super::provider_probe::{self, ProviderHealthSnapshot};
 use super::redaction;
 use super::session_enrichment::SessionEnrichment;
+use super::snapshot_relay::{
+    RelayHealthBuildInput, build_relay_health_snapshot, last_outbound_activity_ms,
+    relay_active_turn_from_inflight, relay_thread_proof_for_channel, relay_turn_key_for_health,
+    trace_relay_health_classification,
+};
 use super::stall_verdict;
 use super::{BotTokenReloadScopes, HealthRegistry, bot_token_reload_scopes};
 use crate::services::discord;
 use crate::services::discord::SharedData;
 use crate::services::discord::relay_health::{
-    RelayActiveTurn, RelayHealthSnapshot, RelayStallClassifier, RelayStallState,
+    RelayHealthSnapshot, RelayStallClassifier, RelayStallState,
 };
 use crate::services::provider::ProviderKind;
 
@@ -181,35 +186,6 @@ impl DiscordHealthSnapshot {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct RelayThreadProofSnapshot {
-    parent_channel_id: Option<u64>,
-    thread_channel_id: Option<u64>,
-    stale_thread_proof: bool,
-}
-
-/// #3631: a rebind-origin inflight row (POST /api/inflight/rebind) is a
-/// synthetic origin marker — `turn_id`/`dispatch_id` null, `user_msg_id`/
-/// `current_msg_id` 0, `full_response` empty — NOT a real user/agent turn.
-/// With no mailbox cancel token there is no live turn, so the channel is idle.
-/// The classifier previously fell through to `Foreground`, falsely reporting
-/// `active_foreground_stream` and stranding queued messages (they never
-/// dispatch because no real turn ever ends to drain the queue). A cancel token
-/// present means a real turn HAS since started on the adopted session, so it is
-/// genuinely active — only treat it as idle when no cancel token is held.
-///
-/// Pure seam so the idle decision is unit-testable without constructing a full
-/// `InflightTurnState`.
-fn rebind_origin_inflight_is_idle(mailbox_has_cancel_token: bool, rebind_origin: bool) -> bool {
-    rebind_origin && !mailbox_has_cancel_token
-}
-
-fn ownerless_external_input_inflight_is_idle(
-    inflight: Option<&discord::inflight::InflightTurnState>,
-) -> bool {
-    inflight.is_some_and(discord::inflight::ownerless_external_input_inflight_is_stale)
-}
-
 /// #4408 phase-2 (I1): resolve the transcript path / provider session the relay
 /// tail is bound to, surfaced on `watcher-state` so the out-of-band watchdog can
 /// compare the server's asserted selector (B) against its own growth-aware
@@ -243,151 +219,6 @@ fn resolve_bound_selector(
     (bound_output_path, bound_session_id)
 }
 
-fn relay_active_turn_from_inflight(
-    mailbox_has_cancel_token: bool,
-    inflight: Option<&discord::inflight::InflightTurnState>,
-) -> RelayActiveTurn {
-    if !mailbox_has_cancel_token && inflight.is_none() {
-        return RelayActiveTurn::None;
-    }
-
-    // #3631: a rebind-origin row (POST /api/inflight/rebind) is a synthetic
-    // origin marker, NOT a real user/agent turn — treat it as idle when there
-    // is no live turn. See `rebind_origin_inflight_is_idle`.
-    if inflight.is_some_and(|state| {
-        rebind_origin_inflight_is_idle(mailbox_has_cancel_token, state.rebind_origin)
-    }) {
-        return RelayActiveTurn::None;
-    }
-
-    // A stale bridge-owned TUI-direct synthetic row has no live relay owner left
-    // after a restart. Restart recovery can recreate a mailbox cancel token for
-    // the persisted row, but that token is not evidence that the lost bridge
-    // tail can still make progress.
-    if ownerless_external_input_inflight_is_idle(inflight) {
-        return RelayActiveTurn::None;
-    }
-
-    if inflight.is_some_and(|state| {
-        state.long_running_placeholder_active || state.task_notification_kind.is_some()
-    }) {
-        RelayActiveTurn::ExplicitBackground
-    } else {
-        RelayActiveTurn::Foreground
-    }
-}
-
-fn last_outbound_activity_ms(
-    last_relay_ts_ms: i64,
-    inflight: Option<&discord::inflight::InflightTurnState>,
-) -> Option<i64> {
-    if last_relay_ts_ms > 0 {
-        return Some(last_relay_ts_ms);
-    }
-
-    let inflight = inflight?;
-    let has_discord_write_evidence = inflight.current_msg_len > 0
-        || inflight.response_sent_offset > 0
-        || inflight.last_watcher_relayed_offset.is_some();
-    if !has_discord_write_evidence {
-        return None;
-    }
-
-    discord::inflight::parse_updated_at_unix(&inflight.updated_at)
-        .and_then(|seconds| seconds.checked_mul(1000))
-}
-
-fn trace_relay_health_classification(
-    relay_health: &RelayHealthSnapshot,
-    relay_stall_state: RelayStallState,
-) {
-    if relay_stall_state.should_log_at_debug() {
-        tracing::debug!(
-            target: "agentdesk::discord::relay_health",
-            provider = relay_health.provider.as_str(),
-            channel_id = relay_health.channel_id,
-            relay_stall_state = relay_stall_state.as_str(),
-            queue_depth = relay_health.queue_depth,
-            tmux_alive = ?relay_health.tmux_alive,
-            desynced = relay_health.desynced,
-            pending_thread_proof = relay_health.pending_thread_proof,
-            "relay health classified"
-        );
-    } else {
-        tracing::trace!(
-            target: "agentdesk::discord::relay_health",
-            provider = relay_health.provider.as_str(),
-            channel_id = relay_health.channel_id,
-            relay_stall_state = relay_stall_state.as_str(),
-            queue_depth = relay_health.queue_depth,
-            "relay health classified"
-        );
-    }
-}
-
-async fn relay_thread_proof_for_channel(
-    shared: &SharedData,
-    provider: Option<&ProviderKind>,
-    channel_id: ChannelId,
-    current_channel_has_live_evidence: bool,
-) -> RelayThreadProofSnapshot {
-    let thread_channel_id = shared
-        .dispatch
-        .thread_parents
-        .get(&channel_id)
-        .map(|entry| entry.value().get());
-    let parent_channel_id = shared
-        .dispatch
-        .thread_parents
-        .iter()
-        .find_map(|entry| (*entry.value() == channel_id).then_some(entry.key().get()));
-
-    let child_has_live_evidence = match thread_channel_id {
-        Some(thread_id) => {
-            let thread_channel = ChannelId::new(thread_id);
-            let thread_mailbox = discord::mailbox_snapshot(shared, thread_channel).await;
-            let thread_inflight = provider
-                .and_then(|provider| discord::inflight::load_inflight_state(provider, thread_id));
-            thread_mailbox.cancel_token.is_some()
-                || thread_inflight.is_some()
-                || shared.tmux_watchers.contains_key(&thread_channel)
-        }
-        None => false,
-    };
-
-    RelayThreadProofSnapshot {
-        parent_channel_id,
-        thread_channel_id,
-        stale_thread_proof: thread_channel_id.is_some_and(|_| !child_has_live_evidence)
-            || parent_channel_id.is_some_and(|_| !current_channel_has_live_evidence),
-    }
-}
-
-struct RelayHealthBuildInput {
-    provider: String,
-    channel_id: u64,
-    mailbox_has_cancel_token: bool,
-    mailbox_active_user_msg_id: Option<u64>,
-    mailbox_turn_started_at_ms: Option<i64>,
-    queue_depth: usize,
-    watcher_attached: bool,
-    watcher_attached_stale: bool,
-    watcher_owner_channel_id: Option<u64>,
-    tmux_session: Option<String>,
-    tmux_alive: Option<bool>,
-    bridge_inflight_present: bool,
-    bridge_current_msg_id: Option<u64>,
-    watcher_owns_live_relay: bool,
-    last_relay_ts_ms: i64,
-    last_relay_offset: u64,
-    last_capture_offset: Option<u64>,
-    unread_bytes: Option<u64>,
-    desynced: bool,
-    thread_proof: RelayThreadProofSnapshot,
-    active_turn: RelayActiveTurn,
-    last_outbound_activity_ms: Option<i64>,
-}
-
 fn authoritative_tmux_session(
     enriched_session: Option<&str>,
     mailbox_cancel_session: Option<&str>,
@@ -395,40 +226,6 @@ fn authoritative_tmux_session(
     enriched_session
         .or(mailbox_cancel_session)
         .map(str::to_string)
-}
-
-fn build_relay_health_snapshot(input: RelayHealthBuildInput) -> RelayHealthSnapshot {
-    RelayHealthSnapshot {
-        provider: input.provider,
-        channel_id: input.channel_id,
-        active_turn: input.active_turn,
-        tmux_session: input.tmux_session,
-        tmux_alive: input.tmux_alive,
-        watcher_attached: input.watcher_attached,
-        watcher_attached_stale: input.watcher_attached_stale,
-        watcher_owner_channel_id: input.watcher_owner_channel_id,
-        watcher_owns_live_relay: input.watcher_owns_live_relay,
-        bridge_inflight_present: input.bridge_inflight_present,
-        bridge_current_msg_id: input.bridge_current_msg_id,
-        mailbox_has_cancel_token: input.mailbox_has_cancel_token,
-        mailbox_active_user_msg_id: input.mailbox_active_user_msg_id,
-        mailbox_turn_started_at_ms: input.mailbox_turn_started_at_ms,
-        queue_depth: input.queue_depth,
-        pending_discord_callback_msg_id: input
-            .bridge_current_msg_id
-            .or(input.mailbox_active_user_msg_id),
-        pending_thread_proof: input.thread_proof.parent_channel_id.is_some()
-            || input.thread_proof.thread_channel_id.is_some(),
-        parent_channel_id: input.thread_proof.parent_channel_id,
-        thread_channel_id: input.thread_proof.thread_channel_id,
-        last_relay_ts_ms: (input.last_relay_ts_ms > 0).then_some(input.last_relay_ts_ms),
-        last_outbound_activity_ms: input.last_outbound_activity_ms,
-        last_capture_offset: input.last_capture_offset,
-        last_relay_offset: input.last_relay_offset,
-        unread_bytes: input.unread_bytes,
-        desynced: input.desynced,
-        stale_thread_proof: input.thread_proof.stale_thread_proof,
-    }
 }
 
 impl HealthRegistry {
@@ -599,6 +396,11 @@ async fn watcher_state_snapshot_for_shared(
         mailbox_turn_started_at_ms: mailbox_snapshot
             .turn_started_at
             .map(|started_at| started_at.timestamp_millis()),
+        relay_turn_key: relay_turn_key_for_health(
+            ChannelId::new(session.watcher_owner_channel_id.unwrap_or(channel.get())),
+            shared.restart.current_generation,
+            session.inflight.as_ref(),
+        ),
         queue_depth: mailbox_snapshot.intervention_queue.len(),
         watcher_attached: session.attached,
         watcher_attached_stale: session.watcher_attached_stale,
@@ -610,6 +412,7 @@ async fn watcher_state_snapshot_for_shared(
         watcher_owns_live_relay: session.watcher_owns_live_relay(),
         last_relay_ts_ms: session.last_relay_ts_ms,
         last_relay_offset: session.last_relay_offset,
+        last_relay_offset_recorded: session.last_relay_offset_recorded,
         last_capture_offset: session.last_capture_offset,
         unread_bytes: session.unread_bytes,
         desynced,
@@ -781,6 +584,11 @@ async fn build_health_snapshot_with_options(
                     mailbox_turn_started_at_ms: snapshot
                         .turn_started_at
                         .map(|started_at| started_at.timestamp_millis()),
+                    relay_turn_key: relay_turn_key_for_health(
+                        ChannelId::new(session.watcher_owner_channel_id.unwrap_or(channel.get())),
+                        entry.shared.restart.current_generation,
+                        session.inflight.as_ref(),
+                    ),
                     queue_depth,
                     watcher_attached: session.watcher_attached,
                     watcher_attached_stale: session.watcher_attached_stale,
@@ -792,6 +600,7 @@ async fn build_health_snapshot_with_options(
                     watcher_owns_live_relay: session.watcher_owns_live_relay(),
                     last_relay_ts_ms: session.last_relay_ts_ms,
                     last_relay_offset: session.last_relay_offset,
+                    last_relay_offset_recorded: session.last_relay_offset_recorded,
                     last_capture_offset: session.last_capture_offset,
                     unread_bytes: session.unread_bytes,
                     desynced,
@@ -1004,9 +813,11 @@ mod tests {
 
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
+    use super::super::snapshot_relay::{
+        rebind_origin_inflight_is_idle, relay_active_turn_from_inflight,
+    };
     use super::{
-        HealthRegistry, authoritative_tmux_session, build_health_snapshot,
-        rebind_origin_inflight_is_idle, relay_active_turn_from_inflight, resolve_bound_selector,
+        HealthRegistry, authoritative_tmux_session, build_health_snapshot, resolve_bound_selector,
     };
     use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::discord::inflight::InflightTurnState;

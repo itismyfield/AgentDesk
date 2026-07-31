@@ -92,19 +92,22 @@ pub(super) fn watcher_backstop_turn_is_terminal(
         runtime_kind,
         std::path::Path::new(&output_path),
     );
-    let confirmed_end_offset = shared
+    let confirmed_end_publication = shared
         .tmux_relay_coord(channel_id)
-        .confirmed_end_offset
-        .load(std::sync::atomic::Ordering::Acquire);
+        .confirmed_end_publication();
     let produced_terminal_end = watcher_backstop_produced_terminal_end(
         shared,
         channel_id,
         inflight_state.as_ref(),
         &tmux_session_name,
         &output_path,
-    )
-    .unwrap_or(confirmed_end_offset);
-    let delivery_confirmed = confirmed_end_offset >= produced_terminal_end;
+    );
+    // Both publication identity and a produced terminal end are required.
+    // Missing either fact is unconfirmed; never manufacture authority by
+    // comparing a frontier to itself.
+    let delivery_confirmed = confirmed_end_publication
+        .zip(produced_terminal_end)
+        .is_some_and(|(confirmed, produced)| confirmed >= produced);
     // Bounded escape hatch: fast-path probes and pulled deadlines stay strict,
     // but the natural far-backstop deadline may finalize a structurally Done
     // turn even if the relay watermark never reaches the produced frontier. This
@@ -117,8 +120,8 @@ pub(super) fn watcher_backstop_turn_is_terminal(
             channel_id = channel_id.get(),
             provider = %provider.as_str(),
             tmux_session = %tmux_session_name,
-            confirmed_end_offset,
-            produced_terminal_end,
+            ?confirmed_end_publication,
+            ?produced_terminal_end,
             at_deadline,
             natural_deadline_escape = delivery_confirmed_or_natural_deadline_escape,
             "watcher backstop observed Done before delivery confirmation"
@@ -182,8 +185,8 @@ fn watcher_backstop_produced_terminal_end(
     // to `output_path` metadata: for CodexTui the watcher path can be the
     // provider rollout transcript, not the relay cursor, and empty/silent turns
     // would over-defer because transcript terminator bytes are not delivered
-    // output. If neither source is present, the caller falls back to the
-    // confirmed frontier so no unknown non-output range is invented.
+    // output. If neither source is present, the caller keeps delivery unconfirmed;
+    // an unknown produced end cannot confer destructive finalization authority.
     end
 }
 
@@ -217,6 +220,37 @@ mod tests {
     /// runtime) as terminal — and must not even RUN the pane capture — while
     /// the at-deadline re-check keeps the pane-ready fallback. `Done` /
     /// `PausedLive` verdicts are identical in both modes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn done_without_inflight_or_lease_defers_strict_finalize() {
+        super::super::tests::with_isolated_runtime_root(|| async move {
+            let shared = Arc::new(crate::services::discord::make_shared_data_for_tests());
+            let channel = ChannelId::new(50_220_023);
+            let session = format!("backstop-no-inflight-{}", std::process::id());
+            let transcript = std::env::temp_dir().join(format!("{session}.jsonl"));
+            std::fs::write(
+                &transcript,
+                "{\"type\":\"result\",\"result\":\"done\",\"session_id\":\"s\"}\n",
+            )
+            .unwrap();
+            shared.tmux_watchers.insert(
+                channel,
+                super::super::tests::backstop_watcher_handle(
+                    &session,
+                    transcript.to_str().unwrap(),
+                ),
+            );
+
+            assert!(!watcher_backstop_turn_is_terminal(
+                &shared,
+                channel,
+                &ProviderKind::Claude,
+                false,
+            ));
+            let _ = std::fs::remove_file(transcript);
+        })
+        .await;
+    }
+
     #[test]
     fn non_jsonl_signal_never_terminal_on_fast_path_probe() {
         use std::cell::Cell;

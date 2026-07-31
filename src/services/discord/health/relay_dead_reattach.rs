@@ -11,11 +11,13 @@ use crate::services::provider::ProviderKind;
 fn should_reattach_relay_dead_watcher(
     snapshot: &WatcherStateSnapshot,
     channel_id: ChannelId,
+    relay_emission_in_flight: bool,
     latest_runtime_activity_unix_nanos: i64,
     now_unix_secs: i64,
     boot_unix_secs: i64,
 ) -> bool {
-    if snapshot.relay_stall_state != RelayStallState::TmuxAliveRelayDead
+    if relay_emission_in_flight
+        || snapshot.relay_stall_state != RelayStallState::TmuxAliveRelayDead
         || !snapshot.attached
         || snapshot.watcher_owner_channel_id != Some(channel_id.get())
         || snapshot.tmux_session_alive != Some(true)
@@ -36,10 +38,19 @@ fn should_reattach_relay_dead_watcher(
     }
     // Fresh runtime activity is a blocker for destructive cleanup, but for a
     // relay frontier that never moved it is evidence that a non-destructive
-    // watcher reattach can recover live output.
+    // watcher reattach can recover live output. This predicate expands only the
+    // watcher registry: `auto_apply_relay_recovery_for_shared` reserves the exact
+    // inflight episode and `apply_relay_recovery_decision` passes that reservation
+    // to `rebind_inflight`, whose automatic arm cannot enter the manual
+    // mailbox/inflight/session cleanup branches. After restart, NotAttempted or
+    // Unknown therefore authorizes only pinned adoption; destructive repair stays
+    // restricted to exact NotDelivered evidence.
     if snapshot
         .relay_health
         .relay_frontier_never_advanced_with_unread_tail()
+        || snapshot
+            .relay_health
+            .relay_frontier_unobserved_with_unread_tail()
     {
         return true;
     }
@@ -58,6 +69,7 @@ pub(super) async fn try_apply(
     snapshot: &WatcherStateSnapshot,
     now_unix_secs: i64,
 ) -> bool {
+    let relay_emission_in_flight = shared.relay_emission_in_flight(channel_id);
     let Some(latest_activity_unix_nanos) = snapshot
         .tmux_session
         .as_deref()
@@ -68,6 +80,7 @@ pub(super) async fn try_apply(
     if !should_reattach_relay_dead_watcher(
         snapshot,
         channel_id,
+        relay_emission_in_flight,
         latest_activity_unix_nanos,
         now_unix_secs,
         registry.started_at_unix(),
@@ -104,6 +117,7 @@ mod tests {
     use super::*;
     use crate::services::discord::relay_health::{RelayActiveTurn, RelayHealthSnapshot};
     use chrono::TimeZone;
+    use std::sync::atomic::Ordering;
 
     fn local_string(unix: i64) -> String {
         chrono::Local
@@ -170,12 +184,57 @@ mod tests {
                 thread_channel_id: None,
                 last_relay_ts_ms: None,
                 last_outbound_activity_ms: None,
+                delivery_evidence: crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered,
                 last_capture_offset: Some(128),
                 last_relay_offset: 0,
+                last_relay_offset_recorded: true,
                 unread_bytes: Some(128),
                 desynced: true,
                 stale_thread_proof: false,
             },
+        }
+    }
+
+    #[tokio::test]
+    async fn relay_dead_reattach_yields_while_watcher_emission_is_in_flight() {
+        let shared = Arc::new(crate::services::discord::make_shared_data_for_tests());
+        let channel = ChannelId::new(50_220_004);
+        shared
+            .tmux_relay_coord(channel)
+            .relay_slot
+            .store(1, Ordering::Release);
+        assert!(shared.relay_emission_in_flight(channel));
+    }
+
+    #[test]
+    fn relay_dead_reattach_yields_while_bridge_or_sink_lease_is_active() {
+        for (index, holder) in [
+            crate::services::discord::LeaseHolder::Bridge,
+            crate::services::discord::LeaseHolder::Sink,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let channel = ChannelId::new(50_220_010 + index as u64);
+            let key = crate::services::discord::DeliveryLeaseKey::new(
+                channel,
+                7,
+                100 + index as u64,
+                None,
+                None,
+            );
+            assert!(shared.delivery_lease(channel).try_acquire(
+                key,
+                holder,
+                0,
+                128,
+                crate::services::discord::lease_now_ms().saturating_add(1_000),
+            ));
+            assert!(
+                shared.relay_emission_in_flight(channel),
+                "an active {holder:?} lease must block relay-dead recovery"
+            );
         }
     }
 
@@ -192,6 +251,15 @@ mod tests {
         assert!(should_reattach_relay_dead_watcher(
             &snapshot(&stale),
             ChannelId::new(42),
+            false,
+            stale_activity,
+            now,
+            boot,
+        ));
+        assert!(!should_reattach_relay_dead_watcher(
+            &snapshot(&stale),
+            ChannelId::new(42),
+            true,
             stale_activity,
             now,
             boot,
@@ -204,6 +272,9 @@ mod tests {
         committed.inflight_terminal_delivery_committed = true;
         let mut fresh_outbound = snapshot(&stale);
         fresh_outbound.relay_health.last_outbound_activity_ms = Some((now - 5) * 1000);
+        let mut delivered_live_fingerprint = snapshot(&stale);
+        delivered_live_fingerprint.relay_health.delivery_evidence =
+            crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::Delivered;
         let mut advanced_frontier = snapshot(&stale);
         advanced_frontier.last_relay_ts_ms = (now - 30) * 1000;
         advanced_frontier.last_relay_offset = 64;
@@ -237,6 +308,7 @@ mod tests {
                 !should_reattach_relay_dead_watcher(
                     &candidate,
                     ChannelId::new(42),
+                    false,
                     activity,
                     now,
                     boot_unix_secs,
@@ -248,6 +320,7 @@ mod tests {
             should_reattach_relay_dead_watcher(
                 &snapshot(&stale),
                 ChannelId::new(42),
+                false,
                 fresh_activity,
                 now,
                 boot,
@@ -258,21 +331,56 @@ mod tests {
             should_reattach_relay_dead_watcher(
                 &advanced_frontier,
                 ChannelId::new(42),
+                false,
                 stale_activity,
                 now,
                 boot,
             ),
             "advanced relay frontiers still require stale runtime activity before reattach"
         );
+        for evidence in [
+            crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotAttempted,
+            crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::Unknown,
+        ] {
+            let mut post_restart = snapshot(&stale);
+            post_restart.relay_health.delivery_evidence = evidence;
+            post_restart.relay_stall_state =
+                crate::services::discord::relay_health::RelayStallClassifier::classify(
+                    &post_restart.relay_health,
+                );
+            assert!(
+                should_reattach_relay_dead_watcher(
+                    &post_restart,
+                    ChannelId::new(42),
+                    false,
+                    stale_activity,
+                    now,
+                    boot,
+                ),
+                "bounded observation must allow non-destructive post-restart reattach for {evidence:?}"
+            );
+        }
         assert!(
-            should_reattach_relay_dead_watcher(
+            !should_reattach_relay_dead_watcher(
                 &fresh_outbound,
                 ChannelId::new(42),
-                stale_activity,
+                false,
+                fresh_activity,
                 now,
                 boot,
             ),
-            "recent outbound activity must not block non-destructive watcher reattach"
+            "fresh outbound and runtime activity must restore the destructive-cleanup blocker"
+        );
+        assert!(
+            !should_reattach_relay_dead_watcher(
+                &delivered_live_fingerprint,
+                ChannelId::new(42),
+                false,
+                fresh_activity,
+                now,
+                boot,
+            ),
+            "confirmed Discord delivery must not bypass the fresh-runtime-activity guard"
         );
     }
 }

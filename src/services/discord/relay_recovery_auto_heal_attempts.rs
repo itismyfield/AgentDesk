@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 use super::{RelayRecoveryActionKind, RelayRecoveryApplySource, is_agentdesk_tmux_session};
+use crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence;
 use crate::services::discord::relay_health::RelayHealthSnapshot;
 
 pub(super) const AUTO_HEAL_WINDOW_SECS: i64 = 600;
@@ -84,13 +85,21 @@ pub(super) fn auto_heal_key(
     channel_id: u64,
     action: RelayRecoveryActionKind,
     source: RelayRecoveryApplySource,
+    delivery_evidence: RelayDeliveryEvidence,
 ) -> String {
+    let evidence_lane = match delivery_evidence {
+        RelayDeliveryEvidence::NotDelivered => "not_delivered",
+        RelayDeliveryEvidence::NotAttempted | RelayDeliveryEvidence::Unknown => "unobserved",
+        RelayDeliveryEvidence::AttemptedUnconfirmed => "attempted_unconfirmed",
+        RelayDeliveryEvidence::Delivered => "delivered",
+    };
     format!(
-        "{}:{}:{}:{}",
+        "{}:{}:{}:{}:{}",
         provider,
         channel_id,
         action.as_str(),
-        source.budget_lane().as_str()
+        source.budget_lane().as_str(),
+        evidence_lane
     )
 }
 
@@ -195,9 +204,16 @@ pub(super) fn max_attempts_per_window_for_snapshot(
     snapshot: &RelayHealthSnapshot,
     action: RelayRecoveryActionKind,
 ) -> u32 {
+    // Exact NotDelivered and post-restart unobserved dead-frontier shapes each
+    // receive at most two non-refunded reservations per ten-minute window in the
+    // shared probe/watchdog lane. Their evidence lanes use distinct keys, so an
+    // ambiguous post-restart observation cannot starve exact non-delivery repair.
+    // Spawn/rebind failures refund reservations; three consecutive refunds then
+    // open a 1,200s backoff, as enforced below.
     if action == RelayRecoveryActionKind::ReattachWatcher
         && is_agentdesk_tmux_session(snapshot.tmux_session.as_deref())
-        && snapshot.relay_frontier_never_advanced_with_unread_tail()
+        && (snapshot.relay_frontier_never_advanced_with_unread_tail()
+            || snapshot.relay_frontier_unobserved_with_unread_tail())
     {
         return AUTO_HEAL_DEAD_FRONTIER_REATTACH_MAX_ATTEMPTS_PER_WINDOW;
     }
@@ -228,6 +244,7 @@ mod tests {
             4_423_101,
             RelayRecoveryActionKind::ReattachWatcher,
             RelayRecoveryApplySource::ProbeAutoHeal,
+            RelayDeliveryEvidence::NotDelivered,
         )
     }
 
@@ -238,18 +255,21 @@ mod tests {
             4_423_102,
             RelayRecoveryActionKind::ReattachWatcher,
             RelayRecoveryApplySource::ProbeAutoHeal,
+            RelayDeliveryEvidence::NotDelivered,
         );
         let watchdog = auto_heal_key(
             "codex",
             4_423_102,
             RelayRecoveryActionKind::ReattachWatcher,
             RelayRecoveryApplySource::StallWatchdog,
+            RelayDeliveryEvidence::NotDelivered,
         );
         let manual = auto_heal_key(
             "codex",
             4_423_102,
             RelayRecoveryActionKind::ReattachWatcher,
             RelayRecoveryApplySource::Manual,
+            RelayDeliveryEvidence::NotDelivered,
         );
 
         assert_eq!(
@@ -257,6 +277,33 @@ mod tests {
             "internal actors must share one budget lane"
         );
         assert_ne!(manual, probe, "manual budget must remain operator-only");
+    }
+
+    #[test]
+    fn relay_recovery_evidence_shapes_have_distinct_budget_keys() {
+        let exact = auto_heal_key(
+            "codex",
+            4_423_102,
+            RelayRecoveryActionKind::ReattachWatcher,
+            RelayRecoveryApplySource::ProbeAutoHeal,
+            RelayDeliveryEvidence::NotDelivered,
+        );
+        for evidence in [
+            RelayDeliveryEvidence::NotAttempted,
+            RelayDeliveryEvidence::Unknown,
+        ] {
+            let unobserved = auto_heal_key(
+                "codex",
+                4_423_102,
+                RelayRecoveryActionKind::ReattachWatcher,
+                RelayRecoveryApplySource::ProbeAutoHeal,
+                evidence,
+            );
+            assert_ne!(
+                exact, unobserved,
+                "unobserved evidence must not consume exact NotDelivered budget"
+            );
+        }
     }
 
     #[tokio::test]
@@ -268,18 +315,21 @@ mod tests {
             4_423_103,
             RelayRecoveryActionKind::ReattachWatcher,
             RelayRecoveryApplySource::ProbeAutoHeal,
+            RelayDeliveryEvidence::NotDelivered,
         );
         let watchdog = auto_heal_key(
             "codex",
             4_423_103,
             RelayRecoveryActionKind::ReattachWatcher,
             RelayRecoveryApplySource::StallWatchdog,
+            RelayDeliveryEvidence::NotDelivered,
         );
         let manual = auto_heal_key(
             "codex",
             4_423_103,
             RelayRecoveryActionKind::ReattachWatcher,
             RelayRecoveryApplySource::Manual,
+            RelayDeliveryEvidence::NotDelivered,
         );
 
         assert_eq!(reserve_auto_heal_attempt(&probe, 1_000, 1), Ok(0));
@@ -304,12 +354,14 @@ mod tests {
             4_423_104,
             RelayRecoveryActionKind::ReattachWatcher,
             RelayRecoveryApplySource::Manual,
+            RelayDeliveryEvidence::NotDelivered,
         );
         let internal = auto_heal_key(
             "codex",
             4_423_104,
             RelayRecoveryActionKind::ReattachWatcher,
             RelayRecoveryApplySource::ProbeAutoHeal,
+            RelayDeliveryEvidence::NotDelivered,
         );
 
         assert_eq!(reserve_auto_heal_attempt(&manual, 1_000, 1), Ok(0));
