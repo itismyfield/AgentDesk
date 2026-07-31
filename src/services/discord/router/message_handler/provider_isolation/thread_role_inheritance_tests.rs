@@ -194,12 +194,12 @@ fn escalation_notice_contains_identity_and_runtime_facts() {
 
 #[cfg(unix)]
 #[test]
-fn weak_idle_mismatch_never_escalates_to_cleanup() {
+fn repeated_weak_idle_mismatch_escalates_once_without_cleanup() {
     let channel_id = ChannelId::new(50_150_010);
     clear_test_defer(channel_id);
     let mut calls = Vec::new();
     let escalation_events = std::cell::Cell::new(0_u32);
-    for _ in 0..(RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT + 3) {
+    for _ in 0..(RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT * 2 + 1) {
         let verdict = reconcile_managed_tmux_runtime_kind_for_config(
             &ProviderKind::Claude,
             channel_id,
