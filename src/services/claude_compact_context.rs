@@ -646,8 +646,11 @@ async fn fetch_catalog(proxy_url: &str) -> Result<GatewayCatalog, String> {
             .build()
             .expect("build Claude context-window HTTP client")
     });
-    let response = client
-        .get(&endpoint)
+    let mut request = client.get(&endpoint);
+    if let Some(token) = local_gateway_admin_token(&endpoint) {
+        request = request.header("x-opencodex-api-key", token);
+    }
+    let response = request
         .send()
         .await
         .map_err(|error| format!("GET {endpoint}: {error}"))?
@@ -709,6 +712,40 @@ fn ocx_auto_compact_window(value: &Value) -> Option<u64> {
         })
         .unwrap_or(OCX_AUTO_COMPACT_WINDOW_DEFAULT_TOKENS);
     Some(window)
+}
+
+/// OCX gates its whole management API (`/api/*`, including the catalog
+/// endpoint) behind an admin token: `OPENCODEX_ADMIN_AUTH_TOKEN` env first,
+/// else the token file in its config dir (`$OPENCODEX_HOME`, default
+/// `~/.opencodex`). Mirror that resolution — but only for loopback endpoints:
+/// the file token is a host-local secret and must never be sent to a remote
+/// gateway. Absent token → no header (pre-auth gateways keep working).
+fn local_gateway_admin_token(endpoint: &str) -> Option<String> {
+    let host = reqwest::Url::parse(endpoint).ok()?.host_str()?.to_string();
+    if !matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1" | "[::1]") {
+        return None;
+    }
+    if let Ok(token) = std::env::var("OPENCODEX_ADMIN_AUTH_TOKEN") {
+        let token = token.trim();
+        if !token.is_empty() {
+            return Some(token.to_string());
+        }
+    }
+    let config_dir = std::env::var("OPENCODEX_HOME")
+        .ok()
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".opencodex")))?;
+    let path = config_dir.join("admin-api-token");
+    let metadata = std::fs::symlink_metadata(&path).ok()?;
+    // Mirror OCX's own read guard: regular file, bounded size.
+    if !metadata.is_file() || metadata.len() > 512 {
+        return None;
+    }
+    let token = std::fs::read_to_string(&path).ok()?;
+    let token = token.trim();
+    (!token.is_empty()).then(|| token.to_string())
 }
 
 fn collect_catalog_windows(value: &Value, windows: &mut HashMap<String, u64>) {
@@ -1020,6 +1057,19 @@ mod tests {
             None,
             "scrubbed launches use native selectors whose [1m] windows are genuinely 1M"
         );
+    }
+
+    #[test]
+    fn gateway_admin_token_is_never_sent_to_non_loopback_hosts() {
+        assert_eq!(
+            local_gateway_admin_token("http://10.0.0.5:10100/api/claude-code"),
+            None
+        );
+        assert_eq!(
+            local_gateway_admin_token("http://gateway.example:10100/api/claude-code"),
+            None
+        );
+        assert_eq!(local_gateway_admin_token("not a url"), None);
     }
 
     #[test]
@@ -1359,5 +1409,36 @@ mod tests {
         assert!(enabled_command.get_envs().any(|(key, value)| {
             key == OsStr::new(CLAUDE_AUTO_COMPACT_WINDOW_ENV) && value == Some(OsStr::new("700000"))
         }));
+    }
+}
+
+/// Operator diagnostic against a live local gateway; never runs in CI.
+/// `cargo test --lib live_probe_tui_launch_window -- --ignored --nocapture`
+/// prints the launch decision, the raw fetch result (window count + policy),
+/// and the committed cache entry for `http://127.0.0.1:10100`.
+#[cfg(test)]
+mod live_probe_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "live gateway probe: requires an opencodex gateway on 127.0.0.1:10100"]
+    fn live_probe_tui_launch_window() {
+        let _guard = state_test_guard();
+        let decision = tui_launch_auto_compact_window(&ClaudeGatewayProxyEnv::Inject {
+            base_url: "http://127.0.0.1:10100".to_string(),
+        });
+        eprintln!("LIVE_PROBE decision={decision:?}");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let raw = runtime.block_on(fetch_catalog("http://127.0.0.1:10100"));
+        eprintln!(
+            "LIVE_PROBE raw_fetch={:?}",
+            raw.as_ref()
+                .map(|catalog| (catalog.windows.len(), catalog.auto_compact_window))
+        );
+        let cached = cached_gateway_auto_compact_window("http://127.0.0.1:10100");
+        eprintln!("LIVE_PROBE cached={cached:?}");
     }
 }
