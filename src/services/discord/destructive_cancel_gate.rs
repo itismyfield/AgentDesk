@@ -568,9 +568,7 @@ mod tests {
             full_response: "unsent",
             response_sent_offset: 0,
             prior_delivery_evidence: false,
-            turn_age_secs: Some(
-                destructive_cancel_liveness::ZERO_DELIVERY_FORFEIT_MIN_AGE_SECS + 1,
-            ),
+            turn_age_secs: Some(destructive_cancel_liveness::RELAY_FORFEIT_MIN_AGE_SECS + 1),
             now_unix: 100_000,
         };
 
@@ -649,7 +647,7 @@ mod tests {
         state.last_watcher_relayed_offset = None;
         state.started_at = (chrono::Local::now()
             - chrono::Duration::seconds(
-                destructive_cancel_liveness::ZERO_DELIVERY_FORFEIT_MIN_AGE_SECS + 60,
+                destructive_cancel_liveness::RELAY_FORFEIT_MIN_AGE_SECS + 60,
             ))
         .format("%Y-%m-%d %H:%M:%S")
         .to_string();
@@ -956,6 +954,27 @@ mod tests {
 
             assert_eq!(gate.denied_reason(), Some("fresh_watcher_heartbeat"));
         });
+    }
+
+    #[test]
+    fn destructive_cancel_frontier_absence_does_not_prove_stalled_delivery() {
+        let evidence = WatcherRelayLivenessEvidence {
+            output_len_at_snapshot: Some(100),
+            output_len_now: Some(100),
+            output_mtime_age_secs: Some(601),
+            relay_frontier_at_snapshot: None,
+            relay_frontier_now: None,
+            last_watcher_relayed_offset: Some(100),
+            last_watcher_relayed_at_unix: Some(90_000),
+            terminal_delivery_committed: false,
+            full_response: "delivered prefix and undelivered suffix",
+            response_sent_offset: "delivered prefix".len(),
+            prior_delivery_evidence: true,
+            turn_age_secs: Some(20_000),
+            now_unix: 100_000,
+        };
+        assert!(!relay_liveness_forfeited(evidence));
+        assert!(fresh_watcher_heartbeat_blocks_rebind(evidence, false));
     }
 
     #[test]

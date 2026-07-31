@@ -2,7 +2,12 @@ use super::inflight;
 
 // Conservative, currently unmeasured threshold inherited from #4992 rollout;
 // would-forfeit remains observation-only pending calibrated #5007 activation.
-pub(super) const ZERO_DELIVERY_FORFEIT_MIN_AGE_SECS: i64 = 1_800;
+pub(super) const RELAY_FORFEIT_MIN_AGE_SECS: i64 = 1_800; // 30 minutes
+
+// A persisted wall-clock timestamp this far behind the current process cannot
+// describe a live turn. Rejecting it keeps a legacy/epoch `started_at` from
+// making the `stall_age <= turn_age` consistency check vacuous.
+pub(super) const MAX_RELAY_LIVENESS_TURN_AGE_SECS: i64 = 7 * 24 * 60 * 60; // 7 days
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct WatcherRelayLivenessEvidence<'a> {
@@ -61,9 +66,9 @@ pub(super) fn relay_liveness_forfeited(evidence: WatcherRelayLivenessEvidence<'_
         && evidence.response_sent_offset == 0
         && evidence.last_watcher_relayed_offset.is_none()
         && !evidence.terminal_delivery_committed
-        && evidence
-            .turn_age_secs
-            .is_some_and(|age| age >= ZERO_DELIVERY_FORFEIT_MIN_AGE_SECS);
+        && evidence.turn_age_secs.is_some_and(|age| {
+            (RELAY_FORFEIT_MIN_AGE_SECS..=MAX_RELAY_LIVENESS_TURN_AGE_SECS).contains(&age)
+        });
 
     // The complementary prior-delivery arm still requires a valid watcher clock
     // and stalled consumer frontier before destructive recovery may proceed.
@@ -77,12 +82,15 @@ pub(super) fn relay_liveness_forfeited(evidence: WatcherRelayLivenessEvidence<'_
             evidence.turn_age_secs,
         ) {
             (Some(stall_age_secs), Some(turn_age_secs)) => {
-                !relay_frontier_advanced(
+                relay_frontier_stalled(
                     evidence.relay_frontier_at_snapshot,
                     evidence.relay_frontier_now,
-                ) && evidence.output_len_now.unwrap_or(0) > evidence.relay_frontier_now.unwrap_or(0)
-                    && stall_age_secs >= ZERO_DELIVERY_FORFEIT_MIN_AGE_SECS
+                ) && capture_exceeds_observed_frontier(
+                    evidence.output_len_now,
+                    evidence.relay_frontier_now,
+                ) && stall_age_secs >= RELAY_FORFEIT_MIN_AGE_SECS
                     && stall_age_secs <= turn_age_secs
+                    && turn_age_secs <= MAX_RELAY_LIVENESS_TURN_AGE_SECS
             }
             _ => false,
         };
@@ -93,6 +101,19 @@ pub(super) fn relay_liveness_forfeited(evidence: WatcherRelayLivenessEvidence<'_
 fn valid_elapsed_secs(timestamp: Option<i64>, now_unix: i64) -> Option<i64> {
     let timestamp = timestamp?;
     (timestamp >= 0 && timestamp <= now_unix).then(|| now_unix - timestamp)
+}
+
+fn relay_frontier_stalled(previous: Option<u64>, current: Option<u64>) -> bool {
+    matches!((previous, current), (Some(previous), Some(current)) if current == previous)
+}
+
+fn capture_exceeds_observed_frontier(
+    output_len_now: Option<u64>,
+    relay_frontier_now: Option<u64>,
+) -> bool {
+    output_len_now
+        .zip(relay_frontier_now)
+        .is_some_and(|(output_len, relay_frontier)| output_len > relay_frontier)
 }
 
 fn capture_progress_recent(evidence: WatcherRelayLivenessEvidence<'_>) -> bool {
@@ -137,7 +158,7 @@ mod tests {
             full_response: "captured but unsent response",
             response_sent_offset: 0,
             prior_delivery_evidence: false,
-            turn_age_secs: Some(ZERO_DELIVERY_FORFEIT_MIN_AGE_SECS + 1),
+            turn_age_secs: Some(RELAY_FORFEIT_MIN_AGE_SECS + 1),
             now_unix: 100_000,
         }
     }
@@ -191,7 +212,7 @@ mod tests {
     #[test]
     fn destructive_cancel_minimum_age_preserves_grace_window() {
         let within_grace = WatcherRelayLivenessEvidence {
-            turn_age_secs: Some(ZERO_DELIVERY_FORFEIT_MIN_AGE_SECS - 1),
+            turn_age_secs: Some(RELAY_FORFEIT_MIN_AGE_SECS - 1),
             ..evidence()
         };
         assert!(fresh_watcher_heartbeat_blocks_rebind(
@@ -318,6 +339,26 @@ mod tests {
             ..evidence()
         };
         assert!(!fresh_watcher_heartbeat_blocks_rebind(no_payload, false));
+    }
+
+    #[test]
+    fn destructive_cancel_legacy_epoch_turn_age_abstains() {
+        let legacy_epoch = WatcherRelayLivenessEvidence {
+            last_watcher_relayed_offset: Some(6_281_996),
+            last_watcher_relayed_at_unix: Some(90_000),
+            output_len_now: Some(6_282_100),
+            relay_frontier_at_snapshot: Some(6_281_996),
+            relay_frontier_now: Some(6_281_996),
+            now_unix: 100_000,
+            turn_age_secs: Some(MAX_RELAY_LIVENESS_TURN_AGE_SECS + 1),
+            prior_delivery_evidence: true,
+            ..evidence()
+        };
+        assert!(!relay_liveness_forfeited(legacy_epoch));
+        assert!(fresh_watcher_heartbeat_blocks_rebind(
+            legacy_epoch,
+            relay_liveness_forfeited(legacy_epoch),
+        ));
     }
 
     #[test]
