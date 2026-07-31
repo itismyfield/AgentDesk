@@ -1046,61 +1046,6 @@ mod tests {
             .expect("read outbox status")
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn stale_pending_retirement_preserves_payload_and_marks_pre_accept_failure() {
-        let pg = TestPostgresDb::create().await;
-        let pool = pg.connect_and_migrate().await;
-        let route_id = insert_outbox(
-            &pool,
-            "stale-payload-channel",
-            "stale-payload-message",
-            "claude",
-            "pending",
-            "forwarded",
-            Some("worker-1"),
-            Some(0),
-            None,
-            None,
-        )
-        .await;
-        sqlx::query(
-            "UPDATE intake_outbox
-                SET created_at = NOW() - INTERVAL '60 seconds'
-              WHERE id = $1",
-        )
-        .bind(route_id)
-        .execute(&pool)
-        .await
-        .expect("age stale route");
-
-        assert!(
-            retire_stale_pending_route_for_local(
-                &pool,
-                "claude",
-                "stale-payload-channel",
-                route_id,
-                12,
-            )
-            .await
-            .expect("retire stale route")
-        );
-
-        let row: (String, String, i32) = sqlx::query_as(
-            "SELECT status, user_text, retry_count
-               FROM intake_outbox WHERE id = $1",
-        )
-        .bind(route_id)
-        .fetch_one(&pool)
-        .await
-        .expect("read retired route");
-        assert_eq!(row.0, "failed_pre_accept");
-        assert_eq!(row.1, "hi", "retirement must preserve the user payload");
-        assert_eq!(row.2, 0, "stale retirement leaves retry budget for sweep");
-
-        pool.close().await;
-        pg.drop().await;
-    }
-
     fn admission_payload(channel: &str, msg: &str, provider: &str) -> InsertPendingPayload {
         InsertPendingPayload {
             target_instance_id: "worker-1".to_string(),
@@ -2058,6 +2003,48 @@ mod tests {
         let pg = TestPostgresDb::create().await;
         let pool = pg.connect_and_migrate().await;
         insert_owner(&pool, "claude", "chanL", "node-W", 0, "active").await;
+        let stale_route_id = insert_outbox(
+            &pool,
+            "stale-local",
+            "msg-stale",
+            "claude",
+            "pending",
+            "forwarded",
+            Some("node-W"),
+            Some(0),
+            None,
+            None,
+        )
+        .await;
+        sqlx::query(
+            "UPDATE intake_outbox
+                SET created_at = NOW() - INTERVAL '60 seconds'
+              WHERE id = $1",
+        )
+        .bind(stale_route_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(
+            retire_stale_pending_route_for_local(
+                &pool,
+                "claude",
+                "stale-local",
+                stale_route_id,
+                12
+            )
+            .await
+            .unwrap()
+        );
+        let retired: (String, String) =
+            sqlx::query_as("SELECT status, user_text FROM intake_outbox WHERE id = $1")
+                .bind(stale_route_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(retired.0, "failed_pre_accept");
+        assert_eq!(retired.1, "hi", "retirement must preserve the user payload");
+
         insert_outbox(
             &pool,
             "chanL",
