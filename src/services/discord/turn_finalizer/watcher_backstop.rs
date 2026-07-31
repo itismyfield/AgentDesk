@@ -92,9 +92,12 @@ pub(super) fn watcher_backstop_turn_is_terminal(
         runtime_kind,
         std::path::Path::new(&output_path),
     );
-    let confirmed_end_publication = shared
-        .tmux_relay_coord(channel_id)
-        .confirmed_end_publication();
+    let confirmed_end_publication = Some(
+        shared
+            .tmux_relay_coord(channel_id)
+            .confirmed_end_offset
+            .load(std::sync::atomic::Ordering::Acquire),
+    );
     let produced_terminal_end = watcher_backstop_produced_terminal_end(
         shared,
         channel_id,

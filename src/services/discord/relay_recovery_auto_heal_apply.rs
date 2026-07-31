@@ -69,6 +69,7 @@ pub(super) async fn apply_relay_recovery_plan_with_seams(
         decision.channel_id,
         decision.action,
         source,
+        decision.evidence.delivery_evidence,
     );
     decision.auto_heal.remaining_attempts =
         remaining_auto_heal_attempts(&key, now_ms, decision.auto_heal.max_attempts_per_window);

@@ -10,6 +10,7 @@ mod catch_up;
 mod commands;
 mod compact_turn_authority;
 mod completion_footer_metadata;
+mod delivery_lease_evidence;
 mod delivery_lease_key;
 mod destructive_cancel_gate;
 mod discord_io;
