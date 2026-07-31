@@ -117,6 +117,7 @@ pub(super) fn build_watchdog_deadlock_prealert_message(
     let updated_at = inflight
         .map(|state| state.updated_at.as_str())
         .unwrap_or("?");
+
     let provider = provider.as_str();
     format!(
         "⚠️ [Watchdog pre-timeout]\n\
@@ -132,6 +133,7 @@ inflight_updated_at: {updated_at}\n\
 정상 진행이면 `POST /api/turns/{channel_id}/extend-timeout`로 연장하세요."
     )
 }
+
 pub(super) fn build_watchdog_timeout_notice_message(elapsed_mins: i64, has_queued: bool) -> String {
     if has_queued {
         format!(
@@ -162,6 +164,7 @@ pub(super) async fn send_watchdog_timeout_notice(
         );
     }
 }
+
 fn headless_inflight_has_watchdog_visible_surface(inflight: &InflightTurnState) -> bool {
     if inflight.rebind_origin || inflight.relay_ownership_only {
         return false;
@@ -277,6 +280,9 @@ pub(super) fn spawn_headless_turn_watchdog(
                 }
                 return;
             }
+            // The identity check and take are separate mailbox round trips.
+            // A successor can replace the token between them, so the second
+            // identity check bounds the remaining check-then-act window.
             if !watchdog_token_is_current(&watchdog_shared, channel_id, &watchdog_token).await {
                 return;
             }
@@ -338,6 +344,7 @@ pub(super) fn spawn_headless_turn_watchdog(
                     }
                 }
             }
+
             let current_deadline = watchdog_token
                 .watchdog_deadline_ms
                 .load(std::sync::atomic::Ordering::Relaxed);
@@ -394,6 +401,9 @@ pub(super) fn spawn_headless_turn_watchdog(
             if now < current_deadline {
                 continue;
             }
+
+            // Must be computed BEFORE reconcile_watchdog_timeout: reconcile
+            // clears the inflight row, and the visibility surfaces live on it.
             let should_emit_timeout_notice = headless_watchdog_timeout_notice_visible(
                 watchdog_shared.as_ref(),
                 &watchdog_provider,

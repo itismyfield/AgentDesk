@@ -1072,8 +1072,11 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         tmux_session_name.is_some(),
         Some(channel_id.get()),
     );
+    // The reconciler performs the identity-guarded recreate side effect; its
+    // verdict is intentionally not consumed by dispatch, which keeps the
+    // prelaunch expectation authoritative for the turn being admitted.
     #[cfg(unix)]
-    let _runtime_mismatch_verdict = reconcile_managed_tmux_runtime_kind_using_runtime(
+    reconcile_managed_tmux_runtime_kind_using_runtime(
         shared,
         &provider,
         channel_id,

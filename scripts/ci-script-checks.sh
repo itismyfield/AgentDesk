@@ -262,6 +262,9 @@ echo "=== Agent maintenance freshness gate (warn, #1432; targeted hard gates) ==
 "$PYTHON" scripts/check_agent_maintenance_docs.py --warning-only --line-count-gate \
   --migration-0093-rollout-gate
 
+echo "=== TUI relay Discord client unit tests ==="
+python3 -m unittest scripts/e2e/tui_relay/test_discord_client.py
+
 echo "=== Shell test suites (tests/*.sh) ==="
 # #4255: these suites existed but NOTHING executed them — `tests/**` appears in
 # ci-pr.yml only as a path filter that triggers the Rust jobs. Their assertions

@@ -176,6 +176,10 @@ pub(super) fn reconcile_managed_tmux_runtime_kind_for_config(
         live_turn || destructive_evidence_unknown,
     );
     if verdict.should_defer() {
+        // Moderate observed evidence is intentionally a permanent defer here:
+        // no exact-identity repair/reattach path can safely promote this legacy
+        // session, and the downstream relay watcher does not revisit this
+        // verdict. Exact-identity kill/recreate remains a separate follow-up.
         let defer_reason = if live_turn {
             "live_turn"
         } else if destructive_evidence_unknown {
