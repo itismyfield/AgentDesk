@@ -213,7 +213,18 @@ pub(super) async fn apply_relay_recovery_decision(
                                     .await
                                     .active_user_message_id
                                     .map(|id| id.get());
-                            if mailbox_active_user_msg_id != probe.pin.mailbox_active_user_msg_id {
+                            if shared.relay_emission_in_flight(owner_channel_id) {
+                                tracing::warn!(
+                                    target: "agentdesk::discord::relay_recovery",
+                                    provider = provider.as_str(),
+                                    channel_id = decision.channel_id,
+                                    watcher_owner_channel_id = owner_channel_id.get(),
+                                    death_evidence = gate.allowed_reason().unwrap_or("unknown"),
+                                    "relay recovery skipped destructive watcher cancel after gate; terminal delivery became active"
+                                );
+                            } else if mailbox_active_user_msg_id
+                                != probe.pin.mailbox_active_user_msg_id
+                            {
                                 tracing::warn!(
                                     target: "agentdesk::discord::relay_recovery",
                                     provider = provider.as_str(),

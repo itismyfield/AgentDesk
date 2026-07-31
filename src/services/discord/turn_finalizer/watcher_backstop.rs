@@ -92,19 +92,24 @@ pub(super) fn watcher_backstop_turn_is_terminal(
         runtime_kind,
         std::path::Path::new(&output_path),
     );
-    let confirmed_end_offset = shared
-        .tmux_relay_coord(channel_id)
-        .confirmed_end_offset
-        .load(std::sync::atomic::Ordering::Acquire);
+    let confirmed_end_publication = Some(
+        shared
+            .tmux_relay_coord(channel_id)
+            .confirmed_end_offset
+            .load(std::sync::atomic::Ordering::Acquire),
+    );
     let produced_terminal_end = watcher_backstop_produced_terminal_end(
         shared,
         channel_id,
         inflight_state.as_ref(),
         &tmux_session_name,
         &output_path,
-    )
-    .unwrap_or(confirmed_end_offset);
-    let delivery_confirmed = confirmed_end_offset >= produced_terminal_end;
+    );
+    // Both publication identity and a produced terminal end are required.
+    // Missing either fact is unconfirmed; never manufacture authority by
+    // comparing a frontier to itself.
+    let delivery_confirmed =
+        delivery_confirmed_for_produced_end(confirmed_end_publication, produced_terminal_end);
     // Bounded escape hatch: fast-path probes and pulled deadlines stay strict,
     // but the natural far-backstop deadline may finalize a structurally Done
     // turn even if the relay watermark never reaches the produced frontier. This
@@ -117,8 +122,8 @@ pub(super) fn watcher_backstop_turn_is_terminal(
             channel_id = channel_id.get(),
             provider = %provider.as_str(),
             tmux_session = %tmux_session_name,
-            confirmed_end_offset,
-            produced_terminal_end,
+            ?confirmed_end_publication,
+            ?produced_terminal_end,
             at_deadline,
             natural_deadline_escape = delivery_confirmed_or_natural_deadline_escape,
             "watcher backstop observed Done before delivery confirmation"
@@ -139,6 +144,15 @@ pub(super) fn watcher_backstop_turn_is_terminal(
     )
 }
 
+fn delivery_confirmed_for_produced_end(
+    confirmed_end_publication: Option<u64>,
+    produced_terminal_end: Option<u64>,
+) -> bool {
+    confirmed_end_publication
+        .zip(produced_terminal_end)
+        .is_some_and(|(confirmed, produced)| confirmed >= produced)
+}
+
 fn watcher_backstop_produced_terminal_end(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
@@ -151,7 +165,12 @@ fn watcher_backstop_produced_terminal_end(
             state.tmux_session_name.as_deref() == Some(tmux_session_name)
                 && state.output_path.as_deref() == Some(output_path)
         })
-        .map(|state| state.last_offset);
+        .map(|state| state.last_offset)
+        // `0` is the inflight sentinel for "no relay output frontier observed",
+        // not a confirmed zero-byte production record. Treating it as a produced
+        // end would let the initial confirmed watermark (`0 >= 0`) fabricate
+        // strict-finalization authority for an empty/silent Done turn.
+        .filter(|offset| *offset > 0);
 
     if let Some(state) = inflight_state {
         let expected_key = DeliveryLeaseKey::from_inflight_state_for_site(
@@ -182,8 +201,8 @@ fn watcher_backstop_produced_terminal_end(
     // to `output_path` metadata: for CodexTui the watcher path can be the
     // provider rollout transcript, not the relay cursor, and empty/silent turns
     // would over-defer because transcript terminator bytes are not delivered
-    // output. If neither source is present, the caller falls back to the
-    // confirmed frontier so no unknown non-output range is invented.
+    // output. If neither source is present, the caller keeps delivery unconfirmed;
+    // an unknown produced end cannot confer destructive finalization authority.
     end
 }
 
@@ -217,6 +236,135 @@ mod tests {
     /// runtime) as terminal — and must not even RUN the pane capture — while
     /// the at-deadline re-check keeps the pane-ready fallback. `Done` /
     /// `PausedLive` verdicts are identical in both modes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn done_without_inflight_or_lease_defers_strict_finalize() {
+        super::super::tests::with_isolated_runtime_root(|| async move {
+            let shared = Arc::new(crate::services::discord::make_shared_data_for_tests());
+            let entropy = chrono::Utc::now()
+                .timestamp_nanos_opt()
+                .unwrap_or_default()
+                .unsigned_abs();
+            let channel = ChannelId::new(50_220_023u64.saturating_add(entropy % 1_000_000));
+            crate::services::discord::inflight::clear_inflight_state(
+                &ProviderKind::Claude,
+                channel.get(),
+            );
+            shared.tmux_watchers.remove(&channel);
+            shared.tmux_relay_coords.remove(&channel);
+            shared.tmux_relay_coord(channel); /* create a fresh coordinate */
+            shared.dispatch.thread_parents.remove(&channel);
+            shared.restart.recovering_channels.remove(&channel);
+            shared.turn_start_times.remove(&channel); /* isolate stale process state */
+            shared.ui.placeholder_live_events.clear_channel(channel); /* isolate stale process state */
+            let channel = ChannelId::new(channel.get()); /* retain isolated identity */
+
+            let session = format!("backstop-no-inflight-{}", std::process::id());
+            let transcript = std::env::temp_dir().join(format!("{session}.jsonl"));
+            std::fs::write(
+                &transcript,
+                "{\"type\":\"result\",\"result\":\"done\",\"session_id\":\"s\"}\n",
+            )
+            .unwrap();
+            shared.tmux_watchers.insert(
+                channel,
+                crate::services::discord::TmuxWatcherHandle {
+                    tmux_session_name: session.clone(),
+                    output_path: transcript.to_str().unwrap().to_string(),
+                    paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    resume_offset: Arc::new(std::sync::Mutex::new(None)),
+                    cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                    turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                        crate::services::discord::tmux_watcher_now_ms(),
+                    )),
+                },
+            );
+
+            assert!(!watcher_backstop_turn_is_terminal(
+                &shared,
+                channel,
+                &ProviderKind::Claude,
+                false,
+            ));
+            let _ = std::fs::remove_file(transcript);
+        })
+        .await;
+    }
+
+    #[test]
+    fn missing_delivery_proof_never_confirms_terminal_end() {
+        assert!(!delivery_confirmed_for_produced_end(Some(0), None));
+        assert!(!delivery_confirmed_for_produced_end(None, Some(64)));
+        assert!(delivery_confirmed_for_produced_end(Some(64), Some(64)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn done_with_zero_inflight_offset_defers_strict_finalize() {
+        super::super::tests::with_isolated_runtime_root(|| async move {
+            let shared = Arc::new(crate::services::discord::make_shared_data_for_tests());
+            let entropy = chrono::Utc::now()
+                .timestamp_nanos_opt()
+                .unwrap_or_default()
+                .unsigned_abs();
+            let channel = ChannelId::new(50_220_024u64.saturating_add(entropy % 1_000_000));
+            let session = format!("backstop-zero-offset-{}", std::process::id());
+            let transcript = std::env::temp_dir().join(format!("{session}.jsonl"));
+            std::fs::write(
+                &transcript,
+                "{\"type\":\"result\",\"result\":\"done\",\"session_id\":\"s\"}\n",
+            )
+            .unwrap();
+            let transcript_str = transcript.to_str().unwrap().to_string();
+            shared.tmux_watchers.insert(
+                channel,
+                crate::services::discord::TmuxWatcherHandle {
+                    tmux_session_name: session.clone(),
+                    output_path: transcript_str.clone(),
+                    paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    resume_offset: Arc::new(std::sync::Mutex::new(None)),
+                    cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                    turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                        crate::services::discord::tmux_watcher_now_ms(),
+                    )),
+                },
+            );
+            let mut state = crate::services::discord::inflight::InflightTurnState::new(
+                ProviderKind::Claude,
+                channel.get(),
+                None,
+                7,
+                210,
+                211,
+                "done with zero sentinel offset".to_string(),
+                None,
+                Some(session),
+                Some(transcript_str),
+                None,
+                0,
+            );
+            state.turn_start_offset = Some(0);
+            crate::services::discord::inflight::save_inflight_state(&state).unwrap();
+            shared
+                .tmux_relay_coord(channel)
+                .confirmed_end_offset
+                .store(0, std::sync::atomic::Ordering::Release);
+
+            assert!(
+                !watcher_backstop_turn_is_terminal(&shared, channel, &ProviderKind::Claude, false,),
+                "zero is an unknown produced frontier sentinel, not delivery proof"
+            );
+            assert!(
+                watcher_backstop_turn_is_terminal(&shared, channel, &ProviderKind::Claude, true,),
+                "the natural far-backstop remains the bounded escape"
+            );
+            let _ = std::fs::remove_file(transcript);
+        })
+        .await;
+    }
+
     #[test]
     fn non_jsonl_signal_never_terminal_on_fast_path_probe() {
         use std::cell::Cell;
