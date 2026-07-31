@@ -604,13 +604,14 @@ cluster:
     # enforce: actually forward.
     mode: "observe"
     # Raw top-level Discord channel IDs selected for owner-authority rollout.
-    # PR-1 records this scope in planner telemetry only; authority behavior is
-    # unchanged until a later rollout PR consumes the allowlist.
+    # A known-empty list is an explicit opt-out; a missing or unloadable routing
+    # scope is unknown and keeps the admission fence fail-safe.
     owner_authority_channel_ids:
       - "123456789012345678"
     # Pre-claim takeover threshold. After this many seconds without
-    # reaching `claimed` (= worker SELECT FOR UPDATE), leader steals
-    # and runs locally. Spawned/accepted rows are NEVER stolen.
+    # reaching `claimed` (= worker SELECT FOR UPDATE), leader atomically
+    # retires the pending row under the channel advisory lock, then runs
+    # locally. Fresh pending and spawned/accepted rows are NEVER stolen.
     forward_pre_claim_timeout_secs: 12
     # Stale claim recovery. After this many seconds in 'claimed'
     # without reaching 'accepted', re-mark pending so another node
@@ -628,11 +629,11 @@ planner-decision count, YAML values, and warning count through `/api/health` or
 
 Every Disabled, Observe, and Enforce planner result emits an info-level structured
 `intake_routing_decision` event with stable `reason_code`, `would_assign_target`,
-`preferred_label_match`, `owner_resolution`, and `authority_channel_opted_in`
-fields. The allowlist tag is telemetry-only in PR-1. In particular,
-`ADK_INTAKE_ROUTING_MODE=enforce` can change the effective planner mode but cannot
-opt a channel into owner authority; only `owner_authority_channel_ids` controls
-that tag.
+`preferred_label_match`, `owner_resolution`, and the tri-state
+`authority_channel_opt_in` field. `ADK_INTAKE_ROUTING_MODE=enforce` can change the
+effective planner mode but cannot opt a channel into owner authority; only
+`owner_authority_channel_ids` controls that state. Unknown configuration is
+fail-safe at the admission boundary.
 
 Operational reload note: `owner_authority_channel_ids` is read from the runtime
 config snapshot for every intake decision, so allowlist edits are reflected by
@@ -1028,7 +1029,7 @@ which is REST-safe and identical on both sides.
 | Mode | Detection | Action |
 |---|---|---|
 | Worker offline (stale heartbeat) | leader-side `worker_nodes.last_heartbeat_at` check at `resolve_intake_target` | route falls through to `Local` |
-| Worker dies before claim | row stays `pending` past `forward_pre_claim_timeout_secs` (12s) | transition 7: leader re-targets to local, bumps retry; on retry exhaustion → `failed_pre_accept` + alert |
+| Worker dies before claim | row stays `pending` past `forward_pre_claim_timeout_secs` (12s) | **Transition 7 is not implemented in the current runtime.** The current guard moves the stale row to `failed_pre_accept`; no local re-target/attempt INSERT occurs, and no automatic consumer currently re-drives this state. Tracked by issue #5057. |
 | Worker dies in `claimed` (cwd validation in flight) | row stuck `claimed` past `stale_claim_recovery_secs` (60s) | transition 8: leader resets to `pending`, increments retry; on exhaustion → `failed_pre_accept` + alert |
 | Worker validation fails (cwd missing, workspace unprovisioned) | worker writes `failed_pre_accept` via transition 6a | leader sweep applies transition 10 to INSERT a fresh attempt with `target_instance_id = local_leader` (linked via `parent_outbox_id`). If `attempt_no >= max_attempts_per_message`, transition 10 refuses → operator alert; further retries require `retry-as-new` via transition 12 |
 | Worker dies in `accepted` | accepted_at > `accepted_unspawned_sla_secs` (default 120s) without `spawned_at` (transition 11) | fast operator alert; **no auto recovery** (round-2 P0 #2). Operator runs `force-fail <row>` (terminal failure) or `retry-as-new <row>` (transition 12, fresh row leader-targeted) |

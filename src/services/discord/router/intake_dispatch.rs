@@ -1,7 +1,9 @@
 use super::message_handler::{self, IntakeDeps, IntakeRequest};
 use crate::services::cluster::intake_router_hook::{
-    IntakeBlockedReason, IntakeRouterContext, IntakeRouterDecision, try_route_intake,
+    IntakeBlockedReason, IntakeRouterContext, IntakeRouterDecision, ResolvedSessionOwner,
+    try_route_intake,
 };
+use crate::services::cluster::intake_routing_config::OwnerAuthorityChannelOptIn;
 use crate::services::provider::ProviderKind;
 use poise::serenity_prelude as serenity;
 
@@ -95,7 +97,7 @@ pub(crate) async fn admit_text_intake(
     let mode = effective_config.mode;
     let channel_id = submission.request.channel_id.get().to_string();
     let user_msg_id = submission.request.user_msg_id.get().to_string();
-    let authority_channel_opted_in = effective_config.owner_authority_channel_opted_in(&channel_id);
+    let authority_channel_opt_in = effective_config.owner_authority_channel_opt_in(&channel_id);
     let Some(pool) = deps.shared.pg_pool.as_ref() else {
         let decision = if matches!(
             mode,
@@ -124,7 +126,7 @@ pub(crate) async fn admit_text_intake(
             mode,
             &channel_id,
             &user_msg_id,
-            authority_channel_opted_in,
+            authority_channel_opt_in,
             &decision,
         );
         return match decision {
@@ -137,7 +139,7 @@ pub(crate) async fn admit_text_intake(
     };
 
     let request = &submission.request;
-    let leader_instance_id =
+    let self_instance_id =
         crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
     let request_owner_id = request.request_owner.get().to_string();
     let node_override =
@@ -148,7 +150,7 @@ pub(crate) async fn admit_text_intake(
     };
     let ctx = IntakeRouterContext {
         mode,
-        leader_instance_id: &leader_instance_id,
+        leader_instance_id: &self_instance_id,
         provider: submission.provider.as_str(),
         channel_id: &channel_id,
         user_msg_id: &user_msg_id,
@@ -175,10 +177,71 @@ pub(crate) async fn admit_text_intake(
         mode,
         &channel_id,
         &user_msg_id,
-        authority_channel_opted_in,
+        authority_channel_opt_in,
         &decision,
     );
-    let admission = match decision {
+    let stale_recovery = match &decision {
+        IntakeRouterDecision::DeferredOpenRoute {
+            open_route_id: Some(route_id),
+            open_route_status,
+            open_route_age_secs: Some(age_secs),
+            resolved_owner: ResolvedSessionOwner::LiveLocal,
+            ..
+        } if matches!(authority_channel_opt_in, OwnerAuthorityChannelOptIn::NotOptedIn)
+            && open_route_status == "pending"
+            && *age_secs as u64 >= effective_config.forward_pre_claim_timeout_secs =>
+        {
+            match crate::services::cluster::intake_router_hook::owner_record::
+                retire_stale_pending_route_for_local(
+                    pool,
+                    submission.provider.as_str(),
+                    &channel_id,
+                    *route_id,
+                    effective_config.forward_pre_claim_timeout_secs,
+                )
+                .await
+            {
+                Ok(retired) => retired,
+                Err(error) => {
+                    tracing::warn!(%error, route_id, "[intake_dispatch] stale route retirement failed; retaining fence");
+                    false
+                }
+            }
+        }
+        _ => true,
+    };
+    let admission = if !stale_recovery {
+        match decision {
+            IntakeRouterDecision::DeferredOpenRoute {
+                target_instance_id, ..
+            } => IntakeAdmission::DeferredOpenRoute { target_instance_id },
+            other => admission_for_decision(
+                authority_channel_opt_in,
+                effective_config.forward_pre_claim_timeout_secs,
+                other,
+                submission,
+            ),
+        }
+    } else {
+        admission_for_decision(
+            authority_channel_opt_in,
+            effective_config.forward_pre_claim_timeout_secs,
+            decision,
+            submission,
+        )
+    };
+
+    log_nonlocal_admission(&admission, &channel_id, &user_msg_id);
+    admission
+}
+
+fn admission_for_decision(
+    authority_channel_opt_in: OwnerAuthorityChannelOptIn,
+    forward_pre_claim_timeout_secs: u64,
+    decision: IntakeRouterDecision,
+    submission: &IntakeSubmission,
+) -> IntakeAdmission {
+    match decision {
         IntakeRouterDecision::RanLocal { .. } | IntakeRouterDecision::Observed { .. } => {
             IntakeAdmission::Local(LocalAdmissionPermit::for_submission(submission))
         }
@@ -191,13 +254,37 @@ pub(crate) async fn admit_text_intake(
             outbox_id,
         },
         IntakeRouterDecision::SkippedDuplicate { .. } => IntakeAdmission::SkippedDuplicate,
+        // A pending row has not crossed the worker claim boundary; claimed,
+        // accepted, and spawned rows may already be executing and remain
+        // fenced. Local recovery retires only a stale pending row before
+        // execution begins. The retirement CAS relies on the pending status
+        // predicate and PostgreSQL row lock, not advisory-lock coverage.
+        IntakeRouterDecision::DeferredOpenRoute {
+            target_instance_id,
+            open_route_status,
+            open_route_age_secs,
+            resolved_owner: ResolvedSessionOwner::LiveLocal,
+            ..
+        } if open_route_status == "pending"
+            && open_route_age_secs.is_some_and(|age| age >= forward_pre_claim_timeout_secs)
+            && matches!(
+                authority_channel_opt_in,
+                OwnerAuthorityChannelOptIn::NotOptedIn
+            ) =>
+        {
+            tracing::warn!(
+                %target_instance_id,
+                open_route_status,
+                authority_channel_opt_in = authority_channel_opt_in.as_str(),
+                "[intake_dispatch] admitted local live owner despite pending open route; stale-route recovery exception"
+            );
+            IntakeAdmission::Local(LocalAdmissionPermit::for_submission(submission))
+        }
         IntakeRouterDecision::DeferredOpenRoute {
             target_instance_id, ..
         } => IntakeAdmission::DeferredOpenRoute { target_instance_id },
         IntakeRouterDecision::Blocked { reason } => IntakeAdmission::Blocked { reason },
-    };
-    log_nonlocal_admission(&admission, &channel_id, &user_msg_id);
-    admission
+    }
 }
 
 /// Common convenience path for producers that do not already own a durable

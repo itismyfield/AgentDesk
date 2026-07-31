@@ -44,6 +44,7 @@ EXPECTED_TEST_NON_PG_COMMANDS = (
     "cargo test --lib intake_queue_transaction::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib pending_reaction_failure_adapter_tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib intake_dispatch_invariant_queued_entrypoints_promote_markers -- --skip _pg --skip pg_ --skip postgres",
+    "cargo test --lib services::discord::router::intake_dispatch::tests::telemetry_only_unopted -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib attachment -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib mailbox_reaction_tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib queue_marker::tests -- --skip _pg --skip pg_ --skip postgres",
@@ -200,6 +201,25 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertEqual(test_job.count("- name: Trusted session forwarding tests"), 1)
         self.assertEqual(test_job.count(command), 1)
         self.assertNotIn(command, job_block(workflow, "scripts"))
+
+    def test_telemetry_only_intake_regressions_run_in_required_lane(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        changes = job_block(workflow, "changes")
+        test_job = job_block(workflow, "test_fast")
+        mirror = job_block(workflow, "fast_targeted_tests_required_context")
+        command = (
+            "env -u AGENTDESK_ROOT_DIR cargo test --lib "
+            "services::discord::router::intake_dispatch::tests::telemetry_only_unopted "
+            "-- --skip _pg --skip pg_ --skip postgres"
+        )
+
+        self.assertEqual(test_job.count("- name: Telemetry-only intake authority regressions"), 1)
+        self.assertEqual(test_job.count(command), 1)
+        self.assertIn("- 'src/services/discord/router/intake_dispatch.rs'", changes)
+        self.assertIn("- 'src/services/discord/router/intake_dispatch/**'", changes)
+        self.assertIn("- test_fast", mirror)
+        self.assertIn("FILTER_NAME: pg_db", mirror)
+        self.assertIn("UPSTREAM_JOB_NAME: test_fast", mirror)
 
     def test_terminal_delivery_evidence_regressions_flow_through_registered_required_context(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")

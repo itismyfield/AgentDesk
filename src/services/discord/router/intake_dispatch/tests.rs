@@ -125,10 +125,12 @@ use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
 
 use super::{
-    IntakeOrigin, IntakeSubmission, QueuedAdmissionDisposition, dispatch_skill_intake,
-    dispatch_text_intake,
+    IntakeAdmission, IntakeOrigin, IntakeSubmission, QueuedAdmissionDisposition,
+    admission_for_decision, dispatch_skill_intake, dispatch_text_intake,
 };
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::cluster::intake_router_hook::{IntakeRouterDecision, ResolvedSessionOwner};
+use crate::services::cluster::intake_routing_config::OwnerAuthorityChannelOptIn;
 use crate::services::discord::router::message_handler::{IntakeDeps, IntakeRequest};
 use crate::services::discord::router::{TurnKind, admit_queued_intake};
 use crate::services::provider::ProviderKind;
@@ -273,6 +275,138 @@ fn queued_intervention(message_id: u64, pending_uploads: Vec<String>) -> Interve
         pending_uploads,
         voice_announcement: None,
     }
+}
+
+fn submission_for_admission(channel_id: ChannelId, message_id: u64) -> IntakeSubmission {
+    IntakeSubmission {
+        provider: ProviderKind::Claude,
+        request: request(channel_id, message_id, "admission policy"),
+        origin: IntakeOrigin::LiveMessage,
+        preserve_on_cancel: false,
+        has_nonportable_uploads: false,
+        attachments: Vec::new(),
+        preloaded_uploads: Vec::new(),
+        voice_announcement: None,
+    }
+}
+
+#[test]
+fn telemetry_only_unopted_live_local_pending_open_route_runs_locally_5040() {
+    let submission = submission_for_admission(ChannelId::new(4_350_351), 4_350_361);
+    let admission = admission_for_decision(
+        OwnerAuthorityChannelOptIn::NotOptedIn,
+        12,
+        IntakeRouterDecision::DeferredOpenRoute {
+            target_instance_id: "mac-mini-release".to_string(),
+            open_route_id: None,
+            open_route_status: "pending".to_string(),
+            open_route_age_secs: Some(60),
+            resolved_owner: ResolvedSessionOwner::LiveLocal,
+        },
+        &submission,
+    );
+
+    assert!(
+        matches!(admission, IntakeAdmission::Local(_)),
+        "an explicitly unlisted local pending route may use the stale-route recovery exception"
+    );
+}
+
+#[test]
+fn telemetry_only_unopted_live_local_fresh_pending_route_stays_fenced_5040() {
+    let submission = submission_for_admission(ChannelId::new(4_350_365), 4_350_375);
+    let admission = admission_for_decision(
+        OwnerAuthorityChannelOptIn::NotOptedIn,
+        12,
+        IntakeRouterDecision::DeferredOpenRoute {
+            target_instance_id: "mac-mini-release".to_string(),
+            open_route_id: None,
+            open_route_status: "pending".to_string(),
+            open_route_age_secs: Some(1),
+            resolved_owner: ResolvedSessionOwner::LiveLocal,
+        },
+        &submission,
+    );
+
+    assert!(matches!(
+        admission,
+        IntakeAdmission::DeferredOpenRoute { .. }
+    ));
+}
+
+#[test]
+fn telemetry_only_unopted_live_foreign_owner_stays_fenced_5040() {
+    let submission = submission_for_admission(ChannelId::new(4_350_371), 4_350_381);
+    let admission = admission_for_decision(
+        OwnerAuthorityChannelOptIn::NotOptedIn,
+        12,
+        IntakeRouterDecision::DeferredOpenRoute {
+            target_instance_id: "foreign-instance".to_string(),
+            open_route_id: None,
+            open_route_status: "pending".to_string(),
+            open_route_age_secs: Some(60),
+            resolved_owner: ResolvedSessionOwner::LiveForeign,
+        },
+        &submission,
+    );
+
+    assert!(
+        matches!(
+            admission,
+            IntakeAdmission::DeferredOpenRoute {
+                ref target_instance_id,
+            } if target_instance_id == "foreign-instance"
+        ),
+        "a live foreign owner must retain the open-route fence"
+    );
+}
+
+#[test]
+fn telemetry_only_unopted_unknown_owner_authority_keeps_local_fence_5040() {
+    let submission = submission_for_admission(ChannelId::new(4_350_391), 4_350_401);
+    let admission = admission_for_decision(
+        OwnerAuthorityChannelOptIn::Unknown,
+        12,
+        IntakeRouterDecision::DeferredOpenRoute {
+            target_instance_id: "local-instance".to_string(),
+            open_route_id: None,
+            open_route_status: "pending".to_string(),
+            open_route_age_secs: Some(60),
+            resolved_owner: ResolvedSessionOwner::LiveLocal,
+        },
+        &submission,
+    );
+
+    assert!(matches!(
+        admission,
+        IntakeAdmission::DeferredOpenRoute {
+            ref target_instance_id,
+        } if target_instance_id == "local-instance"
+    ));
+}
+
+#[test]
+fn telemetry_only_unopted_local_accepted_route_stays_fenced_5040() {
+    let submission = submission_for_admission(ChannelId::new(4_350_411), 4_350_421);
+    let admission = admission_for_decision(
+        OwnerAuthorityChannelOptIn::NotOptedIn,
+        12,
+        IntakeRouterDecision::DeferredOpenRoute {
+            target_instance_id: "local-instance".to_string(),
+            open_route_id: None,
+            open_route_status: "accepted".to_string(),
+            open_route_age_secs: Some(60),
+            resolved_owner: ResolvedSessionOwner::LiveLocal,
+        },
+        &submission,
+    );
+
+    assert!(matches!(
+        admission,
+        IntakeAdmission::DeferredOpenRoute {
+            ref target_instance_id,
+        } if target_instance_id == "local-instance"
+    ));
 }
 
 fn deps<'a>(

@@ -466,6 +466,7 @@ mod tests {
             env_override: Some("observe"),
             warnings: Vec::new(),
             owner_authority_channel_ids: Vec::new(),
+            owner_authority_config_known: true,
             forward_pre_claim_timeout_secs: 12,
             stale_claim_recovery_secs: 60,
         };

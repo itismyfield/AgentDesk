@@ -76,9 +76,14 @@ pub(crate) enum IntakeRouterDecision {
     },
     /// A different message already owns the channel's single open outbox
     /// route. The producer must preserve/retry queued work and MUST NOT run it
-    /// locally while the predecessor is open.
+    /// locally while the predecessor is open. `open_route_status` is carried to
+    /// the admission boundary because only a still-pending local route can use
+    /// the narrowly scoped stale-route recovery exception.
     DeferredOpenRoute {
         target_instance_id: String,
+        open_route_status: String,
+        open_route_id: Option<i64>,
+        open_route_age_secs: Option<u64>,
         resolved_owner: ResolvedSessionOwner,
     },
     /// Ownership or placement could not be proven safe. Caller MUST NOT run
@@ -294,14 +299,12 @@ pub(crate) async fn try_route_intake(
         SessionOwnerResolution::NoOwner
         | SessionOwnerResolution::LiveLocal { .. }
         | SessionOwnerResolution::LiveForeign { .. } => {}
-        SessionOwnerResolution::LiveForeignIncompatible { .. } => {
-            unreachable!("incompatible live owner returns before the open-route fence")
-        }
     }
 
     // The durable single-open-route fence surrounds every placement branch,
     // including a local live owner and attachment-first placement. Preserve the
-    // resolved owner classification for telemetry without changing the fence.
+    // resolved owner classification, row identity, status, and age so the
+    // admission boundary can atomically retire only a stale pending route.
     let resolved_owner = match &owner {
         SessionOwnerResolution::NoOwner => ResolvedSessionOwner::NoOwner,
         SessionOwnerResolution::LiveLocal { .. } => ResolvedSessionOwner::LiveLocal,
@@ -313,17 +316,26 @@ pub(crate) async fn try_route_intake(
         }
     };
     match existing_open_route(pool, ctx.channel_id).await {
-        Ok(Some((_, existing_user_msg_id))) if existing_user_msg_id == ctx.user_msg_id => {
+        Ok(Some((_, _, existing_user_msg_id, _, _))) if existing_user_msg_id == ctx.user_msg_id => {
             return apply_observe_mode(
                 ctx.mode,
                 IntakeRouterDecision::SkippedDuplicate { resolved_owner },
             );
         }
-        Ok(Some((target_instance_id, _))) => {
+        Ok(Some((
+            open_route_id,
+            target_instance_id,
+            _,
+            open_route_status,
+            open_route_age_secs,
+        ))) => {
             return apply_observe_mode(
                 ctx.mode,
                 IntakeRouterDecision::DeferredOpenRoute {
                     target_instance_id,
+                    open_route_id: Some(open_route_id),
+                    open_route_status,
+                    open_route_age_secs: open_route_age_secs.map(|age| age as u64),
                     resolved_owner,
                 },
             );
@@ -662,6 +674,7 @@ fn apply_observe_mode(
         IntakeRouterDecision::DeferredOpenRoute {
             target_instance_id,
             resolved_owner,
+            ..
         } => ObservedIntakeOutcome::WouldDeferOpenRoute {
             target_instance_id,
             resolved_owner,
@@ -677,13 +690,15 @@ fn apply_observe_mode(
 async fn existing_open_route(
     pool: &PgPool,
     channel_id: &str,
-) -> Result<Option<(String, String)>, sqlx::Error> {
+) -> Result<Option<(i64, String, String, String, Option<i64>)>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT target_instance_id, user_msg_id
+        "SELECT id, target_instance_id, user_msg_id, status,
+                GREATEST(0, EXTRACT(EPOCH FROM (NOW() - created_at)))::BIGINT
+                   AS open_route_age_secs
            FROM intake_outbox
           WHERE channel_id = $1
             AND status IN ('pending', 'claimed', 'accepted', 'spawned')
-          ORDER BY id
+          ORDER BY created_at ASC
           LIMIT 1",
     )
     .bind(channel_id)
@@ -706,17 +721,20 @@ async fn route_to_instance(
         }
     };
     match existing_open_route(pool, ctx.channel_id).await {
-        Ok(Some((_, existing_user_msg_id))) if existing_user_msg_id == ctx.user_msg_id => {
+        Ok(Some((_, _, existing_user_msg_id, _, _))) if existing_user_msg_id == ctx.user_msg_id => {
             return apply_observe_mode(
                 ctx.mode,
                 IntakeRouterDecision::SkippedDuplicate { resolved_owner },
             );
         }
-        Ok(Some((existing_target, _))) => {
+        Ok(Some((open_route_id, existing_target, _, open_route_status, open_route_age_secs))) => {
             return apply_observe_mode(
                 ctx.mode,
                 IntakeRouterDecision::DeferredOpenRoute {
                     target_instance_id: existing_target,
+                    open_route_id: Some(open_route_id),
+                    open_route_status,
+                    open_route_age_secs: open_route_age_secs.map(|age| age as u64),
                     resolved_owner,
                 },
             );
@@ -773,17 +791,29 @@ async fn route_to_instance(
         Err(error) => match classify_insert_pending_error(&error) {
             Some(IntakeInsertConflict::OpenRoutePerChannel) => {
                 match existing_open_route(pool, ctx.channel_id).await {
-                    Ok(Some((_, existing_user_msg_id)))
+                    Ok(Some((_, _, existing_user_msg_id, _, _)))
                         if existing_user_msg_id == ctx.user_msg_id =>
                     {
                         IntakeRouterDecision::SkippedDuplicate { resolved_owner }
                     }
-                    Ok(Some((existing_target, _))) => IntakeRouterDecision::DeferredOpenRoute {
+                    Ok(Some((
+                        open_route_id,
+                        existing_target,
+                        _,
+                        open_route_status,
+                        open_route_age_secs,
+                    ))) => IntakeRouterDecision::DeferredOpenRoute {
                         target_instance_id: existing_target,
+                        open_route_id: Some(open_route_id),
+                        open_route_status,
+                        open_route_age_secs: open_route_age_secs.map(|age| age as u64),
                         resolved_owner,
                     },
                     Ok(None) | Err(_) => IntakeRouterDecision::DeferredOpenRoute {
                         target_instance_id: target.to_string(),
+                        open_route_id: None,
+                        open_route_status: "unknown".to_string(),
+                        open_route_age_secs: None,
                         resolved_owner,
                     },
                 }
@@ -2575,13 +2605,32 @@ mod pg_tests {
             &ctx_for_channel(IntakeRoutingMode::Enforce, "ch-conflict"),
         )
         .await;
-        assert_eq!(
-            decision,
+        // The seeded row is a real pending route, so the decision must carry its
+        // identity and age: those are exactly what the admission boundary needs to
+        // decide whether the route is stale. Match instead of comparing a literal so
+        // the assertion does not depend on the serial id or on wall-clock age.
+        match decision {
             IntakeRouterDecision::DeferredOpenRoute {
-                target_instance_id: "worker-conflict".to_string(),
-                resolved_owner: ResolvedSessionOwner::NoOwner,
+                target_instance_id,
+                open_route_id,
+                open_route_status,
+                open_route_age_secs,
+                resolved_owner,
+            } => {
+                assert_eq!(target_instance_id, "worker-conflict");
+                assert_eq!(open_route_status, "pending");
+                assert_eq!(resolved_owner, ResolvedSessionOwner::NoOwner);
+                assert!(
+                    open_route_id.is_some(),
+                    "a pending open route must carry its row id for stale admission"
+                );
+                assert!(
+                    open_route_age_secs.is_some(),
+                    "a pending open route must carry its age for stale admission"
+                );
             }
-        );
+            other => panic!("expected DeferredOpenRoute, got {other:?}"),
+        }
 
         pool.close().await;
         pg_db.drop().await;

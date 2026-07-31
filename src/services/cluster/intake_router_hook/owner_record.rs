@@ -900,6 +900,40 @@ pub(crate) async fn sweep_stale_pre_accept_claims_fenced(
     Ok(result.rows_affected())
 }
 
+/// Atomically retire a stale pending forwarded route before local recovery.
+/// The UPDATE's `status = 'pending'` predicate and PostgreSQL row lock
+/// serialize this transition with concurrent claims; the advisory lock is not
+/// relied on for legacy admission inserts or worker claims. A zero-row result
+/// means another actor won the race.
+pub(crate) async fn retire_stale_pending_route_for_local(
+    pool: &PgPool,
+    provider: &str,
+    channel_id: &str,
+    route_id: i64,
+    stale_after_secs: u64,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let advisory_key = OwnerIdentity::new(provider, channel_id).advisory_key();
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(advisory_key)
+        .execute(&mut *tx)
+        .await?;
+    let result = sqlx::query(
+        "UPDATE intake_outbox
+            SET status = 'failed_pre_accept', completed_at = NOW(),
+                last_error = 'stale route retired for local recovery'
+          WHERE id = $1 AND channel_id = $2 AND status = 'pending'
+            AND created_at <= NOW() - ($3::BIGINT * INTERVAL '1 second')",
+    )
+    .bind(route_id)
+    .bind(channel_id)
+    .bind(stale_after_secs.max(1) as i64)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(result.rows_affected() == 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1969,6 +2003,48 @@ mod tests {
         let pg = TestPostgresDb::create().await;
         let pool = pg.connect_and_migrate().await;
         insert_owner(&pool, "claude", "chanL", "node-W", 0, "active").await;
+        let stale_route_id = insert_outbox(
+            &pool,
+            "stale-local",
+            "msg-stale",
+            "claude",
+            "pending",
+            "forwarded",
+            Some("node-W"),
+            Some(0),
+            None,
+            None,
+        )
+        .await;
+        sqlx::query(
+            "UPDATE intake_outbox
+                SET created_at = NOW() - INTERVAL '60 seconds'
+              WHERE id = $1",
+        )
+        .bind(stale_route_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(
+            retire_stale_pending_route_for_local(
+                &pool,
+                "claude",
+                "stale-local",
+                stale_route_id,
+                12
+            )
+            .await
+            .unwrap()
+        );
+        let retired: (String, String) =
+            sqlx::query_as("SELECT status, user_text FROM intake_outbox WHERE id = $1")
+                .bind(stale_route_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(retired.0, "failed_pre_accept");
+        assert_eq!(retired.1, "hi", "retirement must preserve the user payload");
+
         insert_outbox(
             &pool,
             "chanL",

@@ -1119,14 +1119,16 @@ fn is_default_dispatch_routing_wake_interval_secs(value: &u64) -> bool {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ClusterIntakeRoutingConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "ClusterIntakeRoutingMode::is_default")]
     pub mode: ClusterIntakeRoutingMode,
     /// Raw top-level Discord channel IDs opted into owner-authority planning.
-    /// PR-1 records this scope in telemetry only; it does not change enforcement.
+    /// A valid loaded config with an empty list is an explicit known-empty
+    /// opt-out scope; a config that failed to load is represented as unknown by
+    /// the effective routing snapshot instead of by this field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub owner_authority_channel_ids: Vec<String>,
     #[serde(default = "default_intake_forward_pre_claim_timeout_secs")]
@@ -1378,6 +1380,14 @@ intake_routing:
 "#,
         );
         assert!(invalid.is_err());
+
+        let unknown_scope_key: Result<ClusterConfig, _> = serde_yaml::from_str(
+            r#"
+intake_routing:
+  owner_authority_channel_idz: ["123"]
+"#,
+        );
+        assert!(unknown_scope_key.is_err());
     }
 }
 
