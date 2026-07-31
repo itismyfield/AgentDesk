@@ -35,14 +35,16 @@ struct RuntimeMismatchDeferState {
     count: u32,
     first_seen: std::time::Instant,
     escalated: bool,
-    incident_generation: u64,
-    last_live_turn: bool,
+    incident_identity: Option<u64>,
 }
 
 #[cfg(unix)]
 static RUNTIME_MISMATCH_DEFERS: std::sync::LazyLock<
     dashmap::DashMap<RuntimeMismatchTarget, RuntimeMismatchDeferState>,
 > = std::sync::LazyLock::new(dashmap::DashMap::new);
+#[cfg(unix)]
+static RUNTIME_MISMATCH_DEFERS_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 #[cfg(unix)]
 const RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT: u32 = 3;
 
@@ -51,9 +53,14 @@ pub(super) fn clear_runtime_mismatch_defer(
     channel_id: serenity::ChannelId,
 ) {
     #[cfg(unix)]
-    RUNTIME_MISMATCH_DEFERS.retain(|target, _| {
-        target.provider != provider.as_str() || target.channel_id != channel_id.get()
-    });
+    {
+        let _state_lock = RUNTIME_MISMATCH_DEFERS_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        RUNTIME_MISMATCH_DEFERS.retain(|target, _| {
+            target.provider != provider.as_str() || target.channel_id != channel_id.get()
+        });
+    }
     #[cfg(not(unix))]
     let _ = (provider, channel_id);
 }
@@ -68,41 +75,46 @@ fn record_runtime_mismatch_defer(
     open_inflight: bool,
     transcript_state: Option<crate::services::tui_turn_state::TuiTurnState>,
     defer_reason: &'static str,
-    live_turn: bool,
-) -> (u32, bool) {
+    incident_identity: Option<u64>,
+    target_still_owned: impl FnOnce() -> bool,
+) -> (u32, bool, bool) {
+    let _state_lock = RUNTIME_MISMATCH_DEFERS_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let key =
         RuntimeMismatchTarget::new(provider, channel_id, tmux_session_name, expected, observed);
     RUNTIME_MISMATCH_DEFERS.retain(|target, _| {
         target.provider != key.provider || target.channel_id != key.channel_id || target == &key
     });
-    let mut state =
-        RUNTIME_MISMATCH_DEFERS
-            .entry(key)
-            .or_insert_with(|| RuntimeMismatchDeferState {
-                count: 0,
-                first_seen: std::time::Instant::now(),
-                escalated: false,
-                incident_generation: 0,
-                last_live_turn: live_turn,
-            });
-    // A new live turn is an observable incident boundary: a later mismatch
-    // after that transition is a new incident even if no clear observation ran.
-    if !state.last_live_turn && live_turn {
-        state.incident_generation = state.incident_generation.saturating_add(1);
-        state.count = 0;
-        state.first_seen = std::time::Instant::now();
+    let mut state = RUNTIME_MISMATCH_DEFERS
+        .entry(key.clone())
+        .or_insert_with(|| RuntimeMismatchDeferState {
+            count: 0,
+            first_seen: std::time::Instant::now(),
+            escalated: false,
+            incident_identity,
+        });
+    // A changed open-turn identity proves the previous mismatch observation
+    // belonged to a completed incident; the count remains cumulative so busy
+    // follow-up turns cannot indefinitely postpone the threshold.
+    if incident_identity.is_some()
+        && state.incident_identity.is_some()
+        && state.incident_identity != incident_identity
+    {
         state.escalated = false;
+        state.incident_identity = incident_identity;
     }
-    state.last_live_turn = live_turn;
-    state.count = state.count.saturating_add(1); // Count defers within the current incident.
+    state.count = state.count.saturating_add(1);
     let elapsed_secs = state.first_seen.elapsed().as_secs();
     let escalating = !state.escalated && state.count >= RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT;
-    if escalating {
-        state.escalated = true;
-    }
     let count = state.count;
-    let incident_generation = state.incident_generation;
     drop(state);
+    let owner_matches = !escalating || target_still_owned();
+    if escalating && owner_matches {
+        if let Some(mut state) = RUNTIME_MISMATCH_DEFERS.get_mut(&key) {
+            state.escalated = true;
+        }
+    }
 
     crate::services::observability::emit_inflight_lifecycle_event(
         provider.as_str(),
@@ -117,7 +129,6 @@ fn record_runtime_mismatch_defer(
         },
         serde_json::json!({
             "consecutive_defer_count": count,
-            "incident_generation": incident_generation,
             "elapsed_secs": elapsed_secs,
             "escalation_threshold": RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT,
             "action": "continue_defer_without_kill",
@@ -140,7 +151,7 @@ fn record_runtime_mismatch_defer(
             "managed tmux runtime mismatch deferred without killing the session"
         );
     }
-    (count, escalating)
+    (count, escalating, owner_matches)
 }
 
 #[cfg(unix)]
@@ -164,6 +175,7 @@ pub(super) fn build_runtime_mismatch_escalation_notice(
 pub(super) struct RuntimeInflightEvidence {
     pub(super) open: bool,
     pub(super) stale: bool,
+    pub(super) incident_identity: Option<u64>,
 }
 
 #[cfg(unix)]
@@ -230,7 +242,7 @@ pub(super) fn reconcile_managed_tmux_runtime_kind_for_config(
         } else {
             "runtime_kind_mismatch"
         };
-        let (_defer_count, escalated) = record_runtime_mismatch_defer(
+        let (_defer_count, escalated, owner_matches) = record_runtime_mismatch_defer(
             provider,
             channel_id,
             tmux_session_name,
@@ -239,9 +251,10 @@ pub(super) fn reconcile_managed_tmux_runtime_kind_for_config(
             inflight.open,
             transcript_state,
             defer_reason,
-            live_turn,
+            inflight.incident_identity,
+            || target_still_owned(tmux_session_name),
         );
-        if escalated && target_still_owned(tmux_session_name) {
+        if escalated && owner_matches {
             on_escalation(provider, channel_id, tmux_session_name, expected, observed);
         } else if escalated {
             tracing::warn!(
@@ -267,7 +280,7 @@ pub(super) fn reconcile_managed_tmux_runtime_kind_for_config(
         && !revalidated_inflight.open;
     if !target_unchanged {
         let defer_reason = "destructive_target_revalidation_failed";
-        let (_defer_count, escalated) = record_runtime_mismatch_defer(
+        let (_defer_count, escalated, owner_matches) = record_runtime_mismatch_defer(
             provider,
             channel_id,
             tmux_session_name,
@@ -276,9 +289,10 @@ pub(super) fn reconcile_managed_tmux_runtime_kind_for_config(
             revalidated_inflight.open,
             None,
             defer_reason,
-            false,
+            revalidated_inflight.incident_identity,
+            || owner_matches_at_commit,
         );
-        if escalated && owner_matches_at_commit {
+        if escalated && owner_matches {
             on_escalation(
                 provider,
                 channel_id,
@@ -340,6 +354,7 @@ pub(in crate::services::discord) fn reconcile_managed_tmux_runtime_kind_using_ru
                         crate::services::discord::inflight::INFLIGHT_STALENESS_THRESHOLD_SECS,
                     )
                 }),
+                incident_identity: state.as_ref().map(|state| state.user_msg_id),
             }
         },
         || managed_runtime_transcript_state(provider, current_path, session_id, tmux_session_name),

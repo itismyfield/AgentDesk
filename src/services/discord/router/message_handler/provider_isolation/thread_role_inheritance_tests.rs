@@ -114,6 +114,7 @@ fn reconcile_with_observation(
         || RuntimeInflightEvidence {
             open: live_turn,
             stale: false,
+            incident_identity: None,
         },
         || crate::services::tui_turn_state::TuiTurnState::Idle,
         |_| true,
@@ -218,6 +219,7 @@ fn repeated_weak_idle_mismatch_escalates_once_without_cleanup() {
             || RuntimeInflightEvidence {
                 open: false,
                 stale: false,
+                incident_identity: None,
             },
             || crate::services::tui_turn_state::TuiTurnState::Idle,
             |_| true,
@@ -258,6 +260,7 @@ fn stale_inflight_with_busy_transcript_never_cleans_up() {
             || RuntimeInflightEvidence {
                 open: true,
                 stale: true,
+                incident_identity: None,
             },
             || {
                 probe_calls.set(probe_calls.get() + 1);
@@ -306,6 +309,7 @@ fn stale_inflight_with_unknown_transcript_fails_closed() {
         || RuntimeInflightEvidence {
             open: true,
             stale: true,
+            incident_identity: None,
         },
         || crate::services::tui_turn_state::TuiTurnState::Unknown,
         |_| true,
@@ -344,6 +348,7 @@ fn cleanup_revalidation_rejects_owner_change() {
         || RuntimeInflightEvidence {
             open: false,
             stale: false,
+            incident_identity: None,
         },
         || crate::services::tui_turn_state::TuiTurnState::Idle,
         |_| false,
@@ -381,6 +386,7 @@ fn defer_escalation_rechecks_ownership_before_notice() {
             || RuntimeInflightEvidence {
                 open: false,
                 stale: false,
+                incident_identity: None,
             },
             || crate::services::tui_turn_state::TuiTurnState::Idle,
             |_| {
@@ -399,7 +405,7 @@ fn defer_escalation_rechecks_ownership_before_notice() {
 
 #[cfg(unix)]
 #[test]
-fn new_live_incident_rearms_mismatch_escalation() {
+fn new_inflight_incident_rearms_mismatch_escalation_without_resetting_count() {
     let channel_id = ChannelId::new(50_150_015);
     clear_test_defer(channel_id);
     let escalation_events = std::cell::Cell::new(0_u32);
@@ -411,7 +417,7 @@ fn new_live_incident_rearms_mismatch_escalation() {
         runtime_kind: RuntimeHandoffKind::ClaudeTui,
         evidence_strength: RuntimeKindEvidenceStrength::Strong,
     };
-    for live_turn in [false, false, false, true, true, true] {
+    for incident_identity in [Some(1), Some(1), Some(1), Some(2)] {
         let verdict = reconcile_managed_tmux_runtime_kind_for_config(
             &ProviderKind::Claude,
             channel_id,
@@ -420,16 +426,11 @@ fn new_live_incident_rearms_mismatch_escalation() {
             |_| true,
             |_, _| Some(observed),
             || RuntimeInflightEvidence {
-                open: false,
+                open: true,
                 stale: false,
+                incident_identity,
             },
-            || {
-                if live_turn {
-                    crate::services::tui_turn_state::TuiTurnState::Streaming
-                } else {
-                    crate::services::tui_turn_state::TuiTurnState::Idle
-                }
-            },
+            || crate::services::tui_turn_state::TuiTurnState::Streaming,
             |_| true,
             |_, _, _, _, _| escalation_events.set(escalation_events.get() + 1),
             |_, _, _| {},
@@ -437,6 +438,113 @@ fn new_live_incident_rearms_mismatch_escalation() {
         assert_eq!(verdict, RuntimeMismatchVerdict::Defer);
     }
     assert_eq!(escalation_events.get(), 2);
+    clear_test_defer(channel_id);
+}
+
+#[cfg(unix)]
+#[test]
+fn owner_recovery_retries_escalation_for_same_incident() {
+    let channel_id = ChannelId::new(50_150_016);
+    clear_test_defer(channel_id);
+    let escalation_events = std::cell::Cell::new(0_u32);
+    let owner_matches = std::cell::Cell::new(false);
+    for _ in 0..=RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT {
+        let verdict = reconcile_managed_tmux_runtime_kind_for_config(
+            &ProviderKind::Claude,
+            channel_id,
+            Some("AgentDesk-5015-owner-recovery"),
+            Some(ManagedRuntimeExpectation {
+                runtime_kind: RuntimeHandoffKind::LegacyTmuxWrapper,
+                evidence_strength: RuntimeKindEvidenceStrength::Weak,
+            }),
+            |_| true,
+            |_, _| {
+                Some(ObservedManagedRuntimeKind {
+                    runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                    evidence_strength: RuntimeKindEvidenceStrength::Strong,
+                })
+            },
+            || RuntimeInflightEvidence {
+                open: false,
+                stale: false,
+                incident_identity: Some(7),
+            },
+            || crate::services::tui_turn_state::TuiTurnState::Idle,
+            |_| owner_matches.get(),
+            |_, _, _, _, _| escalation_events.set(escalation_events.get() + 1),
+            |_, _, _| {},
+        );
+        assert_eq!(verdict, RuntimeMismatchVerdict::Defer);
+        owner_matches.set(true);
+    }
+    assert_eq!(escalation_events.get(), 1);
+    clear_test_defer(channel_id);
+}
+
+#[cfg(unix)]
+#[test]
+fn defer_escalation_rechecks_ownership_once_at_threshold() {
+    let channel_id = ChannelId::new(50_150_017);
+    clear_test_defer(channel_id);
+    let ownership_checks = std::cell::Cell::new(0_u32);
+    let escalation_events = std::cell::Cell::new(0_u32);
+    for _ in 0..RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT {
+        let verdict = reconcile_managed_tmux_runtime_kind_for_config(
+            &ProviderKind::Claude,
+            channel_id,
+            Some("AgentDesk-5015-defer-owner-loss"),
+            Some(ManagedRuntimeExpectation {
+                runtime_kind: RuntimeHandoffKind::LegacyTmuxWrapper,
+                evidence_strength: RuntimeKindEvidenceStrength::Weak,
+            }),
+            |_| true,
+            |_, _| {
+                Some(ObservedManagedRuntimeKind {
+                    runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                    evidence_strength: RuntimeKindEvidenceStrength::Strong,
+                })
+            },
+            || RuntimeInflightEvidence {
+                open: false,
+                stale: false,
+                incident_identity: Some(8),
+            },
+            || crate::services::tui_turn_state::TuiTurnState::Idle,
+            |_| {
+                ownership_checks.set(ownership_checks.get() + 1);
+                false
+            },
+            |_, _, _, _, _| escalation_events.set(escalation_events.get() + 1),
+            |_, _, _| {},
+        );
+        assert_eq!(verdict, RuntimeMismatchVerdict::Defer);
+    }
+    assert_eq!(ownership_checks.get(), 1);
+    assert_eq!(escalation_events.get(), 0);
+    clear_test_defer(channel_id);
+}
+
+#[cfg(unix)]
+#[test]
+fn same_mismatch_key_retains_single_state_entry_after_repeated_defers() {
+    let channel_id = ChannelId::new(50_150_018);
+    clear_test_defer(channel_id);
+    let mut calls = Vec::new();
+    for _ in 0..4 {
+        let _ = reconcile_with_observation(
+            ManagedRuntimeExpectation {
+                runtime_kind: RuntimeHandoffKind::LegacyTmuxWrapper,
+                evidence_strength: RuntimeKindEvidenceStrength::Weak,
+            },
+            ObservedManagedRuntimeKind {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                evidence_strength: RuntimeKindEvidenceStrength::Strong,
+            },
+            false,
+            &mut calls,
+        );
+    }
+    assert!(calls.is_empty());
     clear_test_defer(channel_id);
 }
 
