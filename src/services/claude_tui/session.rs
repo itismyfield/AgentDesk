@@ -415,12 +415,20 @@ fn write_launch_script(
     let mut gateway_exports = String::new();
     // Chokepoint base: resolved gateway launch env (#4559).
     config.launch_env.append_shell_env(&mut gateway_exports);
-    // Compact-window overlay (#4591): interactive TUI sessions can change model
-    // after launch, so they never inherit an absolute compact window from
-    // dcserver/tmux.
+    // Compact-window overlay (#4591 revision): interactive TUI sessions can
+    // change model after launch, so a launch-model-derived absolute window
+    // would go stale. The gateway-policy value below is model-independent —
+    // it replicates the exact env an `ocx claude` launch injects — and is the
+    // only compact safety net that reaches CLI-internal subagent loops
+    // running `[1m]`-marked routed models. Scrubbed launches still export
+    // nothing beyond the isolation fence.
+    let auto_compact_window =
+        crate::services::claude_compact_context::tui_launch_auto_compact_window(
+            config.launch_env.gateway_proxy_env(),
+        );
     crate::services::claude_compact_context::append_auto_compact_window_shell_env(
         &mut gateway_exports,
-        None,
+        auto_compact_window,
     );
     let mut escaped_claude_bin = String::new();
     config
@@ -568,7 +576,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_script_never_exports_absolute_compact_window_and_gates_gateway_proxy() {
+    fn launch_script_exports_gateway_policy_compact_window_and_gates_gateway_proxy() {
         let _context_guard = context_state_guard();
         let dir = tempfile::tempdir().unwrap();
         let mut config = sample_config();
@@ -576,6 +584,13 @@ mod tests {
         config.launch_env = ClaudeLaunchEnv::inject_for_test("http://proxy.example/it's-ready");
         let launch_script_path = dir.path().join("launch.sh");
 
+        // A fresh gateway catalog whose auto-context policy is OFF: the launch
+        // still exports only the isolation fence.
+        crate::services::claude_compact_context::put_catalog_with_auto_compact_for_test(
+            "http://proxy.example/it's-ready",
+            std::collections::HashMap::from([("gpt-x".to_string(), 372_000)]),
+            None,
+        );
         write_launch_script(
             &launch_script_path,
             &config,
@@ -587,13 +602,33 @@ mod tests {
         assert!(script.contains("unset CLAUDE_CODE_AUTO_COMPACT_WINDOW\n"));
         assert!(
             !script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW="),
-            "a long-lived interactive Claude TUI must not pin auto-compact to its launch model"
+            "gateway auto-context off must leave the exact-token steering path as the sole compact authority"
         );
         assert!(
             script.contains("export ANTHROPIC_BASE_URL='http://proxy.example/it'\\''s-ready'\n")
         );
         assert!(script.contains("export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1\n"));
         assert!(!script.contains("CLAUDE_CODE_EXTENDED_CACHE_TTL"));
+
+        // The same gateway with auto-context ON: the launch replicates the env
+        // an `ocx claude` launch would inject.
+        crate::services::claude_compact_context::put_catalog_with_auto_compact_for_test(
+            "http://proxy.example/it's-ready",
+            std::collections::HashMap::from([("gpt-x".to_string(), 372_000)]),
+            Some(350_000),
+        );
+        write_launch_script(
+            &launch_script_path,
+            &config,
+            Path::new("/tmp/settings.json"),
+        )
+        .unwrap();
+        let armed_script = std::fs::read_to_string(&launch_script_path).unwrap();
+        assert!(armed_script.contains("unset CLAUDE_CODE_AUTO_COMPACT_WINDOW\n"));
+        assert!(
+            armed_script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW=350000\n"),
+            "gateway auto-context on must arm the CLI-internal compact safety net for [1m]-marked subagent models"
+        );
 
         config.launch_env = ClaudeLaunchEnv::scrub_for_test();
         write_launch_script(
@@ -616,6 +651,8 @@ mod tests {
         let mut config = sample_config();
         let launch_script_path = dir.path().join("launch.sh");
 
+        // Scrubbed launches use only native selectors, whose `[1m]` windows
+        // are genuinely 1M: no absolute window is ever exported.
         write_launch_script(
             &launch_script_path,
             &config,
@@ -628,9 +665,24 @@ mod tests {
         assert!(!sonnet_script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW="));
 
         // `/model` can change the live TUI's model after this script has
-        // launched. Rewriting the artifact with a different launch selector
-        // must still leave the exact-token steering path as the sole compact
-        // authority.
+        // launched. The gateway-policy window is model-independent, so a
+        // different launch selector must produce the identical export — the
+        // value can never go stale against the session's current model.
+        crate::services::claude_compact_context::put_catalog_with_auto_compact_for_test(
+            "http://proxy.example/gateway",
+            std::collections::HashMap::from([("gpt-x".to_string(), 372_000)]),
+            Some(350_000),
+        );
+        config.launch_env = ClaudeLaunchEnv::inject_for_test("http://proxy.example/gateway");
+        write_launch_script(
+            &launch_script_path,
+            &config,
+            Path::new("/tmp/settings.json"),
+        )
+        .unwrap();
+        let sonnet_injected = std::fs::read_to_string(&launch_script_path).unwrap();
+        assert!(sonnet_injected.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW=350000\n"));
+
         config.model = Some("opus".to_string());
         write_launch_script(
             &launch_script_path,
@@ -641,8 +693,7 @@ mod tests {
         let opus_script = std::fs::read_to_string(&launch_script_path).unwrap();
         assert!(opus_script.contains("'--model' 'opus'"));
         assert!(!opus_script.contains("'--model' 'sonnet'"));
-        assert!(opus_script.contains("unset CLAUDE_CODE_AUTO_COMPACT_WINDOW\n"));
-        assert!(!opus_script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW="));
+        assert!(opus_script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW=350000\n"));
         assert!(!opus_script.contains("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"));
     }
 
