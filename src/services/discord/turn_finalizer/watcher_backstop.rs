@@ -108,9 +108,8 @@ pub(super) fn watcher_backstop_turn_is_terminal(
     // Both publication identity and a produced terminal end are required.
     // Missing either fact is unconfirmed; never manufacture authority by
     // comparing a frontier to itself.
-    let delivery_confirmed = confirmed_end_publication
-        .zip(produced_terminal_end)
-        .is_some_and(|(confirmed, produced)| confirmed >= produced);
+    let delivery_confirmed =
+        delivery_confirmed_for_produced_end(confirmed_end_publication, produced_terminal_end);
     // Bounded escape hatch: fast-path probes and pulled deadlines stay strict,
     // but the natural far-backstop deadline may finalize a structurally Done
     // turn even if the relay watermark never reaches the produced frontier. This
@@ -143,6 +142,15 @@ pub(super) fn watcher_backstop_turn_is_terminal(
             .is_some_and(crate::services::pane_readiness::FallbackPaneReadiness::is_ready)
         },
     )
+}
+
+fn delivery_confirmed_for_produced_end(
+    confirmed_end_publication: Option<u64>,
+    produced_terminal_end: Option<u64>,
+) -> bool {
+    confirmed_end_publication
+        .zip(produced_terminal_end)
+        .is_some_and(|(confirmed, produced)| confirmed >= produced)
 }
 
 fn watcher_backstop_produced_terminal_end(
@@ -228,15 +236,24 @@ mod tests {
     async fn done_without_inflight_or_lease_defers_strict_finalize() {
         super::super::tests::with_isolated_runtime_root(|| async move {
             let shared = Arc::new(crate::services::discord::make_shared_data_for_tests());
-            let channel = ChannelId::new(
-                50_220_023u64.saturating_add(
-                    chrono::Utc::now()
-                        .timestamp_nanos_opt()
-                        .unwrap_or_default()
-                        .unsigned_abs()
-                        % 100_000,
-                ),
+            let entropy = chrono::Utc::now()
+                .timestamp_nanos_opt()
+                .unwrap_or_default()
+                .unsigned_abs();
+            let channel = ChannelId::new(50_220_023u64.saturating_add(entropy % 1_000_000));
+            crate::services::discord::inflight::clear_inflight_state(
+                &ProviderKind::Claude,
+                channel.get(),
             );
+            shared.tmux_watchers.remove(&channel);
+            shared.tmux_relay_coords.remove(&channel);
+            shared.tmux_relay_coord(channel); /* create a fresh coordinate */
+            shared.dispatch.thread_parents.remove(&channel);
+            shared.restart.recovering_channels.remove(&channel);
+            shared.turn_start_times.remove(&channel); /* isolate stale process state */
+            shared.ui.placeholder_live_events.clear_channel(channel); /* isolate stale process state */
+            let channel = ChannelId::new(channel.get()); /* retain isolated identity */
+
             let session = format!("backstop-no-inflight-{}", std::process::id());
             let transcript = std::env::temp_dir().join(format!("{session}.jsonl"));
             std::fs::write(
@@ -269,6 +286,13 @@ mod tests {
             let _ = std::fs::remove_file(transcript);
         })
         .await;
+    }
+
+    #[test]
+    fn missing_delivery_proof_never_confirms_terminal_end() {
+        assert!(!delivery_confirmed_for_produced_end(Some(0), None));
+        assert!(!delivery_confirmed_for_produced_end(None, Some(64)));
+        assert!(delivery_confirmed_for_produced_end(Some(64), Some(64)));
     }
 
     #[test]
