@@ -1594,6 +1594,22 @@ mod relay_coord_tests {
         assert_eq!(coord.last_relay_ts_ms.load(Ordering::Acquire), 1_500);
         assert_eq!(coord.confirmed_end_publication(), None);
     }
+
+    #[test]
+    fn relay_frontier_mutators_reject_sentinel_and_non_decreasing_reset() {
+        let coord = TmuxRelayCoord::new(ChannelId::new(4_179));
+
+        assert!(!coord.advance_confirmed_end(UNRECORDED_RELAY_OFFSET));
+        assert_eq!(coord.confirmed_end_publication(), None);
+        assert!(!coord.reset_confirmed_frontier(UNRECORDED_RELAY_OFFSET, 0));
+
+        assert!(coord.advance_confirmed_end(64));
+        assert!(!coord.reset_confirmed_frontier(64, 64));
+        assert!(!coord.reset_confirmed_frontier(64, 65));
+        assert_eq!(coord.confirmed_end_publication(), Some(64));
+        assert!(coord.reset_confirmed_frontier(64, 32));
+        assert_eq!(coord.confirmed_end_publication(), Some(32));
+    }
 }
 
 mod delivery_lease_state;
