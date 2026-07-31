@@ -1717,6 +1717,7 @@ async fn auto_heal_attempts_are_rate_limited_per_window() {
         42,
         RelayRecoveryActionKind::ClearOrphanPendingToken,
         RelayRecoveryApplySource::ProbeAutoHeal,
+        crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered,
     );
 
     assert_eq!(
@@ -1768,6 +1769,7 @@ async fn dead_frontier_reattach_gets_one_bounded_retry_only() {
         decision.channel_id,
         decision.action,
         RelayRecoveryApplySource::Manual,
+        decision.evidence.delivery_evidence,
     );
 
     assert_eq!(decision.action, RelayRecoveryActionKind::ReattachWatcher);
@@ -1788,11 +1790,30 @@ async fn dead_frontier_reattach_gets_one_bounded_retry_only() {
     assert_eq!(
         unobserved.auto_heal.max_attempts_per_window,
         AUTO_HEAL_DEAD_FRONTIER_REATTACH_MAX_ATTEMPTS_PER_WINDOW,
-        "post-restart unobserved evidence shares the bounded dead-frontier retry budget"
+        "post-restart unobserved evidence has an equally bounded but separate budget"
     );
     assert_eq!(
         unobserved.auto_heal.window_secs, AUTO_HEAL_WINDOW_SECS,
-        "the relaxed non-destructive lane remains capped to two attempts per ten minutes"
+        "the relaxed non-destructive lane permits at most two non-refunded reservations per ten-minute window"
+    );
+    let unobserved_key = auto_heal_key(
+        &unobserved.provider,
+        unobserved.channel_id,
+        unobserved.action,
+        RelayRecoveryApplySource::Manual,
+        unobserved.evidence.delivery_evidence,
+    );
+    assert_ne!(
+        key, unobserved_key,
+        "Unknown evidence must not consume exact NotDelivered recovery budget"
+    );
+    assert_eq!(
+        reserve_auto_heal_attempt(
+            &unobserved_key,
+            1_000,
+            unobserved.auto_heal.max_attempts_per_window
+        ),
+        Ok(1)
     );
     assert_eq!(
         reserve_auto_heal_attempt(&key, 1_000, decision.auto_heal.max_attempts_per_window),

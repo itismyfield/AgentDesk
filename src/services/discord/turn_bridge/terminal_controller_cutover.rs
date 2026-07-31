@@ -160,15 +160,13 @@ impl toc::PostHeartbeatGuard for BridgePostHeartbeatGuard {}
 /// separate long-chunk site-4 deletes the anchor), so the cutover passes
 /// `PreserveAlways`; `DeleteIfProvenStale` stays dormant.
 ///
-/// `FallbackCommitPolicy::NoCommitOnFallback` is the bridge's DISTINGUISHING
-/// policy (proven by `sent_fallback_after_edit_failure_does_not_commit_terminal_delivery`
-/// + `turn_bridge_replace_outcome_committed` returning `committed = false` on
-/// `SentFallbackAfterEditFailure`, terminal_delivery.rs:143): the in-place edit
-/// failed, so the terminal-delivery contract treats the card as not yet
-/// committed → the offset must NOT advance. The controller maps
-/// `SentFallbackAfterEditFailure` → `Unknown { fell_back: true }` (#3089 A5
-/// controller extension), which `commit_and_finalize` releases WITHOUT committing
-/// (no advance, I2) while surfacing that the body nonetheless landed.
+/// `FallbackCommitPolicy::CommitOnFallback` supersedes the bridge-specific
+/// `NoCommitOnFallback` decision from #3089 A1 r3. A successful fallback POST is
+/// confirmed transport of the complete terminal body, so leaving its frontier
+/// uncommitted allowed recovery to duplicate a body that had already landed.
+/// The controller therefore advances and returns `Delivered` while preserving
+/// `FreshFallbackAfterEditFailure` so bridge cleanup still records the failed
+/// placeholder edit separately from terminal-body delivery.
 ///
 /// `AcquireFailureMode::Transient` mirrors the legacy B2-skip arm
 /// (mod.rs:6145-6159): a lost acquire means another holder (the watcher) owns the
@@ -284,9 +282,10 @@ pub(super) async fn deliver_short_replace_via_controller(
             // #2757: the bridge short-replace NEVER deletes the original on
             // edit-fail fallback (only the separate long-chunk site deletes).
             edit_fail_policy: toc::EditFailPlaceholderPolicy::PreserveAlways,
-            // The bridge's distinguishing policy: a fallback edit failure does NOT
-            // commit → leave the offset un-advanced (terminal_delivery.rs:143).
-            fallback_commit_policy: toc::FallbackCommitPolicy::NoCommitOnFallback,
+            // A successful fallback POST delivered the terminal body even though
+            // the original placeholder edit failed; commit transport and keep the
+            // edit failure as separate cleanup evidence.
+            fallback_commit_policy: toc::FallbackCommitPolicy::CommitOnFallback,
             // B2 (single-holder): a lost acquire is another holder's range → do
             // NOT re-send. Mirrors the legacy site-5 B2-skip arm.
             acquire_failure_mode: toc::AcquireFailureMode::Transient,
@@ -393,7 +392,7 @@ pub(super) async fn deliver_long_chunks_via_controller(
                 delete_anchor: true,
             },
             edit_fail_policy: toc::EditFailPlaceholderPolicy::PreserveAlways,
-            fallback_commit_policy: toc::FallbackCommitPolicy::NoCommitOnFallback,
+            fallback_commit_policy: toc::FallbackCommitPolicy::CommitOnFallback,
             acquire_failure_mode: toc::AcquireFailureMode::Transient,
             advance: Some(&advance),
             heartbeat: Some(&heartbeat),
@@ -790,18 +789,15 @@ pub(super) async fn apply_bridge_short_replace_controller(
 /// completion-footer fork — are unit-testable WITHOUT a live gateway. Mirrors
 /// A4's `apply_watcher_short_replace_result`.
 ///
-/// Reproduces the legacy site-5 mapping (mod.rs 6160-6245) EXACTLY:
-/// - `Delivered` (EditedOriginal): committed → `terminal_delivery_committed = true;
-///   terminal_body_visible = true;` footer if footer-mode; `Succeeded` cleanup;
-///   the outer epilogue (mod.rs:6293) bumps `response_sent_offset` — the
-///   controller already advanced `confirmed_end`. We also bump
-///   `inflight_response_sent_offset` here so the in-struct mirror matches legacy
-///   (mod.rs:6295 sets `inflight_state.response_sent_offset` on the committed path).
-/// - `Unknown { fell_back: true }` (SentFallbackAfterEditFailure):
-///   `preserve_inflight_for_cleanup_retry = true;` AND the dual-offset bump
-///   `inflight_response_sent_offset = full_response_len` (mod.rs:6241); record
-///   `failed(..)` cleanup; NO `confirmed_end` advance (released Unknown without
-///   commit); NO completion_footer.
+/// Current bridge mapping:
+/// - `Delivered` with `EditedOriginal`: committed/visible, footer if enabled,
+///   `Succeeded` cleanup, and the committed response offset mirrored to inflight.
+/// - `Delivered` with `FreshFallbackAfterEditFailure`: committed/visible because
+///   the fallback POST delivered the terminal body, no footer on the stale
+///   original, failed-edit cleanup retained, and the response offset mirrored.
+/// - `Unknown { fell_back: true }` is now defensive/test-only legacy behavior:
+///   preserve for retry, mirror the response offset, record failed cleanup, and
+///   do not advance the confirmed frontier.
 /// - `Unknown { fell_back: false }` (Partial / Err):
 ///   `preserve_inflight_for_cleanup_retry = true;` record `failed(detail)` cleanup;
 ///   NO `response_sent_offset` bump (distinguishes from the fell_back arm).
@@ -832,16 +828,24 @@ pub(super) fn apply_bridge_short_replace_outcome(
 ) {
     use super::super::placeholder_cleanup::PlaceholderCleanupOutcome;
     match outcome {
-        // Legacy EditedOriginal committed arm (mod.rs:6226-6232): the original was
-        // edited in place → mark committed/visible, register the footer target in
-        // footer-mode, record the `Succeeded` cleanup + emit committed=true. The
-        // controller already advanced `confirmed_end`.
-        toc::DeliveryOutcome::Delivered { .. } => {
+        // Confirmed replace transport. `replace_kind` keeps the original edit and
+        // fresh fallback distinct for footer/cleanup side effects while both commit
+        // the terminal-body frontier.
+        toc::DeliveryOutcome::Delivered { replace_kind, .. } => {
             *locals.terminal_delivery_committed = true;
             *locals.terminal_body_visible = true;
-            if single_message_panel_footer_mode {
-                *locals.completion_footer_terminal_text = Some(relay_text.to_string());
-            }
+            let cleanup = match replace_kind {
+                Some(toc::ReplaceDeliveryKind::FreshFallbackAfterEditFailure {
+                    edit_error,
+                    ..
+                }) => PlaceholderCleanupOutcome::failed(edit_error),
+                Some(toc::ReplaceDeliveryKind::EditedOriginal) | None => {
+                    if single_message_panel_footer_mode {
+                        *locals.completion_footer_terminal_text = Some(relay_text.to_string());
+                    }
+                    PlaceholderCleanupOutcome::Succeeded
+                }
+            };
             // mod.rs:6293-6295: the committed epilogue sets response_sent_offset to
             // the full response length and mirrors it onto the inflight row.
             *locals.inflight_response_sent_offset = full_response_len;
@@ -851,7 +855,7 @@ pub(super) fn apply_bridge_short_replace_outcome(
                 channel_id,
                 msg_id,
                 tmux_session_name,
-                PlaceholderCleanupOutcome::Succeeded,
+                cleanup,
                 true,
                 dispatch_id,
                 session_key,
@@ -977,11 +981,11 @@ mod tests {
     // #3089 A5: the bridge short-replace cutover. These drive the REAL controller
     // (`deliver_short_replace_via_controller`) + the pure write-back
     // (`apply_bridge_short_replace_outcome`) + the pure gate/predicate helpers
-    // against a real per-channel `DeliveryLeaseCell`, proving: NoCommitOnFallback →
-    // Unknown{fell_back} → no advance + the dual-offset bump; EditedOriginal →
-    // advance + committed + footer; Transient (lost acquire) → no transport;
-    // PartialContinuation → no advance + NO bump; heartbeat-before-commit; the pure
-    // lease-range/predicate gates; and OFF byte-identical. Mirrors A4's set.
+    // against a real per-channel `DeliveryLeaseCell`, proving: confirmed fallback
+    // transport advances while retaining failed-edit cleanup and no stale footer;
+    // EditedOriginal advances with a footer; Transient (lost acquire) sends nothing;
+    // PartialContinuation does not advance; heartbeat precedes commit; the pure
+    // lease-range/predicate gates and OFF path remain byte-identical.
     mod bridge_short_replace_controller {
         use super::super::{
             BridgeLongChunksLocals, BridgeShortReplaceLocals, apply_bridge_long_chunks_controller,
@@ -1404,14 +1408,11 @@ mod tests {
             shared
         }
 
-        // (1) NoCommitOnFallback: SentFallbackAfterEditFailure → Unknown{fell_back}
-        // → the write-back PRESERVES + bumps `inflight_response_sent_offset` to the
-        // full response len (the dual-offset recovery) WITHOUT advancing
-        // confirmed_end, and records NO completion_footer. Mutation: flipping the
-        // controller policy to CommitOnFallback makes the controller advance
-        // (`bridge_short_replace_edited_original_advances` covers the Delivered side).
+        // (1) SentFallbackAfterEditFailure is confirmed transport. It advances the
+        // frontier and commits the body, but the failed original edit remains a
+        // cleanup failure and the stale original is never registered as the footer.
         #[tokio::test(flavor = "current_thread")]
-        async fn bridge_short_replace_no_commit_on_fallback_no_advance() {
+        async fn bridge_short_replace_fallback_commits_without_stale_footer() {
             let shared = make_shared_data_for_tests();
             let cell = Arc::new(DeliveryLeaseCell::new(ch()));
             assert_eq!(shared.committed_relay_offset(ch()), 0);
@@ -1423,33 +1424,42 @@ mod tests {
                 true,
             );
             let outcome = run(&gw, &shared, &cell).await;
-            assert!(
-                matches!(outcome, toc::DeliveryOutcome::Unknown { fell_back: true }),
-                "NoCommitOnFallback + SentFallback → Unknown{{fell_back:true}}"
-            );
+            assert!(matches!(
+                outcome,
+                toc::DeliveryOutcome::Delivered {
+                    replace_kind: Some(
+                        toc::ReplaceDeliveryKind::FreshFallbackAfterEditFailure { .. }
+                    ),
+                    ..
+                }
+            ));
             assert_eq!(gw.replace_calls.load(Ordering::SeqCst), 1, "one POST");
             assert_eq!(
                 shared.committed_relay_offset(ch()),
-                0,
-                "NoCommitOnFallback must NOT advance confirmed_end (I2)"
+                END,
+                "confirmed fallback transport must advance confirmed_end"
             );
-            assert!(
-                matches!(cell.read(), LeaseSnapshot::Unleased),
-                "controller released the lease WITHOUT committing"
-            );
+            assert!(matches!(cell.read(), LeaseSnapshot::Unleased));
 
-            // Write-back: preserve + the dual-offset bump, no footer, not committed.
             let full_len = 4096usize;
             let locals = apply(outcome, true, full_len);
-            assert!(locals.preserve, "fell_back preserves inflight for retry");
-            assert_eq!(
-                locals.inflight_offset, full_len,
-                "dual-offset bump: response_sent_offset = full_response.len()"
-            );
-            assert!(!locals.committed, "fell_back is NOT a terminal commit");
+            assert!(locals.committed && locals.visible);
+            assert!(!locals.preserve);
+            assert_eq!(locals.inflight_offset, full_len);
             assert!(
                 locals.footer.is_none(),
-                "fell_back must NOT register the original as the footer target"
+                "fallback must not register the stale original as the footer target"
+            );
+            assert!(
+                shared
+                    .ui
+                    .placeholder_cleanup
+                    .terminal_cleanup_retry_pending(
+                        &ProviderKind::Claude,
+                        ch(),
+                        MessageId::new(MSG)
+                    ),
+                "committed fallback body must retain failed-edit cleanup evidence"
             );
         }
 

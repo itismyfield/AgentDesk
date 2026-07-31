@@ -41,6 +41,13 @@ pub(super) fn record_turn_bridge_terminal_replace_cleanup(
 
 // #3034: pure terminal-delivery commit predicate pinned by the unit tests; the
 // live path matches the outcome inline. Test contract.
+//
+// #3089 A1 r3 originally made the bridge owner-specific and classified
+// `SentFallbackAfterEditFailure` as non-committing. That policy confused the
+// failed placeholder edit with delivery of the terminal body: the fallback POST
+// is confirmed transport of the complete body, so treating it as uncommitted
+// permits duplicate recovery. The bridge now commits that transport like the
+// sink and standby owners while retaining the edit failure as cleanup evidence.
 #[allow(dead_code)]
 fn replace_outcome_commits_terminal_delivery(outcome: &ReplaceLongMessageOutcome) -> bool {
     matches!(
@@ -197,6 +204,10 @@ pub(super) fn turn_bridge_replace_outcome_committed(
             true
         }
         Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { edit_error, .. }) => {
+            // `committed` describes terminal-body transport, while this cleanup
+            // record describes the original placeholder edit. The fallback POST
+            // delivered the body, but the failed edit remains actionable cleanup
+            // evidence; the two statuses intentionally refer to different acts.
             record_turn_bridge_terminal_replace_cleanup(
                 shared,
                 provider,
@@ -1065,8 +1076,8 @@ mod tests {
             false,
             "final response delivered via fallback after edit failure",
         ));
-        assert!(!should_fail_dispatch_after_terminal_delivery(
-            false,
+        assert!(should_fail_dispatch_after_terminal_delivery(
+            true,
             replace_outcome_commits_terminal_delivery(&outcome),
             false,
         ));

@@ -4384,12 +4384,11 @@ mod tests {
         .await;
     }
 
-    /// #4187 follow-up: when neither an inflight row nor a delivery lease can
-    /// produce a relay-space terminal end, the helper intentionally falls back to
-    /// the current confirmed frontier. A live watcher over Done is therefore
-    /// strict-terminal even away from the natural far-backstop deadline.
+    /// A fresh publication with no inflight row or matching delivery lease has
+    /// neither a published confirmed frontier nor a produced terminal end. `Done`
+    /// alone must not grant the strict fast path destructive finalization authority.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn watcher_backstop_done_without_inflight_or_lease_is_strict_terminal() {
+    async fn watcher_backstop_done_without_inflight_or_lease_defers_strict_finalize() {
         with_isolated_runtime_root(|| async move {
             let shared = super::super::make_shared_data_for_tests_with_storage(None);
             let ch = ChannelId::new(5411);
@@ -4406,8 +4405,8 @@ mod tests {
                 .insert(ch, backstop_watcher_handle(&session, &transcript_str));
 
             assert!(
-                watcher_backstop_turn_is_terminal(&shared, ch, &ProviderKind::Claude, false),
-                "strict Done falls back to confirmed_end when no inflight row or lease exists"
+                !watcher_backstop_turn_is_terminal(&shared, ch, &ProviderKind::Claude, false),
+                "strict Done must defer without published confirmation and a produced terminal end"
             );
 
             let _ = std::fs::remove_file(&transcript);
@@ -4521,9 +4520,9 @@ mod tests {
 
     /// #3277 (Defect C) incident shape: a watcher-owned `register_start`
     /// Pending whose LIVE unpaused watcher sits parked at transcript EOF over
-    /// a JSONL turn terminator already on disk (provably `Done` on every
-    /// probe) is finalized by the proven-terminal FAST path well within ~40s —
-    /// NOT after the 1800s far-backstop horizon the #3277 incident waited out.
+    /// a JSONL turn terminator and whose produced relay end is confirmed is
+    /// finalized by the proven-terminal FAST path well within ~40s — NOT after
+    /// the 1800s far-backstop horizon the #3277 incident waited out.
     /// (codex r1: an ABSENT handle no longer takes this path — the proof must
     /// come from the transcript under a live handle, see
     /// `watcher_backstop_fast_path_never_counts_absent_or_dead_handle`.)
@@ -4549,10 +4548,29 @@ mod tests {
                 "{\"type\":\"result\",\"result\":\"done\",\"session_id\":\"s\"}\n",
             )
             .unwrap();
-            shared.tmux_watchers.insert(
-                ch,
-                backstop_watcher_handle(&session, transcript.to_str().unwrap()),
+            let transcript_str = transcript.to_str().unwrap().to_string();
+            shared
+                .tmux_watchers
+                .insert(ch, backstop_watcher_handle(&session, &transcript_str));
+            let mut state = super::super::inflight::InflightTurnState::new(
+                ProviderKind::Claude,
+                ch.get(),
+                None,
+                7,
+                110,
+                111,
+                "done and delivery-confirmed".to_string(),
+                None,
+                Some(session.clone()),
+                Some(transcript_str),
+                None,
+                64,
             );
+            state.turn_start_offset = Some(0);
+            super::super::inflight::save_inflight_state(&state).unwrap();
+            shared
+                .tmux_relay_coord(ch)
+                .publish_confirmed_end_for_test(64);
 
             let fin = TurnFinalizer::spawn();
             let k = TurnKey::new(ch, 110, 0);

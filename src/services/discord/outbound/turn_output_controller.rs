@@ -410,36 +410,26 @@ pub(in crate::services::discord) enum EditFailPlaceholderPolicy {
 
 /// How a `SentFallbackAfterEditFailure` replace result advances the lease.
 ///
-/// `ReplaceLongMessageOutcome::SentFallbackAfterEditFailure` is NOT classified
-/// uniformly across the existing owners, so the controller must NOT hard-code
-/// one mapping:
+/// All live owners pass `CommitOnFallback`: once the fallback POST succeeds, the
+/// complete terminal body reached Discord and the delivery frontier must advance.
+/// This supersedes the #3089 A1 r3 bridge-only `NoCommitOnFallback` decision,
+/// which treated the failed placeholder edit as if the separately successful
+/// fallback transport had not delivered the body. The edit failure remains
+/// observable as placeholder-cleanup evidence and does not negate transport.
 ///
-/// - The sink commits/advances it: it bumps `delivered_total` and calls
-///   `advance_after_confirmed_post`, returning `Delivered`
-///   (`session_relay_sink.rs:905`). The fallback POST carried the response, so
-///   the offset advances.
-/// - Standby likewise returns success (`standby_relay.rs:662`): the fallback
-///   delivered the body, advance.
-/// - `turn_bridge`/`terminal_delivery` does NOT commit it: it records the
-///   cleanup failure and returns `committed = false`
-///   (`terminal_delivery.rs:143`); its commit predicate matches `EditedOriginal`
-///   only (`terminal_delivery.rs:42`). The placeholder edit failed and the
-///   terminal-delivery contract treats a non-edited terminal card as not yet
-///   committed, so the offset must NOT advance.
-///
-/// Each owner therefore MUST pass its policy explicitly — NO `Default` (the
-/// #2757 fence philosophy shared with [`EditFailPlaceholderPolicy`]): a missing
-/// policy must be a compile error, never a silent advance/non-advance. The
-/// sink/standby cutovers (A2/A3) pass `CommitOnFallback`; the turn_bridge
-/// cutover (A5) passes `NoCommitOnFallback`.
-#[allow(dead_code)] // #3089 A1: NoCommitOnFallback arm wired by turn_bridge at A5.
+/// The policy remains explicit with NO `Default` (the #2757 fence philosophy
+/// shared with [`EditFailPlaceholderPolicy`]) so tests can still exercise the
+/// legacy non-commit behavior without allowing a new owner to inherit it
+/// silently. Every production owner must consciously choose confirmed fallback
+/// delivery semantics.
+#[allow(dead_code)] // Legacy NoCommitOnFallback is retained for mutation tests only.
 pub(in crate::services::discord) enum FallbackCommitPolicy {
     /// The fallback POST counts as delivery → commit/advance the offset
     /// (sink `session_relay_sink.rs:905`, standby `standby_relay.rs:662`).
     CommitOnFallback,
-    /// The fallback edit failure does NOT commit → leave the offset un-advanced
-    /// (turn_bridge `terminal_delivery.rs:143`, predicate `:42`). Maps to
-    /// `Unknown` so a retry can re-deliver from the same offset (I2).
+    /// Legacy/test-only behavior: leave a successful fallback POST uncommitted
+    /// and return `Unknown`. No production owner may use this after the bridge
+    /// transport contract superseded #3089 A1 r3.
     NoCommitOnFallback,
 }
 
@@ -646,9 +636,9 @@ pub(in crate::services::discord) struct TurnOutputCtx<
     pub(in crate::services::discord) plan: OutputPlan,
     /// Explicit per-owner edit-fail fallback policy; NO default (#2757 fence).
     pub(in crate::services::discord) edit_fail_policy: EditFailPlaceholderPolicy,
-    /// Explicit per-owner advance policy for `SentFallbackAfterEditFailure`; NO
-    /// default. The sink/standby advance on fallback POST; turn_bridge does not
-    /// (see [`FallbackCommitPolicy`]). The controller must not hard-code one.
+    /// Explicit advance policy for `SentFallbackAfterEditFailure`; NO default.
+    /// All production owners advance on a confirmed fallback POST; the legacy
+    /// non-commit arm remains available only to contract and mutation tests.
     pub(in crate::services::discord) fallback_commit_policy: FallbackCommitPolicy,
     /// A2a capability 1: what to do when the lease acquire FAILS. NO default —
     /// the sink (`ProceedMarkerless`) and watcher/bridge (`Transient`) diverge.
@@ -1163,13 +1153,10 @@ where
 ///   `session_relay_sink.rs:863`, `standby_relay.rs:653`,
 ///   `turn_bridge/terminal_delivery.rs:131` (committed = true) + predicate `:42`,
 ///   `formatting.rs:1785` (`Ok(())`).
-/// - `SentFallbackAfterEditFailure` → owner-SPECIFIC (review-fix H1 r3): the sink
-///   advances (`session_relay_sink.rs:905`) and standby advances
-///   (`standby_relay.rs:662`), but turn_bridge does NOT
-///   (`terminal_delivery.rs:143` returns `committed = false`; predicate `:42`
-///   commits `EditedOriginal` only). The controller consults the owner-passed
-///   `FallbackCommitPolicy`: `CommitOnFallback` → `Delivered`,
-///   `NoCommitOnFallback` → `Unknown { fell_back: true }` (#3089 A5).
+/// - `SentFallbackAfterEditFailure` → confirmed fallback transport. Every live
+///   owner passes `CommitOnFallback`, so the controller returns `Delivered` and
+///   advances. `NoCommitOnFallback` preserves the superseded #3089 A1 r3
+///   behavior only for explicit contract/mutation tests.
 /// - `PartialContinuationFailure` → ambiguous, NEVER advance (I2):
 ///   `session_relay_sink.rs:956`, `standby_relay.rs:678`,
 ///   `turn_bridge/terminal_delivery.rs:155` (committed = false), `formatting.rs:1787`.
@@ -1185,12 +1172,11 @@ fn classify_replace_outcome(
             replace_kind: Some(ReplaceDeliveryKind::EditedOriginal),
             new_chunks: None,
         },
-        // Owner-specific (H1 r3): the edit failed but a fallback POST carried the
-        // body. Honour the owner's `FallbackCommitPolicy` (sink/standby advance;
-        // turn_bridge does not). On the committing arm carry the
-        // `FreshFallbackAfterEditFailure { edit_error, replacement_anchor }`
-        // identity (#3089 A4 r2 + D1) so the watcher mirrors the legacy fallback
-        // cleanup and recovery can durably bind a stale-anchor fallback POST.
+        // The edit failed but a fallback POST carried the body. Every live owner
+        // chooses `CommitOnFallback`; the explicit legacy arm remains only for
+        // tests that prove a non-commit mutation cannot advance. On the committing
+        // arm carry `FreshFallbackAfterEditFailure { .. }` so owner cleanup keeps
+        // the failed-edit evidence and recovery can bind the replacement anchor.
         ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
             edit_error,
             replacement_anchor,

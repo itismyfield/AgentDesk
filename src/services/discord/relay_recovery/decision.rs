@@ -302,6 +302,7 @@ fn auto_heal_metadata(
         snapshot.channel_id,
         action,
         RelayRecoveryApplySource::Manual,
+        snapshot.delivery_evidence,
     );
     let max_attempts_per_window = max_attempts_per_window_for_snapshot(snapshot, action);
     RelayRecoveryAutoHeal {

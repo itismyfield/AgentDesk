@@ -92,16 +92,22 @@ pub(super) fn watcher_backstop_turn_is_terminal(
         runtime_kind,
         std::path::Path::new(&output_path),
     );
-    let confirmed_end_offset = shared.tmux_relay_coord(channel_id).confirmed_end_or_zero();
+    let confirmed_end_publication = shared
+        .tmux_relay_coord(channel_id)
+        .confirmed_end_publication();
     let produced_terminal_end = watcher_backstop_produced_terminal_end(
         shared,
         channel_id,
         inflight_state.as_ref(),
         &tmux_session_name,
         &output_path,
-    )
-    .unwrap_or(confirmed_end_offset);
-    let delivery_confirmed = confirmed_end_offset >= produced_terminal_end;
+    );
+    // Both publication identity and a produced terminal end are required.
+    // Missing either fact is unconfirmed; never manufacture authority by
+    // comparing a frontier to itself.
+    let delivery_confirmed = confirmed_end_publication
+        .zip(produced_terminal_end)
+        .is_some_and(|(confirmed, produced)| confirmed >= produced);
     // Bounded escape hatch: fast-path probes and pulled deadlines stay strict,
     // but the natural far-backstop deadline may finalize a structurally Done
     // turn even if the relay watermark never reaches the produced frontier. This
@@ -114,8 +120,8 @@ pub(super) fn watcher_backstop_turn_is_terminal(
             channel_id = channel_id.get(),
             provider = %provider.as_str(),
             tmux_session = %tmux_session_name,
-            confirmed_end_offset,
-            produced_terminal_end,
+            ?confirmed_end_publication,
+            ?produced_terminal_end,
             at_deadline,
             natural_deadline_escape = delivery_confirmed_or_natural_deadline_escape,
             "watcher backstop observed Done before delivery confirmation"
@@ -179,8 +185,8 @@ fn watcher_backstop_produced_terminal_end(
     // to `output_path` metadata: for CodexTui the watcher path can be the
     // provider rollout transcript, not the relay cursor, and empty/silent turns
     // would over-defer because transcript terminator bytes are not delivered
-    // output. If neither source is present, the caller falls back to the
-    // confirmed frontier so no unknown non-output range is invented.
+    // output. If neither source is present, the caller keeps delivery unconfirmed;
+    // an unknown produced end cannot confer destructive finalization authority.
     end
 }
 

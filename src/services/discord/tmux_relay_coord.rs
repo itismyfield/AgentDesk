@@ -12,7 +12,7 @@ use super::{DeliveryLeaseCell, UNRECORDED_RELAY_OFFSET};
 /// outgoing/successor relay emission and exposes the confirmed-output watermark.
 /// Scope: intra-process only; restart-persistent dedupe remains in
 /// `InflightTurnState::last_watcher_relayed_offset`.
-pub(in crate::services::discord) struct TmuxRelayCoord {
+pub(super) struct TmuxRelayCoord {
     /// Non-zero while some watcher instance is actively emitting a relay for
     /// this channel. Holds the `data_start_offset` of the in-progress emission.
     /// Acquired via `compare_exchange(0, offset)` — only one watcher can
@@ -22,6 +22,13 @@ pub(in crate::services::discord) struct TmuxRelayCoord {
     /// End offset (exclusive) of the last relay this process has confirmed
     /// delivery for. `UNRECORDED_RELAY_OFFSET` means no frontier writer has
     /// published yet; 0 is an intentionally published zero frontier.
+    ///
+    /// #3017: this is the single output-offset authority for relay dedup. The
+    /// watcher advances it; secondary actors (idle JSONL relay, session-bound
+    /// sink, wake/idle-background and monitor auto-turn paths) consult it so a
+    /// range the watcher already committed reaches Discord exactly once (E-13).
+    /// Normal Discord-origin turns with inflight state keep the watcher as sole
+    /// relay owner.
     ///
     /// This atomic stays private to this module so every reader must choose
     /// publication-aware (`confirmed_end_publication`) or compatibility-zero
@@ -39,6 +46,12 @@ pub(in crate::services::discord) struct TmuxRelayCoord {
     pub(in crate::services::discord) reconnect_count: Arc<AtomicU64>,
     /// `.generation` marker file mtime (nanos since epoch) snapshotted the
     /// last time `confirmed_end_offset` was advanced. 0 = never observed.
+    ///
+    /// `reset_stale_relay_watermark_if_output_regressed` (#1270) distinguishes
+    /// two byte-identical regressions with this identity: a same-generation
+    /// head rotation pins the frontier to the surviving EOF, while a fresh
+    /// generation after cancel/respawn resets to zero so genuinely new output
+    /// remains relayable.
     pub(in crate::services::discord) confirmed_end_generation_mtime_ns: Arc<AtomicI64>,
     pub(in crate::services::discord) delivery_lease: Arc<DeliveryLeaseCell>,
 }
@@ -73,6 +86,9 @@ impl TmuxRelayCoord {
         &self,
         committed_end_offset: u64,
     ) -> bool {
+        if committed_end_offset == UNRECORDED_RELAY_OFFSET {
+            return false;
+        }
         let mut current = self.confirmed_end_offset.load(Ordering::Acquire);
         let mut advanced = false;
         if current == UNRECORDED_RELAY_OFFSET {
@@ -112,11 +128,9 @@ impl TmuxRelayCoord {
         expected_offset: u64,
         new_offset: u64,
     ) -> bool {
-        debug_assert_ne!(
-            expected_offset, UNRECORDED_RELAY_OFFSET,
-            "an unpublished relay frontier must never enter reset arithmetic"
-        );
-        debug_assert!(new_offset < expected_offset);
+        if expected_offset == UNRECORDED_RELAY_OFFSET || new_offset >= expected_offset {
+            return false;
+        }
         let mut state = self
             .reset_state
             .lock()

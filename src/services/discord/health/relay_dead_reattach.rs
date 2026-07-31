@@ -38,9 +38,12 @@ fn should_reattach_relay_dead_watcher(
     }
     // Fresh runtime activity is a blocker for destructive cleanup, but for a
     // relay frontier that never moved it is evidence that a non-destructive
-    // watcher reattach can recover live output. After restart the process-local
-    // terminal evidence can be NotAttempted/Unknown; bounded observation above
-    // still permits only reattach, while the manual destructive predicate stays
+    // watcher reattach can recover live output. This predicate expands only the
+    // watcher registry: `auto_apply_relay_recovery_for_shared` reserves the exact
+    // inflight episode and `apply_relay_recovery_decision` passes that reservation
+    // to `rebind_inflight`, whose automatic arm cannot enter the manual
+    // mailbox/inflight/session cleanup branches. After restart, NotAttempted or
+    // Unknown therefore authorizes only pinned adoption; destructive repair stays
     // restricted to exact NotDelivered evidence.
     if snapshot
         .relay_health
