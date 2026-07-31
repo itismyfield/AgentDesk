@@ -167,17 +167,6 @@ jobs:
               - 'src/services/cluster/intake_router_hook/**'
               - 'src/services/discord/router/intake_dispatch.rs'
               - 'src/services/discord/router/intake_dispatch/**'
-              # #5001/#5015: runtime mismatch verdict, turn reservation, and
-              # headless retry changes must run the required targeted tests.
-              - 'src/services/discord/router/message_handler/headless_turn.rs'
-              - 'src/services/discord/router/message_handler/provider_isolation.rs'
-              - 'src/services/discord/router/message_handler/provider_isolation/**'
-              - 'src/services/discord/router/message_handler/tui_followup_retry.rs'
-              - 'src/services/discord/router/message_handler/tui_followup_retry_tests.rs'
-              - 'src/services/discord/router/turn_start.rs'
-              - 'src/services/discord/commands/**'
-              - 'src/services/discord/runtime_bootstrap/**'
-              - 'src/services/turn_orchestrator.rs'
               - 'src/services/observability/**'
               - 'src/config.rs'
               - 'Cargo.toml'
@@ -654,23 +643,6 @@ jobs:
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests
           env -u AGENTDESK_ROOT_DIR cargo test --lib watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row
           env -u AGENTDESK_ROOT_DIR cargo test --lib identity_guarded_save_rejects_stale_write_against_newer_turn
-
-      # #5001/#5015: these non-PG router regressions must run on pull requests,
-      # not only through main's `just check` retained lane.
-      - name: Runtime mismatch and headless defer regressions
-        timeout-minutes: 10
-        shell: bash
-        env:
-          BASH_ENV: /dev/null
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
-        run: |
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::turn_start::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::tui_followup_retry_tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::commands::restart_seed_retry_tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::scheduled_messages::tests::queued_agent_turn_is_rearmed_not_terminalized_5015
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::routines::agent_executor::tests::queued_start_remains_pending_without_terminal_evidence_5015
 
       - name: just test-postgres
         timeout-minutes: 20

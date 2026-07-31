@@ -405,12 +405,7 @@
     {
       "path": "src/services/discord/router/message_handler/tui_followup.rs",
       "lint": "too_many_arguments",
-      "count": 1
-    },
-    {
-      "path": "src/services/discord/router/message_handler/tui_followup_retry.rs",
-      "lint": "too_many_arguments",
-      "count": 1
+      "count": 2
     },
     {
       "path": "src/services/discord/router/message_handler/voice_announcement_scope.rs",

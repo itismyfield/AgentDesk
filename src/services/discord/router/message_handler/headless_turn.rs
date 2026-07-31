@@ -45,39 +45,6 @@ fn fresh_routine_turn(metadata: Option<&serde_json::Value>) -> bool {
         != Some("persistent")
 }
 
-/// Defer replay currently transports only the readable prompt and source id.
-/// Snapshot and fresh-routine turns carry isolation semantics that cannot be
-/// reconstructed from that payload, so they must fail closed and let their
-/// durable caller retry the original request instead.
-pub(super) fn runtime_mismatch_defer_requires_fail_closed(
-    metadata: Option<&serde_json::Value>,
-    source: Option<&str>,
-    channel_name_hint: Option<&str>,
-    tmux_session_label: Option<&str>,
-) -> bool {
-    metadata.is_some()
-        || source.is_some()
-        || channel_name_hint.is_some()
-        || tmux_session_label.is_some()
-}
-
-pub(super) fn preserved_headless_defer_result(
-    channel_id: ChannelId,
-    reservation: HeadlessTurnReservation,
-    retry_preserved: bool,
-) -> Result<HeadlessTurnStartOutcome, HeadlessTurnStartError> {
-    if !retry_preserved {
-        return Err(HeadlessTurnStartError::Internal(format!(
-            "managed runtime mismatch retry could not be preserved for channel {}",
-            channel_id.get()
-        )));
-    }
-    Ok(HeadlessTurnStartOutcome {
-        turn_id: reservation.turn_id(channel_id),
-        status: HeadlessTurnStartStatus::Queued,
-    })
-}
-
 async fn persist_boundary_before_provider_clear<B, BFut, C, CFut, E>(
     persist_boundary: bool,
     clear_provider: bool,
@@ -1106,7 +1073,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         Some(channel_id.get()),
     );
     #[cfg(unix)]
-    let runtime_mismatch_verdict = reconcile_managed_tmux_runtime_kind_using_runtime(
+    let _runtime_mismatch_verdict = reconcile_managed_tmux_runtime_kind_using_runtime(
         shared,
         &provider,
         channel_id,
@@ -1115,64 +1082,6 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         Some(&current_path),
         session_id.as_deref(),
     );
-    #[cfg(unix)]
-    if runtime_mismatch_verdict.should_defer() {
-        if runtime_mismatch_defer_requires_fail_closed(
-            metadata.as_ref(),
-            source,
-            channel_name_hint.as_deref(),
-            tmux_session_label.as_deref(),
-        ) {
-            let _ =
-                release_mailbox_after_placeholder_post_failure(shared, &provider, channel_id).await;
-            return Err(HeadlessTurnStartError::Conflict(format!(
-                "runtime mismatch defer cannot preserve isolation metadata for channel {}",
-                channel_id.get()
-            )));
-        }
-        // Releasing the mailbox consumes this claimed request, so retain the
-        // headless mismatch retry behind existing user work. Queue identity is
-        // the synthetic source id. Callers retrying one logical request must
-        // therefore reuse their HeadlessTurnReservation; distinct prompts keep
-        // distinct reservations and remain separate FIFO entries.
-        let bot_owner_provider = super::super::super::resolve_discord_bot_provider(token);
-        // Retire this turn's channel-scoped state while it still owns the mailbox.
-        // After release, a queued successor may install fresh state under the same
-        // channel key, which this defer must not remove.
-        shared.turn_start_times.remove(&channel_id);
-        super::super::super::clear_watchdog_deadline_override(channel_id.get()).await;
-        let _ =
-            release_mailbox_after_busy_pre_submit_defer(shared, &bot_owner_provider, channel_id)
-                .await;
-        // Queue persistence removes normal-process loss after this enqueue
-        // commits. A crash or persistence error after mailbox release but before
-        // the atomic rename can still lose the request because admission and
-        // release are not one durable transaction; callers receive Internal on
-        // persistence failure, while a process crash has no recovery record.
-        let retry = enqueue_headless_runtime_mismatch_defer(
-            shared,
-            &bot_owner_provider,
-            channel_id,
-            user_msg_id,
-            prompt,
-        )
-        .await;
-        let retry_preserved = busy_retry::present_or_accepted(&retry);
-        if retry_preserved {
-            super::super::super::arm_slow_idle_queue_backstop_if_queue_nonempty(
-                shared,
-                &bot_owner_provider,
-                channel_id,
-                "headless_runtime_mismatch_defer_pending",
-            )
-            .await;
-        }
-        crate::services::discord::saturating_decrement_global_active(shared);
-        cancel_token
-            .cancelled
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        return preserved_headless_defer_result(channel_id, reservation, retry_preserved);
-    }
     let effective_runtime_kind = prelaunch_runtime_kind.map(|expectation| expectation.runtime_kind);
 
     let model_for_turn =

@@ -52,9 +52,6 @@ mod intake_turn;
 mod latency_spans;
 mod provider_isolation;
 mod tui_followup;
-mod tui_followup_retry;
-#[cfg(test)]
-mod tui_followup_retry_tests;
 mod turn_lifecycle;
 pub(in crate::services::discord) mod typing_indicator;
 mod voice_announcement_route;
@@ -62,13 +59,8 @@ mod voice_announcement_scope;
 mod watchdog;
 
 use self::goal_lifecycle::*;
-#[cfg(test)]
-use self::headless_turn::{
-    preserved_headless_defer_result, runtime_mismatch_defer_requires_fail_closed,
-};
 use self::provider_isolation::*;
 use self::tui_followup::*;
-use self::tui_followup_retry::*;
 pub(in crate::services::discord) use self::turn_lifecycle::mailbox_try_start_turn_with_terminal_marker_cleanup;
 use self::turn_lifecycle::{
     cleanup_terminal_delivery_marker_after_turn_start, should_add_turn_pending_reaction,

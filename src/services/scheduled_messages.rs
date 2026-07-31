@@ -17,8 +17,6 @@ use std::sync::Arc;
 
 pub(crate) mod context_snapshot;
 mod evidence;
-mod reservation;
-mod start;
 mod timing;
 
 #[cfg(test)]
@@ -32,13 +30,12 @@ use timing::{MAX_FIRE_RETRIES, compute_resume, fire_retry_next_at};
 use crate::db::scheduled_messages as db;
 use crate::db::scheduled_messages::{ClaimedFire, RunningAgentDelivery, ScheduledMessageRow};
 use crate::services::discord::health::{
-    HealthRegistry, start_reserved_headless_agent_turn_with_owner_channel,
+    HealthRegistry, reserve_headless_agent_turn,
+    start_reserved_headless_agent_turn_with_owner_channel,
 };
 use crate::services::message_outbox::{
     OutboxEnqueueError, OutboxMessage, enqueue_outbox_pg_returning_id_with_persistent_dedupe_on_tx,
 };
-use reservation::{persist_scheduled_reservation, reserve_scheduled_agent_turn};
-use start::runtime_unavailable;
 
 const CLAIM_BATCH: i64 = 10;
 const AGENT_POLL_BATCH: i64 = 20;
@@ -299,14 +296,8 @@ async fn fire_agent(pool: &PgPool, health_registry: Option<&HealthRegistry>, fir
         return;
     };
     match start_agent_turn(pool, health_registry, fire).await {
-        Ok(AgentTurnStartDisposition::Started) => {}
-        Ok(AgentTurnStartDisposition::Queued(turn_id)) => {
-            interrupt_for_retry(
-                pool,
-                fire,
-                &format!("scheduled message turn {turn_id} is queued behind existing work"),
-            )
-            .await;
+        Ok(AgentTurnStartDisposition::Started) => {
+            // Delivery stays running; poll_agent_delivery owns completion.
         }
         Ok(AgentTurnStartDisposition::Consumed(turn_id)) => {
             finish_terminal_failure(
@@ -324,7 +315,7 @@ async fn fire_agent(pool: &PgPool, health_registry: Option<&HealthRegistry>, fir
         Err(error) => {
             tracing::warn!(id = message.id, "[smsg] agent turn start failed: {error}");
             let reason = format!("agent turn start failed: {error}");
-            if runtime_unavailable(&error) {
+            if agent_start_error_is_runtime_unavailable(&error) {
                 let retry_not_before = runtime_defer_until(Utc::now());
                 if let Err(defer_error) = db::defer_delivery_without_retry_pg(
                     pool,
@@ -351,7 +342,6 @@ async fn fire_agent(pool: &PgPool, health_registry: Option<&HealthRegistry>, fir
 
 enum AgentTurnStartDisposition {
     Started,
-    Queued(String),
     /// A lifecycle command was consumed before provider/bridge spawn. Repeating
     /// it could repeat the lifecycle side effect, so terminalize instead.
     Consumed(String),
@@ -361,20 +351,20 @@ enum AgentTurnStartDisposition {
     SnapshotInvalid(String),
 }
 
-fn classify_agent_turn_start(
-    status: crate::services::discord::router::HeadlessTurnStartStatus,
-    turn_id: String,
-) -> AgentTurnStartDisposition {
-    use crate::services::discord::router::HeadlessTurnStartStatus::{Consumed, Queued, Started};
-    match status {
-        Started => AgentTurnStartDisposition::Started,
-        Queued => AgentTurnStartDisposition::Queued(turn_id),
-        Consumed => AgentTurnStartDisposition::Consumed(turn_id),
-    }
-}
-
 fn runtime_defer_until(now: DateTime<Utc>) -> DateTime<Utc> {
     now + chrono::Duration::seconds(RUNTIME_DEFER_SECS)
+}
+
+fn agent_start_error_is_runtime_unavailable(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    [
+        "provider runtime not registered",
+        "provider runtime is not ready",
+        "matched runtime is not ready",
+        "provider token unavailable",
+    ]
+    .into_iter()
+    .any(|needle| message.contains(needle))
 }
 
 /// Start a headless agent turn whose relayed reply delivers the message.
@@ -441,8 +431,7 @@ async fn start_agent_turn(
             }
         };
 
-    let reservation = reserve_scheduled_agent_turn(turn_channel, fire.reservation_user_msg_id);
-    persist_scheduled_reservation(pool, fire, &reservation).await?;
+    let reservation = reserve_headless_agent_turn(turn_channel);
     let turn_id = reservation.turn_id().to_string();
     let recorded = db::record_delivery_agent_turn_intent_pg(
         pool,
@@ -508,9 +497,8 @@ async fn start_agent_turn(
     .await
     .map_err(|error| anyhow!("start scheduled message turn for {agent_id}: {error}"))?;
 
-    match classify_agent_turn_start(outcome.status, turn_id.clone()) {
-        AgentTurnStartDisposition::Started => {}
-        disposition => return Ok(disposition),
+    if outcome.status.as_str() != "started" {
+        return Ok(AgentTurnStartDisposition::Consumed(turn_id));
     }
 
     // `HeadlessTurnStartError` is a pre-spawn contract. After `Started`, never
@@ -1285,23 +1273,6 @@ mod tests {
     }
 
     #[test]
-    fn queued_agent_turn_is_rearmed_not_terminalized_5015() {
-        let disposition = classify_agent_turn_start(
-            crate::services::discord::router::HeadlessTurnStartStatus::Queued,
-            "discord:50:15".to_string(),
-        );
-
-        assert!(matches!(
-            disposition,
-            AgentTurnStartDisposition::Queued(ref turn_id) if turn_id == "discord:50:15"
-        ));
-        assert!(!matches!(
-            disposition,
-            AgentTurnStartDisposition::Consumed(_)
-        ));
-    }
-
-    #[test]
     fn booting_discord_runtime_errors_defer_without_consuming_retry() {
         for message in [
             "provider runtime not registered: codex",
@@ -1309,11 +1280,11 @@ mod tests {
             "matched runtime is not ready for provider codex on channel 123",
             "provider token unavailable for channel 123",
         ] {
-            assert!(runtime_unavailable(&anyhow::anyhow!(
+            assert!(agent_start_error_is_runtime_unavailable(&anyhow::anyhow!(
                 "start scheduled message turn: {message}"
             )));
         }
-        assert!(!runtime_unavailable(&anyhow::anyhow!(
+        assert!(!agent_start_error_is_runtime_unavailable(&anyhow::anyhow!(
             "agent mailbox is busy for channel 123"
         )));
     }

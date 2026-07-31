@@ -271,6 +271,18 @@ pub(super) fn spawn_headless_turn_watchdog(
                 .await;
                 return;
             }
+            let is_current_token =
+                super::super::super::mailbox_cancel_token(&watchdog_shared, channel_id)
+                    .await
+                    .is_some_and(|current| Arc::ptr_eq(&watchdog_token, &current));
+            if !is_current_token {
+                super::super::super::clear_watchdog_deadline_override_if_current(
+                    watchdog_channel_id_num,
+                    watchdog_token.clone(),
+                )
+                .await;
+                return;
+            }
             if let Some(extension) =
                 super::super::super::take_watchdog_deadline_override(watchdog_channel_id_num).await
             {
@@ -367,6 +379,18 @@ pub(super) fn spawn_headless_turn_watchdog(
                 {
                     last_deadlock_prealert_deadline_ms = Some(current_deadline);
                 }
+            }
+            let is_current_token =
+                super::super::super::mailbox_cancel_token(&watchdog_shared, channel_id)
+                    .await
+                    .is_some_and(|current| Arc::ptr_eq(&watchdog_token, &current));
+            if !is_current_token {
+                super::super::super::clear_watchdog_deadline_override_if_current(
+                    watchdog_channel_id_num,
+                    watchdog_token.clone(),
+                )
+                .await;
+                return;
             }
             if let Some(extension) =
                 super::super::super::take_watchdog_deadline_override(watchdog_channel_id_num).await

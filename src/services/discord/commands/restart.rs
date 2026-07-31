@@ -48,7 +48,6 @@ pub(super) fn classify_restart_action(session_snapshot: Option<Option<String>>) 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum RestartSeedStatus {
     Started,
-    Queued,
     Busy,
     Failed(String),
 }
@@ -89,9 +88,6 @@ fn restart_seed_note(status: &RestartSeedStatus) -> String {
         // Successful seed turn needs no narration — the agent's own greeting
         // turn follows immediately and speaks for itself.
         RestartSeedStatus::Started => String::new(),
-        RestartSeedStatus::Queued => {
-            "인사말 turn은 durable queue에 접수되어 기존 작업 뒤에 실행됩니다.".to_string()
-        }
         RestartSeedStatus::Busy => {
             "기존 턴 정리가 아직 끝나지 않아 인사말 turn은 시작하지 못했습니다.".to_string()
         }
@@ -127,7 +123,7 @@ fn build_restart_response(
 
 async fn retry_restart_seed_turn<F, Fut>(mut start: F) -> RestartSeedStatus
 where
-    F: FnMut(super::super::router::HeadlessTurnReservation) -> Fut,
+    F: FnMut() -> Fut,
     Fut: std::future::Future<
             Output = Result<
                 super::super::router::HeadlessTurnStartOutcome,
@@ -138,19 +134,12 @@ where
     const MAX_ATTEMPTS: usize = 30;
     const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 
-    // One reservation is the logical /restart request identity. Reusing it makes
-    // every conflict retry collide with any still-queued or dispatch-reserved copy
-    // of the same prompt instead of minting another durable queue obligation.
-    let reservation = super::super::router::reserve_headless_turn();
     for attempt in 0..MAX_ATTEMPTS {
-        match start(reservation).await {
+        match start().await {
             Ok(outcome) => {
                 return match outcome.status {
                     super::super::router::HeadlessTurnStartStatus::Started => {
                         RestartSeedStatus::Started
-                    }
-                    super::super::router::HeadlessTurnStartStatus::Queued => {
-                        RestartSeedStatus::Queued
                     }
                     super::super::router::HeadlessTurnStartStatus::Consumed => {
                         RestartSeedStatus::Failed(
@@ -190,8 +179,8 @@ async fn start_restart_seed_turn(ctx: &Context<'_>) -> RestartSeedStatus {
         "provider": ctx.data().provider.as_str(),
     });
 
-    retry_restart_seed_turn(|reservation| {
-        super::super::router::start_reserved_headless_turn(
+    retry_restart_seed_turn(|| {
+        super::super::router::start_headless_turn(
             ctx.serenity_context(),
             channel_id,
             RESTART_SEED_PROMPT,
@@ -201,31 +190,9 @@ async fn start_restart_seed_turn(ctx: &Context<'_>) -> RestartSeedStatus {
             Some("/restart"),
             Some(metadata.clone()),
             channel_name_hint.clone(),
-            None,
-            None,
-            reservation,
         )
     })
     .await
-}
-
-#[cfg(test)]
-pub(super) fn restart_seed_note_for_test(status: &RestartSeedStatus) -> String {
-    restart_seed_note(status)
-}
-
-#[cfg(test)]
-pub(super) async fn retry_restart_seed_turn_for_test<F, Fut>(start: F) -> RestartSeedStatus
-where
-    F: FnMut(super::super::router::HeadlessTurnReservation) -> Fut,
-    Fut: std::future::Future<
-            Output = Result<
-                super::super::router::HeadlessTurnStartOutcome,
-                super::super::router::HeadlessTurnStartError,
-            >,
-        >,
-{
-    retry_restart_seed_turn(start).await
 }
 
 async fn run_restart(ctx: Context<'_>, command_name: &'static str) -> Result<(), Error> {

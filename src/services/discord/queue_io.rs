@@ -33,7 +33,7 @@ tokio::task_local! {
 }
 
 #[cfg(test)]
-pub(in crate::services::discord) type IdleQueueKickHookForTests = std::sync::Arc<
+type IdleQueueKickHookForTests = std::sync::Arc<
     dyn Fn(
             Arc<SharedData>,
             ProviderKind,
@@ -50,7 +50,7 @@ static IDLE_QUEUE_KICK_HOOK_FOR_TESTS: std::sync::Mutex<Option<IdleQueueKickHook
     std::sync::Mutex::new(None);
 
 #[cfg(test)]
-pub(in crate::services::discord) struct IdleQueueKickHookResetForTests;
+struct IdleQueueKickHookResetForTests;
 
 #[cfg(test)]
 impl Drop for IdleQueueKickHookResetForTests {
@@ -62,7 +62,7 @@ impl Drop for IdleQueueKickHookResetForTests {
 }
 
 #[cfg(test)]
-pub(in crate::services::discord) fn set_idle_queue_kick_hook_for_tests(
+fn set_idle_queue_kick_hook_for_tests(
     hook: IdleQueueKickHookForTests,
 ) -> IdleQueueKickHookResetForTests {
     *IDLE_QUEUE_KICK_HOOK_FOR_TESTS
@@ -102,9 +102,7 @@ pub(in crate::services::discord) async fn mailbox_cancel_queued_primary_message(
     result.removed
 }
 
-pub(in crate::services::discord) async fn with_post_enqueue_idle_queue_kick_suppressed<F>(
-    future: F,
-) -> F::Output
+pub(super) async fn with_post_enqueue_idle_queue_kick_suppressed<F>(future: F) -> F::Output
 where
     F: std::future::Future,
 {
@@ -443,9 +441,9 @@ pub(super) async fn arm_event_backstop_after_no_start_if_queue_nonempty(
 
 /// #4270 — busy-defer edge-trigger net: arm ONLY the slow (60s) fail-open
 /// backstop for a channel, WITHOUT the fast 2s deferred kick. Used by (1) the
-/// busy pre-submit mailbox release path
-/// (`release_mailbox_after_busy_pre_submit_defer`) and (2) the live dispatch
-/// promote gate (`DiscordGateway::dispatch_queued_turn`), so a
+/// hosted-TUI busy-defer release path
+/// (`release_mailbox_after_busy_pre_submit_defer`) and (2) the live
+/// dispatch promote gate (`DiscordGateway::dispatch_queued_turn`), so a
 /// still-busy follow-up does not fast-spin the kickoff: the watcher-idle
 /// re-drain delivers the fast edge when the TUI reaches Idle, and this backstop
 /// is the lost-wakeup net. Thin wrapper over
@@ -2376,7 +2374,7 @@ mod presleep_tests {
     /// #4270 pin #2 — the busy-defer edge-trigger helper arms ONLY the slow
     /// (60s) fail-open backstop for a non-empty queue and fires NO fast kickoff;
     /// the fast wakeup is delegated to the watcher-idle re-drain. This is the
-    /// arm that both `release_mailbox_after_hosted_tui_busy_pre_submit`
+    /// arm that both `release_mailbox_after_busy_pre_submit_defer`
     /// (post-claim busy defer, turn_start.rs) and the `dispatch_queued_turn`
     /// promote gate call instead of the fixed-delay kickoff.
     #[tokio::test(flavor = "current_thread")]

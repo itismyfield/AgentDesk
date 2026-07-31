@@ -66,10 +66,7 @@ EXPECTED_TEST_NON_PG_COMMANDS = (
     "cargo test --lib services::discord::gateway::tests -- --skip _pg --skip pg_ --skip postgres",
     "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::gateway::outbound_messages::classified_edit_tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
     "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::intake_dispatch::queued::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::turn_start::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
     "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::intake_turn::placeholder_handoff::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::tui_followup_retry_tests -- --test-threads=1",
     "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::completion_admission::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
     "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::completion_admission_actor::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
     "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::cleanup::tests::late_already_finalized_cleanup_releases_mailbox_and_rearms_once_4906 -- --exact --test-threads=1",
@@ -263,36 +260,6 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertIn("FILTER_OUTPUT: ${{ needs.changes.outputs.pg_db }}", mirror_job)
         self.assertIn("UPSTREAM_JOB_NAME: test_fast", mirror_job)
         self.assertIn("UPSTREAM_RESULT: ${{ needs.test_fast.result }}", mirror_job)
-
-    def test_runtime_mismatch_regressions_run_in_required_test_fast_lane(self) -> None:
-        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        changes = job_block(workflow, "changes")
-        test_job = job_block(workflow, "test_fast")
-        mirror_job = job_block(workflow, "fast_targeted_tests_required_context")
-        commands = (
-            "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-            "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::turn_start::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-            "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::tui_followup_retry_tests -- --test-threads=1",
-            "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::commands::restart_seed_retry_tests -- --test-threads=1",
-        )
-        self.assertEqual(
-            test_job.count("- name: Runtime mismatch and headless defer regressions"), 1
-        )
-        for command in commands:
-            self.assertEqual(test_job.count(command), 1)
-        self.assertIn("- 'src/services/discord/**'", changes)
-        for path in (
-            "src/services/discord/router/message_handler/provider_isolation.rs",
-            "src/services/discord/router/message_handler/provider_isolation/**",
-            "src/services/discord/router/message_handler/tui_followup_retry.rs",
-            "src/services/discord/router/message_handler/tui_followup_retry_tests.rs",
-            "src/services/discord/router/turn_start.rs",
-            "src/services/discord/runtime_bootstrap/**",
-            "src/services/turn_orchestrator.rs",
-        ):
-            self.assertIn(f"- '{path}'", changes)
-        self.assertIn("- test_fast", mirror_job)
-        self.assertIn("FILTER_NAME: pg_db", mirror_job)
 
     def test_footer_marker_regressions_run_in_required_test_fast_lane(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")

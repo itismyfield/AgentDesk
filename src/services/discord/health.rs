@@ -54,7 +54,6 @@ pub use crate::services::discord::outbound::send_gate::{
 };
 #[allow(unused_imports)]
 pub use headless_turn::HeadlessAgentTurnReservation;
-pub(crate) use headless_turn::reserve_headless_agent_turn_with_user_msg_id;
 pub use headless_turn::{
     reserve_headless_agent_turn, reserve_headless_agent_turn_in_dm, start_direct_meeting,
     start_headless_agent_turn, start_headless_agent_turn_in_dm,

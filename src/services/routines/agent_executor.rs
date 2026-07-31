@@ -121,7 +121,7 @@ impl RoutineAgentExecutor {
             )
             .await;
         match result {
-            Ok(started) if started.status.is_pending() => Ok(RoutineRunOutcome {
+            Ok(started) if started.started => Ok(RoutineRunOutcome {
                 run_id: claimed.run_id,
                 routine_id: claimed.routine_id,
                 script_ref: claimed.script_ref,
@@ -131,7 +131,7 @@ impl RoutineAgentExecutor {
                 error: None,
                 fresh_context_guaranteed: started.fresh_context_guaranteed,
             }),
-            Ok(started) if started.status.is_terminal() => {
+            Ok(started) => {
                 // Prefer the dispatch label the routine script returned (e.g.
                 // "dependency update check dispatched"); fall back to the
                 // generic message only when the script omitted lastResult.
@@ -167,7 +167,6 @@ impl RoutineAgentExecutor {
                     fresh_context_guaranteed: started.fresh_context_guaranteed,
                 })
             }
-            Ok(started) => unreachable!("unclassified routine start status: {:?}", started.status),
             Err(error) => {
                 let message = error.to_string();
                 self.handle_claimed_agent_failure(
@@ -266,7 +265,7 @@ impl RoutineAgentExecutor {
                     )
                     .await
                 {
-                    Ok(started) if started.status.is_pending() => {
+                    Ok(started) if started.started => {
                         return Ok(RoutineRunOutcome {
                             run_id: claimed.run_id,
                             routine_id: claimed.routine_id,
@@ -278,7 +277,7 @@ impl RoutineAgentExecutor {
                             fresh_context_guaranteed: started.fresh_context_guaranteed,
                         });
                     }
-                    Ok(started) if started.status.is_terminal() => {
+                    Ok(started) => {
                         // Preserve the routine's dispatch label across the
                         // fallback path too; only the agent that never started
                         // a turn reaches here, so the script's lastResult is
@@ -315,10 +314,6 @@ impl RoutineAgentExecutor {
                             fresh_context_guaranteed: started.fresh_context_guaranteed,
                         });
                     }
-                    Ok(started) => unreachable!(
-                        "unclassified fallback routine start status: {:?}",
-                        started.status
-                    ),
                     Err(fallback_error) => {
                         let combined = format!(
                             "{message}; fallback agent {fallback_agent_id} failed: {fallback_error}"
@@ -527,7 +522,7 @@ impl RoutineAgentExecutor {
             )
             .await
         {
-            Ok(started) if started.status.is_pending() => Ok(Some(RoutineRunOutcome {
+            Ok(started) if started.started => Ok(Some(RoutineRunOutcome {
                 run_id: run.run_id,
                 routine_id: run.routine_id,
                 script_ref: run.script_ref,
@@ -537,7 +532,7 @@ impl RoutineAgentExecutor {
                 error: None,
                 fresh_context_guaranteed: started.fresh_context_guaranteed,
             })),
-            Ok(started) if started.status.is_terminal() => {
+            Ok(started) => {
                 let last_result = "retry headless command consumed without starting an agent turn";
                 let closed = store
                     .complete_agent_run(
@@ -562,7 +557,6 @@ impl RoutineAgentExecutor {
                     fresh_context_guaranteed: started.fresh_context_guaranteed,
                 }))
             }
-            Ok(started) => unreachable!("unclassified retry start status: {:?}", started.status),
             Err(error) => {
                 let message = error.to_string();
                 let result_json = Some(pending_result_without_fresh_context_guarantee(
@@ -676,7 +670,7 @@ impl RoutineAgentExecutor {
                     )
                     .await
                 {
-                    Ok(started) if started.status.is_pending() => {
+                    Ok(started) if started.started => {
                         return Ok(Some(RoutineRunOutcome {
                             run_id: run.run_id,
                             routine_id: run.routine_id,
@@ -688,7 +682,7 @@ impl RoutineAgentExecutor {
                             fresh_context_guaranteed: started.fresh_context_guaranteed,
                         }));
                     }
-                    Ok(started) if started.status.is_terminal() => {
+                    Ok(started) => {
                         let last_result =
                             "fallback headless command consumed without starting an agent turn";
                         let closed = store
@@ -714,10 +708,6 @@ impl RoutineAgentExecutor {
                             fresh_context_guaranteed: started.fresh_context_guaranteed,
                         }));
                     }
-                    Ok(started) => unreachable!(
-                        "unclassified fallback routine start status: {:?}",
-                        started.status
-                    ),
                     Err(fallback_error) => {
                         let combined = format!(
                             "{message}; fallback agent {fallback_agent_id} failed: {fallback_error}"
@@ -1133,12 +1123,18 @@ impl RoutineAgentExecutor {
                 outcome.turn_id
             ));
         }
-        let start_status = AgentTurnStartStatus::from_headless(outcome.status);
-        let provider_fresh_context = fresh_context_guaranteed(
-            &claimed.execution_strategy,
-            start_status == AgentTurnStartStatus::Started,
-        );
-        result_json = AgentTurnStartStatus::apply_to_result(result_json, start_status);
+        let started = outcome.status.as_str() == "started";
+        let provider_fresh_context = fresh_context_guaranteed(&claimed.execution_strategy, started);
+        if !started && let Some(object) = result_json.as_object_mut() {
+            object.insert(
+                "status".to_string(),
+                Value::String(outcome.status.as_str().to_string()),
+            );
+            object.insert(
+                "completion_evidence".to_string(),
+                Value::String("headless_start_outcome".to_string()),
+            );
+        }
         let durable_confirmation_persisted = if provider_fresh_context {
             let confirmed_result = result_with_fresh_context_guarantee(result_json.clone(), true);
             match store
@@ -1183,14 +1179,14 @@ impl RoutineAgentExecutor {
         // orphans it. Best-effort: a failure here only loses the boot-recovery
         // backstop (the in-line completion path still tears the session down),
         // so it must never fail the started turn.
-        if start_status == AgentTurnStartStatus::Started {
+        if started {
             self.record_owned_fresh_session(store, claimed, &result_json)
                 .await;
         }
 
         Ok(StartedAgentTurn {
             result_json,
-            status: start_status,
+            started,
             fresh_context_guaranteed,
         })
     }
@@ -1461,69 +1457,9 @@ impl RoutineAgentExecutor {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AgentTurnStartStatus {
-    Started,
-    Queued,
-    Consumed,
-}
-
-impl AgentTurnStartStatus {
-    fn result_json_for_status(status: Self) -> Value {
-        let mut result = json!({
-            "status": status.as_str(),
-            "completion_evidence": "session_transcripts"
-        });
-        if status.is_terminal() {
-            result["completion_evidence"] = json!("headless_start_outcome");
-        }
-        result
-    }
-
-    fn apply_to_result(mut result: Value, status: Self) -> Value {
-        if let Some(object) = result.as_object_mut() {
-            object.insert(
-                "status".to_string(),
-                Value::String(status.as_str().to_string()),
-            );
-            if status.is_terminal() {
-                object.insert(
-                    "completion_evidence".to_string(),
-                    Value::String("headless_start_outcome".to_string()),
-                );
-            }
-        }
-        result
-    }
-
-    fn from_headless(status: crate::services::discord::router::HeadlessTurnStartStatus) -> Self {
-        match status {
-            crate::services::discord::router::HeadlessTurnStartStatus::Started => Self::Started,
-            crate::services::discord::router::HeadlessTurnStartStatus::Queued => Self::Queued,
-            crate::services::discord::router::HeadlessTurnStartStatus::Consumed => Self::Consumed,
-        }
-    }
-
-    fn is_pending(self) -> bool {
-        matches!(self, Self::Started | Self::Queued)
-    }
-
-    fn is_terminal(self) -> bool {
-        self == Self::Consumed
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Started => "started",
-            Self::Queued => "queued",
-            Self::Consumed => "consumed",
-        }
-    }
-}
-
 struct StartedAgentTurn {
     result_json: Value,
-    status: AgentTurnStartStatus,
+    started: bool,
     fresh_context_guaranteed: bool,
 }
 
@@ -2540,35 +2476,6 @@ mod tests {
         assert_eq!(timeout_secs_for_run(&running_run(None), 1800), 1800);
         assert_eq!(timeout_secs_for_run(&running_run(Some(0)), 1800), 1800);
         assert_eq!(timeout_secs_for_run(&running_run(Some(-5)), 1800), 1800);
-    }
-
-    #[test]
-    fn queued_start_remains_pending_without_terminal_evidence_5015() {
-        let status = AgentTurnStartStatus::from_headless(
-            crate::services::discord::router::HeadlessTurnStartStatus::Queued,
-        );
-        let result = AgentTurnStartStatus::result_json_for_status(status);
-
-        assert!(status.is_pending());
-        assert!(!status.is_terminal());
-        assert_eq!(result.get("status"), Some(&json!("queued")));
-        assert_eq!(
-            result.get("completion_evidence"),
-            Some(&json!("session_transcripts"))
-        );
-    }
-
-    #[test]
-    fn consumed_start_uses_headless_terminal_evidence_5015() {
-        let status = AgentTurnStartStatus::Consumed;
-        let result = AgentTurnStartStatus::result_json_for_status(status);
-
-        assert!(status.is_terminal());
-        assert_eq!(result.get("status"), Some(&json!("consumed")));
-        assert_eq!(
-            result.get("completion_evidence"),
-            Some(&json!("headless_start_outcome"))
-        );
     }
 
     #[test]

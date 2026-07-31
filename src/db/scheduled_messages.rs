@@ -19,8 +19,8 @@ mod writes;
 pub use agent::{
     RunningAgentDelivery, commit_delivery_agent_launch_pg, defer_delivery_without_retry_pg,
     list_running_agent_deliveries_pg, mark_delivery_agent_turn_started_pg,
-    record_delivery_agent_turn_intent_pg, record_delivery_reservation_user_msg_id_pg,
-    recover_expired_leases_pg, release_agent_delivery_to_poller_pg,
+    record_delivery_agent_turn_intent_pg, recover_expired_leases_pg,
+    release_agent_delivery_to_poller_pg,
 };
 pub use outbox::outbox_statuses_for_deliveries_pg;
 pub use writes::{insert_scheduled_message_pg, insert_scheduled_message_tx};
@@ -168,10 +168,6 @@ pub struct ClaimedFire {
     pub claim_token: String,
     pub fire_scheduled_at: DateTime<Utc>,
     pub retry_count: i32,
-    /// Stable synthetic Discord source identity for this fire slot. It is
-    /// retained when an interrupted attempt is re-armed so the headless queue
-    /// sees one logical prompt across every retry.
-    pub reservation_user_msg_id: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -558,8 +554,7 @@ async fn arm_delivery_slot_tx(
                 finished_at = NULL,
                 updated_at = NOW()
           WHERE scheduled_message_deliveries.status = 'interrupted'
-         RETURNING id, retry_count, claim_token, resume_scheduled_at,
-                   reservation_user_msg_id",
+         RETURNING id, retry_count, claim_token, resume_scheduled_at",
     )
     .bind(&delivery_id)
     .bind(&message.id)
@@ -605,7 +600,6 @@ async fn arm_delivery_slot_tx(
     let retry_count: i32 = armed.try_get("retry_count")?;
     let claim_token: String = armed.try_get("claim_token")?;
     let resume_scheduled_at: DateTime<Utc> = armed.try_get("resume_scheduled_at")?;
-    let reservation_user_msg_id: Option<i64> = armed.try_get("reservation_user_msg_id")?;
     sqlx::query(
         "UPDATE scheduled_messages
          SET status = 'firing', in_flight_delivery_id = $2,
@@ -625,7 +619,6 @@ async fn arm_delivery_slot_tx(
         claim_token,
         fire_scheduled_at,
         retry_count,
-        reservation_user_msg_id,
     }))
 }
 

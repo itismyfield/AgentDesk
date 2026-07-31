@@ -525,11 +525,6 @@
       "path": "migrations/postgres/0102_dispatch_failed_quality_event.sql",
       "sha256": "abe09efd9228df56e2c0221c302c13ff4ee460e795da71dae173233247ad6edb",
       "version": 102
-    },
-    {
-      "path": "migrations/postgres/0103_scheduled_message_reservation_identity.sql",
-      "sha256": "67ca20df7c1f965405087dd4a183a44b65a8920c1381738689988d4db585f325",
-      "version": 103
     }
   ],
   "version": 1

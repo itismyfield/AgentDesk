@@ -116,36 +116,6 @@ pub async fn record_delivery_agent_turn_intent_pg(
     Ok(recorded)
 }
 
-/// Persist the synthetic headless reservation user-message identity for an
-/// active scheduled delivery. The value is set exactly once before the
-/// external start barrier and survives `interrupted` re-arms.
-pub async fn record_delivery_reservation_user_msg_id_pg(
-    pool: &PgPool,
-    message_id: &str,
-    delivery_id: &str,
-    claim_token: &str,
-    user_msg_id: i64,
-) -> Result<bool, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    if !super::lock_active_delivery_tx(&mut tx, message_id, delivery_id, claim_token).await? {
-        return Ok(false);
-    }
-    let updated = sqlx::query(
-        "UPDATE scheduled_message_deliveries
-         SET reservation_user_msg_id = $3, updated_at = NOW()
-         WHERE id = $1 AND claim_token = $2 AND status = 'running'
-           AND reservation_user_msg_id IS NULL",
-    )
-    .bind(delivery_id)
-    .bind(claim_token)
-    .bind(user_msg_id)
-    .execute(&mut *tx)
-    .await?;
-    let recorded = updated.rows_affected() > 0;
-    tx.commit().await?;
-    Ok(recorded)
-}
-
 /// Commit the at-most-once agent launch immediately before invoking the
 /// external headless runtime. This is the final parent/claim/cancellation
 /// fence: recovery may poll or fail closed after this barrier, but it must

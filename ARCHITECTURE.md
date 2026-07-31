@@ -735,8 +735,6 @@ src/
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
 │   │   │   │   ├── tui_followup.rs
-│   │   │   │   ├── tui_followup_retry.rs
-│   │   │   │   ├── tui_followup_retry_tests.rs
 │   │   │   │   ├── turn_lifecycle.rs
 │   │   │   │   ├── typing_indicator.rs
 │   │   │   │   ├── voice_announcement_route.rs
@@ -1299,8 +1297,6 @@ src/
 │   │   ├── context_snapshot.rs
 │   │   ├── evidence.rs
 │   │   ├── postgres_tests.rs
-│   │   ├── reservation.rs
-│   │   ├── start.rs
 │   │   └── timing.rs
 │   ├── session_backend/
 │   │   ├── stream_line.rs

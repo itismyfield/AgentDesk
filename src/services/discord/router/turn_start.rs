@@ -18,7 +18,6 @@ pub(crate) struct HeadlessTurnStartOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HeadlessTurnStartStatus {
     Started,
-    Queued,
     Consumed,
 }
 
@@ -26,7 +25,6 @@ impl HeadlessTurnStartStatus {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Started => "started",
-            Self::Queued => "queued",
             Self::Consumed => "consumed",
         }
     }
@@ -41,10 +39,6 @@ pub(crate) struct HeadlessTurnReservation {
 impl HeadlessTurnReservation {
     pub(in crate::services::discord) fn turn_id(&self, channel_id: ChannelId) -> String {
         discord_turn_id(channel_id, self.user_msg_id)
-    }
-
-    pub(in crate::services::discord) fn user_msg_id(&self) -> MessageId {
-        self.user_msg_id
     }
 }
 
@@ -127,14 +121,8 @@ fn headless_turn_message_id_seed_impl(now_millis: u64, process_id: u32) -> u64 {
 }
 
 pub(in crate::services::discord) fn reserve_headless_turn() -> HeadlessTurnReservation {
-    reserve_headless_turn_with_user_msg_id(next_headless_turn_message_id())
-}
-
-pub(in crate::services::discord) fn reserve_headless_turn_with_user_msg_id(
-    user_msg_id: MessageId,
-) -> HeadlessTurnReservation {
     HeadlessTurnReservation {
-        user_msg_id,
+        user_msg_id: next_headless_turn_message_id(),
         placeholder_msg_id: next_headless_turn_message_id(),
     }
 }
@@ -661,85 +649,4 @@ pub(in crate::services::discord) async fn release_mailbox_after_busy_pre_submit_
         MailboxReleaseKickoff::SlowBackstop("busy_pre_submit_defer_pending"),
     )
     .await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::services::provider::CancelToken;
-    use crate::services::turn_orchestrator::{Intervention, InterventionMode};
-    use poise::serenity_prelude::{MessageId, UserId};
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Instant;
-
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn busy_defer_release_arms_only_slow_backstop() {
-        let root = tempfile::tempdir().expect("runtime root");
-        let _env = crate::config::set_agentdesk_root_for_test(root.path());
-        let shared = super::super::super::make_shared_data_for_tests();
-        let provider = super::super::super::ProviderKind::Claude;
-        let channel_id = ChannelId::new(50_150_100);
-        let user_msg_id = MessageId::new(50_150_101);
-        assert!(
-            super::super::super::mailbox_try_start_turn(
-                &shared,
-                channel_id,
-                Arc::new(CancelToken::new()),
-                UserId::new(50_150_102),
-                user_msg_id,
-            )
-            .await
-        );
-        super::super::super::queue_io::with_post_enqueue_idle_queue_kick_suppressed(
-            super::super::super::mailbox_enqueue_intervention(
-                &shared,
-                &provider,
-                channel_id,
-                Intervention {
-                    author_id: UserId::new(50_150_102),
-                    author_is_bot: false,
-                    message_id: MessageId::new(50_150_103),
-                    queued_generation: 0,
-                    source_message_ids: vec![MessageId::new(50_150_103)],
-                    source_message_queued_generations: Vec::new(),
-                    source_text_segments: Vec::new(),
-                    text: "pending after defer".to_string(),
-                    mode: InterventionMode::Soft,
-                    created_at: Instant::now(),
-                    reply_context: None,
-                    has_reply_boundary: false,
-                    merge_consecutive: false,
-                    pending_uploads: Vec::new(),
-                    voice_announcement: None,
-                },
-            ),
-        )
-        .await;
-
-        let fast_calls = Arc::new(AtomicUsize::new(0));
-        let observed = Arc::clone(&fast_calls);
-        let _hook = super::super::super::queue_io::set_idle_queue_kick_hook_for_tests(Arc::new(
-            move |_, _, _, _| {
-                let observed = Arc::clone(&observed);
-                Box::pin(async move {
-                    observed.fetch_add(1, Ordering::SeqCst);
-                    None
-                })
-            },
-        ));
-
-        assert!(release_mailbox_after_busy_pre_submit_defer(&shared, &provider, channel_id).await);
-        tokio::task::yield_now().await;
-        tokio::time::advance(std::time::Duration::from_secs(2)).await;
-        for _ in 0..4 {
-            tokio::task::yield_now().await;
-        }
-        assert_eq!(fast_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            shared.restart.deferred_hook_backlog.load(Ordering::Relaxed),
-            1,
-            "only the slow backstop is armed"
-        );
-    }
 }

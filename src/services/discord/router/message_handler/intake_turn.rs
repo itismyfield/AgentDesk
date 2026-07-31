@@ -1771,7 +1771,7 @@ pub(super) async fn handle_text_message(
         Some(channel_id.get()),
     );
     #[cfg(unix)]
-    let runtime_mismatch_verdict = reconcile_managed_tmux_runtime_kind_using_runtime(
+    let _runtime_mismatch_verdict = reconcile_managed_tmux_runtime_kind_using_runtime(
         shared,
         &provider,
         channel_id,
@@ -2037,8 +2037,7 @@ pub(super) async fn handle_text_message(
         }
     };
     #[cfg(unix)]
-    if runtime_mismatch_verdict.should_defer() || tui_busy_diagnostic.is_some() {
-        let mismatch_deferred = runtime_mismatch_verdict.should_defer();
+    if let Some(diagnostic) = tui_busy_diagnostic {
         let bot_owner_provider = super::super::super::resolve_discord_bot_provider(token);
         let queue_kickoff_scheduled_by_release =
             release_mailbox_after_busy_pre_submit_defer(shared, &bot_owner_provider, channel_id)
@@ -2082,10 +2081,7 @@ pub(super) async fn handle_text_message(
         let queued_card_rendered = false;
         let queue_kickoff_scheduled =
             queue_kickoff_scheduled_by_release || retry_present_or_accepted;
-        let mut diagnostic_json = tui_busy_diagnostic
-            .as_ref()
-            .map(ClaudeTuiBusyFollowupDiagnostic::to_json)
-            .unwrap_or_else(|| serde_json::json!({"runtime_kind_mismatch": true}));
+        let mut diagnostic_json = diagnostic.to_json();
         if let Some(object) = diagnostic_json.as_object_mut() {
             object.insert(
                 "queued_for_retry".to_string(),
@@ -2122,8 +2118,7 @@ pub(super) async fn handle_text_message(
             channel_id = channel_id.get(),
             user_msg_id = user_msg_id.get(),
             diagnostics = %diagnostic_json,
-            mismatch_deferred,
-            "turn queued because managed TUI dispatch must be deferred before prompt submission"
+            "claude_tui follow-up queued because hosted TUI is busy before prompt submission"
         );
         crate::services::observability::emit_inflight_lifecycle_event(
             provider.as_str(),
@@ -2131,11 +2126,7 @@ pub(super) async fn handle_text_message(
             dispatch_id.as_deref(),
             adk_session_key.as_deref(),
             Some(turn_id.as_str()),
-            if mismatch_deferred {
-                "runtime_kind_mismatch_deferred_pre_submit"
-            } else {
-                "claude_tui_followup_busy_pre_submit"
-            },
+            "claude_tui_followup_busy_pre_submit",
             diagnostic_json,
         );
         super::super::super::saturating_decrement_global_active(shared);
@@ -2161,7 +2152,6 @@ pub(super) async fn handle_text_message(
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
             channel_id = channel_id.get(),
-            mismatch_deferred,
             enqueued = enqueue_outcome.enqueued,
             merged = enqueue_outcome.merged,
             queue_depth_after_busy_enqueue,
