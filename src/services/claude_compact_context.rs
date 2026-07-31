@@ -1410,16 +1410,11 @@ mod tests {
             key == OsStr::new(CLAUDE_AUTO_COMPACT_WINDOW_ENV) && value == Some(OsStr::new("700000"))
         }));
     }
-}
 
-/// Operator diagnostic against a live local gateway; never runs in CI.
-/// `cargo test --lib live_probe_tui_launch_window -- --ignored --nocapture`
-/// prints the launch decision, the raw fetch result (window count + policy),
-/// and the committed cache entry for `http://127.0.0.1:10100`.
-#[cfg(test)]
-mod live_probe_tests {
-    use super::*;
-
+    /// Operator diagnostic against a live local gateway; never runs in CI.
+    /// `cargo test --lib live_probe_tui_launch_window -- --ignored --nocapture`
+    /// prints the launch decision, the raw fetch result (window count +
+    /// policy), and the committed cache entry for `http://127.0.0.1:10100`.
     #[test]
     #[ignore = "live gateway probe: requires an opencodex gateway on 127.0.0.1:10100"]
     fn live_probe_tui_launch_window() {
