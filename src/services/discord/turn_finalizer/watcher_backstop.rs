@@ -166,6 +166,10 @@ fn watcher_backstop_produced_terminal_end(
                 && state.output_path.as_deref() == Some(output_path)
         })
         .map(|state| state.last_offset)
+        // `0` is the inflight sentinel for "no relay output frontier observed",
+        // not a confirmed zero-byte production record. Treating it as a produced
+        // end would let the initial confirmed watermark (`0 >= 0`) fabricate
+        // strict-finalization authority for an empty/silent Done turn.
         .filter(|offset| *offset > 0);
 
     if let Some(state) = inflight_state {
@@ -293,6 +297,72 @@ mod tests {
         assert!(!delivery_confirmed_for_produced_end(Some(0), None));
         assert!(!delivery_confirmed_for_produced_end(None, Some(64)));
         assert!(delivery_confirmed_for_produced_end(Some(64), Some(64)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn done_with_zero_inflight_offset_defers_strict_finalize() {
+        super::super::tests::with_isolated_runtime_root(|| async move {
+            let shared = Arc::new(crate::services::discord::make_shared_data_for_tests());
+            let entropy = chrono::Utc::now()
+                .timestamp_nanos_opt()
+                .unwrap_or_default()
+                .unsigned_abs();
+            let channel = ChannelId::new(50_220_024u64.saturating_add(entropy % 1_000_000));
+            let session = format!("backstop-zero-offset-{}", std::process::id());
+            let transcript = std::env::temp_dir().join(format!("{session}.jsonl"));
+            std::fs::write(
+                &transcript,
+                "{\"type\":\"result\",\"result\":\"done\",\"session_id\":\"s\"}\n",
+            )
+            .unwrap();
+            let transcript_str = transcript.to_str().unwrap().to_string();
+            shared.tmux_watchers.insert(
+                channel,
+                crate::services::discord::TmuxWatcherHandle {
+                    tmux_session_name: session.clone(),
+                    output_path: transcript_str.clone(),
+                    paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    resume_offset: Arc::new(std::sync::Mutex::new(None)),
+                    cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                    turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                        crate::services::discord::tmux_watcher_now_ms(),
+                    )),
+                },
+            );
+            let mut state = crate::services::discord::inflight::InflightTurnState::new(
+                ProviderKind::Claude,
+                channel.get(),
+                None,
+                7,
+                210,
+                211,
+                "done with zero sentinel offset".to_string(),
+                None,
+                Some(session),
+                Some(transcript_str),
+                None,
+                0,
+            );
+            state.turn_start_offset = Some(0);
+            crate::services::discord::inflight::save_inflight_state(&state).unwrap();
+            shared
+                .tmux_relay_coord(channel)
+                .confirmed_end_offset
+                .store(0, std::sync::atomic::Ordering::Release);
+
+            assert!(
+                !watcher_backstop_turn_is_terminal(&shared, channel, &ProviderKind::Claude, false,),
+                "zero is an unknown produced frontier sentinel, not delivery proof"
+            );
+            assert!(
+                watcher_backstop_turn_is_terminal(&shared, channel, &ProviderKind::Claude, true,),
+                "the natural far-backstop remains the bounded escape"
+            );
+            let _ = std::fs::remove_file(transcript);
+        })
+        .await;
     }
 
     #[test]
