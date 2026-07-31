@@ -311,6 +311,29 @@ fn unopted_live_local_pending_open_route_runs_locally_5040() {
 }
 
 #[test]
+fn unopted_live_local_pending_route_allows_raw_attachment_5040() {
+    let mut submission = submission_for_admission(ChannelId::new(4_350_361), 4_350_371);
+    submission.origin = IntakeOrigin::RawAttachment;
+    submission.has_nonportable_uploads = true;
+    submission.attachments = vec![super::super::message_handler::AttachmentDescriptor {
+        filename: "report.txt".to_string(),
+        url: "https://cdn.discordapp.com/attachments/1/2/report.txt".to_string(),
+    }];
+    let admission = admission_for_decision(
+        OwnerAuthorityChannelOptIn::NotOptedIn,
+        "local-instance",
+        IntakeRouterDecision::DeferredOpenRoute {
+            target_instance_id: "local-instance".to_string(),
+            open_route_status: "pending".to_string(),
+            resolved_owner: ResolvedSessionOwner::LiveLocal,
+        },
+        &submission,
+    );
+
+    assert!(matches!(admission, IntakeAdmission::Local(_)));
+}
+
+#[test]
 fn unopted_live_foreign_owner_stays_fenced_5040() {
     let submission = submission_for_admission(ChannelId::new(4_350_371), 4_350_381);
     let admission = admission_for_decision(
