@@ -1138,18 +1138,7 @@ impl RoutineAgentExecutor {
             &claimed.execution_strategy,
             start_status == AgentTurnStartStatus::Started,
         );
-        if let Some(object) = result_json.as_object_mut() {
-            object.insert(
-                "status".to_string(),
-                Value::String(start_status.as_str().to_string()),
-            );
-            if start_status == AgentTurnStartStatus::Consumed {
-                object.insert(
-                    "completion_evidence".to_string(),
-                    Value::String("headless_start_outcome".to_string()),
-                );
-            }
-        }
+        result_json = AgentTurnStartStatus::apply_to_result(result_json, start_status);
         let durable_confirmation_persisted = if provider_fresh_context {
             let confirmed_result = result_with_fresh_context_guarantee(result_json.clone(), true);
             match store
@@ -1480,6 +1469,33 @@ enum AgentTurnStartStatus {
 }
 
 impl AgentTurnStartStatus {
+    fn result_json_for_status(status: Self) -> Value {
+        let mut result = json!({
+            "status": status.as_str(),
+            "completion_evidence": "session_transcripts"
+        });
+        if status.is_terminal() {
+            result["completion_evidence"] = json!("headless_start_outcome");
+        }
+        result
+    }
+
+    fn apply_to_result(mut result: Value, status: Self) -> Value {
+        if let Some(object) = result.as_object_mut() {
+            object.insert(
+                "status".to_string(),
+                Value::String(status.as_str().to_string()),
+            );
+            if status.is_terminal() {
+                object.insert(
+                    "completion_evidence".to_string(),
+                    Value::String("headless_start_outcome".to_string()),
+                );
+            }
+        }
+        result
+    }
+
     fn from_headless(status: crate::services::discord::router::HeadlessTurnStartStatus) -> Self {
         match status {
             crate::services::discord::router::HeadlessTurnStartStatus::Started => Self::Started,
@@ -2531,13 +2547,7 @@ mod tests {
         let status = AgentTurnStartStatus::from_headless(
             crate::services::discord::router::HeadlessTurnStartStatus::Queued,
         );
-        let mut result = json!({
-            "status": status.as_str(),
-            "completion_evidence": "session_transcripts"
-        });
-        if status.is_terminal() {
-            result["completion_evidence"] = json!("headless_start_outcome");
-        }
+        let result = AgentTurnStartStatus::result_json_for_status(status);
 
         assert!(status.is_pending());
         assert!(!status.is_terminal());
@@ -2545,6 +2555,19 @@ mod tests {
         assert_eq!(
             result.get("completion_evidence"),
             Some(&json!("session_transcripts"))
+        );
+    }
+
+    #[test]
+    fn consumed_start_uses_headless_terminal_evidence_5015() {
+        let status = AgentTurnStartStatus::Consumed;
+        let result = AgentTurnStartStatus::result_json_for_status(status);
+
+        assert!(status.is_terminal());
+        assert_eq!(result.get("status"), Some(&json!("consumed")));
+        assert_eq!(
+            result.get("completion_evidence"),
+            Some(&json!("headless_start_outcome"))
         );
     }
 
