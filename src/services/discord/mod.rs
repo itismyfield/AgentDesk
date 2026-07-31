@@ -74,7 +74,7 @@ mod restart_mode;
 // #1074: session identity parsing SSoT (legacy + namespaced session_key forms).
 pub(crate) mod restart_report;
 mod role_map;
-mod router;
+pub(in crate::services) mod router;
 mod runtime_bootstrap;
 pub(in crate::services::discord) mod semantic_boundaries;
 // #1446 stall-deadlock recovery: shared post-clear bookkeeping for the THREAD-GUARD
