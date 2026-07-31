@@ -288,7 +288,10 @@ mod tests {
             RelayRecoveryApplySource::ProbeAutoHeal,
             RelayDeliveryEvidence::NotDelivered,
         );
-        for evidence in [RelayDeliveryEvidence::NotAttempted, RelayDeliveryEvidence::Unknown] {
+        for evidence in [
+            RelayDeliveryEvidence::NotAttempted,
+            RelayDeliveryEvidence::Unknown,
+        ] {
             let unobserved = auto_heal_key(
                 "codex",
                 4_423_102,
