@@ -525,7 +525,6 @@ services::discord_config_audit::voice_alias_precheck_tests
 services::dispatch_gate::tests
 services::dispatch_watchdog::tests
 services::dispatched_sessions::kill_tmux_resume_tests
-services::dispatches::discord_delivery::guard::tests
 services::dispatches::discord_delivery::orchestration::slot_routing_pure_tests
 services::dispatches::discord_delivery::transport::tests
 services::dispatches::outbox_route::tests

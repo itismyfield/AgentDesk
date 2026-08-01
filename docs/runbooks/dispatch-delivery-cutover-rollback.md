@@ -110,8 +110,8 @@ Run local verification before deploy:
 
 ```bash
 cargo test -p agentdesk \
-  services::dispatches::discord_delivery::guard::tests::duplicate_delivery_replay_returns_prior_message_metadata_without_resend \
-  services::dispatches::discord_delivery::guard::tests::expired_reserved_delivery_recovers_with_new_attempt_and_single_transport_send
+  services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests::duplicate_delivery_replay_returns_prior_message_metadata_without_resend \
+  services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests::expired_reserved_delivery_recovers_with_new_attempt_and_single_transport_send
 
 cargo build
 ```
