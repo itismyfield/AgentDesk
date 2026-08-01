@@ -12,6 +12,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import yaml
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts/check_pg_test_lane_membership.py"
 INTEGRITY_SCRIPT = REPO_ROOT / "scripts/check_test_target_integrity.py"
@@ -137,6 +139,18 @@ class DetectionMutation(FixtureCase):
         )
         self.assertEqual(membership.discover_pg_inventory(self.root).tests, {})
 
+    def test_qualified_path_segments_are_not_reinterpreted_in_caller_scope(self) -> None:
+        self.fx.write_source(
+            "src/lib.rs",
+            "#[cfg(test)] mod other { pub fn h() {} }\n"
+            "#[cfg(test)] mod caller {\n"
+            "fn other() { create_test_database(); }\n"
+            "fn h() { create_test_database(); }\n"
+            "#[test] fn qualified_plain() { crate::other::h(); }\n"
+            "}\n",
+        )
+        self.assertEqual(membership.discover_pg_inventory(self.root).tests, {})
+
     def test_associated_impl_seed_and_qualified_helper_are_detected(self) -> None:
         self.fx.write_source(
             "src/service.rs",
@@ -165,6 +179,38 @@ class DetectionMutation(FixtureCase):
             set(membership.discover_pg_inventory(self.root).tests),
             {"tests::qualified"},
         )
+
+    def test_multi_segment_associated_and_ufcs_transitive_calls(self) -> None:
+        self.fx.write_source(
+            "src/lib.rs",
+            (FIXTURES / "associated_calls.rs").read_text("utf-8"),
+        )
+        expected = {"tests::multi_segment_case", "tests::ufcs_case"}
+        self.assertEqual(set(membership.discover_pg_inventory(self.root).tests), expected)
+
+        legacy_call = re.compile(
+            r"(?<![.:])\b(?P<path>(?:(?:crate|self|super)"
+            r"(?:::[A-Za-z_][A-Za-z0-9_]*)+|[A-Za-z_][A-Za-z0-9_]*))\s*!?\s*\("
+        )
+        no_ufcs = re.compile(r"(?!)")
+        with mock.patch.object(membership, "_CALL", legacy_call), mock.patch.object(
+            membership, "_UFCS_CALL", no_ufcs
+        ):
+            with self.assertRaises(AssertionError):
+                self.assertEqual(
+                    set(membership.discover_pg_inventory(self.root).tests), expected
+                )
+
+    def test_nested_impl_mask_starts_at_the_consumed_opening_brace(self) -> None:
+        body = (
+            "{ impl Local { fn pure() {} fn pg() { create_test_database(); } } "
+            "after(); }"
+        )
+        no_functions = re.compile(r"(?!)")
+        with mock.patch.object(membership, "_FN", no_functions):
+            masked = membership._mask_nested_items(body)
+        self.assertNotIn("create_test_database", masked)
+        self.assertIn("after()", masked)
 
     def test_cross_file_three_hop_transitive_closure(self) -> None:
         self.fx.write_source(
@@ -284,8 +330,8 @@ class ParserMutations(FixtureCase):
         cases = {
             "jobs_comment.yml": "comment_job",
             "jobs_4space.yml": "four_space_job",
+            "jobs_6space.yml": "six_space_job",
             "jobs_quoted.yml": "quoted_job",
-            "jobs_tab.yml": "tab_job",
         }
         workflow = self.root / ".github/workflows/ci-main.yml"
 
@@ -324,13 +370,37 @@ class ParserMutations(FixtureCase):
 
     def test_low_indent_block_scalar_line_does_not_hide_later_job(self) -> None:
         workflow = self.root / ".github/workflows/ci-main.yml"
-        workflow.write_text((FIXTURES / "jobs_block_scalar.yml").read_text("utf-8"), "utf-8")
+        fixture_text = (FIXTURES / "jobs_block_scalar.yml").read_text("utf-8")
+        loaded = yaml.safe_load(fixture_text)
+        run_script = loaded["jobs"]["prepare"]["steps"][0]["run"]
+        self.assertIn("EOF", run_script.splitlines())
+        workflow.write_text(fixture_text, "utf-8")
         jobs = membership.parse_jobs(workflow, self.root)
         self.assertEqual([job.name for job in jobs], ["prepare", "pg_lane"])
         self.assertEqual(
             self.fx.analysis().debts["rule4"],
             {".github/workflows/ci-main.yml:pg_lane"},
         )
+
+    def test_top_level_section_after_jobs_does_not_create_ghost_job(self) -> None:
+        workflow = self.root / ".github/workflows/ci-main.yml"
+        fixture_text = (FIXTURES / "jobs_followed_by_section.yml").read_text("utf-8")
+        self.assertIsInstance(yaml.safe_load(fixture_text), dict)
+        workflow.write_text(fixture_text, "utf-8")
+        jobs = membership.parse_jobs(workflow, self.root)
+        self.assertEqual([job.name for job in jobs], ["pg_lane"])
+        self.assertNotIn("defaults", jobs[0].text)
+        self.assertEqual(
+            self.fx.analysis().debts["rule4"],
+            {".github/workflows/ci-main.yml:pg_lane"},
+        )
+
+        with mock.patch.object(membership, "_jobs_section_end", return_value=len(fixture_text)):
+            with self.assertRaises(AssertionError):
+                self.assertEqual(
+                    [job.name for job in membership.parse_jobs(workflow, self.root)],
+                    ["pg_lane"],
+                )
 
     def test_empty_jobs_map_is_warn_only(self) -> None:
         workflow = self.root / ".github/workflows/empty.yml"

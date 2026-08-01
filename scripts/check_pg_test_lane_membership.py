@@ -3,8 +3,9 @@
 
 The gate identifies PG-dependent Rust tests only inside test regions, checks four
 lane contracts, and ratchets existing violations through a sectioned baseline.
-During the T0 rollout, newly discovered debt is reported without changing the
-script's return code; T1 promotes that warning to enforcement.
+During T0, newly discovered live debt is warn-only. Return code 1 is reserved for
+manifest drift, candidate baseline growth, and stale baseline entries; malformed
+inputs and configuration errors return code 2. T1 promotes new debt to enforcement.
 """
 
 from __future__ import annotations
@@ -138,7 +139,21 @@ _FN = re.compile(r"\b(?:async\s+)?(?:unsafe\s+)?fn\s+(?P<name>[A-Za-z_][A-Za-z0-
 _CALL = re.compile(
     r"(?<![.:])\b(?P<path>[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)\s*!?\s*\("
 )
+_UFCS_CALL = re.compile(
+    r"<\s*(?P<type>[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)"
+    r"\s+as\s+[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*\s*>"
+    r"\s*::\s*[A-Za-z_][A-Za-z0-9_]*\s*\("
+)
+_BARE_REFERENCE = re.compile(
+    r"(?<![.:])\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b(?!\s*::)"
+)
 _USE = re.compile(r"\buse\s+(?P<path>[^;]+);")
+_TOP_LEVEL_KEY = re.compile(
+    r"^(?:[A-Za-z_][A-Za-z0-9_-]*|'[^']+'|\"[^\"]+\")\s*:"
+)
+_BLOCK_SCALAR_HEADER = re.compile(
+    r":\s*[|>](?:[1-9][+-]?|[+-][1-9]?)?\s*(?:#.*)?$"
+)
 
 
 def _matching_brace(clean: str, opening: int, counter: list[int] | None = None) -> int:
@@ -292,6 +307,19 @@ def _aliases(repo_root: Path, coverage) -> dict[tuple[str, ...], tuple[str, ...]
 def discover_pg_inventory(
     repo_root: Path, findings: list[Finding] | None = None
 ) -> PgInventory:
+    """Discover PG tests with a deliberately bounded Rust call model.
+
+    Supported indirect references are bare/free-function calls, fully-qualified
+    free functions, single- and multi-segment associated calls, and UFCS calls of
+    the form ``<Type as Trait>::method()``. Test and helper bodies use the same
+    reference extractor and both mask block-local functions and impls.
+
+    Out of scope are block-local call graphs, method-level dispatch within an
+    impl (an impl is conservatively treated as one type-level item), and UFCS
+    receivers containing generic, tuple, reference, or ``dyn`` type syntax. A
+    real Rust parser would be required to cover those forms without broad false
+    positives.
+    """
     repo_root = repo_root.resolve()
     coverage = _load_coverage_module(repo_root)
     src_root = (repo_root / "src").resolve()
@@ -461,7 +489,9 @@ def discover_pg_inventory(
 
     def resolve(module: tuple[str, ...], raw: str) -> set[tuple[tuple[str, ...], str, str]]:
         if "::" in raw:
-            target = absolute_path(module, raw)
+            parts = tuple(part for part in raw.split("::") if part)
+            alias = use_aliases.get(module, {}).get(parts[0]) if parts else None
+            target = (*alias, *parts[1:]) if alias else absolute_path(module, raw)
             return by_path.get((target[:-1], target[-1]), set()) if target else set()
         targets = set(by_path.get((module, raw), set()))
         alias = use_aliases.get(module, {}).get(raw)
@@ -474,50 +504,57 @@ def discover_pg_inventory(
     def resolve_call(
         module: tuple[str, ...], raw: str
     ) -> set[tuple[tuple[str, ...], str, str]]:
-        """Resolve a function path and the receiver of an associated call.
+        """Resolve a free call or one whole associated-call receiver path.
 
         ``crate::support::h()`` resolves to the fully-qualified free function,
-        while ``TestDatabase::create()`` also resolves ``TestDatabase`` in the
-        caller's logical module.  Both routes still go through module-scoped
-        tuple keys, so a same-named helper in another module cannot taint it.
+        while ``a::b::TestDatabase::create()`` falls back to resolving the whole
+        ``a::b::TestDatabase`` receiver. Individual qualifier segments are never
+        reinterpreted in the caller's module.
         """
         targets = set(resolve(module, raw))
-        first, separator, _rest = raw.partition("::")
-        if separator and first not in ("crate", "self", "super"):
-            targets.update(resolve(module, first))
+        receiver, separator, _method = raw.rpartition("::")
+        if separator and not targets:
+            targets.update(resolve(module, receiver))
+        return targets
+
+    def body_references(
+        module: tuple[str, ...], body: str
+    ) -> set[tuple[tuple[str, ...], str, str]]:
+        """Extract identical module-scoped references from tests and helpers."""
+        calls = list(_CALL.finditer(body))
+        ufcs_calls = list(_UFCS_CALL.finditer(body))
+        occupied = [match.span() for match in (*calls, *ufcs_calls)]
+        targets = {
+            target
+            for call in calls
+            for target in resolve_call(module, call.group("path"))
+        }
+        targets.update(
+            target
+            for call in ufcs_calls
+            for target in resolve(module, call.group("type"))
+        )
+        targets.update(
+            target
+            for mention in _BARE_REFERENCE.finditer(body)
+            if not any(start <= mention.start() < end for start, end in occupied)
+            for target in resolve(module, mention.group("name"))
+        )
         return targets
 
     edges: dict[tuple[tuple[str, ...], str, str], set[tuple[tuple[str, ...], str, str]]] = {}
     for key, body in item_bodies.items():
         if key[2] != "fn":
             continue
-        edges[key] = {
-            target
-            for call in _CALL.finditer(body)
-            for target in resolve_call(key[0], call.group("path"))
-        }
+        edges[key] = body_references(
+            key[0], _mask_nested_items(body, brace_counter)
+        )
 
     tests: dict[str, str] = {}
     for name, path, module, body in records:
         visible_body = _mask_nested_items(body, brace_counter)
         direct = any(pattern.search(visible_body) for pattern in SEED_PATTERNS)
-        mentioned_names = {
-            match.group("name")
-            for match in re.finditer(
-                r"\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b",
-                visible_body,
-            )
-        }
-        referenced = {
-            target
-            for item_name in mentioned_names
-            for target in resolve(module, item_name)
-        }
-        referenced.update(
-            target
-            for call in _CALL.finditer(visible_body)
-            for target in resolve(module, call.group("path"))
-        )
+        referenced = body_references(module, visible_body)
         indirect = _transitive_closure(referenced, seeded, edges)
         if direct or indirect:
             tests[name] = path
@@ -534,6 +571,30 @@ def _indent_width(indent: str) -> int:
     return len(indent.expandtabs(8))
 
 
+def _jobs_section_end(text: str, start: int) -> int:
+    """Find the next top-level mapping key, respecting block scalar bodies."""
+    offset = start
+    block_parent_indent: int | None = None
+    for line in text[start:].splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        stripped = content.strip()
+        indent_text = content[: len(content) - len(content.lstrip())]
+        indent = _indent_width(indent_text)
+
+        if block_parent_indent is not None:
+            if not stripped or indent > block_parent_indent:
+                offset += len(line)
+                continue
+            block_parent_indent = None
+
+        if _TOP_LEVEL_KEY.match(content):
+            return offset
+        if _BLOCK_SCALAR_HEADER.search(content):
+            block_parent_indent = indent
+        offset += len(line)
+    return len(text)
+
+
 def parse_jobs(
     path: Path, repo_root: Path, findings: list[Finding] | None = None
 ) -> list[Job]:
@@ -541,16 +602,18 @@ def parse_jobs(
 
     This intentionally stays dependency-free instead of relying on PyYAML, which
     is not declared by AgentDesk's script-check environment. It supports the
-    repository's block-style workflows. An empty top-level job map is reported as
-    a warn-only finding by ``analyze``; an absent top-level ``jobs:`` key is ignored.
+    repository's block-style workflows and tracks scalar bodies while locating
+    the next column-zero mapping key. An empty top-level job map is reported as a
+    warn-only finding by ``analyze``; an absent top-level ``jobs:`` key is ignored.
     """
     text = path.read_text("utf-8")
     jobs_key = _JOBS_KEY.search(text)
     if jobs_key is None:
         return []
     jobs_indent = 0
+    section_end = _jobs_section_end(text, jobs_key.end())
     in_section = [
-        match for match in _JOB.finditer(text, jobs_key.end())
+        match for match in _JOB.finditer(text, jobs_key.end(), section_end)
         if _indent_width(match.group("indent")) > jobs_indent
     ]
     job_indent = min(
@@ -570,7 +633,7 @@ def parse_jobs(
             match.group("name").strip("'\""),
             text[
                 match.end():
-                candidates[index + 1].start() if index + 1 < len(candidates) else len(text)
+                candidates[index + 1].start() if index + 1 < len(candidates) else section_end
             ],
         )
         for index, match in enumerate(candidates)
@@ -875,7 +938,11 @@ def check(repo_root: Path, baseline_path: Path, manifest_path: Path, baseline_re
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__.splitlines()[0],
-        epilog=("During T0, new violations are warn-only; stale snapshots and manifest drift remain enforced. T1 promotes new debt to enforcement."),
+        epilog=(
+            "During T0, new live debt is warn-only. Manifest drift, candidate "
+            "baseline growth, and stale baseline entries return rc=1; T1 promotes "
+            "new debt to enforcement."
+        ),
     )
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     parser.add_argument("--baseline", type=Path)
