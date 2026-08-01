@@ -1205,22 +1205,33 @@ fn test_database_owners()
 #[cfg(test)]
 fn test_database_server_identity(options: &PgConnectOptions) -> String {
     let host = options.get_host().trim();
-    let unbracketed_host = host
+    // Strip a DNS-style trailing dot before removing IPv6 brackets so both
+    // `[::1]` and `[::1].` reach the same canonical parser input. Preserve
+    // Unix-socket paths verbatim below; a path is not a DNS host name.
+    let host_for_ip_or_hostname = host.trim_end_matches('.');
+    let unbracketed_host = host_for_ip_or_hostname
         .strip_prefix('[')
         .and_then(|value| value.strip_suffix(']'))
-        .unwrap_or(host);
-    let host_alias = unbracketed_host.trim_end_matches('.').to_ascii_lowercase();
-    let normalized_host = if matches!(host_alias.as_str(), "localhost" | "127.0.0.1" | "::1") {
-        // PostgreSQL fixtures may create through the CI base URL and connect
-        // through config.host; treat the three loopback spellings as one
-        // server identity so ownership cleanup cannot split its registry key.
-        "loopback".to_string()
-    } else if let Ok(address) = unbracketed_host.parse::<IpAddr>() {
+        .unwrap_or(host_for_ip_or_hostname);
+    let normalized_host = if let Ok(address) = unbracketed_host.parse::<IpAddr>() {
+        // Canonicalize first: long-form IPv6 loopback parses to `::1`, so the
+        // alias match below covers every equivalent textual representation.
         address.to_string()
-    } else if unbracketed_host.starts_with('/') {
-        unbracketed_host.to_string()
+    } else if host.starts_with('/') {
+        host.to_string()
     } else {
-        host_alias
+        unbracketed_host.to_ascii_lowercase()
+    };
+    let normalized_host = match normalized_host.as_str() {
+        "localhost" | "127.0.0.1" | "::1" => {
+            // PostgreSQL fixtures may create through the CI base URL and connect
+            // through config.host; treat the three loopback spellings as one
+            // server identity so ownership cleanup cannot split its registry key.
+            // Angle brackets cannot occur in a URL host, keeping this key distinct
+            // from a real DNS hostname such as `loopback`.
+            "<loopback>".to_string()
+        }
+        _ => normalized_host,
     };
     if normalized_host.contains(':') {
         format!("[{normalized_host}]:{}", options.get_port())
@@ -1868,8 +1879,9 @@ mod tests {
         connect_test_pool_with_max_connections_and_migrate, create_test_database, database_enabled,
         database_summary, health_check, require_pg_guard, run_test_postgres_sqlx_op_with_timeout,
         runtime_pool_settings, should_yield_for_counters, startup_pool_settings, startup_reseed,
-        sync_agents_from_config_pg, with_startup_advisory_lock,
+        sync_agents_from_config_pg, test_database_server_identity, with_startup_advisory_lock,
     };
+    use sqlx::postgres::PgConnectOptions;
     use sqlx::{Executor as _, PgPool, Row};
     use std::collections::BTreeMap;
     use std::future::Future;
@@ -2090,6 +2102,35 @@ mod tests {
             )),
             Ok(None)
         ));
+    }
+
+    #[test]
+    fn test_database_server_identity_normalizes_loopback_aliases_without_collisions() {
+        fn identity(host: &str) -> String {
+            let options = PgConnectOptions::new().host(host).port(5432);
+            test_database_server_identity(&options)
+        }
+
+        let expected = identity("localhost");
+        for host in [
+            "localhost",
+            "127.0.0.1",
+            "127.0.0.1.",
+            "::1",
+            "[::1]",
+            "[::1].",
+            "0:0:0:0:0:0:0:1",
+            "LOCALHOST.",
+        ] {
+            assert_eq!(identity(host), expected, "loopback spelling {host:?}");
+        }
+
+        assert_ne!(
+            expected,
+            identity("loopback"),
+            "the loopback sentinel must not collide with a real DNS hostname"
+        );
+        assert_eq!(identity("DB.Example.COM."), "db.example.com:5432");
     }
 
     struct TestDatabase {
