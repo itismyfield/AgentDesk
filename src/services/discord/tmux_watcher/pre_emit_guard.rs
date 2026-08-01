@@ -89,11 +89,10 @@ pub(super) async fn run_pre_emit_guard(
         deferred_monitor_ready,
     ) {
         if let Some(msg_id) = placeholder_msg_id {
-            let inflight_before_cleanup =
-                crate::services::discord::inflight::load_inflight_state(
-                    watcher_provider,
-                    channel_id.get(),
-                );
+            let inflight_before_cleanup = crate::services::discord::inflight::load_inflight_state(
+                watcher_provider,
+                channel_id.get(),
+            );
             let _ = delete_nonterminal_placeholder_unless_delivered(
                 http,
                 channel_id,
