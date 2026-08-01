@@ -83,6 +83,8 @@ EXPECTED_TEST_NON_PG_COMMANDS = (
     "cargo test --lib canonical_identity::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib session_canonical_identity::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib services::observability::metrics::tests -- --skip _pg --skip pg_ --skip postgres",
+    "cargo test --lib services::observability::turn_lifecycle::tests -- --skip _pg --skip pg_ --skip postgres",
+    "cargo test --lib services::observability::recovery_audit::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib cli::args::tests::legacy_queue_help_directs_users_to_query_without_changing_compatibility_contract",
     "cargo test --all-targets transition -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
     "cargo test --all-targets auto_queue -- --skip _pg --skip pg_ --skip postgres",
