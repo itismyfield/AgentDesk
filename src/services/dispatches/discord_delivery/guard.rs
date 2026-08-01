@@ -1416,7 +1416,6 @@ mod tests {
         /// duplicate. A single all-in-one finalize transaction would have rolled the
         /// anchor back on the bookkeeping failure and re-sent on the reclaim.
         #[tokio::test]
-        #[rustfmt::skip]
         async fn delivery_first_send_not_resent_by_reclaim_after_permanent_bookkeeping_failure() {
             let pg_db = create_test_pg_db().await;
             let pool = pg_db.connect_and_migrate().await;
@@ -1457,7 +1456,9 @@ mod tests {
 
             // 2. The reservation expires before any retry succeeds (DB was down long
             //    enough): age out both the kv guard key and the typed reservation.
-            sqlx::query("UPDATE kv_meta SET expires_at = NOW() - INTERVAL '1 minute' WHERE key = $1")
+            sqlx::query(
+                "UPDATE kv_meta SET expires_at = NOW() - INTERVAL '1 minute' WHERE key = $1",
+            )
             .bind(reserving_key(dispatch_id))
             .execute(&pool)
             .await
