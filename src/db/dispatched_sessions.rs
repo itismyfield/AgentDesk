@@ -1285,14 +1285,25 @@ mod selector_cleanup_tests {
     }
 
     // #4979 S6: session-authority PG tests live below `*_pg_tests` so
-    // `just test-postgres` selects them through its `_pg` filter. The nested
-    // `#[cfg(test)]` is compile-time redundant but load-bearing:
-    // `check_test_lane_coverage.py` assigns each test fn to the innermost
-    // `cfg(test)` module. Removing it would assign the unmarked tests to the
-    // parent `…::selector_cleanup_tests`, which no curated invocation fully
-    // covers. The enforced naming contract is only that the normalized path
-    // contains `_pg`, `pg_`, or `postgres`; the `*_pg_tests` suffix itself is
-    // a human convention.
+    // `just test-postgres` selects them through its `_pg` filter. That filter
+    // is a substring match on the whole test path, not a module-scope rule —
+    // seven of these tests already carried `_pg` in their own fn names and so
+    // were selected before the move; the module marker is what now covers the
+    // rest.
+    //
+    // Be precise about what protects that, because it is weaker here than in
+    // the sibling slices (#5088 S3, #5092 S5). Renaming this module away from
+    // the marker is caught only by the manifest-drift check (hard rc=1). It is
+    // NOT caught by the other two signals a reader might expect:
+    //   - new rule1/rule2 debt is warn-only during the #5071 T0 rollout, so a
+    //     regenerated manifest turns the drift failure into a passing WARN;
+    //   - the coverage gate stays silent because the parent module is already
+    //     carried in `test_lane_coverage_baseline.txt` as uncovered debt, so
+    //     reassigning tests back to it changes nothing it measures.
+    // Consequently the nested `#[cfg(test)]` here is defence-in-depth for when
+    // that parent debt is repaid — it is not currently load-bearing. Do not
+    // copy a "removing this breaks the gate" claim into slices whose parent is
+    // genuinely covered; there it is true, here it is not.
     #[cfg(test)]
     mod session_authority_pg_tests {
         use super::*;
