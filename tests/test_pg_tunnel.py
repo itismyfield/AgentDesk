@@ -196,16 +196,17 @@ class DeploymentWiringTests(unittest.TestCase):
         This guard intentionally does no bash parsing: every physical line that
         starts with trap is compared as a full-line ordered multiset.  It also
         pins unique cleanup definitions, relative reset/registration order, and
-        the preflight-call strip set.  Trap tokens that are not at line start
-        (for example after ``;`` in a compound command), indirect registrations
-        through the builtin trap command, and registrations assembled by eval
-        are outside this static guard; the real-signal INT/TERM harness is the
-        behavioral backstop.  The EXIT-leg harness executes this production
-        slice on normal exit and injects INT during cleanup, so a registration
-        hidden in a heredoc is caught behaviorally even though this exact-line
-        guard deliberately does not parse shell syntax.  A query such as
-        ``trap -p INT`` is still a trap line and therefore fails the exact
-        contract.
+        the preflight-call strip set.  The real-signal INT/TERM and EXIT harnesses
+        behaviorally backstop indirect changes only inside the production slice
+        ending immediately before ``_self_hosted_release_session``.  Past the
+        registrations, a separate conservative lexical guard rejects trap/eval
+        commands through EOF because executing the rest of the deploy is neither
+        hermetic nor safe in a unit test.  Neither this physical-line/definition
+        scan nor ``test_trap_function_shadowing_is_absent`` excludes heredoc
+        bodies, and the tail guard is likewise lexical.  Harmless command-looking
+        heredoc text can therefore be a false positive in all of them; that is an
+        accepted fail-closed tradeoff.  A query such as ``trap -p INT`` is still
+        a trap line and therefore fails the exact contract.
         """
         deploy = DEPLOY.read_text(encoding="utf-8")
         deploy_lines = deploy.splitlines()
@@ -215,9 +216,9 @@ class DeploymentWiringTests(unittest.TestCase):
             for line_number, line in enumerate(deploy_lines, 1)
             if re.match(r"^[ \t]*trap[ \t]", line)
         ]
-        # The reset commands are deliberately indented as function-body lines;
-        # all five rows remain raw exact matches, while the three top-level
-        # registrations below are required to stay at column 0.
+        # The reset commands are deliberately indented as function-body lines.
+        # The raw expected literals themselves enforce that the three
+        # registrations remain at column 0.
         expected_traps = [
             "    trap - EXIT",
             "    trap '' INT TERM",
@@ -232,27 +233,32 @@ class DeploymentWiringTests(unittest.TestCase):
             "expected exactly five trap lines in this order; observed rows="
             + repr([f"line {line_number}: {text}" for line_number, text in trap_rows]),
         )
-        for line_number, text in trap_rows[2:]:
-            self.assertEqual(
-                text,
-                text.lstrip(),
-                "top-level trap registrations must remain at column 0: "
-                f"line {line_number}: {text!r}",
-            )
 
         def definition_rows(name: str) -> list[tuple[int, str]]:
+            spaced_parens = r"[ \t]*\([ \t]*\)"
             direct_patterns = (
                 re.compile(
-                    r"^[ \t]*" + re.escape(name) + r"\(\)[ \t]*\{"
+                    r"^[ \t]*" + re.escape(name) + spaced_parens + r"[ \t]*\{"
                 ),
                 re.compile(
                     r"^[ \t]*function[ \t]+"
                     + re.escape(name)
-                    + r"(?:\(\))?[ \t]*\{"
+                    + r"(?:"
+                    + spaced_parens
+                    + r")?[ \t]*\{"
                 ),
             )
-            multiline_name = re.compile(
-                r"^[ \t]*" + re.escape(name) + r"\(\)[ \t]*$"
+            multiline_names = (
+                re.compile(
+                    r"^[ \t]*" + re.escape(name) + spaced_parens + r"[ \t]*$"
+                ),
+                re.compile(
+                    r"^[ \t]*function[ \t]+"
+                    + re.escape(name)
+                    + r"(?:"
+                    + spaced_parens
+                    + r")?[ \t]*$"
+                ),
             )
             opening_brace = re.compile(r"^[ \t]*\{")
             rows: list[tuple[int, str]] = []
@@ -261,7 +267,7 @@ class DeploymentWiringTests(unittest.TestCase):
                     rows.append((index + 1, line.strip()))
                     continue
                 if (
-                    multiline_name.fullmatch(line)
+                    any(pattern.fullmatch(line) for pattern in multiline_names)
                     and index + 1 < len(deploy_lines)
                     and opening_brace.match(deploy_lines[index + 1])
                 ):
@@ -316,6 +322,17 @@ class DeploymentWiringTests(unittest.TestCase):
             "expected three cleanup registration rows; observed rows="
             + repr(registration_rows),
         )
+        first_registration_line = min(
+            line_number for line_number, _text in registration_rows
+        )
+        self.assertLess(
+            max(cleanup_definition_line, signal_definition_line),
+            first_registration_line,
+            "the last cleanup-handler definition must be the contract definition "
+            "before registrations: "
+            f"cleanup={cleanup_definition_line}, signal={signal_definition_line}, "
+            f"registrations={registration_rows}",
+        )
         for reset_text in ("    trap - EXIT", "    trap '' INT TERM"):
             with self.subTest(reset=reset_text):
                 reset_line = reset_rows[reset_text]
@@ -328,8 +345,7 @@ class DeploymentWiringTests(unittest.TestCase):
                 self.assertLess(
                     reset_line,
                     signal_definition_line,
-                    "cleanup reset must stay inside _cleanup_on_exit, before "
-                    "_handle_cleanup_signal: "
+                    "cleanup reset must precede the signal-handler definition: "
                     f"reset={reset_line}, signal_definition={signal_definition_line}",
                 )
                 self.assertLess(
@@ -378,10 +394,10 @@ class DeploymentWiringTests(unittest.TestCase):
         )
 
     def test_trap_function_shadowing_is_absent(self):
-        """Reject Bash ``trap`` function declarations, including split braces."""
+        """Reject Bash ``trap`` function declarations, including spaced parens."""
         deploy = DEPLOY.read_text(encoding="utf-8")
         shadow_patterns = (
-            re.compile(r"^[ \t]*trap[ \t]*\(\)", re.MULTILINE),
+            re.compile(r"^[ \t]*trap[ \t]*\([ \t]*\)", re.MULTILINE),
             re.compile(r"^[ \t]*function[ \t]+trap\b", re.MULTILINE),
         )
         for pattern in shadow_patterns:
@@ -392,6 +408,34 @@ class DeploymentWiringTests(unittest.TestCase):
                     "trap function shadowing is outside the supported contract: "
                     + pattern.pattern,
                 )
+
+    def test_no_trap_or_eval_commands_follow_production_registrations(self):
+        """Fail closed on trap mutation outside the executable harness slice.
+
+        The dynamic harness safely executes through the three registrations but
+        cannot execute the remaining deploy flow.  From that boundary through
+        EOF, command-looking trap/eval text is forbidden.  This is deliberately
+        lexical and can reject harmless heredoc documentation; accepting that
+        false-positive risk keeps the unexecuted region fail closed.
+        """
+        deploy = DEPLOY.read_text(encoding="utf-8")
+        boundary = "trap '_handle_cleanup_signal 143' TERM"
+        tail = deploy[deploy.index(boundary) + len(boundary) :]
+        forbidden = re.compile(
+            r"\b(?:(?:builtin|command)[ \t]+)?trap(?:[ \t]|$)"
+            r"|\beval(?:[ \t]|$)"
+        )
+        rows = [
+            (line_number, line)
+            for line_number, line in enumerate(tail.splitlines(), 1)
+            if not line.lstrip().startswith("#") and forbidden.search(line)
+        ]
+        self.assertEqual(
+            rows,
+            [],
+            "trap/eval commands after production registration are outside the "
+            "dynamic backstop; tail-relative rows=" + repr(rows),
+        )
 
     def test_wrapper_is_registered_for_portable_path_lint(self):
         checker = (REPO_ROOT / "scripts/check-portable-paths.py").read_text(
@@ -821,9 +865,9 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
         """Run one real signal path with bounded child and parent lifetimes.
 
         Code-path budget from measured runs: a typical successful path is
-        ~0.2–1.3 s; a guarded failure is bounded by
-        ``max(4 + 1.25, 4 + 3) ≈ 7 s`` (the two post-readiness terms are
-        mutually exclusive), and both fit within the 10 s subprocess timeout.
+        ~0.2–1.3 s; a guarded failure is bounded by the serial path
+        ``4 + 3 + 1.25 ≈ 8.25 s`` (readiness guard, signal guard, then EXIT
+        cleanup), leaving about 1.75 s within the 10 s subprocess timeout.
         """
         signal_status = {"INT": 130, "TERM": 143}[signal_name]
         cleanup_sleep = self._cleanup_sleep_literal()
@@ -985,6 +1029,31 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
         self.assertEqual(status, 143, events)
         self.assertEqual(events.count("probe-term"), 1, events)
         self.assertEqual(events.count("cleanup=143"), 1, events)
+
+    def test_cleanup_traps_register_without_test_environment(self):
+        """Observe production registrations with all harness-only vars unset."""
+        script = (
+            "set -euo pipefail\n"
+            + self._production_cleanup_handlers()
+            + "\nprintf 'EXIT=<%s>\\n' \"$(builtin trap -p EXIT)\"\n"
+            + "printf 'INT=<%s>\\n' \"$(builtin trap -p INT)\"\n"
+            + "printf 'TERM=<%s>\\n' \"$(builtin trap -p TERM)\"\n"
+            + "builtin trap - EXIT INT TERM\n"
+        )
+        process = subprocess.run(
+            ["/bin/bash", "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={"PATH": "/usr/bin:/bin"},
+        )
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertEqual(
+            process.stdout,
+            "EXIT=<trap -- '_cleanup_on_exit' EXIT>\n"
+            "INT=<trap -- '_handle_cleanup_signal 130' SIGINT>\n"
+            "TERM=<trap -- '_handle_cleanup_signal 143' SIGTERM>\n",
+        )
 
     def test_exit_cleanup_runs_once_and_masks_int_during_cleanup(self):
         """Exercise the production EXIT registration, including a heredoc backstop.
