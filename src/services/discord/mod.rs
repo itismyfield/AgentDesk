@@ -211,9 +211,6 @@ use tokio::sync::Mutex;
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
 
-#[cfg(test)]
-use self::session_idle_cleanup::mark_session_disconnected_for_idle_cleanup;
-use self::session_idle_cleanup::maybe_cleanup_sessions;
 use crate::services::agent_protocol::{DEFAULT_ALLOWED_TOOLS, StreamMessage};
 use crate::services::claude;
 use crate::services::codex;
@@ -250,6 +247,9 @@ use recovery_engine::restore_inflight_turns;
 use restart_report::flush_restart_reports;
 use role_map_enrichment::enrich_role_map_with_channel_ids;
 use router::handle_event;
+#[cfg(test)]
+use session_idle_cleanup::mark_session_disconnected_for_idle_cleanup;
+use session_idle_cleanup::maybe_cleanup_sessions;
 use session_status_hook::{
     post_canonical as post_adk_session_status_with_canonical_identity,
     post_channel_turn as post_adk_session_status_for_channel,
