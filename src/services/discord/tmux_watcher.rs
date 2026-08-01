@@ -588,7 +588,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             mut monitor_auto_turn_synthetic_msg_id,
             mut monitor_auto_turn_ledger_generation,
             mut completion_footer_terminal_target,
-            mut session_bound_relay_turn_fully_mirrored,
+            session_bound_relay_turn_fully_mirrored,
             session_bound_relay_turn_first_forwarded_sequence,
             found_result,
             terminal_kind,

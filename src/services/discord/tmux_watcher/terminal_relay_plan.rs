@@ -543,9 +543,9 @@ pub(super) async fn run_terminal_relay_plan<'a>(
         if split_trailing_turn_follows {
             all_data_session_bound_relay_ack = None;
         }
-            let watcher_direct_terminal_idle_committed = false;
-            let tui_direct_anchor_terminal_body_visible = false;
-            let tui_direct_anchor_or_lease_present_for_lifecycle =
+        let watcher_direct_terminal_idle_committed = false;
+        let tui_direct_anchor_terminal_body_visible = false;
+        let tui_direct_anchor_or_lease_present_for_lifecycle =
             prompt_anchor_present_before_relay || external_input_lease_before_relay;
         write_terminal_relay_plan_state(
             state,

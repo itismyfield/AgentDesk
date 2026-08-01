@@ -856,6 +856,7 @@ src/
 │   │   │   ├── terminal_preflight.rs
 │   │   │   ├── terminal_readiness.rs
 │   │   │   ├── terminal_readiness_tests.rs
+│   │   │   ├── terminal_relay_plan.rs
 │   │   │   ├── terminal_send.rs
 │   │   │   ├── terminal_token_update.rs
 │   │   │   ├── tests.rs
