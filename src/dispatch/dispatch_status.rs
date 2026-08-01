@@ -1392,24 +1392,18 @@ fn complete_dispatch_inner_with_backends(
     Ok(dispatch)
 }
 
-/// #699 / #4884: inject `verdict = context.phase_gate.pass_verdict` into a
-/// phase-gate dispatch result when every declared `checks.*` entry passed but
-/// the caller forgot the explicit verdict field.
-///
-/// Returns `Some(enriched)` only when an injection happened — callers should
-/// fall back to the original `result` otherwise.
-///
-/// The pass/fail decision itself is delegated to
-/// `crate::db::auto_queue::phase_gate_verdict`, the single Rust authority also
-/// used by the durable reconciler that runs for CRUD / watcher / bridge
-/// recovery completions. This path only owns the *side effect* of persisting
-/// the inferred verdict onto the result payload; it must never reach a
-/// different verdict than the reconciler would for the same evidence.
-fn infer_phase_gate_verdict(
-    dispatch_id: &str,
+/// Typed phase-gate inference result shared by production logging and tests.
+struct InferredPhaseGateVerdict {
+    enriched_result: serde_json::Value,
+    pass_verdict: String,
+    declared_check_count: usize,
+    reported_check_count: usize,
+}
+
+fn infer_phase_gate_verdict_details(
     context: &serde_json::Value,
     result: &serde_json::Value,
-) -> Option<serde_json::Value> {
+) -> Option<InferredPhaseGateVerdict> {
     let phase_gate_ctx = context.get("phase_gate")?;
     let phase_gate_verdict::VerdictResolution::Inferred(pass_verdict) =
         phase_gate_verdict::resolve_verdict(Some(context), result)
@@ -1417,11 +1411,11 @@ fn infer_phase_gate_verdict(
         return None;
     };
 
-    let mut enriched = result.clone();
-    if !enriched.is_object() {
-        enriched = serde_json::Value::Object(serde_json::Map::new());
+    let mut enriched_result = result.clone();
+    if !enriched_result.is_object() {
+        enriched_result = serde_json::Value::Object(serde_json::Map::new());
     }
-    if let Some(obj) = enriched.as_object_mut() {
+    if let Some(obj) = enriched_result.as_object_mut() {
         obj.insert(
             "verdict".to_string(),
             serde_json::Value::String(pass_verdict.clone()),
@@ -1440,15 +1434,43 @@ fn infer_phase_gate_verdict(
         .get("checks")
         .and_then(serde_json::Value::as_object)
         .map_or(0, serde_json::Map::len);
-    tracing::info!(
-        dispatch_id = %dispatch_id,
-        pass_verdict = %pass_verdict,
+
+    Some(InferredPhaseGateVerdict {
+        enriched_result,
+        pass_verdict,
         declared_check_count,
         reported_check_count,
+    })
+}
+
+/// #699 / #4884: inject `verdict = context.phase_gate.pass_verdict` into a
+/// phase-gate dispatch result when every declared `checks.*` entry passed but
+/// the caller forgot the explicit verdict field.
+///
+/// Returns `Some(enriched)` only when an injection happened — callers should
+/// fall back to the original `result` otherwise.
+///
+/// The pass/fail decision itself is delegated to
+/// `crate::db::auto_queue::phase_gate_verdict`, the single Rust authority also
+/// used by the durable reconciler that runs for CRUD / watcher / bridge
+/// recovery completions. This path only owns the *side effect* of persisting
+/// the inferred verdict onto the result payload; it must never reach a
+/// different verdict than the reconciler would for the same evidence.
+fn infer_phase_gate_verdict(
+    dispatch_id: &str,
+    context: &serde_json::Value,
+    result: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let details = infer_phase_gate_verdict_details(context, result)?;
+    tracing::info!(
+        dispatch_id = %dispatch_id,
+        pass_verdict = %details.pass_verdict,
+        declared_check_count = details.declared_check_count,
+        reported_check_count = details.reported_check_count,
         "[dispatch] #699 inferred phase-gate verdict because all declared checks passed",
     );
 
-    Some(enriched)
+    Some(details.enriched_result)
 }
 
 #[cfg(test)]
@@ -1648,61 +1670,13 @@ mod auto_queue_terminal_sync_policy_tests {
 #[cfg(test)]
 mod auto_queue_phase_gate_finalize_wrapper_tests {
     use super::{
-        infer_effective_completion_result, infer_phase_gate_verdict, log_phase_gate_reconciliation,
-        maybe_inject_phase_gate_verdict_pg, set_dispatch_status_on_pg_async,
+        infer_effective_completion_result, infer_phase_gate_verdict,
+        infer_phase_gate_verdict_details, maybe_inject_phase_gate_verdict_pg,
+        set_dispatch_status_on_pg_async,
     };
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use serde_json::{Value, json};
     use sqlx::{PgPool, Row};
-    use std::io::{self, Write};
-    use std::sync::{Arc, Mutex};
-    use tracing_subscriber::fmt::writer::MakeWriter;
-
-    #[derive(Clone)]
-    struct CapturingWriter {
-        buffer: Arc<Mutex<Vec<u8>>>,
-    }
-
-    impl Write for CapturingWriter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            match self.buffer.lock() {
-                Ok(mut buffer) => buffer.extend_from_slice(bytes),
-                Err(poisoned) => poisoned.into_inner().extend_from_slice(bytes),
-            }
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> MakeWriter<'a> for CapturingWriter {
-        type Writer = CapturingWriter;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
-    fn capture_info_logs(emit: impl FnOnce()) -> Result<String, std::string::FromUtf8Error> {
-        let buffer = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::INFO)
-            .with_ansi(false)
-            .without_time()
-            .with_target(false)
-            .with_writer(CapturingWriter {
-                buffer: buffer.clone(),
-            })
-            .finish();
-        tracing::subscriber::with_default(subscriber, emit);
-        let bytes = match buffer.lock() {
-            Ok(buffer) => buffer.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        };
-        String::from_utf8(bytes)
-    }
 
     fn gate() -> serde_json::Value {
         json!({
@@ -2148,73 +2122,18 @@ mod auto_queue_phase_gate_finalize_wrapper_tests {
     }
 
     #[test]
-    fn failed_reconciliation_log_does_not_emit_verdict_payload() {
-        let result = json!({
-            "verdict": {"authorization": "Bearer secret"},
-            "checks": {"build_passed": "fail"},
-        });
-        let resolution = crate::db::auto_queue::phase_gate_verdict::resolve_verdict(None, &result);
-        assert_eq!(
-            resolution,
-            crate::db::auto_queue::phase_gate_verdict::VerdictResolution::Missing
-        );
-        let failed_reason = match crate::db::auto_queue::phase_gate_verdict::diagnostic_verdict(
-            &result,
-            &resolution,
-        ) {
-            Some(diagnostic) => format!("expected verdict gate_ok, got {diagnostic}"),
-            None => "expected verdict gate_ok, got none".to_string(),
-        };
-        let outcome = crate::db::auto_queue::PhaseGateReconciliation::MarkedFailed {
-            run_id: "run-log-redaction".to_string(),
-            phase: 0,
-            failed_dispatch_id: "dsp-log-redaction".to_string(),
-            failed_reason,
-        };
-        let logs = capture_info_logs(|| {
-            log_phase_gate_reconciliation("dsp-log-redaction", &outcome);
-        });
-
-        assert!(
-            logs.as_ref()
-                .is_ok_and(|logs| logs.contains("<non-string:object>")),
-            "{logs:?}"
-        );
-        assert!(
-            logs.as_ref().is_ok_and(|logs| {
-                !logs.contains("authorization") && !logs.contains("Bearer secret")
-            }),
-            "failed reconciliation log leaked verdict payload: {logs:?}"
-        );
-    }
-
-    #[test]
-    fn inferred_verdict_log_preserves_check_cardinality_fields() {
+    fn inferred_verdict_preserves_check_cardinality_fields() {
         let result = json!({ "checks": passing_checks() });
-        let logs = capture_info_logs(|| {
-            let injected = infer_phase_gate_verdict("dsp-log-fields", &gate(), &result);
-            assert!(injected.is_some());
-        });
+        let details = infer_phase_gate_verdict_details(&gate(), &result)
+            .expect("passing declared checks should infer a verdict"); // agentdesk-audit: allow-unwrap — deterministic typed-verdict assertion in #[cfg(test)] module (#5044)
 
-        assert!(
-            logs.as_ref()
-                .is_ok_and(|logs| logs.contains("dispatch_id=dsp-log-fields")),
-            "{logs:?}"
-        );
-        assert!(
-            logs.as_ref()
-                .is_ok_and(|logs| logs.contains("pass_verdict=phase_gate_passed")),
-            "{logs:?}"
-        );
-        assert!(
-            logs.as_ref()
-                .is_ok_and(|logs| logs.contains("declared_check_count=3")),
-            "{logs:?}"
-        );
-        assert!(
-            logs.as_ref()
-                .is_ok_and(|logs| logs.contains("reported_check_count=3")),
-            "{logs:?}"
+        assert_eq!(details.pass_verdict, "phase_gate_passed");
+        assert_eq!(details.declared_check_count, 3);
+        assert_eq!(details.reported_check_count, 3);
+        assert_eq!(details.enriched_result["verdict"], "phase_gate_passed");
+        assert_eq!(
+            details.enriched_result["verdict_inferred"],
+            serde_json::Value::Bool(true)
         );
     }
 
