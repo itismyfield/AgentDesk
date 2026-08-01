@@ -1,7 +1,7 @@
 use super::*;
 
 #[cfg(test)]
-mod restored_session_cwd_channel_isolation_tests {
+mod restored_session_cwd_channel_isolation_pg_tests {
     //! #3207 (part 2) P0-b: watcher restart recovery resolves a restored
     //! session's cwd via `load_restored_session_cwd` and injects it into the
     //! restored runtime state (`session.current_path` via

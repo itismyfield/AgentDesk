@@ -332,7 +332,7 @@ fn database_error(error: sqlx::Error) -> PipelineOverrideError {
 }
 
 #[cfg(test)]
-mod tests {
+mod pipeline_override_pg_tests {
     use super::*;
 
     struct TestPostgresDb {

@@ -128,10 +128,14 @@ jobs:
               - 'src/services/session_forwarding.rs'
               - 'src/services/session_forwarding/**'
               - 'src/server/routes/queue_api.rs'
+              - 'src/server/resource_locks.rs'
               # #4460: recovery owns production-shaped PostgreSQL/outbox
               # tests; changes to the owner or its sidecars must run them.
               - 'src/services/discord/health/recovery.rs'
               - 'src/services/discord/health/recovery/**'
+              - 'src/services/discord/watchers/lifecycle/restore_tests.rs'
+              - 'src/services/maintenance/jobs/worktree_orphan_sweep.rs'
+              - 'src/services/pipeline_override.rs'
               # #5025: terminal-delivery evidence routing and every local
               # producer/epilogue sibling run in `test_fast`, whose registered
               # required mirror is `Fast targeted tests (ubuntu-latest)`.

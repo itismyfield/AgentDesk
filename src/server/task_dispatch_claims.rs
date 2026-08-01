@@ -358,7 +358,7 @@ fn clean_optional(value: Option<&str>) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+mod task_dispatch_claims_pg_tests {
     use super::*;
     use serde_json::json;
     use uuid::Uuid;

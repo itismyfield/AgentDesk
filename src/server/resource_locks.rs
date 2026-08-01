@@ -238,7 +238,7 @@ fn lock_from_row(row: sqlx::postgres::PgRow) -> Result<ResourceLock, String> {
 }
 
 #[cfg(test)]
-mod tests {
+mod resource_locks_pg_tests {
     use super::*;
     use uuid::Uuid;
 

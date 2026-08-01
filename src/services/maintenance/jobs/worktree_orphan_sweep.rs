@@ -1343,7 +1343,7 @@ mod deploy_worktree_protection_tests {
 }
 
 #[cfg(test)]
-mod resumable_keep_set_query_tests {
+mod resumable_keep_set_query_pg_tests {
     //! #3207 P1 / #3231 (A): exercise the REAL `fetch_resumable_cwds` query
     //! against Postgres so the GUID-primary keep rule is verified, not just the
     //! `is_dir_active` path-matching stub.
@@ -1495,7 +1495,7 @@ mod resumable_keep_set_query_tests {
 }
 
 #[cfg(test)]
-mod active_dispatch_worktree_keep_set_tests {
+mod active_dispatch_worktree_keep_set_pg_tests {
     //! #3231 (codex #1): an active managed dispatch records its worktree under
     //! `task_dispatches.context.worktree_path` at CREATE time — before any
     //! `sessions.cwd` or live tmux pane exists. `fetch_active_dispatch_worktree_paths`
@@ -1969,7 +1969,7 @@ mod git_pointer_fallback_tests {
 }
 
 #[cfg(test)]
-mod keep_set_query_failure_fail_closed_tests {
+mod keep_set_query_failure_fail_closed_pg_tests {
     //! #3231 (codex #2): a FAILED keep-set query must suppress ALL deletions for
     //! the run (fail-closed), exactly like a failed tmux probe. A closed pool makes
     //! every keep-set query error, so the sweep must delete nothing even though a
