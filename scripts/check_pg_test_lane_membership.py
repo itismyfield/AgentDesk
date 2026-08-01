@@ -129,6 +129,10 @@ _TEST_ATTR = re.compile(
 _STRUCT = re.compile(r"\bstruct\s+([A-Za-z_][A-Za-z0-9_]*)\b")
 _IMPL = re.compile(r"\bimpl(?:\s*<[^>{}]*>)?\s+(?:[^{}]*?\s+for\s+)?([A-Za-z_][A-Za-z0-9_]*)\b[^{};]*\{")
 _JOBS_KEY = re.compile(
+    r"^(?:jobs|'jobs'|\"jobs\")[^\S\n]*:(?=[^\S\n]|$)",
+    re.MULTILINE,
+)
+_JOBS_BLOCK_KEY = re.compile(
     r"^(?:jobs|'jobs'|\"jobs\"):[^\S\n]*(?:#.*)?$",
     re.MULTILINE,
 )
@@ -604,27 +608,37 @@ def parse_jobs(
     This intentionally stays dependency-free instead of relying on PyYAML, which
     is not declared by AgentDesk's script-check environment. It supports the
     repository's block-style workflows and tracks scalar bodies while locating
-    the next column-zero mapping key. An empty top-level job map is reported as a
-    configuration error; an absent top-level ``jobs:`` key is ignored.
+    the next column-zero mapping key. Top-level ``jobs`` presence is detected
+    more broadly than the supported block syntax so unsupported forms fail as a
+    configuration error instead of looking absent. A genuinely absent key is
+    ignored.
     """
     text = path.read_text("utf-8")
-    jobs_key = _JOBS_KEY.search(text)
-    if jobs_key is None:
+    # Normalize only the presence probe. Enumeration stays strict against the
+    # original text so BOM, flow maps, and pre-colon spacing fail closed rather
+    # than being partially supported by the lightweight block parser.
+    has_bom = text.startswith("\ufeff")
+    present_jobs_key = _JOBS_KEY.search(text.removeprefix("\ufeff"))
+    if present_jobs_key is None:
         return []
-    jobs_indent = 0
-    section_end = _jobs_section_end(text, jobs_key.end())
-    in_section = [
-        match for match in _JOB.finditer(text, jobs_key.end(), section_end)
-        if _indent_width(match.group("indent")) > jobs_indent
-    ]
-    job_indent = min(
-        (_indent_width(match.group("indent")) for match in in_section),
-        default=None,
-    )
-    candidates = [
-        match for match in in_section
-        if _indent_width(match.group("indent")) == job_indent
-    ]
+    jobs_key = None if has_bom else _JOBS_BLOCK_KEY.match(text, present_jobs_key.start())
+    section_end = len(text)
+    candidates: list[re.Match[str]] = []
+    if jobs_key is not None:
+        jobs_indent = 0
+        section_end = _jobs_section_end(text, jobs_key.end())
+        in_section = [
+            match for match in _JOB.finditer(text, jobs_key.end(), section_end)
+            if _indent_width(match.group("indent")) > jobs_indent
+        ]
+        job_indent = min(
+            (_indent_width(match.group("indent")) for match in in_section),
+            default=None,
+        )
+        candidates = [
+            match for match in in_section
+            if _indent_width(match.group("indent")) == job_indent
+        ]
     rel = str(path.relative_to(repo_root))
     if not candidates and findings is not None:
         findings.append(Finding("jobs-empty", rel, "jobs: is present but no job keys were parsed"))
