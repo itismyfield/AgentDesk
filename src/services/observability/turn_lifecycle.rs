@@ -732,8 +732,19 @@ mod tests {
     // #4979 S7: PG tests live below a marked module so `just test-postgres`
     // selects them by the whole-path `_pg` substring. The three pure siblings
     // stay in this parent and are selected by the curated non-PG invocation.
-    // The enforced marker contract is only `_pg`, `pg_`, or `postgres` as a
-    // normalized-path substring; this module suffix is a human convention.
+    //
+    // The `*_pg_tests` suffix is a human convention, but the marker contract
+    // it satisfies is enforced, and it is two-sided — a name that clears one
+    // side can still fail the other:
+    //   rule1 (`justfile` test-postgres) selects on `_pg`, `pg_`, or
+    //     `postgres` as a normalized-path substring;
+    //   rule2 (nightly pgless sweep, ci-nightly.yml:121 and :163) excludes on
+    //     `_pg_` or `postgres_` — note the trailing underscore.
+    // So `pg_foo_tests` clears rule1 yet is still swept by the pgless lane and
+    // lands as rule2 debt; a live example sits at
+    // scripts/pg_test_lane_baseline.txt:81
+    // (`dispatch::dispatch_cancel::pg_observability_tests::…`). The `_pg_tests`
+    // suffix used here contains `_pg_` and so clears both sides.
     //
     // Batch mutation measurements at this declaration and the sibling in
     // recovery_audit.rs (rc values are measured, not inferred):
