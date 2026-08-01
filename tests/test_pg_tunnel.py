@@ -201,6 +201,10 @@ class DeploymentWiringTests(unittest.TestCase):
         indirection such as ``_disarm_exit``, commands assembled in variables,
         ``builtin``/``command``/``eval`` dispatch, and other multi-segment
         definition syntax are outside the static contract.
+        Neither this physical-line/definition scan nor
+        ``test_trap_function_shadowing_is_absent`` excludes heredoc bodies.
+        Harmless command-looking heredoc text can therefore be reported as a
+        false positive; that is an accepted fail-closed tradeoff.
 
         The dynamic INT/TERM/EXIT backstop executes only the production slice
         that starts at ``_cleanup_owned_pg_tunnel_preflight`` and ends immediately
@@ -394,9 +398,14 @@ class DeploymentWiringTests(unittest.TestCase):
     def test_trap_function_shadowing_is_absent(self):
         """Reject Bash ``trap`` function declarations, including spaced parens."""
         deploy = DEPLOY.read_text(encoding="utf-8")
+        definition_anchor = r"(?:^|[;&|]\s*)[ \t]*"
         shadow_patterns = (
-            re.compile(r"^[ \t]*trap[ \t]*\([ \t]*\)", re.MULTILINE),
-            re.compile(r"^[ \t]*function[ \t]+trap\b", re.MULTILINE),
+            re.compile(
+                definition_anchor + r"trap[ \t]*\([ \t]*\)", re.MULTILINE
+            ),
+            re.compile(
+                definition_anchor + r"function[ \t]+trap\b", re.MULTILINE
+            ),
         )
         for pattern in shadow_patterns:
             with self.subTest(pattern=pattern.pattern):
