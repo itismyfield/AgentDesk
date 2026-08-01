@@ -14,7 +14,6 @@ mod placeholder_handoff;
 pub(super) mod race_loss;
 mod runtime_transition;
 mod stale_dispatch_guard;
-mod steering_hook;
 mod turn_watchdog;
 mod voice_intake;
 mod worker_entry;
@@ -63,7 +62,7 @@ pub(super) async fn handle_text_message(
     dm_hint: Option<bool>,
     turn_kind: TurnKind,
     preserve_on_cancel: bool,
-    queued_drain: bool,
+    _queued_drain: bool,
     preloaded_uploads: Vec<String>,
     gate_resolved_voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> Result<(), Error> {
@@ -1822,35 +1821,6 @@ pub(super) async fn handle_text_message(
         );
     let watcher_tmux_name = inflight_tmux_name.clone();
     let watcher_output_path = inflight_output_path.clone();
-    #[cfg(unix)]
-    if let Some(result) =
-        steering_hook::maybe_handle_intake_steering(steering_hook::IntakeSteeringContext {
-            http,
-            shared,
-            token,
-            channel_id,
-            user_msg_id,
-            placeholder_msg_id,
-            provider: &provider,
-            provider_label,
-            tmux_session_name: tmux_session_name.as_deref(),
-            current_path: &current_path,
-            session_id: session_id.as_deref(),
-            user_text,
-            cancel_token: &cancel_token,
-            intake_latency: &intake_latency,
-            foreground: matches!(turn_kind, TurnKind::Foreground),
-            local: remote_profile.is_none(),
-            wait_for_completion,
-            queued_drain,
-            has_dispatch: dispatch_id.is_some() || dispatch_id_for_thread.is_some(),
-            is_voice_announcement,
-            has_pending_uploads: !pending_uploads.is_empty(),
-        })
-        .await
-    {
-        return result;
-    }
     #[cfg(unix)]
     let mut recapture_offset_after_busy_wait = false;
     // #2416: compute claude_tui busy-followup diagnostic with a wait+retry step.
