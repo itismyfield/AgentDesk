@@ -86,4 +86,12 @@ fn derived_completion_entry_points_have_one_writer_contract_pg() {
     assert!(ops.contains("finalizeRunIfReady"));
     assert!(ops.contains("forceCompleteRun"));
     assert!(!ops.contains("release_run_slots_pg"));
+
+    let runs = include_str!("../../db/auto_queue/runs.rs");
+    assert_eq!(
+        runs.matches("DELETE FROM auto_queue_phase_gates WHERE run_id = $1")
+            .count(),
+        1,
+        "only force completion may delete gates"
+    );
 }
