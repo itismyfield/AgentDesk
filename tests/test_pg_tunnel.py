@@ -182,7 +182,7 @@ class DeploymentWiringTests(unittest.TestCase):
         """Remove physical-line comments without hiding code after quoted ``#``."""
         token = re.compile(
             r''' '(?:[^'\r\n]*)' | "(?:\\[^\r\n]|[^"\\\r\n])*" |
-                \\[^\r\n] | [ \t]*\#[^\r\n]* ''',
+                \\[^\r\n] | (?m:^\#[^\r\n]*) | (?<=[ \t])\#[^\r\n]* ''',
             re.VERBOSE,
         )
 
