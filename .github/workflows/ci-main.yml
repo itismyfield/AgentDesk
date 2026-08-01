@@ -146,6 +146,7 @@ jobs:
       PGPORT: "5432"
       PGUSER: postgres
       PGPASSWORD: postgres
+      AGENTDESK_REQUIRE_PG: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -226,6 +227,7 @@ jobs:
       PGPORT: "5432"
       PGUSER: postgres
       PGPASSWORD: postgres
+      AGENTDESK_REQUIRE_PG: "1"
     steps:
       - uses: actions/checkout@v4
 

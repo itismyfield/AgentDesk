@@ -561,6 +561,7 @@ jobs:
       PGPORT: "5432"
       PGUSER: postgres
       PGPASSWORD: postgres
+      AGENTDESK_REQUIRE_PG: "1"
       # Preserve the full serial PostgreSQL suite while reducing cold-link
       # time and memory exposure on hosted runners. Assertions and panic text
       # remain available; only native debug symbols are omitted.
@@ -675,6 +676,7 @@ jobs:
       PGPORT: "5432"
       PGUSER: postgres
       PGPASSWORD: postgres
+      AGENTDESK_REQUIRE_PG: "1"
     steps:
       - uses: actions/checkout@v4
 

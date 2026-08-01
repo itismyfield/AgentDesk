@@ -12,11 +12,8 @@ struct PromptManifestPgDatabase {
 
 impl PromptManifestPgDatabase {
     async fn create() -> Option<Self> {
-        let base = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE")
-            .ok()
-            .filter(|value| !value.trim().is_empty())?;
+        let base = crate::db::postgres::postgres_test_database_url_base()?;
         let lifecycle = crate::db::postgres::lock_test_lifecycle();
-        let base = base.trim().trim_end_matches('/').to_string();
         let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
             .ok()
             .filter(|value| !value.trim().is_empty())

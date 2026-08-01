@@ -410,10 +410,3 @@ src/services/stale_turn_reconciler.rs
 src/voice/announce_meta.rs
 src/voice/turn_link.rs
 [rule4]
-.github/workflows/ci-main.yml:high-risk-recovery
-.github/workflows/ci-main.yml:postgres
-.github/workflows/ci-nightly.yml:high_risk_recovery_full
-.github/workflows/ci-nightly.yml:multinode_regression
-.github/workflows/ci-nightly.yml:postgres_full
-.github/workflows/ci-pr.yml:high-risk-recovery
-.github/workflows/ci-pr.yml:test_fast

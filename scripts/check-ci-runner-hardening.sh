@@ -100,11 +100,14 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.pg_db == 'true'",
     "runs_on" => "ubuntu-latest",
+    # #4979 S2 re-pins after adding the AGENTDESK_REQUIRE_PG=1 job env so a PG
+    # connection failure in this PG-backed lane hard-fails instead of
+    # soft-skipping green; the command inventory itself is unchanged.
     # #5040 re-pins after adding the telemetry-only intake authority regressions
     # to this existing toolchain-provisioned lane whose mirror is required.
     # #5025 and #4985 retain their production bridge and footer-marker coverage
     # in the same job block, so the pin covers the merged command inventory.
-    "job_sha256" => "af225f069f93ce21e5029a65dc5ffea9b17ce0f25ed5262cb6aae20ed2e4615b",
+    "job_sha256" => "45379287c8cd87d4dae3a9733b92cb65984dc042972e0e12046125f18664e3a9",
     "cargo_steps" => {
       "Footer-only marker regressions" => {
         "commands" => [
