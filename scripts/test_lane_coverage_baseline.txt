@@ -568,9 +568,7 @@ services::message_outbox_recovery_tests
 services::observability::cancellation_observability_tests
 services::observability::emit::tests
 services::observability::queries::alert_authority_tests
-services::observability::recovery_audit::tests
 services::observability::relay_signal_alert::tests
-services::observability::turn_lifecycle::tests
 services::onboarding::canonical_status_tests
 services::onboarding::credential_token_permission_tests
 services::opencode::tests

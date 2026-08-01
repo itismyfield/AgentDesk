@@ -37,9 +37,6 @@ services::maintenance::jobs::db_retention::tests::db_retention_keeps_skill_usage
 services::maintenance::jobs::db_retention::tests::db_retention_preserves_permanent_outbox_dedupe_sentinels
 services::maintenance::jobs::db_retention::tests::db_retention_prunes_old_rows_archives_turns_and_is_idempotent
 services::maintenance::jobs::db_retention::tests::db_retention_turns_window_is_strict_with_no_archive_less_delete
-services::observability::recovery_audit::tests::recovery_audit_round_trips_and_fetches_by_turn
-services::observability::turn_lifecycle::tests::emit_turn_lifecycle_enqueues_expected_notifications_and_dedupes
-services::observability::turn_lifecycle::tests::emit_turn_lifecycle_persists_round_trip
 services::session_resume::tests::production_resume_lock_blocks_effective_intake_snapshot_until_rebind_finishes
 services::session_resume::tests::resume_production_path_clears_stale_binding_and_rebinds_runtime
 services::session_resume::tests::resume_production_path_retains_live_owner_after_teardown
@@ -218,9 +215,6 @@ services::maintenance::jobs::db_retention::tests::db_retention_preserves_permane
 services::maintenance::jobs::db_retention::tests::db_retention_prunes_old_rows_archives_turns_and_is_idempotent
 services::maintenance::jobs::db_retention::tests::db_retention_turns_window_is_strict_with_no_archive_less_delete
 services::observability::queries::alert_authority_tests::rollup_is_aggregation_only_and_rule_engine_is_sole_alerter_pg
-services::observability::recovery_audit::tests::recovery_audit_round_trips_and_fetches_by_turn
-services::observability::turn_lifecycle::tests::emit_turn_lifecycle_enqueues_expected_notifications_and_dedupes
-services::observability::turn_lifecycle::tests::emit_turn_lifecycle_persists_round_trip
 services::pipeline_routes::tests::replace_stages_persists_backoff_round_trip_pg
 services::session_forwarding::tests::cancel_owner_does_not_fall_back_to_agent_binding_pg
 services::session_forwarding::tests::cancel_owner_ignores_disconnected_sessions_pg

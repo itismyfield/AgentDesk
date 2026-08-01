@@ -138,8 +138,8 @@ services::maintenance::jobs::worktree_orphan_sweep::resumable_keep_set_query_pg_
 services::message_outbox::postgres_held_gc_tests
 services::message_outbox::postgres_source_contract_tests
 services::observability::queries::alert_authority_tests
-services::observability::recovery_audit::tests
-services::observability::turn_lifecycle::tests
+services::observability::recovery_audit::tests::recovery_audit_pg_tests
+services::observability::turn_lifecycle::tests::turn_lifecycle_pg_tests
 services::pipeline_override::pipeline_override_pg_tests
 services::pipeline_routes::tests
 services::scheduled_messages::context_snapshot::postgres_tests
@@ -515,9 +515,9 @@ services::message_outbox::postgres_source_contract_tests::every_enqueue_variant_
 services::message_outbox::postgres_source_contract_tests::fixed_lifecycle_enqueue_uses_registered_source_pg
 services::message_outbox::postgres_source_contract_tests::persistent_dedupe_returns_old_row_and_distinct_slot_inserts_pg
 services::observability::queries::alert_authority_tests::rollup_is_aggregation_only_and_rule_engine_is_sole_alerter_pg
-services::observability::recovery_audit::tests::recovery_audit_round_trips_and_fetches_by_turn
-services::observability::turn_lifecycle::tests::emit_turn_lifecycle_enqueues_expected_notifications_and_dedupes
-services::observability::turn_lifecycle::tests::emit_turn_lifecycle_persists_round_trip
+services::observability::recovery_audit::tests::recovery_audit_pg_tests::recovery_audit_round_trips_and_fetches_by_turn
+services::observability::turn_lifecycle::tests::turn_lifecycle_pg_tests::emit_turn_lifecycle_enqueues_expected_notifications_and_dedupes
+services::observability::turn_lifecycle::tests::turn_lifecycle_pg_tests::emit_turn_lifecycle_persists_round_trip
 services::pipeline_override::pipeline_override_pg_tests::agent_write_rejects_dangling_repo_assigned_card_context_when_repo_pair_valid
 services::pipeline_override::pipeline_override_pg_tests::agent_write_rejects_malformed_existing_repo_override
 services::pipeline_override::pipeline_override_pg_tests::agent_write_rejects_standalone_assigned_card_context_when_repo_pair_valid

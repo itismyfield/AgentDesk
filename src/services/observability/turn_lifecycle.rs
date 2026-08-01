@@ -729,43 +729,78 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn emit_turn_lifecycle_persists_round_trip() -> Result<()> {
-        let Some(pg_db) = TestPostgresDb::try_create().await else {
-            return Ok(());
-        };
-        let pool = pg_db.connect_and_migrate().await?;
+    // #4979 S7: PG tests live below a marked module so `just test-postgres`
+    // selects them by the whole-path `_pg` substring. The three pure siblings
+    // stay in this parent and are selected by the curated non-PG invocation.
+    //
+    // The `*_pg_tests` suffix is a human convention, but the marker contract
+    // it satisfies is enforced, and it is two-sided — a name that clears one
+    // side can still fail the other:
+    //   rule1 (`justfile` test-postgres) selects on `_pg`, `pg_`, or
+    //     `postgres` as a normalized-path substring;
+    //   rule2 (nightly pgless sweep, ci-nightly.yml:121 and :163) excludes on
+    //     `_pg_` or `postgres_` — note the trailing underscore.
+    // So `pg_foo_tests` clears rule1 yet is still swept by the pgless lane and
+    // lands as rule2 debt; a live example sits at
+    // scripts/pg_test_lane_baseline.txt:81
+    // (`dispatch::dispatch_cancel::pg_observability_tests::…`). The `_pg_tests`
+    // suffix used here contains `_pg_` and so clears both sides.
+    //
+    // Batch mutation measurements at this declaration and the sibling in
+    // recovery_audit.rs (rc values are measured, not inferred):
+    //
+    //   1. Rename both modules away from the marker, retaining `#[cfg(test)]`:
+    //        membership rc=1 (manifest drift; after snapshot regeneration,
+    //        membership rc=1 again on rule1/rule2 baseline growth)
+    //        coverage rc=0; after snapshot regeneration coverage rc=0
+    //      The curated parent invocations cover the renamed modules, so the
+    //      membership manifest/baseline ratchet, not coverage, guards markers.
+    //
+    //   2. Remove only both nested `#[cfg(test)]` attributes:
+    //        membership rc=0, coverage rc=1 (two newly uncovered parents)
+    //      The parent coverage debts were removed in S7 after adding the pure
+    //      invocations. Thus this attribute IS load-bearing in this slice.
+    #[cfg(test)]
+    mod turn_lifecycle_pg_tests {
+        use super::*;
 
-        let persisted = emit_turn_lifecycle(
-            &pool,
-            TurnLifecycleEmit::new(
-                "discord:42:420",
-                "42",
-                TurnEvent::SessionResumeFailedWithRecovery(RecoveryDetails {
-                    reason: "session transcript missing".to_string(),
-                    recovery_action: "start fresh session".to_string(),
-                    previous_session_key: Some("agentdesk-old".to_string()),
-                    recovered_session_key: Some("agentdesk-new".to_string()),
-                    recovery: Some(RecoveryContextDetails {
-                        source: "discord_recent_messages".to_string(),
-                        message_count: 7,
-                        max_chars: 300,
+        #[tokio::test]
+        async fn emit_turn_lifecycle_persists_round_trip() -> Result<()> {
+            let Some(pg_db) = TestPostgresDb::try_create().await else {
+                return Ok(());
+            };
+            let pool = pg_db.connect_and_migrate().await?;
+
+            let persisted = emit_turn_lifecycle(
+                &pool,
+                TurnLifecycleEmit::new(
+                    "discord:42:420",
+                    "42",
+                    TurnEvent::SessionResumeFailedWithRecovery(RecoveryDetails {
+                        reason: "session transcript missing".to_string(),
+                        recovery_action: "start fresh session".to_string(),
+                        previous_session_key: Some("agentdesk-old".to_string()),
+                        recovered_session_key: Some("agentdesk-new".to_string()),
+                        recovery: Some(RecoveryContextDetails {
+                            source: "discord_recent_messages".to_string(),
+                            message_count: 7,
+                            max_chars: 300,
+                        }),
                     }),
-                }),
-                "resume failed; started fresh session",
+                    "resume failed; started fresh session",
+                )
+                .session_key("agentdesk-new")
+                .dispatch_id("dispatch-123"),
             )
-            .session_key("agentdesk-new")
-            .dispatch_id("dispatch-123"),
-        )
-        .await?
-        .expect("event should persist");
+            .await?
+            .expect("event should persist");
 
-        assert_eq!(persisted.kind, "session_resume_failed_with_recovery");
-        assert_eq!(persisted.severity, "warn");
-        assert!(persisted.notify_user);
-        assert_eq!(persisted.notification_enqueued, Some(true));
+            assert_eq!(persisted.kind, "session_resume_failed_with_recovery");
+            assert_eq!(persisted.severity, "warn");
+            assert!(persisted.notify_user);
+            assert_eq!(persisted.notification_enqueued, Some(true));
 
-        let row = sqlx::query(
+            let row = sqlx::query(
             "SELECT turn_id, channel_id, session_key, dispatch_id, kind, severity, summary, details_json
              FROM turn_lifecycle_events
              WHERE id = $1",
@@ -774,178 +809,179 @@ mod tests {
         .fetch_one(&pool)
         .await?;
 
-        assert_eq!(row.try_get::<String, _>("turn_id")?, "discord:42:420");
-        assert_eq!(row.try_get::<String, _>("channel_id")?, "42");
-        assert_eq!(
-            row.try_get::<Option<String>, _>("session_key")?,
-            Some("agentdesk-new".to_string())
-        );
-        assert_eq!(
-            row.try_get::<Option<String>, _>("dispatch_id")?,
-            Some("dispatch-123".to_string())
-        );
-        assert_eq!(
-            row.try_get::<String, _>("kind")?,
-            "session_resume_failed_with_recovery"
-        );
-        assert_eq!(row.try_get::<String, _>("severity")?, "warn");
-        assert_eq!(
-            row.try_get::<String, _>("summary")?,
-            "resume failed; started fresh session"
-        );
-        let details = row.try_get::<Value, _>("details_json")?;
-        assert_eq!(details["reason"], "session transcript missing");
-        assert_eq!(details["recoveryAction"], "start fresh session");
-        assert_eq!(details["previousSessionKey"], "agentdesk-old");
-        assert_eq!(details["recoveredSessionKey"], "agentdesk-new");
-        assert_eq!(details["recovery"]["source"], "discord_recent_messages");
-        assert_eq!(details["recovery"]["messageCount"], 7);
-        assert_eq!(details["recovery"]["maxChars"], 300);
+            assert_eq!(row.try_get::<String, _>("turn_id")?, "discord:42:420");
+            assert_eq!(row.try_get::<String, _>("channel_id")?, "42");
+            assert_eq!(
+                row.try_get::<Option<String>, _>("session_key")?,
+                Some("agentdesk-new".to_string())
+            );
+            assert_eq!(
+                row.try_get::<Option<String>, _>("dispatch_id")?,
+                Some("dispatch-123".to_string())
+            );
+            assert_eq!(
+                row.try_get::<String, _>("kind")?,
+                "session_resume_failed_with_recovery"
+            );
+            assert_eq!(row.try_get::<String, _>("severity")?, "warn");
+            assert_eq!(
+                row.try_get::<String, _>("summary")?,
+                "resume failed; started fresh session"
+            );
+            let details = row.try_get::<Value, _>("details_json")?;
+            assert_eq!(details["reason"], "session transcript missing");
+            assert_eq!(details["recoveryAction"], "start fresh session");
+            assert_eq!(details["previousSessionKey"], "agentdesk-old");
+            assert_eq!(details["recoveredSessionKey"], "agentdesk-new");
+            assert_eq!(details["recovery"]["source"], "discord_recent_messages");
+            assert_eq!(details["recovery"]["messageCount"], 7);
+            assert_eq!(details["recovery"]["maxChars"], 300);
 
-        let outbox = sqlx::query(
-            "SELECT target, content, bot, source, reason_code, session_key
+            let outbox = sqlx::query(
+                "SELECT target, content, bot, source, reason_code, session_key
              FROM message_outbox
              ORDER BY id ASC",
-        )
-        .fetch_one(&pool)
-        .await?;
-        assert_eq!(outbox.try_get::<String, _>("target")?, "channel:42");
-        assert_eq!(outbox.try_get::<String, _>("bot")?, "notify");
-        assert_eq!(
-            outbox.try_get::<String, _>("source")?,
-            crate::services::message_outbox::LIFECYCLE_NOTIFIER_SOURCE
-        );
-        assert_eq!(
-            outbox.try_get::<Option<String>, _>("reason_code")?,
-            Some("lifecycle.session_resume_failed".to_string())
-        );
-        assert_eq!(
-            outbox.try_get::<Option<String>, _>("session_key")?,
-            Some("channel:42".to_string())
-        );
-        let content = outbox.try_get::<String, _>("content")?;
-        assert!(content.contains("♻️ 이전 대화 이어가기 실패"));
-        assert!(content.contains("사유: session transcript missing"));
-        assert!(content.contains("복구: start fresh session"));
-
-        pool.close().await;
-        pg_db.drop().await;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn emit_turn_lifecycle_enqueues_expected_notifications_and_dedupes() -> Result<()> {
-        let Some(pg_db) = TestPostgresDb::try_create().await else {
-            return Ok(());
-        };
-        let pool = pg_db.connect_and_migrate().await?;
-
-        let fresh_first = emit_turn_lifecycle(
-            &pool,
-            TurnLifecycleEmit::new(
-                "discord:77:1",
-                "77",
-                TurnEvent::SessionFresh(SessionStrategyDetails::fresh("first_turn")),
-                "fresh session",
             )
-            .session_key("session-a"),
-        )
-        .await?
-        .expect("fresh event persists");
-        assert!(!fresh_first.notify_user);
-        assert_eq!(fresh_first.notification_enqueued, None);
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(outbox.try_get::<String, _>("target")?, "channel:42");
+            assert_eq!(outbox.try_get::<String, _>("bot")?, "notify");
+            assert_eq!(
+                outbox.try_get::<String, _>("source")?,
+                crate::services::message_outbox::LIFECYCLE_NOTIFIER_SOURCE
+            );
+            assert_eq!(
+                outbox.try_get::<Option<String>, _>("reason_code")?,
+                Some("lifecycle.session_resume_failed".to_string())
+            );
+            assert_eq!(
+                outbox.try_get::<Option<String>, _>("session_key")?,
+                Some("channel:42".to_string())
+            );
+            let content = outbox.try_get::<String, _>("content")?;
+            assert!(content.contains("♻️ 이전 대화 이어가기 실패"));
+            assert!(content.contains("사유: session transcript missing"));
+            assert!(content.contains("복구: start fresh session"));
 
-        let fresh_duplicate = emit_turn_lifecycle(
-            &pool,
-            TurnLifecycleEmit::new(
-                "discord:77:2",
-                "77",
-                TurnEvent::SessionFresh(SessionStrategyDetails::fresh(
-                    "no_cached_provider_session",
-                )),
-                "fresh session again",
+            pool.close().await;
+            pg_db.drop().await;
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn emit_turn_lifecycle_enqueues_expected_notifications_and_dedupes() -> Result<()> {
+            let Some(pg_db) = TestPostgresDb::try_create().await else {
+                return Ok(());
+            };
+            let pool = pg_db.connect_and_migrate().await?;
+
+            let fresh_first = emit_turn_lifecycle(
+                &pool,
+                TurnLifecycleEmit::new(
+                    "discord:77:1",
+                    "77",
+                    TurnEvent::SessionFresh(SessionStrategyDetails::fresh("first_turn")),
+                    "fresh session",
+                )
+                .session_key("session-a"),
             )
-            .session_key("session-b"),
-        )
-        .await?
-        .expect("duplicate fresh event still persists");
-        assert_eq!(fresh_duplicate.notification_enqueued, None);
+            .await?
+            .expect("fresh event persists");
+            assert!(!fresh_first.notify_user);
+            assert_eq!(fresh_first.notification_enqueued, None);
 
-        let resumed = emit_turn_lifecycle(
-            &pool,
-            TurnLifecycleEmit::new(
-                "discord:77:3",
-                "77",
-                TurnEvent::SessionResumed(SessionStrategyDetails::resumed(
-                    "runtime_cached_provider_session",
-                    "provider-session-123",
-                )),
-                "session resumed",
+            let fresh_duplicate = emit_turn_lifecycle(
+                &pool,
+                TurnLifecycleEmit::new(
+                    "discord:77:2",
+                    "77",
+                    TurnEvent::SessionFresh(SessionStrategyDetails::fresh(
+                        "no_cached_provider_session",
+                    )),
+                    "fresh session again",
+                )
+                .session_key("session-b"),
             )
-            .session_key("session-b"),
-        )
-        .await?
-        .expect("resumed event persists");
-        assert!(!resumed.notify_user);
-        assert_eq!(resumed.notification_enqueued, None);
+            .await?
+            .expect("duplicate fresh event still persists");
+            assert_eq!(fresh_duplicate.notification_enqueued, None);
 
-        let compacted = emit_turn_lifecycle(
-            &pool,
-            TurnLifecycleEmit::new(
-                "discord:77:4",
-                "77",
-                TurnEvent::ContextCompacted(ContextCompactionDetails {
-                    before_pct: 88,
-                    after_pct: Some(41),
-                    preserved_sections: vec![
-                        "Goal".to_string(),
-                        "Progress".to_string(),
-                        "Decisions".to_string(),
-                        "Files".to_string(),
-                        "Next".to_string(),
-                    ],
-                }),
-                "context compacted",
+            let resumed = emit_turn_lifecycle(
+                &pool,
+                TurnLifecycleEmit::new(
+                    "discord:77:3",
+                    "77",
+                    TurnEvent::SessionResumed(SessionStrategyDetails::resumed(
+                        "runtime_cached_provider_session",
+                        "provider-session-123",
+                    )),
+                    "session resumed",
+                )
+                .session_key("session-b"),
             )
-            .session_key("session-b"),
-        )
-        .await?
-        .expect("compacted event persists");
-        assert_eq!(compacted.notification_enqueued, Some(true));
+            .await?
+            .expect("resumed event persists");
+            assert!(!resumed.notify_user);
+            assert_eq!(resumed.notification_enqueued, None);
 
-        let rows = sqlx::query(
-            "SELECT reason_code, content, source
+            let compacted = emit_turn_lifecycle(
+                &pool,
+                TurnLifecycleEmit::new(
+                    "discord:77:4",
+                    "77",
+                    TurnEvent::ContextCompacted(ContextCompactionDetails {
+                        before_pct: 88,
+                        after_pct: Some(41),
+                        preserved_sections: vec![
+                            "Goal".to_string(),
+                            "Progress".to_string(),
+                            "Decisions".to_string(),
+                            "Files".to_string(),
+                            "Next".to_string(),
+                        ],
+                    }),
+                    "context compacted",
+                )
+                .session_key("session-b"),
+            )
+            .await?
+            .expect("compacted event persists");
+            assert_eq!(compacted.notification_enqueued, Some(true));
+
+            let rows = sqlx::query(
+                "SELECT reason_code, content, source
              FROM message_outbox
              WHERE target = 'channel:77'
              ORDER BY id ASC",
-        )
-        .fetch_all(&pool)
-        .await?;
+            )
+            .fetch_all(&pool)
+            .await?;
 
-        assert_eq!(rows.len(), 1);
-        assert_eq!(
-            rows[0].try_get::<Option<String>, _>("reason_code")?,
-            Some("lifecycle.context_compacted".to_string())
-        );
-        assert!(
-            rows[0]
-                .try_get::<String, _>("content")?
-                .contains("이전 88% → 이후 41%")
-        );
-        for row in rows {
+            assert_eq!(rows.len(), 1);
             assert_eq!(
-                row.try_get::<String, _>("source")?,
-                crate::services::message_outbox::LIFECYCLE_NOTIFIER_SOURCE
+                rows[0].try_get::<Option<String>, _>("reason_code")?,
+                Some("lifecycle.context_compacted".to_string())
             );
+            assert!(
+                rows[0]
+                    .try_get::<String, _>("content")?
+                    .contains("이전 88% → 이후 41%")
+            );
+            for row in rows {
+                assert_eq!(
+                    row.try_get::<String, _>("source")?,
+                    crate::services::message_outbox::LIFECYCLE_NOTIFIER_SOURCE
+                );
+            }
+
+            assert_eq!(
+                crate::services::message_outbox::LIFECYCLE_NOTIFY_DEDUPE_TTL_SECS,
+                5 * 60
+            );
+
+            pool.close().await;
+            pg_db.drop().await;
+            Ok(())
         }
-
-        assert_eq!(
-            crate::services::message_outbox::LIFECYCLE_NOTIFY_DEDUPE_TTL_SECS,
-            5 * 60
-        );
-
-        pool.close().await;
-        pg_db.drop().await;
-        Ok(())
     }
 }
