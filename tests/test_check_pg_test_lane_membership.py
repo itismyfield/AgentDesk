@@ -402,11 +402,41 @@ class ParserMutations(FixtureCase):
                     ["pg_lane"],
                 )
 
-    def test_empty_jobs_map_is_warn_only(self) -> None:
+    def test_empty_jobs_shapes_are_configuration_errors(self) -> None:
+        cases = {
+            "comment": "jobs: # parsed, but empty\n",
+            "quoted": "\"jobs\": # quoted and empty\n",
+            "four-space": "jobs:\n    # indented comment, but no job key\n",
+            "tab": "jobs:\n\t# tab-indented comment, but no job key\n",
+        }
         workflow = self.root / ".github/workflows/empty.yml"
-        workflow.write_text("jobs: # parsed, but empty\n", "utf-8")
+        empty = {section: set() for section in membership.SECTIONS}
+        for shape, text in cases.items():
+            with self.subTest(shape=shape):
+                workflow.write_text(text, "utf-8")
+                analysis = self.fx.analysis()
+                findings = [
+                    finding for finding in analysis.findings if finding.kind == "jobs-empty"
+                ]
+                self.assertEqual(len(findings), 1)
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    rc = membership.check_analysis(
+                        analysis,
+                        empty,
+                        empty,
+                        membership.render_manifest(analysis.inventory),
+                        reference_label="fixture base",
+                        allowlist_label="fixture allowlist",
+                    )
+                self.assertEqual(rc, 2)
+                self.assertIn("FAIL: [jobs-empty]", stderr.getvalue())
+
+    def test_workflow_without_jobs_key_is_not_configuration_error(self) -> None:
+        workflow = self.root / ".github/workflows/no-jobs.yml"
+        workflow.write_text("on:\n  push:\n", "utf-8")
         analysis = self.fx.analysis()
-        self.assertTrue(any(finding.kind == "jobs-empty" for finding in analysis.findings))
+        self.assertFalse(any(finding.kind == "jobs-empty" for finding in analysis.findings))
         empty = {section: set() for section in membership.SECTIONS}
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
@@ -419,7 +449,7 @@ class ParserMutations(FixtureCase):
                 allowlist_label="fixture allowlist",
             )
         self.assertEqual(rc, 0)
-        self.assertIn("WARN: [jobs-empty]", stderr.getvalue())
+        self.assertNotIn("jobs-empty", stderr.getvalue())
 
     def test_jobs_comment_rule4_debt_is_warn_only_with_real_analysis(self) -> None:
         workflow = self.root / ".github/workflows/ci-main.yml"

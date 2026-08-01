@@ -47,6 +47,7 @@ def _seed_pattern(seed: str) -> re.Pattern[str]:
 SEED_PATTERNS = tuple(_seed_pattern(seed) for seed in SEEDS)
 CONNECT_SEED_PATTERNS = tuple(_seed_pattern(seed) for seed in CONNECT_SEEDS)
 SECTIONS = ("rule1", "rule2", "rule3", "rule4")
+CONFIGURATION_ERROR_FINDINGS = frozenset({"jobs-empty"})
 
 
 def _load_coverage_module(repo_root: Path):
@@ -604,7 +605,7 @@ def parse_jobs(
     is not declared by AgentDesk's script-check environment. It supports the
     repository's block-style workflows and tracks scalar bodies while locating
     the next column-zero mapping key. An empty top-level job map is reported as a
-    warn-only finding by ``analyze``; an absent top-level ``jobs:`` key is ignored.
+    configuration error; an absent top-level ``jobs:`` key is ignored.
     """
     text = path.read_text("utf-8")
     jobs_key = _JOBS_KEY.search(text)
@@ -842,6 +843,13 @@ def reference_baseline(repo_root: Path, ref: str) -> tuple[str, dict[str, set[st
     return sha, parse_baseline(blob.stdout, f"{sha}:{BASELINE_REL}")
 
 
+def _configuration_errors(findings: Iterable[Finding]) -> tuple[Finding, ...]:
+    return tuple(
+        finding for finding in findings
+        if finding.kind in CONFIGURATION_ERROR_FINDINGS
+    )
+
+
 def check_analysis(
     analysis: Analysis,
     baseline: dict[str, set[str]],
@@ -852,9 +860,15 @@ def check_analysis(
     allowlist_label: str,
 ) -> int:
     """Apply manifest and one-way baseline contracts to a supplied analysis."""
+    configuration_errors = _configuration_errors(analysis.findings)
     failed = False
     for finding in analysis.findings:
-        print(f"WARN: [{finding.kind}] {finding.source}: {finding.detail}", file=sys.stderr)
+        if finding.kind in CONFIGURATION_ERROR_FINDINGS:
+            print(f"FAIL: [{finding.kind}] {finding.source}: {finding.detail}", file=sys.stderr)
+        else:
+            print(f"WARN: [{finding.kind}] {finding.source}: {finding.detail}", file=sys.stderr)
+    if configuration_errors:
+        return 2
     expected_manifest = render_manifest(analysis.inventory)
     if actual_manifest != expected_manifest:
         print("FAIL: PG test-lane manifest drift.", file=sys.stderr)
@@ -958,6 +972,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.write_snapshots:
             analysis = analyze(root, allowlist)
+            configuration_errors = _configuration_errors(analysis.findings)
+            for finding in configuration_errors:
+                print(f"FAIL: [{finding.kind}] {finding.source}: {finding.detail}", file=sys.stderr)
+            if configuration_errors:
+                return 2
             manifest.write_text(render_manifest(analysis.inventory), "utf-8")
             baseline.write_text(render_baseline(analysis.debts), "utf-8")
             print(f"wrote {manifest} and {baseline}")
