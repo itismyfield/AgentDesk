@@ -8,14 +8,12 @@ use poise::serenity_prelude::ChannelId;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::services::discord) enum IdleSessionWatcherCleanup {
+enum IdleSessionWatcherCleanup {
     ExpireSession,
     DeferToTmuxLiveness,
 }
 
-pub(in crate::services::discord) fn idle_session_watcher_cleanup(
-    has_watcher: bool,
-) -> IdleSessionWatcherCleanup {
+fn idle_session_watcher_cleanup(has_watcher: bool) -> IdleSessionWatcherCleanup {
     if has_watcher {
         IdleSessionWatcherCleanup::DeferToTmuxLiveness
     } else {

@@ -211,11 +211,9 @@ use tokio::sync::Mutex;
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
 
-#[allow(unused_imports)]
-use self::session_idle_cleanup::{
-    IdleSessionWatcherCleanup, idle_session_watcher_cleanup,
-    mark_session_disconnected_for_idle_cleanup, maybe_cleanup_sessions,
-};
+#[cfg(test)]
+use self::session_idle_cleanup::mark_session_disconnected_for_idle_cleanup;
+use self::session_idle_cleanup::maybe_cleanup_sessions;
 use crate::services::agent_protocol::{DEFAULT_ALLOWED_TOOLS, StreamMessage};
 use crate::services::claude;
 use crate::services::codex;
