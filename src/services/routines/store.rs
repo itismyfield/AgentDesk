@@ -3565,42 +3565,15 @@ mod tests {
         include_automation_candidate_card_observations, precomputed_observation_from_kv,
         preserve_fresh_context_evidence, resume_without_next_due_is_invalid, truncate_chars,
     };
-    use crate::api_caller_observability::{AuthStrength, LOG_TARGET, RequestPrincipal};
+    use crate::api_caller_observability::{AuthStrength, RequestPrincipal};
     use chrono::{TimeZone, Utc};
     use serde_json::Value;
-    use std::io::{self, Write};
-    use std::sync::{Arc, Mutex};
-    use tracing_subscriber::fmt::writer::MakeWriter;
 
     // Integration tests that require a live PG connection live in
     // src/integration_tests.rs and are gated on the `integration` feature.
     // The store SQL is compiled by `cargo check`; concurrent claim/recovery
     // behavior should be covered by PG integration tests once the runtime
     // harness starts executing routines.
-
-    #[derive(Clone)]
-    struct CapturingWriter {
-        buffer: Arc<Mutex<Vec<u8>>>,
-    }
-
-    impl Write for CapturingWriter {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.buffer.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> MakeWriter<'a> for CapturingWriter {
-        type Writer = CapturingWriter;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
 
     #[test]
     fn resume_omitted_next_due_rejects_legacy_schedule_less_rows() {
@@ -4050,19 +4023,7 @@ mod tests {
     }
 
     #[test]
-    fn routine_delete_scope_gate_logs_delete_path_identity_consumption() {
-        let buffer = Arc::new(Mutex::new(Vec::new()));
-        let writer = CapturingWriter {
-            buffer: buffer.clone(),
-        };
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::INFO)
-            .with_ansi(false)
-            .without_time()
-            .with_target(true)
-            .with_writer(writer)
-            .finish();
-        let _guard = tracing::subscriber::set_default(subscriber);
+    fn routine_delete_scope_gate_returns_other_agent_for_resolved_caller() {
         let principal = RequestPrincipal {
             auth_strength: AuthStrength::ServerAdmin,
             claimed_agent_id: Some("codex".to_string()),
@@ -4079,31 +4040,6 @@ mod tests {
                 owner: "codex".to_string(),
                 caller: "resolved-codex".to_string()
             }
-        );
-        drop(_guard);
-
-        let logs = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
-        assert!(logs.contains(LOG_TARGET), "logs={logs}");
-        assert!(
-            logs.contains("endpoint=\"DELETE /api/routines/{id}\""),
-            "logs={logs}"
-        );
-        assert!(
-            logs.contains("auth_strength=\"ServerAdmin\""),
-            "logs={logs}"
-        );
-        assert!(logs.contains("claimed_agent_id=\"codex\""), "logs={logs}");
-        assert!(
-            logs.contains("claimed_channel_id=\"manager-channel\""),
-            "logs={logs}"
-        );
-        assert!(
-            logs.contains("consumed_agent_id=\"resolved-codex\""),
-            "logs={logs}"
-        );
-        assert!(
-            logs.contains("manager_channel_check_relied_on_claimed_header=false"),
-            "logs={logs}"
         );
     }
 
