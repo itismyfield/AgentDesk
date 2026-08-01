@@ -36,6 +36,38 @@ impl RequestPrincipal {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IdentityConsumptionFields {
+    endpoint: &'static str,
+    auth_strength: &'static str,
+    claimed_agent_id: String,
+    claimed_channel_id: String,
+    consumed_agent_id: String,
+    manager_channel_check_relied_on_claimed_header: bool,
+}
+
+impl IdentityConsumptionFields {
+    /// Return the projected fields in the same name/value form used by the
+    /// identity-consumption event.  Keeping this view next to the typed
+    /// projection gives tests a complete, tracing-independent redaction
+    /// oracle for every emitted field.
+    #[cfg(test)]
+    fn named_values(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("endpoint", self.endpoint.to_string()),
+            ("auth_strength", self.auth_strength.to_string()),
+            ("claimed_agent_id", self.claimed_agent_id.clone()),
+            ("claimed_channel_id", self.claimed_channel_id.clone()),
+            ("consumed_agent_id", self.consumed_agent_id.clone()),
+            (
+                "manager_channel_check_relied_on_claimed_header",
+                self.manager_channel_check_relied_on_claimed_header
+                    .to_string(),
+            ),
+        ]
+    }
+}
+
 pub fn manager_channel_check_relied_on_claimed_header(
     headers: &HeaderMap,
     expected_channel_id: Option<&str>,
@@ -49,32 +81,52 @@ pub fn manager_channel_check_relied_on_claimed_header(
     trimmed_header_value(headers, "x-channel-id").as_deref() == Some(expected_channel_id)
 }
 
+pub(crate) fn identity_consumption_fields(
+    endpoint: &'static str,
+    principal: Option<&RequestPrincipal>,
+    consumed_agent_id: Option<&str>,
+    manager_channel_check_relied_on_claimed_header: bool,
+) -> IdentityConsumptionFields {
+    IdentityConsumptionFields {
+        endpoint,
+        auth_strength: principal
+            .map(|principal| principal.auth_strength.as_str())
+            .unwrap_or(AuthStrength::None.as_str()),
+        claimed_agent_id: principal
+            .and_then(|principal| principal.claimed_agent_id.as_deref())
+            .unwrap_or("")
+            .to_string(),
+        claimed_channel_id: principal
+            .and_then(|principal| principal.claimed_channel_id.as_deref())
+            .unwrap_or("")
+            .to_string(),
+        consumed_agent_id: consumed_agent_id.unwrap_or("").to_string(),
+        manager_channel_check_relied_on_claimed_header,
+    }
+}
+
 pub fn log_identity_consumption(
     endpoint: &'static str,
     principal: Option<&RequestPrincipal>,
     consumed_agent_id: Option<&str>,
     manager_channel_check_relied_on_claimed_header: bool,
 ) {
-    let auth_strength = principal
-        .map(|principal| principal.auth_strength.as_str())
-        .unwrap_or(AuthStrength::None.as_str());
-    let claimed_agent_id = principal
-        .and_then(|principal| principal.claimed_agent_id.as_deref())
-        .unwrap_or("");
-    let claimed_channel_id = principal
-        .and_then(|principal| principal.claimed_channel_id.as_deref())
-        .unwrap_or("");
-    let consumed_agent_id = consumed_agent_id.unwrap_or("");
+    let fields = identity_consumption_fields(
+        endpoint,
+        principal,
+        consumed_agent_id,
+        manager_channel_check_relied_on_claimed_header,
+    );
 
     tracing::info!(
         target: LOG_TARGET,
-        endpoint = endpoint,
-        auth_strength = auth_strength,
-        claimed_agent_id = claimed_agent_id,
-        claimed_channel_id = claimed_channel_id,
-        consumed_agent_id = consumed_agent_id,
-        manager_channel_check_relied_on_claimed_header =
-            manager_channel_check_relied_on_claimed_header,
+        endpoint = fields.endpoint,
+        auth_strength = fields.auth_strength,
+        claimed_agent_id = fields.claimed_agent_id.as_str(),
+        claimed_channel_id = fields.claimed_channel_id.as_str(),
+        consumed_agent_id = fields.consumed_agent_id.as_str(),
+        manager_channel_check_relied_on_claimed_header = fields
+            .manager_channel_check_relied_on_claimed_header,
         "api caller identity consumed"
     );
 }
@@ -136,9 +188,57 @@ mod tests {
         ));
     }
 
-    // `log_identity_consumption` has no typed return/projection: it only emits
-    // a process-global tracing event. The removed formatted-output test had
-    // the same thread-local capture versus callsite-interest race as the
-    // routines test, so field-level assertions must wait for a typed event
-    // surface rather than reintroducing a flaky formatted-output oracle.
+    #[test]
+    fn log_identity_consumption_emits_expected_fields_without_authorization() {
+        let principal = RequestPrincipal {
+            auth_strength: AuthStrength::ServerAdmin,
+            claimed_agent_id: Some("codex".to_string()),
+            claimed_channel_id: Some("manager-channel".to_string()),
+        };
+        let fields = identity_consumption_fields(
+            "POST /api/test",
+            Some(&principal),
+            Some("resolved-codex"),
+            true,
+        );
+
+        for (name, value) in fields.named_values() {
+            let field = format!("{name}={value}");
+            assert!(
+                !field.to_ascii_lowercase().contains("authorization"),
+                "field={field}"
+            );
+        }
+        assert_eq!(
+            fields,
+            IdentityConsumptionFields {
+                endpoint: "POST /api/test",
+                auth_strength: "ServerAdmin",
+                claimed_agent_id: "codex".to_string(),
+                claimed_channel_id: "manager-channel".to_string(),
+                consumed_agent_id: "resolved-codex".to_string(),
+                manager_channel_check_relied_on_claimed_header: true,
+            }
+        );
+
+        let no_principal_fields = identity_consumption_fields("GET /api/test", None, None, false);
+        for (name, value) in no_principal_fields.named_values() {
+            let field = format!("{name}={value}");
+            assert!(
+                !field.to_ascii_lowercase().contains("authorization"),
+                "field={field}"
+            );
+        }
+        assert_eq!(
+            no_principal_fields,
+            IdentityConsumptionFields {
+                endpoint: "GET /api/test",
+                auth_strength: "None",
+                claimed_agent_id: String::new(),
+                claimed_channel_id: String::new(),
+                consumed_agent_id: String::new(),
+                manager_channel_check_relied_on_claimed_header: false,
+            }
+        );
+    }
 }
