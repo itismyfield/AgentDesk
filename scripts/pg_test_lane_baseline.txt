@@ -314,7 +314,6 @@ src/github/sync.rs
 src/server/issue_specs.rs
 src/server/mod.rs
 src/server/multinode_regression.rs
-src/server/resource_locks.rs
 src/server/routes/escalation.rs
 src/server/routes/memory_api.rs
 src/server/routes/stats.rs
@@ -329,10 +328,7 @@ src/services/discord/router/message_handler/voice_announcement_route.rs
 src/services/discord/session_runtime.rs
 src/services/discord/turn_bridge/completion_guard/completion_postgres.rs
 src/services/discord/turn_bridge/recovery_text.rs
-src/services/discord/watchers/lifecycle/restore_tests.rs
 src/services/maintenance/jobs/db_retention.rs
-src/services/maintenance/jobs/worktree_orphan_sweep.rs
-src/services/pipeline_override.rs
 src/services/pipeline_routes.rs
 src/services/session_resume.rs
 src/services/settings.rs
