@@ -1121,6 +1121,7 @@ src/
 │   │   ├── restart_mode.rs
 │   │   ├── restart_report.rs
 │   │   ├── role_map.rs
+│   │   ├── role_map_enrichment.rs
 │   │   ├── runtime_bootstrap.rs
 │   │   ├── runtime_store.rs
 │   │   ├── semantic_boundaries.rs
