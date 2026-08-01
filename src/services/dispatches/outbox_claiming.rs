@@ -699,10 +699,18 @@ mod tests {
             None
         );
     }
+
+    // #4979 B0: PG 테스트를 `*_pg_tests` 하위 모듈로 이관해 `just test-postgres`의
+    // `_pg` 선택자에 걸리게 한다. 아래 `#[cfg(test)]`는 컴파일상 중복이지만
+    // 지우면 안 된다 — `check_test_lane_coverage.py`가 test fn을 가장 안쪽
+    // `cfg(test)` 모듈에 귀속시키므로, 빼면 PG 2건이 부모 `…::tests`로 귀속되고
+    // 그 부모는 `--skip _pg` 탓에 어떤 curated 호출로도 커버되지 않게 된다.
+    // 반면 `*_pg_tests` 접미사는 어떤 게이트도 강제하지 않는 사람 규약이다
+    // (bare `pg_tests` 모듈이 이미 3건 존재) — 후속 이관은 이름을 게이트가
+    // 지켜준다고 가정하지 말 것.
     #[cfg(test)]
     mod outbox_claiming_pg_tests {
         use super::*;
-        use serde_json::json;
         use sqlx::PgPool;
         use uuid::Uuid;
 
