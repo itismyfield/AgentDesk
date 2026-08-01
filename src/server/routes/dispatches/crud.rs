@@ -946,111 +946,131 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn publish_only_dispatch_patch_broadcasts_without_mutating_result_or_phase_gate_pg() {
-        let pg_db = TestPostgresDb::create().await;
-        let pool = pg_db.connect_and_migrate().await;
-        let state = test_state_with_pg(pool.clone());
-        let mut receiver = state.broadcast_tx.subscribe();
-        sqlx::query(
-            "INSERT INTO auto_queue_runs (id, status) VALUES ('run-publish-only', 'active')",
-        )
-        .execute(&pool)
-        .await
-        .expect("seed publish-only run");
-        let context = serde_json::json!({
-            "phase_gate": {
-                "run_id": "run-publish-only",
-                "phase": 1,
-                "pass_verdict": "pass",
-                "final_phase": false
-            }
-        });
-        let detailed_result = serde_json::json!({
-            "error": "transport failure",
-            "diagnostics": {"attempts": 3, "provider": "test"}
-        });
-        sqlx::query(
-            "INSERT INTO task_dispatches (
+    // #4979 S6: dispatch API PG tests live below `*_pg_tests` so
+    // `just test-postgres` selects them through its `_pg` filter, which is a
+    // substring match on the whole test path rather than a module-scope rule.
+    // See the matching comment in `src/db/dispatched_sessions.rs` for the
+    // measured protection story: renaming this module away from the marker
+    // fails both gates (and coverage keeps failing even after the manifest is
+    // regenerated), whereas removing the nested `#[cfg(test)]` alone leaves
+    // both green — the parent here is already carried as uncovered debt, so
+    // that attribute is defence-in-depth rather than load-bearing in this
+    // slice.
+    //
+    // `publish_only_dispatch_patch_broadcasts_without_mutating_result_or_phase_gate_pg`
+    // already ended in `_gate_pg`, so it was selected by the PG lane before the
+    // move. It still appeared in rule2 because the nightly pgless lane skips on
+    // `_pg_` with a trailing underscore, which that suffix does not match; the
+    // move gives it `_pg_` via the module path and closes that half.
+    #[cfg(test)]
+    mod dispatch_api_pg_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn publish_only_dispatch_patch_broadcasts_without_mutating_result_or_phase_gate_pg() {
+            let pg_db = TestPostgresDb::create().await;
+            let pool = pg_db.connect_and_migrate().await;
+            let state = test_state_with_pg(pool.clone());
+            let mut receiver = state.broadcast_tx.subscribe();
+            sqlx::query(
+                "INSERT INTO auto_queue_runs (id, status) VALUES ('run-publish-only', 'active')",
+            )
+            .execute(&pool)
+            .await
+            .expect("seed publish-only run");
+            let context = serde_json::json!({
+                "phase_gate": {
+                    "run_id": "run-publish-only",
+                    "phase": 1,
+                    "pass_verdict": "pass",
+                    "final_phase": false
+                }
+            });
+            let detailed_result = serde_json::json!({
+                "error": "transport failure",
+                "diagnostics": {"attempts": 3, "provider": "test"}
+            });
+            sqlx::query(
+                "INSERT INTO task_dispatches (
                  id, status, dispatch_type, context, result
              ) VALUES ($1, 'failed', 'phase-gate', $2, $3)",
-        )
-        .bind("dispatch-publish-only")
-        .bind(context.to_string())
-        .bind(detailed_result.to_string())
-        .execute(&pool)
-        .await
-        .expect("seed publish-only dispatch");
-        sqlx::query(
-            "INSERT INTO auto_queue_phase_gates (
+            )
+            .bind("dispatch-publish-only")
+            .bind(context.to_string())
+            .bind(detailed_result.to_string())
+            .execute(&pool)
+            .await
+            .expect("seed publish-only dispatch");
+            sqlx::query(
+                "INSERT INTO auto_queue_phase_gates (
                  run_id, phase, dispatch_id, status, pass_verdict, final_phase
              ) VALUES ('run-publish-only', 1, 'dispatch-publish-only', 'failed', 'pass', FALSE)",
-        )
-        .execute(&pool)
-        .await
-        .expect("seed failed phase gate");
-
-        let (status, _) = update_dispatch(
-            State(state),
-            Path("dispatch-publish-only".to_string()),
-            axum::Json(UpdateDispatchBody {
-                status: None,
-                result: None,
-                allowed_from: None,
-            }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let event = receiver
-            .recv()
+            )
+            .execute(&pool)
             .await
-            .expect("receive dispatch update event");
-        assert_eq!(event.event, "task_dispatch_updated");
-        assert_eq!(event.data["id"], "dispatch-publish-only");
+            .expect("seed failed phase gate");
 
-        let state_row = sqlx::query_as::<_, (String, String, String, i64)>(
-            "SELECT d.result::TEXT, pg.status, r.status,
+            let (status, _) = update_dispatch(
+                State(state),
+                Path("dispatch-publish-only".to_string()),
+                axum::Json(UpdateDispatchBody {
+                    status: None,
+                    result: None,
+                    allowed_from: None,
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let event = receiver
+                .recv()
+                .await
+                .expect("receive dispatch update event");
+            assert_eq!(event.event, "task_dispatch_updated");
+            assert_eq!(event.data["id"], "dispatch-publish-only");
+
+            let state_row = sqlx::query_as::<_, (String, String, String, i64)>(
+                "SELECT d.result::TEXT, pg.status, r.status,
                     (SELECT COUNT(*) FROM dispatch_events WHERE dispatch_id = d.id)
              FROM task_dispatches d
              JOIN auto_queue_phase_gates pg ON pg.dispatch_id = d.id
              JOIN auto_queue_runs r ON r.id = pg.run_id
              WHERE d.id = 'dispatch-publish-only'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("load publish-only state");
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&state_row.0)
-                .expect("decode persisted result"),
-            detailed_result
-        );
-        assert_eq!(state_row.1, "failed");
-        assert_eq!(state_row.2, "active");
-        assert_eq!(
-            state_row.3, 0,
-            "publish-only route must not add audit writes"
-        );
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("load publish-only state");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&state_row.0)
+                    .expect("decode persisted result"),
+                detailed_result
+            );
+            assert_eq!(state_row.1, "failed");
+            assert_eq!(state_row.2, "active");
+            assert_eq!(
+                state_row.3, 0,
+                "publish-only route must not add audit writes"
+            );
 
-        pool.close().await;
-        pg_db.drop().await;
-    }
+            pool.close().await;
+            pg_db.drop().await;
+        }
 
-    #[tokio::test]
-    async fn dispatch_delivery_events_route_returns_typed_rows_newest_first() {
-        let pg_db = TestPostgresDb::create().await;
-        let pool = pg_db.connect_and_migrate().await;
-        let state = test_state_with_pg(pool.clone());
+        #[tokio::test]
+        async fn dispatch_delivery_events_route_returns_typed_rows_newest_first() {
+            let pg_db = TestPostgresDb::create().await;
+            let pool = pg_db.connect_and_migrate().await;
+            let state = test_state_with_pg(pool.clone());
 
-        sqlx::query(
-            "INSERT INTO task_dispatches (id, status, title, created_at, updated_at)
+            sqlx::query(
+                "INSERT INTO task_dispatches (id, status, title, created_at, updated_at)
              VALUES ($1, 'completed', 'Delivery event route test', NOW(), NOW())",
-        )
-        .bind("dispatch-events-route")
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO dispatch_delivery_events (
+            )
+            .bind("dispatch-events-route")
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO dispatch_delivery_events (
                 dispatch_id, correlation_id, semantic_event_id, operation, target_kind,
                 status, attempt, error, result_json, created_at, updated_at
              ) VALUES (
@@ -1060,12 +1080,12 @@ mod tests {
                 NOW() - INTERVAL '1 minute',
                 NOW() - INTERVAL '1 minute'
              )",
-        )
-        .bind("dispatch-events-route")
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
+            )
+            .bind("dispatch-events-route")
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
             "INSERT INTO dispatch_delivery_events (
                 dispatch_id, correlation_id, semantic_event_id, operation, target_kind,
                 target_channel_id, status, attempt, message_id, messages_json, result_json,
@@ -1083,76 +1103,79 @@ mod tests {
         .await
         .unwrap();
 
-        let (status, body) =
-            get_dispatch_delivery_events(State(state), Path("dispatch-events-route".to_string()))
-                .await;
-        let body = serde_json::to_value(body.0).unwrap();
+            let (status, body) = get_dispatch_delivery_events(
+                State(state),
+                Path("dispatch-events-route".to_string()),
+            )
+            .await;
+            let body = serde_json::to_value(body.0).unwrap();
 
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["dispatch_id"], "dispatch-events-route");
-        assert_eq!(body["events"].as_array().unwrap().len(), 2);
-        assert_eq!(body["events"][0]["status"], "sent");
-        assert_eq!(body["events"][0]["attempt"], 2);
-        assert_eq!(body["events"][0]["message_id"], "1500000000000000001");
-        assert_eq!(body["events"][1]["status"], "failed");
-        assert_eq!(body["events"][1]["error"], "first failure");
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["dispatch_id"], "dispatch-events-route");
+            assert_eq!(body["events"].as_array().unwrap().len(), 2);
+            assert_eq!(body["events"][0]["status"], "sent");
+            assert_eq!(body["events"][0]["attempt"], 2);
+            assert_eq!(body["events"][0]["message_id"], "1500000000000000001");
+            assert_eq!(body["events"][1]["status"], "failed");
+            assert_eq!(body["events"][1]["error"], "first failure");
 
-        pool.close().await;
-        pg_db.drop().await;
-    }
+            pool.close().await;
+            pg_db.drop().await;
+        }
 
-    // SAFETY (await_holding_lock): the shared dispatch-delivery metric Mutex is
-    // intentionally held across awaits to serialize tests that mutate the
-    // process-global mismatch metrics; releasing early would race concurrent
-    // tests. Test-only.
-    #[allow(clippy::await_holding_lock)]
-    #[tokio::test]
-    async fn dispatch_delivery_reconcile_stats_route_returns_current_stats_and_metric_rows() {
-        let _serial = crate::reconcile::lock_dispatch_delivery_metric_tests();
-        crate::reconcile::reset_dispatch_delivery_event_mismatch_metrics_for_tests();
-        let Some(pg_db) = TestPostgresDb::try_create().await else {
-            return;
-        };
-        let pool = pg_db.connect_and_migrate().await;
-        let state = test_state_with_pg(pool.clone());
+        // SAFETY (await_holding_lock): the shared dispatch-delivery metric Mutex is
+        // intentionally held across awaits to serialize tests that mutate the
+        // process-global mismatch metrics; releasing early would race concurrent
+        // tests. Test-only.
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn dispatch_delivery_reconcile_stats_route_returns_current_stats_and_metric_rows() {
+            let _serial = crate::reconcile::lock_dispatch_delivery_metric_tests();
+            crate::reconcile::reset_dispatch_delivery_event_mismatch_metrics_for_tests();
+            let Some(pg_db) = TestPostgresDb::try_create().await else {
+                return;
+            };
+            let pool = pg_db.connect_and_migrate().await;
+            let state = test_state_with_pg(pool.clone());
 
-        sqlx::query(
-            "INSERT INTO task_dispatches (id, status, title)
+            sqlx::query(
+                "INSERT INTO task_dispatches (id, status, title)
              VALUES ($1, 'pending', 'Delivery reconcile route test')",
-        )
-        .bind("dispatch-route-reconcile")
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO kv_meta (key, value)
-             VALUES ('dispatch_reserving:dispatch-route-reconcile', 'dispatch-route-reconcile')",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        crate::reconcile::reconcile_dispatch_delivery_events_pg(&pool)
+            )
+            .bind("dispatch-route-reconcile")
+            .execute(&pool)
             .await
             .unwrap();
+            sqlx::query(
+                "INSERT INTO kv_meta (key, value)
+             VALUES ('dispatch_reserving:dispatch-route-reconcile', 'dispatch-route-reconcile')",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            crate::reconcile::reconcile_dispatch_delivery_events_pg(&pool)
+                .await
+                .unwrap();
 
-        let (status, body) = get_dispatch_delivery_reconcile_stats(State(state)).await;
-        let body = body.0;
+            let (status, body) = get_dispatch_delivery_reconcile_stats(State(state)).await;
+            let body = body.0;
 
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["stats"]["mismatch_count"], 1);
-        assert_eq!(body["stats"]["missing_typed"], 1);
-        assert_eq!(
-            body["mismatches"][0]["dispatch_id"],
-            "dispatch-route-reconcile"
-        );
-        assert_eq!(
-            body["metrics"][0]["name"],
-            "agentdesk_dispatch_delivery_event_mismatch_total"
-        );
-        assert_eq!(body["metrics"][0]["kind"], "missing_typed");
-        assert_eq!(body["metrics"][0]["value"], 1);
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["stats"]["mismatch_count"], 1);
+            assert_eq!(body["stats"]["missing_typed"], 1);
+            assert_eq!(
+                body["mismatches"][0]["dispatch_id"],
+                "dispatch-route-reconcile"
+            );
+            assert_eq!(
+                body["metrics"][0]["name"],
+                "agentdesk_dispatch_delivery_event_mismatch_total"
+            );
+            assert_eq!(body["metrics"][0]["kind"], "missing_typed");
+            assert_eq!(body["metrics"][0]["value"], 1);
 
-        pool.close().await;
-        pg_db.drop().await;
+            pool.close().await;
+            pg_db.drop().await;
+        }
     }
 }

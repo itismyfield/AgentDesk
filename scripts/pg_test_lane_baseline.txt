@@ -1,16 +1,8 @@
 # Existing PostgreSQL lane debt. Sections and entries are sorted; debt may only shrink.
 [rule1]
-db::dispatched_sessions::selector_cleanup_tests::clearing_session_ids_resets_raw_transcript_watermark_evidence
-db::dispatched_sessions::selector_cleanup_tests::raw_provider_transcript_growth_flag_only_observation_does_not_raise_watermark
-db::dispatched_sessions::selector_cleanup_tests::raw_provider_transcript_len_watermark_is_monotonic
-db::dispatched_sessions::selector_cleanup_tests::raw_provider_transcript_watermark_raw_id_mismatch_resets_baseline
-db::dispatched_sessions::selector_cleanup_tests::same_claude_session_id_heartbeats_do_not_refresh_recorded_at_guard
-db::dispatched_sessions::selector_cleanup_tests::tmux_only_kill_preserves_resume_selectors
 engine::ops::config_ops::tests::policy_engine_config_get_preserves_types_precedence_and_fail_closed_contract
 engine::ops::db_ops::tests::policy_db_query_json_returns_typed_json_columns_and_query_keeps_strings
 server::issue_specs::tests::upsert_issue_spec_persists_parsed_contract
-server::routes::dispatches::crud::tests::dispatch_delivery_events_route_returns_typed_rows_newest_first
-server::routes::dispatches::crud::tests::dispatch_delivery_reconcile_stats_route_returns_current_stats_and_metric_rows
 server::routes::memory_api::request_body_tests::local_memory_api_uses_migrated_table
 server::routes::memory_api::request_body_tests::local_memory_migration_preserves_preexisting_route_table_rows
 server::routes::memory_api::request_body_tests::memory_recall_forget_handlers_use_local_when_memento_runtime_unavailable
@@ -76,12 +68,6 @@ db::auto_queue::entries::dispatch_failure::tests::retry_failure_keeps_run_runnab
 db::auto_queue::entries::dispatch_failure::tests::terminal_failure_finalizes_once_and_duplicate_is_noop_pg
 db::auto_queue::entries::dispatch_failure::tests::terminal_failure_rolls_back_when_alert_obligation_cannot_enqueue_pg
 db::dispatched_session_rebind_override::tests::health_rebind_override_upserts_selectors_with_recorded_at_guard_pg
-db::dispatched_sessions::selector_cleanup_tests::clearing_session_ids_resets_raw_transcript_watermark_evidence
-db::dispatched_sessions::selector_cleanup_tests::raw_provider_transcript_growth_flag_only_observation_does_not_raise_watermark
-db::dispatched_sessions::selector_cleanup_tests::raw_provider_transcript_len_watermark_is_monotonic
-db::dispatched_sessions::selector_cleanup_tests::raw_provider_transcript_watermark_raw_id_mismatch_resets_baseline
-db::dispatched_sessions::selector_cleanup_tests::same_claude_session_id_heartbeats_do_not_refresh_recorded_at_guard
-db::dispatched_sessions::selector_cleanup_tests::tmux_only_kill_preserves_resume_selectors
 db::dispatches::outbox::delivery::tests::old_owner_completion_after_stale_reclaim_is_noop_pg
 db::idempotency::tests::pg_integration::claim_then_record_then_reclaim_replays_cached_response
 db::idempotency::tests::pg_integration::claim_with_different_fingerprint_reports_mismatch
@@ -134,9 +120,6 @@ server::multinode_regression::tests::multinode_dispatch_claims_prefer_label_but_
 server::multinode_regression::tests::multinode_dispatch_claims_route_mixed_required_and_preferred_to_best_online_node
 server::multinode_regression::tests::multinode_single_leader_lock_allows_one_holder
 server::multinode_regression::tests::multinode_unreal_resource_lock_is_exclusive
-server::routes::dispatches::crud::tests::dispatch_delivery_events_route_returns_typed_rows_newest_first
-server::routes::dispatches::crud::tests::dispatch_delivery_reconcile_stats_route_returns_current_stats_and_metric_rows
-server::routes::dispatches::crud::tests::publish_only_dispatch_patch_broadcasts_without_mutating_result_or_phase_gate_pg
 server::routes::memory_api::request_body_tests::local_memory_api_uses_migrated_table
 server::routes::memory_api::request_body_tests::local_memory_migration_preserves_preexisting_route_table_rows
 server::routes::memory_api::request_body_tests::memory_recall_forget_handlers_use_local_when_memento_runtime_unavailable
