@@ -1604,9 +1604,12 @@ fn assert_suppression_arm_uses_confirmed_end_helper(reason: &str) {
     // wiring guarantee survives further extraction (each source must be an
     // `include_str!` literal because the paths are resolved at compile time; a
     // reason that goes missing from all of them still trips the panic below).
+    // #4229 W2b extracted the suppression arms into
+    // tmux_watcher/terminal_preflight.rs, so that module hosts them now.
     const MODULE_SOURCES: &[&str] = &[
         include_str!("../tmux_watcher.rs"),
         include_str!("loop_poll_prologue.rs"),
+        include_str!("terminal_preflight.rs"),
     ];
     let (module_src, reason_idx) = MODULE_SOURCES
         .iter()
