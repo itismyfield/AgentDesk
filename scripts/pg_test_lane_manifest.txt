@@ -2,6 +2,7 @@
 [files]
 src/db/auto_queue/entries/dispatch_failure.rs
 src/db/auto_queue/phase_gates.rs
+src/db/auto_queue/readiness_pg_tests.rs
 src/db/auto_queue/tests.rs
 src/db/dispatched_sessions.rs
 src/db/dispatched_sessions/rebind_override.rs
@@ -37,6 +38,7 @@ src/services/auto_queue/activate_command.rs
 src/services/auto_queue/cancel_run.rs
 src/services/auto_queue/phase_gate.rs
 src/services/auto_queue/planning.rs
+src/services/auto_queue/readiness_pg_tests.rs
 src/services/auto_queue/route_generate.rs
 src/services/cluster/intake_preflight.rs
 src/services/cluster/intake_router_hook.rs
@@ -75,6 +77,7 @@ src/voice/turn_link.rs
 db::auto_queue::entries::dispatch_failure::tests
 db::auto_queue::phase_gates::current_batch_phase_pg_tests
 db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests
+db::auto_queue::readiness_pg_tests::cases_pg_tests
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests
 db::dispatched_session_rebind_override::tests
 db::dispatched_sessions::selector_cleanup_tests::session_authority_pg_tests
@@ -111,6 +114,7 @@ services::auto_queue::route::activate_command::tests::depth_gate_activate_pg_tes
 services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests
 services::auto_queue::route::phase_gate::pg_tests
 services::auto_queue::route::planning::failed_entry_alert_tests
+services::auto_queue::route::readiness_pg_tests::cases_pg_tests
 services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::postgres_tests
 services::auto_queue::tests
 services::cluster::intake_preflight::tests
@@ -189,6 +193,13 @@ db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::repair_reports_orpha
 db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::repair_serializes_with_concurrent_dispatch_update_without_deadlock
 db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::status_only_completion_uses_persisted_result_for_pass
 db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::verdict_mismatch_marks_gate_failed_and_pauses_run
+db::auto_queue::readiness_pg_tests::cases_pg_tests::completion_notification_failure_rolls_back_status_and_slot_pg
+db::auto_queue::readiness_pg_tests::cases_pg_tests::completion_updates_status_slot_and_outbox_once_pg
+db::auto_queue::readiness_pg_tests::cases_pg_tests::force_completion_deletes_gate_and_audits_operator_source_pg
+db::auto_queue::readiness_pg_tests::cases_pg_tests::pending_and_failed_phase_gates_block_readiness_pg
+db::auto_queue::readiness_pg_tests::cases_pg_tests::phase_gate_grace_blocks_readiness_pg
+db::auto_queue::readiness_pg_tests::cases_pg_tests::runnable_entry_blocks_readiness_pg
+db::auto_queue::readiness_pg_tests::cases_pg_tests::user_cancelled_with_other_terminal_entry_blocks_readiness_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::allocate_slot_for_group_agent_pg_does_not_reuse_busy_existing_group_slot
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::allocate_slot_for_group_agent_pg_rejects_pending_review_slot_blocker
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::allocate_slot_for_group_agent_pg_releases_claim_when_dispatch_appears_after_update
@@ -381,6 +392,7 @@ services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests:
 services::auto_queue::route::phase_gate::pg_tests::cancelled_run_rejects_dispatch_attach
 services::auto_queue::route::planning::failed_entry_alert_tests::failed_entry_transition_and_alert_share_commit_with_explicit_ttl_pg
 services::auto_queue::route::planning::failed_entry_alert_tests::production_failure_wrapper_preserves_restoring_slot_binding_pg
+services::auto_queue::route::readiness_pg_tests::cases_pg_tests::activate_empty_drain_and_submit_order_zero_share_readiness_outcome_pg
 services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::postgres_tests::unavailable_deploy_gate_creates_no_database_rows
 services::auto_queue::tests::auto_queue_status_query_uses_latest_review_clock_pg
 services::cluster::intake_preflight::tests::evaluation_does_not_mutate_production_handoff_state_pg
