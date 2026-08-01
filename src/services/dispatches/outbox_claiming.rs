@@ -705,9 +705,14 @@ mod tests {
     // 지우면 안 된다 — `check_test_lane_coverage.py`가 test fn을 가장 안쪽
     // `cfg(test)` 모듈에 귀속시키므로, 빼면 PG 2건이 부모 `…::tests`로 귀속되고
     // 그 부모는 `--skip _pg` 탓에 어떤 curated 호출로도 커버되지 않게 된다.
-    // 반면 `*_pg_tests` 접미사는 어떤 게이트도 강제하지 않는 사람 규약이다
-    // (bare `pg_tests` 모듈이 이미 3건 존재) — 후속 이관은 이름을 게이트가
-    // 지켜준다고 가정하지 말 것.
+    // 이름 계약은 두 층으로 갈린다. `*_pg_tests`라는 **접미사 형태**는 어떤
+    // 게이트도 강제하지 않는 사람 규약이고(bare `pg_tests` 모듈이 이미 4건
+    // 있다), 실제로 강제되는 것은 정규화된 테스트 경로가 `_pg`·`pg_`·`postgres`
+    // 중 하나를 부분문자열로 포함해야 한다는 것뿐이다 — `justfile`의
+    // `cargo test --lib -- _pg pg_ postgres`(rule1)와 비PG 레인의 `--skip _pg
+    // --skip pg_ --skip postgres`(rule2)에서 나오며, 둘 다 one-way ratchet이라
+    // 위반하면 CI가 red다. 즉 `mod db_backed_tests` 같은 이름은 규약 위반이
+    // 아니라 게이트 위반이다.
     #[cfg(test)]
     mod outbox_claiming_pg_tests {
         use super::*;
