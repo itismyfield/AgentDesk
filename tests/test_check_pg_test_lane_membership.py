@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import re
 import sys
 import tempfile
 import unittest
@@ -14,6 +15,7 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts/check_pg_test_lane_membership.py"
 INTEGRITY_SCRIPT = REPO_ROOT / "scripts/check_test_target_integrity.py"
+FIXTURES = REPO_ROOT / "tests/fixtures/pg_lane"
 
 
 def load_module(name: str, path: Path):
@@ -126,6 +128,65 @@ class DetectionMutation(FixtureCase):
         )
         self.assertEqual(membership.discover_pg_inventory(self.root).tests, {})
 
+    def test_helper_identity_is_limited_to_logical_module_scope(self) -> None:
+        self.fx.write_source(
+            "src/service.rs",
+            "#[cfg(test)] mod a { fn h() { create_test_database(); } }\n"
+            "#[cfg(test)] mod b { fn h() {} #[test] fn plain() { h(); } }\n",
+            "mod service;\n",
+        )
+        self.assertEqual(membership.discover_pg_inventory(self.root).tests, {})
+
+    def test_cross_file_three_hop_transitive_closure(self) -> None:
+        self.fx.write_source(
+            "src/xfile_a.rs",
+            (FIXTURES / "xfile_a.rs").read_text("utf-8"),
+            "mod xfile_a;\nmod xfile_b;\n",
+        )
+        self.fx.write_source(
+            "src/xfile_b.rs",
+            (FIXTURES / "xfile_b.rs").read_text("utf-8"),
+        )
+        expected = {"xfile_a::tests::transitive_case"}
+        self.assertEqual(set(membership.discover_pg_inventory(self.root).tests), expected)
+        with mock.patch.object(membership, "_transitive_closure", return_value=False):
+            with self.assertRaises(AssertionError):
+                self.assertEqual(set(membership.discover_pg_inventory(self.root).tests), expected)
+
+    def test_brace_aware_edges_do_not_capture_the_next_function(self) -> None:
+        self.fx.write_source(
+            "src/service.rs",
+            "#[cfg(test)] mod tests {\n"
+            "fn bridge() {}\n"
+            "fn seeded() { create_test_database(); }\n"
+            "#[test] fn plain() { bridge(); }\n"
+            "#[test] fn case() { seeded(); }\n"
+            "}\n",
+            "mod service;\n",
+        )
+        expected = {"service::tests::case"}
+        self.assertEqual(set(membership.discover_pg_inventory(self.root).tests), expected)
+
+        def unbounded_body(clean: str, opening: int, counter=None) -> str:
+            return clean[opening:]
+
+        with mock.patch.object(membership, "_edge_boundary", side_effect=unbounded_body):
+            with self.assertRaises(AssertionError):
+                self.assertEqual(set(membership.discover_pg_inventory(self.root).tests), expected)
+
+    def test_block_local_and_impl_method_chains_remain_fail_open(self) -> None:
+        self.fx.write_source(
+            "src/service.rs",
+            "#[cfg(test)] mod tests {\n"
+            "#[test] fn pg() { fn h() { create_test_database(); } h(); }\n"
+            "#[test] fn plain() { fn h() {} h(); }\n"
+            "struct Db; impl Db { fn pg() { create_test_database(); } fn pure() {} }\n"
+            "#[test] fn method_case() { Db::pure(); }\n"
+            "}\n",
+            "mod service;\n",
+        )
+        self.assertEqual(membership.discover_pg_inventory(self.root).tests, {})
+
 
 class RuleMutations(FixtureCase):
     def test_rule1_bad_and_good(self) -> None:
@@ -187,6 +248,84 @@ class ParserMutations(FixtureCase):
         jobs = membership.parse_jobs(workflow, self.root)
         self.assertEqual([job.name for job in jobs], ["first", "second"])
         self.assertNotIn("second", jobs[0].text)
+
+    def test_jobs_parser_variants_surface_rule4_by_set_equality(self) -> None:
+        cases = {
+            "jobs_comment.yml": "comment_job",
+            "jobs_4space.yml": "four_space_job",
+            "jobs_quoted.yml": "quoted_job",
+            "jobs_tab.yml": "tab_job",
+        }
+        workflow = self.root / ".github/workflows/ci-main.yml"
+
+        def legacy_job_names(text: str) -> list[str]:
+            jobs_key = re.search(r"^(?P<indent>[^\S\n]*)jobs:[^\S\n]*$", text, re.MULTILINE)
+            if jobs_key is None:
+                return []
+            jobs_indent = len(jobs_key.group("indent"))
+            return [
+                match.group("name")
+                for match in re.finditer(
+                    r"^(?P<indent>[^\S\n]+)(?P<name>[A-Za-z0-9_-]+):[^\S\n]*$",
+                    text[jobs_key.end():],
+                    re.MULTILINE,
+                )
+                if len(match.group("indent")) == jobs_indent + 2
+            ]
+
+        for fixture, job_name in cases.items():
+            with self.subTest(fixture=fixture):
+                fixture_text = (FIXTURES / fixture).read_text("utf-8")
+                self.assertEqual(legacy_job_names(fixture_text), [])
+                workflow.write_text(fixture_text, "utf-8")
+                self.assertEqual(
+                    self.fx.analysis().debts["rule4"],
+                    {f".github/workflows/ci-main.yml:{job_name}"},
+                )
+
+    def test_empty_jobs_map_is_warn_only(self) -> None:
+        workflow = self.root / ".github/workflows/empty.yml"
+        workflow.write_text("jobs: # parsed, but empty\n", "utf-8")
+        analysis = self.fx.analysis()
+        self.assertTrue(any(finding.kind == "jobs-empty" for finding in analysis.findings))
+        empty = {section: set() for section in membership.SECTIONS}
+        synthetic = membership.Analysis(
+            membership.PgInventory({}), empty, 0, analysis.findings
+        )
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            rc = membership.check_analysis(
+                synthetic,
+                empty,
+                empty,
+                membership.render_manifest(synthetic.inventory),
+                reference_label="fixture base",
+                allowlist_label="fixture allowlist",
+            )
+        self.assertEqual(rc, 0)
+        self.assertIn("WARN: [jobs-empty]", stderr.getvalue())
+
+    def test_operation_counter_is_warn_only(self) -> None:
+        analysis = self.fx.analysis()
+        counters = [finding for finding in analysis.findings if finding.kind == "operation-counter"]
+        self.assertEqual(len(counters), 1)
+        self.assertRegex(counters[0].detail, r"_matching_brace calls=\d+")
+        empty = {section: set() for section in membership.SECTIONS}
+        synthetic = membership.Analysis(
+            membership.PgInventory({}), empty, 0, tuple(counters)
+        )
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            rc = membership.check_analysis(
+                synthetic,
+                empty,
+                empty,
+                membership.render_manifest(synthetic.inventory),
+                reference_label="fixture base",
+                allowlist_label="fixture allowlist",
+            )
+        self.assertEqual(rc, 0)
+        self.assertIn("WARN: [operation-counter]", stderr.getvalue())
 
     def test_first_job_rule4_violation_is_visible(self) -> None:
         workflow = self.root / ".github/workflows/ci-main.yml"

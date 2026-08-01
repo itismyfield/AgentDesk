@@ -16,7 +16,6 @@ src/dispatch/dispatch_cancel.rs
 src/dispatch/dispatch_context.rs
 src/dispatch/dispatch_status.rs
 src/engine/ops/config_ops.rs
-src/engine/ops/db_ops.rs
 src/engine/ops/kanban_ops.rs
 src/engine/ops/message_ops.rs
 src/github/sync.rs
@@ -26,7 +25,6 @@ src/server/mod.rs
 src/server/multinode_regression.rs
 src/server/resource_locks.rs
 src/server/routes/dispatches/crud.rs
-src/server/routes/escalation.rs
 src/server/routes/memory_api.rs
 src/server/routes/message_outbox.rs
 src/server/routes/stats.rs
@@ -55,7 +53,6 @@ src/services/discord/turn_bridge/recovery_text.rs
 src/services/discord/watchers/lifecycle/restore_tests.rs
 src/services/dispatches/discord_delivery/guard.rs
 src/services/dispatches/outbox_claiming.rs
-src/services/dispatches/wait_queue.rs
 src/services/maintenance/jobs/db_retention.rs
 src/services/maintenance/jobs/worktree_orphan_sweep.rs
 src/services/message_outbox.rs
@@ -67,7 +64,6 @@ src/services/pipeline_routes.rs
 src/services/scheduled_messages/context_snapshot.rs
 src/services/session_forwarding.rs
 src/services/session_resume.rs
-src/services/settings.rs
 src/services/stale_turn_reconciler.rs
 src/voice/announce_meta.rs
 src/voice/turn_link.rs
@@ -90,7 +86,6 @@ dispatch::dispatch_cancel::pg_observability_tests
 dispatch::dispatch_context::pg_rereview_tests
 dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests
 engine::ops::config_ops::tests
-engine::ops::db_ops::tests
 engine::ops::kanban_ops::tests
 engine::ops::message_ops::tests
 github::sync::terminal_open_alert_tests
@@ -100,7 +95,6 @@ server::message_outbox_retry_tests
 server::multinode_regression::tests
 server::resource_locks::tests
 server::routes::dispatches::crud::tests
-server::routes::escalation::manual_decision_gate_tests
 server::routes::memory_api::request_body_tests
 server::routes::message_outbox::tests
 server::routes::stats::memento_feedback_stats_pg_tests
@@ -130,7 +124,6 @@ services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_
 services::discord::turn_bridge::recovery_text::tests
 services::dispatches::discord_delivery::guard::tests
 services::dispatches::outbox_claiming::tests
-services::dispatches::wait_queue::tests
 services::maintenance::jobs::db_retention::tests
 services::maintenance::jobs::worktree_orphan_sweep::active_dispatch_worktree_keep_set_tests
 services::maintenance::jobs::worktree_orphan_sweep::keep_set_query_failure_fail_closed_tests
@@ -145,7 +138,6 @@ services::pipeline_routes::tests
 services::scheduled_messages::context_snapshot::postgres_tests
 services::session_forwarding::tests
 services::session_resume::tests
-services::settings::tests
 services::stale_turn_reconciler::tests
 voice::announce_meta::tests
 voice::turn_link::tests
@@ -310,8 +302,6 @@ dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgre
 dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests::patch_completion_reconstructs_legacy_default_and_clears_gate
 engine::ops::config_ops::tests::policy_engine_config_get_preserves_types_precedence_and_fail_closed_contract
 engine::ops::config_ops::tests::policy_engine_config_get_query_error_fails_closed_with_live_postgres
-engine::ops::db_ops::tests::policy_db_pg_exec_and_query_support_sqlite_compat_functions
-engine::ops::db_ops::tests::policy_db_query_json_returns_typed_json_columns_and_query_keeps_strings
 engine::ops::kanban_ops::tests::set_status_raw_pg_allows_fresh_pass_verdict_after_review_entered_at
 engine::ops::kanban_ops::tests::set_status_raw_pg_allows_no_rule_in_progress_to_requested_forced
 engine::ops::kanban_ops::tests::set_status_raw_pg_allows_requested_to_in_progress_with_active_dispatch
@@ -350,9 +340,7 @@ server::resource_locks::tests::resource_lock_reclaims_expired_holder
 server::routes::dispatches::crud::tests::dispatch_delivery_events_route_returns_typed_rows_newest_first
 server::routes::dispatches::crud::tests::dispatch_delivery_reconcile_stats_route_returns_current_stats_and_metric_rows
 server::routes::dispatches::crud::tests::publish_only_dispatch_patch_broadcasts_without_mutating_result_or_phase_gate_pg
-server::routes::escalation::manual_decision_gate_tests::emit_escalation_pg_rejects_superseded_manual_decision_cards_without_discord_send
 server::routes::memory_api::request_body_tests::local_memory_api_uses_migrated_table
-server::routes::memory_api::request_body_tests::local_memory_migration_preserves_preexisting_route_table_rows
 server::routes::memory_api::request_body_tests::memory_recall_forget_handlers_use_local_when_memento_runtime_unavailable
 server::routes::message_outbox::tests::monitor_alert_action_id_is_durable_and_idempotent_pg
 server::routes::stats::memento_feedback_stats_pg_tests::load_memento_feedback_counts_returns_persisted_writer_values_pg
@@ -497,7 +485,6 @@ services::dispatches::discord_delivery::guard::tests::finalize_delivery_guard_sh
 services::dispatches::discord_delivery::guard::tests::kv_meta_markers_remain_authoritative_when_typed_shadow_missing
 services::dispatches::outbox_claiming::tests::reassign_stale_claim_owner_clears_owner_when_no_live_candidate_matches
 services::dispatches::outbox_claiming::tests::reassign_stale_claim_owners_moves_100_pending_rows_to_live_label_match
-services::dispatches::wait_queue::tests::wake_waiting_dispatch_outbox_pg_reassigns_wait_rows_fifo
 services::maintenance::jobs::db_retention::tests::db_retention_context_snapshot_pg_reference_gate
 services::maintenance::jobs::db_retention::tests::db_retention_context_snapshot_terminal_reclaim
 services::maintenance::jobs::db_retention::tests::db_retention_keeps_skill_usage_rows_with_null_used_at
@@ -546,11 +533,6 @@ services::session_forwarding::tests::cancel_selection_session_key_fallback_prese
 services::session_resume::tests::production_resume_lock_blocks_effective_intake_snapshot_until_rebind_finishes
 services::session_resume::tests::resume_production_path_clears_stale_binding_and_rebinds_runtime
 services::session_resume::tests::resume_production_path_retains_live_owner_after_teardown
-services::settings::tests::cli_pg_put_get_set_round_trip_survives_startup_seed
-services::settings::tests::metadata_less_put_pg_runtime_config_preserves_explicit_overrides_and_metadata_replaces_them
-services::settings::tests::put_pg_runtime_config_object_and_non_object_keep_only_blob_authority
-services::settings::tests::runtime_config_pg_delete_failure_rolls_back_blob_and_every_mirror
-services::settings::tests::startup_pg_runtime_config_writer_keeps_blob_authority_without_mirror_reinsertion
 services::stale_turn_reconciler::tests::keyed_unchanged_outcome_keeps_live_row_turn_active_pg
 services::stale_turn_reconciler::tests::preserved_live_tmux_evidence_keeps_stale_row_busy_pg
 services::stale_turn_reconciler::tests::probe_failure_spinner_and_provider_mismatch_preserve_rows_pg

@@ -78,6 +78,14 @@ class Analysis:
     inventory: PgInventory
     debts: dict[str, set[str]]
     allowlist_count: int
+    findings: tuple["Finding", ...] = ()
+
+
+@dataclass(frozen=True)
+class Finding:
+    kind: str
+    source: str
+    detail: str
 
 
 @dataclass(frozen=True)
@@ -119,14 +127,24 @@ _TEST_ATTR = re.compile(
 )
 _STRUCT = re.compile(r"\bstruct\s+([A-Za-z_][A-Za-z0-9_]*)\b")
 _IMPL = re.compile(r"\bimpl(?:\s*<[^>{}]*>)?\s+(?:[^{}]*?\s+for\s+)?([A-Za-z_][A-Za-z0-9_]*)\b[^{};]*\{")
-_JOBS_KEY = re.compile(r"^(?P<indent>[^\S\n]*)jobs:[^\S\n]*$", re.MULTILINE)
-_JOB = re.compile(
-    r"^(?P<indent>[^\S\n]+)(?P<name>[A-Za-z0-9_-]+):[^\S\n]*$",
+_JOBS_KEY = re.compile(
+    r"^(?P<indent>[^\S\n]*)(?:jobs|'jobs'|\"jobs\"):[^\S\n]*(?:#.*)?$",
     re.MULTILINE,
 )
+_JOB = re.compile(
+    r"^(?P<indent>[^\S\n]+)(?P<name>[A-Za-z0-9_-]+|'[^']+'|\"[^\"]+\"):[^\S\n]*(?:#.*)?$",
+    re.MULTILINE,
+)
+_FN = re.compile(r"\b(?:async\s+)?(?:unsafe\s+)?fn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)")
+_CALL = re.compile(
+    r"(?<![.:])\b(?P<path>(?:(?:crate|self|super)(?:::[A-Za-z_][A-Za-z0-9_]*)+|[A-Za-z_][A-Za-z0-9_]*))\s*!?\s*\("
+)
+_USE = re.compile(r"\buse\s+(?P<path>[^;]+);")
 
 
-def _matching_brace(clean: str, opening: int) -> int:
+def _matching_brace(clean: str, opening: int, counter: list[int] | None = None) -> int:
+    if counter is not None:
+        counter[0] += 1
     depth = 0
     for index in range(opening, len(clean)):
         if clean[index] == "{":
@@ -146,7 +164,56 @@ def _opening_brace(clean: str, start: int) -> int | None:
     return brace
 
 
-def _module_ranges(source: str, clean: str) -> list[ModuleRange]:
+def _edge_boundary(clean: str, opening: int, counter: list[int] | None = None) -> str:
+    """Return exactly one caller body, excluding adjacent functions/items."""
+    return clean[opening:_matching_brace(clean, opening, counter) + 1]
+
+
+def _mask_nested_items(
+    body: str, counter: list[int] | None = None
+) -> str:
+    """Blank block-local functions/impls so their seeds do not taint a test."""
+    spans: list[tuple[int, int]] = []
+    for pattern in (_FN, _IMPL):
+        for match in pattern.finditer(body):
+            opening = _opening_brace(body, match.end())
+            if opening is None:
+                continue
+            spans.append((match.start(), _matching_brace(body, opening, counter) + 1))
+    masked = list(body)
+    for start, end in spans:
+        masked[start:end] = ("\n" if char == "\n" else " " for char in masked[start:end])
+    return "".join(masked)
+
+
+def _transitive_closure(
+    referenced: set[tuple[tuple[str, ...], str, str]],
+    seeded: set[tuple[tuple[str, ...], str, str]],
+    edges: dict[
+        tuple[tuple[str, ...], str, str],
+        set[tuple[tuple[str, ...], str, str]],
+    ],
+    max_depth: int = 3,
+) -> bool:
+    """Whether a module-scoped helper reaches a PG seed within ``max_depth``."""
+    frontier = set(referenced)
+    seen: set[tuple[tuple[str, ...], str, str]] = set()
+    for _depth in range(1, max_depth + 1):
+        if frontier & seeded:
+            return True
+        seen.update(frontier)
+        frontier = {
+            target
+            for caller in frontier
+            for target in edges.get(caller, set())
+            if target not in seen
+        }
+    return False
+
+
+def _module_ranges(
+    source: str, clean: str, counter: list[int] | None = None
+) -> list[ModuleRange]:
     attrs = {match.start("name"): match.group("attrs") for match in _ATTR_MOD.finditer(clean)}
     ranges: list[ModuleRange] = []
     for match in _MOD.finditer(clean):
@@ -154,7 +221,7 @@ def _module_ranges(source: str, clean: str) -> list[ModuleRange]:
             continue
         opening = match.end() - 1
         ranges.append(ModuleRange(
-            opening, _matching_brace(clean, opening), match.group("name"),
+            opening, _matching_brace(clean, opening, counter), match.group("name"),
             bool(_CFG_TEST.search(attrs.get(match.start("name"), ""))),
         ))
     return ranges
@@ -169,13 +236,15 @@ def _inside_test_region(offset: int, ranges: Iterable[ModuleRange], external: bo
     return external or any(item.is_test and item.start < offset < item.end for item in ranges)
 
 
-def _external_test_files(repo_root: Path, coverage) -> set[Path]:
+def _external_test_files(
+    repo_root: Path, coverage, counter: list[int] | None = None
+) -> set[Path]:
     src_root = (repo_root / "src").resolve()
     targets: set[Path] = set()
     for path in sorted(src_root.rglob("*.rs")):
         source = path.read_text("utf-8")
         clean = coverage.strip_rust(source)
-        ranges = _module_ranges(source, clean)
+        ranges = _module_ranges(source, clean, counter)
         for match in _ATTR_MOD.finditer(clean):
             if match.group("term") != ";" or not _CFG_TEST.search(match.group("attrs")):
                 continue
@@ -221,18 +290,50 @@ def _aliases(repo_root: Path, coverage) -> dict[tuple[str, ...], tuple[str, ...]
     return aliases
 
 
-def discover_pg_inventory(repo_root: Path) -> PgInventory:
+def discover_pg_inventory(
+    repo_root: Path, findings: list[Finding] | None = None
+) -> PgInventory:
     repo_root = repo_root.resolve()
     coverage = _load_coverage_module(repo_root)
     src_root = (repo_root / "src").resolve()
     aliases = _aliases(repo_root, coverage)
-    external_tests = _external_test_files(repo_root, coverage)
+    brace_counter = [0]
+    external_tests = _external_test_files(repo_root, coverage, brace_counter)
     declared_tests = {
         test
         for test_names in coverage.discover_test_inventory(repo_root).values()
         for test in test_names
     }
-    records: list[tuple[str, str, str, set[str]]] = []
+    item_bodies: dict[tuple[tuple[str, ...], str, str], str] = {}
+    seeded: set[tuple[tuple[str, ...], str, str]] = set()
+    records: list[tuple[str, str, tuple[str, ...], str]] = []
+    use_aliases: dict[tuple[str, ...], dict[str, tuple[str, ...]]] = {}
+    wildcard_uses: dict[tuple[str, ...], list[tuple[str, ...]]] = {}
+
+    def absolute_path(module: tuple[str, ...], raw: str) -> tuple[str, ...]:
+        parts = tuple(part for part in raw.strip().split("::") if part)
+        if not parts:
+            return ()
+        if parts[0] == "crate":
+            return parts[1:]
+        if parts[0] == "self":
+            return (*module, *parts[1:])
+        if parts[0] == "super":
+            drop = 0
+            while drop < len(parts) and parts[drop] == "super":
+                drop += 1
+            return (*module[: max(0, len(module) - drop)], *parts[drop:])
+        return parts
+
+    def nested(offset: int, ranges: Iterable[tuple[int, int]]) -> bool:
+        return any(start < offset < end for start, end in ranges)
+
+    def seed_match(body: str) -> bool:
+        # Keep the cheap prefilter confined to seed discovery. Edge and test-body
+        # extraction below always inspect their complete brace-bounded bodies.
+        return any(seed in body for seed in CONNECT_SEEDS) and any(
+            pattern.search(body) for pattern in CONNECT_SEED_PATTERNS
+        )
 
     for path in sorted(src_root.rglob("*.rs")):
         rel = path.relative_to(src_root)
@@ -240,36 +341,104 @@ def discover_pg_inventory(repo_root: Path) -> PgInventory:
             continue
         source = path.read_text("utf-8")
         clean = coverage.strip_rust(source)
-        ranges = _module_ranges(source, clean)
+        ranges = _module_ranges(source, clean, brace_counter)
         external = path.resolve() in external_tests
         physical_base = coverage.file_module_path(src_root, path)
 
-        helpers: set[str] = set()
+        fn_ranges: list[tuple[int, int, re.Match[str], int]] = []
+        for match in _FN.finditer(clean):
+            opening = _opening_brace(clean, match.end())
+            if opening is not None:
+                fn_ranges.append(
+                    (match.start(), _matching_brace(clean, opening, brace_counter), match, opening)
+                )
+        impl_ranges: list[tuple[int, int]] = []
+        for match in _IMPL.finditer(clean):
+            opening = match.end() - 1
+            impl_ranges.append(
+                (match.start(), _matching_brace(clean, opening, brace_counter))
+            )
+
+        test_name_offsets = {
+            match.start("name")
+            for match in _ATTR_FN.finditer(clean)
+            if _TEST_ATTR.search(match.group("attrs"))
+        }
+
+        for use in _USE.finditer(clean):
+            if nested(use.start(), ((start, end) for start, end, _, _ in fn_ranges)) or nested(
+                use.start(), impl_ranges
+            ):
+                continue
+            physical_module = (*physical_base, *_scope_at(use.start(), ranges))
+            module = coverage._normalize_alias_path(physical_module, aliases)
+            raw = use.group("path").strip()
+            expanded: list[str]
+            brace = re.fullmatch(r"(?P<base>.+)::\{(?P<items>[^{}]+)\}", raw)
+            if brace:
+                expanded = [
+                    f"{brace.group('base')}::{item.strip()}"
+                    for item in brace.group("items").split(",")
+                    if item.strip()
+                ]
+            else:
+                expanded = [raw]
+            for entry in expanded:
+                target_text, separator, alias = entry.partition(" as ")
+                target = absolute_path(module, target_text)
+                if not target:
+                    continue
+                binding = alias.strip() if separator else target[-1]
+                if binding == "*":
+                    wildcard_uses.setdefault(module, []).append(target[:-1])
+                else:
+                    use_aliases.setdefault(module, {})[binding] = target
+
+        all_fn_ranges = [(start, end) for start, end, _, _ in fn_ranges]
+        for start, end, match, opening in fn_ranges:
+            if match.start("name") in test_name_offsets:
+                continue
+            other_fns = ((outer_start, outer_end) for outer_start, outer_end in all_fn_ranges if outer_start != start)
+            if nested(start, other_fns) or nested(start, impl_ranges):
+                continue
+            if not _inside_test_region(start, ranges, external):
+                continue
+            physical_module = (*physical_base, *_scope_at(start, ranges))
+            module = coverage._normalize_alias_path(physical_module, aliases)
+            key = (module, match.group("name"), "fn")
+            body = _edge_boundary(clean, opening, brace_counter)
+            item_bodies[key] = body
+            if seed_match(body):
+                seeded.add(key)
+
         for match in _STRUCT.finditer(clean):
             if not _inside_test_region(match.start(), ranges, external):
                 continue
+            if nested(match.start(), all_fn_ranges) or nested(match.start(), impl_ranges):
+                continue
             opening = _opening_brace(clean, match.end())
             if opening is None:
                 continue
-            body = clean[opening:_matching_brace(clean, opening) + 1]
-            if any(pattern.search(body) for pattern in CONNECT_SEED_PATTERNS):
-                helpers.add(match.group(1))
+            body = _edge_boundary(clean, opening, brace_counter)
+            physical_module = (*physical_base, *_scope_at(match.start(), ranges))
+            module = coverage._normalize_alias_path(physical_module, aliases)
+            key = (module, match.group(1), "struct")
+            item_bodies[key] = body
+            if seed_match(body):
+                seeded.add(key)
         for match in _IMPL.finditer(clean):
             if not _inside_test_region(match.start(), ranges, external):
                 continue
+            if nested(match.start(), all_fn_ranges):
+                continue
             opening = match.end() - 1
-            body = clean[opening:_matching_brace(clean, opening) + 1]
-            if any(pattern.search(body) for pattern in CONNECT_SEED_PATTERNS):
-                helpers.add(match.group(1))
-        for match in re.finditer(r"\b(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)", clean):
-            if not _inside_test_region(match.start(), ranges, external):
-                continue
-            opening = _opening_brace(clean, match.end())
-            if opening is None:
-                continue
-            body = clean[opening:_matching_brace(clean, opening) + 1]
-            if any(pattern.search(body) for pattern in CONNECT_SEED_PATTERNS):
-                helpers.add(match.group(1))
+            body = _edge_boundary(clean, opening, brace_counter)
+            physical_module = (*physical_base, *_scope_at(match.start(), ranges))
+            module = coverage._normalize_alias_path(physical_module, aliases)
+            key = (module, match.group(1), "impl")
+            item_bodies[key] = body
+            if seed_match(body):
+                seeded.add(key)
 
         for match in _ATTR_FN.finditer(clean):
             if not _TEST_ATTR.search(match.group("attrs")):
@@ -279,44 +448,118 @@ def discover_pg_inventory(repo_root: Path) -> PgInventory:
             opening = _opening_brace(clean, match.end())
             if opening is None:
                 continue
-            body = clean[opening:_matching_brace(clean, opening) + 1]
+            body = _edge_boundary(clean, opening, brace_counter)
             physical = (*physical_base, *_scope_at(match.start(), ranges), match.group("name"))
             logical = coverage._normalize_alias_path(physical, aliases)
             name = "::".join(logical)
             if name in declared_tests:
-                records.append((name, str(path.relative_to(repo_root)), body, helpers.copy()))
+                records.append((name, str(path.relative_to(repo_root)), logical[:-1], body))
+
+    by_path: dict[tuple[tuple[str, ...], str], set[tuple[tuple[str, ...], str, str]]] = {}
+    for key in item_bodies:
+        module, name, _ = key
+        by_path.setdefault((module, name), set()).add(key)
+
+    def resolve(module: tuple[str, ...], raw: str) -> set[tuple[tuple[str, ...], str, str]]:
+        if "::" in raw:
+            target = absolute_path(module, raw)
+            return by_path.get((target[:-1], target[-1]), set()) if target else set()
+        targets = set(by_path.get((module, raw), set()))
+        alias = use_aliases.get(module, {}).get(raw)
+        if alias:
+            targets.update(by_path.get((alias[:-1], alias[-1]), set()))
+        for base in wildcard_uses.get(module, []):
+            targets.update(by_path.get((base, raw), set()))
+        return targets
+
+    edges: dict[tuple[tuple[str, ...], str, str], set[tuple[tuple[str, ...], str, str]]] = {}
+    for key, body in item_bodies.items():
+        if key[2] != "fn":
+            continue
+        edges[key] = {
+            target
+            for call in _CALL.finditer(body)
+            for target in resolve(key[0], call.group("path"))
+            if target[2] == "fn"
+        }
 
     tests: dict[str, str] = {}
-    for name, path, body, helpers in records:
-        direct = any(pattern.search(body) for pattern in SEED_PATTERNS)
-        indirect = any(re.search(rf"\b{re.escape(helper)}\b", body) for helper in helpers)
+    for name, path, module, body in records:
+        visible_body = _mask_nested_items(body, brace_counter)
+        direct = any(pattern.search(visible_body) for pattern in SEED_PATTERNS)
+        mentioned_names = {
+            match.group("name")
+            for match in re.finditer(
+                r"\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b(?!\s*::)",
+                visible_body,
+            )
+        }
+        referenced = {
+            target
+            for item_name in mentioned_names
+            for target in resolve(module, item_name)
+        }
+        indirect = _transitive_closure(referenced, seeded, edges)
         if direct or indirect:
             tests[name] = path
+    if findings is not None:
+        findings.append(Finding(
+            "operation-counter",
+            "discover_pg_inventory",
+            f"_matching_brace calls={brace_counter[0]}",
+        ))
     return PgInventory(tests)
 
 
-def parse_jobs(path: Path, repo_root: Path) -> list[Job]:
+def _indent_width(indent: str) -> int:
+    return len(indent.expandtabs(8))
+
+
+def parse_jobs(
+    path: Path, repo_root: Path, findings: list[Finding] | None = None
+) -> list[Job]:
     """Parse top-level jobs without treating workflow trigger keys as jobs.
 
     This intentionally stays dependency-free instead of relying on PyYAML, which
     is not declared by AgentDesk's script-check environment. It supports the
-    repository's block-style workflows and fails closed if ``jobs:`` is absent.
+    repository's block-style workflows. Missing or empty job maps are reported as
+    warn-only findings by ``analyze``; they do not add a blocking predicate.
     """
     text = path.read_text("utf-8")
     jobs_key = _JOBS_KEY.search(text)
     if jobs_key is None:
         return []
-    jobs_indent = len(jobs_key.group("indent"))
+    jobs_indent = _indent_width(jobs_key.group("indent"))
+    section_end = len(text)
+    for line in re.finditer(r"^(?P<indent>[^\S\n]*)(?P<body>\S.*)$", text[jobs_key.end():], re.MULTILINE):
+        if line.group("body").startswith("#"):
+            continue
+        if _indent_width(line.group("indent")) <= jobs_indent:
+            section_end = jobs_key.end() + line.start()
+            break
+    in_section = [
+        match for match in _JOB.finditer(text, jobs_key.end(), section_end)
+        if _indent_width(match.group("indent")) > jobs_indent
+    ]
+    job_indent = min(
+        (_indent_width(match.group("indent")) for match in in_section),
+        default=None,
+    )
     candidates = [
-        match for match in _JOB.finditer(text, jobs_key.end())
-        if len(match.group("indent")) == jobs_indent + 2
+        match for match in in_section
+        if _indent_width(match.group("indent")) == job_indent
     ]
     rel = str(path.relative_to(repo_root))
+    if not candidates and findings is not None:
+        findings.append(Finding("jobs-empty", rel, "jobs: is present but no job keys were parsed"))
     return [
         Job(
             rel,
-            match.group("name"),
-            text[match.end():candidates[index + 1].start() if index + 1 < len(candidates) else len(text)],
+            match.group("name").strip("'\""),
+            text[
+                match.end():
+                candidates[index + 1].start() if index + 1 < len(candidates) else section_end
+            ],
         )
         for index, match in enumerate(candidates)
     ]
@@ -446,12 +689,13 @@ def load_allowlist(path: Path) -> tuple[set[str], set[str]]:
 
 def analyze(repo_root: Path, allowlist_path: Path | None = None) -> Analysis:
     coverage = _load_coverage_module(repo_root)
+    findings: list[Finding] = []
     workflows = sorted(
         set((repo_root / ".github/workflows").glob("*.yml"))
         | set((repo_root / ".github/workflows").glob("*.yaml"))
     )
-    jobs = [job for path in workflows for job in parse_jobs(path, repo_root)]
-    inventory = discover_pg_inventory(repo_root)
+    jobs = [job for path in workflows for job in parse_jobs(path, repo_root, findings)]
+    inventory = discover_pg_inventory(repo_root, findings)
     allowed_tests, allowed_files = load_allowlist(allowlist_path or repo_root / ALLOWLIST_REL)
     active_tests = {name: path for name, path in inventory.tests.items() if name not in allowed_tests and path not in allowed_files}
     pg_lanes = pg_lane_filters(repo_root, jobs, coverage)
@@ -463,7 +707,12 @@ def analyze(repo_root: Path, allowlist_path: Path | None = None) -> Analysis:
         "rule3": {path for path in set(active_tests.values()) if not path_selected(path, patterns)},
         "rule4": {job.key for job in jobs if "postgres-service.sh start" in job.text and not re.search(r"^\s+AGENTDESK_REQUIRE_PG:\s*['\"]?1['\"]?\s*$", job.text, re.MULTILINE)},
     }
-    return Analysis(PgInventory(active_tests), debts, len(allowed_tests) + len(allowed_files))
+    return Analysis(
+        PgInventory(active_tests),
+        debts,
+        len(allowed_tests) + len(allowed_files),
+        tuple(findings),
+    )
 
 
 def render_manifest(inventory: PgInventory) -> str:
@@ -529,6 +778,8 @@ def check_analysis(
 ) -> int:
     """Apply manifest and one-way baseline contracts to a supplied analysis."""
     failed = False
+    for finding in analysis.findings:
+        print(f"WARN: [{finding.kind}] {finding.source}: {finding.detail}", file=sys.stderr)
     expected_manifest = render_manifest(analysis.inventory)
     if actual_manifest != expected_manifest:
         print("FAIL: PG test-lane manifest drift.", file=sys.stderr)
