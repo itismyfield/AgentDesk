@@ -211,6 +211,11 @@ use tokio::sync::Mutex;
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
 
+#[allow(unused_imports)]
+use self::session_idle_cleanup::{
+    IdleSessionWatcherCleanup, idle_session_watcher_cleanup,
+    mark_session_disconnected_for_idle_cleanup, maybe_cleanup_sessions,
+};
 use crate::services::agent_protocol::{DEFAULT_ALLOWED_TOOLS, StreamMessage};
 use crate::services::claude;
 use crate::services::codex;
@@ -218,10 +223,9 @@ use crate::services::gemini;
 use crate::services::opencode;
 use crate::services::provider::{CancelToken, ProviderKind, ReadOutputResult};
 use crate::services::qwen;
-use crate::ui::ai_screen::{self, HistoryItem, HistoryType};
-
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
 use crate::services::turn_orchestrator::HasPendingSoftQueueResult;
+use crate::ui::ai_screen::{self, HistoryItem, HistoryType};
 use adk_session::{
     build_adk_session_key, build_session_key_candidates, derive_adk_session_info,
     lookup_pending_dispatch_for_thread, parse_dispatch_id,
@@ -248,7 +252,6 @@ use recovery_engine::restore_inflight_turns;
 use restart_report::flush_restart_reports;
 use role_map_enrichment::enrich_role_map_with_channel_ids;
 use router::handle_event;
-use session_idle_cleanup::maybe_cleanup_sessions;
 use session_status_hook::{
     post_canonical as post_adk_session_status_with_canonical_identity,
     post_channel_turn as post_adk_session_status_for_channel,
@@ -4369,6 +4372,142 @@ pub(super) async fn kickoff_idle_queues(
 use discord_io::{check_auth, check_owner, rate_limit_wait, try_handle_pending_dm_reply};
 
 // ─── Event handler ───────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod idle_cleanup_selector_tests {
+    use super::mark_session_disconnected_for_idle_cleanup;
+
+    struct TestPostgresDb {
+        _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl TestPostgresDb {
+        async fn create() -> Self {
+            let lifecycle = crate::db::postgres::lock_test_lifecycle();
+            let admin_url = postgres_admin_database_url();
+            let database_name =
+                format!("agentdesk_idle_selector_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
+            crate::db::postgres::create_test_database(
+                &admin_url,
+                &database_name,
+                "idle selector tests",
+            )
+            .await
+            .expect("create idle selector postgres test db");
+
+            Self {
+                _lifecycle: lifecycle,
+                admin_url,
+                database_name,
+                database_url,
+            }
+        }
+
+        async fn connect_and_migrate(&self) -> sqlx::PgPool {
+            crate::db::postgres::connect_test_pool_and_migrate(
+                &self.database_url,
+                "idle selector tests",
+            )
+            .await
+            .expect("apply idle selector postgres migrations")
+        }
+
+        async fn drop(self) {
+            crate::db::postgres::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                "idle selector tests",
+            )
+            .await
+            .expect("drop idle selector postgres test db");
+        }
+    }
+
+    fn postgres_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn postgres_admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", postgres_base_database_url(), admin_db)
+    }
+
+    #[tokio::test]
+    async fn idle_cleanup_preserves_provider_selector_columns_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let session_key = "host:idle-selector-preserve";
+
+        sqlx::query(
+            "INSERT INTO sessions
+             (session_key, status, active_dispatch_id, claude_session_id,
+              raw_provider_session_id, created_at)
+             VALUES ($1, 'idle', 'dispatch-1841', 'claude-selector-1841',
+                     'raw-selector-1841', NOW())",
+        )
+        .bind(session_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(mark_session_disconnected_for_idle_cleanup(Some(&pool), session_key).await);
+
+        let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
+            "SELECT status, active_dispatch_id, claude_session_id, raw_provider_session_id
+             FROM sessions
+             WHERE session_key = $1",
+        )
+        .bind(session_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, "disconnected");
+        assert_eq!(row.1, None);
+        assert_eq!(row.2.as_deref(), Some("claude-selector-1841"));
+        assert_eq!(row.3.as_deref(), Some("raw-selector-1841"));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+}
 
 // ─── Slash commands (extracted to commands/ module) ──────────────────────────
 
