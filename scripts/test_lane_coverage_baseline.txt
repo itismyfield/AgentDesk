@@ -532,7 +532,6 @@ services::dispatched_sessions::kill_tmux_resume_tests
 services::dispatches::discord_delivery::guard::tests
 services::dispatches::discord_delivery::orchestration::slot_routing_pure_tests
 services::dispatches::discord_delivery::transport::tests
-services::dispatches::outbox_claiming::tests
 services::dispatches::outbox_route::tests
 services::dispatches::result_header::tests
 services::dispatches::routing_constraint::tests

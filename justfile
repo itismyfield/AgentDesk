@@ -44,6 +44,8 @@ test-non-pg:
     cargo test --lib server::claude_oauth_usage_tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib tui_task_card::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib server::routes::message_outbox::tests -- --skip _pg --skip pg_ --skip postgres
+    # Keep the non-PostgreSQL unit tests covered after outbox_claiming's PG split.
+    cargo test --lib services::dispatches::outbox_claiming::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib discord_thread_create -- --test-threads=1
     # #4599: queue reaction fallback and persisted-v1 promotion contracts.
     cargo test --lib reaction_control::tests -- --skip _pg --skip pg_ --skip postgres

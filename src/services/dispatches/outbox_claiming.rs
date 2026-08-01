@@ -520,133 +520,6 @@ mod tests {
     use crate::db::dispatches::outbox::DispatchOutboxClaimCandidate;
     use crate::services::dispatches::routing_constraint::{NoOpConstraint, RoutingEngine};
     use serde_json::json;
-    use sqlx::PgPool;
-    use uuid::Uuid;
-
-    struct TestPostgresDb {
-        _lock: crate::db::postgres::PostgresTestLifecycleGuard,
-        admin_url: String,
-        database_name: String,
-        database_url: String,
-    }
-
-    impl TestPostgresDb {
-        async fn create() -> Option<Self> {
-            let lock = crate::db::postgres::lock_test_lifecycle();
-            let admin_url = postgres_admin_database_url();
-            let database_name = format!("agentdesk_outbox_claiming_{}", Uuid::new_v4().simple());
-            let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
-            if let Err(error) = crate::db::postgres::create_test_database(
-                &admin_url,
-                &database_name,
-                "outbox claiming tests",
-            )
-            .await
-            {
-                eprintln!("skipping outbox claiming postgres test: {error}");
-                return None;
-            }
-
-            Some(Self {
-                _lock: lock,
-                admin_url,
-                database_name,
-                database_url,
-            })
-        }
-
-        async fn connect_and_migrate(&self) -> PgPool {
-            crate::db::postgres::connect_test_pool_and_migrate(
-                &self.database_url,
-                "outbox claiming tests",
-            )
-            .await
-            .expect("connect and migrate outbox claiming postgres test database")
-        }
-
-        async fn drop(self) {
-            crate::db::postgres::drop_test_database(
-                &self.admin_url,
-                &self.database_name,
-                "outbox claiming tests",
-            )
-            .await
-            .expect("drop outbox claiming postgres test database");
-        }
-    }
-
-    fn postgres_base_database_url() -> String {
-        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
-            let trimmed = base.trim();
-            if !trimmed.is_empty() {
-                return trimmed.trim_end_matches('/').to_string();
-            }
-        }
-
-        let user = std::env::var("PGUSER")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| {
-                std::env::var("USER")
-                    .ok()
-                    .filter(|value| !value.trim().is_empty())
-            })
-            .unwrap_or_else(|| "postgres".to_string());
-        let password = std::env::var("PGPASSWORD")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
-        let host = std::env::var("PGHOST")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "localhost".to_string());
-        let port = std::env::var("PGPORT")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "5432".to_string());
-
-        match password {
-            Some(password) => format!("postgres://{user}:{password}@{host}:{port}"),
-            None => format!("postgres://{user}@{host}:{port}"),
-        }
-    }
-
-    fn postgres_admin_database_url() -> String {
-        if let Ok(url) = std::env::var("POSTGRES_TEST_ADMIN_URL") {
-            let trimmed = url.trim();
-            if !trimmed.is_empty() {
-                return trimmed.to_string();
-            }
-        }
-        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "postgres".to_string());
-        format!("{}/{}", postgres_base_database_url(), admin_db)
-    }
-
-    async fn seed_worker_node(
-        pool: &PgPool,
-        instance_id: &str,
-        labels: serde_json::Value,
-        heartbeat_age_secs: i64,
-    ) {
-        sqlx::query(
-            "INSERT INTO worker_nodes (
-                instance_id, hostname, process_id, role, effective_role, status,
-                labels, capabilities, last_heartbeat_at, started_at, updated_at
-             ) VALUES (
-                $1, $1, 100, 'auto', 'worker', 'online',
-                $2, '{\"providers\":[\"codex\"]}'::jsonb,
-                NOW() - ($3::BIGINT * INTERVAL '1 second'), NOW(), NOW()
-             )",
-        )
-        .bind(instance_id)
-        .bind(labels)
-        .bind(heartbeat_age_secs)
-        .execute(pool)
-        .await
-        .expect("seed worker node");
-    }
 
     #[test]
     fn non_empty_required_capabilities_handles_null_and_empty_object() {
@@ -827,107 +700,253 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn reassign_stale_claim_owners_moves_100_pending_rows_to_live_label_match() {
-        let Some(pg_db) = TestPostgresDb::create().await else {
-            return;
-        };
-        let pool = pg_db.connect_and_migrate().await;
-        seed_worker_node(&pool, "stale-node", json!(["mac-book"]), 45).await;
-        seed_worker_node(&pool, "mac-mini-release", json!(["mac-mini"]), 0).await;
+    // #4979 B0: PG 테스트를 `*_pg_tests` 하위 모듈로 이관해 `just test-postgres`의
+    // `_pg` 선택자에 걸리게 한다. 아래 `#[cfg(test)]`는 컴파일상 중복이지만
+    // 지우면 안 된다 — `check_test_lane_coverage.py`가 test fn을 가장 안쪽
+    // `cfg(test)` 모듈에 귀속시키므로, 빼면 PG 2건이 부모 `…::tests`로 귀속되고
+    // 그 부모는 `--skip _pg` 탓에 어떤 curated 호출로도 커버되지 않게 된다.
+    // 이름 계약은 두 층으로 갈린다. `*_pg_tests`라는 **접미사 형태**는 어떤
+    // 게이트도 강제하지 않는 사람 규약이고(bare `pg_tests` 모듈이 이미 4건
+    // 있다), 실제로 강제되는 것은 정규화된 테스트 경로가 `_pg`·`pg_`·`postgres`
+    // 중 하나를 부분문자열로 포함해야 한다는 것뿐이다 — `justfile`의
+    // `cargo test --lib -- _pg pg_ postgres`(rule1)와 비PG 레인의 `--skip _pg
+    // --skip pg_ --skip postgres`(rule2)에서 나오며, 둘 다 one-way ratchet이라
+    // 위반하면 CI가 red다. 즉 `mod db_backed_tests` 같은 이름은 규약 위반이
+    // 아니라 게이트 위반이다.
+    #[cfg(test)]
+    mod outbox_claiming_pg_tests {
+        use super::*;
+        use sqlx::PgPool;
+        use uuid::Uuid;
 
-        sqlx::query(
-            "INSERT INTO dispatch_outbox (
+        struct TestPostgresDb {
+            _lock: crate::db::postgres::PostgresTestLifecycleGuard,
+            admin_url: String,
+            database_name: String,
+            database_url: String,
+        }
+
+        impl TestPostgresDb {
+            async fn create() -> Option<Self> {
+                let lock = crate::db::postgres::lock_test_lifecycle();
+                let admin_url = postgres_admin_database_url();
+                let database_name =
+                    format!("agentdesk_outbox_claiming_{}", Uuid::new_v4().simple());
+                let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
+                if let Err(error) = crate::db::postgres::create_test_database(
+                    &admin_url,
+                    &database_name,
+                    "outbox claiming tests",
+                )
+                .await
+                {
+                    eprintln!("skipping outbox claiming postgres test: {error}");
+                    return None;
+                }
+
+                Some(Self {
+                    _lock: lock,
+                    admin_url,
+                    database_name,
+                    database_url,
+                })
+            }
+
+            async fn connect_and_migrate(&self) -> PgPool {
+                crate::db::postgres::connect_test_pool_and_migrate(
+                    &self.database_url,
+                    "outbox claiming tests",
+                )
+                .await
+                .expect("connect and migrate outbox claiming postgres test database")
+            }
+
+            async fn drop(self) {
+                crate::db::postgres::drop_test_database(
+                    &self.admin_url,
+                    &self.database_name,
+                    "outbox claiming tests",
+                )
+                .await
+                .expect("drop outbox claiming postgres test database");
+            }
+        }
+
+        fn postgres_base_database_url() -> String {
+            if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+                let trimmed = base.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.trim_end_matches('/').to_string();
+                }
+            }
+
+            let user = std::env::var("PGUSER")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| {
+                    std::env::var("USER")
+                        .ok()
+                        .filter(|value| !value.trim().is_empty())
+                })
+                .unwrap_or_else(|| "postgres".to_string());
+            let password = std::env::var("PGPASSWORD")
+                .ok()
+                .filter(|value| !value.trim().is_empty());
+            let host = std::env::var("PGHOST")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "localhost".to_string());
+            let port = std::env::var("PGPORT")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "5432".to_string());
+
+            match password {
+                Some(password) => format!("postgres://{user}:{password}@{host}:{port}"),
+                None => format!("postgres://{user}@{host}:{port}"),
+            }
+        }
+
+        fn postgres_admin_database_url() -> String {
+            if let Ok(url) = std::env::var("POSTGRES_TEST_ADMIN_URL") {
+                let trimmed = url.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_string();
+                }
+            }
+            let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "postgres".to_string());
+            format!("{}/{}", postgres_base_database_url(), admin_db)
+        }
+
+        async fn seed_worker_node(
+            pool: &PgPool,
+            instance_id: &str,
+            labels: serde_json::Value,
+            heartbeat_age_secs: i64,
+        ) {
+            sqlx::query(
+                "INSERT INTO worker_nodes (
+                instance_id, hostname, process_id, role, effective_role, status,
+                labels, capabilities, last_heartbeat_at, started_at, updated_at
+             ) VALUES (
+                $1, $1, 100, 'auto', 'worker', 'online',
+                $2, '{\"providers\":[\"codex\"]}'::jsonb,
+                NOW() - ($3::BIGINT * INTERVAL '1 second'), NOW(), NOW()
+             )",
+            )
+            .bind(instance_id)
+            .bind(labels)
+            .bind(heartbeat_age_secs)
+            .execute(pool)
+            .await
+            .expect("seed worker node");
+        }
+
+        #[tokio::test]
+        async fn reassign_stale_claim_owners_moves_100_pending_rows_to_live_label_match() {
+            let Some(pg_db) = TestPostgresDb::create().await else {
+                return;
+            };
+            let pool = pg_db.connect_and_migrate().await;
+            seed_worker_node(&pool, "stale-node", json!(["mac-book"]), 45).await;
+            seed_worker_node(&pool, "mac-mini-release", json!(["mac-mini"]), 0).await;
+
+            sqlx::query(
+                "INSERT INTO dispatch_outbox (
                 dispatch_id, action, status, claim_owner, required_capabilities
              )
              SELECT 'dispatch-stale-' || gs, 'notify', 'pending', 'stale-node', $1
                FROM generate_series(1, 100) gs",
-        )
-        .bind(json!({"preferred": {"labels": ["mac-book", "mac-mini"]}}))
-        .execute(&pool)
-        .await
-        .expect("seed stale claim-owner outbox rows");
+            )
+            .bind(json!({"preferred": {"labels": ["mac-book", "mac-mini"]}}))
+            .execute(&pool)
+            .await
+            .expect("seed stale claim-owner outbox rows");
 
-        let mut config = crate::config::ClusterConfig::default();
-        config.heartbeat_interval_secs = 10;
-        let reassigned =
-            reassign_stale_dispatch_outbox_claim_owners_with_cluster_config_pg(&pool, &config)
-                .await
-                .expect("reassign stale claim owners");
-        assert_eq!(reassigned, 100);
+            let mut config = crate::config::ClusterConfig::default();
+            config.heartbeat_interval_secs = 10;
+            let reassigned =
+                reassign_stale_dispatch_outbox_claim_owners_with_cluster_config_pg(&pool, &config)
+                    .await
+                    .expect("reassign stale claim owners");
+            assert_eq!(reassigned, 100);
 
-        let new_owner_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*)::BIGINT
+            let new_owner_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*)::BIGINT
                FROM dispatch_outbox
               WHERE claim_owner = 'mac-mini-release'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(new_owner_count, 100);
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(new_owner_count, 100);
 
-        let diagnostics: serde_json::Value = sqlx::query_scalar(
-            "SELECT routing_diagnostics
+            let diagnostics: serde_json::Value = sqlx::query_scalar(
+                "SELECT routing_diagnostics
                FROM dispatch_outbox
               WHERE dispatch_id = 'dispatch-stale-1'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(diagnostics["event"], "stale_claim_owner_reassigned");
-        assert_eq!(diagnostics["previous_claim_owner"], "stale-node");
-        assert_eq!(diagnostics["new_claim_owner"], "mac-mini-release");
-        assert_eq!(
-            diagnostics["selected"]["decision"]["instance_id"],
-            "mac-mini-release"
-        );
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(diagnostics["event"], "stale_claim_owner_reassigned");
+            assert_eq!(diagnostics["previous_claim_owner"], "stale-node");
+            assert_eq!(diagnostics["new_claim_owner"], "mac-mini-release");
+            assert_eq!(
+                diagnostics["selected"]["decision"]["instance_id"],
+                "mac-mini-release"
+            );
 
-        pool.close().await;
-        pg_db.drop().await;
-    }
+            pool.close().await;
+            pg_db.drop().await;
+        }
 
-    #[tokio::test]
-    async fn reassign_stale_claim_owner_clears_owner_when_no_live_candidate_matches() {
-        let Some(pg_db) = TestPostgresDb::create().await else {
-            return;
-        };
-        let pool = pg_db.connect_and_migrate().await;
-        seed_worker_node(&pool, "stale-node", json!(["mac-book"]), 45).await;
-        seed_worker_node(&pool, "mac-mini-release", json!(["mac-mini"]), 0).await;
+        #[tokio::test]
+        async fn reassign_stale_claim_owner_clears_owner_when_no_live_candidate_matches() {
+            let Some(pg_db) = TestPostgresDb::create().await else {
+                return;
+            };
+            let pool = pg_db.connect_and_migrate().await;
+            seed_worker_node(&pool, "stale-node", json!(["mac-book"]), 45).await;
+            seed_worker_node(&pool, "mac-mini-release", json!(["mac-mini"]), 0).await;
 
-        sqlx::query(
-            "INSERT INTO dispatch_outbox (
+            sqlx::query(
+                "INSERT INTO dispatch_outbox (
                 dispatch_id, action, status, claim_owner, required_capabilities
              ) VALUES (
                 'dispatch-no-candidate', 'notify', 'pending', 'stale-node', $1
              )",
-        )
-        .bind(json!({"required": {"labels": ["linux"]}}))
-        .execute(&pool)
-        .await
-        .expect("seed no-candidate stale claim-owner outbox row");
+            )
+            .bind(json!({"required": {"labels": ["linux"]}}))
+            .execute(&pool)
+            .await
+            .expect("seed no-candidate stale claim-owner outbox row");
 
-        let config = crate::config::ClusterConfig::default();
-        let reassigned =
-            reassign_stale_dispatch_outbox_claim_owners_with_cluster_config_pg(&pool, &config)
-                .await
-                .expect("clear stale claim owner");
-        assert_eq!(reassigned, 1);
+            let config = crate::config::ClusterConfig::default();
+            let reassigned =
+                reassign_stale_dispatch_outbox_claim_owners_with_cluster_config_pg(&pool, &config)
+                    .await
+                    .expect("clear stale claim owner");
+            assert_eq!(reassigned, 1);
 
-        let (claim_owner, diagnostics): (Option<String>, serde_json::Value) = sqlx::query_as(
-            "SELECT claim_owner, routing_diagnostics
+            let (claim_owner, diagnostics): (Option<String>, serde_json::Value) = sqlx::query_as(
+                "SELECT claim_owner, routing_diagnostics
                FROM dispatch_outbox
               WHERE dispatch_id = 'dispatch-no-candidate'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert!(claim_owner.is_none());
-        assert_eq!(diagnostics["previous_claim_owner"], "stale-node");
-        assert!(diagnostics["new_claim_owner"].is_null());
-        assert!(diagnostics["selected"].is_null());
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(claim_owner.is_none());
+            assert_eq!(diagnostics["previous_claim_owner"], "stale-node");
+            assert!(diagnostics["new_claim_owner"].is_null());
+            assert!(diagnostics["selected"].is_null());
 
-        pool.close().await;
-        pg_db.drop().await;
+            pool.close().await;
+            pg_db.drop().await;
+        }
     }
 }
