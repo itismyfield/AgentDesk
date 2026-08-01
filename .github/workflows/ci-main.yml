@@ -277,6 +277,12 @@ jobs:
         with:
           python-version: "3.11"
 
+      # See the matching step in ci-pr.yml: the PyYAML oracle in
+      # `tests/test_check_pg_test_lane_membership.py` is not available on the
+      # clean setup-python interpreter and must be installed explicitly.
+      - name: Install script-test Python deps
+        run: python3 -m pip install --disable-pip-version-check pyyaml
+
       - name: Install shellcheck
         run: sudo apt-get install -y shellcheck
 

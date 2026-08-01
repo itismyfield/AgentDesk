@@ -843,6 +843,15 @@ jobs:
         with:
           python-version: "3.11"
 
+      # `scripts/check_pg_test_lane_membership.py` stays dependency-free on
+      # purpose, but `tests/test_check_pg_test_lane_membership.py` uses PyYAML
+      # as an independent oracle to prove the hand-written `tests/fixtures/
+      # pg_lane/jobs_*.yml` inputs really are the YAML shapes the dependency-free
+      # parser claims to handle. setup-python gives a clean interpreter, so the
+      # oracle must be installed explicitly or the suite errors on import.
+      - name: Install script-test Python deps
+        run: python3 -m pip install --disable-pip-version-check pyyaml
+
       - name: Large file guard
         shell: bash
         run: |
