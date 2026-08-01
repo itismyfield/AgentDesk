@@ -98,9 +98,9 @@ pub(super) async fn reset_scoped_with_pg(
                 .map(str::trim)
                 .is_some_and(|run_repo| !run_repo.is_empty())
             {
-                return Err(reset_ownership_conflict(
+                return Err(reset_scope_conflict(
                     run_id,
-                    "repo does not own the requested run",
+                    "repo constraint does not match the requested run",
                 ));
             }
             let mismatched_entries = sqlx::query_scalar::<_, i64>(
@@ -116,16 +116,16 @@ pub(super) async fn reset_scoped_with_pg(
             .await
             .map_err(|error| {
                 AppError::internal(format!(
-                    "check auto-queue run '{run_id}' repo ownership: {error}"
+                    "check auto-queue run '{run_id}' repo constraint: {error}"
                 ))
                 .with_code(ErrorCode::Database)
                 .with_context("run_id", run_id)
-                .with_operation("auto_queue.reset.check_repo_ownership")
+                .with_operation("auto_queue.reset.check_repo_constraint")
             })?;
             if mismatched_entries == 0 {
-                return Err(reset_ownership_conflict(
+                return Err(reset_scope_conflict(
                     run_id,
-                    "repo does not own the requested run",
+                    "repo constraint does not match the requested run",
                 ));
             }
         }
@@ -144,16 +144,16 @@ pub(super) async fn reset_scoped_with_pg(
         .await
         .map_err(|error| {
             AppError::internal(format!(
-                "check auto-queue entry repo ownership for '{run_id}': {error}"
+                "check auto-queue entry repo constraint for '{run_id}': {error}"
             ))
             .with_code(ErrorCode::Database)
             .with_context("run_id", run_id)
-            .with_operation("auto_queue.reset.check_entry_repo_ownership")
+            .with_operation("auto_queue.reset.check_entry_repo_constraint")
         })?;
         if foreign_repo_entries > 0 {
-            return Err(reset_ownership_conflict(
+            return Err(reset_scope_conflict(
                 run_id,
-                "repo does not own every entry in the requested run",
+                "repo constraint does not match every entry in the requested run",
             ));
         }
     }
@@ -165,9 +165,9 @@ pub(super) async fn reset_scoped_with_pg(
                 .map(str::trim)
                 .is_some_and(|run_agent| !run_agent.is_empty())
             {
-                return Err(reset_ownership_conflict(
+                return Err(reset_scope_conflict(
                     run_id,
-                    "agent_id does not own the requested run",
+                    "agent_id constraint does not match the requested run",
                 ));
             }
             let matching_entries = sqlx::query_scalar::<_, i64>(
@@ -182,16 +182,16 @@ pub(super) async fn reset_scoped_with_pg(
             .await
             .map_err(|error| {
                 AppError::internal(format!(
-                    "check auto-queue run '{run_id}' agent ownership: {error}"
+                    "check auto-queue run '{run_id}' agent constraint: {error}"
                 ))
                 .with_code(ErrorCode::Database)
                 .with_context("run_id", run_id)
-                .with_operation("auto_queue.reset.check_agent_ownership")
+                .with_operation("auto_queue.reset.check_agent_constraint")
             })?;
             if matching_entries == 0 {
-                return Err(reset_ownership_conflict(
+                return Err(reset_scope_conflict(
                     run_id,
-                    "agent_id does not own the requested run",
+                    "agent_id constraint does not match the requested run",
                 ));
             }
         }
@@ -209,16 +209,16 @@ pub(super) async fn reset_scoped_with_pg(
         .await
         .map_err(|error| {
             AppError::internal(format!(
-                "check auto-queue entry agent ownership for '{run_id}': {error}"
+                "check auto-queue entry agent constraint for '{run_id}': {error}"
             ))
             .with_code(ErrorCode::Database)
             .with_context("run_id", run_id)
-            .with_operation("auto_queue.reset.check_entry_agent_ownership")
+            .with_operation("auto_queue.reset.check_entry_agent_constraint")
         })?;
         if foreign_agent_entries > 0 {
-            return Err(reset_ownership_conflict(
+            return Err(reset_scope_conflict(
                 run_id,
-                "agent_id does not own every entry in the requested run",
+                "agent_id constraint does not match every entry in the requested run",
             ));
         }
     }
@@ -238,9 +238,9 @@ pub(super) async fn reset_scoped_with_pg(
     })
 }
 
-fn reset_ownership_conflict(run_id: &str, reason: &str) -> AppError {
+fn reset_scope_conflict(run_id: &str, reason: &str) -> AppError {
     AppError::conflict(format!(
-        "auto-queue reset ownership mismatch for run '{run_id}': {reason}"
+        "auto-queue reset scope constraint mismatch for run '{run_id}': {reason}"
     ))
     .with_code(ErrorCode::AutoQueue)
     .with_context("run_id", run_id)

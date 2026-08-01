@@ -883,6 +883,9 @@ pub(crate) async fn cancel_selected_runs_with_pg(
         .await
         .map_err(|error| format!("begin postgres run cancel transaction: {error}"))?;
 
+    // hashtext is a 32-bit key: unrelated run ids can collide and wait on one
+    // another, but that only over-serializes cancellation/enqueue operations;
+    // it does not weaken the per-run exclusion guarantee.
     let locked_run_ids = sqlx::query_scalar::<_, String>(
         "WITH target_runs AS (
              SELECT id

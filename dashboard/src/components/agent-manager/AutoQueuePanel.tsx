@@ -262,9 +262,9 @@ export default function AutoQueuePanel({
     }
     suppressedRunIdRef.current = activeRunId;
     try {
-      // Dashboard repo/agent filters are selectors, not ownership claims.
-      // The run id is the destructive scope; only the run's actual agent owner
-      // is safe to echo when one exists.
+      // Dashboard filters select what is shown; they do not authorize reset.
+      // The run id narrows the destructive scope to one run. Echo only the
+      // run's recorded agent as an optional consistency constraint.
       await resetAutoQueueForSelection(
         api,
         status?.run?.agent_id ?? null,

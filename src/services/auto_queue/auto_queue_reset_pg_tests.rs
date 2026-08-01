@@ -459,11 +459,11 @@ async fn reset_then_status_returns_cancelled_run_with_skipped_entries_pg() {
 }
 
 #[tokio::test]
-async fn reset_repo_and_agent_ownership_mismatch_returns_conflict_pg() {
+async fn reset_repo_and_agent_scope_mismatch_returns_conflict_pg() {
     let (pg_db, pool) = reset_test_db().await;
     let target = seed_reset_run(
         &pool,
-        "ownership",
+        "scope-mismatch",
         "repo-reset-a",
         "agent-reset",
         "active",
@@ -507,8 +507,8 @@ async fn reset_repo_and_agent_ownership_mismatch_returns_conflict_pg() {
         .bind(&target.run_id)
         .fetch_one(&pool)
         .await
-        .expect("load ownership target status");
-    assert_eq!(run_status, "active", "ownership rejection must not mutate");
+        .expect("load scope-mismatch target status");
+    assert_eq!(run_status, "active", "scope rejection must not mutate");
 
     pool.close().await;
     pg_db.drop().await;

@@ -49,9 +49,19 @@ pub(super) async fn enqueue_entries_into_existing_run_with_pg(
         .await
         .map_err(|err| format!("begin enqueue transaction: {err}"))?;
 
-    // Serialize entry creation with reset/cancel. The status reload must be a
-    // separate statement after the advisory lock so READ COMMITTED observes a
-    // terminal transition that won the lock first.
+    // The post-lock status reload depends on a fresh statement snapshot. Pin
+    // this transaction instead of trusting a database/role default that an
+    // operator could change to REPEATABLE READ.
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        .execute(&mut *tx)
+        .await
+        .map_err(|err| format!("set enqueue isolation for run {run_id}: {err}"))?;
+
+    // Serialize entry creation with reset/cancel. PostgreSQL hashtext returns
+    // 32 bits, so distinct run ids can collide. Such a collision only causes
+    // conservative cross-run serialization; it cannot bypass this safety lock.
+    // The separate SELECT after the lock then observes a terminal transition
+    // that acquired the same key first.
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('aq_run:' || $1))")
         .bind(run_id)
         .execute(&mut *tx)

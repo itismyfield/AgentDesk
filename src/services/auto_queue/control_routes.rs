@@ -100,8 +100,9 @@ pub async fn reset_slot_thread(
 }
 
 /// POST /api/queue/reset
-/// Reset exactly one run. The optional repo/agent fields are ownership claims,
-/// not selectors: when supplied they must match the run and its entries.
+/// Reset exactly one run selected by `run_id`. Optional repo/agent values are
+/// defensive consistency constraints, not authorization: when supplied they
+/// must match the run and every entry to reduce operator targeting mistakes.
 pub async fn reset(
     State(state): State<AppState>,
     body: Bytes,

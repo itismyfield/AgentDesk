@@ -7,7 +7,7 @@ import {
 } from "./auto-queue-actions";
 
 describe("auto-queue-actions", () => {
-  it("uses the selected repo for generation but not as a reset ownership claim", async () => {
+  it("uses the selected repo for generation but not as a reset scope constraint", async () => {
     const resetAutoQueue = vi.fn().mockResolvedValue({ ok: true });
     const generateAutoQueue = vi
       .fn()
