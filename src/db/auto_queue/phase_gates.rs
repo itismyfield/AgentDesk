@@ -2,6 +2,8 @@ use serde_json::Value;
 use sqlx::{PgPool, Row as SqlxRow};
 use thiserror::Error;
 
+mod orphan_repair;
+
 // #4884: verdict inference lives in exactly one place. The aliases keep this
 // module's long-standing local names while the bodies moved to the canonical
 // reducer shared with the dispatch finalize path.
@@ -781,10 +783,7 @@ pub struct PhaseGateRepairSummary {
     pub awaiting_siblings: usize,
     pub stale_dispatches: usize,
     pub no_context_dispatches: usize,
-    /// #2257: gates that match the filter but have `dispatch_id IS NULL`.
-    /// The repair candidate query skips them (it requires a JOIN onto
-    /// `task_dispatches`), but operators need to see they exist so they
-    /// can decide whether to delete or hand-patch them separately.
+    /// Compatibility field; successful repair no longer skips matching orphans.
     pub orphan_gates_skipped: usize,
     pub blocking_gates_remaining: i64,
     pub run_status: Option<String>,
@@ -814,11 +813,10 @@ struct PhaseGateRepairCandidate {
 const PHASE_GATE_REPAIR_CANDIDATE_PHASES_SQL: &str = "\
 SELECT DISTINCT pg.phase
 FROM auto_queue_phase_gates pg
-JOIN task_dispatches td ON td.id = pg.dispatch_id
+LEFT JOIN task_dispatches td ON td.id = pg.dispatch_id
 WHERE pg.run_id = $1
   AND pg.status IN ('pending', 'failed')
-  AND pg.dispatch_id IS NOT NULL
-  AND td.status NOT IN ('pending', 'dispatched')
+  AND (td.id IS NULL OR td.status NOT IN ('pending', 'dispatched'))
   AND ($2::BIGINT IS NULL OR pg.phase = $2)
   AND ($3::TEXT IS NULL OR pg.dispatch_id = $3)
 ORDER BY pg.phase";
@@ -1075,6 +1073,15 @@ pub async fn repair_phase_gates_for_run_on_pg(
         outcomes.push(repair_outcome);
     }
 
+    let orphan_gates_cleared = orphan_repair::clear_orphan_gates_on_pg_tx(
+        &mut tx,
+        run_id,
+        options.phase,
+        dispatch_id.as_deref(),
+    )
+    .await?;
+    cleared_gates += orphan_gates_cleared;
+
     let blocking_gates_remaining = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::BIGINT
          FROM auto_queue_phase_gates
@@ -1094,28 +1101,18 @@ pub async fn repair_phase_gates_for_run_on_pg(
         ))
     })?;
 
-    // #2257: surface the count of orphan gates (no dispatch row) so operators
-    // know the candidate query intentionally skipped them. Orphans cannot
-    // match a concrete dispatch-id filter, so a filtered repair reports 0.
-    let orphan_gates_skipped = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::BIGINT
-         FROM auto_queue_phase_gates
-         WHERE run_id = $1
-           AND status IN ('pending', 'failed')
-           AND dispatch_id IS NULL
-           AND ($2::BIGINT IS NULL OR phase = $2)
-           AND $3::TEXT IS NULL",
-    )
-    .bind(run_id)
-    .bind(options.phase)
-    .bind(dispatch_id.as_deref())
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|error| {
-        PhaseGateRepairError::database(format!(
-            "count orphan phase gates for run {run_id}: {error}"
-        ))
-    })? as usize;
+    // Response compatibility: successful repair never skips a matching
+    // orphan. A concrete filter cannot match a NULL dispatch id.
+    let orphan_gates_skipped = 0;
+
+    if orphan_gates_cleared > 0 && blocking_gates_remaining == 0 {
+        resume_run_if_paused_on_pg_tx(&mut tx, run_id)
+            .await
+            .map_err(PhaseGateRepairError::reconcile)?;
+        super::runs::maybe_finalize_run_if_ready_pg(&mut tx, run_id)
+            .await
+            .map_err(PhaseGateRepairError::reconcile)?;
+    }
 
     let run_status =
         sqlx::query_scalar::<_, Option<String>>("SELECT status FROM auto_queue_runs WHERE id = $1")
@@ -2926,58 +2923,7 @@ mod reconcile_phase_gate_pg_tests {
     async fn repair_reports_orphan_null_dispatch_gates_without_clearing_them() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
-        fixture(&pool).await;
-        save_phase_gate_state_on_pg(
-            &pool,
-            "run-pg-test",
-            0,
-            &PhaseGateStateWrite {
-                status: "failed".into(),
-                pass_verdict: "phase_gate_passed".into(),
-                dispatch_ids: vec![],
-                next_phase: Some(1),
-                final_phase: false,
-                failure_reason: Some("orphaned phase gate".into()),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("seed orphan gate state");
-        sqlx::query("UPDATE auto_queue_runs SET status='paused' WHERE id='run-pg-test'")
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        let summary = repair_phase_gates_for_run_on_pg(
-            &pool,
-            "run-pg-test",
-            PhaseGateRepairOptions::default(),
-        )
-        .await
-        .expect("repair reports orphan gates");
-
-        assert_eq!(summary.candidate_dispatches, 0);
-        assert_eq!(summary.cleared_gates, 0);
-        assert_eq!(summary.orphan_gates_skipped, 1);
-        assert_eq!(summary.blocking_gates_remaining, 1);
-        assert_eq!(summary.run_status.as_deref(), Some("paused"));
-        assert_eq!(gate_count(&pool, "run-pg-test", 0).await, 1);
-
-        let dispatch_filtered = repair_phase_gates_for_run_on_pg(
-            &pool,
-            "run-pg-test",
-            PhaseGateRepairOptions {
-                dispatch_id: Some("dispatch-that-cannot-match-null".to_string()),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("dispatch-filtered repair ignores null-dispatch orphans");
-        assert_eq!(dispatch_filtered.candidate_dispatches, 0);
-        assert_eq!(dispatch_filtered.cleared_gates, 0);
-        assert_eq!(dispatch_filtered.orphan_gates_skipped, 0);
-        assert_eq!(dispatch_filtered.blocking_gates_remaining, 0);
-
+        super::orphan_repair::assert_filtered_then_unfiltered_repair_contract(&pool).await;
         pool.close().await;
         pg_db.drop().await;
     }

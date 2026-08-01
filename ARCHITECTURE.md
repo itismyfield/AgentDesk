@@ -61,6 +61,8 @@ src/
 │   ├── auto_queue/
 │   │   ├── entries/
 │   │   │   └── dispatch_failure.rs
+│   │   ├── phase_gates/
+│   │   │   └── orphan_repair.rs
 │   │   ├── claim.rs
 │   │   ├── consultation.rs
 │   │   ├── entries.rs

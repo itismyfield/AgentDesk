@@ -98,5 +98,12 @@ mod cases_pg_tests {
             1,
             "only force completion may delete gates"
         );
+        let phase_gates = include_str!("../../db/auto_queue/phase_gates.rs");
+        assert!(phase_gates.contains("orphan_repair::clear_orphan_gates_on_pg_tx"));
+        let orphan_repair = include_str!("../../db/auto_queue/phase_gates/orphan_repair.rs");
+        assert!(orphan_repair.contains("clear orphan phase gates for run"));
+        assert!(
+            orphan_repair.contains("NOT EXISTS (\n               SELECT 1 FROM task_dispatches")
+        );
     }
 }

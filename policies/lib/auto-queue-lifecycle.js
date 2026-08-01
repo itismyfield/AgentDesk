@@ -82,10 +82,24 @@ function completeRunAndNotify(runId) {
   try {
     var completed = agentdesk.autoQueue.finalizeRunIfReady(runId);
     if (completed && (completed.outcome === "completed" || completed.outcome === "already_terminal")) return;
-    autoQueueLog("info", "Phase-gate completion deferred for run " + runId, {
+    autoQueueLog("info", "Phase-gate completion deferred for run " + runId + "; resuming for tick recovery", {
       run_id: runId,
       reason: completed ? completed.reason : null
     });
+    // A final-phase gate pauses the run before dispatching its checks. Once
+    // the gate row is cleared, any readiness block (for example a pending
+    // entry restored by an operator) must not leave the run paused with no
+    // gate. Return it to `active`; the bounded tick owns both dispatch and
+    // completion retries from here. Do not activate inline because the writer
+    // reason may be grace rather than runnable work.
+    try {
+      agentdesk.autoQueue.resumeRun(runId, "phase_gate_completion_deferred");
+    } catch (resumeError) {
+      autoQueueLog("warn", "Failed to resume deferred final phase-gate run " + runId + ": " + resumeError, {
+        run_id: runId,
+        reason: completed ? completed.reason : null
+      });
+    }
   } catch (e) {
     autoQueueLog("warn", "Failed to complete final phase-gate run " + runId + ": " + e, {
       run_id: runId

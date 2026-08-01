@@ -56,7 +56,7 @@ identity. Required gates should fail when a scenario declares `controlled` or
 | Dispatch completion | dispatch status transition helper | Called by the streaming-final hook and explicit fallback helpers only. |
 | Auto-queue entry terminal state | `update_entry_status_on_pg` / terminal-entry helper | Entry status drives run readiness; no policy hook is required to close the run. |
 | Auto-queue run completion | `maybe_finalize_run_if_ready_pg` | Transactional derivation from run status, blocking gates, grace, `user_cancelled`, and runnable entries; returns `Completed`, `Blocked(reason)`, or `AlreadyTerminal`. |
-| Operator force completion | `force_complete_run_on_pg` | Separate command requiring operator and source; the only completion path allowed to delete gates, with an `audit_logs` record in the same transaction. |
+| Operator force completion | `force_complete_run_on_pg` | Separate command requiring operator and source; the only completion path allowed to bulk-delete valid gates, with an `audit_logs` record in the same transaction. Non-force repair may delete only orphan gates that have no matching dispatch. |
 | Discord mailbox cleanup | mailbox finish/stop helpers | Cleans runtime state after canonical completion/cancel has recorded durable state. |
 | Watchdog | detector/reconciler | Emits suspicion/timeout and invokes cancel/recovery; never marks work complete directly. |
 
@@ -78,7 +78,7 @@ identity. Required gates should fail when a scenario declares `controlled` or
 
 - After dispatch completion, update the matching auto-queue entry through the
   terminal-entry helper instead of relying on policy/card terminal side effects.
-- Preserve `user_cancelled` as resumable and non-run-finalizing.
+- Preserve `user_cancelled` as non-dispatchable and operator-resumable while runnable work remains; once a run is otherwise drained, the bounded tick normalizes it to `skipped` so the run and slot cannot remain pinned forever.
 - Keep `maybe_finalize_run_if_ready_pg` as the only run completion writer.
 - Rollback point: disable the new entry update and leave existing policy/GitHub
   cleanup fallbacks in place.
@@ -97,7 +97,8 @@ identity. Required gates should fail when a scenario declares `controlled` or
 - Unit tests for the canonical finalizer input contract and idempotent repeated
   completion.
 - Postgres tests covering dispatch completed, entry terminal, phase-gated run
-  completion, and `user_cancelled` non-finalization.
+  completion, immediate `user_cancelled` non-finalization, and bounded tick
+  terminalization after the run drains.
 - Route or integration tests for watcher completion, bridge fallback completion,
   watchdog timeout cancellation, and GitHub/card terminal cleanup fallback.
 - Observability assertions that completion events are emitted once per terminal

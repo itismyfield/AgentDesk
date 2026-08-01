@@ -1,8 +1,9 @@
 #[cfg(test)]
 mod cases_pg_tests {
     use super::super::{
-        ForceRunCompletionCommand, RunCompletionBlockedReason as Blocked,
+        EntryStatusUpdateOptions, ForceRunCompletionCommand, RunCompletionBlockedReason as Blocked,
         RunReadinessOutcome as Outcome, finalize_run_if_ready_on_pg, force_complete_run_on_pg,
+        update_entry_status_on_pg,
     };
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use sqlx::{PgPool, Row};
@@ -68,17 +69,47 @@ mod cases_pg_tests {
         .await
         .expect("seed user-cancelled and terminal entries");
 
-        let outcome = finalize_run_if_ready_on_pg(&pool, "run-user-cancelled")
-            .await
-            .expect("evaluate user-cancelled run");
-
-        assert_eq!(outcome, Outcome::Blocked(Blocked::UserCancelledEntry));
+        for _ in 0..3 {
+            let outcome = finalize_run_if_ready_on_pg(&pool, "run-user-cancelled")
+                .await
+                .expect("evaluate user-cancelled run");
+            assert_eq!(outcome, Outcome::Blocked(Blocked::UserCancelledEntry));
+        }
         assert_eq!(run_status(&pool, "run-user-cancelled").await, "active");
         assert_eq!(
             assigned_run(&pool).await.as_deref(),
             Some("run-user-cancelled")
         );
         assert_eq!(outbox_count(&pool).await, 0);
+
+        update_entry_status_on_pg(
+            &pool,
+            "entry-user-cancelled",
+            "skipped",
+            "tick_user_cancelled_terminalization",
+            &EntryStatusUpdateOptions::default(),
+        )
+        .await
+        .expect("tick terminalizes drained user-cancelled entry");
+
+        let trigger_source: String = sqlx::query_scalar(
+            "SELECT trigger_source FROM auto_queue_entry_transitions
+             WHERE entry_id = 'entry-user-cancelled'
+             ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load tick terminalization transition");
+        assert_eq!(trigger_source, "tick_user_cancelled_terminalization");
+        assert_eq!(run_status(&pool, "run-user-cancelled").await, "completed");
+        assert_eq!(assigned_run(&pool).await, None);
+        assert_eq!(outbox_count(&pool).await, 1);
+        assert_eq!(
+            finalize_run_if_ready_on_pg(&pool, "run-user-cancelled")
+                .await
+                .expect("repeat completed readiness"),
+            Outcome::AlreadyTerminal
+        );
         pool.close().await;
         pg_db.drop().await;
     }

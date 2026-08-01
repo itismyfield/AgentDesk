@@ -20,8 +20,9 @@ pub const ENTRY_STATUS_SKIPPED: &str = "skipped";
 pub const ENTRY_STATUS_FAILED: &str = "failed";
 /// Non-dispatchable terminal state used when the operator explicitly stopped
 /// the linked dispatch (#815). The auto-queue tick must NOT resurrect these
-/// entries back to `pending`; only a deliberate operator action (re-activate,
-/// pmd_reopen, etc.) should move them out of this state.
+/// entries back to `pending`. An operator may re-activate them while work
+/// remains; once the run is otherwise drained, the bounded tick may normalize
+/// them to `skipped` so the run and slot do not remain pinned forever.
 pub const ENTRY_STATUS_USER_CANCELLED: &str = "user_cancelled";
 
 /// Returns true when an entry in `status` is eligible for the auto-queue
@@ -584,13 +585,10 @@ pub async fn update_entry_status_on_pg(
         )
         .await?;
 
-        // #815 P1: `user_cancelled` is a NON-run-finalizing terminal status.
-        // The run must stay in its prior state (`active` / `paused`) so the
-        // operator can flip the entry back to `pending` (e.g. via the API) and
-        // a later tick can re-pick it up. Auto-completing the run would
-        // strand the entry — `restore` only accepts cancelled/restoring,
-        // `resume` only reopens paused, and `activate()` only promotes
-        // generated/pending, so no path could re-open the entry.
+        // #815 + #4881 r2: `user_cancelled` never directly finalizes or
+        // re-dispatches the run. This preserves an operator recovery window;
+        // the bounded tick owns the later `user_cancelled -> skipped`
+        // terminalization once no runnable work or gate/grace blocker remains.
         if matches!(
             normalized,
             ENTRY_STATUS_DONE | ENTRY_STATUS_SKIPPED | ENTRY_STATUS_FAILED
@@ -825,9 +823,9 @@ pub async fn update_entry_status_on_pg_tx(
     record_entry_transition_on_pg(tx, entry_id, &current.status, normalized, trigger_source)
         .await?;
 
-    // #815 P1: `user_cancelled` is intentionally NOT in this list — the run
-    // must stay in its prior state so the operator can flip the entry back to
-    // `pending` and a later tick can re-pick it up.
+    // #815 + #4881 r2: `user_cancelled` is intentionally NOT in this list. It
+    // stays recoverable while work remains; the bounded tick separately moves
+    // drained cancellations to `skipped`, which invokes this writer.
     if matches!(
         normalized,
         ENTRY_STATUS_DONE | ENTRY_STATUS_SKIPPED | ENTRY_STATUS_FAILED

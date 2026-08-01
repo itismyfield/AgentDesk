@@ -561,6 +561,13 @@ test("auto-queue onTick1min honors stale dispatched runtime config", () => {
         result: []
       },
       {
+        match(sql) {
+          return sql.includes("SELECT e.id, e.run_id") &&
+            sql.includes("WHERE e.status = 'user_cancelled'");
+        },
+        result: []
+      },
+      {
         match: "FROM auto_queue_runs r WHERE r.status IN ('active', 'paused')",
         result: []
       },
@@ -664,6 +671,13 @@ test("auto-queue terminal cleanup uses pipeline terminal states", () => {
       },
       {
         match(sql) {
+          return sql.includes("SELECT e.id, e.run_id") &&
+            sql.includes("WHERE e.status = 'user_cancelled'");
+        },
+        result: []
+      },
+      {
+        match(sql) {
           return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
             sql.includes("WHERE r.status IN ('active', 'paused')");
         },
@@ -699,7 +713,7 @@ test("auto-queue terminal cleanup uses pipeline terminal states", () => {
   ]);
 });
 
-test("auto-queue finalization sweep delegates readiness to the canonical writer", () => {
+test("auto-queue terminalizes drained user-cancelled entries before readiness", () => {
   const { policy, state } = loadPolicy("policies/auto-queue.js", {
     dbQuery: createSqlRouter([
       {
@@ -708,11 +722,83 @@ test("auto-queue finalization sweep delegates readiness to the canonical writer"
       },
       {
         match(sql) {
-          return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
-            sql.includes("WHERE r.status IN ('active', 'paused')") &&
-            sql.includes("ORDER BY r.id ASC");
+          return sql.includes("SELECT e.id, e.run_id") &&
+            sql.includes("WHERE e.status = 'user_cancelled'") &&
+            sql.includes("remaining.status IN ('pending', 'dispatched')") &&
+            sql.includes("auto_queue_phase_gates") &&
+            sql.includes("phase_gate_grace_until") &&
+            sql.includes("LIMIT 50");
         },
-        result: [{ id: "run-eligible" }]
+        result: [{ id: "entry-user-cancelled", run_id: "run-drained" }]
+      },
+      {
+        match: "SELECT run_id, id as entry_id, kanban_card_id as card_id",
+        result: [{
+          run_id: "run-drained",
+          entry_id: "entry-user-cancelled",
+          card_id: null,
+          dispatch_id: null,
+          agent_id: "agent-drained",
+          thread_group: 0,
+          batch_phase: 0,
+          slot_index: null
+        }]
+      },
+      {
+        match(sql) {
+          return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
+            sql.includes("auto_queue_phase_gates");
+        },
+        result: []
+      },
+      {
+        match(sql) {
+          return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
+            sql.includes("JOIN LATERAL (");
+        },
+        result: []
+      },
+      { match: "e.status = 'dispatched'", result: [] }
+    ])
+  });
+
+  policy.onTick1min();
+
+  assert.deepEqual(state.autoQueueStatusUpdates, [{
+    entryId: "entry-user-cancelled",
+    status: "skipped",
+    reason: "tick_user_cancelled_terminalization",
+    extra: null
+  }]);
+});
+
+test("auto-queue finalization sweep prefilters blocked runs and caps writer calls", () => {
+  const candidateRuns = Array.from({ length: 200 }, (_, index) => ({ id: `run-${index}` }));
+  const { policy, state } = loadPolicy("policies/auto-queue.js", {
+    dbQuery: createSqlRouter([
+      {
+        match: "JOIN kanban_cards kc ON kc.id = e.kanban_card_id",
+        result: []
+      },
+      {
+        match(sql) {
+          return sql.includes("SELECT e.id, e.run_id") &&
+            sql.includes("WHERE e.status = 'user_cancelled'");
+        },
+        result: []
+      },
+      {
+        match(sql) {
+          return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
+            sql.includes("auto_queue_phase_gates");
+        },
+        result(sql) {
+          assert.match(sql, /status IN \('pending', 'dispatched', 'user_cancelled'\)/);
+          assert.match(sql, /pg\.status IN \('pending', 'failed'\)/);
+          assert.match(sql, /phase_gate_grace_until/);
+          assert.match(sql, /ORDER BY r\.id ASC LIMIT 50/);
+          return candidateRuns.slice(0, 50);
+        }
       },
       {
         match(sql) {
@@ -735,12 +821,30 @@ test("auto-queue finalization sweep delegates readiness to the canonical writer"
 
   const finishedRunQuery = state.queries.find((query) =>
     query.sql.includes("SELECT r.id FROM auto_queue_runs r") &&
-    query.sql.includes("WHERE r.status IN ('active', 'paused')")
+    query.sql.includes("auto_queue_phase_gates")
   );
-  assert.doesNotMatch(finishedRunQuery.sql, /auto_queue_phase_gates|phase_gate_grace_until|auto_queue_entries/);
-  assert.deepEqual(state.autoQueueCompletes, [
-    { runId: "run-eligible" }
-  ]);
+  assert.ok(finishedRunQuery);
+  assert.equal(candidateRuns.length, 200);
+  assert.equal(state.autoQueueCompletes.length, 50);
+  assert.deepEqual(state.autoQueueCompletes.at(0), { runId: "run-0" });
+  assert.deepEqual(state.autoQueueCompletes.at(-1), { runId: "run-49" });
+});
+
+test("final-phase readiness block resumes paused run for bounded tick recovery", () => {
+  const { module, state } = loadPolicy("policies/lib/auto-queue-lifecycle.js", {
+    autoQueueFinalizeRunIfReady() {
+      return { outcome: "blocked", reason: "runnable_entry" };
+    }
+  });
+
+  module.completeRunAndNotify("run-final-phase-blocked");
+
+  assert.deepEqual(state.autoQueueCompletes, [{ runId: "run-final-phase-blocked" }]);
+  assert.deepEqual(state.autoQueueResumes, [{
+    runId: "run-final-phase-blocked",
+    source: "phase_gate_completion_deferred"
+  }]);
+  assert.deepEqual(state.autoQueueActivations, []);
 });
 
 test("auto-queue rotates saturated active runs in bounded tick sweep", () => {
@@ -748,6 +852,13 @@ test("auto-queue rotates saturated active runs in bounded tick sweep", () => {
     dbQuery: createSqlRouter([
       {
         match: "JOIN kanban_cards kc ON kc.id = e.kanban_card_id",
+        result: []
+      },
+      {
+        match(sql) {
+          return sql.includes("SELECT e.id, e.run_id") &&
+            sql.includes("WHERE e.status = 'user_cancelled'");
+        },
         result: []
       },
       {
@@ -791,6 +902,13 @@ test("auto-queue does not rotate deferred active run activations", () => {
     dbQuery: createSqlRouter([
       {
         match: "JOIN kanban_cards kc ON kc.id = e.kanban_card_id",
+        result: []
+      },
+      {
+        match(sql) {
+          return sql.includes("SELECT e.id, e.run_id") &&
+            sql.includes("WHERE e.status = 'user_cancelled'");
+        },
         result: []
       },
       {

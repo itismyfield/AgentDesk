@@ -506,11 +506,64 @@ var autoQueue = {
       );
     }
 
+    // #815 + #4881 r2: an explicit user cancellation remains non-dispatchable,
+    // but it must not pin an otherwise drained run (and its slot) forever.
+    // Preserve the operator recovery window while runnable work exists; once
+    // none remains, normalize the cancelled entries to `skipped`. The shared
+    // entry writer then invokes canonical readiness and completes the run when
+    // the last such entry transitions. Keep this recovery bounded separately
+    // from the ordinary readiness sweep.
+    var drainedUserCancelled = agentdesk.db.query(
+      "SELECT e.id, e.run_id " +
+      "FROM auto_queue_entries e " +
+      "JOIN auto_queue_runs r ON r.id = e.run_id " +
+      "WHERE e.status = 'user_cancelled' " +
+      "AND r.status IN ('active', 'paused') " +
+      "AND NOT EXISTS (" +
+      "  SELECT 1 FROM auto_queue_entries remaining " +
+      "  WHERE remaining.run_id = e.run_id " +
+      "    AND remaining.status IN ('pending', 'dispatched')" +
+      ") " +
+      "AND NOT EXISTS (" +
+      "  SELECT 1 FROM auto_queue_phase_gates pg " +
+      "  WHERE pg.run_id = e.run_id AND pg.status IN ('pending', 'failed')" +
+      ") " +
+      "AND (" +
+      "  r.phase_gate_grace_until IS NULL " +
+      "  OR datetime(r.phase_gate_grace_until) <= datetime('now')" +
+      ") " +
+      "ORDER BY e.updated_at ASC LIMIT 50",
+      []
+    );
+    for (var uc = 0; uc < drainedUserCancelled.length; uc++) {
+      var cancelled = drainedUserCancelled[uc];
+      autoQueueLog("info", "onTick1min: terminalizing drained user-cancelled entry " + cancelled.id, {
+        run_id: cancelled.run_id,
+        entry_id: cancelled.id
+      });
+      agentdesk.autoQueue.updateEntryStatus(
+        cancelled.id,
+        "skipped",
+        "tick_user_cancelled_terminalization"
+      );
+    }
+
     var finishedRuns = agentdesk.db.query(
       "SELECT r.id " +
       "FROM auto_queue_runs r " +
       "WHERE r.status IN ('active', 'paused') " +
-      "ORDER BY r.id ASC",
+      "AND NOT EXISTS (" +
+      "  SELECT 1 FROM auto_queue_entries e " +
+      "  WHERE e.run_id = r.id AND e.status IN ('pending', 'dispatched', 'user_cancelled')" +
+      ") " +
+      "AND NOT EXISTS (" +
+      "  SELECT 1 FROM auto_queue_phase_gates pg " +
+      "  WHERE pg.run_id = r.id AND pg.status IN ('pending', 'failed')" +
+      ") " +
+      "AND (" +
+      "  r.phase_gate_grace_until IS NULL " +
+      "  OR datetime(r.phase_gate_grace_until) <= datetime('now')" +
+      ") ORDER BY r.id ASC LIMIT 50",
       []
     );
     for (var fr = 0; fr < finishedRuns.length; fr++) {

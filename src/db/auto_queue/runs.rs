@@ -193,8 +193,9 @@ pub(super) async fn maybe_finalize_run_after_terminal_entry_pg(
             RunCompletionBlockedReason::PolicyContinuationPending,
         ));
     }
-    // #815 P1: never finalize on `user_cancelled` — it must leave the run in a
-    // resumable state so the operator can flip the entry back to `pending`.
+    // #815 + #4881 r2: never finalize directly on `user_cancelled`. Preserve
+    // the operator recovery window; the bounded tick later normalizes a
+    // drained cancellation to `skipped` and re-enters readiness.
     if new_status == ENTRY_STATUS_USER_CANCELLED {
         return Ok(RunReadinessOutcome::Blocked(
             RunCompletionBlockedReason::UserCancelledEntry,
@@ -253,7 +254,6 @@ pub(crate) async fn maybe_finalize_run_if_ready_pg(
             RunCompletionBlockedReason::PhaseGateGraceWindow,
         ));
     }
-
     let has_user_cancelled = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(
              SELECT 1 FROM auto_queue_entries
@@ -285,7 +285,6 @@ pub(crate) async fn maybe_finalize_run_if_ready_pg(
             RunCompletionBlockedReason::RunnableEntry,
         ));
     }
-
     // The status transition is the release authority. In particular, a run in
     // the restore hand-off window must retain its slot until restore finalizes;
     // releasing first and then discovering the status is ineligible creates a
@@ -437,13 +436,11 @@ pub async fn force_complete_run_on_pg(
             RunCompletionBlockedReason::RunStatusNotCompletable,
         ));
     }
-    // #2048 F17: only this explicit force command may drop any
-    // pending/failed phase-gate rows AND release the run's slot bindings.
-    // Otherwise a completed run leaves stale phase_gate rows that next
-    // restore/audit treats as still-pending, plus zombie slot assignments
-    // that block other runs from picking up the slot. We perform the
-    // delete + release inside the same transaction so the operation is
-    // atomic with the status flip.
+    // #2048 F17 + #4881 r2: only this explicit force command may bulk-drop
+    // valid pending/failed phase gates. The non-force repair path may delete
+    // only orphan rows that have no corresponding dispatch and therefore can
+    // never reconcile. Force keeps the broad delete + slot release atomic
+    // with the status flip.
     sqlx::query("DELETE FROM auto_queue_phase_gates WHERE run_id = $1")
         .bind(run_id)
         .execute(&mut *tx)
