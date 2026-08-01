@@ -1,0 +1,11 @@
+on:
+  workflow_call:
+    inputs:
+      jobs:
+        required: false
+        type: string
+jobs:
+  pg_lane:
+    steps:
+      - run: ./scripts/ci/postgres-service.sh start
+      - run: cargo test postgres_

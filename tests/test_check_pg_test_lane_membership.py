@@ -137,6 +137,35 @@ class DetectionMutation(FixtureCase):
         )
         self.assertEqual(membership.discover_pg_inventory(self.root).tests, {})
 
+    def test_associated_impl_seed_and_qualified_helper_are_detected(self) -> None:
+        self.fx.write_source(
+            "src/service.rs",
+            "#[cfg(test)] mod tests {\n"
+            "struct TestDatabase;\n"
+            "impl TestDatabase { async fn create() { create_test_database(); } }\n"
+            "fn through_assoc() { TestDatabase::create(); }\n"
+            "#[test] fn direct_assoc() { let _db = TestDatabase::create().await; }\n"
+            "#[test] fn transitive_assoc() { through_assoc(); }\n"
+            "}\n",
+            "mod service;\n",
+        )
+        expected = {
+            "service::tests::direct_assoc",
+            "service::tests::transitive_assoc",
+        }
+        self.assertEqual(set(membership.discover_pg_inventory(self.root).tests), expected)
+
+        self.fx.write_source(
+            "src/lib.rs",
+            "#[cfg(test)] mod support { pub fn h() { create_test_database(); } }\n"
+            "#[cfg(test)] mod tests { #[test] fn qualified() { crate::support::h(); } }\n",
+        )
+        self.fx.write_source("src/service.rs", "")
+        self.assertEqual(
+            set(membership.discover_pg_inventory(self.root).tests),
+            {"tests::qualified"},
+        )
+
     def test_cross_file_three_hop_transitive_closure(self) -> None:
         self.fx.write_source(
             "src/xfile_a.rs",
@@ -174,14 +203,16 @@ class DetectionMutation(FixtureCase):
             with self.assertRaises(AssertionError):
                 self.assertEqual(set(membership.discover_pg_inventory(self.root).tests), expected)
 
-    def test_block_local_and_impl_method_chains_remain_fail_open(self) -> None:
+    def test_block_local_items_remain_fail_open(self) -> None:
         self.fx.write_source(
             "src/service.rs",
             "#[cfg(test)] mod tests {\n"
             "#[test] fn pg() { fn h() { create_test_database(); } h(); }\n"
             "#[test] fn plain() { fn h() {} h(); }\n"
-            "struct Db; impl Db { fn pg() { create_test_database(); } fn pure() {} }\n"
-            "#[test] fn method_case() { Db::pure(); }\n"
+            "#[test] fn local_impl() {\n"
+            "struct Local; impl Local { fn pure() {} fn pg() { create_test_database(); } }\n"
+            "Local::pure();\n"
+            "}\n"
             "}\n",
             "mod service;\n",
         )
@@ -283,27 +314,94 @@ class ParserMutations(FixtureCase):
                     {f".github/workflows/ci-main.yml:{job_name}"},
                 )
 
+    def test_top_level_jobs_wins_over_nested_input_key(self) -> None:
+        workflow = self.root / ".github/workflows/ci-main.yml"
+        workflow.write_text((FIXTURES / "jobs_nested_input.yml").read_text("utf-8"), "utf-8")
+        self.assertEqual(
+            self.fx.analysis().debts["rule4"],
+            {".github/workflows/ci-main.yml:pg_lane"},
+        )
+
+    def test_low_indent_block_scalar_line_does_not_hide_later_job(self) -> None:
+        workflow = self.root / ".github/workflows/ci-main.yml"
+        workflow.write_text((FIXTURES / "jobs_block_scalar.yml").read_text("utf-8"), "utf-8")
+        jobs = membership.parse_jobs(workflow, self.root)
+        self.assertEqual([job.name for job in jobs], ["prepare", "pg_lane"])
+        self.assertEqual(
+            self.fx.analysis().debts["rule4"],
+            {".github/workflows/ci-main.yml:pg_lane"},
+        )
+
     def test_empty_jobs_map_is_warn_only(self) -> None:
         workflow = self.root / ".github/workflows/empty.yml"
         workflow.write_text("jobs: # parsed, but empty\n", "utf-8")
         analysis = self.fx.analysis()
         self.assertTrue(any(finding.kind == "jobs-empty" for finding in analysis.findings))
         empty = {section: set() for section in membership.SECTIONS}
-        synthetic = membership.Analysis(
-            membership.PgInventory({}), empty, 0, analysis.findings
-        )
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             rc = membership.check_analysis(
-                synthetic,
+                analysis,
                 empty,
                 empty,
-                membership.render_manifest(synthetic.inventory),
+                membership.render_manifest(analysis.inventory),
                 reference_label="fixture base",
                 allowlist_label="fixture allowlist",
             )
         self.assertEqual(rc, 0)
         self.assertIn("WARN: [jobs-empty]", stderr.getvalue())
+
+    def test_jobs_comment_rule4_debt_is_warn_only_with_real_analysis(self) -> None:
+        workflow = self.root / ".github/workflows/ci-main.yml"
+        workflow.write_text((FIXTURES / "jobs_comment.yml").read_text("utf-8"), "utf-8")
+        analysis = self.fx.analysis()
+        self.assertEqual(
+            analysis.debts["rule4"],
+            {".github/workflows/ci-main.yml:comment_job"},
+        )
+        empty = {section: set() for section in membership.SECTIONS}
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            rc = membership.check_analysis(
+                analysis,
+                empty,
+                empty,
+                membership.render_manifest(analysis.inventory),
+                reference_label="fixture base",
+                allowlist_label="fixture allowlist",
+            )
+        self.assertEqual(rc, 0)
+        self.assertIn("WARN: [rule4] baseline drift: 1 new", stderr.getvalue())
+
+    def test_three_hop_rule_debt_is_warn_only_with_real_analysis(self) -> None:
+        self.fx.write_source(
+            "src/xfile_a.rs",
+            (FIXTURES / "xfile_a.rs").read_text("utf-8"),
+            "mod xfile_a;\nmod xfile_b;\n",
+        )
+        self.fx.write_source(
+            "src/xfile_b.rs",
+            (FIXTURES / "xfile_b.rs").read_text("utf-8"),
+        )
+        analysis = self.fx.analysis()
+        self.assertEqual(
+            {section: len(analysis.debts[section]) for section in ("rule1", "rule2", "rule3")},
+            {"rule1": 1, "rule2": 1, "rule3": 1},
+        )
+        empty = {section: set() for section in membership.SECTIONS}
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            rc = membership.check_analysis(
+                analysis,
+                empty,
+                empty,
+                membership.render_manifest(analysis.inventory),
+                reference_label="fixture base",
+                allowlist_label="fixture allowlist",
+            )
+        self.assertEqual(rc, 0)
+        for section in ("rule1", "rule2", "rule3"):
+            self.assertIn(f"WARN: [{section}] baseline drift: 1 new", stderr.getvalue())
 
     def test_operation_counter_is_warn_only(self) -> None:
         analysis = self.fx.analysis()
@@ -393,12 +491,13 @@ class BaselineAndEnforcement(FixtureCase):
         self.assertEqual(rc, 1)
         self.assertIn("Remove '-' entries", error)
 
-    def test_new_violation_and_baseline_coverup_fail(self) -> None:
+    def test_new_violation_warns_and_baseline_coverup_fails(self) -> None:
         empty = {section: set() for section in membership.SECTIONS}
         current = {section: set() for section in membership.SECTIONS}
         current["rule1"] = {"service::tests::case"}
         rc, _, error = self.run_check(self.analysis(current), empty, empty)
-        self.assertEqual(rc, 1)
+        self.assertEqual(rc, 0)
+        self.assertIn("WARN: [rule1] baseline drift", error)
         self.assertIn("Fix '+' violations", error)
         rc, _, error = self.run_check(self.analysis(current), current, empty)
         self.assertEqual(rc, 1)

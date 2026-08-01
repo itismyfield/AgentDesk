@@ -15,12 +15,14 @@ db::intake_outbox::migration_tests::intake_outbox_touch_updated_at_trigger_advan
 db::intake_outbox::migration_tests::intake_outbox_unique_message_attempt_blocks_duplicate_attempt_no
 db::intake_outbox::migration_tests::migration_0080_recovers_provider_from_claim_owner_and_fails_closed_by_accept_phase
 engine::ops::config_ops::tests::policy_engine_config_get_preserves_types_precedence_and_fail_closed_contract
+engine::ops::db_ops::tests::policy_db_query_json_returns_typed_json_columns_and_query_keeps_strings
 server::issue_specs::tests::upsert_issue_spec_persists_parsed_contract
 server::resource_locks::tests::resource_lock_allows_only_one_active_holder
 server::resource_locks::tests::resource_lock_reclaims_expired_holder
 server::routes::dispatches::crud::tests::dispatch_delivery_events_route_returns_typed_rows_newest_first
 server::routes::dispatches::crud::tests::dispatch_delivery_reconcile_stats_route_returns_current_stats_and_metric_rows
 server::routes::memory_api::request_body_tests::local_memory_api_uses_migrated_table
+server::routes::memory_api::request_body_tests::local_memory_migration_preserves_preexisting_route_table_rows
 server::routes::memory_api::request_body_tests::memory_recall_forget_handlers_use_local_when_memento_runtime_unavailable
 server::task_dispatch_claims::tests::claim_acquires_first_per_node_semaphore_on_preferred_node
 server::task_dispatch_claims::tests::claim_does_not_reclaim_active_null_expiry_semaphore_holder
@@ -163,6 +165,7 @@ dispatch::dispatch_context::pg_rereview_tests::pg_rereview_rejects_pr_tracking_w
 dispatch::dispatch_context::pg_rereview_tests::pg_rereview_retries_once_when_dirty_settles_within_backoff
 engine::ops::config_ops::tests::policy_engine_config_get_preserves_types_precedence_and_fail_closed_contract
 engine::ops::config_ops::tests::policy_engine_config_get_query_error_fails_closed_with_live_postgres
+engine::ops::db_ops::tests::policy_db_query_json_returns_typed_json_columns_and_query_keeps_strings
 engine::ops::message_ops::tests::policy_dynamic_source_rejected_before_insert_pg
 github::sync::terminal_open_alert_tests::pg_card_driven_reconcile_closes_old_closed_issue_missing_from_fetch_window
 github::sync::terminal_open_alert_tests::pg_stale_candidate_selection_excludes_custom_terminal_status
@@ -191,6 +194,7 @@ server::routes::dispatches::crud::tests::dispatch_delivery_events_route_returns_
 server::routes::dispatches::crud::tests::dispatch_delivery_reconcile_stats_route_returns_current_stats_and_metric_rows
 server::routes::dispatches::crud::tests::publish_only_dispatch_patch_broadcasts_without_mutating_result_or_phase_gate_pg
 server::routes::memory_api::request_body_tests::local_memory_api_uses_migrated_table
+server::routes::memory_api::request_body_tests::local_memory_migration_preserves_preexisting_route_table_rows
 server::routes::memory_api::request_body_tests::memory_recall_forget_handlers_use_local_when_memento_runtime_unavailable
 server::routes::message_outbox::tests::monitor_alert_action_id_is_durable_and_idempotent_pg
 server::task_dispatch_claims::tests::claim_acquires_first_per_node_semaphore_on_preferred_node
@@ -381,6 +385,7 @@ src/server/issue_specs.rs
 src/server/mod.rs
 src/server/multinode_regression.rs
 src/server/resource_locks.rs
+src/server/routes/escalation.rs
 src/server/routes/memory_api.rs
 src/server/routes/stats.rs
 src/services/agent_quality/regression_alerts.rs
@@ -400,6 +405,7 @@ src/services/maintenance/jobs/worktree_orphan_sweep.rs
 src/services/pipeline_override.rs
 src/services/pipeline_routes.rs
 src/services/session_resume.rs
+src/services/settings.rs
 src/services/stale_turn_reconciler.rs
 src/voice/announce_meta.rs
 src/voice/turn_link.rs

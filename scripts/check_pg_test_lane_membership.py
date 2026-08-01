@@ -3,9 +3,8 @@
 
 The gate identifies PG-dependent Rust tests only inside test regions, checks four
 lane contracts, and ratchets existing violations through a sectioned baseline.
-It is enforced from day one: unlike #5006's warn-only rollout over live
-unbaselined offenders, this gate records all pre-existing debt, leaving no
-initial false-positive surface for warnings to hide.
+During the T0 rollout, newly discovered debt is reported without changing the
+script's return code; T1 promotes that warning to enforcement.
 """
 
 from __future__ import annotations
@@ -128,7 +127,7 @@ _TEST_ATTR = re.compile(
 _STRUCT = re.compile(r"\bstruct\s+([A-Za-z_][A-Za-z0-9_]*)\b")
 _IMPL = re.compile(r"\bimpl(?:\s*<[^>{}]*>)?\s+(?:[^{}]*?\s+for\s+)?([A-Za-z_][A-Za-z0-9_]*)\b[^{};]*\{")
 _JOBS_KEY = re.compile(
-    r"^(?P<indent>[^\S\n]*)(?:jobs|'jobs'|\"jobs\"):[^\S\n]*(?:#.*)?$",
+    r"^(?:jobs|'jobs'|\"jobs\"):[^\S\n]*(?:#.*)?$",
     re.MULTILINE,
 )
 _JOB = re.compile(
@@ -137,7 +136,7 @@ _JOB = re.compile(
 )
 _FN = re.compile(r"\b(?:async\s+)?(?:unsafe\s+)?fn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)")
 _CALL = re.compile(
-    r"(?<![.:])\b(?P<path>(?:(?:crate|self|super)(?:::[A-Za-z_][A-Za-z0-9_]*)+|[A-Za-z_][A-Za-z0-9_]*))\s*!?\s*\("
+    r"(?<![.:])\b(?P<path>[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)\s*!?\s*\("
 )
 _USE = re.compile(r"\buse\s+(?P<path>[^;]+);")
 
@@ -176,7 +175,7 @@ def _mask_nested_items(
     spans: list[tuple[int, int]] = []
     for pattern in (_FN, _IMPL):
         for match in pattern.finditer(body):
-            opening = _opening_brace(body, match.end())
+            opening = match.end() - 1 if pattern is _IMPL else _opening_brace(body, match.end())
             if opening is None:
                 continue
             spans.append((match.start(), _matching_brace(body, opening, counter) + 1))
@@ -472,6 +471,22 @@ def discover_pg_inventory(
             targets.update(by_path.get((base, raw), set()))
         return targets
 
+    def resolve_call(
+        module: tuple[str, ...], raw: str
+    ) -> set[tuple[tuple[str, ...], str, str]]:
+        """Resolve a function path and the receiver of an associated call.
+
+        ``crate::support::h()`` resolves to the fully-qualified free function,
+        while ``TestDatabase::create()`` also resolves ``TestDatabase`` in the
+        caller's logical module.  Both routes still go through module-scoped
+        tuple keys, so a same-named helper in another module cannot taint it.
+        """
+        targets = set(resolve(module, raw))
+        first, separator, _rest = raw.partition("::")
+        if separator and first not in ("crate", "self", "super"):
+            targets.update(resolve(module, first))
+        return targets
+
     edges: dict[tuple[tuple[str, ...], str, str], set[tuple[tuple[str, ...], str, str]]] = {}
     for key, body in item_bodies.items():
         if key[2] != "fn":
@@ -479,8 +494,7 @@ def discover_pg_inventory(
         edges[key] = {
             target
             for call in _CALL.finditer(body)
-            for target in resolve(key[0], call.group("path"))
-            if target[2] == "fn"
+            for target in resolve_call(key[0], call.group("path"))
         }
 
     tests: dict[str, str] = {}
@@ -490,7 +504,7 @@ def discover_pg_inventory(
         mentioned_names = {
             match.group("name")
             for match in re.finditer(
-                r"\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b(?!\s*::)",
+                r"\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b",
                 visible_body,
             )
         }
@@ -499,6 +513,11 @@ def discover_pg_inventory(
             for item_name in mentioned_names
             for target in resolve(module, item_name)
         }
+        referenced.update(
+            target
+            for call in _CALL.finditer(visible_body)
+            for target in resolve(module, call.group("path"))
+        )
         indirect = _transitive_closure(referenced, seeded, edges)
         if direct or indirect:
             tests[name] = path
@@ -522,23 +541,16 @@ def parse_jobs(
 
     This intentionally stays dependency-free instead of relying on PyYAML, which
     is not declared by AgentDesk's script-check environment. It supports the
-    repository's block-style workflows. Missing or empty job maps are reported as
-    warn-only findings by ``analyze``; they do not add a blocking predicate.
+    repository's block-style workflows. An empty top-level job map is reported as
+    a warn-only finding by ``analyze``; an absent top-level ``jobs:`` key is ignored.
     """
     text = path.read_text("utf-8")
     jobs_key = _JOBS_KEY.search(text)
     if jobs_key is None:
         return []
-    jobs_indent = _indent_width(jobs_key.group("indent"))
-    section_end = len(text)
-    for line in re.finditer(r"^(?P<indent>[^\S\n]*)(?P<body>\S.*)$", text[jobs_key.end():], re.MULTILINE):
-        if line.group("body").startswith("#"):
-            continue
-        if _indent_width(line.group("indent")) <= jobs_indent:
-            section_end = jobs_key.end() + line.start()
-            break
+    jobs_indent = 0
     in_section = [
-        match for match in _JOB.finditer(text, jobs_key.end(), section_end)
+        match for match in _JOB.finditer(text, jobs_key.end())
         if _indent_width(match.group("indent")) > jobs_indent
     ]
     job_indent = min(
@@ -558,7 +570,7 @@ def parse_jobs(
             match.group("name").strip("'\""),
             text[
                 match.end():
-                candidates[index + 1].start() if index + 1 < len(candidates) else section_end
+                candidates[index + 1].start() if index + 1 < len(candidates) else len(text)
             ],
         )
         for index, match in enumerate(candidates)
@@ -819,7 +831,8 @@ def check_analysis(
         new = sorted(analysis.debts[section] - baseline[section])
         stale = sorted(baseline[section] - analysis.debts[section])
         if new or stale:
-            print(f"FAIL: [{section}] baseline drift: {len(new)} new, {len(stale)} stale.", file=sys.stderr)
+            level = "FAIL" if stale else "WARN"
+            print(f"{level}: [{section}] baseline drift: {len(new)} new, {len(stale)} stale.", file=sys.stderr)
             for entry in new:
                 print(f"  + {entry}", file=sys.stderr)
             for entry in stale:
@@ -834,7 +847,8 @@ def check_analysis(
                 "every entry requires an inline reason comment.",
                 file=sys.stderr,
             )
-            failed = True
+            if stale:
+                failed = True
     counts = analysis.debts
     print(f"pg-lane debt: rule1={len(counts['rule1'])} rule2={len(counts['rule2'])} rule3={len(counts['rule3'])} (allowlist={analysis.allowlist_count})")
     if failed:
@@ -861,7 +875,7 @@ def check(repo_root: Path, baseline_path: Path, manifest_path: Path, baseline_re
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__.splitlines()[0],
-        epilog=("This is a day-one enforced gate (violations return rc=1): existing debt is fully baselined, unlike #5006's warn-only rollout over unbaselined offenders."),
+        epilog=("During T0, new violations are warn-only; stale snapshots and manifest drift remain enforced. T1 promotes new debt to enforcement."),
     )
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     parser.add_argument("--baseline", type=Path)

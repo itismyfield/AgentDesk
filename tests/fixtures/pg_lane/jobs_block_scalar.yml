@@ -1,0 +1,13 @@
+on:
+  push:
+jobs:
+  prepare:
+    steps:
+      - run: |
+          cat <<'EOF'
+          setup
+EOF
+  pg_lane:
+    steps:
+      - run: ./scripts/ci/postgres-service.sh start
+      - run: cargo test postgres_
