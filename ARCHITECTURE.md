@@ -1129,6 +1129,7 @@ src/
 │   │   ├── session_banner.rs
 │   │   ├── session_canonical_identity.rs
 │   │   ├── session_identity.rs
+│   │   ├── session_idle_cleanup.rs
 │   │   ├── session_relay_sink.rs
 │   │   ├── session_runtime.rs
 │   │   ├── session_status_hook.rs
