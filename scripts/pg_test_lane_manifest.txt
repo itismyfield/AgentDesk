@@ -119,7 +119,7 @@ services::cluster::intake_router_hook::pg_tests
 services::discord::catch_up::too_old_notice::tests
 services::discord::health::recovery::stall_alert::tests
 services::discord::health::recovery::stall_watchdog_auto_heal_tests
-services::discord::idle_cleanup_selector_tests
+services::discord::session_idle_cleanup::idle_cleanup_selector_tests
 services::discord::idle_recap_interaction::tests
 services::discord::relay_recovery::circuit_breaker::tests
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
@@ -450,7 +450,7 @@ services::discord::health::recovery::stall_alert::tests::pg_outbox_routes_dm_ale
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::branch4_absolute_backstop_pages_without_cleaning_live_turn_pg
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_capture_advance_has_defense_in_depth_suppression_pg
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_flat_capture_pages_genuine_stall_pg
-services::discord::idle_cleanup_selector_tests::idle_cleanup_preserves_provider_selector_columns_pg
+services::discord::session_idle_cleanup::idle_cleanup_selector_tests::idle_cleanup_preserves_provider_selector_columns_pg
 services::discord::idle_recap_interaction::tests::concurrent_recap_compact_claim_pg_consumes_exactly_once
 services::discord::idle_recap_interaction::tests::recap_compact_claim_pg_rejects_owner_handoff_without_consuming_pointer
 services::discord::relay_recovery::circuit_breaker::tests::pg_alert_is_actionable_and_durably_one_shot_per_episode
