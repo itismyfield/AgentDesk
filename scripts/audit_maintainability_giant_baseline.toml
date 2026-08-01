@@ -485,14 +485,11 @@
 # `intake_turn/claim_bootstrap.rs`. The helper remains after the stale-dispatch
 # guard and before the placeholder handoff; won-claim gating and bump-before-
 # captured-clear ordering are unchanged.
-# #4570 (reviewable admission, +13): flag-gated native TUI steer INJECTION dispatch
-# entry. The hook body (141 prod) is extracted to the `intake_turn/steering_hook.rs`
-# child module (under the 700-line namespace cap); the residual in the root is the
-# irreducible dispatch site — the enable/foreground/local/dispatch/upload guards plus
-# the ~15-field IntakeSteeringContext threading, which must live at the intake call
-# site. Net-zero would require an unrelated extraction from this CORE relay-intake
-# giant; the injection is inert by default (AGENTDESK_TUI_STEERING off). Delivery-order
-# boundary deferred to #4740. 2695 -> 2708.
+# #4570 (reviewable admission, +13): flag-gated native TUI steer injection dispatch
+# entry. The hook body was extracted to a child module under the 700-line namespace
+# cap; the residual root wiring was the irreducible dispatch site. The injection was
+# inert by default. Delivery-order boundary deferred to #4740. 2695 -> 2708.
+# Slice 1 removes this automatic dispatch path.
 # #4807: remove the hosted-TUI readiness-wait placeholder edit (-10), then
 # lower the frozen baseline to the measured production LoC after current-main
 # drift (-2) so the deleted presentation path cannot silently regrow. 2708 -> 2706.
