@@ -665,7 +665,7 @@ test("auto-queue terminal cleanup uses pipeline terminal states", () => {
       {
         match(sql) {
           return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
-            sql.includes("user_cancelled");
+            sql.includes("WHERE r.status IN ('active', 'paused')");
         },
         result: []
       },
@@ -753,7 +753,7 @@ test("auto-queue rotates saturated active runs in bounded tick sweep", () => {
       {
         match(sql) {
           return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
-            sql.includes("user_cancelled");
+            sql.includes("WHERE r.status IN ('active', 'paused')");
         },
         result: []
       },
@@ -796,7 +796,7 @@ test("auto-queue does not rotate deferred active run activations", () => {
       {
         match(sql) {
           return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
-            sql.includes("user_cancelled");
+            sql.includes("WHERE r.status IN ('active', 'paused')");
         },
         result: []
       },
