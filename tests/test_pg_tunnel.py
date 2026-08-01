@@ -178,6 +178,21 @@ class DeploymentWiringTests(unittest.TestCase):
     """Pin every load-bearing launchd/deploy invariant individually."""
 
     @staticmethod
+    def _strip_shell_comments(text: str) -> str:
+        """Remove physical-line comments without hiding code after quoted ``#``."""
+        token = re.compile(
+            r''' '(?:[^'\r\n]*)' | "(?:\\[^\r\n]|[^"\\\r\n])*" |
+                \\[^\r\n] | [ \t]*\#[^\r\n]* ''',
+            re.VERBOSE,
+        )
+
+        def replace(match: re.Match[str]) -> str:
+            value = match.group(0)
+            return "" if value.lstrip(" \t").startswith("#") else value
+
+        return token.sub(replace, text)
+
+    @staticmethod
     def _pg_block() -> str:
         deploy = DEPLOY.read_text(encoding="utf-8")
         start = deploy.index("PG_TUNNEL_LABEL=\"com.agentdesk.pg-tunnel\"")
@@ -201,17 +216,22 @@ class DeploymentWiringTests(unittest.TestCase):
         indirection such as ``_disarm_exit``, commands assembled in variables,
         ``builtin``/``command``/``eval`` dispatch, and other multi-segment
         definition syntax are outside the static contract.
-        Neither this physical-line/definition scan nor
-        ``test_trap_function_shadowing_is_absent`` excludes heredoc bodies.
-        Harmless command-looking heredoc text can therefore be reported as a
-        false positive; that is an accepted fail-closed tradeoff.
+        All three static scans (this physical-line/definition scan,
+        ``test_trap_function_shadowing_is_absent``, and the post-registration
+        tail guard) remove text from ``#`` through each physical line end before
+        matching, while preserving simple quoted spans so a real forbidden form
+        after a quoted ``#`` is not hidden.  This is not a shell parser and does
+        not identify heredoc bodies.  A harmless command-looking heredoc line
+        without a comment can therefore still be reported as a false positive;
+        that is an accepted fail-closed tradeoff.
 
         The dynamic INT/TERM/EXIT backstop executes only the production slice
         that starts at ``_cleanup_owned_pg_tunnel_preflight`` and ends immediately
         before ``_self_hosted_release_session``.  Trap-state changes outside that
         slice are covered only by the static contract and inherit the limitations
         above.  The post-registration tail guard applies the same physical-line
-        literal-``trap`` boundary and ignores full-line and trailing comments.
+        literal-``trap`` prefix check (``trap`` followed by whitespace or
+        end-of-line) and ignores full-line and trailing comments.
         That tail contains detached-child paths where clearing an inherited trap
         with ``trap - EXIT`` can be legitimate; if such a use is needed, this
         contract must be changed explicitly rather than treating it as
@@ -222,7 +242,9 @@ class DeploymentWiringTests(unittest.TestCase):
         are pinned.  A line-leading query such as ``trap -p INT`` is therefore
         also rejected by the exact contract.
         """
-        deploy = DEPLOY.read_text(encoding="utf-8")
+        deploy = self._strip_shell_comments(
+            DEPLOY.read_text(encoding="utf-8")
+        )
         deploy_lines = deploy.splitlines()
 
         trap_rows = [
@@ -397,7 +419,9 @@ class DeploymentWiringTests(unittest.TestCase):
 
     def test_trap_function_shadowing_is_absent(self):
         """Reject Bash ``trap`` function declarations, including spaced parens."""
-        deploy = DEPLOY.read_text(encoding="utf-8")
+        deploy = self._strip_shell_comments(
+            DEPLOY.read_text(encoding="utf-8")
+        )
         definition_anchor = r"(?:^|[;&|]\s*)[ \t]*"
         shadow_patterns = (
             re.compile(
@@ -426,14 +450,16 @@ class DeploymentWiringTests(unittest.TestCase):
         comments; indirect, assembled, builtin, command, and eval forms remain
         outside the declared static contract.
         """
-        deploy = DEPLOY.read_text(encoding="utf-8")
+        deploy = self._strip_shell_comments(
+            DEPLOY.read_text(encoding="utf-8")
+        )
         boundary = "trap '_handle_cleanup_signal 143' TERM"
         tail = deploy[deploy.index(boundary) + len(boundary) :]
         forbidden = re.compile(r"^[ \t]*trap(?:[ \t]|$)")
         rows = [
             (line_number, line)
             for line_number, line in enumerate(tail.splitlines(), 1)
-            if forbidden.search(line.partition("#")[0])
+            if forbidden.search(line)
         ]
         self.assertEqual(
             rows,
