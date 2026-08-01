@@ -49,11 +49,14 @@ pub(crate) struct IdentityConsumptionFields {
 impl IdentityConsumptionFields {
     /// Return only the fields built by `identity_consumption_fields`.
     ///
-    /// This projection lets tests inspect the values supplied to the event
-    /// without formatted tracing capture. It does not observe the emitted
-    /// event, so a field added directly to `tracing::info!` is outside this
-    /// guard. Closing that gap requires generating emission and projection
-    /// from one declarative field list.
+    /// This projection lets tests inspect a field set they construct, without
+    /// formatted tracing capture. Two things sit outside the guard: it does not
+    /// observe the emitted event, so a field added directly to `tracing::info!`
+    /// is invisible here; and a caller that builds its own arguments is not
+    /// checking what any production call site passed. Closing the first gap
+    /// needs emission and projection generated from one declarative field list;
+    /// the second needs a seam reporting emitted values back from production.
+    /// Both are tracked as sites on umbrella #5003.
     #[cfg(test)]
     pub(crate) fn named_values(&self) -> Vec<(&'static str, String)> {
         vec![

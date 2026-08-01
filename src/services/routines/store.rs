@@ -4055,11 +4055,15 @@ mod tests {
             }
         );
 
-        // This preserves the DELETE site's target and the exact typed fields
-        // passed to emission without the flaky formatted tracing capture. It
-        // does not inspect subscriber output or detect fields added directly
-        // inside `tracing::info!`; a single-source generated field list would
-        // be required to cover that broader contract.
+        // This asserts the projection helper's own output for the DELETE
+        // argument shape, without the flaky formatted tracing capture. It does
+        // NOT observe the production call site: the helper is invoked here with
+        // arguments this test supplies, so changing what the DELETE handler
+        // actually passes — say, its `caller_agent_id` — leaves this test green.
+        // Nor does it inspect subscriber output or see fields added directly
+        // inside `tracing::info!`. Closing either gap needs a seam that reports
+        // the emitted values back from the production path; tracked as a site on
+        // umbrella #5003.
         assert_eq!(LOG_TARGET, "agentdesk::api_caller_observability");
         assert_eq!(
             super::routine_delete_identity_consumption_fields(
