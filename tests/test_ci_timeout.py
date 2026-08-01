@@ -39,9 +39,11 @@ class Process:
     def __init__(self, results=(), default=None):
         self.pid, self.returncode = 4413, None
         self.results, self.default = list(results), default
+        self.poll_calls = 0
         self.terminate, self.kill = mock.Mock(), mock.Mock()
 
     def poll(self):
+        self.poll_calls += 1
         result = self.results.pop(0) if self.results else self.default
         if result is not None:
             self.returncode = result
@@ -185,76 +187,111 @@ class CiTimeoutTests(unittest.TestCase):
 
     # F8(b,c)
     def test_two_hanging_dumpers_share_one_diagnostic_cap(self):
-        primary, dumpers, checkpoints = Process(default=None), [], []
-        real_popen, real_checkpoint = subprocess.Popen, ci_timeout._checkpoint
+        primary, dumpers, checkpoints, attempts = Process(default=None), [], [], []
+        real_checkpoint = ci_timeout._checkpoint
 
-        def popen(command, **options):
+        def popen(command, _enabled):
             if command == ["primary"]:
                 return primary
-            dumpers.append(real_popen(command, **options))
+            attempts.append(command)
+            time.sleep(1.2)  # Scaled equivalent of each 6s seam under a 10s cap.
+            dumpers.append(Process(default=None))
             return dumpers[-1]
 
         def send(*_args, force=False, **_kwargs):
-            if force:
-                primary.returncode = primary.default = -signal.SIGKILL
+            primary.returncode = primary.default = (
+                -signal.SIGKILL if force else -signal.SIGTERM
+            )
 
         def checkpoint(state, enabled, name):
             checkpoints.append(name)
             return real_checkpoint(state, enabled, name)
 
-        sleeper = [sys.executable, "-c", "import time;time.sleep(600)"]
         started = time.monotonic()
-        try:
-            with mock.patch.object(ci_timeout, "_mask_forwarded_signals", return_value=False), \
-                 mock.patch.object(ci_timeout.subprocess, "Popen", side_effect=popen), \
-                 mock.patch.object(ci_timeout, "_diagnostic_commands", return_value=[sleeper] * 2), \
-                 mock.patch.object(ci_timeout, "_send_process_signal", side_effect=send), \
-                 mock.patch.object(ci_timeout, "DIAGNOSTIC_CAP_SECONDS", 0.05), \
-                 mock.patch.object(ci_timeout, "TERMINATION_GRACE_SECONDS", 0.01), \
-                 mock.patch.object(ci_timeout, "KILL_WAIT_SECONDS", 0.01), \
-                 mock.patch.object(ci_timeout, "_checkpoint", side_effect=checkpoint), \
-                 contextlib.redirect_stderr(io.StringIO()):
-                rc = ci_timeout.run_command(0.01, ["primary"])
-        finally:
-            for dumper in dumpers:
-                try:
-                    dumper.wait(timeout=1)
-                except subprocess.TimeoutExpired:
-                    dumper.kill(); dumper.wait(timeout=1)
-        self.assertEqual((rc, len(dumpers)), (124, 2))
+        with mock.patch.object(ci_timeout, "_mask_forwarded_signals", return_value=True), \
+             mock.patch.object(ci_timeout, "_popen", side_effect=popen), \
+             mock.patch.object(ci_timeout, "_diagnostic_commands",
+                               return_value=[["dumper-1"], ["dumper-2"]]), \
+             mock.patch.object(ci_timeout, "_send_process_signal", side_effect=send), \
+             mock.patch.object(ci_timeout, "DIAGNOSTIC_CAP_SECONDS", 2.0), \
+             mock.patch.object(ci_timeout, "_checkpoint", side_effect=checkpoint), \
+             mock.patch.object(ci_timeout.signal, "sigpending", return_value=set()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            rc = ci_timeout.run_command(0, ["primary"])
+        elapsed = time.monotonic() - started
+        self.assertEqual((rc, len(attempts), len(dumpers)), (124, 2, 1))
         self.assertIn("diagnostic_poll", checkpoints)
-        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertGreaterEqual(elapsed, 1.9)
+        self.assertLess(elapsed, 2.3)
+
+    def test_diagnostic_poll_never_sleeps_a_negative_duration(self):
+        dumper, times, sleeps = Process(default=None), iter((0, 0, 0, 0, 2, 2)), []
+
+        def sleep(seconds):
+            self.assertGreaterEqual(seconds, 0)
+            sleeps.append(seconds)
+
+        with mock.patch.object(ci_timeout, "DIAGNOSTIC_CAP_SECONDS", 1), \
+             mock.patch.object(ci_timeout, "_diagnostic_commands", return_value=[["dump"]]), \
+             mock.patch.object(ci_timeout, "_popen", return_value=dumper), \
+             mock.patch.object(ci_timeout, "_checkpoint", return_value=False), \
+             mock.patch.object(ci_timeout, "_monotonic", side_effect=times), \
+             mock.patch.object(ci_timeout, "_sleep", side_effect=sleep), \
+             contextlib.redirect_stderr(io.StringIO()):
+            ci_timeout._diagnose_capped(Process(), ci_timeout._RunState(), False)
+        self.assertEqual(sleeps, [0])
 
     # F9
+    @unittest.skipUnless(hasattr(signal, "pthread_sigmask"), "POSIX required")
     def test_post_cutoff_signals_never_use_any_send_path(self):
-        for has_killpg in (True, False):
-            for reaped in (True, False):
-                proc, state = Process(), ci_timeout._RunState(reaped=reaped, cutoff=True)
-                proc.returncode = 0 if reaped else None
-                fake_os = types.SimpleNamespace(environ={})
-                if has_killpg:
-                    fake_os.killpg = mock.Mock()
-                with mock.patch.object(ci_timeout, "os", fake_os):
-                    ci_timeout._send_process_signal(proc, state, signal.SIGTERM)
-                    ci_timeout._send_process_signal(proc, state, signal.SIGTERM, force=True)
-                if has_killpg:
-                    fake_os.killpg.assert_not_called()
-                proc.terminate.assert_not_called(); proc.kill.assert_not_called()
-                with mock.patch.object(ci_timeout.signal, "sigpending") as pending:
-                    self.assertFalse(ci_timeout._checkpoint(state, True, "post_cutoff"))
-                pending.assert_not_called(); self.assertIsNone(state.first_signum)
-                expected = 0 if reaped else 124
-                self.assertEqual(
-                    ci_timeout._select_return_code(
-                        state, timed_out=not reaped, child_returncode=proc.returncode
-                    ),
-                    expected,
-                )
-        proc, state = Process(), ci_timeout._RunState(reaped=False)
-        proc.returncode = 0
-        with mock.patch.object(ci_timeout.os, "killpg") as killpg:
-            ci_timeout._send_process_signal(proc, state, signal.SIGTERM)
-        killpg.assert_not_called()
+        original_mask, real_checkpoint = signal.pthread_sigmask, ci_timeout._checkpoint
+        old_mask = original_mask(signal.SIG_BLOCK, set())
+        try:
+            for path, proc, expected in (
+                ("reaped", Process([0]), 0),
+                ("unreaped", Process(default=None), 124),
+            ):
+                with self.subTest(path=path):
+                    clock, captured, after_cutoff = Clock(), {}, []
+
+                    def checkpoint(state, enabled, name):
+                        captured["state"] = state
+                        return real_checkpoint(state, enabled, name)
+
+                    def report(*_args):
+                        sends_before = killpg.call_count
+                        os.kill(os.getpid(), signal.SIGTERM)
+                        self.assertIn(signal.SIGTERM, signal.sigpending())
+                        after_cutoff.append(
+                            real_checkpoint(captured["state"], True, "post_cutoff")
+                        )
+                        ci_timeout._send_process_signal(
+                            proc, captured["state"], signal.SIGTERM
+                        )
+                        ci_timeout._send_process_signal(
+                            proc, captured["state"], signal.SIGTERM, force=True
+                        )
+                        self.assertEqual(killpg.call_count, sends_before)
+
+                    try:
+                        with mock.patch.object(ci_timeout, "_popen", return_value=proc), \
+                             mock.patch.object(ci_timeout, "_diagnose_capped"), \
+                             mock.patch.object(ci_timeout.os, "killpg") as killpg, \
+                             mock.patch.object(ci_timeout, "_monotonic", side_effect=clock.monotonic), \
+                             mock.patch.object(ci_timeout, "_sleep", side_effect=clock.sleep), \
+                             mock.patch.object(ci_timeout, "_checkpoint", side_effect=checkpoint), \
+                             mock.patch.object(ci_timeout, "_report", side_effect=report), \
+                             contextlib.redirect_stderr(io.StringIO()):
+                            rc = ci_timeout.run_command(0, ["cargo", "test"])
+                        self.assertEqual((rc, after_cutoff), (expected, [False]))
+                        self.assertIsNone(captured["state"].first_signum)
+                    finally:
+                        if signal.SIGTERM in signal.sigpending():
+                            signal.sigwait({signal.SIGTERM})
+        finally:
+            if signal.SIGTERM in signal.sigpending():
+                signal.sigwait({signal.SIGTERM})
+            original_mask(signal.SIG_SETMASK, old_mask)
 
     # F10-①
     @unittest.skipUnless(hasattr(signal, "pthread_sigmask"), "POSIX required")
@@ -338,6 +375,102 @@ class CiTimeoutTests(unittest.TestCase):
         self.assertTrue(required.issubset(names))
         self.assertLessEqual(max(clock.sleeps), ci_timeout.POLL_INTERVAL_SECONDS)
 
+    def test_poll_child_checkpoints_every_iteration(self):
+        proc, state, clock, checkpoints = Process([None, None, 0]), ci_timeout._RunState(), Clock(), []
+
+        def checkpoint(*_args):
+            checkpoints.append("poll")
+            return False
+
+        with mock.patch.object(ci_timeout, "_checkpoint", side_effect=checkpoint), \
+             mock.patch.object(ci_timeout, "_monotonic", side_effect=clock.monotonic), \
+             mock.patch.object(ci_timeout, "_sleep", side_effect=clock.sleep):
+            rc, outcome = ci_timeout._poll_child(
+                proc, state, True, 1, stop_on_signal=True
+            )
+        self.assertEqual((rc, outcome), (0, "reaped"))
+        self.assertEqual(len(checkpoints), proc.poll_calls)
+
+    def test_every_signal_arrival_row_meets_the_cleanup_bound(self):
+        real_checkpoint = ci_timeout._checkpoint
+        signal_rows = (
+            "checkpoint1", "checkpoint2", "poll", "term_boundary",
+            "grace_boundary", "kill_boundary", "final",
+        )
+        for target in signal_rows:
+            with self.subTest(target=target):
+                clock = Clock()
+                proc = Process([0] if target == "final" else (), default=None)
+                injected = [False]
+
+                def checkpoint(state, enabled, name):
+                    if name == target and not injected[0]:
+                        injected[0] = True
+                        state.first_signum = signal.SIGTERM
+                        return True
+                    return real_checkpoint(state, enabled, name)
+
+                with mock.patch.object(ci_timeout, "_mask_forwarded_signals", return_value=True), \
+                     mock.patch.object(ci_timeout.signal, "sigpending", return_value=set()), \
+                     mock.patch.object(ci_timeout, "_popen", return_value=proc) as popen, \
+                     mock.patch.object(ci_timeout, "_diagnose_capped"), \
+                     mock.patch.object(ci_timeout, "_send_process_signal"), \
+                     mock.patch.object(ci_timeout, "_monotonic", side_effect=clock.monotonic), \
+                     mock.patch.object(ci_timeout, "_sleep", side_effect=clock.sleep), \
+                     mock.patch.object(ci_timeout, "_checkpoint", side_effect=checkpoint), \
+                     mock.patch.object(ci_timeout, "_report"), \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    rc = ci_timeout.run_command(0, ["cargo", "test"])
+                self.assertTrue(injected[0])
+                self.assertEqual(rc, 143)
+                self.assertLessEqual(clock.now, 55.1)
+                if target == "checkpoint1":
+                    popen.assert_not_called()
+
+    @unittest.skipUnless(hasattr(signal, "pthread_sigmask"), "POSIX required")
+    def test_cutoff_boundary_uses_real_pending_signals(self):
+        original_mask, real_checkpoint = signal.pthread_sigmask, ci_timeout._checkpoint
+        old_mask = original_mask(signal.SIG_BLOCK, set())
+        try:
+            for timing, expected in (("before", 143), ("after", 0)):
+                with self.subTest(timing=timing):
+                    proc, captured, injected, after_result = Process([0]), {}, [False], []
+
+                    def checkpoint(state, enabled, name):
+                        captured["state"] = state
+                        if timing == "before" and name == "final" and not injected[0]:
+                            injected[0] = True
+                            os.kill(os.getpid(), signal.SIGTERM)
+                        return real_checkpoint(state, enabled, name)
+
+                    def report(*_args):
+                        if timing == "after":
+                            injected[0] = True
+                            os.kill(os.getpid(), signal.SIGTERM)
+                            after_result.append(
+                                real_checkpoint(captured["state"], True, "after_cutoff")
+                            )
+
+                    try:
+                        with mock.patch.object(ci_timeout, "_popen", return_value=proc), \
+                             mock.patch.object(ci_timeout, "_send_process_signal") as send, \
+                             mock.patch.object(ci_timeout, "_checkpoint", side_effect=checkpoint), \
+                             mock.patch.object(ci_timeout, "_report", side_effect=report):
+                            rc = ci_timeout.run_command(30, ["cargo", "test"])
+                        self.assertTrue(injected[0])
+                        self.assertEqual(rc, expected)
+                        if timing == "after":
+                            self.assertEqual(after_result, [False])
+                            self.assertIsNone(captured["state"].first_signum)
+                            send.assert_not_called()
+                    finally:
+                        if signal.SIGTERM in signal.sigpending():
+                            signal.sigwait({signal.SIGTERM})
+        finally:
+            if signal.SIGTERM in signal.sigpending():
+                signal.sigwait({signal.SIGTERM})
+            original_mask(signal.SIG_SETMASK, old_mask)
+
     # F11
     def test_spawn_and_input_errors_preserve_legacy_rows(self):
         with mock.patch.object(ci_timeout.signal, "pthread_sigmask") as mask_call, \
@@ -353,6 +486,23 @@ class CiTimeoutTests(unittest.TestCase):
         result = subprocess.run([sys.executable, str(SCRIPT_PATH), "1", "/not/a/program"],
                                 capture_output=True, timeout=5)
         self.assertEqual(result.returncode, 1)
+
+    def test_non_posix_path_installs_and_restores_legacy_handlers(self):
+        installed = {}
+
+        def install(signum, handler):
+            previous = installed.get(signum, signal.SIG_DFL)
+            installed[signum] = handler
+            return previous
+
+        with mock.patch.object(ci_timeout, "_mask_forwarded_signals", return_value=False), \
+             mock.patch.object(ci_timeout, "_popen", return_value=Process([0])), \
+             mock.patch.object(ci_timeout.signal, "signal", side_effect=install) as handlers:
+            rc = ci_timeout.run_command(30, ["cargo", "test"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(handlers.call_count, 4)
+        self.assertEqual(installed, {signal.SIGTERM: signal.SIG_DFL,
+                                     signal.SIGINT: signal.SIG_DFL})
 
     # F12
     @unittest.skipUnless(hasattr(signal, "pthread_sigmask"), "POSIX required")
@@ -388,21 +538,39 @@ class CiTimeoutTests(unittest.TestCase):
         self.assertEqual((imports, constructors), ([], []))
 
     # F13
+    @unittest.skipUnless(hasattr(signal, "pthread_sigmask"), "POSIX required")
     def test_checkpoint_one_pending_signal_never_spawns_or_cleans_up(self):
-        for pending, expected in (({signal.SIGINT}, 130), ({signal.SIGTERM}, 143),
-                                  ({signal.SIGTERM, signal.SIGINT}, 143)):
-            with self.subTest(pending=pending), \
-                 mock.patch.object(ci_timeout, "_mask_forwarded_signals", return_value=True), \
-                 mock.patch.object(ci_timeout.signal, "sigpending", return_value=pending), \
-                 mock.patch.object(ci_timeout.signal, "signal") as handlers, \
+        original_mask, original_signal = signal.pthread_sigmask, signal.signal
+        old_mask = original_mask(signal.SIG_BLOCK, set())
+        old_handler = original_signal(signal.SIGTERM, lambda *_args: None)
+        mask_operations = []
+
+        def mask(how, signals):
+            mask_operations.append(how)
+            return original_mask(how, signals)
+
+        try:
+            original_mask(signal.SIG_BLOCK, {signal.SIGTERM})
+            os.kill(os.getpid(), signal.SIGTERM)
+            self.assertIn(signal.SIGTERM, signal.sigpending())
+            with mock.patch.object(ci_timeout.signal, "pthread_sigmask", side_effect=mask), \
                  mock.patch.object(ci_timeout, "_popen") as popen, \
                  mock.patch.object(ci_timeout, "_diagnose_capped") as diagnose, \
                  mock.patch.object(ci_timeout, "_cleanup") as cleanup, \
                  mock.patch.object(ci_timeout, "_send_process_signal") as send:
-                started = time.monotonic(); rc = ci_timeout.run_command(30, ["cargo", "test"])
-            self.assertEqual(rc, expected); self.assertLess(time.monotonic() - started, 55.1)
-            for operation in (popen, diagnose, cleanup, send, handlers):
+                started = time.monotonic()
+                rc = ci_timeout.run_command(30, ["cargo", "test"])
+            self.assertEqual(rc, 143)
+            self.assertLess(time.monotonic() - started, 55.1)
+            self.assertIn(signal.SIGTERM, signal.sigpending())
+            self.assertNotIn(signal.SIG_UNBLOCK, mask_operations)
+            for operation in (popen, diagnose, cleanup, send):
                 operation.assert_not_called()
+        finally:
+            if signal.SIGTERM in signal.sigpending():
+                signal.sigwait({signal.SIGTERM})
+            original_mask(signal.SIG_SETMASK, old_mask)
+            original_signal(signal.SIGTERM, old_handler)
 
 
 if __name__ == "__main__":

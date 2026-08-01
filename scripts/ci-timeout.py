@@ -20,6 +20,10 @@ _FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 _monotonic, _sleep = time.monotonic, time.sleep
 
 
+class _DiagnosticCapExpired(Exception):
+    pass
+
+
 @dataclass
 class _RunState:
     first_signum: int | None = None
@@ -69,7 +73,8 @@ def _poll_child(
 ) -> tuple[int | None, str]:
     while True:
         # R2″ checkpoint ③: every bounded poll iteration observes pending signals.
-        if _checkpoint(state, enabled, "poll") and stop_on_signal:
+        _checkpoint(state, enabled, "poll")
+        if state.first_signum is not None and stop_on_signal:
             return None, "signal"
         returncode = proc.poll()
         if returncode is not None:
@@ -124,23 +129,56 @@ def _diagnostic_commands(proc: subprocess.Popen[bytes]) -> list[list[str]]:
 def _diagnose_capped(
     proc: subprocess.Popen[bytes], state: _RunState, enabled: bool
 ) -> None:
-    # R1: bounded poll only. Every diagnostic shares this single hard deadline.
+    # R1: bounded poll only. Every diagnostic, including Popen, shares this hard cap.
     deadline = _monotonic() + DIAGNOSTIC_CAP_SECONDS
-    dumpers = []
+    dumpers: list[subprocess.Popen[bytes]] = []
+    alarm_supported = all(
+        hasattr(signal, name)
+        for name in ("SIGALRM", "ITIMER_REAL", "getsignal", "setitimer")
+    )
+    previous_alarm_handler = None
+    previous_timer: tuple[float, float] | None = None
+
+    def diagnostic_cap_expired(_signum: int, _frame: object) -> None:
+        raise _DiagnosticCapExpired
+
     print("::group::ci-timeout diagnostics", file=sys.stderr)
     try:
-        for command in _diagnostic_commands(proc):
-            if _monotonic() >= deadline:
-                break
-            try:
-                dumpers.append(_popen(command, enabled))
-            except (OSError, subprocess.SubprocessError) as error:
-                print(f"ci-timeout: diagnostic failed: {error}", file=sys.stderr)
-        while dumpers and _monotonic() < deadline:
-            _checkpoint(state, enabled, "diagnostic_poll")
-            dumpers = [dumper for dumper in dumpers if dumper.poll() is None]
-            if dumpers:
-                _sleep(min(POLL_INTERVAL_SECONDS, deadline - _monotonic()))
+        if not alarm_supported:
+            print(
+                "ci-timeout: diagnostic hard cap unavailable on this platform",
+                file=sys.stderr,
+            )
+            return
+        remaining_cap = max(0.0, deadline - _monotonic())
+        if remaining_cap == 0:
+            return
+        previous_alarm_handler = signal.getsignal(signal.SIGALRM)
+        signal.signal(signal.SIGALRM, diagnostic_cap_expired)
+        previous_timer = signal.setitimer(signal.ITIMER_REAL, remaining_cap)
+        try:
+            for command in _diagnostic_commands(proc):
+                if _monotonic() >= deadline:
+                    break
+                try:
+                    dumpers.append(_popen(command, enabled))
+                    _checkpoint(state, enabled, "diagnostic_poll")
+                except (OSError, subprocess.SubprocessError) as error:
+                    print(f"ci-timeout: diagnostic failed: {error}", file=sys.stderr)
+            while dumpers and _monotonic() < deadline:
+                _checkpoint(state, enabled, "diagnostic_poll")
+                dumpers = [dumper for dumper in dumpers if dumper.poll() is None]
+                if dumpers:
+                    remaining = max(0.0, deadline - _monotonic())
+                    _sleep(min(POLL_INTERVAL_SECONDS, remaining))
+        except _DiagnosticCapExpired:
+            pass
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous_alarm_handler)
+            assert previous_timer is not None
+            if previous_timer[0] > 0:
+                signal.setitimer(signal.ITIMER_REAL, *previous_timer)
         for dumper in dumpers:
             try:
                 dumper.kill()
@@ -221,6 +259,7 @@ def _report(timeout: float, command: list[str], elapsed: float, rc: int) -> None
 
 def run_command(timeout: float, command: list[str]) -> int:
     enabled, state = _mask_forwarded_signals(), _RunState()
+    previous_handlers: dict[int, signal.Handlers] = {}
     checkpoint1_started = _monotonic()
     # Checkpoint ① is the special no-spawn rc-table row 1a.
     if _checkpoint(state, enabled, "checkpoint1"):
@@ -229,39 +268,56 @@ def run_command(timeout: float, command: list[str]) -> int:
         _report(timeout, command, _monotonic() - checkpoint1_started, rc)
         return rc
 
-    proc = _popen(command, enabled)
-    spawn_completed = _monotonic()
-    child_rc, timed_out = None, False
-    # Checkpoint ② observes signals that arrived inside Popen.
-    if _checkpoint(state, enabled, "checkpoint2"):
-        _cleanup(proc, state, enabled)
-    else:
-        child_rc, outcome = _poll_child(
-            proc, state, enabled, spawn_completed + timeout, stop_on_signal=True
-        )
-        timed_out = outcome == "deadline"
-        if outcome == "signal":
-            _cleanup(proc, state, enabled)
-        elif timed_out:
-            elapsed = _monotonic() - spawn_completed
-            print(
-                f"::error::ci-timeout: exceeded {timeout:g}s after {elapsed:.1f}s "
-                f"— {shlex.join(command)}",
-                file=sys.stderr,
-            )
-            _cleanup(proc, state, enabled)
+    try:
+        proc = _popen(command, enabled)
 
-    # Checkpoint ⑤ is immediately before cutoff C and the sole rc selection.
-    had_signal = state.first_signum is not None
-    observed_at_final = _checkpoint(state, enabled, "final")
-    newly_observed = observed_at_final and not had_signal
-    if newly_observed and not state.cleanup_done:
-        _cleanup(proc, state, enabled)
-        _checkpoint(state, enabled, "final")
-    state.cutoff = True
-    rc = _select_return_code(state, timed_out=timed_out, child_returncode=child_rc)
-    _report(timeout, command, _monotonic() - spawn_completed, rc)
-    return rc
+        if not enabled:
+            # Preserve the pre-masking implementation on platforms without POSIX APIs.
+            def forward_signal(signum: int, _frame: object) -> None:
+                if state.cutoff:
+                    return
+                if state.first_signum is None:
+                    state.first_signum = signum
+                _send_process_signal(proc, state, signum)
+
+            for signum in _FORWARDED_SIGNALS:
+                previous_handlers[signum] = signal.signal(signum, forward_signal)
+
+        spawn_completed = _monotonic()
+        child_rc, timed_out = None, False
+        # Checkpoint ② observes signals that arrived inside Popen.
+        if _checkpoint(state, enabled, "checkpoint2"):
+            _cleanup(proc, state, enabled)
+        else:
+            child_rc, outcome = _poll_child(
+                proc, state, enabled, spawn_completed + timeout, stop_on_signal=True
+            )
+            timed_out = outcome == "deadline"
+            if outcome == "signal":
+                _cleanup(proc, state, enabled)
+            elif timed_out:
+                elapsed = _monotonic() - spawn_completed
+                print(
+                    f"::error::ci-timeout: exceeded {timeout:g}s after {elapsed:.1f}s "
+                    f"— {shlex.join(command)}",
+                    file=sys.stderr,
+                )
+                _cleanup(proc, state, enabled)
+
+        # Checkpoint ⑤ is immediately before cutoff C and the sole rc selection.
+        had_signal = state.first_signum is not None
+        observed_at_final = _checkpoint(state, enabled, "final")
+        newly_observed = observed_at_final and not had_signal
+        if newly_observed and not state.cleanup_done:
+            _cleanup(proc, state, enabled)
+            _checkpoint(state, enabled, "final")
+        state.cutoff = True
+        rc = _select_return_code(state, timed_out=timed_out, child_returncode=child_rc)
+        _report(timeout, command, _monotonic() - spawn_completed, rc)
+        return rc
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
 
 
 def main() -> int:
