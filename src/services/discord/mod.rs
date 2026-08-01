@@ -228,10 +228,7 @@ use adk_session::{
 pub(in crate::services) use compact_turn_authority::{
     ManagedCompactTurnIdentity, compact_eligible_turn_source, live_managed_turn_matches,
 };
-use formatting::{
-    BUILTIN_SKILLS, extract_skill_description, format_for_discord, format_tool_input,
-    send_long_message_raw, truncate_str,
-};
+use formatting::{format_for_discord, format_tool_input, send_long_message_raw, truncate_str};
 #[cfg(test)]
 use inflight::save_inflight_state;
 use inflight::{InflightTurnState, load_inflight_states};

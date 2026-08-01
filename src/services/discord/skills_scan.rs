@@ -1,5 +1,7 @@
 use super::formatting::{BUILTIN_SKILLS, extract_skill_description};
-use super::{Path, ProviderKind, fs};
+use crate::services::provider::ProviderKind;
+use std::fs;
+use std::path::Path;
 
 /// Scan for provider-specific skills available to this bot.
 pub(in crate::services) fn scan_skills(
