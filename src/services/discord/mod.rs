@@ -246,8 +246,8 @@ use queue_dispatch::{
     mailbox_take_next_soft_intervention,
 };
 use recovery_engine::restore_inflight_turns;
-use role_map_enrichment::enrich_role_map_with_channel_ids;
 use restart_report::flush_restart_reports;
+use role_map_enrichment::enrich_role_map_with_channel_ids;
 use router::handle_event;
 use session_status_hook::{
     post_canonical as post_adk_session_status_with_canonical_identity,
@@ -4926,7 +4926,6 @@ mod idle_cleanup_selector_tests {
 // bootstrap_thread_session, resolve_channel_category, and other non-command functions.
 
 // ─── Text message → Claude AI ───────────────────────────────────────────────
-
 
 // #3167 — a queued external USER intervention must be kickable while a
 // low-priority Background turn (monitor relay / self-paced TUI loop) holds the
