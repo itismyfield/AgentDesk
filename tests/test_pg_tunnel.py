@@ -196,23 +196,31 @@ class DeploymentWiringTests(unittest.TestCase):
         This guard intentionally does no bash parsing: every physical line that
         starts with trap is compared as a full-line ordered multiset.  It also
         pins unique cleanup definitions, relative reset/registration order, and
-        the preflight-call strip set.  Indirect registrations through the
-        builtin trap command or eval are outside this static guard; the
-        real-signal INT/TERM harness is the behavioral backstop.  A query such
-        as trap -p INT is still a trap line and therefore fails the exact
+        the preflight-call strip set.  Trap tokens that are not at line start
+        (for example after ``;`` in a compound command), indirect registrations
+        through the builtin trap command, and registrations assembled by eval
+        are outside this static guard; the real-signal INT/TERM harness is the
+        behavioral backstop.  The EXIT-leg harness executes this production
+        slice on normal exit and injects INT during cleanup, so a registration
+        hidden in a heredoc is caught behaviorally even though this exact-line
+        guard deliberately does not parse shell syntax.  A query such as
+        ``trap -p INT`` is still a trap line and therefore fails the exact
         contract.
         """
         deploy = DEPLOY.read_text(encoding="utf-8")
         deploy_lines = deploy.splitlines()
 
         trap_rows = [
-            (line_number, line.strip())
+            (line_number, line)
             for line_number, line in enumerate(deploy_lines, 1)
             if re.match(r"^[ \t]*trap[ \t]", line)
         ]
+        # The reset commands are deliberately indented as function-body lines;
+        # all five rows remain raw exact matches, while the three top-level
+        # registrations below are required to stay at column 0.
         expected_traps = [
-            "trap - EXIT",
-            "trap '' INT TERM",
+            "    trap - EXIT",
+            "    trap '' INT TERM",
             "trap _cleanup_on_exit EXIT",
             "trap '_handle_cleanup_signal 130' INT",
             "trap '_handle_cleanup_signal 143' TERM",
@@ -224,16 +232,46 @@ class DeploymentWiringTests(unittest.TestCase):
             "expected exactly five trap lines in this order; observed rows="
             + repr([f"line {line_number}: {text}" for line_number, text in trap_rows]),
         )
+        for line_number, text in trap_rows[2:]:
+            self.assertEqual(
+                text,
+                text.lstrip(),
+                "top-level trap registrations must remain at column 0: "
+                f"line {line_number}: {text!r}",
+            )
 
         def definition_rows(name: str) -> list[tuple[int, str]]:
-            pattern = re.compile(
-                r"^[ \t]*" + re.escape(name) + r"\(\)[ \t]*\{"
+            direct_patterns = (
+                re.compile(
+                    r"^[ \t]*" + re.escape(name) + r"\(\)[ \t]*\{"
+                ),
+                re.compile(
+                    r"^[ \t]*function[ \t]+"
+                    + re.escape(name)
+                    + r"(?:\(\))?[ \t]*\{"
+                ),
             )
-            return [
-                (line_number, line.strip())
-                for line_number, line in enumerate(deploy_lines, 1)
-                if pattern.match(line)
-            ]
+            multiline_name = re.compile(
+                r"^[ \t]*" + re.escape(name) + r"\(\)[ \t]*$"
+            )
+            opening_brace = re.compile(r"^[ \t]*\{")
+            rows: list[tuple[int, str]] = []
+            for index, line in enumerate(deploy_lines):
+                if any(pattern.match(line) for pattern in direct_patterns):
+                    rows.append((index + 1, line.strip()))
+                    continue
+                if (
+                    multiline_name.fullmatch(line)
+                    and index + 1 < len(deploy_lines)
+                    and opening_brace.match(deploy_lines[index + 1])
+                ):
+                    rows.append(
+                        (
+                            index + 1,
+                            f"{line.strip()}\\n{deploy_lines[index + 1].strip()}",
+                        )
+                    )
+            return rows
 
         cleanup_definitions = definition_rows("_cleanup_on_exit")
         signal_definitions = definition_rows("_handle_cleanup_signal")
@@ -250,11 +288,12 @@ class DeploymentWiringTests(unittest.TestCase):
             + repr(signal_definitions),
         )
         cleanup_definition_line = cleanup_definitions[0][0]
+        signal_definition_line = signal_definitions[0][0]
 
         reset_rows = {
             text: line_number
             for line_number, text in trap_rows
-            if text in {"trap - EXIT", "trap '' INT TERM"}
+            if text in {"    trap - EXIT", "    trap '' INT TERM"}
         }
         registration_texts = [
             "trap _cleanup_on_exit EXIT",
@@ -268,7 +307,7 @@ class DeploymentWiringTests(unittest.TestCase):
         ]
         self.assertEqual(
             set(reset_rows),
-            {"trap - EXIT", "trap '' INT TERM"},
+            {"    trap - EXIT", "    trap '' INT TERM"},
             "expected both cleanup reset lines; observed rows=" + repr(trap_rows),
         )
         self.assertEqual(
@@ -277,7 +316,7 @@ class DeploymentWiringTests(unittest.TestCase):
             "expected three cleanup registration rows; observed rows="
             + repr(registration_rows),
         )
-        for reset_text in ("trap - EXIT", "trap '' INT TERM"):
+        for reset_text in ("    trap - EXIT", "    trap '' INT TERM"):
             with self.subTest(reset=reset_text):
                 reset_line = reset_rows[reset_text]
                 self.assertGreater(
@@ -285,6 +324,13 @@ class DeploymentWiringTests(unittest.TestCase):
                     cleanup_definition_line,
                     "cleanup reset must follow the cleanup definition: "
                     f"definition={cleanup_definition_line}, reset={reset_line}",
+                )
+                self.assertLess(
+                    reset_line,
+                    signal_definition_line,
+                    "cleanup reset must stay inside _cleanup_on_exit, before "
+                    "_handle_cleanup_signal: "
+                    f"reset={reset_line}, signal_definition={signal_definition_line}",
                 )
                 self.assertLess(
                     reset_line,
@@ -330,6 +376,22 @@ class DeploymentWiringTests(unittest.TestCase):
             "expected six preflight-shaped call rows; observed rows="
             + repr(candidate_call_rows),
         )
+
+    def test_trap_function_shadowing_is_absent(self):
+        """Reject Bash ``trap`` function declarations, including split braces."""
+        deploy = DEPLOY.read_text(encoding="utf-8")
+        shadow_patterns = (
+            re.compile(r"^[ \t]*trap[ \t]*\(\)", re.MULTILINE),
+            re.compile(r"^[ \t]*function[ \t]+trap\b", re.MULTILINE),
+        )
+        for pattern in shadow_patterns:
+            with self.subTest(pattern=pattern.pattern):
+                self.assertEqual(
+                    pattern.findall(deploy),
+                    [],
+                    "trap function shadowing is outside the supported contract: "
+                    + pattern.pattern,
+                )
 
     def test_wrapper_is_registered_for_portable_path_lint(self):
         checker = (REPO_ROOT / "scripts/check-portable-paths.py").read_text(
@@ -758,12 +820,10 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
     def _run_signal_cleanup(self, signal_name: str) -> tuple[int, str]:
         """Run one real signal path with bounded child and parent lifetimes.
 
-        Code-path budget: readiness waits at most 4 s (``SECONDS + 4``), the
-        preflight reap is 25 x 0.05 s = 1.25 s under the deterministic shim,
-        and the post-signal guard polls at most 60 x 0.05 s = 3 s.  A
-        successful signal path is about 5.3 s; a guarded failure can consume
-        about 8.25 s (4 + 1.25 + 3), leaving about 1.75 s under the 10 s
-        subprocess timeout.
+        Code-path budget from measured runs: a typical successful path is
+        ~0.2–1.3 s; a guarded failure is bounded by
+        ``max(4 + 1.25, 4 + 3) ≈ 7 s`` (the two post-readiness terms are
+        mutually exclusive), and both fit within the 10 s subprocess timeout.
         """
         signal_status = {"INT": 130, "TERM": 143}[signal_name]
         cleanup_sleep = self._cleanup_sleep_literal()
@@ -925,6 +985,75 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
         self.assertEqual(status, 143, events)
         self.assertEqual(events.count("probe-term"), 1, events)
         self.assertEqual(events.count("cleanup=143"), 1, events)
+
+    def test_exit_cleanup_runs_once_and_masks_int_during_cleanup(self):
+        """Exercise the production EXIT registration, including a heredoc backstop.
+
+        Each case executes the production cleanup/registration slice and exits
+        normally.  The second case sends INT from the cleanup body itself; the
+        reset lines must already be owned by ``_cleanup_on_exit`` so the marker
+        is not duplicated by signal-handler re-entry.  This behavioral check is
+        also what catches an EXIT registration that a physical-line scan sees
+        only because it is hidden inside a heredoc.
+        """
+
+        def run_exit_case(inject_int: bool) -> tuple[int, str]:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                event_log = root / "events.log"
+                injected_marker = root / "injected.marker"
+                script = (
+                    "set -euo pipefail\n"
+                    f"EVENT_LOG={shlex.quote(str(event_log))}\n"
+                    f"INJECT_INT={int(inject_int)}\n"
+                    f"INJECTED_MARKER={shlex.quote(str(injected_marker))}\n"
+                    "export EVENT_LOG INJECT_INT INJECTED_MARKER\n"
+                    "PG_TUNNEL_PREFLIGHT_PID=\"\"\n"
+                    "PG_TUNNEL_PREFLIGHT_CONNINFO_DIR=\"\"\n"
+                    "PG_TUNNEL_PREFLIGHT_PASSWORD_FILE=\"\"\n"
+                    "PG_TUNNEL_ROLLBACK_ARMED=0\n"
+                    "PG_TUNNEL_ROLLBACK_DIR=\"\"\n"
+                    "PG_TUNNEL_ROLLBACK_JOB_LOADED=0\n"
+                    "PG_TUNNEL_ROLLBACK_MANUAL_KIND=none\n"
+                    "PG_TUNNEL_ROLLBACK_MANUAL_CONFIG=\"\"\n"
+                    "PG_TUNNEL_ROLLBACK_WRAPPER_SOURCE=\"\"\n"
+                    "ROLLBACK_ARMED=0\n"
+                    "DEPLOY_OK=0\n"
+                    "STAGED_BINARY=\"\"\n"
+                    "POLICIES_STAGED=\"\"\n"
+                    "LAUNCHD_MIGRATED_STAGED=\"\"\n"
+                    "RELEASE_ROOT_SCRIPTS_STAGED=\"\"\n"
+                    "DEPLOY_MKDIR_LOCK_DIR=\"\"\n"
+                    "_rollback_release_binary() { :; }\n"
+                    + self._production_cleanup_handlers()
+                    + "\n_cleanup_owned_pg_tunnel_preflight() {\n"
+                    + "    printf 'cleanup-enter\\n' >> \"$EVENT_LOG\"\n"
+                    + "    if [ \"$INJECT_INT\" = 1 ] && [ ! -e \"$INJECTED_MARKER\" ]; then\n"
+                    + "        : > \"$INJECTED_MARKER\"\n"
+                    + "        kill -INT $$\n"
+                    + "    fi\n"
+                    + "}\n"
+                    + "_finalize_detached_helper() {\n"
+                    + "    printf 'cleanup-marker=%s\\n' \"$1\" >> \"$EVENT_LOG\"\n"
+                    + "}\n"
+                    + "exit 0\n"
+                )
+                process = subprocess.run(
+                    ["bash", "-c", script], capture_output=True, text=True, timeout=10
+                )
+                events = (
+                    event_log.read_text(encoding="utf-8")
+                    if event_log.exists()
+                    else ""
+                )
+                return process.returncode, events
+
+        for inject_int in (False, True):
+            with self.subTest(inject_int=inject_int):
+                status, events = run_exit_case(inject_int)
+                self.assertEqual(status, 0, events)
+                self.assertEqual(events.count("cleanup-enter"), 1, events)
+                self.assertEqual(events.count("cleanup-marker=0"), 1, events)
 
     def test_probe_uses_individual_libpq_environment_without_dsn_argv(self):
         block = self._pg_block()
