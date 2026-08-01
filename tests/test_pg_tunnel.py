@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import plistlib
+import re
 import shlex
+import signal
 import subprocess
 import tempfile
 import unittest
@@ -156,12 +159,19 @@ class WrapperSafetyTests(unittest.TestCase):
         self.assertIn('"$PG_TUNNEL_SSH_TARGET"', text)
 
     def test_probe_cleanup_always_waits_after_term_and_kill(self):
+        """Static contract: every owned-probe signal is followed by a reap."""
         deploy = DEPLOY.read_text(encoding="utf-8")
         start = deploy.index("_cleanup_owned_pg_tunnel_preflight() {")
         end = deploy.index("_rollback_pg_tunnel_migration() {", start)
         cleanup = deploy[start:end]
+        preflight_end = deploy.index("_reset_pg_tunnel_rollback_state() {", start)
+        preflight = deploy[start:preflight_end]
         self.assertLess(cleanup.index('kill -TERM "$pid"'), cleanup.index('wait "$pid"'))
         self.assertLess(cleanup.index('kill -KILL "$pid"'), cleanup.index('wait "$pid"'))
+        self.assertIn('while kill -0 "$pid" 2>/dev/null && [ "$attempts" -lt 25 ]; do', preflight)
+        self.assertEqual(
+            re.findall(r"sleep 0\.2(?![0-9])", preflight), ["sleep 0.2"]
+        )
 
 
 class DeploymentWiringTests(unittest.TestCase):
@@ -179,6 +189,147 @@ class DeploymentWiringTests(unittest.TestCase):
     def test_ci_script_checks_runs_this_suite(self):
         ci = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
         self.assertIn("tests.test_pg_tunnel", ci)
+
+    def test_signal_traps_match_exact_physical_line_contract(self):
+        """Require the complete physical trap-line contract in deploy-release.sh.
+
+        This guard intentionally does no bash parsing: every physical line that
+        starts with trap is compared as a full-line ordered multiset.  It also
+        pins unique cleanup definitions, relative reset/registration order, and
+        the preflight-call strip set.  Indirect registrations through the
+        builtin trap command or eval are outside this static guard; the
+        real-signal INT/TERM harness is the behavioral backstop.  A query such
+        as trap -p INT is still a trap line and therefore fails the exact
+        contract.
+        """
+        deploy = DEPLOY.read_text(encoding="utf-8")
+        deploy_lines = deploy.splitlines()
+
+        trap_rows = [
+            (line_number, line.strip())
+            for line_number, line in enumerate(deploy_lines, 1)
+            if re.match(r"^[ \t]*trap[ \t]", line)
+        ]
+        expected_traps = [
+            "trap - EXIT",
+            "trap '' INT TERM",
+            "trap _cleanup_on_exit EXIT",
+            "trap '_handle_cleanup_signal 130' INT",
+            "trap '_handle_cleanup_signal 143' TERM",
+        ]
+        observed_traps = [text for _line_number, text in trap_rows]
+        self.assertEqual(
+            observed_traps,
+            expected_traps,
+            "expected exactly five trap lines in this order; observed rows="
+            + repr([f"line {line_number}: {text}" for line_number, text in trap_rows]),
+        )
+
+        def definition_rows(name: str) -> list[tuple[int, str]]:
+            pattern = re.compile(
+                r"^[ \t]*" + re.escape(name) + r"\(\)[ \t]*\{"
+            )
+            return [
+                (line_number, line.strip())
+                for line_number, line in enumerate(deploy_lines, 1)
+                if pattern.match(line)
+            ]
+
+        cleanup_definitions = definition_rows("_cleanup_on_exit")
+        signal_definitions = definition_rows("_handle_cleanup_signal")
+        self.assertEqual(
+            len(cleanup_definitions),
+            1,
+            "expected one _cleanup_on_exit() definition; observed rows="
+            + repr(cleanup_definitions),
+        )
+        self.assertEqual(
+            len(signal_definitions),
+            1,
+            "expected one _handle_cleanup_signal() definition; observed rows="
+            + repr(signal_definitions),
+        )
+        cleanup_definition_line = cleanup_definitions[0][0]
+
+        reset_rows = {
+            text: line_number
+            for line_number, text in trap_rows
+            if text in {"trap - EXIT", "trap '' INT TERM"}
+        }
+        registration_texts = [
+            "trap _cleanup_on_exit EXIT",
+            "trap '_handle_cleanup_signal 130' INT",
+            "trap '_handle_cleanup_signal 143' TERM",
+        ]
+        registration_rows = [
+            (line_number, text)
+            for line_number, text in trap_rows
+            if text in registration_texts
+        ]
+        self.assertEqual(
+            set(reset_rows),
+            {"trap - EXIT", "trap '' INT TERM"},
+            "expected both cleanup reset lines; observed rows=" + repr(trap_rows),
+        )
+        self.assertEqual(
+            len(registration_rows),
+            3,
+            "expected three cleanup registration rows; observed rows="
+            + repr(registration_rows),
+        )
+        for reset_text in ("trap - EXIT", "trap '' INT TERM"):
+            with self.subTest(reset=reset_text):
+                reset_line = reset_rows[reset_text]
+                self.assertGreater(
+                    reset_line,
+                    cleanup_definition_line,
+                    "cleanup reset must follow the cleanup definition: "
+                    f"definition={cleanup_definition_line}, reset={reset_line}",
+                )
+                self.assertLess(
+                    reset_line,
+                    min(line_number for line_number, _text in registration_rows),
+                    "cleanup reset must precede all signal registrations: "
+                    f"reset={reset_line}, registrations={registration_rows}",
+                )
+
+        expected_call_name = "_cleanup_owned_pg_tunnel_preflight"
+        call_rows = []
+        candidate_call_rows = []
+        call_pattern = re.compile(
+            r"^([A-Za-z_][A-Za-z0-9_]*)(?:[ \t]*(?:;|&&|\|\||\||&))?$"
+        )
+        for line_number, line in enumerate(deploy_lines, 1):
+            stripped = line.strip()
+            match = call_pattern.fullmatch(stripped)
+            if match is None:
+                continue
+            name = match.group(1)
+            if name == expected_call_name:
+                call_rows.append((line_number, stripped))
+            if "cleanup_owned_pg_tunnel_preflight" in name:
+                candidate_call_rows.append((line_number, stripped))
+
+        expected_call_set = {expected_call_name}
+        observed_call_set = {text for _line_number, text in candidate_call_rows}
+        self.assertEqual(
+            observed_call_set,
+            expected_call_set,
+            "preflight call strip set mismatch; observed rows="
+            + repr(candidate_call_rows),
+        )
+        self.assertEqual(
+            len(call_rows),
+            6,
+            "expected six _cleanup_owned_pg_tunnel_preflight calls; observed rows="
+            + repr(call_rows),
+        )
+        self.assertEqual(
+            len(candidate_call_rows),
+            6,
+            "expected six preflight-shaped call rows; observed rows="
+            + repr(candidate_call_rows),
+        )
 
     def test_wrapper_is_registered_for_portable_path_lint(self):
         checker = (REPO_ROOT / "scripts/check-portable-paths.py").read_text(
@@ -367,6 +518,12 @@ def stop(_signum, _frame):
 
 
 signal.signal(signal.SIGTERM, stop)
+def expire(_signum, _frame):
+    raise SystemExit(124)
+
+
+signal.signal(signal.SIGALRM, expire)
+signal.alarm(8)
 open(os.environ["PROBE_READY"], "a", encoding="utf-8").close()
 while True:
     signal.pause()
@@ -582,14 +739,47 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
         end = deploy.index("_cleanup_on_exit() {", start)
         return deploy[start:end]
 
+    @staticmethod
+    def _cleanup_sleep_literal() -> str:
+        deploy = DEPLOY.read_text(encoding="utf-8")
+        start = deploy.index("_cleanup_owned_pg_tunnel_preflight() {")
+        end = deploy.index("_reset_pg_tunnel_rollback_state() {", start)
+        preflight = deploy[start:end]
+        matches = re.findall(
+            r"sleep[ \t]+([0-9]+(?:\.[0-9]+)?)(?![0-9])", preflight
+        )
+        if len(matches) != 1:
+            raise AssertionError(
+                "expected one cleanup sleep literal in deploy preflight: "
+                f"{matches!r}"
+            )
+        return matches[0]
+
     def _run_signal_cleanup(self, signal_name: str) -> tuple[int, str]:
+        """Run one real signal path with bounded child and parent lifetimes.
+
+        Code-path budget: readiness waits at most 4 s (``SECONDS + 4``), the
+        preflight reap is 25 x 0.05 s = 1.25 s under the deterministic shim,
+        and the post-signal guard polls at most 60 x 0.05 s = 3 s.  A
+        successful signal path is about 5.3 s; a guarded failure can consume
+        about 8.25 s (4 + 1.25 + 3), leaving about 1.75 s under the 10 s
+        subprocess timeout.
+        """
+        signal_status = {"INT": 130, "TERM": 143}[signal_name]
+        cleanup_sleep = self._cleanup_sleep_literal()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             fake_bin = root / "fake-bin"
             fake_bin.mkdir()
             event_log = root / "events.log"
             (fake_bin / "sleep").write_text(
-                "#!/bin/sh\nexec /bin/sleep 0.01\n", encoding="utf-8"
+                "#!/bin/sh\n"
+                f'if [ "${{1:-}}" = {cleanup_sleep} ]; then\n'
+                '  printf "scaled-sleep=%s\\n" "$1" >> "$EVENT_LOG"\n'
+                "  exec /bin/sleep 0.05\n"
+                "fi\n"
+                "exec /bin/sleep 0.01\n",
+                encoding="utf-8",
             )
             (fake_bin / "sleep").chmod(0o755)
             probe = root / "probe.py"
@@ -605,6 +795,11 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
                 "    raise SystemExit(0)\n"
                 "\n"
                 "signal.signal(signal.SIGTERM, stop)\n"
+                "def expire(_signum, _frame):\n"
+                "    raise SystemExit(124)\n"
+                "\n"
+                "signal.signal(signal.SIGALRM, expire)\n"
+                "signal.alarm(8)\n"
                 "with open(os.environ['EVENT_LOG'], 'a', encoding='utf-8') as handle:\n"
                 "    handle.write('probe-ready\\n')\n"
                 "while True:\n"
@@ -628,20 +823,89 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
                 "LAUNCHD_MIGRATED_STAGED=\"\"\n"
                 "RELEASE_ROOT_SCRIPTS_STAGED=\"\"\n"
                 "DEPLOY_MKDIR_LOCK_DIR=\"\"\n"
-                "_rollback_pg_tunnel_migration() { :; }\n"
                 "_rollback_release_binary() { :; }\n"
                 "_finalize_detached_helper() { printf 'cleanup=%s\\n' \"$1\" >> \"$EVENT_LOG\"; }\n"
                 + self._production_cleanup_handlers()
                 + f"\nPARENT_PID=$$ {shlex.quote(str(probe))} &\n"
                 "PG_TUNNEL_PREFLIGHT_PID=$!\n"
-                "while ! grep -q '^probe-ready$' \"$EVENT_LOG\"; do /bin/sleep 0.01; done\n"
+                "probe_ready_deadline=$((SECONDS + 4))\n"
+                "while ! grep -q '^probe-ready$' \"$EVENT_LOG\"; do\n"
+                "    if [ \"$SECONDS\" -ge \"$probe_ready_deadline\" ]; then\n"
+                "        printf 'probe-ready timeout at SECONDS=%s (deadline=%s)\\n' \"$SECONDS\" \"$probe_ready_deadline\" >&2\n"
+                "        exit 98\n"
+                "    fi\n"
+                "    /bin/sleep 0.01\n"
+                "done\n"
                 f"kill -{signal_name} $$\n"
-                "exit 99\n"
+                "signal_wait_attempts=0\n"
+                "while :; do\n"
+                "    if [ \"$signal_wait_attempts\" -ge 60 ]; then\n"
+                "        printf 'signal cleanup timeout after %s attempts\\n' \"$signal_wait_attempts\" >&2\n"
+                "        exit 97\n"
+                "    fi\n"
+                "    /bin/sleep 0.05\n"
+                "    signal_wait_attempts=$((signal_wait_attempts + 1))\n"
+                "done\n"
+            )
+            process = subprocess.Popen(
+                ["bash", "-c", script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            try:
+                stdout, stderr = process.communicate(timeout=10)
+            except subprocess.TimeoutExpired as exc:
+                # The probe is a child of the harness.  Kill its process group
+                # and synchronously communicate again so no orphan survives a
+                # failed bounded run.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                stdout, stderr = process.communicate()
+                self.fail(
+                    "signal cleanup harness timed out after 10 s; "
+                    f"stdout={stdout or exc.stdout!r} stderr={stderr or exc.stderr!r}"
+                )
+            p = subprocess.CompletedProcess(
+                process.args, process.returncode, stdout, stderr
+            )
+            events = event_log.read_text(encoding="utf-8") if event_log.exists() else ""
+            self.assertEqual(p.returncode, signal_status, p.stdout + p.stderr + events)
+            return p.returncode, events
+
+    def test_cleanup_sleep_shim_scales_preflight_delay_deterministically(self):
+        """Exercise the fake sleep once without relying on a busy-wait race."""
+        cleanup_sleep = self._cleanup_sleep_literal()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            event_log = root / "events.log"
+            (fake_bin / "sleep").write_text(
+                "#!/bin/sh\n"
+                f'if [ "${{1:-}}" = {cleanup_sleep} ]; then\n'
+                '  printf "scaled-sleep=%s\\n" "$1" >> "$EVENT_LOG"\n'
+                "  exec /bin/sleep 0.05\n"
+                "fi\n"
+                "exec /bin/sleep 0.01\n",
+                encoding="utf-8",
+            )
+            (fake_bin / "sleep").chmod(0o755)
+            script = (
+                f"EVENT_LOG={shlex.quote(str(event_log))}\n"
+                f"PATH={shlex.quote(str(fake_bin))}:/usr/bin:/bin\n"
+                "export EVENT_LOG PATH\n"
+                f"sleep {cleanup_sleep}\n"
             )
             p = subprocess.run(
-                ["bash", "-c", script], capture_output=True, text=True, timeout=10
+                ["/bin/sh", "-c", script], capture_output=True, text=True, timeout=5
             )
-            return p.returncode, event_log.read_text(encoding="utf-8")
+            events = event_log.read_text(encoding="utf-8") if event_log.exists() else ""
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr + events)
+            self.assertEqual(events, f"scaled-sleep={cleanup_sleep}\n")
 
     @staticmethod
     def _production_cleanup_handlers() -> str:
