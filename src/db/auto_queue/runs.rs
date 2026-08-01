@@ -4,13 +4,62 @@ use super::entries::{ENTRY_STATUS_DONE, ENTRY_STATUS_USER_CANCELLED};
 use super::slots::release_run_slots_on_pg_tx;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Why canonical run completion declined to write `completed`.
+///
+/// Every new variant must document all three parts of its ownership contract:
+/// the resolver (and whether it is automatic or manual), the signal emitted
+/// when resolution does not happen, and whether the run's slot is retained or
+/// has already been released by the surrounding lifecycle.
 pub enum RunCompletionBlockedReason {
+    /// Resolution: a valid gate is cleared automatically by terminal-dispatch
+    /// reconciliation; an orphan gate has no automatic resolver and requires
+    /// the operator HTTP repair route. Signal: readiness returns this typed
+    /// reason, while failed-gate handling and operator repair emit their
+    /// existing alerts/audit summary; no tick invokes orphan repair. Slot:
+    /// readiness itself changes nothing, but normal gate creation pauses the
+    /// run before gate dispatch creation, and that pause releases its slot.
     BlockingPhaseGate,
+    /// Resolution: the bounded completion tick retries after the DB comparison
+    /// says the grace deadline has passed. Signal: readiness returns this typed
+    /// reason until then. Slot: readiness preserves current ownership. A tick
+    /// racing the pre-gate continuation leaves the slot held until that
+    /// continuation clears the deadline or pauses; gate creation then releases
+    /// the slot through pause.
+    /// The deadline is written from application `Date.now()` but compared with
+    /// DB `NOW()`, so finite clock skew can extend the otherwise bounded wait.
     PhaseGateGraceWindow,
+    /// Resolution: the bounded tick automatically changes drained, gate-free,
+    /// grace-expired `user_cancelled` entries to `skipped`, then re-enters the
+    /// canonical writer. Signal: readiness returns this typed reason and tick
+    /// transition failures reach policy error logging. Slot: any assigned slot
+    /// remains held until the automatic transition lets completion release it.
     UserCancelledEntry,
+    /// Resolution: the bounded dispatch tick automatically advances pending
+    /// work on `active` runs; a final-phase block first resumes a paused run.
+    /// Signal: readiness returns this typed reason and a failed final-phase
+    /// resume emits a warning. Slot: readiness preserves current ownership.
+    /// `generated`/`pending` runs are not scanned by that tick, but are still
+    /// pre-activation and therefore do not own an assigned slot.
     RunnableEntry,
+    /// Resolution: none is automatic. In particular, if the process crashes
+    /// after `apply_restore_state_changes_pg` commits `restoring`
+    /// (`fsm.rs:292-313`) but before `finalize_restore_run_pg`
+    /// (`fsm.rs:398-437`), only an operator restore retry exits the state.
+    /// Signal: an explicit readiness call returns this typed reason, but the
+    /// stuck `restoring` state has no periodic sweep or alert. Slot: retained
+    /// deliberately across restore. This crash window is pre-existing debt,
+    /// not introduced by #4881.
     RunStatusNotCompletable,
+    /// Resolution: the `onCardTerminal` policy hook automatically performs the
+    /// continuation that may create a phase gate or re-enter finalization.
+    /// Signal: the terminal-entry writer returns this typed reason while that
+    /// continuation is pending. Slot: readiness retains it; continuation keeps
+    /// it while dispatching more work, or releases it by completion/gate pause.
     PolicyContinuationPending,
+    /// Resolution: none applies because no run row exists. Signal: the caller
+    /// receives this typed reason and must treat the identifier as stale or
+    /// invalid. Slot: readiness neither acquires nor releases a slot for the
+    /// missing run.
     RunNotFound,
 }
 

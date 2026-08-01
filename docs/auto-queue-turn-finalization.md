@@ -60,6 +60,23 @@ identity. Required gates should fail when a scenario declares `controlled` or
 | Discord mailbox cleanup | mailbox finish/stop helpers | Cleans runtime state after canonical completion/cancel has recorded durable state. |
 | Watchdog | detector/reconciler | Emits suspicion/timeout and invokes cancel/recovery; never marks work complete directly. |
 
+## Completion Block Ownership
+
+`RunCompletionBlockedReason` is a refusal to write `completed`, not a generic
+retry promise. The enum beside the writer is the authoritative maintenance
+contract: every new reason must name its resolver, failure signal, and slot
+effect. This table mirrors that contract for operators.
+
+| Reason | Resolution owner | Resolution-failure signal | Slot effect |
+| --- | --- | --- | --- |
+| `blocking_phase_gate` | Valid gate: terminal-dispatch reconcile, automatic. Orphan gate: operator HTTP repair, manual; no tick calls repair. | Typed readiness result; failed-gate alert and repair audit/summary where applicable. | Readiness does not release a slot. Normal gate creation pauses before creating gate dispatches, and pause releases the slot; an independently injected gate has no such guarantee. |
+| `phase_gate_grace_window` | DB deadline expiry plus the bounded completion tick, automatic. App `Date.now()` writes the deadline while DB `NOW()` compares it, so finite clock skew can extend the wait. | Typed readiness result on each attempted finalization. | Readiness preserves current ownership. During the pre-gate continuation race the slot remains held until continuation clears the deadline or pauses; gate pause releases it. |
+| `user_cancelled_entry` | Bounded tick changes otherwise drained, gate-free, grace-expired cancellations to `skipped`, automatic. | Typed readiness result; policy error logging if the tick transition fails. | An assigned slot remains held until the transition allows canonical completion to release it. |
+| `runnable_entry` | Active-run dispatch tick, automatic. A final-phase block first resumes a paused run. `generated`/`pending` are outside that tick but are pre-activation. | Typed readiness result; warning if final-phase resume fails. | Readiness preserves current ownership. Pre-activation `generated`/`pending` runs have no assigned slot. |
+| `run_status_not_completable` | No automatic resolver. A crash between `apply_restore_state_changes_pg` committing `restoring` (`fsm.rs:292-313`) and `finalize_restore_run_pg` (`fsm.rs:398-437`) requires an operator restore retry. This is pre-existing debt, not introduced by #4881. | Typed result only when readiness is explicitly called; a crash-stuck `restoring` run has no periodic sweep or alert. | The slot is deliberately retained across restore. |
+| `policy_continuation_pending` | `onCardTerminal` policy continuation, automatic. | Typed terminal-entry result while continuation is pending. | Readiness retains it; continuation keeps it while dispatching more work, or releases it by completion/gate pause. |
+| `run_not_found` | No resolver applies; the identifier is stale or invalid. | Typed readiness result to the caller. | No run-row slot transition is performed. |
+
 ## Migration Checklist
 
 ### #1638 - Canonical Streaming-Final Hook
