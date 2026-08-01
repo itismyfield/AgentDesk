@@ -792,56 +792,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn kv_meta_markers_remain_authoritative_when_typed_shadow_missing() {
-        let pg_db = create_test_pg_db().await;
-        let pool = pg_db.connect_and_migrate().await;
-
-        let notified_dispatch_id = "dispatch-kv-notified-authority";
-        seed_dispatch(&pool, notified_dispatch_id).await;
-        sqlx::query("INSERT INTO kv_meta (key, value) VALUES ($1, $2)")
-            .bind(notified_key(notified_dispatch_id))
-            .bind(notified_dispatch_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        assert!(
-            !claim_dispatch_delivery_guard(Some(&pool), notified_dispatch_id)
-                .await
-                .unwrap(),
-            "kv_meta notified marker must block sends without a typed shadow row"
-        );
-        assert_eq!(delivery_event_count(&pool, notified_dispatch_id).await, 0);
-
-        let reserving_dispatch_id = "dispatch-kv-reserving-authority";
-        seed_dispatch(&pool, reserving_dispatch_id).await;
-        sqlx::query(
-            "INSERT INTO kv_meta (key, value, expires_at)
-             VALUES ($1, $2, NOW() + INTERVAL '5 minutes')",
-        )
-        .bind(reserving_key(reserving_dispatch_id))
-        .bind(reserving_dispatch_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        assert!(
-            !claim_dispatch_delivery_guard(Some(&pool), reserving_dispatch_id)
-                .await
-                .unwrap(),
-            "kv_meta reservation marker must block sends without a typed shadow row"
-        );
-        assert_eq!(
-            kv_meta_count(&pool, &reserving_key(reserving_dispatch_id)).await,
-            1
-        );
-        assert_eq!(delivery_event_count(&pool, reserving_dispatch_id).await, 0);
-
-        pool.close().await;
-        pg_db.drop().await;
-    }
-
     #[test]
     fn delivery_result_status_maps_to_event_status() {
         let skipped = DispatchNotifyDeliveryResult::success(
@@ -869,693 +819,761 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn claim_delivery_guard_shadow_writes_one_reserved_event() {
-        let pg_db = create_test_pg_db().await;
-        let pool = pg_db.connect_and_migrate().await;
-        let dispatch_id = "dispatch-shadow-reserved";
-        seed_dispatch(&pool, dispatch_id).await;
+    // #4979 S5: PG tests live below `*_pg_tests` so `just test-postgres` selects
+    // them through its `_pg` filter while the five pure tests remain in this
+    // parent module. The nested `#[cfg(test)]` is compile-time redundant but
+    // load-bearing: `check_test_lane_coverage.py` assigns each test fn to the
+    // innermost `cfg(test)` module. Removing it would assign these tests to the
+    // parent `…::tests`, which neither curated invocation fully covers: non-PG
+    // skips the marked tests while the PG filter excludes the five pure siblings.
+    // The enforced naming contract is only that the normalized path contains
+    // `_pg`, `pg_`, or `postgres`; the `*_pg_tests` suffix itself is a human
+    // convention.
+    #[cfg(test)]
+    mod delivery_journal_pg_tests {
+        use super::*;
 
-        assert!(
-            claim_dispatch_delivery_guard(Some(&pool), dispatch_id)
+        #[tokio::test]
+        async fn kv_meta_markers_remain_authoritative_when_typed_shadow_missing() {
+            let pg_db = create_test_pg_db().await;
+            let pool = pg_db.connect_and_migrate().await;
+
+            let notified_dispatch_id = "dispatch-kv-notified-authority";
+            seed_dispatch(&pool, notified_dispatch_id).await;
+            sqlx::query("INSERT INTO kv_meta (key, value) VALUES ($1, $2)")
+                .bind(notified_key(notified_dispatch_id))
+                .bind(notified_dispatch_id)
+                .execute(&pool)
                 .await
-                .unwrap()
-        );
-        assert!(
-            !claim_dispatch_delivery_guard(Some(&pool), dispatch_id)
-                .await
-                .unwrap()
-        );
+                .unwrap();
 
-        assert_eq!(
-            kv_meta_count(&pool, &reserving_key(dispatch_id)).await,
-            1,
-            "kv_meta reservation remains authoritative"
-        );
-        assert_eq!(delivery_event_count(&pool, dispatch_id).await, 1);
+            assert!(
+                !claim_dispatch_delivery_guard(Some(&pool), notified_dispatch_id)
+                    .await
+                    .unwrap(),
+                "kv_meta notified marker must block sends without a typed shadow row"
+            );
+            assert_eq!(delivery_event_count(&pool, notified_dispatch_id).await, 0);
 
-        let (status, reserved_until): (String, Option<chrono::DateTime<chrono::Utc>>) =
-            sqlx::query_as(
-                "SELECT status, reserved_until
+            let reserving_dispatch_id = "dispatch-kv-reserving-authority";
+            seed_dispatch(&pool, reserving_dispatch_id).await;
+            sqlx::query(
+                "INSERT INTO kv_meta (key, value, expires_at)
+                 VALUES ($1, $2, NOW() + INTERVAL '5 minutes')",
+            )
+            .bind(reserving_key(reserving_dispatch_id))
+            .bind(reserving_dispatch_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            assert!(
+                !claim_dispatch_delivery_guard(Some(&pool), reserving_dispatch_id)
+                    .await
+                    .unwrap(),
+                "kv_meta reservation marker must block sends without a typed shadow row"
+            );
+            assert_eq!(
+                kv_meta_count(&pool, &reserving_key(reserving_dispatch_id)).await,
+                1
+            );
+            assert_eq!(delivery_event_count(&pool, reserving_dispatch_id).await, 0);
+
+            pool.close().await;
+            pg_db.drop().await;
+        }
+
+        #[tokio::test]
+        async fn claim_delivery_guard_shadow_writes_one_reserved_event() {
+            let pg_db = create_test_pg_db().await;
+            let pool = pg_db.connect_and_migrate().await;
+            let dispatch_id = "dispatch-shadow-reserved";
+            seed_dispatch(&pool, dispatch_id).await;
+
+            assert!(
+                claim_dispatch_delivery_guard(Some(&pool), dispatch_id)
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                !claim_dispatch_delivery_guard(Some(&pool), dispatch_id)
+                    .await
+                    .unwrap()
+            );
+
+            assert_eq!(
+                kv_meta_count(&pool, &reserving_key(dispatch_id)).await,
+                1,
+                "kv_meta reservation remains authoritative"
+            );
+            assert_eq!(delivery_event_count(&pool, dispatch_id).await, 1);
+
+            let (status, reserved_until): (String, Option<chrono::DateTime<chrono::Utc>>) =
+                sqlx::query_as(
+                    "SELECT status, reserved_until
                    FROM dispatch_delivery_events
                   WHERE dispatch_id = $1",
+                )
+                .bind(dispatch_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(status, "reserved");
+            assert!(reserved_until.is_some());
+
+            pool.close().await;
+            pg_db.drop().await;
+        }
+
+        #[tokio::test]
+        async fn finalize_delivery_guard_shadow_updates_sent_event_and_kv_meta() {
+            let pg_db = create_test_pg_db().await;
+            let pool = pg_db.connect_and_migrate().await;
+            let dispatch_id = "dispatch-shadow-sent";
+            seed_dispatch(&pool, dispatch_id).await;
+            assert!(
+                claim_dispatch_delivery_guard(Some(&pool), dispatch_id)
+                    .await
+                    .unwrap()
+            );
+
+            let result = DispatchNotifyDeliveryResult {
+                status: "success".to_string(),
+                dispatch_id: dispatch_id.to_string(),
+                action: "notify".to_string(),
+                correlation_id: Some(format!("dispatch:{dispatch_id}")),
+                semantic_event_id: Some(format!("dispatch:{dispatch_id}:notify")),
+                target_channel_id: Some("1500000000000000000".to_string()),
+                message_id: Some("1500000000000000001".to_string()),
+                fallback_kind: None,
+                detail: Some("sent".to_string()),
+            };
+            finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Ok(&result))
+                .await
+                .unwrap();
+
+            assert_eq!(kv_meta_count(&pool, &reserving_key(dispatch_id)).await, 0);
+            assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 1);
+            assert_eq!(delivery_event_count(&pool, dispatch_id).await, 1);
+
+            let (
+                status,
+                target_channel_id,
+                message_id,
+                messages_json,
+                error,
+                result_json,
+                reserved_until,
+            ): (
+                String,
+                Option<String>,
+                Option<String>,
+                Value,
+                Option<String>,
+                Value,
+                Option<chrono::DateTime<chrono::Utc>>,
+            ) = sqlx::query_as(
+                "SELECT status, target_channel_id, message_id, messages_json,
+                    error, result_json, reserved_until
+               FROM dispatch_delivery_events
+              WHERE dispatch_id = $1",
             )
             .bind(dispatch_id)
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(status, "reserved");
-        assert!(reserved_until.is_some());
 
-        pool.close().await;
-        pg_db.drop().await;
-    }
+            assert_eq!(status, "sent");
+            assert_eq!(target_channel_id.as_deref(), Some("1500000000000000000"));
+            assert_eq!(message_id.as_deref(), Some("1500000000000000001"));
+            assert_eq!(messages_json[0]["message_id"], "1500000000000000001");
+            assert!(error.is_none());
+            assert_eq!(result_json["status"], "success");
+            assert!(reserved_until.is_none());
 
-    #[tokio::test]
-    async fn finalize_delivery_guard_shadow_updates_sent_event_and_kv_meta() {
-        let pg_db = create_test_pg_db().await;
-        let pool = pg_db.connect_and_migrate().await;
-        let dispatch_id = "dispatch-shadow-sent";
-        seed_dispatch(&pool, dispatch_id).await;
-        assert!(
-            claim_dispatch_delivery_guard(Some(&pool), dispatch_id)
+            let reconcile = crate::reconcile::dispatch_delivery_event_reconcile_report_pg(&pool)
                 .await
-                .unwrap()
-        );
+                .unwrap();
+            assert_eq!(
+                reconcile.stats.mismatch_count, 0,
+                "dual-write delivery guard happy path must reconcile cleanly"
+            );
 
-        let result = DispatchNotifyDeliveryResult {
-            status: "success".to_string(),
-            dispatch_id: dispatch_id.to_string(),
-            action: "notify".to_string(),
-            correlation_id: Some(format!("dispatch:{dispatch_id}")),
-            semantic_event_id: Some(format!("dispatch:{dispatch_id}:notify")),
-            target_channel_id: Some("1500000000000000000".to_string()),
-            message_id: Some("1500000000000000001".to_string()),
-            fallback_kind: None,
-            detail: Some("sent".to_string()),
-        };
-        finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Ok(&result))
-            .await
-            .unwrap();
+            pool.close().await;
+            pg_db.drop().await;
+        }
 
-        assert_eq!(kv_meta_count(&pool, &reserving_key(dispatch_id)).await, 0);
-        assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 1);
-        assert_eq!(delivery_event_count(&pool, dispatch_id).await, 1);
+        #[tokio::test]
+        async fn finalize_delivery_guard_shadow_updates_failed_event_without_notified_marker() {
+            let pg_db = create_test_pg_db().await;
+            let pool = pg_db.connect_and_migrate().await;
+            let dispatch_id = "dispatch-shadow-failed";
+            seed_dispatch(&pool, dispatch_id).await;
+            assert!(
+                claim_dispatch_delivery_guard(Some(&pool), dispatch_id)
+                    .await
+                    .unwrap()
+            );
 
-        let (
-            status,
-            target_channel_id,
-            message_id,
-            messages_json,
-            error,
-            result_json,
-            reserved_until,
-        ): (
-            String,
-            Option<String>,
-            Option<String>,
-            Value,
-            Option<String>,
-            Value,
-            Option<chrono::DateTime<chrono::Utc>>,
-        ) = sqlx::query_as(
-            "SELECT status, target_channel_id, message_id, messages_json,
-                    error, result_json, reserved_until
-               FROM dispatch_delivery_events
-              WHERE dispatch_id = $1",
-        )
-        .bind(dispatch_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-
-        assert_eq!(status, "sent");
-        assert_eq!(target_channel_id.as_deref(), Some("1500000000000000000"));
-        assert_eq!(message_id.as_deref(), Some("1500000000000000001"));
-        assert_eq!(messages_json[0]["message_id"], "1500000000000000001");
-        assert!(error.is_none());
-        assert_eq!(result_json["status"], "success");
-        assert!(reserved_until.is_none());
-
-        let reconcile = crate::reconcile::dispatch_delivery_event_reconcile_report_pg(&pool)
-            .await
-            .unwrap();
-        assert_eq!(
-            reconcile.stats.mismatch_count, 0,
-            "dual-write delivery guard happy path must reconcile cleanly"
-        );
-
-        pool.close().await;
-        pg_db.drop().await;
-    }
-
-    #[tokio::test]
-    async fn finalize_delivery_guard_shadow_updates_failed_event_without_notified_marker() {
-        let pg_db = create_test_pg_db().await;
-        let pool = pg_db.connect_and_migrate().await;
-        let dispatch_id = "dispatch-shadow-failed";
-        seed_dispatch(&pool, dispatch_id).await;
-        assert!(
-            claim_dispatch_delivery_guard(Some(&pool), dispatch_id)
+            let error = "discord transport failed".to_string();
+            finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Err(&error))
                 .await
-                .unwrap()
-        );
+                .unwrap();
 
-        let error = "discord transport failed".to_string();
-        finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Err(&error))
-            .await
-            .unwrap();
+            assert_eq!(kv_meta_count(&pool, &reserving_key(dispatch_id)).await, 0);
+            assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 0);
+            assert_eq!(delivery_event_count(&pool, dispatch_id).await, 1);
 
-        assert_eq!(kv_meta_count(&pool, &reserving_key(dispatch_id)).await, 0);
-        assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 0);
-        assert_eq!(delivery_event_count(&pool, dispatch_id).await, 1);
-
-        let (status, stored_error, result_json): (String, Option<String>, Value) = sqlx::query_as(
-            "SELECT status, error, result_json
+            let (status, stored_error, result_json): (String, Option<String>, Value) =
+                sqlx::query_as(
+                    "SELECT status, error, result_json
                    FROM dispatch_delivery_events
                   WHERE dispatch_id = $1",
-        )
-        .bind(dispatch_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(status, "failed");
-        assert_eq!(stored_error.as_deref(), Some("discord transport failed"));
-        assert_eq!(result_json["status"], "failed");
-
-        pool.close().await;
-        pg_db.drop().await;
-    }
-
-    #[tokio::test]
-    async fn failed_delivery_retry_shadow_writes_next_attempt_without_changing_kv_meta() {
-        let pg_db = create_test_pg_db().await;
-        let pool = pg_db.connect_and_migrate().await;
-        let dispatch_id = "dispatch-shadow-retry";
-        seed_dispatch(&pool, dispatch_id).await;
-
-        assert!(
-            claim_dispatch_delivery_guard(Some(&pool), dispatch_id)
+                )
+                .bind(dispatch_id)
+                .fetch_one(&pool)
                 .await
-                .unwrap()
-        );
-        let first_error = "first discord transport failure".to_string();
-        finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Err(&first_error))
-            .await
-            .unwrap();
+                .unwrap();
+            assert_eq!(status, "failed");
+            assert_eq!(stored_error.as_deref(), Some("discord transport failed"));
+            assert_eq!(result_json["status"], "failed");
 
-        assert_eq!(kv_meta_count(&pool, &reserving_key(dispatch_id)).await, 0);
-        assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 0);
-        assert!(
-            claim_dispatch_delivery_guard(Some(&pool), dispatch_id)
+            pool.close().await;
+            pg_db.drop().await;
+        }
+
+        #[tokio::test]
+        async fn failed_delivery_retry_shadow_writes_next_attempt_without_changing_kv_meta() {
+            let pg_db = create_test_pg_db().await;
+            let pool = pg_db.connect_and_migrate().await;
+            let dispatch_id = "dispatch-shadow-retry";
+            seed_dispatch(&pool, dispatch_id).await;
+
+            assert!(
+                claim_dispatch_delivery_guard(Some(&pool), dispatch_id)
+                    .await
+                    .unwrap()
+            );
+            let first_error = "first discord transport failure".to_string();
+            finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Err(&first_error))
                 .await
-                .unwrap(),
-            "failed terminal rows must not block the authoritative kv_meta retry"
-        );
+                .unwrap();
 
-        let result = DispatchNotifyDeliveryResult {
-            status: "success".to_string(),
-            dispatch_id: dispatch_id.to_string(),
-            action: "notify".to_string(),
-            correlation_id: Some(format!("dispatch:{dispatch_id}")),
-            semantic_event_id: Some(format!("dispatch:{dispatch_id}:notify")),
-            target_channel_id: Some("1500000000000000002".to_string()),
-            message_id: Some("1500000000000000003".to_string()),
-            fallback_kind: None,
-            detail: Some("sent after retry".to_string()),
-        };
-        finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Ok(&result))
-            .await
-            .unwrap();
+            assert_eq!(kv_meta_count(&pool, &reserving_key(dispatch_id)).await, 0);
+            assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 0);
+            assert!(
+                claim_dispatch_delivery_guard(Some(&pool), dispatch_id)
+                    .await
+                    .unwrap(),
+                "failed terminal rows must not block the authoritative kv_meta retry"
+            );
 
-        assert_eq!(kv_meta_count(&pool, &reserving_key(dispatch_id)).await, 0);
-        assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 1);
-        assert_eq!(delivery_event_count(&pool, dispatch_id).await, 2);
+            let result = DispatchNotifyDeliveryResult {
+                status: "success".to_string(),
+                dispatch_id: dispatch_id.to_string(),
+                action: "notify".to_string(),
+                correlation_id: Some(format!("dispatch:{dispatch_id}")),
+                semantic_event_id: Some(format!("dispatch:{dispatch_id}:notify")),
+                target_channel_id: Some("1500000000000000002".to_string()),
+                message_id: Some("1500000000000000003".to_string()),
+                fallback_kind: None,
+                detail: Some("sent after retry".to_string()),
+            };
+            finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Ok(&result))
+                .await
+                .unwrap();
 
-        let rows: Vec<(String, i32, Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT status, attempt, error, message_id
+            assert_eq!(kv_meta_count(&pool, &reserving_key(dispatch_id)).await, 0);
+            assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 1);
+            assert_eq!(delivery_event_count(&pool, dispatch_id).await, 2);
+
+            let rows: Vec<(String, i32, Option<String>, Option<String>)> = sqlx::query_as(
+                "SELECT status, attempt, error, message_id
                FROM dispatch_delivery_events
               WHERE dispatch_id = $1
               ORDER BY attempt",
-        )
-        .bind(dispatch_id)
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+            )
+            .bind(dispatch_id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
 
-        assert_eq!(
-            rows,
-            vec![
-                (
-                    "failed".to_string(),
-                    1,
-                    Some("first discord transport failure".to_string()),
-                    None
-                ),
-                (
-                    "sent".to_string(),
-                    2,
-                    None,
-                    Some("1500000000000000003".to_string())
-                ),
-            ]
-        );
+            assert_eq!(
+                rows,
+                vec![
+                    (
+                        "failed".to_string(),
+                        1,
+                        Some("first discord transport failure".to_string()),
+                        None
+                    ),
+                    (
+                        "sent".to_string(),
+                        2,
+                        None,
+                        Some("1500000000000000003".to_string())
+                    ),
+                ]
+            );
 
-        pool.close().await;
-        pg_db.drop().await;
-    }
+            pool.close().await;
+            pg_db.drop().await;
+        }
 
-    #[tokio::test]
-    async fn expired_reserved_delivery_recovers_with_new_attempt_and_single_transport_send() {
-        let pg_db = create_test_pg_db().await;
-        let pool = pg_db.connect_and_migrate().await;
-        let dispatch_id = "dispatch-expired-reserved-recovery";
-        seed_dispatch(&pool, dispatch_id).await;
+        #[tokio::test]
+        async fn expired_reserved_delivery_recovers_with_new_attempt_and_single_transport_send() {
+            let pg_db = create_test_pg_db().await;
+            let pool = pg_db.connect_and_migrate().await;
+            let dispatch_id = "dispatch-expired-reserved-recovery";
+            seed_dispatch(&pool, dispatch_id).await;
 
-        sqlx::query(
-            "INSERT INTO dispatch_delivery_events (
+            sqlx::query(
+                "INSERT INTO dispatch_delivery_events (
                 dispatch_id, correlation_id, semantic_event_id, operation, target_kind,
                 status, attempt, result_json, reserved_until
              ) VALUES (
                 $1, $2, $3, 'send', 'channel', 'reserved', 1, '{}'::jsonb,
                 NOW() - INTERVAL '1 minute'
              )",
-        )
-        .bind(dispatch_id)
-        .bind(format!("dispatch:{dispatch_id}"))
-        .bind(format!("dispatch:{dispatch_id}:notify"))
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO kv_meta (key, value, expires_at)
+            )
+            .bind(dispatch_id)
+            .bind(format!("dispatch:{dispatch_id}"))
+            .bind(format!("dispatch:{dispatch_id}:notify"))
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO kv_meta (key, value, expires_at)
              VALUES ($1, $2, NOW() - INTERVAL '1 minute')",
-        )
-        .bind(reserving_key(dispatch_id))
-        .bind(dispatch_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+            )
+            .bind(reserving_key(dispatch_id))
+            .bind(dispatch_id)
+            .execute(&pool)
+            .await
+            .unwrap();
 
-        let transport =
-            RecordingDispatchTransport::new("1500000000000000010", "1500000000000000011")
-                .with_reservation_assertion(pool.clone());
-        let result = send_dispatch_with_delivery_guard(
-            Some(&pool),
-            "agent-1",
-            "Expired reservation",
-            "card-expired-reserved",
-            dispatch_id,
-            &transport,
-        )
-        .await
-        .unwrap();
+            let transport =
+                RecordingDispatchTransport::new("1500000000000000010", "1500000000000000011")
+                    .with_reservation_assertion(pool.clone());
+            let result = send_dispatch_with_delivery_guard(
+                Some(&pool),
+                "agent-1",
+                "Expired reservation",
+                "card-expired-reserved",
+                dispatch_id,
+                &transport,
+            )
+            .await
+            .unwrap();
 
-        assert_eq!(result.status, "success");
-        assert_eq!(transport.calls(), 1);
-        assert_eq!(kv_meta_count(&pool, &reserving_key(dispatch_id)).await, 0);
-        assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 1);
+            assert_eq!(result.status, "success");
+            assert_eq!(transport.calls(), 1);
+            assert_eq!(kv_meta_count(&pool, &reserving_key(dispatch_id)).await, 0);
+            assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 1);
 
-        let rows: Vec<(String, i32, Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT status, attempt, error, message_id
+            let rows: Vec<(String, i32, Option<String>, Option<String>)> = sqlx::query_as(
+                "SELECT status, attempt, error, message_id
                FROM dispatch_delivery_events
               WHERE dispatch_id = $1
               ORDER BY attempt",
-        )
-        .bind(dispatch_id)
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-        assert_eq!(
-            rows,
-            vec![
-                (
-                    "failed".to_string(),
-                    1,
-                    Some("delivery reservation expired before finalize".to_string()),
-                    None
-                ),
-                (
-                    "sent".to_string(),
-                    2,
-                    None,
-                    Some("1500000000000000011".to_string())
-                ),
-            ]
-        );
+            )
+            .bind(dispatch_id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                rows,
+                vec![
+                    (
+                        "failed".to_string(),
+                        1,
+                        Some("delivery reservation expired before finalize".to_string()),
+                        None
+                    ),
+                    (
+                        "sent".to_string(),
+                        2,
+                        None,
+                        Some("1500000000000000011".to_string())
+                    ),
+                ]
+            );
 
-        pool.close().await;
-        pg_db.drop().await;
-    }
-
-    #[tokio::test]
-    async fn duplicate_delivery_replay_returns_prior_message_metadata_without_resend() {
-        let pg_db = create_test_pg_db().await;
-        let pool = pg_db.connect_and_migrate().await;
-        let dispatch_id = "dispatch-duplicate-replay";
-        seed_dispatch(&pool, dispatch_id).await;
-
-        let transport =
-            RecordingDispatchTransport::new("1500000000000000020", "1500000000000000021");
-        let first = send_dispatch_with_delivery_guard(
-            Some(&pool),
-            "agent-1",
-            "Duplicate replay",
-            "card-duplicate-replay",
-            dispatch_id,
-            &transport,
-        )
-        .await
-        .unwrap();
-        assert_eq!(first.status, "success");
-
-        let second = send_dispatch_with_delivery_guard(
-            Some(&pool),
-            "agent-1",
-            "Duplicate replay",
-            "card-duplicate-replay",
-            dispatch_id,
-            &transport,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(transport.calls(), 1);
-        assert_eq!(second.status, "duplicate");
-        assert_eq!(
-            second.correlation_id.as_deref(),
-            Some("dispatch:dispatch-duplicate-replay")
-        );
-        assert_eq!(
-            second.semantic_event_id.as_deref(),
-            Some("dispatch:dispatch-duplicate-replay:notify")
-        );
-        assert_eq!(
-            second.target_channel_id.as_deref(),
-            Some("1500000000000000020")
-        );
-        assert_eq!(second.message_id.as_deref(), Some("1500000000000000021"));
-
-        pool.close().await;
-        pg_db.drop().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn active_dispatch_delivery_unique_key_allows_one_concurrent_reserved_row() {
-        let pg_db = create_test_pg_db().await;
-        let pool = pg_db.connect_and_migrate_with_max_connections(2).await;
-        let dispatch_id = "dispatch-active-unique";
-        seed_dispatch(&pool, dispatch_id).await;
-
-        let barrier = Arc::new(tokio::sync::Barrier::new(2));
-        let mut tasks = Vec::new();
-        for _ in 0..2 {
-            let pool = pool.clone();
-            let barrier = barrier.clone();
-            let dispatch_id = dispatch_id.to_string();
-            tasks.push(tokio::spawn(async move {
-                barrier.wait().await;
-                insert_reserved_dispatch_delivery_event_pg(&pool, &dispatch_id, None, None)
-                    .await
-                    .unwrap()
-            }));
+            pool.close().await;
+            pg_db.drop().await;
         }
 
-        let mut inserted = 0;
-        for task in tasks {
-            if task.await.unwrap() {
-                inserted += 1;
+        #[tokio::test]
+        async fn duplicate_delivery_replay_returns_prior_message_metadata_without_resend() {
+            let pg_db = create_test_pg_db().await;
+            let pool = pg_db.connect_and_migrate().await;
+            let dispatch_id = "dispatch-duplicate-replay";
+            seed_dispatch(&pool, dispatch_id).await;
+
+            let transport =
+                RecordingDispatchTransport::new("1500000000000000020", "1500000000000000021");
+            let first = send_dispatch_with_delivery_guard(
+                Some(&pool),
+                "agent-1",
+                "Duplicate replay",
+                "card-duplicate-replay",
+                dispatch_id,
+                &transport,
+            )
+            .await
+            .unwrap();
+            assert_eq!(first.status, "success");
+
+            let second = send_dispatch_with_delivery_guard(
+                Some(&pool),
+                "agent-1",
+                "Duplicate replay",
+                "card-duplicate-replay",
+                dispatch_id,
+                &transport,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(transport.calls(), 1);
+            assert_eq!(second.status, "duplicate");
+            assert_eq!(
+                second.correlation_id.as_deref(),
+                Some("dispatch:dispatch-duplicate-replay")
+            );
+            assert_eq!(
+                second.semantic_event_id.as_deref(),
+                Some("dispatch:dispatch-duplicate-replay:notify")
+            );
+            assert_eq!(
+                second.target_channel_id.as_deref(),
+                Some("1500000000000000020")
+            );
+            assert_eq!(second.message_id.as_deref(), Some("1500000000000000021"));
+
+            pool.close().await;
+            pg_db.drop().await;
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn active_dispatch_delivery_unique_key_allows_one_concurrent_reserved_row() {
+            let pg_db = create_test_pg_db().await;
+            let pool = pg_db.connect_and_migrate_with_max_connections(2).await;
+            let dispatch_id = "dispatch-active-unique";
+            seed_dispatch(&pool, dispatch_id).await;
+
+            let barrier = Arc::new(tokio::sync::Barrier::new(2));
+            let mut tasks = Vec::new();
+            for _ in 0..2 {
+                let pool = pool.clone();
+                let barrier = barrier.clone();
+                let dispatch_id = dispatch_id.to_string();
+                tasks.push(tokio::spawn(async move {
+                    barrier.wait().await;
+                    insert_reserved_dispatch_delivery_event_pg(&pool, &dispatch_id, None, None)
+                        .await
+                        .unwrap()
+                }));
             }
-        }
-        assert_eq!(inserted, 1);
-        assert_eq!(delivery_event_count(&pool, dispatch_id).await, 1);
 
-        let (status, attempt): (String, i32) = sqlx::query_as(
-            "SELECT status, attempt
+            let mut inserted = 0;
+            for task in tasks {
+                if task.await.unwrap() {
+                    inserted += 1;
+                }
+            }
+            assert_eq!(inserted, 1);
+            assert_eq!(delivery_event_count(&pool, dispatch_id).await, 1);
+
+            let (status, attempt): (String, i32) = sqlx::query_as(
+                "SELECT status, attempt
                FROM dispatch_delivery_events
               WHERE dispatch_id = $1",
-        )
-        .bind(dispatch_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(status, "reserved");
-        assert_eq!(attempt, 1);
+            )
+            .bind(dispatch_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(status, "reserved");
+            assert_eq!(attempt, 1);
 
-        pool.close().await;
-        pg_db.drop().await;
-    }
+            pool.close().await;
+            pg_db.drop().await;
+        }
 
-    async fn delivery_event_status(pool: &PgPool, dispatch_id: &str) -> String {
-        sqlx::query_scalar::<_, String>(
-            "SELECT status
+        async fn delivery_event_status(pool: &PgPool, dispatch_id: &str) -> String {
+            sqlx::query_scalar::<_, String>(
+                "SELECT status
                FROM dispatch_delivery_events
               WHERE dispatch_id = $1
               ORDER BY attempt DESC
               LIMIT 1",
-        )
-        .bind(dispatch_id)
-        .fetch_one(pool)
-        .await
-        .unwrap()
-    }
+            )
+            .bind(dispatch_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+        }
 
-    /// Inject a mid-sequence DB failure: a CHECK constraint that rejects the
-    /// typed-ledger finalize's terminal `sent` status. BEGIN and the in-tx
-    /// reserving-key DELETE still succeed, so the finalize statement specifically
-    /// fails — exercising real transactional rollback rather than a `pool.begin()`
-    /// failure that never executes a statement.
-    async fn block_typed_sent_finalize(pool: &PgPool) {
-        sqlx::query(
-            "ALTER TABLE dispatch_delivery_events
+        /// Inject a mid-sequence DB failure: a CHECK constraint that rejects the
+        /// typed-ledger finalize's terminal `sent` status. BEGIN and the in-tx
+        /// reserving-key DELETE still succeed, so the finalize statement specifically
+        /// fails — exercising real transactional rollback rather than a `pool.begin()`
+        /// failure that never executes a statement.
+        async fn block_typed_sent_finalize(pool: &PgPool) {
+            sqlx::query(
+                "ALTER TABLE dispatch_delivery_events
                  ADD CONSTRAINT block_sent_3861 CHECK (status <> 'sent')",
-        )
-        .execute(pool)
-        .await
-        .unwrap();
-    }
-
-    async fn unblock_typed_sent_finalize(pool: &PgPool) {
-        sqlx::query("ALTER TABLE dispatch_delivery_events DROP CONSTRAINT block_sent_3861")
+            )
             .execute(pool)
             .await
             .unwrap();
-    }
-
-    fn success_result(
-        dispatch_id: &str,
-        channel_id: &str,
-        message_id: &str,
-    ) -> DispatchNotifyDeliveryResult {
-        DispatchNotifyDeliveryResult {
-            status: "success".to_string(),
-            dispatch_id: dispatch_id.to_string(),
-            action: "notify".to_string(),
-            correlation_id: Some(format!("dispatch:{dispatch_id}")),
-            semantic_event_id: Some(format!("dispatch:{dispatch_id}:notify")),
-            target_channel_id: Some(channel_id.to_string()),
-            message_id: Some(message_id.to_string()),
-            fallback_kind: None,
-            detail: Some("sent".to_string()),
         }
-    }
 
-    /// #3861: the durable `notified` dedup ANCHOR is committed independently
-    /// BEFORE the bookkeeping transaction, so a failure isolated to the
-    /// typed-ledger finalize (a) surfaces the error (not swallowed), (b) leaves
-    /// the bookkeeping atomic — the reserving key is NOT deleted (rolled back),
-    /// and (c) does NOT roll back the anchor. This is the property a single
-    /// all-in-one transaction would regress.
-    #[tokio::test]
-    async fn delivery_finalize_notified_anchor_survives_bookkeeping_failure() {
-        let pg_db = create_test_pg_db().await;
-        let pool = pg_db.connect_and_migrate().await;
-        let dispatch_id = "dispatch-anchor-survives-bookkeeping-fail";
-        seed_dispatch(&pool, dispatch_id).await;
-
-        assert!(
-            claim_dispatch_delivery_guard(Some(&pool), dispatch_id)
+        async fn unblock_typed_sent_finalize(pool: &PgPool) {
+            sqlx::query("ALTER TABLE dispatch_delivery_events DROP CONSTRAINT block_sent_3861")
+                .execute(pool)
                 .await
-                .unwrap()
-        );
-        let result = success_result(dispatch_id, "1500000000000000030", "1500000000000000031");
+                .unwrap();
+        }
 
-        // The typed finalize statement (status -> 'sent') fails mid-transaction.
-        block_typed_sent_finalize(&pool).await;
-        let finalize =
-            finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Ok(&result)).await;
-        assert!(
-            finalize.is_err(),
-            "bookkeeping failure must surface the error, not swallow it"
-        );
+        fn success_result(
+            dispatch_id: &str,
+            channel_id: &str,
+            message_id: &str,
+        ) -> DispatchNotifyDeliveryResult {
+            DispatchNotifyDeliveryResult {
+                status: "success".to_string(),
+                dispatch_id: dispatch_id.to_string(),
+                action: "notify".to_string(),
+                correlation_id: Some(format!("dispatch:{dispatch_id}")),
+                semantic_event_id: Some(format!("dispatch:{dispatch_id}:notify")),
+                target_channel_id: Some(channel_id.to_string()),
+                message_id: Some(message_id.to_string()),
+                fallback_kind: None,
+                detail: Some("sent".to_string()),
+            }
+        }
 
-        // (a) anchor is durable despite the bookkeeping failure (independent commit).
-        assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 1);
-        // (b) bookkeeping rolled back atomically: reserving key intact, row still reserved.
-        assert_eq!(kv_meta_count(&pool, &reserving_key(dispatch_id)).await, 1);
-        assert_eq!(delivery_event_count(&pool, dispatch_id).await, 1);
-        assert_eq!(delivery_event_status(&pool, dispatch_id).await, "reserved");
+        /// #3861: the durable `notified` dedup ANCHOR is committed independently
+        /// BEFORE the bookkeeping transaction, so a failure isolated to the
+        /// typed-ledger finalize (a) surfaces the error (not swallowed), (b) leaves
+        /// the bookkeeping atomic — the reserving key is NOT deleted (rolled back),
+        /// and (c) does NOT roll back the anchor. This is the property a single
+        /// all-in-one transaction would regress.
+        #[tokio::test]
+        async fn delivery_finalize_notified_anchor_survives_bookkeeping_failure() {
+            let pg_db = create_test_pg_db().await;
+            let pool = pg_db.connect_and_migrate().await;
+            let dispatch_id = "dispatch-anchor-survives-bookkeeping-fail";
+            seed_dispatch(&pool, dispatch_id).await;
 
-        // Once the DB recovers, retrying the bookkeeping converges to `sent`.
-        unblock_typed_sent_finalize(&pool).await;
-        finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Ok(&result))
+            assert!(
+                claim_dispatch_delivery_guard(Some(&pool), dispatch_id)
+                    .await
+                    .unwrap()
+            );
+            let result = success_result(dispatch_id, "1500000000000000030", "1500000000000000031");
+
+            // The typed finalize statement (status -> 'sent') fails mid-transaction.
+            block_typed_sent_finalize(&pool).await;
+            let finalize =
+                finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Ok(&result)).await;
+            assert!(
+                finalize.is_err(),
+                "bookkeeping failure must surface the error, not swallow it"
+            );
+
+            // (a) anchor is durable despite the bookkeeping failure (independent commit).
+            assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 1);
+            // (b) bookkeeping rolled back atomically: reserving key intact, row still reserved.
+            assert_eq!(kv_meta_count(&pool, &reserving_key(dispatch_id)).await, 1);
+            assert_eq!(delivery_event_count(&pool, dispatch_id).await, 1);
+            assert_eq!(delivery_event_status(&pool, dispatch_id).await, "reserved");
+
+            // Once the DB recovers, retrying the bookkeeping converges to `sent`.
+            unblock_typed_sent_finalize(&pool).await;
+            finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Ok(&result))
+                .await
+                .unwrap();
+            assert_eq!(kv_meta_count(&pool, &reserving_key(dispatch_id)).await, 0);
+            assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 1);
+            assert_eq!(delivery_event_status(&pool, dispatch_id).await, "sent");
+
+            pool.close().await;
+            pg_db.drop().await;
+        }
+
+        /// #3861 core regression guard, driven through the real delivery entry point
+        /// (`send_dispatch_with_delivery_guard`) for BOTH the first processing and the
+        /// reclaim redrive — so the mock transport actually sends, and we assert the
+        /// total transport call count is exactly ONE (first send only, zero re-send).
+        ///
+        /// Flow: first processing sends once -> STEP 2 bookkeeping PERMANENTLY fails
+        /// (CHECK constraint) while the STEP 1 anchor stays durable -> reservation
+        /// expires -> reconcile backfills `sent` from the anchor -> stale-outbox
+        /// reclaim re-drives the same entry point -> the guard short-circuits as a
+        /// duplicate. A single all-in-one finalize transaction would have rolled the
+        /// anchor back on the bookkeeping failure and re-sent on the reclaim.
+        #[tokio::test]
+        async fn delivery_first_send_not_resent_by_reclaim_after_permanent_bookkeeping_failure() {
+            let pg_db = create_test_pg_db().await;
+            let pool = pg_db.connect_and_migrate().await;
+            let dispatch_id = "dispatch-worker-path-no-resend";
+            seed_dispatch(&pool, dispatch_id).await;
+
+            let transport =
+                RecordingDispatchTransport::new("1500000000000000040", "1500000000000000041");
+
+            // 1. FIRST worker processing through the real entry point. The transport
+            //    sends (call #1); STEP 1 anchor commits; STEP 2 bookkeeping permanently
+            //    fails against the CHECK constraint. The guard still returns the
+            //    transport's success (it must not re-drive a delivered message).
+            block_typed_sent_finalize(&pool).await;
+            let first = send_dispatch_with_delivery_guard(
+                Some(&pool),
+                "agent-1",
+                "Worker path first send",
+                "card-worker-path",
+                dispatch_id,
+                &transport,
+            )
             .await
             .unwrap();
-        assert_eq!(kv_meta_count(&pool, &reserving_key(dispatch_id)).await, 0);
-        assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 1);
-        assert_eq!(delivery_event_status(&pool, dispatch_id).await, "sent");
+            assert_eq!(first.status, "success");
+            assert_eq!(
+                transport.calls(),
+                1,
+                "first processing must send exactly once"
+            );
+            assert_eq!(
+                kv_meta_count(&pool, &notified_key(dispatch_id)).await,
+                1,
+                "notified anchor must be durable even when bookkeeping fails"
+            );
+            assert_eq!(delivery_event_status(&pool, dispatch_id).await, "reserved");
+            unblock_typed_sent_finalize(&pool).await;
 
-        pool.close().await;
-        pg_db.drop().await;
-    }
-
-    /// #3861 core regression guard, driven through the real delivery entry point
-    /// (`send_dispatch_with_delivery_guard`) for BOTH the first processing and the
-    /// reclaim redrive — so the mock transport actually sends, and we assert the
-    /// total transport call count is exactly ONE (first send only, zero re-send).
-    ///
-    /// Flow: first processing sends once -> STEP 2 bookkeeping PERMANENTLY fails
-    /// (CHECK constraint) while the STEP 1 anchor stays durable -> reservation
-    /// expires -> reconcile backfills `sent` from the anchor -> stale-outbox
-    /// reclaim re-drives the same entry point -> the guard short-circuits as a
-    /// duplicate. A single all-in-one finalize transaction would have rolled the
-    /// anchor back on the bookkeeping failure and re-sent on the reclaim.
-    #[tokio::test]
-    async fn delivery_first_send_not_resent_by_reclaim_after_permanent_bookkeeping_failure() {
-        let pg_db = create_test_pg_db().await;
-        let pool = pg_db.connect_and_migrate().await;
-        let dispatch_id = "dispatch-worker-path-no-resend";
-        seed_dispatch(&pool, dispatch_id).await;
-
-        let transport =
-            RecordingDispatchTransport::new("1500000000000000040", "1500000000000000041");
-
-        // 1. FIRST worker processing through the real entry point. The transport
-        //    sends (call #1); STEP 1 anchor commits; STEP 2 bookkeeping permanently
-        //    fails against the CHECK constraint. The guard still returns the
-        //    transport's success (it must not re-drive a delivered message).
-        block_typed_sent_finalize(&pool).await;
-        let first = send_dispatch_with_delivery_guard(
-            Some(&pool),
-            "agent-1",
-            "Worker path first send",
-            "card-worker-path",
-            dispatch_id,
-            &transport,
-        )
-        .await
-        .unwrap();
-        assert_eq!(first.status, "success");
-        assert_eq!(
-            transport.calls(),
-            1,
-            "first processing must send exactly once"
-        );
-        assert_eq!(
-            kv_meta_count(&pool, &notified_key(dispatch_id)).await,
-            1,
-            "notified anchor must be durable even when bookkeeping fails"
-        );
-        assert_eq!(delivery_event_status(&pool, dispatch_id).await, "reserved");
-        unblock_typed_sent_finalize(&pool).await;
-
-        // 2. The reservation expires before any retry succeeds (DB was down long
-        //    enough): age out both the kv guard key and the typed reservation.
-        sqlx::query("UPDATE kv_meta SET expires_at = NOW() - INTERVAL '1 minute' WHERE key = $1")
+            // 2. The reservation expires before any retry succeeds (DB was down long
+            //    enough): age out both the kv guard key and the typed reservation.
+            sqlx::query(
+                "UPDATE kv_meta SET expires_at = NOW() - INTERVAL '1 minute' WHERE key = $1",
+            )
             .bind(reserving_key(dispatch_id))
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query(
-            "UPDATE dispatch_delivery_events
+            sqlx::query(
+                "UPDATE dispatch_delivery_events
                 SET reserved_until = NOW() - INTERVAL '1 minute'
               WHERE dispatch_id = $1 AND status = 'reserved'",
-        )
-        .bind(dispatch_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        // 3. Reconcile recovery runs: the notified anchor lets it backfill the
-        //    typed ledger to `sent` instead of leaving a `failed` (= "not sent")
-        //    row that a reclaim would re-send.
-        crate::reconcile::reconcile_dispatch_delivery_events_pg(&pool)
-            .await
-            .unwrap();
-        assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 1);
-        assert_eq!(delivery_event_status(&pool, dispatch_id).await, "sent");
-
-        // 4. Stale-outbox reclaim re-drives the SAME entry point. The guard must
-        //    short-circuit as a duplicate — the transport call count stays at ONE.
-        let redrive = send_dispatch_with_delivery_guard(
-            Some(&pool),
-            "agent-1",
-            "Worker path reclaim redrive",
-            "card-worker-path",
-            dispatch_id,
-            &transport,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            transport.calls(),
-            1,
-            "reclaim redrive must NOT re-send: total transport sends stays exactly 1"
-        );
-        assert_eq!(redrive.status, "duplicate");
-        // The message_id was lost with the failed bookkeeping and the anchor stores
-        // only the dispatch_id, so recovery cannot reconstruct it — acceptable,
-        // since the invariant under test is ZERO re-sends, not metadata fidelity.
-        assert_eq!(redrive.message_id, None);
-
-        pool.close().await;
-        pg_db.drop().await;
-    }
-
-    /// #3861 point (b): a STEP 1 anchor permanent failure (delivered but no
-    /// durable dedup proof) must SURFACE — the guard returns `Err` rather than
-    /// swallowing it — so the operator-alert path
-    /// (`record_dispatch_notified_anchor_durability_breach`) fires. Injected by a
-    /// CHECK constraint that blocks the `dispatch_notified:*` anchor key only.
-    #[tokio::test]
-    async fn delivery_finalize_step1_anchor_permanent_failure_is_surfaced() {
-        let pg_db = create_test_pg_db().await;
-        let pool = pg_db.connect_and_migrate().await;
-        let dispatch_id = "dispatch-step1-anchor-failure";
-        seed_dispatch(&pool, dispatch_id).await;
-
-        assert!(
-            claim_dispatch_delivery_guard(Some(&pool), dispatch_id)
-                .await
-                .unwrap()
-        );
-        let result = success_result(dispatch_id, "1500000000000000050", "1500000000000000051");
-
-        // Block ONLY the notified anchor key (the reserving key is unaffected, so
-        // STEP 1 specifically fails).
-        sqlx::query(
-            "ALTER TABLE kv_meta
-                 ADD CONSTRAINT block_notified_3861
-                 CHECK (key NOT LIKE 'dispatch\\_notified:%')",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        let finalize =
-            finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Ok(&result)).await;
-        assert!(
-            finalize.is_err(),
-            "STEP 1 anchor permanent failure must be surfaced, not swallowed"
-        );
-        // Operator-alert path fired: a structured `invariant_violation` event for
-        // this dispatch was emitted (the breach fn ran). Read immediately — there
-        // is no await between the breach emit inside finalize and this read, so the
-        // event cannot have been evicted by a parallel test.
-        let breach = crate::services::observability::events::recent(64)
-            .into_iter()
-            .find(|event| {
-                event.event_type == "invariant_violation"
-                    && event.payload.get("invariant").and_then(|v| v.as_str())
-                        == Some("dispatch_delivery_notified_anchor_durable")
-                    && event.payload.to_string().contains(dispatch_id)
-            });
-        assert!(
-            breach.is_some(),
-            "STEP 1 anchor failure must emit an operator-alertable invariant_violation event"
-        );
-        // STEP 1 failed before STEP 2: anchor absent, reservation still intact.
-        assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 0);
-        assert_eq!(kv_meta_count(&pool, &reserving_key(dispatch_id)).await, 1);
-        assert_eq!(delivery_event_status(&pool, dispatch_id).await, "reserved");
-
-        sqlx::query("ALTER TABLE kv_meta DROP CONSTRAINT block_notified_3861")
+            )
+            .bind(dispatch_id)
             .execute(&pool)
             .await
             .unwrap();
 
-        pool.close().await;
-        pg_db.drop().await;
+            // 3. Reconcile recovery runs: the notified anchor lets it backfill the
+            //    typed ledger to `sent` instead of leaving a `failed` (= "not sent")
+            //    row that a reclaim would re-send.
+            crate::reconcile::reconcile_dispatch_delivery_events_pg(&pool)
+                .await
+                .unwrap();
+            assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 1);
+            assert_eq!(delivery_event_status(&pool, dispatch_id).await, "sent");
+
+            // 4. Stale-outbox reclaim re-drives the SAME entry point. The guard must
+            //    short-circuit as a duplicate — the transport call count stays at ONE.
+            let redrive = send_dispatch_with_delivery_guard(
+                Some(&pool),
+                "agent-1",
+                "Worker path reclaim redrive",
+                "card-worker-path",
+                dispatch_id,
+                &transport,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                transport.calls(),
+                1,
+                "reclaim redrive must NOT re-send: total transport sends stays exactly 1"
+            );
+            assert_eq!(redrive.status, "duplicate");
+            // The message_id was lost with the failed bookkeeping and the anchor stores
+            // only the dispatch_id, so recovery cannot reconstruct it — acceptable,
+            // since the invariant under test is ZERO re-sends, not metadata fidelity.
+            assert_eq!(redrive.message_id, None);
+
+            pool.close().await;
+            pg_db.drop().await;
+        }
+
+        /// #3861 point (b): a STEP 1 anchor permanent failure (delivered but no
+        /// durable dedup proof) must SURFACE — the guard returns `Err` rather than
+        /// swallowing it — so the operator-alert path
+        /// (`record_dispatch_notified_anchor_durability_breach`) fires. Injected by a
+        /// CHECK constraint that blocks the `dispatch_notified:*` anchor key only.
+        #[tokio::test]
+        async fn delivery_finalize_step1_anchor_permanent_failure_is_surfaced() {
+            let pg_db = create_test_pg_db().await;
+            let pool = pg_db.connect_and_migrate().await;
+            let dispatch_id = "dispatch-step1-anchor-failure";
+            seed_dispatch(&pool, dispatch_id).await;
+
+            assert!(
+                claim_dispatch_delivery_guard(Some(&pool), dispatch_id)
+                    .await
+                    .unwrap()
+            );
+            let result = success_result(dispatch_id, "1500000000000000050", "1500000000000000051");
+
+            // Block ONLY the notified anchor key (the reserving key is unaffected, so
+            // STEP 1 specifically fails).
+            sqlx::query(
+                "ALTER TABLE kv_meta
+                 ADD CONSTRAINT block_notified_3861
+                 CHECK (key NOT LIKE 'dispatch\\_notified:%')",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            let finalize =
+                finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Ok(&result)).await;
+            assert!(
+                finalize.is_err(),
+                "STEP 1 anchor permanent failure must be surfaced, not swallowed"
+            );
+            // Operator-alert path fired: a structured `invariant_violation` event for
+            // this dispatch was emitted (the breach fn ran). Read immediately — there
+            // is no await between the breach emit inside finalize and this read, so the
+            // event cannot have been evicted by a parallel test.
+            let breach = crate::services::observability::events::recent(64)
+                .into_iter()
+                .find(|event| {
+                    event.event_type == "invariant_violation"
+                        && event.payload.get("invariant").and_then(|v| v.as_str())
+                            == Some("dispatch_delivery_notified_anchor_durable")
+                        && event.payload.to_string().contains(dispatch_id)
+                });
+            assert!(
+                breach.is_some(),
+                "STEP 1 anchor failure must emit an operator-alertable invariant_violation event"
+            );
+            // STEP 1 failed before STEP 2: anchor absent, reservation still intact.
+            assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 0);
+            assert_eq!(kv_meta_count(&pool, &reserving_key(dispatch_id)).await, 1);
+            assert_eq!(delivery_event_status(&pool, dispatch_id).await, "reserved");
+
+            sqlx::query("ALTER TABLE kv_meta DROP CONSTRAINT block_notified_3861")
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            pool.close().await;
+            pg_db.drop().await;
+        }
     }
 
     /// #3861 P0: a transport send that outlives its deadline must be bounded and
