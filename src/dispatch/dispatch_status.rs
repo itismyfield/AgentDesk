@@ -2125,7 +2125,7 @@ mod auto_queue_phase_gate_finalize_wrapper_tests {
     fn inferred_verdict_preserves_check_cardinality_fields() {
         let result = json!({ "checks": passing_checks() });
         let details = infer_phase_gate_verdict_details(&gate(), &result)
-            .expect("passing declared checks should infer a verdict");
+            .expect("passing declared checks should infer a verdict"); // agentdesk-audit: allow-unwrap — deterministic typed-verdict assertion in #[cfg(test)] module (#5044)
 
         assert_eq!(details.pass_verdict, "phase_gate_passed");
         assert_eq!(details.declared_check_count, 3);
