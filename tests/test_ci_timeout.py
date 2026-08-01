@@ -191,6 +191,20 @@ class CiTimeoutTests(unittest.TestCase):
             self.assertNotIn("SIGALRM", source)
             self.assertNotIn("setitimer", source)
             self.assertNotIn("_DiagnosticCapExpired", source)
+        with self.subTest("contract wording stays scoped to actual guarantees"):
+            for wording in (
+                "Diagnostic process creation is best-effort and outside the cleanup bound.",
+                "Select rc for signal, timeout, and child-exit rows after spawn.",
+                "Preserve the pre-masking contract",
+                "spawn-path rc selection",
+            ):
+                self.assertIn(wording, source)
+            for overstatement in (
+                "Apply all seven rc-table rows in one place.",
+                "Preserve the pre-masking implementation",
+                "the sole rc selection",
+            ):
+                self.assertNotIn(overstatement, source)
 
     # F8(b,c)
     def test_returned_dumpers_are_tracked_when_popen_exceeds_deadline(self):
@@ -230,12 +244,17 @@ class CiTimeoutTests(unittest.TestCase):
              mock.patch.object(ci_timeout.signal, "sigpending", return_value=set()), \
              mock.patch.object(ci_timeout, "_monotonic", side_effect=clock.monotonic), \
              mock.patch.object(ci_timeout, "_sleep", side_effect=clock.sleep), \
-             contextlib.redirect_stderr(io.StringIO()):
+             contextlib.redirect_stderr(stderr := io.StringIO()):
             rc = ci_timeout.run_command(0, ["primary"])
         self.assertEqual((rc, len(attempts), len(dumpers)), (124, 2, 2))
         for dumper in dumpers:
             dumper.kill.assert_called_once_with()
-        self.assertIn("diagnostic_poll", checkpoints)
+            self.assertIn(
+                f"::warning::ci-timeout: diagnostic pid {dumper.pid} unreaped",
+                stderr.getvalue(),
+            )
+        # One checkpoint per returned child plus one bounded poll iteration.
+        self.assertEqual(checkpoints.count("diagnostic_poll"), len(dumpers) + 1)
         # Popen creation is outside the poll deadline, but every returned child
         # is owned and killed; no SIGALRM can interrupt registration.
         self.assertAlmostEqual(clock.now, 2.4)
@@ -347,6 +366,31 @@ class CiTimeoutTests(unittest.TestCase):
                     "popen_returned", "checkpoint_observed", "term_sent"]
         self.assertEqual([events.index(e) for e in required], sorted(events.index(e) for e in required))
         self.assertEqual(rc, 143)
+
+    @unittest.skipUnless(hasattr(signal, "pthread_sigmask"), "POSIX required")
+    def test_spawned_reaped_child_final_pending_sigint_returns_130(self):
+        original_mask, real_checkpoint = signal.pthread_sigmask, ci_timeout._checkpoint
+        old_mask = original_mask(signal.SIG_BLOCK, set())
+        proc, injected = Process([0]), []
+
+        def checkpoint(state, enabled, name):
+            if name == "final" and not injected:
+                os.kill(os.getpid(), signal.SIGINT)
+                injected.append(True)
+            return real_checkpoint(state, enabled, name)
+
+        try:
+            with mock.patch.object(ci_timeout, "_popen", return_value=proc), \
+                 mock.patch.object(ci_timeout, "_checkpoint", side_effect=checkpoint), \
+                 mock.patch.object(ci_timeout, "_cleanup") as cleanup:
+                rc = ci_timeout.run_command(30, ["cargo", "test"])
+            self.assertEqual(rc, 130)
+            self.assertIn(signal.SIGINT, signal.sigpending())
+            cleanup.assert_not_called()
+        finally:
+            if signal.SIGINT in signal.sigpending():
+                signal.sigwait({signal.SIGINT})
+            original_mask(signal.SIG_SETMASK, old_mask)
 
     # F10-②..⑥
     def test_signal_boundaries_polling_and_tie_break(self):
@@ -661,6 +705,26 @@ class CiTimeoutTests(unittest.TestCase):
                     signal.sigwait({signum})
             original_mask(signal.SIG_SETMASK, old_mask)
             original_signal(signal.SIGTERM, old_handler)
+
+    @unittest.skipUnless(hasattr(signal, "pthread_sigmask"), "POSIX required")
+    def test_checkpoint_one_pending_sigint_returns_130_without_spawn(self):
+        original_mask = signal.pthread_sigmask
+        old_mask = original_mask(signal.SIG_BLOCK, set())
+        try:
+            original_mask(signal.SIG_BLOCK, {signal.SIGINT})
+            os.kill(os.getpid(), signal.SIGINT)
+            self.assertEqual(signal.sigpending(), {signal.SIGINT})
+            with mock.patch.object(ci_timeout, "_popen") as popen, \
+                 mock.patch.object(ci_timeout, "_cleanup") as cleanup, \
+                 mock.patch.object(ci_timeout, "_send_process_signal") as send:
+                rc = ci_timeout.run_command(30, ["cargo", "test"])
+            self.assertEqual(rc, 130)
+            for operation in (popen, cleanup, send):
+                operation.assert_not_called()
+        finally:
+            if signal.SIGINT in signal.sigpending():
+                signal.sigwait({signal.SIGINT})
+            original_mask(signal.SIG_SETMASK, old_mask)
 
 
 if __name__ == "__main__":

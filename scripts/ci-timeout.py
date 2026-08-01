@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Run a command with a wall-clock timeout and bounded cleanup."""
+"""Run a command with a wall-clock timeout and bounded cleanup.
+
+Diagnostic process creation is best-effort and outside the cleanup bound.
+"""
 
 from __future__ import annotations
 
@@ -25,7 +28,6 @@ class _RunState:
     first_signum: int | None = None
     reaped: bool = False
     cutoff: bool = False
-    cleanup_done: bool = False
 
 
 def _mask_forwarded_signals() -> bool:
@@ -210,7 +212,6 @@ def _cleanup(proc: subprocess.Popen[bytes], state: _RunState, enabled: bool) -> 
             f"::warning::ci-timeout: child pid {proc.pid} unreaped after KILL_WAIT",
             file=sys.stderr,
         )
-    state.cleanup_done = True
 
 
 def _normalize_return_code(returncode: int) -> int:
@@ -220,7 +221,7 @@ def _normalize_return_code(returncode: int) -> int:
 def _select_return_code(
     state: _RunState, *, timed_out: bool, child_returncode: int | None
 ) -> int:
-    """Apply all seven rc-table rows in one place."""
+    """Select rc for signal, timeout, and child-exit rows after spawn."""
     if state.first_signum is not None:
         return 128 + state.first_signum
     if timed_out:
@@ -253,7 +254,7 @@ def run_command(timeout: float, command: list[str]) -> int:
         proc = _popen(command, enabled)
 
         if not enabled:
-            # Preserve the pre-masking implementation on platforms without POSIX APIs.
+            # Preserve the pre-masking contract on platforms without POSIX APIs.
             def forward_signal(signum: int, _frame: object) -> None:
                 if state.cutoff:
                     return
@@ -285,13 +286,8 @@ def run_command(timeout: float, command: list[str]) -> int:
                 )
                 _cleanup(proc, state, enabled)
 
-        # Checkpoint ⑤ is immediately before cutoff C and the sole rc selection.
-        had_signal = state.first_signum is not None
-        observed_at_final = _checkpoint(state, enabled, "final")
-        newly_observed = observed_at_final and not had_signal
-        if newly_observed and not state.cleanup_done:
-            _cleanup(proc, state, enabled)
-            _checkpoint(state, enabled, "final")
+        # Checkpoint ⑤ is immediately before cutoff C and spawn-path rc selection.
+        _checkpoint(state, enabled, "final")
         state.cutoff = True
         rc = _select_return_code(state, timed_out=timed_out, child_returncode=child_rc)
         _report(timeout, command, _monotonic() - spawn_completed, rc)
