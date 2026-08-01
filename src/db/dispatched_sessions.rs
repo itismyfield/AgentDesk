@@ -1291,19 +1291,29 @@ mod selector_cleanup_tests {
     // were selected before the move; the module marker is what now covers the
     // rest.
     //
-    // Be precise about what protects that, because it is weaker here than in
-    // the sibling slices (#5088 S3, #5092 S5). Renaming this module away from
-    // the marker is caught only by the manifest-drift check (hard rc=1). It is
-    // NOT caught by the other two signals a reader might expect:
-    //   - new rule1/rule2 debt is warn-only during the #5071 T0 rollout, so a
-    //     regenerated manifest turns the drift failure into a passing WARN;
-    //   - the coverage gate stays silent because the parent module is already
-    //     carried in `test_lane_coverage_baseline.txt` as uncovered debt, so
-    //     reassigning tests back to it changes nothing it measures.
-    // Consequently the nested `#[cfg(test)]` here is defence-in-depth for when
-    // that parent debt is repaid — it is not currently load-bearing. Do not
-    // copy a "removing this breaks the gate" claim into slices whose parent is
-    // genuinely covered; there it is true, here it is not.
+    // Two edits could undo this, and they are protected very differently.
+    // Measured rc, not inferred:
+    //
+    //   1. Renaming the module away from the marker (`…_pg_tests` →
+    //      `…_tests`), keeping the `#[cfg(test)]`:
+    //        membership rc=1  (PG test-lane manifest drift)
+    //        coverage   rc=1  (2 newly uncovered modules)
+    //      Regenerating the manifest silences membership — new rule1/rule2 debt
+    //      is warn-only during the #5071 T0 rollout — but coverage still fails,
+    //      because the renamed nested module becomes a *new* uncovered module
+    //      rather than folding back into the parent. So the marker is well
+    //      guarded; the coverage gate is the signal that survives a regen.
+    //
+    //   2. Removing the nested `#[cfg(test)]` alone:
+    //        membership rc=0, coverage rc=0
+    //      This is harmless for lane selection — the path still contains the
+    //      marker — and the gates stay green because the tests fold back into
+    //      the parent, which `test_lane_coverage_baseline.txt` already carries
+    //      as uncovered debt. So unlike the sibling slices (#5088 S3, #5092 S5)
+    //      where the parent is genuinely covered, this attribute is NOT
+    //      load-bearing here; it is defence-in-depth for when that parent debt
+    //      is repaid. Do not copy a "removing this breaks the gate" claim out
+    //      of this file without checking whether the parent is baselined.
     #[cfg(test)]
     mod session_authority_pg_tests {
         use super::*;

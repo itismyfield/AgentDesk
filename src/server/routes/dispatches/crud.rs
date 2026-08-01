@@ -949,12 +949,13 @@ mod tests {
     // #4979 S6: dispatch API PG tests live below `*_pg_tests` so
     // `just test-postgres` selects them through its `_pg` filter, which is a
     // substring match on the whole test path rather than a module-scope rule.
-    // See the matching comment in `src/db/dispatched_sessions.rs` for why the
-    // nested `#[cfg(test)]` is defence-in-depth rather than load-bearing in
-    // this slice: the parent module is already carried as uncovered debt in
-    // `test_lane_coverage_baseline.txt`, and new rule1/rule2 debt is warn-only
-    // during the #5071 T0 rollout, so manifest drift (hard rc=1) is the only
-    // signal that actually catches a rename away from the marker.
+    // See the matching comment in `src/db/dispatched_sessions.rs` for the
+    // measured protection story: renaming this module away from the marker
+    // fails both gates (and coverage keeps failing even after the manifest is
+    // regenerated), whereas removing the nested `#[cfg(test)]` alone leaves
+    // both green — the parent here is already carried as uncovered debt, so
+    // that attribute is defence-in-depth rather than load-bearing in this
+    // slice.
     //
     // `publish_only_dispatch_patch_broadcasts_without_mutating_result_or_phase_gate_pg`
     // already ended in `_gate_pg`, so it was selected by the PG lane before the
