@@ -279,6 +279,9 @@ db::postgres::tests::postgres_startup_advisory_lock_serializes_concurrent_startu
 db::postgres::tests::postgres_startup_reseed_clears_session_fk_for_removed_agent
 db::postgres::tests::postgres_startup_reseed_migrates_legacy_openclaw_agent_ids
 db::postgres::tests::postgres_startup_reseed_preserves_configured_legacy_openclaw_agent_id
+db::postgres::tests::require_pg_guard_leaves_success_untouched_when_ci_lane_requires_postgres
+db::postgres::tests::require_pg_guard_panics_for_all_entrypoints_on_unreachable_database
+db::postgres::tests::require_pg_guard_preserves_errors_when_ci_lane_does_not_require_postgres
 db::postgres::tests::sync_agents_writes_and_preserves_preferred_intake_node_labels
 db::postgres::tests::worker_node_reseed_does_not_clobber_shared_agent_roster
 db::relay_dead_letter::tests::insert_read_back_detached_and_retention_roundtrip_pg

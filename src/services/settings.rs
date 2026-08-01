@@ -1116,6 +1116,7 @@ mod tests {
     use serde_json::json;
 
     struct TestDatabase {
+        _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
         admin_url: String,
         database_name: String,
         database_url: String,
@@ -1123,13 +1124,19 @@ mod tests {
 
     impl TestDatabase {
         async fn create_if_configured() -> Option<Self> {
-            std::env::var("POSTGRES_TEST_DATABASE_URL_BASE")
-                .ok()
-                .filter(|value| !value.trim().is_empty())?;
-            Some(Self::create().await)
+            crate::db::postgres::postgres_test_database_url_base()?;
+            let lifecycle = crate::db::postgres::lock_test_lifecycle();
+            Some(Self::create_with_lifecycle(lifecycle).await)
         }
 
         async fn create() -> Self {
+            let lifecycle = crate::db::postgres::lock_test_lifecycle();
+            Self::create_with_lifecycle(lifecycle).await
+        }
+
+        async fn create_with_lifecycle(
+            lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
+        ) -> Self {
             let admin_url = crate::dispatch::test_support::postgres_admin_database_url();
             let database_name = format!("agentdesk_settings_{}", uuid::Uuid::new_v4().simple());
             let database_url = format!(
@@ -1145,6 +1152,7 @@ mod tests {
             .await
             .expect("create settings postgres test db");
             Self {
+                _lifecycle: lifecycle,
                 admin_url,
                 database_name,
                 database_url,

@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
+#[cfg(test)]
+use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -1150,17 +1152,152 @@ fn database_url_override() -> Option<String> {
 }
 
 #[cfg(test)]
+/// Read the shared PG fixture base; required PG lanes must not silently turn
+/// a missing base into a soft-skip. This is intentionally wired only through
+/// the settings, prompt-manifest, and canonical-identity fixtures; the other
+/// PG fixture constructors still read environment variables directly and are
+/// deferred to the S3 follow-up.
+pub(crate) fn postgres_test_database_url_base() -> Option<String> {
+    let base = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty());
+    if base.is_none() && std::env::var(AGENTDESK_REQUIRE_PG_ENV).ok().as_deref() == Some("1") {
+        panic!("PG required but POSTGRES_TEST_DATABASE_URL_BASE unset"); // agentdesk-audit: allow-unwrap — AGENTDESK_REQUIRE_PG=1 CI 계약: PG fixture base 누락을 soft-skip green으로 붕괴시키지 않는 의도적 hard-fail (#4979 S2)
+    }
+    base
+}
+
+#[cfg(test)]
 const TEST_POSTGRES_OP_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(test)]
 const TEST_POSTGRES_POOL_MAX_CONNECTIONS: u32 = 1;
 #[cfg(test)]
 const TEST_POSTGRES_ADMIN_POOL_MAX_CONNECTIONS: u32 = 1;
 #[cfg(test)]
+const AGENTDESK_REQUIRE_PG_ENV: &str = "AGENTDESK_REQUIRE_PG";
+#[cfg(test)]
+const TEST_POSTGRES_ACQUIRE_TIMEOUT_ENV: &str = "AGENTDESK_TEST_POSTGRES_ACQUIRE_TIMEOUT_MS";
+#[cfg(test)]
 static POSTGRES_TEST_SETUP_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
     std::sync::OnceLock::new();
 #[cfg(test)]
 static POSTGRES_TEST_LIFECYCLE_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
     std::sync::OnceLock::new();
+#[cfg(test)]
+static POSTGRES_TEST_DATABASE_OWNERS: std::sync::OnceLock<
+    std::sync::Mutex<BTreeMap<(String, String), TestDatabaseOwnershipToken>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+struct TestDatabaseOwnershipToken {
+    registry_key: (String, String),
+    admin_url: String,
+    database_name: String,
+}
+
+#[cfg(test)]
+fn test_database_owners()
+-> &'static std::sync::Mutex<BTreeMap<(String, String), TestDatabaseOwnershipToken>> {
+    POSTGRES_TEST_DATABASE_OWNERS.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
+fn test_database_server_identity(options: &PgConnectOptions) -> String {
+    let host = options.get_host().trim();
+    // Strip a DNS-style trailing dot before removing IPv6 brackets so both
+    // `[::1]` and `[::1].` reach the same canonical parser input. Preserve
+    // Unix-socket paths verbatim below; a path is not a DNS host name.
+    let host_for_ip_or_hostname = host.trim_end_matches('.');
+    let unbracketed_host = host_for_ip_or_hostname
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host_for_ip_or_hostname);
+    let normalized_host = if let Ok(address) = unbracketed_host.parse::<IpAddr>() {
+        // Canonicalize first: long-form IPv6 loopback parses to `::1`, so the
+        // alias match below covers every equivalent textual representation.
+        address.to_string()
+    } else if host.starts_with('/') {
+        host.to_string()
+    } else {
+        unbracketed_host.to_ascii_lowercase()
+    };
+    let normalized_host = match normalized_host.as_str() {
+        "localhost" | "127.0.0.1" | "::1" => {
+            // PostgreSQL fixtures may create through the CI base URL and connect
+            // through config.host; treat the three loopback spellings as one
+            // server identity so ownership cleanup cannot split its registry key.
+            // Angle brackets cannot occur in a URL host, keeping this key distinct
+            // from a real DNS hostname such as `loopback`.
+            "<loopback>".to_string()
+        }
+        _ => normalized_host,
+    };
+    if normalized_host.contains(':') {
+        format!("[{normalized_host}]:{}", options.get_port())
+    } else {
+        format!("{normalized_host}:{}", options.get_port())
+    }
+}
+
+#[cfg(test)]
+fn test_database_registry_key(options: &PgConnectOptions, database_name: &str) -> (String, String) {
+    (
+        test_database_server_identity(options),
+        database_name.to_string(),
+    )
+}
+
+#[cfg(test)]
+fn register_test_database_ownership(
+    admin_options: &PgConnectOptions,
+    admin_url: &str,
+    database_name: &str,
+) {
+    let registry_key = test_database_registry_key(admin_options, database_name);
+    let mut owners = test_database_owners()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(
+        !owners.contains_key(&registry_key),
+        "a database ownership token must not be overwritten"
+    );
+    owners.insert(
+        registry_key.clone(),
+        TestDatabaseOwnershipToken {
+            registry_key,
+            admin_url: admin_url.to_string(),
+            database_name: database_name.to_string(),
+        },
+    );
+}
+
+#[cfg(test)]
+fn take_test_database_ownership(
+    database_options: &PgConnectOptions,
+    database_name: &str,
+) -> Option<TestDatabaseOwnershipToken> {
+    let registry_key = test_database_registry_key(database_options, database_name);
+    test_database_owners()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&registry_key)
+}
+
+#[cfg(test)]
+fn restore_test_database_ownership(ownership: TestDatabaseOwnershipToken) {
+    let mut owners = test_database_owners()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if owners.contains_key(&ownership.registry_key) {
+        tracing::warn!(
+            database_name = ownership.database_name,
+            "refusing to overwrite an existing postgres test database ownership token"
+        );
+        return;
+    }
+    owners.insert(ownership.registry_key.clone(), ownership);
+}
 
 #[cfg(test)]
 fn lock_test_setup() -> std::sync::MutexGuard<'static, ()> {
@@ -1214,21 +1351,73 @@ where
 }
 
 #[cfg(test)]
+/// Escalate failed shared PostgreSQL test-helper results in PG-backed CI lanes.
+/// Direct SQLx connections are outside this funnel and remain hard-fail-only.
+/// The six public shared-helper entrypoints call this exactly once at their
+/// final `Result` boundary; inner operations stay return-based so cleanup can
+/// finish before a required-lane panic.
+fn require_pg_guard<T>(result: Result<T, String>) -> Result<T, String> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) if std::env::var(AGENTDESK_REQUIRE_PG_ENV).ok().as_deref() == Some("1") => {
+            let message = format!(
+                "PostgreSQL required by this CI lane (AGENTDESK_REQUIRE_PG=1) but unavailable: {error}"
+            );
+            panic!("{message}"); // agentdesk-audit: allow-unwrap — AGENTDESK_REQUIRE_PG=1 CI 계약: PG 연결 실패를 soft-skip green으로 붕괴시키지 않기 위한 의도적 hard-fail (#4979 S2)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+fn parse_test_postgres_options(
+    database_url: &str,
+    label: &str,
+) -> Result<PgConnectOptions, String> {
+    PgConnectOptions::from_str(database_url)
+        .map_err(|error| format!("{label} parse postgres url: {error}"))
+}
+
+#[cfg(test)]
+async fn connect_test_pool_with_options(
+    options: PgConnectOptions,
+    label: &str,
+    max_connections: u32,
+) -> Result<PgPool, String> {
+    let acquire_timeout = std::env::var(TEST_POSTGRES_ACQUIRE_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(TEST_POSTGRES_OP_TIMEOUT);
+    run_test_postgres_sqlx_op(
+        &format!("{label} connect postgres"),
+        PgPoolOptions::new()
+            .max_connections(max_connections.max(1))
+            .acquire_timeout(acquire_timeout)
+            .connect_with(options),
+    )
+    .await
+}
+
+#[cfg(test)]
+async fn connect_test_pool_with_max_connections_inner(
+    database_url: &str,
+    label: &str,
+    max_connections: u32,
+) -> Result<PgPool, String> {
+    let options = parse_test_postgres_options(database_url, label)?;
+    connect_test_pool_with_options(options, label, max_connections).await
+}
+
+#[cfg(test)]
 pub(crate) async fn connect_test_pool_with_max_connections(
     database_url: &str,
     label: &str,
     max_connections: u32,
 ) -> Result<PgPool, String> {
-    let options = PgConnectOptions::from_str(database_url)
-        .map_err(|error| format!("{label} parse postgres url: {error}"))?;
-    run_test_postgres_sqlx_op(
-        &format!("{label} connect postgres"),
-        PgPoolOptions::new()
-            .max_connections(max_connections.max(1))
-            .acquire_timeout(TEST_POSTGRES_OP_TIMEOUT)
-            .connect_with(options),
+    require_pg_guard(
+        connect_test_pool_with_max_connections_inner(database_url, label, max_connections).await,
     )
-    .await
 }
 
 #[cfg(test)]
@@ -1236,8 +1425,14 @@ pub(crate) async fn connect_test_pool(database_url: &str, label: &str) -> Result
     // Test helpers frequently create many isolated pools in parallel on CI.
     // Keep the default test pool lean so PG-backed route tests do not exhaust
     // the shared runner database just by setting up fixtures.
-    connect_test_pool_with_max_connections(database_url, label, TEST_POSTGRES_POOL_MAX_CONNECTIONS)
-        .await
+    require_pg_guard(
+        connect_test_pool_with_max_connections_inner(
+            database_url,
+            label,
+            TEST_POSTGRES_POOL_MAX_CONNECTIONS,
+        )
+        .await,
+    )
 }
 
 #[cfg(test)]
@@ -1246,6 +1441,10 @@ pub(crate) async fn connect_test_pool(database_url: &str, label: &str) -> Result
 // PG-backed test DB create/drop so they cannot race. Dropping the guard before
 // the awaits would reintroduce the CI race this lock was added to fix. Test-only.
 #[allow(clippy::await_holding_lock)]
+/// Ownership tokens are process-local: a crash between `CREATE DATABASE` and
+/// registration, or process exit after registration, can leave an unowned
+/// `agentdesk_*` database. This limitation is accepted; inspect that prefix
+/// with `psql` and manually drop only confirmed-stale databases.
 pub(crate) async fn create_test_database(
     admin_url: &str,
     database_name: &str,
@@ -1255,19 +1454,232 @@ pub(crate) async fn create_test_database(
     // isolated databases at the same time. Serialize setup/teardown at the
     // shared helper boundary so every test module benefits from the guard.
     let _guard = lock_test_setup();
-    let admin_pool = connect_test_pool_with_max_connections(
-        admin_url,
-        &format!("{label} admin"),
-        TEST_POSTGRES_ADMIN_POOL_MAX_CONNECTIONS,
-    )
-    .await?;
-    run_test_postgres_sqlx_op(
-        &format!("{label} create postgres test db {database_name}"),
-        sqlx::query(&format!("CREATE DATABASE \"{database_name}\"")).execute(&admin_pool),
-    )
-    .await?;
-    close_test_pool(admin_pool, &format!("{label} admin")).await?;
+    let result = async {
+        let admin_options = parse_test_postgres_options(admin_url, &format!("{label} admin"))?;
+        let admin_pool = connect_test_pool_with_options(
+            admin_options.clone(),
+            &format!("{label} admin"),
+            TEST_POSTGRES_ADMIN_POOL_MAX_CONNECTIONS,
+        )
+        .await?;
+        let create_result = run_test_postgres_sqlx_op(
+            &format!("{label} create postgres test db {database_name}"),
+            sqlx::query(&format!("CREATE DATABASE \"{database_name}\"")).execute(&admin_pool),
+        )
+        .await;
+
+        if let Err(error) = create_result {
+            if let Err(close_error) = close_test_pool(admin_pool, &format!("{label} admin")).await {
+                tracing::warn!(
+                    label,
+                    close_error,
+                    "failed to close postgres admin pool after test database create error"
+                );
+            }
+            // CREATE failed, so this test never owned `database_name`; in
+            // particular, DuplicateDatabase must not trigger a destructive
+            // cleanup of a pre-existing database.
+            return Err(error);
+        }
+
+        // Only a successful CREATE grants this test an ownership token. Every
+        // later best-effort or explicit cleanup path must consume that token.
+        register_test_database_ownership(&admin_options, admin_url, database_name);
+
+        if let Err(error) = close_test_pool(admin_pool, &format!("{label} admin")).await {
+            best_effort_drop_owned_test_database(&admin_options, database_name, label).await;
+            return Err(error);
+        }
+        Ok(())
+    }
+    .await;
+    require_pg_guard(result)
+}
+
+#[cfg(test)]
+async fn migrate_test_pool(pool: &PgPool, label: &str) -> Result<(), String> {
+    tokio::time::timeout(TEST_POSTGRES_OP_TIMEOUT, migrate(pool))
+        .await
+        .map_err(|_| {
+            format!(
+                "{label} migrate postgres timed out after {}s",
+                TEST_POSTGRES_OP_TIMEOUT.as_secs()
+            )
+        })?
+}
+
+#[cfg(test)]
+fn is_safe_test_database_name(database_name: &str) -> bool {
+    !database_name.is_empty()
+        && database_name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
+#[cfg(test)]
+async fn best_effort_drop_test_database_with_options(
+    admin_options: PgConnectOptions,
+    database_name: &str,
+    label: &str,
+) -> Result<(), TestDatabaseDropError> {
+    if !is_safe_test_database_name(database_name) {
+        return Err(TestDatabaseDropError::before_drop(format!(
+            "{label} unsafe postgres test database name {database_name}"
+        )));
+    }
+    drop_test_database_with_options(admin_options, database_name, label).await
+}
+
+#[cfg(test)]
+struct TestDatabaseDropError {
+    message: String,
+    drop_succeeded: bool,
+}
+
+#[cfg(test)]
+impl TestDatabaseDropError {
+    fn before_drop(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            drop_succeeded: false,
+        }
+    }
+
+    fn after_drop(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            drop_succeeded: true,
+        }
+    }
+}
+
+#[cfg(test)]
+async fn drop_owned_test_database_with_options(
+    database_options: &PgConnectOptions,
+    database_name: &str,
+    label: &str,
+) -> Result<(), String> {
+    if !is_safe_test_database_name(database_name) {
+        return Err(format!(
+            "{label} unsafe postgres test database name {database_name}"
+        ));
+    }
+    // Every caller is inside the setup-lock critical section (directly or via
+    // the wrapper), so this take/restore reservation window is serialized with
+    // all test-database create/drop helpers.
+    let Some(ownership) = take_test_database_ownership(database_options, database_name) else {
+        tracing::debug!(
+            label,
+            database_name,
+            "skipping postgres test database cleanup without an ownership token"
+        );
+        return Ok(());
+    };
+    let admin_options =
+        match parse_test_postgres_options(&ownership.admin_url, &format!("{label} admin")) {
+            Ok(options) => options,
+            Err(error) => {
+                restore_test_database_ownership(ownership);
+                return Err(error);
+            }
+        };
+    let result =
+        best_effort_drop_test_database_with_options(admin_options, &ownership.database_name, label)
+            .await;
+    if let Err(error) = result {
+        // Keep the token available for the caller's unwind/backstop retry only
+        // when DROP was not confirmed. Once DROP succeeds, a later admin-pool
+        // close timeout is still an error, but the already-deleted database's
+        // ownership token must remain consumed.
+        if !error.drop_succeeded {
+            restore_test_database_ownership(ownership);
+        }
+        return Err(error.message);
+    }
     Ok(())
+}
+
+#[cfg(test)]
+async fn best_effort_drop_owned_test_database(
+    database_options: &PgConnectOptions,
+    database_name: &str,
+    label: &str,
+) {
+    if let Err(error) =
+        drop_owned_test_database_with_options(database_options, database_name, label).await
+    {
+        tracing::warn!(
+            label,
+            database_name,
+            error,
+            "best-effort postgres test database cleanup failed"
+        );
+    }
+}
+
+#[cfg(test)]
+async fn best_effort_drop_owned_test_database_for_database_options(
+    database_options: PgConnectOptions,
+    label: &str,
+) {
+    let Some(database_name) = database_options.get_database().map(str::to_owned) else {
+        return;
+    };
+    best_effort_drop_owned_test_database(&database_options, &database_name, label).await;
+}
+
+#[cfg(test)]
+/// Migration setup does not hold `POSTGRES_TEST_SETUP_LOCK`; acquire it here
+/// before the owned DROP. The create close-failure path calls the unlocked
+/// helper while it already holds that lock, and public `drop_test_database`
+/// does too; neither path may re-enter this wrapper.
+// SAFETY (await_holding_lock): `lock_test_setup()` is a test-only
+// serialization mutex; only this PostgreSQL test-helper family contends for it,
+// so holding it across the cleanup await cannot block live application code.
+#[allow(clippy::await_holding_lock)]
+async fn best_effort_drop_owned_test_database_with_setup_lock(
+    database_options: PgConnectOptions,
+    label: &str,
+) {
+    let _guard = lock_test_setup();
+    best_effort_drop_owned_test_database_for_database_options(database_options, label).await;
+}
+
+#[cfg(test)]
+/// Close a failed migration pool and best-effort drop only a database whose
+/// successful CREATE left an ownership token in this test process.
+async fn best_effort_cleanup_after_migration_failure(
+    pool: PgPool,
+    database_options: PgConnectOptions,
+    label: &str,
+) {
+    if let Err(error) = close_test_pool(pool, &format!("{label} migration failure cleanup")).await {
+        tracing::warn!(
+            label,
+            error,
+            "failed to close postgres test pool after migration failure"
+        );
+    }
+    best_effort_drop_owned_test_database_with_setup_lock(database_options, label).await;
+}
+
+#[cfg(test)]
+async fn connect_test_pool_and_migrate_inner(
+    database_url: &str,
+    label: &str,
+) -> Result<PgPool, String> {
+    let database_options = parse_test_postgres_options(database_url, label)?;
+    let pool = connect_test_pool_with_options(
+        database_options.clone(),
+        label,
+        TEST_POSTGRES_POOL_MAX_CONNECTIONS,
+    )
+    .await?;
+    if let Err(error) = migrate_test_pool(&pool, label).await {
+        best_effort_cleanup_after_migration_failure(pool, database_options, label).await;
+        return Err(error);
+    }
+    Ok(pool)
 }
 
 #[cfg(test)]
@@ -1275,15 +1687,22 @@ pub(crate) async fn connect_test_pool_and_migrate(
     database_url: &str,
     label: &str,
 ) -> Result<PgPool, String> {
-    let pool = connect_test_pool(database_url, label).await?;
-    tokio::time::timeout(TEST_POSTGRES_OP_TIMEOUT, migrate(&pool))
-        .await
-        .map_err(|_| {
-            format!(
-                "{label} migrate postgres timed out after {}s",
-                TEST_POSTGRES_OP_TIMEOUT.as_secs()
-            )
-        })??;
+    require_pg_guard(connect_test_pool_and_migrate_inner(database_url, label).await)
+}
+
+#[cfg(test)]
+async fn connect_test_pool_with_max_connections_and_migrate_inner(
+    database_url: &str,
+    label: &str,
+    max_connections: u32,
+) -> Result<PgPool, String> {
+    let database_options = parse_test_postgres_options(database_url, label)?;
+    let pool =
+        connect_test_pool_with_options(database_options.clone(), label, max_connections).await?;
+    if let Err(error) = migrate_test_pool(&pool, label).await {
+        best_effort_cleanup_after_migration_failure(pool, database_options, label).await;
+        return Err(error);
+    }
     Ok(pool)
 }
 
@@ -1293,20 +1712,18 @@ pub(crate) async fn connect_test_pool_with_max_connections_and_migrate(
     label: &str,
     max_connections: u32,
 ) -> Result<PgPool, String> {
-    let pool = connect_test_pool_with_max_connections(database_url, label, max_connections).await?;
-    tokio::time::timeout(TEST_POSTGRES_OP_TIMEOUT, migrate(&pool))
-        .await
-        .map_err(|_| {
-            format!(
-                "{label} migrate postgres timed out after {}s",
-                TEST_POSTGRES_OP_TIMEOUT.as_secs()
-            )
-        })??;
-    Ok(pool)
+    require_pg_guard(
+        connect_test_pool_with_max_connections_and_migrate_inner(
+            database_url,
+            label,
+            max_connections,
+        )
+        .await,
+    )
 }
 
 #[cfg(test)]
-pub(crate) async fn connect_test_pool_and_migrate_config(
+async fn connect_test_pool_and_migrate_config_inner(
     config: &Config,
     label: &str,
 ) -> Result<Option<PgPool>, String> {
@@ -1323,43 +1740,46 @@ pub(crate) async fn connect_test_pool_and_migrate_config(
         options = options.password(password);
     }
 
-    let pool = run_test_postgres_sqlx_op(
-        &format!("{label} connect postgres"),
-        PgPoolOptions::new()
-            .max_connections(config.database.pool_max.max(1))
-            .acquire_timeout(TEST_POSTGRES_OP_TIMEOUT)
-            .connect_with(options),
-    )
-    .await?;
-    tokio::time::timeout(TEST_POSTGRES_OP_TIMEOUT, migrate(&pool))
-        .await
-        .map_err(|_| {
-            format!(
-                "{label} migrate postgres timed out after {}s",
-                TEST_POSTGRES_OP_TIMEOUT.as_secs()
-            )
-        })??;
+    let pool =
+        connect_test_pool_with_options(options.clone(), label, config.database.pool_max.max(1))
+            .await?;
+    if let Err(error) = migrate_test_pool(&pool, label).await {
+        best_effort_cleanup_after_migration_failure(pool, options, label).await;
+        return Err(error);
+    }
     Ok(Some(pool))
 }
 
 #[cfg(test)]
-// SAFETY (await_holding_lock): same serialization rationale as
-// `create_test_database` — `lock_test_setup()` is held across the teardown
-// awaits to keep concurrent PG test DB drops from racing. Test-only.
-#[allow(clippy::await_holding_lock)]
-pub(crate) async fn drop_test_database(
-    admin_url: &str,
+/// `database.enabled = false` intentionally returns `Ok(None)` before any
+/// PostgreSQL connection attempt, even when `AGENTDESK_REQUIRE_PG=1`.
+pub(crate) async fn connect_test_pool_and_migrate_config(
+    config: &Config,
+    label: &str,
+) -> Result<Option<PgPool>, String> {
+    require_pg_guard(connect_test_pool_and_migrate_config_inner(config, label).await)
+}
+
+#[cfg(test)]
+/// The primitive intentionally does not acquire `POSTGRES_TEST_SETUP_LOCK`:
+/// create's close-failure path calls it while that lock is held. Callers
+/// outside that critical section must use the setup-lock wrapper above.
+async fn drop_test_database_with_options(
+    admin_options: PgConnectOptions,
     database_name: &str,
     label: &str,
-) -> Result<(), String> {
-    let _guard = lock_test_setup();
-    let admin_pool = connect_test_pool_with_max_connections(
-        admin_url,
+) -> Result<(), TestDatabaseDropError> {
+    let admin_pool = match connect_test_pool_with_options(
+        admin_options,
         &format!("{label} admin"),
         TEST_POSTGRES_ADMIN_POOL_MAX_CONNECTIONS,
     )
-    .await?;
-    run_test_postgres_sqlx_op(
+    .await
+    {
+        Ok(pool) => pool,
+        Err(error) => return Err(TestDatabaseDropError::before_drop(error)),
+    };
+    if let Err(error) = run_test_postgres_sqlx_op(
         &format!("{label} terminate postgres test db sessions {database_name}"),
         sqlx::query(
             "SELECT pg_terminate_backend(pid)
@@ -1370,7 +1790,16 @@ pub(crate) async fn drop_test_database(
         .bind(database_name)
         .execute(&admin_pool),
     )
-    .await?;
+    .await
+    {
+        let message = match close_test_pool(admin_pool, &format!("{label} admin")).await {
+            Ok(()) => error,
+            Err(close_error) => {
+                format!("{error}; failed to close postgres admin pool: {close_error}")
+            }
+        };
+        return Err(TestDatabaseDropError::before_drop(message));
+    }
     let drop_sql = format!("DROP DATABASE IF EXISTS \"{database_name}\" WITH (FORCE)");
     let mut last_error = None;
     for attempt in 1..=3 {
@@ -1393,11 +1822,38 @@ pub(crate) async fn drop_test_database(
         }
     }
     if let Some(error) = last_error {
-        close_test_pool(admin_pool, &format!("{label} admin")).await?;
-        return Err(error);
+        let message = match close_test_pool(admin_pool, &format!("{label} admin")).await {
+            Ok(()) => error,
+            Err(close_error) => {
+                format!("{error}; failed to close postgres admin pool: {close_error}")
+            }
+        };
+        return Err(TestDatabaseDropError::before_drop(message));
     }
-    close_test_pool(admin_pool, &format!("{label} admin")).await?;
+    // The SQL DROP has succeeded at this point. A later pool-close failure is
+    // reported as an error, but must not make the caller restore the token for
+    // a database that is already gone.
+    if let Err(error) = close_test_pool(admin_pool, &format!("{label} admin")).await {
+        return Err(TestDatabaseDropError::after_drop(error));
+    }
     Ok(())
+}
+
+#[cfg(test)]
+// SAFETY (await_holding_lock): same serialization rationale as
+// `create_test_database` — `lock_test_setup()` is held across the teardown
+// awaits to keep concurrent PG test DB drops from racing. Test-only.
+#[allow(clippy::await_holding_lock)]
+pub(crate) async fn drop_test_database(
+    admin_url: &str,
+    database_name: &str,
+    label: &str,
+) -> Result<(), String> {
+    let _guard = lock_test_setup();
+    let admin_options = parse_test_postgres_options(admin_url, &format!("{label} admin"))?;
+    // The token's admin URL remains authoritative inside the owned helper:
+    // callers cannot redirect cleanup to a database they did not create.
+    drop_owned_test_database_with_options(&admin_options, database_name, label).await
 }
 
 #[cfg(test)]
@@ -1415,22 +1871,267 @@ pub(crate) async fn close_test_pool(pool: PgPool, label: &str) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::{
-        AdvisoryLockLease, POSTGRES_MIGRATOR, STARTUP_PG_ACQUIRE_TIMEOUT_SECS,
-        agent_roster_sync_enabled, bootstrap_pool_settings, checksum_hex, clamp_foreground_reserve,
-        close_test_pool, config_database_summary, connect_options,
-        connect_test_pool_and_migrate_config, create_test_database, database_enabled,
-        database_summary, health_check, run_test_postgres_sqlx_op_with_timeout,
+        AGENTDESK_REQUIRE_PG_ENV, AdvisoryLockLease, POSTGRES_MIGRATOR,
+        STARTUP_PG_ACQUIRE_TIMEOUT_SECS, agent_roster_sync_enabled, bootstrap_pool_settings,
+        checksum_hex, clamp_foreground_reserve, close_test_pool, config_database_summary,
+        connect_options, connect_test_pool, connect_test_pool_and_migrate,
+        connect_test_pool_and_migrate_config, connect_test_pool_with_max_connections,
+        connect_test_pool_with_max_connections_and_migrate, create_test_database, database_enabled,
+        database_summary, health_check, require_pg_guard, run_test_postgres_sqlx_op_with_timeout,
         runtime_pool_settings, should_yield_for_counters, startup_pool_settings, startup_reseed,
-        sync_agents_from_config_pg, with_startup_advisory_lock,
+        sync_agents_from_config_pg, test_database_server_identity, with_startup_advisory_lock,
     };
+    use sqlx::postgres::PgConnectOptions;
     use sqlx::{Executor as _, PgPool, Row};
     use std::collections::BTreeMap;
+    use std::future::Future;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
     use std::time::Duration;
     use tokio::sync::{Mutex, Notify};
+
+    /// Contract: the three fixtures wired through
+    /// `postgres_test_database_url_base()` take the shared lifecycle lock for
+    /// their create/connect/drop sequence. The `just test-postgres` recipe is
+    /// the serial lane (`--test-threads=1`); the `test_fast` Terminal delivery
+    /// evidence step has no skip flag, but its narrow positive filters do not
+    /// select these guard tests. The lock plus lane selection makes this
+    /// temporary process environment override effective; this guard is not a
+    /// substitute for either prerequisite.
+    struct RequirePgEnvGuard {
+        _env_lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
+        _lifecycle: super::PostgresTestLifecycleGuard,
+        previous: Option<std::ffi::OsString>,
+        previous_acquire_timeout: Option<std::ffi::OsString>,
+    }
+
+    impl RequirePgEnvGuard {
+        fn set(value: Option<&str>) -> Self {
+            let env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+            let lifecycle = super::lock_test_lifecycle();
+            let previous = std::env::var_os(AGENTDESK_REQUIRE_PG_ENV);
+            let previous_acquire_timeout =
+                std::env::var_os(super::TEST_POSTGRES_ACQUIRE_TIMEOUT_ENV);
+            match value {
+                Some(value) => unsafe { std::env::set_var(AGENTDESK_REQUIRE_PG_ENV, value) },
+                None => unsafe { std::env::remove_var(AGENTDESK_REQUIRE_PG_ENV) },
+            }
+            // SQLx retries connection-refused errors until the pool's acquire
+            // timeout; keep this test-only failure mode bounded.
+            unsafe { std::env::set_var(super::TEST_POSTGRES_ACQUIRE_TIMEOUT_ENV, "250") };
+            Self {
+                _env_lock: env_lock,
+                _lifecycle: lifecycle,
+                previous,
+                previous_acquire_timeout,
+            }
+        }
+    }
+
+    impl Drop for RequirePgEnvGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var(AGENTDESK_REQUIRE_PG_ENV, value) },
+                None => unsafe { std::env::remove_var(AGENTDESK_REQUIRE_PG_ENV) },
+            }
+            match self.previous_acquire_timeout.take() {
+                Some(value) => unsafe {
+                    std::env::set_var(super::TEST_POSTGRES_ACQUIRE_TIMEOUT_ENV, value)
+                },
+                None => unsafe { std::env::remove_var(super::TEST_POSTGRES_ACQUIRE_TIMEOUT_ENV) },
+            }
+        }
+    }
+
+    fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+        if let Some(message) = payload.downcast_ref::<String>() {
+            return message.clone();
+        }
+        if let Some(message) = payload.downcast_ref::<&str>() {
+            return (*message).to_string();
+        }
+        "non-string panic payload".to_string()
+    }
+
+    fn block_on_test_runtime<F, T>(future: F) -> T
+    where
+        F: Future<Output = T>,
+    {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime for postgres guard test")
+            .block_on(future)
+    }
+
+    fn assert_required_pg_panic<T, F>(future: F)
+    where
+        T: std::fmt::Debug,
+        F: Future<Output = Result<T, String>>,
+    {
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            block_on_test_runtime(future)
+        }))
+        .expect_err(
+            "required PG lane must panic on a PostgreSQL error; this probe assumes no PostgreSQL listener on 127.0.0.1:1",
+        );
+        let message = panic_message(panic);
+        assert!(
+            message.contains("AGENTDESK_REQUIRE_PG=1"),
+            "panic must identify the require env: {message}"
+        );
+        assert!(
+            message.contains("unavailable:"),
+            "panic must retain the original helper error after its context: {message}"
+        );
+        let lower_message = message.to_ascii_lowercase();
+        assert!(
+            lower_message.contains("pooltimedout")
+                || lower_message.contains("timed out")
+                || lower_message.contains("timeout"),
+            "panic must retain the deterministic timeout failure reason (the 127.0.0.1:1 no-listener premise): {message}"
+        );
+    }
+
+    fn assert_soft_skip_error<T, F>(future: F)
+    where
+        T: std::fmt::Debug,
+        F: Future<Output = Result<T, String>>,
+    {
+        let error = block_on_test_runtime(future).expect_err(
+            "PG-less test helper must preserve its connection error; this probe assumes no PostgreSQL listener on 127.0.0.1:1",
+        );
+        let lower_error = error.to_ascii_lowercase();
+        assert!(
+            lower_error.contains("pooltimedout")
+                || lower_error.contains("timed out")
+                || lower_error.contains("timeout"),
+            "PG-less test helper must preserve the deterministic timeout failure (the 127.0.0.1:1 no-listener premise): {error}"
+        );
+    }
+
+    fn unreachable_postgres_config() -> crate::config::Config {
+        let mut config = crate::config::Config::default();
+        config.database.enabled = true;
+        config.database.host = "127.0.0.1".to_string();
+        // The guard probes assume privileged loopback port 1 has no listener.
+        config.database.port = 1;
+        config.database.user = "postgres".to_string();
+        config.database.dbname = "postgres".to_string();
+        config
+    }
+
+    #[test]
+    fn require_pg_guard_panics_for_all_entrypoints_on_unreachable_database() {
+        let _env = RequirePgEnvGuard::set(Some("1"));
+        // Environment premise: CI runners and developer machines do not run a
+        // PostgreSQL listener on privileged loopback port 1. If that premise
+        // is violated, the assertions above must identify it as the cause.
+        const UNREACHABLE_POSTGRES_URL: &str = "postgresql://postgres@127.0.0.1:1/postgres";
+
+        assert_required_pg_panic(connect_test_pool_with_max_connections(
+            UNREACHABLE_POSTGRES_URL,
+            "guard max",
+            1,
+        ));
+        assert_required_pg_panic(connect_test_pool(UNREACHABLE_POSTGRES_URL, "guard default"));
+        assert_required_pg_panic(create_test_database(
+            UNREACHABLE_POSTGRES_URL,
+            "guard_db",
+            "guard create",
+        ));
+        assert_required_pg_panic(connect_test_pool_and_migrate(
+            UNREACHABLE_POSTGRES_URL,
+            "guard migrate",
+        ));
+        assert_required_pg_panic(connect_test_pool_with_max_connections_and_migrate(
+            UNREACHABLE_POSTGRES_URL,
+            "guard max migrate",
+            1,
+        ));
+        assert_required_pg_panic(connect_test_pool_and_migrate_config(
+            &unreachable_postgres_config(),
+            "guard config",
+        ));
+    }
+
+    #[test]
+    fn require_pg_guard_preserves_errors_when_ci_lane_does_not_require_postgres() {
+        let _env = RequirePgEnvGuard::set(None);
+        // Keep the same explicit no-listener premise as the required-lane
+        // probe; a live port-1 service would invalidate the timeout contract.
+        const UNREACHABLE_POSTGRES_URL: &str = "postgresql://postgres@127.0.0.1:1/postgres";
+
+        assert_soft_skip_error(connect_test_pool_with_max_connections(
+            UNREACHABLE_POSTGRES_URL,
+            "soft max",
+            1,
+        ));
+        assert_soft_skip_error(connect_test_pool(UNREACHABLE_POSTGRES_URL, "soft default"));
+        assert_soft_skip_error(create_test_database(
+            UNREACHABLE_POSTGRES_URL,
+            "soft_db",
+            "soft create",
+        ));
+        assert_soft_skip_error(connect_test_pool_and_migrate(
+            UNREACHABLE_POSTGRES_URL,
+            "soft migrate",
+        ));
+        assert_soft_skip_error(connect_test_pool_with_max_connections_and_migrate(
+            UNREACHABLE_POSTGRES_URL,
+            "soft max migrate",
+            1,
+        ));
+        assert_soft_skip_error(connect_test_pool_and_migrate_config(
+            &unreachable_postgres_config(),
+            "soft config",
+        ));
+    }
+
+    #[test]
+    fn require_pg_guard_leaves_success_untouched_when_ci_lane_requires_postgres() {
+        let _env = RequirePgEnvGuard::set(Some("1"));
+        assert_eq!(require_pg_guard(Ok::<_, String>(42)), Ok(42));
+        let config = crate::config::Config::default();
+        assert!(matches!(
+            block_on_test_runtime(connect_test_pool_and_migrate_config(
+                &config,
+                "guard disabled config",
+            )),
+            Ok(None)
+        ));
+    }
+
+    #[test]
+    fn test_database_server_identity_normalizes_loopback_aliases_without_collisions() {
+        fn identity(host: &str) -> String {
+            let options = PgConnectOptions::new().host(host).port(5432);
+            test_database_server_identity(&options)
+        }
+
+        let expected = identity("localhost");
+        for host in [
+            "localhost",
+            "127.0.0.1",
+            "127.0.0.1.",
+            "::1",
+            "[::1]",
+            "[::1].",
+            "0:0:0:0:0:0:0:1",
+            "LOCALHOST.",
+        ] {
+            assert_eq!(identity(host), expected, "loopback spelling {host:?}");
+        }
+
+        assert_ne!(
+            expected,
+            identity("loopback"),
+            "the loopback sentinel must not collide with a real DNS hostname"
+        );
+        assert_eq!(identity("DB.Example.COM."), "db.example.com:5432");
+    }
 
     struct TestDatabase {
         admin_url: String,
