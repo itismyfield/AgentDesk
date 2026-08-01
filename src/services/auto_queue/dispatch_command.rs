@@ -49,6 +49,31 @@ pub(super) async fn enqueue_entries_into_existing_run_with_pg(
         .await
         .map_err(|err| format!("begin enqueue transaction: {err}"))?;
 
+    // Serialize entry creation with reset/cancel. The status reload must be a
+    // separate statement after the advisory lock so READ COMMITTED observes a
+    // terminal transition that won the lock first.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('aq_run:' || $1))")
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|err| format!("lock auto-queue run {run_id} for enqueue: {err}"))?;
+    let run_status = sqlx::query_scalar::<_, String>(
+        "SELECT status
+         FROM auto_queue_runs
+         WHERE id = $1",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|err| format!("reload auto-queue run {run_id} for enqueue: {err}"))?
+    .ok_or_else(|| format!("auto-queue run {run_id} not found"))?;
+    if run_status != "active" {
+        tx.rollback().await.ok();
+        return Err(format!(
+            "auto-queue run {run_id} is not active (status={run_status})"
+        ));
+    }
+
     let existing_live_cards: HashSet<String> = sqlx::query_scalar::<_, String>(
         "SELECT kanban_card_id
          FROM auto_queue_entries

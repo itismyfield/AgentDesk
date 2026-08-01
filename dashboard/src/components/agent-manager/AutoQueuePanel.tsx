@@ -262,12 +262,11 @@ export default function AutoQueuePanel({
     }
     suppressedRunIdRef.current = activeRunId;
     try {
-      // A multi-agent run has no single agent owner. Do not turn the
-      // dashboard's filter into a narrower claim and then reject the whole
-      // run on an ownership mismatch; the run id is the destructive scope.
+      // Dashboard repo/agent filters are selectors, not ownership claims.
+      // The run id is the destructive scope; only the run's actual agent owner
+      // is safe to echo when one exists.
       await resetAutoQueueForSelection(
         api,
-        selectedRepo || null,
         status?.run?.agent_id ?? null,
         activeRunId,
       );

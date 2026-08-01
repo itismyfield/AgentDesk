@@ -27,7 +27,11 @@ function makeRun(
   };
 }
 
-function makeStatus(run: AutoQueueRun | null, entryCount = 0): AutoQueueStatus {
+function makeStatus(
+  run: AutoQueueRun | null,
+  entryCount = 0,
+  entryStatus: AutoQueueStatus["entries"][number]["status"] = "pending",
+): AutoQueueStatus {
   return {
     run,
     entries: Array.from({ length: entryCount }, (_, index) => ({
@@ -36,7 +40,7 @@ function makeStatus(run: AutoQueueRun | null, entryCount = 0): AutoQueueStatus {
       card_id: `card-${index}`,
       priority_rank: index,
       reason: null,
-      status: "pending",
+      status: entryStatus,
       created_at: 0,
       dispatched_at: null,
       completed_at: null,
@@ -47,10 +51,17 @@ function makeStatus(run: AutoQueueRun | null, entryCount = 0): AutoQueueStatus {
 }
 
 describe("auto-queue-panel-state", () => {
-  it("suppresses a reset-cleared run until a new run appears", () => {
-    const status = makeStatus(makeRun("generated", "run-reset"), 0);
+  it("suppresses a reset-cancelled run with retained skipped entries until a new run appears", () => {
+    const status = makeStatus(makeRun("cancelled", "run-reset"), 2, "skipped");
 
     expect(normalizeAutoQueueStatus(status, "run-reset")).toEqual(createEmptyAutoQueueStatus());
+  });
+
+  it("shows Generate after reset polling returns the cancelled run", () => {
+    const polled = makeStatus(makeRun("cancelled", "run-reset"), 2, "skipped");
+    const normalized = normalizeAutoQueueStatus(polled, "run-reset");
+
+    expect(getAutoQueuePrimaryAction(normalized.run, 0)).toBe("generate");
   });
 
   it("keeps a PM-assisted pending run when it was not suppressed", () => {
@@ -59,8 +70,8 @@ describe("auto-queue-panel-state", () => {
     expect(normalizeAutoQueueStatus(status, null)).toEqual(status);
   });
 
-  it("keeps suppression while the server still returns the reset-cleared run", () => {
-    const status = makeStatus(makeRun("generated", "run-reset"), 0);
+  it("keeps suppression while the server still returns the reset-cancelled run", () => {
+    const status = makeStatus(makeRun("cancelled", "run-reset"), 2, "skipped");
 
     expect(shouldClearSuppressedAutoQueueRun(status, "run-reset")).toBe(false);
   });
@@ -73,6 +84,7 @@ describe("auto-queue-panel-state", () => {
   it("returns the correct primary action per run state", () => {
     expect(getAutoQueuePrimaryAction(null, 0)).toBe("generate");
     expect(getAutoQueuePrimaryAction(makeRun("completed"), 0)).toBe("generate");
+    expect(getAutoQueuePrimaryAction(makeRun("cancelled"), 0)).toBe("generate");
     expect(getAutoQueuePrimaryAction(makeRun("generated"), 2)).toBe("start");
     expect(getAutoQueuePrimaryAction(makeRun("active"), 2)).toBe("dispatch");
     expect(getAutoQueuePrimaryAction(makeRun("generated"), 0)).toBeNull();

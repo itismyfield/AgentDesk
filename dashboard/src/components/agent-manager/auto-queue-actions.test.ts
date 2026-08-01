@@ -7,7 +7,7 @@ import {
 } from "./auto-queue-actions";
 
 describe("auto-queue-actions", () => {
-  it("passes the selected repo and agent to reset and generate", async () => {
+  it("uses the selected repo for generation but not as a reset ownership claim", async () => {
     const resetAutoQueue = vi.fn().mockResolvedValue({ ok: true });
     const generateAutoQueue = vi
       .fn()
@@ -21,27 +21,24 @@ describe("auto-queue-actions", () => {
     );
 
     expect(resetAutoQueue).toHaveBeenCalledWith({
-      repo: "test-repo",
       agentId: "agent-selected",
       runId: "run-123",
     });
     expect(generateAutoQueue).toHaveBeenCalledWith("test-repo", "agent-selected");
   });
 
-  it("passes the selected scope to reset-only actions", async () => {
+  it("omits the dashboard repo filter when resetting a multi-repo run", async () => {
     const resetAutoQueue = vi.fn().mockResolvedValue({ ok: true });
 
     await resetAutoQueueForSelection(
       { resetAutoQueue },
-      "test-repo",
-      "agent-selected",
-      "run-123",
+      "run-agent",
+      "run-multi-repo",
     );
 
     expect(resetAutoQueue).toHaveBeenCalledWith({
-      repo: "test-repo",
-      agentId: "agent-selected",
-      runId: "run-123",
+      agentId: "run-agent",
+      runId: "run-multi-repo",
     });
     expect(resetAutoQueue).toHaveBeenCalledTimes(1);
   });
@@ -52,7 +49,6 @@ describe("auto-queue-actions", () => {
     await expect(
       resetAutoQueueForSelection(
         { resetAutoQueue },
-        "test-repo",
         "agent-selected",
         null,
       ),

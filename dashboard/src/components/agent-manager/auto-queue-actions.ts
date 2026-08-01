@@ -67,7 +67,6 @@ export async function generateAutoQueueForSelection(
   }
 
   await api.resetAutoQueue({
-    repo,
     agentId: resetAgentId,
     runId: runId.trim(),
   });
@@ -76,7 +75,6 @@ export async function generateAutoQueueForSelection(
 
 export async function resetAutoQueueForSelection(
   api: AutoQueueResetApi,
-  repo: string | null,
   agentId: string | null | undefined,
   runId: string | null | undefined,
 ): Promise<unknown> {
@@ -87,7 +85,6 @@ export async function resetAutoQueueForSelection(
   const resetAgentId = agentId?.trim();
 
   return api.resetAutoQueue({
-    repo,
     agentId: resetAgentId,
     runId: runId.trim(),
   });
