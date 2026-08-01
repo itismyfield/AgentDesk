@@ -1,5 +1,3 @@
-#![cfg(test)]
-
 #[cfg(test)]
 mod cases_pg_tests {
     use super::super::{
@@ -12,10 +10,7 @@ mod cases_pg_tests {
     async fn setup_pool() -> (TestPostgresDb, PgPool) {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
-        sqlx::query(
-            "INSERT INTO agents (id, name, provider, discord_channel_id)
-         VALUES ('readiness-agent', 'Readiness Agent', 'claude', '123456789')",
-        )
+        sqlx::query("INSERT INTO agents (id, name, provider, discord_channel_id) VALUES ('readiness-agent', 'Readiness Agent', 'claude', '123456789')")
         .execute(&pool)
         .await
         .expect("seed readiness agent");
@@ -23,22 +18,12 @@ mod cases_pg_tests {
     }
 
     async fn seed_run_with_slot(pool: &PgPool, run_id: &str) {
-        sqlx::query(
-            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
-         VALUES ($1, 'repo/readiness', 'readiness-agent', 'active')",
-        )
+        sqlx::query("INSERT INTO auto_queue_runs (id, repo, agent_id, status) VALUES ($1, 'repo/readiness', 'readiness-agent', 'active')")
         .bind(run_id)
         .execute(pool)
         .await
         .expect("seed readiness run");
-        sqlx::query(
-            "INSERT INTO auto_queue_slots
-            (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map)
-         VALUES ('readiness-agent', 0, $1, 0, '{}'::jsonb)
-         ON CONFLICT (agent_id, slot_index) DO UPDATE
-         SET assigned_run_id = EXCLUDED.assigned_run_id,
-             assigned_thread_group = EXCLUDED.assigned_thread_group",
-        )
+        sqlx::query("INSERT INTO auto_queue_slots (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map) VALUES ('readiness-agent', 0, $1, 0, '{}'::jsonb) ON CONFLICT (agent_id, slot_index) DO UPDATE SET assigned_run_id = EXCLUDED.assigned_run_id, assigned_thread_group = EXCLUDED.assigned_thread_group")
         .bind(run_id)
         .execute(pool)
         .await

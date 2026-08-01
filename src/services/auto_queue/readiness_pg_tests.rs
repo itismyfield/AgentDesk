@@ -1,5 +1,3 @@
-#![cfg(test)]
-
 #[cfg(test)]
 mod cases_pg_tests {
     use super::super::activate_command::{
