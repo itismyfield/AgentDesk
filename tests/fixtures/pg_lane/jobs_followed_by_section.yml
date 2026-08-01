@@ -1,0 +1,11 @@
+on:
+  push:
+jobs:
+  pg_lane:
+    runs-on: ubuntu-latest
+    steps:
+      - run: ./scripts/ci/postgres-service.sh start
+      - run: cargo test postgres_
+defaults:
+  run:
+    shell: bash

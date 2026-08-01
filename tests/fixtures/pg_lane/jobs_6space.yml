@@ -1,0 +1,7 @@
+on:
+  push:
+jobs:
+      six_space_job:
+        steps:
+          - run: ./scripts/ci/postgres-service.sh start
+          - run: cargo test postgres_
