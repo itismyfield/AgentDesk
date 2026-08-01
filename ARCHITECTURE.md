@@ -68,6 +68,7 @@ src/
 │   │   ├── phase_gate_verdict.rs
 │   │   ├── phase_gates.rs
 │   │   ├── queries.rs
+│   │   ├── readiness_pg_tests.rs
 │   │   ├── run_status.rs
 │   │   ├── runs.rs
 │   │   ├── slot_predicate.rs
@@ -374,6 +375,7 @@ src/
 │   │   ├── phase_gate_violations.rs
 │   │   ├── planning.rs
 │   │   ├── query.rs
+│   │   ├── readiness_pg_tests.rs
 │   │   ├── route.rs
 │   │   ├── route_generate.rs
 │   │   ├── route_request_generate.rs
