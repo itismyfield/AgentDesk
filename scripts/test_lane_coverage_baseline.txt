@@ -36,7 +36,6 @@ db::dispatches::delivery_events::tests
 db::dispatches::metadata::tests
 db::dispatches::outbox::delivery::tests
 db::idempotency::tests
-db::intake_outbox::migration_tests
 db::prompt_manifests::tests
 db::relay_dead_letter::tests
 db::session_agent_resolution::tests
@@ -90,7 +89,6 @@ server::multinode_regression::tests
 server::outbox_actionable_delivery::tests
 server::policy_tick_schedule_tests
 server::rate_limit_header_tests
-server::resource_locks::tests
 server::routes::agents::tmux_relay_adoption_state_tests
 server::routes::audit_explicit_auth_routes_tests
 server::routes::auth::tests
@@ -112,7 +110,6 @@ server::routes::reviews::recovery_commit_validation_tests
 server::routes::scheduled_messages::tests
 server::routes::voice_config::tests
 server::startup_preflight::tests
-server::task_dispatch_claims::tests
 server::test_phase_runs::tests
 server::worker_recovery::tests
 server::worker_registry::leader_takeover_tests
@@ -434,7 +431,6 @@ services::discord::tmux::tui_completion_gate_tests
 services::discord::tmux::watcher_lifecycle::claude_restore::claude_tui_transcript_fallback_tests
 services::discord::tmux::watcher_lifecycle::codex_restore::codex_direct_resume_args_tests
 services::discord::tmux::watcher_lifecycle::output_policy::post_terminal_output_tests
-services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_tests
 services::discord::tmux::watcher_lifecycle::tests::tests
 services::discord::tmux::watcher_placeholder_status_tests
 services::discord::tmux::watcher_stream_progress_tests
@@ -551,16 +547,13 @@ services::maintenance::jobs::db_retention::tests
 services::maintenance::jobs::target_sweep::tests
 services::maintenance::jobs::tmp_pipeline_sweep::tests
 services::maintenance::jobs::voice_cache_sweep::tests
-services::maintenance::jobs::worktree_orphan_sweep::active_dispatch_worktree_keep_set_tests
 services::maintenance::jobs::worktree_orphan_sweep::blocking_directory_walk_tests
 services::maintenance::jobs::worktree_orphan_sweep::deploy_worktree_protection_tests
 services::maintenance::jobs::worktree_orphan_sweep::fresh_provision_toctou_tests
 services::maintenance::jobs::worktree_orphan_sweep::git_pointer_fallback_tests
-services::maintenance::jobs::worktree_orphan_sweep::keep_set_query_failure_fail_closed_tests
 services::maintenance::jobs::worktree_orphan_sweep::managed_root_recursion_tests
 services::maintenance::jobs::worktree_orphan_sweep::naming_whitelist_tests
 services::maintenance::jobs::worktree_orphan_sweep::phantom_sweep_decision_tests
-services::maintenance::jobs::worktree_orphan_sweep::resumable_keep_set_query_tests
 services::maintenance::jobs::worktree_orphan_sweep::resumable_keep_set_tests
 services::mcp_config::review_slim_tests
 services::memory::local::tests
@@ -584,7 +577,6 @@ services::onboarding::credential_token_permission_tests
 services::opencode::tests
 services::operator_connectors::tests
 services::pane_readiness::tests
-services::pipeline_override::tests
 services::pipeline_routes::tests
 services::platform::binary_resolver::tests
 services::platform::tmux::availability::availability_cache_tests

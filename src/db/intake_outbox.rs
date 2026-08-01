@@ -692,7 +692,7 @@ pub(crate) async fn list_accepted_unspawned_sla(
 }
 
 #[cfg(test)]
-mod migration_tests {
+mod migration_pg_tests {
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use serde_json::json;
     use sqlx::Row;
