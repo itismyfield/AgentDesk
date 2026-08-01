@@ -17,11 +17,6 @@ db::intake_outbox::migration_tests::migration_0080_recovers_provider_from_claim_
 engine::ops::config_ops::tests::policy_engine_config_get_preserves_types_precedence_and_fail_closed_contract
 engine::ops::db_ops::tests::policy_db_query_json_returns_typed_json_columns_and_query_keeps_strings
 server::issue_specs::tests::upsert_issue_spec_persists_parsed_contract
-server::multinode_regression::tests::multinode_dispatch_claims_exactly_once_then_reclaims_expired_lease
-server::multinode_regression::tests::multinode_dispatch_claims_prefer_label_but_fallback_when_preferred_node_offline
-server::multinode_regression::tests::multinode_dispatch_claims_route_mixed_required_and_preferred_to_best_online_node
-server::multinode_regression::tests::multinode_single_leader_lock_allows_one_holder
-server::multinode_regression::tests::multinode_unreal_resource_lock_is_exclusive
 server::resource_locks::tests::resource_lock_allows_only_one_active_holder
 server::resource_locks::tests::resource_lock_reclaims_expired_holder
 server::routes::dispatches::crud::tests::dispatch_delivery_events_route_returns_typed_rows_newest_first
