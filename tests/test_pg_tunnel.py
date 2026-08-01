@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import plistlib
+import re
 import shlex
+import signal
 import subprocess
 import tempfile
 import unittest
@@ -156,16 +159,38 @@ class WrapperSafetyTests(unittest.TestCase):
         self.assertIn('"$PG_TUNNEL_SSH_TARGET"', text)
 
     def test_probe_cleanup_always_waits_after_term_and_kill(self):
+        """Static contract: every owned-probe signal is followed by a reap."""
         deploy = DEPLOY.read_text(encoding="utf-8")
         start = deploy.index("_cleanup_owned_pg_tunnel_preflight() {")
         end = deploy.index("_rollback_pg_tunnel_migration() {", start)
         cleanup = deploy[start:end]
+        preflight_end = deploy.index("_reset_pg_tunnel_rollback_state() {", start)
+        preflight = deploy[start:preflight_end]
         self.assertLess(cleanup.index('kill -TERM "$pid"'), cleanup.index('wait "$pid"'))
         self.assertLess(cleanup.index('kill -KILL "$pid"'), cleanup.index('wait "$pid"'))
+        self.assertIn('while kill -0 "$pid" 2>/dev/null && [ "$attempts" -lt 25 ]; do', preflight)
+        self.assertEqual(
+            re.findall(r"sleep 0\.2(?![0-9])", preflight), ["sleep 0.2"]
+        )
 
 
 class DeploymentWiringTests(unittest.TestCase):
     """Pin every load-bearing launchd/deploy invariant individually."""
+
+    @staticmethod
+    def _strip_shell_comments(text: str) -> str:
+        """Remove physical-line comments without hiding code after quoted ``#``."""
+        token = re.compile(
+            r''' '(?:[^'\r\n]*)' | "(?:\\[^\r\n]|[^"\\\r\n])*" |
+                \\[^\r\n] | (?m:^\#[^\r\n]*) | (?<=[ \t])\#[^\r\n]* ''',
+            re.VERBOSE,
+        )
+
+        def replace(match: re.Match[str]) -> str:
+            value = match.group(0)
+            return "" if value.lstrip(" \t").startswith("#") else value
+
+        return token.sub(replace, text)
 
     @staticmethod
     def _pg_block() -> str:
@@ -179,6 +204,269 @@ class DeploymentWiringTests(unittest.TestCase):
     def test_ci_script_checks_runs_this_suite(self):
         ci = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
         self.assertIn("tests.test_pg_tunnel", ci)
+
+    def test_signal_traps_match_exact_physical_line_contract(self):
+        """Enforce the deliberately narrow static trap contract.
+
+        The static contract covers literal ``trap`` commands that start a
+        physical line and cleanup-handler definitions that start a physical line
+        or immediately follow ``;``, ``&``, or ``|``.  For those definitions,
+        whitespace, newlines, and comments between ``()`` and ``{`` are covered.
+        This is not a Bash parser.  Trap tokens elsewhere on a line, function
+        indirection such as ``_disarm_exit``, commands assembled in variables,
+        ``builtin``/``command``/``eval`` dispatch, and other multi-segment
+        definition syntax are outside the static contract.
+        All three static scans (this physical-line/definition scan,
+        ``test_trap_function_shadowing_is_absent``, and the post-registration
+        tail guard) remove text from ``#`` through each physical line end before
+        matching, while preserving simple quoted spans so a real forbidden form
+        after a quoted ``#`` is not hidden.  This is not a shell parser and does
+        not identify heredoc bodies.  A harmless command-looking heredoc line
+        without a comment can therefore still be reported as a false positive;
+        that is an accepted fail-closed tradeoff.
+
+        The dynamic INT/TERM/EXIT backstop executes only the production slice
+        that starts at ``_cleanup_owned_pg_tunnel_preflight`` and ends immediately
+        before ``_self_hosted_release_session``.  Trap-state changes outside that
+        slice are covered only by the static contract and inherit the limitations
+        above.  The post-registration tail guard applies the same physical-line
+        literal-``trap`` prefix check (``trap`` followed by whitespace or
+        end-of-line) and ignores full-line and trailing comments.
+        That tail contains detached-child paths where clearing an inherited trap
+        with ``trap - EXIT`` can be legitimate; if such a use is needed, this
+        contract must be changed explicitly rather than treating it as
+        dynamically covered.
+
+        Inside this boundary, exact ordered trap lines, unique cleanup-handler
+        definitions, reset/registration order, and the preflight-call strip set
+        are pinned.  A line-leading query such as ``trap -p INT`` is therefore
+        also rejected by the exact contract.
+        """
+        deploy = self._strip_shell_comments(
+            DEPLOY.read_text(encoding="utf-8")
+        )
+        deploy_lines = deploy.splitlines()
+
+        trap_rows = [
+            (line_number, line)
+            for line_number, line in enumerate(deploy_lines, 1)
+            if re.match(r"^[ \t]*trap[ \t]", line)
+        ]
+        # The reset commands are deliberately indented as function-body lines.
+        # The raw expected literals themselves enforce that the three
+        # registrations remain at column 0.
+        expected_traps = [
+            "    trap - EXIT",
+            "    trap '' INT TERM",
+            "trap _cleanup_on_exit EXIT",
+            "trap '_handle_cleanup_signal 130' INT",
+            "trap '_handle_cleanup_signal 143' TERM",
+        ]
+        observed_traps = [text for _line_number, text in trap_rows]
+        self.assertEqual(
+            observed_traps,
+            expected_traps,
+            "expected exactly five trap lines in this order; observed rows="
+            + repr([f"line {line_number}: {text}" for line_number, text in trap_rows]),
+        )
+
+        def definition_rows(name: str) -> list[tuple[int, str]]:
+            spaced_parens = r"[ \t]*\([ \t]*\)"
+            definition_anchor = r"(?:^|[;&|]\s*)[ \t]*"
+            brace_gap = r"(?:[ \t]*(?:#[^\n]*)?\n)*[ \t]*"
+            patterns = (
+                re.compile(
+                    definition_anchor
+                    + re.escape(name)
+                    + spaced_parens
+                    + brace_gap
+                    + r"\{",
+                    re.MULTILINE,
+                ),
+                re.compile(
+                    definition_anchor
+                    + r"function[ \t]+"
+                    + re.escape(name)
+                    + r"(?:"
+                    + spaced_parens
+                    + r")?"
+                    + brace_gap
+                    + r"\{",
+                    re.MULTILINE,
+                ),
+            )
+            rows: list[tuple[int, str]] = []
+            for pattern in patterns:
+                for match in pattern.finditer(deploy):
+                    line_number = deploy.count("\n", 0, match.start()) + 1
+                    rows.append((line_number, match.group(0).strip()))
+            rows.sort(key=lambda row: row[0])
+            return rows
+
+        cleanup_definitions = definition_rows("_cleanup_on_exit")
+        signal_definitions = definition_rows("_handle_cleanup_signal")
+        self.assertEqual(
+            len(cleanup_definitions),
+            1,
+            "expected one _cleanup_on_exit() definition; observed rows="
+            + repr(cleanup_definitions),
+        )
+        self.assertEqual(
+            len(signal_definitions),
+            1,
+            "expected one _handle_cleanup_signal() definition; observed rows="
+            + repr(signal_definitions),
+        )
+        cleanup_definition_line = cleanup_definitions[0][0]
+        signal_definition_line = signal_definitions[0][0]
+
+        reset_rows = {
+            text: line_number
+            for line_number, text in trap_rows
+            if text in {"    trap - EXIT", "    trap '' INT TERM"}
+        }
+        registration_texts = [
+            "trap _cleanup_on_exit EXIT",
+            "trap '_handle_cleanup_signal 130' INT",
+            "trap '_handle_cleanup_signal 143' TERM",
+        ]
+        registration_rows = [
+            (line_number, text)
+            for line_number, text in trap_rows
+            if text in registration_texts
+        ]
+        self.assertEqual(
+            set(reset_rows),
+            {"    trap - EXIT", "    trap '' INT TERM"},
+            "expected both cleanup reset lines; observed rows=" + repr(trap_rows),
+        )
+        self.assertEqual(
+            len(registration_rows),
+            3,
+            "expected three cleanup registration rows; observed rows="
+            + repr(registration_rows),
+        )
+        first_registration_line = min(
+            line_number for line_number, _text in registration_rows
+        )
+        self.assertLess(
+            max(cleanup_definition_line, signal_definition_line),
+            first_registration_line,
+            "the last cleanup-handler definition must be the contract definition "
+            "before registrations: "
+            f"cleanup={cleanup_definition_line}, signal={signal_definition_line}, "
+            f"registrations={registration_rows}",
+        )
+        for reset_text in ("    trap - EXIT", "    trap '' INT TERM"):
+            with self.subTest(reset=reset_text):
+                reset_line = reset_rows[reset_text]
+                self.assertGreater(
+                    reset_line,
+                    cleanup_definition_line,
+                    "cleanup reset must follow the cleanup definition: "
+                    f"definition={cleanup_definition_line}, reset={reset_line}",
+                )
+                self.assertLess(
+                    reset_line,
+                    signal_definition_line,
+                    "cleanup reset must precede the signal-handler definition: "
+                    f"reset={reset_line}, signal_definition={signal_definition_line}",
+                )
+                self.assertLess(
+                    reset_line,
+                    min(line_number for line_number, _text in registration_rows),
+                    "cleanup reset must precede all signal registrations: "
+                    f"reset={reset_line}, registrations={registration_rows}",
+                )
+
+        expected_call_name = "_cleanup_owned_pg_tunnel_preflight"
+        call_rows = []
+        candidate_call_rows = []
+        call_pattern = re.compile(
+            r"^([A-Za-z_][A-Za-z0-9_]*)(?:[ \t]*(?:;|&&|\|\||\||&))?$"
+        )
+        for line_number, line in enumerate(deploy_lines, 1):
+            stripped = line.strip()
+            match = call_pattern.fullmatch(stripped)
+            if match is None:
+                continue
+            name = match.group(1)
+            if name == expected_call_name:
+                call_rows.append((line_number, stripped))
+            if "cleanup_owned_pg_tunnel_preflight" in name:
+                candidate_call_rows.append((line_number, stripped))
+
+        expected_call_set = {expected_call_name}
+        observed_call_set = {text for _line_number, text in candidate_call_rows}
+        self.assertEqual(
+            observed_call_set,
+            expected_call_set,
+            "preflight call strip set mismatch; observed rows="
+            + repr(candidate_call_rows),
+        )
+        self.assertEqual(
+            len(call_rows),
+            6,
+            "expected six _cleanup_owned_pg_tunnel_preflight calls; observed rows="
+            + repr(call_rows),
+        )
+        self.assertEqual(
+            len(candidate_call_rows),
+            6,
+            "expected six preflight-shaped call rows; observed rows="
+            + repr(candidate_call_rows),
+        )
+
+    def test_trap_function_shadowing_is_absent(self):
+        """Reject Bash ``trap`` function declarations, including spaced parens."""
+        deploy = self._strip_shell_comments(
+            DEPLOY.read_text(encoding="utf-8")
+        )
+        definition_anchor = r"(?:^|[;&|]\s*)[ \t]*"
+        shadow_patterns = (
+            re.compile(
+                definition_anchor + r"trap[ \t]*\([ \t]*\)", re.MULTILINE
+            ),
+            re.compile(
+                definition_anchor + r"function[ \t]+trap\b", re.MULTILINE
+            ),
+        )
+        for pattern in shadow_patterns:
+            with self.subTest(pattern=pattern.pattern):
+                self.assertEqual(
+                    pattern.findall(deploy),
+                    [],
+                    "trap function shadowing is outside the supported contract: "
+                    + pattern.pattern,
+                )
+
+    def test_no_line_leading_trap_follows_production_registrations(self):
+        """Apply the narrow line-leading trap contract after registrations.
+
+        The dynamic harness safely executes through the three registrations but
+        cannot execute the remaining deploy flow.  From that boundary through
+        EOF, only a literal ``trap`` command at physical line start is forbidden.
+        Comment text is removed before that lexical check, including trailing
+        comments; indirect, assembled, builtin, command, and eval forms remain
+        outside the declared static contract.
+        """
+        deploy = self._strip_shell_comments(
+            DEPLOY.read_text(encoding="utf-8")
+        )
+        boundary = "trap '_handle_cleanup_signal 143' TERM"
+        tail = deploy[deploy.index(boundary) + len(boundary) :]
+        forbidden = re.compile(r"^[ \t]*trap(?:[ \t]|$)")
+        rows = [
+            (line_number, line)
+            for line_number, line in enumerate(tail.splitlines(), 1)
+            if forbidden.search(line)
+        ]
+        self.assertEqual(
+            rows,
+            [],
+            "line-leading trap commands after production registration are "
+            "outside the dynamic backstop; tail-relative rows=" + repr(rows),
+        )
 
     def test_wrapper_is_registered_for_portable_path_lint(self):
         checker = (REPO_ROOT / "scripts/check-portable-paths.py").read_text(
@@ -367,6 +655,12 @@ def stop(_signum, _frame):
 
 
 signal.signal(signal.SIGTERM, stop)
+def expire(_signum, _frame):
+    raise SystemExit(124)
+
+
+signal.signal(signal.SIGALRM, expire)
+signal.alarm(8)
 open(os.environ["PROBE_READY"], "a", encoding="utf-8").close()
 while True:
     signal.pause()
@@ -582,14 +876,50 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
         end = deploy.index("_cleanup_on_exit() {", start)
         return deploy[start:end]
 
+    @staticmethod
+    def _cleanup_sleep_literal() -> str:
+        deploy = DEPLOY.read_text(encoding="utf-8")
+        start = deploy.index("_cleanup_owned_pg_tunnel_preflight() {")
+        end = deploy.index("_reset_pg_tunnel_rollback_state() {", start)
+        preflight = deploy[start:end]
+        matches = re.findall(
+            r"sleep[ \t]+([0-9]+(?:\.[0-9]+)?)(?![0-9])", preflight
+        )
+        if len(matches) != 1:
+            raise AssertionError(
+                "expected one cleanup sleep literal in deploy preflight: "
+                f"{matches!r}"
+            )
+        return matches[0]
+
     def _run_signal_cleanup(self, signal_name: str) -> tuple[int, str]:
+        """Run one real signal path with bounded child and parent lifetimes.
+
+        Code-path budget from measured runs: a typical successful path is
+        ~0.2–1.3 s.  Five isolated runs of the old 60 x 0.05 s signal guard
+        averaged 7.01 s on this host; added to readiness near 4 s, that agrees
+        with the observed ~10.75 s failure and disproves the former 8.25 s bound.
+        The reduced 20-iteration guard averaged 2.37 s, giving a conservative
+        serial estimate of ``4 + 2.37 + 1.25 = 7.62 s`` including maximum EXIT
+        cleanup.  The external 10 s timeout still fails closed and reaps the
+        process group, but scheduler delay can make it fire before the intended
+        internal diagnostic.
+        """
+        signal_status = {"INT": 130, "TERM": 143}[signal_name]
+        cleanup_sleep = self._cleanup_sleep_literal()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             fake_bin = root / "fake-bin"
             fake_bin.mkdir()
             event_log = root / "events.log"
             (fake_bin / "sleep").write_text(
-                "#!/bin/sh\nexec /bin/sleep 0.01\n", encoding="utf-8"
+                "#!/bin/sh\n"
+                f'if [ "${{1:-}}" = {cleanup_sleep} ]; then\n'
+                '  printf "scaled-sleep=%s\\n" "$1" >> "$EVENT_LOG"\n'
+                "  exec /bin/sleep 0.05\n"
+                "fi\n"
+                "exec /bin/sleep 0.01\n",
+                encoding="utf-8",
             )
             (fake_bin / "sleep").chmod(0o755)
             probe = root / "probe.py"
@@ -605,6 +935,11 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
                 "    raise SystemExit(0)\n"
                 "\n"
                 "signal.signal(signal.SIGTERM, stop)\n"
+                "def expire(_signum, _frame):\n"
+                "    raise SystemExit(124)\n"
+                "\n"
+                "signal.signal(signal.SIGALRM, expire)\n"
+                "signal.alarm(8)\n"
                 "with open(os.environ['EVENT_LOG'], 'a', encoding='utf-8') as handle:\n"
                 "    handle.write('probe-ready\\n')\n"
                 "while True:\n"
@@ -628,20 +963,89 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
                 "LAUNCHD_MIGRATED_STAGED=\"\"\n"
                 "RELEASE_ROOT_SCRIPTS_STAGED=\"\"\n"
                 "DEPLOY_MKDIR_LOCK_DIR=\"\"\n"
-                "_rollback_pg_tunnel_migration() { :; }\n"
                 "_rollback_release_binary() { :; }\n"
                 "_finalize_detached_helper() { printf 'cleanup=%s\\n' \"$1\" >> \"$EVENT_LOG\"; }\n"
                 + self._production_cleanup_handlers()
                 + f"\nPARENT_PID=$$ {shlex.quote(str(probe))} &\n"
                 "PG_TUNNEL_PREFLIGHT_PID=$!\n"
-                "while ! grep -q '^probe-ready$' \"$EVENT_LOG\"; do /bin/sleep 0.01; done\n"
+                "probe_ready_deadline=$((SECONDS + 4))\n"
+                "while ! grep -q '^probe-ready$' \"$EVENT_LOG\"; do\n"
+                "    if [ \"$SECONDS\" -ge \"$probe_ready_deadline\" ]; then\n"
+                "        printf 'probe-ready timeout at SECONDS=%s (deadline=%s)\\n' \"$SECONDS\" \"$probe_ready_deadline\" >&2\n"
+                "        exit 98\n"
+                "    fi\n"
+                "    /bin/sleep 0.01\n"
+                "done\n"
                 f"kill -{signal_name} $$\n"
-                "exit 99\n"
+                "signal_wait_attempts=0\n"
+                "while :; do\n"
+                "    if [ \"$signal_wait_attempts\" -ge 20 ]; then\n"
+                "        printf 'signal cleanup timeout after %s attempts\\n' \"$signal_wait_attempts\" >&2\n"
+                "        exit 97\n"
+                "    fi\n"
+                "    /bin/sleep 0.05\n"
+                "    signal_wait_attempts=$((signal_wait_attempts + 1))\n"
+                "done\n"
+            )
+            process = subprocess.Popen(
+                ["bash", "-c", script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            try:
+                stdout, stderr = process.communicate(timeout=10)
+            except subprocess.TimeoutExpired as exc:
+                # The probe is a child of the harness.  Kill its process group
+                # and synchronously communicate again so no orphan survives a
+                # failed bounded run.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                stdout, stderr = process.communicate()
+                self.fail(
+                    "signal cleanup harness timed out after 10 s; "
+                    f"stdout={stdout or exc.stdout!r} stderr={stderr or exc.stderr!r}"
+                )
+            p = subprocess.CompletedProcess(
+                process.args, process.returncode, stdout, stderr
+            )
+            events = event_log.read_text(encoding="utf-8") if event_log.exists() else ""
+            self.assertEqual(p.returncode, signal_status, p.stdout + p.stderr + events)
+            return p.returncode, events
+
+    def test_cleanup_sleep_shim_scales_preflight_delay_deterministically(self):
+        """Exercise the fake sleep once without relying on a busy-wait race."""
+        cleanup_sleep = self._cleanup_sleep_literal()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            event_log = root / "events.log"
+            (fake_bin / "sleep").write_text(
+                "#!/bin/sh\n"
+                f'if [ "${{1:-}}" = {cleanup_sleep} ]; then\n'
+                '  printf "scaled-sleep=%s\\n" "$1" >> "$EVENT_LOG"\n'
+                "  exec /bin/sleep 0.05\n"
+                "fi\n"
+                "exec /bin/sleep 0.01\n",
+                encoding="utf-8",
+            )
+            (fake_bin / "sleep").chmod(0o755)
+            script = (
+                f"EVENT_LOG={shlex.quote(str(event_log))}\n"
+                f"PATH={shlex.quote(str(fake_bin))}:/usr/bin:/bin\n"
+                "export EVENT_LOG PATH\n"
+                f"sleep {cleanup_sleep}\n"
             )
             p = subprocess.run(
-                ["bash", "-c", script], capture_output=True, text=True, timeout=10
+                ["/bin/sh", "-c", script], capture_output=True, text=True, timeout=5
             )
-            return p.returncode, event_log.read_text(encoding="utf-8")
+            events = event_log.read_text(encoding="utf-8") if event_log.exists() else ""
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr + events)
+            self.assertEqual(events, f"scaled-sleep={cleanup_sleep}\n")
 
     @staticmethod
     def _production_cleanup_handlers() -> str:
@@ -661,6 +1065,100 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
         self.assertEqual(status, 143, events)
         self.assertEqual(events.count("probe-term"), 1, events)
         self.assertEqual(events.count("cleanup=143"), 1, events)
+
+    def test_cleanup_traps_register_without_test_environment(self):
+        """Observe production registrations with all harness-only vars unset."""
+        script = (
+            "set -euo pipefail\n"
+            + self._production_cleanup_handlers()
+            + "\nprintf 'EXIT=<%s>\\n' \"$(builtin trap -p EXIT)\"\n"
+            + "printf 'INT=<%s>\\n' \"$(builtin trap -p INT)\"\n"
+            + "printf 'TERM=<%s>\\n' \"$(builtin trap -p TERM)\"\n"
+            + "builtin trap - EXIT INT TERM\n"
+        )
+        process = subprocess.run(
+            ["/bin/bash", "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={"PATH": "/usr/bin:/bin"},
+        )
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertEqual(
+            process.stdout,
+            "EXIT=<trap -- '_cleanup_on_exit' EXIT>\n"
+            "INT=<trap -- '_handle_cleanup_signal 130' SIGINT>\n"
+            "TERM=<trap -- '_handle_cleanup_signal 143' SIGTERM>\n",
+        )
+
+    def test_exit_cleanup_runs_once_and_masks_int_during_cleanup(self):
+        """Exercise the production EXIT registration, including a heredoc backstop.
+
+        Each case executes the production cleanup/registration slice and exits
+        normally.  The second case sends INT from the cleanup body itself; the
+        reset lines must already be owned by ``_cleanup_on_exit`` so the marker
+        is not duplicated by signal-handler re-entry.  This behavioral check is
+        also what catches an EXIT registration that a physical-line scan sees
+        only because it is hidden inside a heredoc.
+        """
+
+        def run_exit_case(inject_int: bool) -> tuple[int, str]:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                event_log = root / "events.log"
+                injected_marker = root / "injected.marker"
+                script = (
+                    "set -euo pipefail\n"
+                    f"EVENT_LOG={shlex.quote(str(event_log))}\n"
+                    f"INJECT_INT={int(inject_int)}\n"
+                    f"INJECTED_MARKER={shlex.quote(str(injected_marker))}\n"
+                    "export EVENT_LOG INJECT_INT INJECTED_MARKER\n"
+                    "PG_TUNNEL_PREFLIGHT_PID=\"\"\n"
+                    "PG_TUNNEL_PREFLIGHT_CONNINFO_DIR=\"\"\n"
+                    "PG_TUNNEL_PREFLIGHT_PASSWORD_FILE=\"\"\n"
+                    "PG_TUNNEL_ROLLBACK_ARMED=0\n"
+                    "PG_TUNNEL_ROLLBACK_DIR=\"\"\n"
+                    "PG_TUNNEL_ROLLBACK_JOB_LOADED=0\n"
+                    "PG_TUNNEL_ROLLBACK_MANUAL_KIND=none\n"
+                    "PG_TUNNEL_ROLLBACK_MANUAL_CONFIG=\"\"\n"
+                    "PG_TUNNEL_ROLLBACK_WRAPPER_SOURCE=\"\"\n"
+                    "ROLLBACK_ARMED=0\n"
+                    "DEPLOY_OK=0\n"
+                    "STAGED_BINARY=\"\"\n"
+                    "POLICIES_STAGED=\"\"\n"
+                    "LAUNCHD_MIGRATED_STAGED=\"\"\n"
+                    "RELEASE_ROOT_SCRIPTS_STAGED=\"\"\n"
+                    "DEPLOY_MKDIR_LOCK_DIR=\"\"\n"
+                    "_rollback_release_binary() { :; }\n"
+                    + self._production_cleanup_handlers()
+                    + "\n_cleanup_owned_pg_tunnel_preflight() {\n"
+                    + "    printf 'cleanup-enter\\n' >> \"$EVENT_LOG\"\n"
+                    + "    if [ \"$INJECT_INT\" = 1 ] && [ ! -e \"$INJECTED_MARKER\" ]; then\n"
+                    + "        : > \"$INJECTED_MARKER\"\n"
+                    + "        kill -INT $$\n"
+                    + "    fi\n"
+                    + "}\n"
+                    + "_finalize_detached_helper() {\n"
+                    + "    printf 'cleanup-marker=%s\\n' \"$1\" >> \"$EVENT_LOG\"\n"
+                    + "}\n"
+                    + "exit 0\n"
+                )
+                process = subprocess.run(
+                    ["bash", "-c", script], capture_output=True, text=True, timeout=10
+                )
+                events = (
+                    event_log.read_text(encoding="utf-8")
+                    if event_log.exists()
+                    else ""
+                )
+                return process.returncode, events
+
+        for inject_int in (False, True):
+            with self.subTest(inject_int=inject_int):
+                status, events = run_exit_case(inject_int)
+                self.assertEqual(status, 0, events)
+                self.assertEqual(events.count("cleanup-enter"), 1, events)
+                self.assertEqual(events.count("cleanup-marker=0"), 1, events)
 
     def test_probe_uses_individual_libpq_environment_without_dsn_argv(self):
         block = self._pg_block()
