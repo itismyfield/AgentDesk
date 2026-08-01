@@ -23,6 +23,11 @@ fn idle_session_watcher_cleanup(has_watcher: bool) -> IdleSessionWatcherCleanup 
 
 /// Periodically clean up idle sessions and their associated data.
 /// Called from handle_event; uses a static Mutex to track the last cleanup time.
+///
+/// 호출부는 `router/intake_gate.rs` 하나뿐이고, 그 파일의 `use super::super::*`
+/// 가 부모 `mod.rs` 의 재수출 바인딩을 집어간다. 따라서 `mod.rs` 쪽 `use` 는
+/// 그 파일 안에서 호출되지 않더라도 load-bearing 이다 — 제거하면 호출부가
+/// 이름을 해석하지 못한다.
 pub(in crate::services::discord) async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
     use std::sync::OnceLock;
     static LAST_CLEANUP: OnceLock<tokio::sync::Mutex<tokio::time::Instant>> = OnceLock::new();
