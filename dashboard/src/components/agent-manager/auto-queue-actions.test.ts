@@ -17,11 +17,13 @@ describe("auto-queue-actions", () => {
       { resetAutoQueue, generateAutoQueue },
       "test-repo",
       "agent-selected",
+      "run-123",
     );
 
     expect(resetAutoQueue).toHaveBeenCalledWith({
       repo: "test-repo",
       agentId: "agent-selected",
+      runId: "run-123",
     });
     expect(generateAutoQueue).toHaveBeenCalledWith("test-repo", "agent-selected");
   });
@@ -41,6 +43,21 @@ describe("auto-queue-actions", () => {
       agentId: "agent-selected",
       runId: "run-123",
     });
+    expect(resetAutoQueue).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a reset without the active run scope", async () => {
+    const resetAutoQueue = vi.fn().mockResolvedValue({ ok: true });
+
+    await expect(
+      resetAutoQueueForSelection(
+        { resetAutoQueue },
+        "test-repo",
+        "agent-selected",
+        null,
+      ),
+    ).rejects.toThrow("run_id is required for reset");
+    expect(resetAutoQueue).not.toHaveBeenCalled();
   });
 
   it("groups request-generate candidates by repo and agent", () => {

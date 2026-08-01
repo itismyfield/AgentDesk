@@ -103,12 +103,16 @@ pub struct AddRunEntryBody {
     pub batch_phase: Option<i64>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResetBody {
+    pub run_id: String,
+    pub repo: Option<String>,
     pub agent_id: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResetGlobalBody {
     pub confirmation_token: Option<String>,
 }

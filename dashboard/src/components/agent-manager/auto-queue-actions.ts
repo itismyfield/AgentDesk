@@ -1,7 +1,7 @@
 export interface AutoQueueResetScope {
-  runId?: string | null;
+  runId: string;
   repo?: string | null;
-  agentId: string;
+  agentId?: string | null;
 }
 
 interface AutoQueueGenerateApi {
@@ -55,13 +55,22 @@ export async function generateAutoQueueForSelection(
   api: AutoQueueGenerateApi,
   repo: string | null,
   agentId: string | null | undefined,
+  runId: string | null | undefined = null,
 ): Promise<Record<string, unknown>> {
   const resetAgentId = agentId?.trim();
   if (!resetAgentId) {
     throw new Error("agent_id is required for reset");
   }
 
-  await api.resetAutoQueue({ repo, agentId: resetAgentId });
+  if (!runId?.trim()) {
+    throw new Error("run_id is required for reset");
+  }
+
+  await api.resetAutoQueue({
+    repo,
+    agentId: resetAgentId,
+    runId: runId.trim(),
+  });
   return api.generateAutoQueue(repo, agentId);
 }
 
@@ -69,16 +78,17 @@ export async function resetAutoQueueForSelection(
   api: AutoQueueResetApi,
   repo: string | null,
   agentId: string | null | undefined,
-  runId?: string | null,
+  runId: string | null | undefined,
 ): Promise<unknown> {
-  const resetAgentId = agentId?.trim();
-  if (!resetAgentId) {
-    throw new Error("agent_id is required for reset");
+  if (!runId?.trim()) {
+    throw new Error("run_id is required for reset");
   }
+
+  const resetAgentId = agentId?.trim();
 
   return api.resetAutoQueue({
     repo,
     agentId: resetAgentId,
-    runId: runId ?? null,
+    runId: runId.trim(),
   });
 }

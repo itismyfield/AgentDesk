@@ -91,6 +91,10 @@ pub use view_admin_routes::{add_run_entry, history, restore_run, status, update_
 pub(crate) use activate_command::activate_with_deps_pg;
 pub(crate) use fsm::{AutoQueueActivateDeps, activate_with_bridge_pg};
 
+#[cfg(test)]
+#[path = "auto_queue_reset_pg_tests.rs"]
+mod auto_queue_reset_pg_tests;
+
 use activate_preflight::*;
 use command::*;
 use dispatch_assignment_command::*;

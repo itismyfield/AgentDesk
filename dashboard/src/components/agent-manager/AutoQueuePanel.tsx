@@ -17,7 +17,7 @@ import {
   normalizeAutoQueueStatus,
   shouldClearSuppressedAutoQueueRun,
 } from "./auto-queue-panel-state";
-import { buildRequestGenerateGroups } from "./auto-queue-actions";
+import { buildRequestGenerateGroups, resetAutoQueueForSelection } from "./auto-queue-actions";
 import AutoQueuePanelView from "./AutoQueuePanelView";
 import { useSortableReorder } from "./AutoQueueSortableRows";
 import { formatRequestGroupKey, isCompletedEntry, requestGroupKey, sortEntriesForDisplay, type ViewMode } from "./auto-queue-panel-utils";
@@ -250,24 +250,27 @@ export default function AutoQueuePanel({
   const handleReset = async () => {
     setError(null);
     setNoReadyCards(false);
-    suppressedRunIdRef.current = status?.run?.id ?? null;
+    const activeRunId = status?.run?.id?.trim();
+    if (!activeRunId) {
+      setError(
+        tr(
+          "초기화할 활성 run을 찾지 못했습니다.",
+          "No active run to reset.",
+        ),
+      );
+      return;
+    }
+    suppressedRunIdRef.current = activeRunId;
     try {
-      const targets = resolveResetAgentTargets();
-      if (targets.length === 0) {
-        throw new Error(
-          tr(
-            "초기화할 에이전트를 찾지 못했습니다. 상단 필터에서 에이전트를 선택하세요.",
-            "No agent to reset. Select an agent from the filter above.",
-          ),
-        );
-      }
-      for (const agentId of targets) {
-        await api.resetAutoQueue({
-          runId: status?.run?.id ?? null,
-          repo: selectedRepo || null,
-          agentId,
-        });
-      }
+      // A multi-agent run has no single agent owner. Do not turn the
+      // dashboard's filter into a narrower claim and then reject the whole
+      // run on an ownership mismatch; the run id is the destructive scope.
+      await resetAutoQueueForSelection(
+        api,
+        selectedRepo || null,
+        status?.run?.agent_id ?? null,
+        activeRunId,
+      );
       resetPanelState();
     } catch (e) {
       suppressedRunIdRef.current = null;
@@ -361,16 +364,6 @@ export default function AutoQueuePanel({
   const entries = status?.entries ?? [];
   const phaseGates = status?.phase_gates ?? [];
   const deployPhases = new Set(run?.deploy_phases ?? []);
-  const resetAgentId = selectedAgentId ?? run?.agent_id ?? null;
-  const resolveResetAgentTargets = (): string[] => {
-    if (resetAgentId) return [resetAgentId];
-    const fromEntries = Array.from(
-      new Set(entries.map((e) => e.agent_id).filter((id): id is string => Boolean(id))),
-    );
-    if (fromEntries.length > 0) return fromEntries;
-    const fromStats = Object.keys(status?.agents ?? {});
-    return fromStats;
-  };
   const gatesByPhase = new Map<number, PhaseGateInfo[]>();
   for (const gate of phaseGates) {
     const list = gatesByPhase.get(gate.phase) ?? [];

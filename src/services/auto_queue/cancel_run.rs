@@ -30,7 +30,7 @@ impl AutoQueueService {
         })?;
 
         match run_status.flatten() {
-            Some(status) if is_live_run_status(&status) => cancel_selected_runs_with_pg(
+            Some(status) if is_resettable_run_status(&status) => cancel_selected_runs_with_pg(
                 health_registry,
                 pool,
                 &[run_id.to_string()],
@@ -43,7 +43,7 @@ impl AutoQueueService {
                     .with_context("run_id", run_id)
                     .with_operation("auto_queue.cancel_run_with_pg.cancel_selected_runs_with_pg")
             }),
-            Some(status) => Err(ServiceError::bad_request(format!(
+            Some(status) => Err(ServiceError::conflict(format!(
                 "auto-queue run '{run_id}' is not cancelable (status={status})"
             ))
             .with_code(ErrorCode::AutoQueue)
@@ -70,6 +70,13 @@ impl AutoQueueService {
                     .with_operation("auto_queue.cancel_runs_with_pg.cancel_with_pg")
             })
     }
+}
+
+/// Reset and explicit single-run cancellation share the same cleanup contract.
+/// Generated and pending runs can still own entries, gates, dispatches, or
+/// slots, so they must not fall through to a no-op terminal path.
+fn is_resettable_run_status(status: &str) -> bool {
+    is_live_run_status(status) || matches!(status.trim(), "generated" | "pending")
 }
 
 #[derive(Debug, Default)]
@@ -956,7 +963,7 @@ pub(crate) async fn cancel_selected_runs_with_pg(
          SET status = 'cancelled',
              completed_at = NOW()
          WHERE id = ANY($1)
-           AND status IN ('active', 'paused', 'restoring')",
+           AND status IN ('generated', 'pending', 'active', 'paused', 'restoring')",
     )
     .bind(&locked_run_ids)
     .execute(&mut *tx)
@@ -978,6 +985,9 @@ pub(crate) async fn cancel_selected_runs_with_pg(
     .map_err(|error| format!("load postgres cancel entries: {error}"))?;
 
     let mut cancelled_entries = 0usize;
+    let mut pending_to_skipped = 0usize;
+    let mut dispatched_to_skipped = 0usize;
+    let mut user_cancelled_to_skipped = 0usize;
     let mut cancel_metas = Vec::new();
     let mut seen_dispatch_ids = HashSet::new();
     for (entry_id, _entry_status, dispatch_id) in entry_rows {
@@ -999,20 +1009,32 @@ pub(crate) async fn cancel_selected_runs_with_pg(
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(|error| format!("reload postgres cancel entry {entry_id}: {error}"))?;
-        if matches!(
+        let transition = if matches!(
             current_status.as_str(),
             "pending" | "dispatched" | "user_cancelled"
         ) {
-            crate::db::auto_queue::update_entry_status_on_pg_tx(
-                &mut tx,
-                &entry_id,
-                crate::db::auto_queue::ENTRY_STATUS_SKIPPED,
-                "run_cancel",
-                &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+            Some(
+                crate::db::auto_queue::update_entry_status_on_pg_tx(
+                    &mut tx,
+                    &entry_id,
+                    crate::db::auto_queue::ENTRY_STATUS_SKIPPED,
+                    "run_cancel",
+                    &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+                )
+                .await?,
             )
-            .await?;
+        } else {
+            None
+        };
+        if let Some(transition) = transition.filter(|transition| transition.changed) {
+            cancelled_entries += 1;
+            match transition.from_status.as_str() {
+                "pending" => pending_to_skipped += 1,
+                "dispatched" => dispatched_to_skipped += 1,
+                "user_cancelled" => user_cancelled_to_skipped += 1,
+                _ => {}
+            }
         }
-        cancelled_entries += 1;
     }
 
     for dispatch_id in &live_dispatch_ids {
@@ -1122,6 +1144,13 @@ pub(crate) async fn cancel_selected_runs_with_pg(
         "remaining_live_dispatches": remaining_live_dispatches,
         "released_slots": cleanup.slot_cleanup.released_slots,
         "cleared_slot_sessions": cleanup.slot_cleanup.cleared_slot_sessions,
+        "entry_transition_summary": {
+            "total": cancelled_entries,
+            "skipped": cancelled_entries,
+            "pending_to_skipped": pending_to_skipped,
+            "dispatched_to_skipped": dispatched_to_skipped,
+            "user_cancelled_to_skipped": user_cancelled_to_skipped,
+        },
     });
     if let Some(warning) = slot_cleanup_warning(&cleanup.slot_cleanup.warnings) {
         response["warning"] = json!(warning);

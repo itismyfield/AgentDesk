@@ -16,33 +16,234 @@ pub(super) async fn cancel_selected_runs_with_pg(
 }
 
 pub(super) async fn reset_scoped_with_pg(
-    agent_id: &str,
+    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    body: &ResetBody,
     pool: &sqlx::PgPool,
-) -> Result<serde_json::Value, String> {
-    let deleted_entries = sqlx::query("DELETE FROM auto_queue_entries WHERE agent_id = $1")
-        .bind(agent_id)
-        .execute(pool)
-        .await
-        .map_err(|error| format!("delete auto_queue_entries for agent {agent_id}: {error}"))?
-        .rows_affected() as usize;
-    let completed_runs = sqlx::query(
-        "UPDATE auto_queue_runs
-             SET status = 'completed',
-                 completed_at = NOW()
-             WHERE status IN ('generated', 'pending', 'active', 'paused')
-               AND agent_id = $1",
+) -> Result<serde_json::Value, AppError> {
+    let run_id = body.run_id.trim();
+    if run_id.is_empty() {
+        return Err(
+            AppError::bad_request("run_id is required for reset").with_code(ErrorCode::AutoQueue)
+        );
+    }
+
+    let run = sqlx::query(
+        "SELECT repo, agent_id, status
+         FROM auto_queue_runs
+         WHERE id = $1",
     )
-    .bind(agent_id)
-    .execute(pool)
+    .bind(run_id)
+    .fetch_optional(pool)
     .await
-    .map_err(|error| format!("complete auto_queue_runs for agent {agent_id}: {error}"))?
-    .rows_affected() as usize;
-    Ok(json!({
-        "ok": true,
-        "deleted_entries": deleted_entries,
-        "completed_runs": completed_runs,
-        "protected_active_runs": 0usize,
-    }))
+    .map_err(|error| {
+        AppError::internal(format!("load auto-queue run '{run_id}': {error}"))
+            .with_code(ErrorCode::Database)
+            .with_context("run_id", run_id)
+            .with_operation("auto_queue.reset.load_run")
+    })?
+    .ok_or_else(|| {
+        AppError::not_found(format!("auto-queue run '{run_id}' not found"))
+            .with_code(ErrorCode::AutoQueue)
+            .with_context("run_id", run_id)
+    })?;
+
+    let run_repo: Option<String> = run.try_get("repo").map_err(|error| {
+        AppError::internal(format!("decode auto-queue run '{run_id}' repo: {error}"))
+            .with_code(ErrorCode::Database)
+            .with_context("run_id", run_id)
+            .with_operation("auto_queue.reset.decode_run_repo")
+    })?;
+    let run_agent_id: Option<String> = run.try_get("agent_id").map_err(|error| {
+        AppError::internal(format!(
+            "decode auto-queue run '{run_id}' agent_id: {error}"
+        ))
+        .with_code(ErrorCode::Database)
+        .with_context("run_id", run_id)
+        .with_operation("auto_queue.reset.decode_run_agent")
+    })?;
+    let run_status: String = run.try_get("status").map_err(|error| {
+        AppError::internal(format!("decode auto-queue run '{run_id}' status: {error}"))
+            .with_code(ErrorCode::Database)
+            .with_context("run_id", run_id)
+            .with_operation("auto_queue.reset.decode_run_status")
+    })?;
+
+    if !matches!(
+        run_status.as_str(),
+        "generated" | "pending" | "active" | "paused" | "restoring"
+    ) {
+        return Err(AppError::conflict(format!(
+            "auto-queue run '{run_id}' is not resettable (status={run_status})"
+        ))
+        .with_code(ErrorCode::AutoQueue)
+        .with_context("run_id", run_id)
+        .with_context("status", run_status));
+    }
+
+    let requested_repo = body
+        .repo
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let requested_agent = body
+        .agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if let Some(requested_repo) = requested_repo {
+        if run_repo.as_deref().map(str::trim) != Some(requested_repo) {
+            if run_repo
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|run_repo| !run_repo.is_empty())
+            {
+                return Err(reset_ownership_conflict(
+                    run_id,
+                    "repo does not own the requested run",
+                ));
+            }
+            let mismatched_entries = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)
+                 FROM auto_queue_entries e
+                 JOIN kanban_cards c ON c.id = e.kanban_card_id
+                 WHERE e.run_id = $1
+                   AND c.repo_id = $2",
+            )
+            .bind(run_id)
+            .bind(requested_repo)
+            .fetch_one(pool)
+            .await
+            .map_err(|error| {
+                AppError::internal(format!(
+                    "check auto-queue run '{run_id}' repo ownership: {error}"
+                ))
+                .with_code(ErrorCode::Database)
+                .with_context("run_id", run_id)
+                .with_operation("auto_queue.reset.check_repo_ownership")
+            })?;
+            if mismatched_entries == 0 {
+                return Err(reset_ownership_conflict(
+                    run_id,
+                    "repo does not own the requested run",
+                ));
+            }
+        }
+
+        let foreign_repo_entries = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)
+             FROM auto_queue_entries e
+             JOIN kanban_cards c ON c.id = e.kanban_card_id
+             WHERE e.run_id = $1
+               AND c.repo_id IS NOT NULL
+               AND c.repo_id <> $2",
+        )
+        .bind(run_id)
+        .bind(requested_repo)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| {
+            AppError::internal(format!(
+                "check auto-queue entry repo ownership for '{run_id}': {error}"
+            ))
+            .with_code(ErrorCode::Database)
+            .with_context("run_id", run_id)
+            .with_operation("auto_queue.reset.check_entry_repo_ownership")
+        })?;
+        if foreign_repo_entries > 0 {
+            return Err(reset_ownership_conflict(
+                run_id,
+                "repo does not own every entry in the requested run",
+            ));
+        }
+    }
+
+    if let Some(requested_agent) = requested_agent {
+        if run_agent_id.as_deref().map(str::trim) != Some(requested_agent) {
+            if run_agent_id
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|run_agent| !run_agent.is_empty())
+            {
+                return Err(reset_ownership_conflict(
+                    run_id,
+                    "agent_id does not own the requested run",
+                ));
+            }
+            let matching_entries = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)
+                 FROM auto_queue_entries
+                 WHERE run_id = $1
+                   AND BTRIM(COALESCE(agent_id, '')) = $2",
+            )
+            .bind(run_id)
+            .bind(requested_agent)
+            .fetch_one(pool)
+            .await
+            .map_err(|error| {
+                AppError::internal(format!(
+                    "check auto-queue run '{run_id}' agent ownership: {error}"
+                ))
+                .with_code(ErrorCode::Database)
+                .with_context("run_id", run_id)
+                .with_operation("auto_queue.reset.check_agent_ownership")
+            })?;
+            if matching_entries == 0 {
+                return Err(reset_ownership_conflict(
+                    run_id,
+                    "agent_id does not own the requested run",
+                ));
+            }
+        }
+
+        let foreign_agent_entries = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)
+             FROM auto_queue_entries
+             WHERE run_id = $1
+               AND BTRIM(COALESCE(agent_id, '')) <> ''
+               AND BTRIM(agent_id) <> $2",
+        )
+        .bind(run_id)
+        .bind(requested_agent)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| {
+            AppError::internal(format!(
+                "check auto-queue entry agent ownership for '{run_id}': {error}"
+            ))
+            .with_code(ErrorCode::Database)
+            .with_context("run_id", run_id)
+            .with_operation("auto_queue.reset.check_entry_agent_ownership")
+        })?;
+        if foreign_agent_entries > 0 {
+            return Err(reset_ownership_conflict(
+                run_id,
+                "agent_id does not own every entry in the requested run",
+            ));
+        }
+    }
+
+    crate::services::auto_queue::cancel_run::cancel_selected_runs_with_pg(
+        health_registry,
+        pool,
+        &[run_id.to_string()],
+        "auto_queue_reset",
+    )
+    .await
+    .map_err(|error| {
+        AppError::internal(format!("reset auto-queue run '{run_id}': {error}"))
+            .with_code(ErrorCode::Database)
+            .with_context("run_id", run_id)
+            .with_operation("auto_queue.reset.cancel_selected_runs_with_pg")
+    })
+}
+
+fn reset_ownership_conflict(run_id: &str, reason: &str) -> AppError {
+    AppError::conflict(format!(
+        "auto-queue reset ownership mismatch for run '{run_id}': {reason}"
+    ))
+    .with_code(ErrorCode::AutoQueue)
+    .with_context("run_id", run_id)
 }
 
 pub(super) async fn reset_global_with_pg(pool: &sqlx::PgPool) -> Result<serde_json::Value, String> {
