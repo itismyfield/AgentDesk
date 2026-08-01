@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import types
@@ -63,7 +64,9 @@ class CiTimeoutTests(unittest.TestCase):
             ):
                 stack.enter_context(patcher)
             if not diag:
-                stack.enter_context(mock.patch.object(ci_timeout, "_diagnose_capped"))
+                stack.enter_context(
+                    mock.patch.object(ci_timeout, "_diagnose_with_deadline")
+                )
             return ci_timeout.run_command(timeout, ["cargo", "test"]), clock
 
     # F1
@@ -184,17 +187,27 @@ class CiTimeoutTests(unittest.TestCase):
                 violations.append(node.lineno)
         with self.subTest("F8-d AST"):
             self.assertEqual((aliases, violations), (set(), []))
+        with self.subTest("no process-global diagnostic timer"):
+            self.assertNotIn("SIGALRM", source)
+            self.assertNotIn("setitimer", source)
+            self.assertNotIn("_DiagnosticCapExpired", source)
 
     # F8(b,c)
-    def test_two_hanging_dumpers_share_one_diagnostic_cap(self):
-        primary, dumpers, checkpoints, attempts = Process(default=None), [], [], []
+    def test_returned_dumpers_are_tracked_when_popen_exceeds_deadline(self):
+        primary, dumpers, checkpoints, attempts, clock = (
+            Process(default=None),
+            [],
+            [],
+            [],
+            Clock(),
+        )
         real_checkpoint = ci_timeout._checkpoint
 
         def popen(command, _enabled):
             if command == ["primary"]:
                 return primary
             attempts.append(command)
-            time.sleep(1.2)  # Scaled equivalent of each 6s seam under a 10s cap.
+            clock.now += 1.2  # Each Popen seam consumes time outside the deadline.
             dumpers.append(Process(default=None))
             return dumpers[-1]
 
@@ -207,7 +220,6 @@ class CiTimeoutTests(unittest.TestCase):
             checkpoints.append(name)
             return real_checkpoint(state, enabled, name)
 
-        started = time.monotonic()
         with mock.patch.object(ci_timeout, "_mask_forwarded_signals", return_value=True), \
              mock.patch.object(ci_timeout, "_popen", side_effect=popen), \
              mock.patch.object(ci_timeout, "_diagnostic_commands",
@@ -216,16 +228,20 @@ class CiTimeoutTests(unittest.TestCase):
              mock.patch.object(ci_timeout, "DIAGNOSTIC_CAP_SECONDS", 2.0), \
              mock.patch.object(ci_timeout, "_checkpoint", side_effect=checkpoint), \
              mock.patch.object(ci_timeout.signal, "sigpending", return_value=set()), \
+             mock.patch.object(ci_timeout, "_monotonic", side_effect=clock.monotonic), \
+             mock.patch.object(ci_timeout, "_sleep", side_effect=clock.sleep), \
              contextlib.redirect_stderr(io.StringIO()):
             rc = ci_timeout.run_command(0, ["primary"])
-        elapsed = time.monotonic() - started
-        self.assertEqual((rc, len(attempts), len(dumpers)), (124, 2, 1))
+        self.assertEqual((rc, len(attempts), len(dumpers)), (124, 2, 2))
+        for dumper in dumpers:
+            dumper.kill.assert_called_once_with()
         self.assertIn("diagnostic_poll", checkpoints)
-        self.assertGreaterEqual(elapsed, 1.9)
-        self.assertLess(elapsed, 2.3)
+        # Popen creation is outside the poll deadline, but every returned child
+        # is owned and killed; no SIGALRM can interrupt registration.
+        self.assertAlmostEqual(clock.now, 2.4)
 
     def test_diagnostic_poll_never_sleeps_a_negative_duration(self):
-        dumper, times, sleeps = Process(default=None), iter((0, 0, 0, 0, 2, 2)), []
+        dumper, times, sleeps = Process(default=None), iter((0, 0, 2)), []
 
         def sleep(seconds):
             self.assertGreaterEqual(seconds, 0)
@@ -238,8 +254,10 @@ class CiTimeoutTests(unittest.TestCase):
              mock.patch.object(ci_timeout, "_monotonic", side_effect=times), \
              mock.patch.object(ci_timeout, "_sleep", side_effect=sleep), \
              contextlib.redirect_stderr(io.StringIO()):
-            ci_timeout._diagnose_capped(Process(), ci_timeout._RunState(), False)
-        self.assertEqual(sleeps, [0])
+            ci_timeout._diagnose_with_deadline(
+                Process(), ci_timeout._RunState(), True
+            )
+        self.assertEqual(sleeps, [])
 
     # F9
     @unittest.skipUnless(hasattr(signal, "pthread_sigmask"), "POSIX required")
@@ -275,7 +293,7 @@ class CiTimeoutTests(unittest.TestCase):
 
                     try:
                         with mock.patch.object(ci_timeout, "_popen", return_value=proc), \
-                             mock.patch.object(ci_timeout, "_diagnose_capped"), \
+                             mock.patch.object(ci_timeout, "_diagnose_with_deadline"), \
                              mock.patch.object(ci_timeout.os, "killpg") as killpg, \
                              mock.patch.object(ci_timeout, "_monotonic", side_effect=clock.monotonic), \
                              mock.patch.object(ci_timeout, "_sleep", side_effect=clock.sleep), \
@@ -318,7 +336,7 @@ class CiTimeoutTests(unittest.TestCase):
             with mock.patch.object(ci_timeout.signal, "pthread_sigmask", side_effect=mask), \
                  mock.patch.object(ci_timeout.signal, "sigpending", side_effect=pending), \
                  mock.patch.object(ci_timeout, "_popen", side_effect=popen), \
-                 mock.patch.object(ci_timeout, "_diagnose_capped"), \
+                 mock.patch.object(ci_timeout, "_diagnose_with_deadline"), \
                  mock.patch.object(ci_timeout, "_send_process_signal", side_effect=send):
                 rc = ci_timeout.run_command(30, ["cargo", "test"])
             signal.sigwait({signal.SIGTERM})
@@ -359,7 +377,7 @@ class CiTimeoutTests(unittest.TestCase):
         with mock.patch.object(ci_timeout, "_mask_forwarded_signals", return_value=True), \
              mock.patch.object(ci_timeout, "_popen", side_effect=popen), \
              mock.patch.object(ci_timeout.signal, "sigpending", side_effect=pending_signal), \
-             mock.patch.object(ci_timeout, "_diagnose_capped"), \
+             mock.patch.object(ci_timeout, "_diagnose_with_deadline"), \
              mock.patch.object(ci_timeout, "_send_process_signal", side_effect=send), \
              mock.patch.object(ci_timeout, "_monotonic", side_effect=clock.monotonic), \
              mock.patch.object(ci_timeout, "_sleep", side_effect=clock.sleep), \
@@ -413,7 +431,7 @@ class CiTimeoutTests(unittest.TestCase):
                 with mock.patch.object(ci_timeout, "_mask_forwarded_signals", return_value=True), \
                      mock.patch.object(ci_timeout.signal, "sigpending", return_value=set()), \
                      mock.patch.object(ci_timeout, "_popen", return_value=proc) as popen, \
-                     mock.patch.object(ci_timeout, "_diagnose_capped"), \
+                     mock.patch.object(ci_timeout, "_diagnose_with_deadline"), \
                      mock.patch.object(ci_timeout, "_send_process_signal"), \
                      mock.patch.object(ci_timeout, "_monotonic", side_effect=clock.monotonic), \
                      mock.patch.object(ci_timeout, "_sleep", side_effect=clock.sleep), \
@@ -487,22 +505,79 @@ class CiTimeoutTests(unittest.TestCase):
                                 capture_output=True, timeout=5)
         self.assertEqual(result.returncode, 1)
 
-    def test_non_posix_path_installs_and_restores_legacy_handlers(self):
-        installed = {}
+    def test_non_posix_path_forwards_sigterm_to_real_child_and_restores_handlers(self):
+        installed, trigger_threads, children = {}, [], []
+        real_popen = ci_timeout._popen
 
         def install(signum, handler):
             previous = installed.get(signum, signal.SIG_DFL)
             installed[signum] = handler
+            if (
+                not trigger_threads
+                and all(callable(installed.get(item)) for item in ci_timeout._FORWARDED_SIGNALS)
+            ):
+                trigger = threading.Thread(target=forward_when_child_is_ready)
+                trigger_threads.append(trigger)
+                trigger.start()
             return previous
 
-        with mock.patch.object(ci_timeout, "_mask_forwarded_signals", return_value=False), \
-             mock.patch.object(ci_timeout, "_popen", return_value=Process([0])), \
-             mock.patch.object(ci_timeout.signal, "signal", side_effect=install) as handlers:
-            rc = ci_timeout.run_command(30, ["cargo", "test"])
-        self.assertEqual(rc, 0)
-        self.assertEqual(handlers.call_count, 4)
-        self.assertEqual(installed, {signal.SIGTERM: signal.SIG_DFL,
-                                     signal.SIGINT: signal.SIG_DFL})
+        with tempfile.TemporaryDirectory() as directory:
+            ready = Path(directory) / "ready"
+            received = Path(directory) / "received"
+
+            def forward_when_child_is_ready():
+                deadline = time.monotonic() + 3
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                if ready.exists():
+                    installed[signal.SIGTERM](signal.SIGTERM, None)
+
+            child = "\n".join(
+                (
+                    "import signal, sys, time",
+                    "from pathlib import Path",
+                    "def handled(signum, _frame):",
+                    "    Path(sys.argv[2]).write_text(str(signum))",
+                    "    raise SystemExit(0)",
+                    "signal.signal(signal.SIGTERM, handled)",
+                    "Path(sys.argv[1]).write_text('ready')",
+                    "while True: time.sleep(0.01)",
+                )
+            )
+            fallback_os = types.SimpleNamespace(environ=os.environ)
+
+            def popen(command, enabled):
+                spawned = real_popen(command, enabled)
+                children.append(spawned)
+                return spawned
+
+            try:
+                with mock.patch.object(ci_timeout, "_mask_forwarded_signals", return_value=False), \
+                     mock.patch.object(ci_timeout, "_popen", side_effect=popen), \
+                     mock.patch.object(ci_timeout, "_cleanup"), \
+                     mock.patch.object(ci_timeout, "os", fallback_os), \
+                     mock.patch.object(ci_timeout.signal, "signal", side_effect=install) as handlers, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    rc = ci_timeout.run_command(
+                        5, [sys.executable, "-c", child, str(ready), str(received)]
+                    )
+                trigger_threads[0].join(timeout=1)
+                receipt_deadline = time.monotonic() + 1
+                while not received.exists() and time.monotonic() < receipt_deadline:
+                    time.sleep(0.01)
+                self.assertEqual(rc, 143)
+                self.assertEqual(received.read_text(), str(signal.SIGTERM))
+                self.assertFalse(trigger_threads[0].is_alive())
+                self.assertEqual(handlers.call_count, 4)
+                self.assertEqual(
+                    installed,
+                    {signal.SIGTERM: signal.SIG_DFL, signal.SIGINT: signal.SIG_DFL},
+                )
+            finally:
+                for spawned in children:
+                    if spawned.poll() is None:
+                        spawned.kill()
+                    spawned.wait(timeout=1)
 
     # F12
     @unittest.skipUnless(hasattr(signal, "pthread_sigmask"), "POSIX required")
@@ -543,11 +618,20 @@ class CiTimeoutTests(unittest.TestCase):
         original_mask, original_signal = signal.pthread_sigmask, signal.signal
         old_mask = original_mask(signal.SIG_BLOCK, set())
         old_handler = original_signal(signal.SIGTERM, lambda *_args: None)
-        mask_operations = []
+        mask_operations, select_calls, report_pending = [], [], []
+        real_select = ci_timeout._select_return_code
 
         def mask(how, signals):
             mask_operations.append(how)
             return original_mask(how, signals)
+
+        def select(*args, **kwargs):
+            select_calls.append(True)
+            os.kill(os.getpid(), signal.SIGINT)
+            return real_select(*args, **kwargs)
+
+        def report(*_args):
+            report_pending.append(signal.sigpending())
 
         try:
             original_mask(signal.SIG_BLOCK, {signal.SIGTERM})
@@ -555,20 +639,26 @@ class CiTimeoutTests(unittest.TestCase):
             self.assertIn(signal.SIGTERM, signal.sigpending())
             with mock.patch.object(ci_timeout.signal, "pthread_sigmask", side_effect=mask), \
                  mock.patch.object(ci_timeout, "_popen") as popen, \
-                 mock.patch.object(ci_timeout, "_diagnose_capped") as diagnose, \
+                 mock.patch.object(ci_timeout, "_diagnose_with_deadline") as diagnose, \
                  mock.patch.object(ci_timeout, "_cleanup") as cleanup, \
-                 mock.patch.object(ci_timeout, "_send_process_signal") as send:
+                 mock.patch.object(ci_timeout, "_send_process_signal") as send, \
+                 mock.patch.object(ci_timeout, "_select_return_code", side_effect=select), \
+                 mock.patch.object(ci_timeout, "_report", side_effect=report):
                 started = time.monotonic()
                 rc = ci_timeout.run_command(30, ["cargo", "test"])
             self.assertEqual(rc, 143)
             self.assertLess(time.monotonic() - started, 55.1)
             self.assertIn(signal.SIGTERM, signal.sigpending())
+            self.assertEqual(select_calls, [True])
+            self.assertEqual(len(report_pending), 1)
+            self.assertIn(signal.SIGINT, report_pending[0])
             self.assertNotIn(signal.SIG_UNBLOCK, mask_operations)
             for operation in (popen, diagnose, cleanup, send):
                 operation.assert_not_called()
         finally:
-            if signal.SIGTERM in signal.sigpending():
-                signal.sigwait({signal.SIGTERM})
+            for signum in (signal.SIGTERM, signal.SIGINT):
+                if signum in signal.sigpending():
+                    signal.sigwait({signum})
             original_mask(signal.SIG_SETMASK, old_mask)
             original_signal(signal.SIGTERM, old_handler)
 

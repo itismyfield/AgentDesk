@@ -20,10 +20,6 @@ _FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 _monotonic, _sleep = time.monotonic, time.sleep
 
 
-class _DiagnosticCapExpired(Exception):
-    pass
-
-
 @dataclass
 class _RunState:
     first_signum: int | None = None
@@ -126,59 +122,45 @@ def _diagnostic_commands(proc: subprocess.Popen[bytes]) -> list[list[str]]:
     return commands
 
 
-def _diagnose_capped(
+def _diagnose_with_deadline(
     proc: subprocess.Popen[bytes], state: _RunState, enabled: bool
 ) -> None:
-    # R1: bounded poll only. Every diagnostic, including Popen, shares this hard cap.
+    """Poll returned diagnostic children against one shared deadline.
+
+    Diagnostic Popen creation is deliberately outside the deadline: Python cannot
+    safely interrupt Popen and still guarantee ownership of a child it has not
+    returned.  Once Popen returns, the child is registered immediately and is
+    killed best-effort if it remains alive at the shared deadline.  No
+    process-global signal handler or timer is installed here.
+    """
+    # R1: bounded poll only; dumper creation itself is best-effort and unbounded.
     deadline = _monotonic() + DIAGNOSTIC_CAP_SECONDS
     dumpers: list[subprocess.Popen[bytes]] = []
-    alarm_supported = all(
-        hasattr(signal, name)
-        for name in ("SIGALRM", "ITIMER_REAL", "getsignal", "setitimer")
-    )
-    previous_alarm_handler = None
-    previous_timer: tuple[float, float] | None = None
-
-    def diagnostic_cap_expired(_signum: int, _frame: object) -> None:
-        raise _DiagnosticCapExpired
 
     print("::group::ci-timeout diagnostics", file=sys.stderr)
     try:
-        if not alarm_supported:
+        if not enabled:
             print(
-                "ci-timeout: diagnostic hard cap unavailable on this platform",
+                "ci-timeout: diagnostics skipped without POSIX signal masking",
                 file=sys.stderr,
             )
             return
-        remaining_cap = max(0.0, deadline - _monotonic())
-        if remaining_cap == 0:
-            return
-        previous_alarm_handler = signal.getsignal(signal.SIGALRM)
-        signal.signal(signal.SIGALRM, diagnostic_cap_expired)
-        previous_timer = signal.setitimer(signal.ITIMER_REAL, remaining_cap)
-        try:
-            for command in _diagnostic_commands(proc):
-                if _monotonic() >= deadline:
-                    break
-                try:
-                    dumpers.append(_popen(command, enabled))
-                    _checkpoint(state, enabled, "diagnostic_poll")
-                except (OSError, subprocess.SubprocessError) as error:
-                    print(f"ci-timeout: diagnostic failed: {error}", file=sys.stderr)
-            while dumpers and _monotonic() < deadline:
+        for command in _diagnostic_commands(proc):
+            if _monotonic() >= deadline:
+                break
+            try:
+                dumper = _popen(command, enabled)
+                dumpers.append(dumper)
                 _checkpoint(state, enabled, "diagnostic_poll")
-                dumpers = [dumper for dumper in dumpers if dumper.poll() is None]
-                if dumpers:
-                    remaining = max(0.0, deadline - _monotonic())
-                    _sleep(min(POLL_INTERVAL_SECONDS, remaining))
-        except _DiagnosticCapExpired:
-            pass
-        finally:
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            signal.signal(signal.SIGALRM, previous_alarm_handler)
-            assert previous_timer is not None
-            if previous_timer[0] > 0:
-                signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+            except (OSError, subprocess.SubprocessError) as error:
+                print(f"ci-timeout: diagnostic failed: {error}", file=sys.stderr)
+        while dumpers:
+            _checkpoint(state, enabled, "diagnostic_poll")
+            dumpers = [dumper for dumper in dumpers if dumper.poll() is None]
+            remaining = deadline - _monotonic()
+            if not dumpers or remaining <= 0:
+                break
+            _sleep(min(POLL_INTERVAL_SECONDS, remaining))
         for dumper in dumpers:
             try:
                 dumper.kill()
@@ -195,7 +177,7 @@ def _diagnose_capped(
 
 def _cleanup(proc: subprocess.Popen[bytes], state: _RunState, enabled: bool) -> None:
     if not state.reaped and proc.returncode is None:
-        _diagnose_capped(proc, state, enabled)
+        _diagnose_with_deadline(proc, state, enabled)
 
     _checkpoint(state, enabled, "term_boundary")  # R2″ ④: TERM boundary
     _refresh_reaped(proc, state)
@@ -263,7 +245,6 @@ def run_command(timeout: float, command: list[str]) -> int:
     checkpoint1_started = _monotonic()
     # Checkpoint ① is the special no-spawn rc-table row 1a.
     if _checkpoint(state, enabled, "checkpoint1"):
-        state.cutoff = True
         rc = _select_return_code(state, timed_out=False, child_returncode=None)
         _report(timeout, command, _monotonic() - checkpoint1_started, rc)
         return rc
