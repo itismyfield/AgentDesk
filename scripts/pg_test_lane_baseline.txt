@@ -74,8 +74,6 @@ services::dispatches::discord_delivery::guard::tests::failed_delivery_retry_shad
 services::dispatches::discord_delivery::guard::tests::finalize_delivery_guard_shadow_updates_failed_event_without_notified_marker
 services::dispatches::discord_delivery::guard::tests::finalize_delivery_guard_shadow_updates_sent_event_and_kv_meta
 services::dispatches::discord_delivery::guard::tests::kv_meta_markers_remain_authoritative_when_typed_shadow_missing
-services::dispatches::outbox_claiming::tests::reassign_stale_claim_owner_clears_owner_when_no_live_candidate_matches
-services::dispatches::outbox_claiming::tests::reassign_stale_claim_owners_moves_100_pending_rows_to_live_label_match
 services::maintenance::jobs::db_retention::tests::db_retention_context_snapshot_terminal_reclaim
 services::maintenance::jobs::db_retention::tests::db_retention_keeps_skill_usage_rows_with_null_used_at
 services::maintenance::jobs::db_retention::tests::db_retention_preserves_permanent_outbox_dedupe_sentinels
@@ -309,8 +307,6 @@ services::dispatches::discord_delivery::guard::tests::failed_delivery_retry_shad
 services::dispatches::discord_delivery::guard::tests::finalize_delivery_guard_shadow_updates_failed_event_without_notified_marker
 services::dispatches::discord_delivery::guard::tests::finalize_delivery_guard_shadow_updates_sent_event_and_kv_meta
 services::dispatches::discord_delivery::guard::tests::kv_meta_markers_remain_authoritative_when_typed_shadow_missing
-services::dispatches::outbox_claiming::tests::reassign_stale_claim_owner_clears_owner_when_no_live_candidate_matches
-services::dispatches::outbox_claiming::tests::reassign_stale_claim_owners_moves_100_pending_rows_to_live_label_match
 services::maintenance::jobs::db_retention::tests::db_retention_context_snapshot_terminal_reclaim
 services::maintenance::jobs::db_retention::tests::db_retention_keeps_skill_usage_rows_with_null_used_at
 services::maintenance::jobs::db_retention::tests::db_retention_preserves_permanent_outbox_dedupe_sentinels
