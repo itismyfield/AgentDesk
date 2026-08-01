@@ -1138,6 +1138,7 @@ src/
 │   │   ├── shared_state.rs
 │   │   ├── sidecar_interaction.rs
 │   │   ├── single_message_panel.rs
+│   │   ├── skills_scan.rs
 │   │   ├── stall_recovery.rs
 │   │   ├── standby_relay.rs
 │   │   ├── startup_reclaim.rs
