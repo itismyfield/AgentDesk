@@ -57,6 +57,9 @@ pub mod phase_gate_violations;
 mod planning;
 #[path = "query.rs"]
 mod query;
+#[cfg(test)]
+#[path = "readiness_pg_tests.rs"]
+mod readiness_pg_tests;
 #[path = "route_generate.rs"]
 mod route_generate;
 #[path = "route_request_generate.rs"]

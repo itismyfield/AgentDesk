@@ -50,13 +50,20 @@ pub(super) fn register_auto_queue_ops<'js>(
             },
         )?,
     )?;
-    let pg_complete_run = pg_pool.clone();
+    let pg_finalize_run = pg_pool.clone();
     auto_queue_obj.set(
-        "__completeRunRaw",
+        "__finalizeRunIfReadyRaw",
+        Function::new(ctx.clone(), move |run_id: String| -> String {
+            finalize_run_if_ready_raw(pg_finalize_run.as_ref(), &run_id)
+        })?,
+    )?;
+    let pg_force_complete_run = pg_pool.clone();
+    auto_queue_obj.set(
+        "__forceCompleteRunRaw",
         Function::new(
             ctx.clone(),
-            move |run_id: String, source: String, opts_json: String| -> String {
-                complete_run_raw(pg_complete_run.as_ref(), &run_id, &source, &opts_json)
+            move |run_id: String, command_json: String| -> String {
+                force_complete_run_raw(pg_force_complete_run.as_ref(), &run_id, &command_json)
             },
         )?,
     )?;
@@ -185,12 +192,18 @@ pub(super) fn register_auto_queue_ops<'js>(
                 if (result.error) throw new Error(result.error);
                 return result;
             };
-            agentdesk.autoQueue.completeRun = function(runId, source, opts) {
+            agentdesk.autoQueue.finalizeRunIfReady = function(runId) {
                 var result = JSON.parse(
-                    agentdesk.autoQueue.__completeRunRaw(
+                    agentdesk.autoQueue.__finalizeRunIfReadyRaw(runId)
+                );
+                if (result.error) throw new Error(result.error);
+                return result;
+            };
+            agentdesk.autoQueue.forceCompleteRun = function(runId, command) {
+                var result = JSON.parse(
+                    agentdesk.autoQueue.__forceCompleteRunRaw(
                         runId,
-                        source || "",
-                        JSON.stringify(opts || {})
+                        JSON.stringify(command || {})
                     )
                 );
                 if (result.error) throw new Error(result.error);
@@ -352,47 +365,70 @@ fn resume_run_raw(pg_pool: Option<&PgPool>, run_id: &str, source: &str) -> Strin
     }
 }
 
-fn complete_run_raw(
-    pg_pool: Option<&PgPool>,
-    run_id: &str,
-    source: &str,
-    opts_json: &str,
-) -> String {
-    if source.trim().is_empty() {
-        return r#"{"error":"source is required"}"#.to_string();
-    }
+fn finalize_run_if_ready_raw(pg_pool: Option<&PgPool>, run_id: &str) -> String {
+    let Some(pool) = pg_pool else {
+        return r#"{"error":"postgres backend is required for autoQueue.finalizeRunIfReady"}"#
+            .to_string();
+    };
+    let run_id_owned = run_id.to_string();
+    let result = run_async_bridge_pg(pool, move |pool| async move {
+        crate::db::auto_queue::finalize_run_if_ready_on_pg(&pool, &run_id_owned).await
+    });
 
-    let opts_value: serde_json::Value = match serde_json::from_str(opts_json) {
-        Ok(value) => value,
+    match result {
+        Ok(outcome) => serde_json::json!({
+            "ok": true,
+            "changed": outcome.is_completed(),
+            "outcome": outcome.outcome_name(),
+            "reason": outcome.blocked_reason(),
+        })
+        .to_string(),
+        Err(error) => serde_json::json!({
+            "error": error.to_string()
+        })
+        .to_string(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ForceRunCompletionPayload {
+    operator: String,
+    source: String,
+}
+
+fn force_complete_run_raw(pg_pool: Option<&PgPool>, run_id: &str, command_json: &str) -> String {
+    let command: ForceRunCompletionPayload = match serde_json::from_str(command_json) {
+        Ok(command) => command,
         Err(error) => {
             return serde_json::json!({
-                "error": format!("invalid opts JSON: {error}")
+                "error": format!("invalid force completion command JSON: {error}")
             })
             .to_string();
         }
     };
-    let release_slots = opts_value
-        .get("releaseSlots")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false);
-
     let Some(pool) = pg_pool else {
-        return r#"{"error":"postgres backend is required for autoQueue.completeRun"}"#.to_string();
+        return r#"{"error":"postgres backend is required for autoQueue.forceCompleteRun"}"#
+            .to_string();
     };
     let run_id_owned = run_id.to_string();
     let result = run_async_bridge_pg(pool, move |pool| async move {
-        if release_slots {
-            crate::db::auto_queue::release_run_slots_pg(&pool, &run_id_owned)
-                .await
-                .map_err(|error| format!("release postgres auto-queue slots: {error}"))?;
-        }
-        crate::db::auto_queue::complete_run_on_pg(&pool, &run_id_owned).await
+        crate::db::auto_queue::force_complete_run_on_pg(
+            &pool,
+            &crate::db::auto_queue::ForceRunCompletionCommand {
+                run_id: &run_id_owned,
+                operator: &command.operator,
+                source: &command.source,
+            },
+        )
+        .await
     });
 
     match result {
-        Ok(changed) => serde_json::json!({
+        Ok(outcome) => serde_json::json!({
             "ok": true,
-            "changed": changed,
+            "changed": outcome.is_completed(),
+            "outcome": outcome.outcome_name(),
+            "reason": outcome.blocked_reason(),
         })
         .to_string(),
         Err(error) => serde_json::json!({

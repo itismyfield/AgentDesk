@@ -10,6 +10,8 @@ pub mod slot_predicate;
 pub mod slots;
 
 #[cfg(test)]
+mod readiness_pg_tests;
+#[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;

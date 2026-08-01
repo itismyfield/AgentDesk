@@ -55,7 +55,8 @@ identity. Required gates should fail when a scenario declares `controlled` or
 | Streaming turn completion | canonical streaming-final hook | One hook receives full response, dispatch id, provider/channel, token usage, and completion source. |
 | Dispatch completion | dispatch status transition helper | Called by the streaming-final hook and explicit fallback helpers only. |
 | Auto-queue entry terminal state | `update_entry_status_on_pg` / terminal-entry helper | Entry status drives run readiness; no policy hook is required to close the run. |
-| Auto-queue run completion | `maybe_finalize_run_if_ready_pg` | Pure derivation from entries and phase gates. |
+| Auto-queue run completion | `maybe_finalize_run_if_ready_pg` | Transactional derivation from run status, blocking gates, grace, `user_cancelled`, and runnable entries; returns `Completed`, `Blocked(reason)`, or `AlreadyTerminal`. |
+| Operator force completion | `force_complete_run_on_pg` | Separate command requiring operator and source; the only completion path allowed to delete gates, with an `audit_logs` record in the same transaction. |
 | Discord mailbox cleanup | mailbox finish/stop helpers | Cleans runtime state after canonical completion/cancel has recorded durable state. |
 | Watchdog | detector/reconciler | Emits suspicion/timeout and invokes cancel/recovery; never marks work complete directly. |
 

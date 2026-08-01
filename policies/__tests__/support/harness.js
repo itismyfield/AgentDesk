@@ -443,9 +443,12 @@ function createAgentdeskMock(options) {
         }
         return { activated: true };
       },
-      completeRun(runId, reason, optionsArg) {
-        state.autoQueueCompletes.push({ runId, reason, options: clone(optionsArg || {}) });
-        return { changed: true };
+      finalizeRunIfReady(runId) {
+        state.autoQueueCompletes.push({ runId });
+        if (typeof settings.autoQueueFinalizeRunIfReady === "function") {
+          return clone(settings.autoQueueFinalizeRunIfReady(runId, state));
+        }
+        return { changed: true, outcome: "completed", reason: null };
       },
       pauseRun(runId, source) {
         state.autoQueuePauses.push({ runId, source });

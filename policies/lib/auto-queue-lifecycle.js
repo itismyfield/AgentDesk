@@ -23,10 +23,8 @@ var _autoQueuePhaseGateLib = require("./auto-queue-phase-gate");
 
 var autoQueueLog = _autoQueueLogLib.autoQueueLog;
 var activateRun = _autoQueueDispatchLib.activateRun;
-var runHasBlockingPhaseGate = _autoQueuePhaseGateLib.runHasBlockingPhaseGate;
 var beginPhaseGateGraceWindow = _autoQueuePhaseGateLib.beginPhaseGateGraceWindow;
 var clearPhaseGateGraceWindow = _autoQueuePhaseGateLib.clearPhaseGateGraceWindow;
-var runWithinPhaseGateGrace = _autoQueuePhaseGateLib.runWithinPhaseGateGrace;
 var _createPhaseGateDispatches = _autoQueuePhaseGateLib.createPhaseGateDispatches;
 var _phaseGateRequired = _autoQueuePhaseGateLib.phaseGateRequired;
 
@@ -52,48 +50,19 @@ function remainingRunnableEntryCount(runId, phase) {
   return (rows.length > 0) ? rows[0].cnt : 0;
 }
 
-function runHasUserCancelledEntry(runId) {
-  var rows = agentdesk.db.query(
-    "SELECT COUNT(*) as cnt FROM auto_queue_entries " +
-    "WHERE run_id = ? AND status = 'user_cancelled'",
-    [runId]
-  );
-  return (rows.length > 0) && rows[0].cnt > 0;
-}
-
 function finalizeRunWithoutPhaseGate(runId) {
   if (!runId) return false;
 
-  if (runHasBlockingPhaseGate(runId)) return false;
-  if (remainingRunnableEntryCount(runId) > 0) return false;
-  // #815 P1: `user_cancelled` entries are operator-held terminal state.
-  // They are intentionally non-runnable, but they must still block the
-  // tick-side backstop from auto-completing the run; otherwise the next
-  // minute tick would strand a user-stopped run in `completed`.
-  if (runHasUserCancelledEntry(runId)) {
-    autoQueueLog("info", "Deferring finalize for run " + runId + " — user_cancelled entry still present", {
-      run_id: runId
-    });
-    return false;
-  }
-  // Phase-gate race guard: the main engine's `onCardTerminal` may still be
-  // in the middle of creating gate dispatches. Respect the grace window so
-  // we never mark a run completed before phase gates get registered.
-  if (runWithinPhaseGateGrace(runId)) {
-    autoQueueLog("info", "Deferring finalize for run " + runId + " — phase-gate grace window active", {
-      run_id: runId
-    });
-    return false;
-  }
-
   var completed = false;
   try {
-    var result = agentdesk.autoQueue.completeRun(
-      runId,
-      "finalize_without_phase_gate",
-      { releaseSlots: true }
-    );
-    completed = !!(result && result.changed);
+    var result = agentdesk.autoQueue.finalizeRunIfReady(runId);
+    completed = !!(result && result.outcome === "completed");
+    if (!completed && result && result.outcome === "blocked") {
+      autoQueueLog("info", "Deferring finalize for run " + runId + " — " + result.reason, {
+        run_id: runId,
+        reason: result.reason
+      });
+    }
   } catch (e) {
     autoQueueLog("warn", "Failed to finalize run " + runId + ": " + e, {
       run_id: runId
@@ -111,28 +80,17 @@ function finalizeRunWithoutPhaseGate(runId) {
 function completeRunAndNotify(runId) {
   if (!runId) return;
   try {
-    var completed = agentdesk.autoQueue.completeRun(
-      runId,
-      "phase_gate_complete",
-      { releaseSlots: true }
-    );
-    if (completed && completed.changed) return;
-    autoQueueLog("warn", "Phase-gate completion did not mark run " + runId + " completed; falling back to resume", {
-      run_id: runId
+    var completed = agentdesk.autoQueue.finalizeRunIfReady(runId);
+    if (completed && (completed.outcome === "completed" || completed.outcome === "already_terminal")) return;
+    autoQueueLog("info", "Phase-gate completion deferred for run " + runId, {
+      run_id: runId,
+      reason: completed ? completed.reason : null
     });
   } catch (e) {
     autoQueueLog("warn", "Failed to complete final phase-gate run " + runId + ": " + e, {
       run_id: runId
     });
   }
-  try {
-    agentdesk.autoQueue.resumeRun(runId, "phase_gate_complete_resume_fallback");
-  } catch (e) {
-    autoQueueLog("warn", "Failed to resume final phase-gate run " + runId + ": " + e, {
-      run_id: runId
-    });
-  }
-  activateRun(runId, null);
 }
 
 function continueRunAfterEntry(runId, agentId, doneGroup, donePhase, anchorCardId) {
@@ -184,9 +142,7 @@ function continueRunAfterEntry(runId, agentId, doneGroup, donePhase, anchorCardI
     // No more work AND no phase gate required → grace window no longer
     // needed. Clear it so finalization can proceed immediately.
     clearPhaseGateGraceWindow(runId);
-    if (!finalizeRunWithoutPhaseGate(runId)) {
-      completeRunAndNotify(runId);
-    }
+    finalizeRunWithoutPhaseGate(runId);
     return;
   }
 
@@ -250,7 +206,6 @@ function resumeRunAndActivate(runId, nextPhase) {
 module.exports = {
   loadRunInfo: loadRunInfo,
   remainingRunnableEntryCount: remainingRunnableEntryCount,
-  runHasUserCancelledEntry: runHasUserCancelledEntry,
   finalizeRunWithoutPhaseGate: finalizeRunWithoutPhaseGate,
   completeRunAndNotify: completeRunAndNotify,
   continueRunAfterEntry: continueRunAfterEntry,

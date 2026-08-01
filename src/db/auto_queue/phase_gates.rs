@@ -694,7 +694,9 @@ async fn reconcile_phase_gate_for_terminal_dispatch_on_pg_tx_inner(
         })?;
 
     let run_resumed = resume_run_if_paused_on_pg_tx(tx, &gate.run_id).await?;
-    let run_finalized = super::runs::maybe_finalize_run_if_ready_pg(tx, &gate.run_id).await?;
+    let run_finalized = super::runs::maybe_finalize_run_if_ready_pg(tx, &gate.run_id)
+        .await?
+        .is_completed();
 
     Ok(PhaseGateReconciliation::Cleared {
         run_id: gate.run_id,

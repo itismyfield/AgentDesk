@@ -699,7 +699,7 @@ test("auto-queue terminal cleanup uses pipeline terminal states", () => {
   ]);
 });
 
-test("auto-queue finalization sweep filters blocked runs before LIMIT", () => {
+test("auto-queue finalization sweep delegates readiness to the canonical writer", () => {
   const { policy, state } = loadPolicy("policies/auto-queue.js", {
     dbQuery: createSqlRouter([
       {
@@ -709,27 +709,10 @@ test("auto-queue finalization sweep filters blocked runs before LIMIT", () => {
       {
         match(sql) {
           return sql.includes("SELECT r.id FROM auto_queue_runs r") &&
-            sql.includes("auto_queue_phase_gates") &&
-            sql.includes("phase_gate_grace_until") &&
-            sql.includes("ORDER BY r.id ASC LIMIT 50");
+            sql.includes("WHERE r.status IN ('active', 'paused')") &&
+            sql.includes("ORDER BY r.id ASC");
         },
         result: [{ id: "run-eligible" }]
-      },
-      {
-        match: "SELECT COUNT(*) as cnt FROM auto_queue_phase_gates",
-        result: [{ cnt: 0 }]
-      },
-      {
-        match: "SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE run_id = ? AND status IN ('pending', 'dispatched')",
-        result: [{ cnt: 0 }]
-      },
-      {
-        match: "SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE run_id = ? AND status = 'user_cancelled'",
-        result: [{ cnt: 0 }]
-      },
-      {
-        match: "SELECT phase_gate_grace_until FROM auto_queue_runs WHERE id = ?",
-        result: [{ phase_gate_grace_until: null }]
       },
       {
         match(sql) {
@@ -752,12 +735,11 @@ test("auto-queue finalization sweep filters blocked runs before LIMIT", () => {
 
   const finishedRunQuery = state.queries.find((query) =>
     query.sql.includes("SELECT r.id FROM auto_queue_runs r") &&
-    query.sql.includes("auto_queue_phase_gates")
+    query.sql.includes("WHERE r.status IN ('active', 'paused')")
   );
-  assert.match(finishedRunQuery.sql, /NOT EXISTS \(  SELECT 1 FROM auto_queue_phase_gates pg/);
-  assert.match(finishedRunQuery.sql, /datetime\(r\.phase_gate_grace_until\) <= datetime\('now'\)/);
+  assert.doesNotMatch(finishedRunQuery.sql, /auto_queue_phase_gates|phase_gate_grace_until|auto_queue_entries/);
   assert.deepEqual(state.autoQueueCompletes, [
-    { runId: "run-eligible", reason: "finalize_without_phase_gate", options: { releaseSlots: true } }
+    { runId: "run-eligible" }
   ]);
 });
 

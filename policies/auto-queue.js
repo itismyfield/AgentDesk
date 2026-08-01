@@ -79,7 +79,6 @@ var clearPhaseGateState = _autoQueuePhaseGateLib.clearPhaseGateState;
 var runHasBlockingPhaseGate = _autoQueuePhaseGateLib.runHasBlockingPhaseGate;
 var beginPhaseGateGraceWindow = _autoQueuePhaseGateLib.beginPhaseGateGraceWindow;
 var clearPhaseGateGraceWindow = _autoQueuePhaseGateLib.clearPhaseGateGraceWindow;
-var runWithinPhaseGateGrace = _autoQueuePhaseGateLib.runWithinPhaseGateGrace;
 var pauseRun = _autoQueuePhaseGateLib.pauseRun;
 var loadPhaseGateDispatches = _autoQueuePhaseGateLib.loadPhaseGateDispatches;
 var _phaseGateRequired = _autoQueuePhaseGateLib.phaseGateRequired;
@@ -90,7 +89,6 @@ var _createPhaseGateDispatches = _autoQueuePhaseGateLib.createPhaseGateDispatche
 // ── lifecycle helpers ───────────────────────────────────────────────
 var loadRunInfo = _autoQueueLifecycleLib.loadRunInfo;
 var remainingRunnableEntryCount = _autoQueueLifecycleLib.remainingRunnableEntryCount;
-var runHasUserCancelledEntry = _autoQueueLifecycleLib.runHasUserCancelledEntry;
 var finalizeRunWithoutPhaseGate = _autoQueueLifecycleLib.finalizeRunWithoutPhaseGate;
 var completeRunAndNotify = _autoQueueLifecycleLib.completeRunAndNotify;
 var continueRunAfterEntry = _autoQueueLifecycleLib.continueRunAfterEntry;
@@ -512,18 +510,7 @@ var autoQueue = {
       "SELECT r.id " +
       "FROM auto_queue_runs r " +
       "WHERE r.status IN ('active', 'paused') " +
-      "AND NOT EXISTS (" +
-      "  SELECT 1 FROM auto_queue_entries e " +
-      "  WHERE e.run_id = r.id AND e.status IN ('pending', 'dispatched', 'user_cancelled')" +
-      ") " +
-      "AND NOT EXISTS (" +
-      "  SELECT 1 FROM auto_queue_phase_gates pg " +
-      "  WHERE pg.run_id = r.id AND pg.status IN ('pending', 'failed')" +
-      ") " +
-      "AND (" +
-      "  r.phase_gate_grace_until IS NULL " +
-      "  OR datetime(r.phase_gate_grace_until) <= datetime('now')" +
-      ") ORDER BY r.id ASC LIMIT 50",
+      "ORDER BY r.id ASC",
       []
     );
     for (var fr = 0; fr < finishedRuns.length; fr++) {

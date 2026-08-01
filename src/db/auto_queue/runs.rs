@@ -3,6 +3,66 @@ use sqlx::{PgPool, Row as SqlxRow};
 use super::entries::{ENTRY_STATUS_DONE, ENTRY_STATUS_USER_CANCELLED};
 use super::slots::release_run_slots_on_pg_tx;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunCompletionBlockedReason {
+    BlockingPhaseGate,
+    PhaseGateGraceWindow,
+    UserCancelledEntry,
+    RunnableEntry,
+    RunStatusNotCompletable,
+    PolicyContinuationPending,
+    RunNotFound,
+}
+
+impl RunCompletionBlockedReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::BlockingPhaseGate => "blocking_phase_gate",
+            Self::PhaseGateGraceWindow => "phase_gate_grace_window",
+            Self::UserCancelledEntry => "user_cancelled_entry",
+            Self::RunnableEntry => "runnable_entry",
+            Self::RunStatusNotCompletable => "run_status_not_completable",
+            Self::PolicyContinuationPending => "policy_continuation_pending",
+            Self::RunNotFound => "run_not_found",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunReadinessOutcome {
+    Completed,
+    Blocked(RunCompletionBlockedReason),
+    AlreadyTerminal,
+}
+
+impl RunReadinessOutcome {
+    pub fn is_completed(&self) -> bool {
+        matches!(self, Self::Completed)
+    }
+
+    pub fn outcome_name(&self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Blocked(_) => "blocked",
+            Self::AlreadyTerminal => "already_terminal",
+        }
+    }
+
+    pub fn blocked_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Blocked(reason) => Some(reason.as_str()),
+            Self::Completed | Self::AlreadyTerminal => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForceRunCompletionCommand<'a> {
+    pub run_id: &'a str,
+    pub operator: &'a str,
+    pub source: &'a str,
+}
+
 async fn queue_run_completion_notify_on_pg(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
@@ -127,14 +187,18 @@ pub(super) async fn maybe_finalize_run_after_terminal_entry_pg(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
     new_status: &str,
-) -> Result<bool, String> {
+) -> Result<RunReadinessOutcome, String> {
     if new_status == ENTRY_STATUS_DONE {
-        return Ok(false);
+        return Ok(RunReadinessOutcome::Blocked(
+            RunCompletionBlockedReason::PolicyContinuationPending,
+        ));
     }
     // #815 P1: never finalize on `user_cancelled` — it must leave the run in a
     // resumable state so the operator can flip the entry back to `pending`.
     if new_status == ENTRY_STATUS_USER_CANCELLED {
-        return Ok(false);
+        return Ok(RunReadinessOutcome::Blocked(
+            RunCompletionBlockedReason::UserCancelledEntry,
+        ));
     }
 
     maybe_finalize_run_if_ready_pg(tx, run_id).await
@@ -143,9 +207,67 @@ pub(super) async fn maybe_finalize_run_after_terminal_entry_pg(
 pub(crate) async fn maybe_finalize_run_if_ready_pg(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
-) -> Result<bool, String> {
+) -> Result<RunReadinessOutcome, String> {
+    let run = sqlx::query(
+        "SELECT status,
+                phase_gate_grace_until IS NOT NULL
+                    AND phase_gate_grace_until > NOW() AS within_phase_gate_grace
+         FROM auto_queue_runs
+         WHERE id = $1
+         FOR UPDATE",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| format!("lock auto-queue run {run_id} for readiness: {error}"))?;
+    let Some(run) = run else {
+        return Ok(RunReadinessOutcome::Blocked(
+            RunCompletionBlockedReason::RunNotFound,
+        ));
+    };
+    let status: String = run
+        .try_get("status")
+        .map_err(|error| format!("decode readiness status for run {run_id}: {error}"))?;
+    if matches!(status.as_str(), "completed" | "cancelled" | "failed") {
+        return Ok(RunReadinessOutcome::AlreadyTerminal);
+    }
+    if !matches!(
+        status.as_str(),
+        "active" | "paused" | "generated" | "pending"
+    ) {
+        return Ok(RunReadinessOutcome::Blocked(
+            RunCompletionBlockedReason::RunStatusNotCompletable,
+        ));
+    }
+
     if super::phase_gates::run_has_blocking_phase_gate_on_pg_tx(tx, run_id).await? {
-        return Ok(false);
+        return Ok(RunReadinessOutcome::Blocked(
+            RunCompletionBlockedReason::BlockingPhaseGate,
+        ));
+    }
+    let within_phase_gate_grace: bool = run
+        .try_get("within_phase_gate_grace")
+        .map_err(|error| format!("decode phase-gate grace readiness for run {run_id}: {error}"))?;
+    if within_phase_gate_grace {
+        return Ok(RunReadinessOutcome::Blocked(
+            RunCompletionBlockedReason::PhaseGateGraceWindow,
+        ));
+    }
+
+    let has_user_cancelled = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+             SELECT 1 FROM auto_queue_entries
+             WHERE run_id = $1 AND status = 'user_cancelled'
+         )",
+    )
+    .bind(run_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| format!("check user-cancelled entries for run {run_id}: {error}"))?;
+    if has_user_cancelled {
+        return Ok(RunReadinessOutcome::Blocked(
+            RunCompletionBlockedReason::UserCancelledEntry,
+        ));
     }
 
     let remaining = sqlx::query_scalar::<_, i64>(
@@ -159,7 +281,9 @@ pub(crate) async fn maybe_finalize_run_if_ready_pg(
     .await
     .map_err(|error| format!("count remaining auto-queue entries for run {run_id}: {error}"))?;
     if remaining > 0 {
-        return Ok(false);
+        return Ok(RunReadinessOutcome::Blocked(
+            RunCompletionBlockedReason::RunnableEntry,
+        ));
     }
 
     // The status transition is the release authority. In particular, a run in
@@ -171,22 +295,38 @@ pub(crate) async fn maybe_finalize_run_if_ready_pg(
          SET status = 'completed',
              completed_at = NOW()
          WHERE id = $1
-           AND status IN ('active', 'paused', 'generated', 'pending')",
+           AND status = $2",
     )
     .bind(run_id)
+    .bind(&status)
     .execute(&mut **tx)
     .await
     .map_err(|error| format!("complete auto-queue run {run_id}: {error}"))?
     .rows_affected();
     if updated == 0 {
-        return Ok(false);
+        return Ok(RunReadinessOutcome::AlreadyTerminal);
     }
 
     release_run_slots_on_pg_tx(tx, run_id)
         .await
         .map_err(|error| format!("release auto-queue slots for run {run_id}: {error}"))?;
     queue_run_completion_notify_on_pg(tx, run_id).await?;
-    Ok(true)
+    Ok(RunReadinessOutcome::Completed)
+}
+
+pub async fn finalize_run_if_ready_on_pg(
+    pool: &PgPool,
+    run_id: &str,
+) -> Result<RunReadinessOutcome, String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin postgres readiness for run {run_id}: {error}"))?;
+    let outcome = maybe_finalize_run_if_ready_pg(&mut tx, run_id).await?;
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit postgres readiness for run {run_id}: {error}"))?;
+    Ok(outcome)
 }
 
 pub(super) async fn auto_queue_run_review_disabled_on_pg_tx(
@@ -251,12 +391,53 @@ pub async fn resume_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, Strin
     Ok(updated > 0)
 }
 
-pub async fn complete_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, String> {
+pub async fn force_complete_run_on_pg(
+    pool: &PgPool,
+    command: &ForceRunCompletionCommand<'_>,
+) -> Result<RunReadinessOutcome, String> {
+    let run_id = command.run_id.trim();
+    let operator = command.operator.trim();
+    let source = command.source.trim();
+    if run_id.is_empty() || operator.is_empty() || source.is_empty() {
+        return Err("force completion requires run_id, operator, and source".to_string());
+    }
     let mut tx = pool
         .begin()
         .await
         .map_err(|error| format!("begin postgres complete auto-queue run {run_id}: {error}"))?;
-    // #2048 F17: even an explicit "manual complete" call must drop any
+    let status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM auto_queue_runs WHERE id = $1 FOR UPDATE",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| format!("lock force-completed run {run_id}: {error}"))?;
+    let Some(status) = status else {
+        tx.rollback()
+            .await
+            .map_err(|error| format!("rollback missing force-completed run {run_id}: {error}"))?;
+        return Ok(RunReadinessOutcome::Blocked(
+            RunCompletionBlockedReason::RunNotFound,
+        ));
+    };
+    if matches!(status.as_str(), "completed" | "cancelled" | "failed") {
+        tx.rollback()
+            .await
+            .map_err(|error| format!("rollback terminal force-completed run {run_id}: {error}"))?;
+        return Ok(RunReadinessOutcome::AlreadyTerminal);
+    }
+    if !matches!(
+        status.as_str(),
+        "active" | "paused" | "generated" | "pending"
+    ) {
+        tx.rollback().await.map_err(|error| {
+            format!("rollback ineligible force-completed run {run_id}: {error}")
+        })?;
+        return Ok(RunReadinessOutcome::Blocked(
+            RunCompletionBlockedReason::RunStatusNotCompletable,
+        ));
+    }
+    // #2048 F17: only this explicit force command may drop any
     // pending/failed phase-gate rows AND release the run's slot bindings.
     // Otherwise a completed run leaves stale phase_gate rows that next
     // restore/audit treats as still-pending, plus zombie slot assignments
@@ -284,7 +465,7 @@ pub async fn complete_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, Str
         tx.rollback().await.map_err(|error| {
             format!("rollback stale postgres complete auto-queue run {run_id}: {error}")
         })?;
-        return Ok(false);
+        return Ok(RunReadinessOutcome::AlreadyTerminal);
     }
 
     release_run_slots_on_pg_tx(&mut tx, run_id)
@@ -292,8 +473,18 @@ pub async fn complete_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, Str
         .map_err(|error| format!("release slots for completed run {run_id}: {error}"))?;
 
     queue_run_completion_notify_on_pg(&mut tx, run_id).await?;
+    sqlx::query(
+        "INSERT INTO audit_logs (entity_type, entity_id, action, actor)
+         VALUES ('auto_queue_run', $1, $2, $3)",
+    )
+    .bind(run_id)
+    .bind(format!("force_complete:{source}"))
+    .bind(operator)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("audit force completion for run {run_id}: {error}"))?;
     tx.commit()
         .await
         .map_err(|error| format!("commit postgres complete auto-queue run {run_id}: {error}"))?;
-    Ok(true)
+    Ok(RunReadinessOutcome::Completed)
 }

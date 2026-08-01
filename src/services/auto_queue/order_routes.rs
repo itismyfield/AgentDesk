@@ -84,7 +84,6 @@ pub(super) async fn resolve_submit_order_card_with_pg(
 }
 
 pub(super) async fn submit_order_with_pg(
-    state: &AppState,
     run_id: &str,
     headers: &HeaderMap,
     principal: Option<&RequestPrincipal>,
@@ -213,7 +212,7 @@ pub(super) async fn submit_order_with_pg(
                 .map(|agent_id| format!("{agent_id} order submitted"))
                 .unwrap_or_else(|| "API order submitted".to_string())
         });
-    if created > 0 {
+    let completion_outcome = if created > 0 {
         if let Err(error) = sqlx::query(
             "UPDATE auto_queue_runs
              SET status = 'active',
@@ -230,32 +229,42 @@ pub(super) async fn submit_order_with_pg(
                 Json(json!({"error": format!("activate auto-queue run '{run_id}': {error}")})),
             ));
         }
+        None
     } else {
         crate::auto_queue_log!(
             warn,
             "submit_order_no_ready_cards",
             run_log_ctx.clone(),
-            "[auto-queue] submit_order: no ready cards enqueued, run {run_id} stays pending"
+            "[auto-queue] submit_order: no ready cards enqueued, evaluating run {run_id} readiness"
         );
         if let Err(error) = sqlx::query(
             "UPDATE auto_queue_runs
-             SET status = 'completed',
-                 ai_rationale = $1
-             WHERE id = $2",
+             SET ai_rationale = $1
+             WHERE id = $2 AND status = 'pending'",
         )
-        .bind(format!("{rationale} (no ready cards — auto-completed)"))
+        .bind(format!("{rationale} (no ready cards)"))
         .bind(run_id)
         .execute(pool)
         .await
         {
             return Err(auto_queue_json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("complete auto-queue run '{run_id}': {error}")})),
+                Json(
+                    json!({"error": format!("record empty order rationale for run '{run_id}': {error}")}),
+                ),
             ));
         }
-    }
-
-    let _ = state;
+        Some(
+            crate::db::auto_queue::finalize_run_if_ready_on_pg(pool, run_id)
+                .await
+                .map_err(|error| {
+                    auto_queue_json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("finalize empty ordered run '{run_id}': {error}")})),
+                    )
+                })?,
+        )
+    };
 
     Ok((
         StatusCode::OK,
@@ -264,6 +273,8 @@ pub(super) async fn submit_order_with_pg(
             "created": created,
             "run_id": run_id,
             "message": "Queue active. Call POST /api/queue/dispatch-next to start dispatching.",
+            "completion_outcome": completion_outcome.as_ref().map(|outcome| outcome.outcome_name()),
+            "completion_blocked_reason": completion_outcome.as_ref().and_then(|outcome| outcome.blocked_reason()),
         })),
     ))
 }
@@ -284,7 +295,6 @@ pub async fn submit_order(
         return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
     submit_order_with_pg(
-        &state,
         &run_id,
         &headers,
         principal.as_ref().map(|Extension(principal)| principal),

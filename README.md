@@ -556,7 +556,8 @@ agentdesk.autoQueue.activate("run-123")                   // or activate({ run_i
 agentdesk.autoQueue.updateEntryStatus(entryId, "active", "policy")
 agentdesk.autoQueue.pauseRun(runId, "manual-hold")
 agentdesk.autoQueue.resumeRun(runId, "policy-resume")
-agentdesk.autoQueue.completeRun(runId, "policy", { reason: "all entries done" })
+agentdesk.autoQueue.finalizeRunIfReady(runId)             // derived completion; returns typed outcome
+agentdesk.autoQueue.forceCompleteRun(runId, { operator: "admin", source: "manual-recovery" })
 agentdesk.autoQueue.savePhaseGateState(runId, phase, state)
 agentdesk.queue.status()                                  // run/slot snapshot used by dashboards
 

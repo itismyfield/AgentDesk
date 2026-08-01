@@ -841,11 +841,11 @@ async fn promote_run_and_clear_inactive_slots(
     Ok(())
 }
 
-/// Counts the run's entries; when zero, best-effort completes the stale run
+/// Counts the run's entries; when zero, delegates completion to the readiness writer
 /// and short-circuits the activate request. Both the "stale empty run
 /// completed" OK response and any DB failure are returned as
 /// `Err(ActivateResponse)`; `Ok(())` means the run has entries to dispatch.
-async fn complete_run_if_empty(
+pub(super) async fn complete_run_if_empty(
     pool: &sqlx::PgPool,
     run_id: &str,
     run_log_ctx: &AutoQueueLogContext<'_>,
@@ -870,39 +870,33 @@ async fn complete_run_if_empty(
         }
     };
     if entry_count == 0 {
-        if let Err(error) = sqlx::query(
-            // #2048 F18: only auto-complete runs that are still active /
-            // promotable. A caller passing a cancelled/completed run_id
-            // should not flip its status — only the explicit cancel/complete
-            // paths may finalize. The activate path is best-effort.
-            "UPDATE auto_queue_runs
-             SET status = 'completed',
-                 completed_at = NOW()
-             WHERE id = $1
-               AND status IN ('active', 'paused', 'generated', 'pending')",
-        )
-        .bind(run_id)
-        .execute(pool)
-        .await
-        {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({"error": format!("complete stale postgres auto-queue run {run_id}: {error}")}),
-                ),
-            ));
-        }
+        let outcome = match crate::db::auto_queue::finalize_run_if_ready_on_pg(pool, run_id).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("finalize stale postgres auto-queue run {run_id}: {error}")}),
+                    ),
+                ));
+            }
+        };
         crate::auto_queue_log!(
             info,
-            "activate_stale_empty_run_completed_pg",
+            "activate_stale_empty_run_readiness_pg",
             run_log_ctx.clone(),
-            "[auto-queue] Completed stale empty PG run {run_id} — no entries, skipping fallback populate (#85)"
+            "[auto-queue] Empty PG run {run_id} readiness outcome: {}",
+            outcome.outcome_name()
         );
         return Err((
             StatusCode::OK,
-            Json(
-                json!({ "dispatched": [], "count": 0, "message": "Stale empty run completed — no entries to dispatch" }),
-            ),
+            Json(json!({
+                "dispatched": [],
+                "count": 0,
+                "message": "Stale empty run evaluated — no entries to dispatch",
+                "completion_outcome": outcome.outcome_name(),
+                "completion_blocked_reason": outcome.blocked_reason(),
+            })),
         ));
     }
     Ok(())
@@ -1267,12 +1261,12 @@ async fn compute_activate_groups_to_dispatch(
     })
 }
 
-/// Final activate phase: drains the run if no entries remain (releasing slots
-/// and best-effort completing the run), recomputes the active/pending group
+/// Final activate phase: asks the readiness writer to drain the run if no entries remain,
+/// recomputes the active/pending group
 /// counts and post-activate turn count, and builds the success payload. Count
 /// failures short-circuit with a 500 returned as `Err(ActivateResponse)`; the
 /// success payload is returned as `Ok(ActivateResponse)`.
-async fn finalize_activate_run_and_build_response(
+pub(super) async fn finalize_activate_run_and_build_response(
     pool: &sqlx::PgPool,
     run_id: &str,
     run_log_ctx: &AutoQueueLogContext<'_>,
@@ -1299,59 +1293,21 @@ async fn finalize_activate_run_and_build_response(
             ));
         }
     };
-    if remaining == 0 {
-        if let Err(error) = crate::db::auto_queue::release_run_slots_pg(pool, run_id).await {
-            crate::auto_queue_log!(
-                warn,
-                "activate_release_run_slots_failed_pg",
-                run_log_ctx.clone(),
-                "[auto-queue] failed to release PG slots for drained run {}: {}",
-                run_id,
-                error
-            );
-        }
-        let still_dispatched = match sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT
-             FROM auto_queue_entries
-             WHERE run_id = $1
-               AND status = 'dispatched'",
-        )
-        .bind(run_id)
-        .fetch_one(pool)
-        .await
-        {
-            Ok(value) => value,
+    let completion_outcome = if remaining == 0 {
+        match crate::db::auto_queue::finalize_run_if_ready_on_pg(pool, run_id).await {
+            Ok(outcome) => Some(outcome),
             Err(error) => {
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(
-                        json!({"error": format!("count postgres dispatched entries for {run_id}: {error}")}),
+                        json!({"error": format!("finalize drained postgres auto-queue run {run_id}: {error}")}),
                     ),
                 ));
             }
-        };
-        if still_dispatched == 0
-            && let Err(error) = sqlx::query(
-                "UPDATE auto_queue_runs
-                 SET status = 'completed',
-                     completed_at = NOW()
-                 WHERE id = $1
-                   AND status IN ('active', 'paused', 'generated', 'pending')",
-            )
-            .bind(run_id)
-            .execute(pool)
-            .await
-        {
-            crate::auto_queue_log!(
-                warn,
-                "activate_finalize_run_failed_pg",
-                run_log_ctx.clone(),
-                "[auto-queue] failed to finalize PG run {} after dispatch drain: {}",
-                run_id,
-                error
-            );
         }
-    }
+    } else {
+        None
+    };
 
     let active_group_count = match sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(DISTINCT COALESCE(thread_group, 0))::BIGINT
@@ -1428,6 +1384,25 @@ async fn finalize_activate_run_and_build_response(
         "active_turn_count": active_turn_count_after,
         "pending_groups": pending_group_count,
     });
+    if let Some(outcome) = completion_outcome
+        && let Some(map) = body.as_object_mut()
+    {
+        map.insert(
+            "completion_outcome".to_string(),
+            json!(outcome.outcome_name()),
+        );
+        map.insert(
+            "completion_blocked_reason".to_string(),
+            json!(outcome.blocked_reason()),
+        );
+        crate::auto_queue_log!(
+            info,
+            "activate_drained_run_readiness_pg",
+            run_log_ctx.clone(),
+            "[auto-queue] Drained PG run {run_id} readiness outcome: {}",
+            outcome.outcome_name()
+        );
+    }
     if !deferred_entries.is_empty() {
         if let Some(map) = body.as_object_mut() {
             map.insert("deferred_count".to_string(), json!(deferred_entries.len()));
