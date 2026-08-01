@@ -853,6 +853,7 @@ src/
 │   │   │   ├── terminal_direct_fallback.rs
 │   │   │   ├── terminal_direct_fallback_tests.rs
 │   │   │   ├── terminal_long_chunks.rs
+│   │   │   ├── terminal_preflight.rs
 │   │   │   ├── terminal_readiness.rs
 │   │   │   ├── terminal_readiness_tests.rs
 │   │   │   ├── terminal_send.rs

@@ -26,8 +26,7 @@ pub(super) struct TerminalPreflightLocals<'a> {
 }
 
 pub(super) struct TerminalPreflightState<'a> {
-    pub(super) watcher_streaming_rollover_frozen_msg_ids:
-        &'a mut Vec<serenity::MessageId>,
+    pub(super) watcher_streaming_rollover_frozen_msg_ids: &'a mut Vec<serenity::MessageId>,
     pub(super) placeholder_msg_id: &'a mut Option<serenity::MessageId>,
     pub(super) placeholder_from_restored_inflight: &'a mut bool,
     pub(super) status_panel_msg_id: &'a mut Option<serenity::MessageId>,
@@ -46,8 +45,7 @@ pub(super) struct TerminalPreflightPrepared {
     pub(super) inflight_before_relay_is_stale_newer_turn: bool,
     pub(super) has_assistant_response: bool,
     pub(super) has_current_response: bool,
-    pub(super) recent_stop_for_output:
-        Option<super::super::tmux_kill_policy::RecentTurnStop>,
+    pub(super) recent_stop_for_output: Option<super::super::tmux_kill_policy::RecentTurnStop>,
     pub(super) inflight_missing_before_relay: bool,
     pub(super) inflight_silent_turn: bool,
 }
