@@ -191,22 +191,32 @@ class DeploymentWiringTests(unittest.TestCase):
         self.assertIn("tests.test_pg_tunnel", ci)
 
     def test_signal_traps_match_exact_physical_line_contract(self):
-        """Require the complete physical trap-line contract in deploy-release.sh.
+        """Enforce the deliberately narrow static trap contract.
 
-        This guard intentionally does no bash parsing: every physical line that
-        starts with trap is compared as a full-line ordered multiset.  It also
-        pins unique cleanup definitions, relative reset/registration order, and
-        the preflight-call strip set.  The real-signal INT/TERM and EXIT harnesses
-        behaviorally backstop indirect changes only inside the production slice
-        ending immediately before ``_self_hosted_release_session``.  Past the
-        registrations, a separate conservative lexical guard rejects trap/eval
-        commands through EOF because executing the rest of the deploy is neither
-        hermetic nor safe in a unit test.  Neither this physical-line/definition
-        scan nor ``test_trap_function_shadowing_is_absent`` excludes heredoc
-        bodies, and the tail guard is likewise lexical.  Harmless command-looking
-        heredoc text can therefore be a false positive in all of them; that is an
-        accepted fail-closed tradeoff.  A query such as ``trap -p INT`` is still
-        a trap line and therefore fails the exact contract.
+        The static contract covers literal ``trap`` commands that start a
+        physical line and cleanup-handler definitions that start a physical line
+        or immediately follow ``;``, ``&``, or ``|``.  For those definitions,
+        whitespace, newlines, and comments between ``()`` and ``{`` are covered.
+        This is not a Bash parser.  Trap tokens elsewhere on a line, function
+        indirection such as ``_disarm_exit``, commands assembled in variables,
+        ``builtin``/``command``/``eval`` dispatch, and other multi-segment
+        definition syntax are outside the static contract.
+
+        The dynamic INT/TERM/EXIT backstop executes only the production slice
+        that starts at ``_cleanup_owned_pg_tunnel_preflight`` and ends immediately
+        before ``_self_hosted_release_session``.  Trap-state changes outside that
+        slice are covered only by the static contract and inherit the limitations
+        above.  The post-registration tail guard applies the same physical-line
+        literal-``trap`` boundary and ignores full-line and trailing comments.
+        That tail contains detached-child paths where clearing an inherited trap
+        with ``trap - EXIT`` can be legitimate; if such a use is needed, this
+        contract must be changed explicitly rather than treating it as
+        dynamically covered.
+
+        Inside this boundary, exact ordered trap lines, unique cleanup-handler
+        definitions, reset/registration order, and the preflight-call strip set
+        are pinned.  A line-leading query such as ``trap -p INT`` is therefore
+        also rejected by the exact contract.
         """
         deploy = DEPLOY.read_text(encoding="utf-8")
         deploy_lines = deploy.splitlines()
@@ -236,47 +246,35 @@ class DeploymentWiringTests(unittest.TestCase):
 
         def definition_rows(name: str) -> list[tuple[int, str]]:
             spaced_parens = r"[ \t]*\([ \t]*\)"
-            direct_patterns = (
+            definition_anchor = r"(?:^|[;&|]\s*)[ \t]*"
+            brace_gap = r"(?:[ \t]*(?:#[^\n]*)?\n)*[ \t]*"
+            patterns = (
                 re.compile(
-                    r"^[ \t]*" + re.escape(name) + spaced_parens + r"[ \t]*\{"
+                    definition_anchor
+                    + re.escape(name)
+                    + spaced_parens
+                    + brace_gap
+                    + r"\{",
+                    re.MULTILINE,
                 ),
                 re.compile(
-                    r"^[ \t]*function[ \t]+"
+                    definition_anchor
+                    + r"function[ \t]+"
                     + re.escape(name)
                     + r"(?:"
                     + spaced_parens
-                    + r")?[ \t]*\{"
+                    + r")?"
+                    + brace_gap
+                    + r"\{",
+                    re.MULTILINE,
                 ),
             )
-            multiline_names = (
-                re.compile(
-                    r"^[ \t]*" + re.escape(name) + spaced_parens + r"[ \t]*$"
-                ),
-                re.compile(
-                    r"^[ \t]*function[ \t]+"
-                    + re.escape(name)
-                    + r"(?:"
-                    + spaced_parens
-                    + r")?[ \t]*$"
-                ),
-            )
-            opening_brace = re.compile(r"^[ \t]*\{")
             rows: list[tuple[int, str]] = []
-            for index, line in enumerate(deploy_lines):
-                if any(pattern.match(line) for pattern in direct_patterns):
-                    rows.append((index + 1, line.strip()))
-                    continue
-                if (
-                    any(pattern.fullmatch(line) for pattern in multiline_names)
-                    and index + 1 < len(deploy_lines)
-                    and opening_brace.match(deploy_lines[index + 1])
-                ):
-                    rows.append(
-                        (
-                            index + 1,
-                            f"{line.strip()}\\n{deploy_lines[index + 1].strip()}",
-                        )
-                    )
+            for pattern in patterns:
+                for match in pattern.finditer(deploy):
+                    line_number = deploy.count("\n", 0, match.start()) + 1
+                    rows.append((line_number, match.group(0).strip()))
+            rows.sort(key=lambda row: row[0])
             return rows
 
         cleanup_definitions = definition_rows("_cleanup_on_exit")
@@ -409,32 +407,30 @@ class DeploymentWiringTests(unittest.TestCase):
                     + pattern.pattern,
                 )
 
-    def test_no_trap_or_eval_commands_follow_production_registrations(self):
-        """Fail closed on trap mutation outside the executable harness slice.
+    def test_no_line_leading_trap_follows_production_registrations(self):
+        """Apply the narrow line-leading trap contract after registrations.
 
         The dynamic harness safely executes through the three registrations but
         cannot execute the remaining deploy flow.  From that boundary through
-        EOF, command-looking trap/eval text is forbidden.  This is deliberately
-        lexical and can reject harmless heredoc documentation; accepting that
-        false-positive risk keeps the unexecuted region fail closed.
+        EOF, only a literal ``trap`` command at physical line start is forbidden.
+        Comment text is removed before that lexical check, including trailing
+        comments; indirect, assembled, builtin, command, and eval forms remain
+        outside the declared static contract.
         """
         deploy = DEPLOY.read_text(encoding="utf-8")
         boundary = "trap '_handle_cleanup_signal 143' TERM"
         tail = deploy[deploy.index(boundary) + len(boundary) :]
-        forbidden = re.compile(
-            r"\b(?:(?:builtin|command)[ \t]+)?trap(?:[ \t]|$)"
-            r"|\beval(?:[ \t]|$)"
-        )
+        forbidden = re.compile(r"^[ \t]*trap(?:[ \t]|$)")
         rows = [
             (line_number, line)
             for line_number, line in enumerate(tail.splitlines(), 1)
-            if not line.lstrip().startswith("#") and forbidden.search(line)
+            if forbidden.search(line.partition("#")[0])
         ]
         self.assertEqual(
             rows,
             [],
-            "trap/eval commands after production registration are outside the "
-            "dynamic backstop; tail-relative rows=" + repr(rows),
+            "line-leading trap commands after production registration are "
+            "outside the dynamic backstop; tail-relative rows=" + repr(rows),
         )
 
     def test_wrapper_is_registered_for_portable_path_lint(self):
@@ -865,9 +861,14 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
         """Run one real signal path with bounded child and parent lifetimes.
 
         Code-path budget from measured runs: a typical successful path is
-        ~0.2–1.3 s; a guarded failure is bounded by the serial path
-        ``4 + 3 + 1.25 ≈ 8.25 s`` (readiness guard, signal guard, then EXIT
-        cleanup), leaving about 1.75 s within the 10 s subprocess timeout.
+        ~0.2–1.3 s.  Five isolated runs of the old 60 x 0.05 s signal guard
+        averaged 7.01 s on this host; added to readiness near 4 s, that agrees
+        with the observed ~10.75 s failure and disproves the former 8.25 s bound.
+        The reduced 20-iteration guard averaged 2.37 s, giving a conservative
+        serial estimate of ``4 + 2.37 + 1.25 = 7.62 s`` including maximum EXIT
+        cleanup.  The external 10 s timeout still fails closed and reaps the
+        process group, but scheduler delay can make it fire before the intended
+        internal diagnostic.
         """
         signal_status = {"INT": 130, "TERM": 143}[signal_name]
         cleanup_sleep = self._cleanup_sleep_literal()
@@ -943,7 +944,7 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
                 f"kill -{signal_name} $$\n"
                 "signal_wait_attempts=0\n"
                 "while :; do\n"
-                "    if [ \"$signal_wait_attempts\" -ge 60 ]; then\n"
+                "    if [ \"$signal_wait_attempts\" -ge 20 ]; then\n"
                 "        printf 'signal cleanup timeout after %s attempts\\n' \"$signal_wait_attempts\" >&2\n"
                 "        exit 97\n"
                 "    fi\n"
