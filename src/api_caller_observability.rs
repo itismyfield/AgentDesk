@@ -47,12 +47,15 @@ pub(crate) struct IdentityConsumptionFields {
 }
 
 impl IdentityConsumptionFields {
-    /// Return the projected fields in the same name/value form used by the
-    /// identity-consumption event.  Keeping this view next to the typed
-    /// projection gives tests a complete, tracing-independent redaction
-    /// oracle for every emitted field.
+    /// Return only the fields built by `identity_consumption_fields`.
+    ///
+    /// This projection lets tests inspect the values supplied to the event
+    /// without formatted tracing capture. It does not observe the emitted
+    /// event, so a field added directly to `tracing::info!` is outside this
+    /// guard. Closing that gap requires generating emission and projection
+    /// from one declarative field list.
     #[cfg(test)]
-    fn named_values(&self) -> Vec<(&'static str, String)> {
+    pub(crate) fn named_values(&self) -> Vec<(&'static str, String)> {
         vec![
             ("endpoint", self.endpoint.to_string()),
             ("auth_strength", self.auth_strength.to_string()),
@@ -111,13 +114,15 @@ pub fn log_identity_consumption(
     consumed_agent_id: Option<&str>,
     manager_channel_check_relied_on_claimed_header: bool,
 ) {
-    let fields = identity_consumption_fields(
+    emit_identity_consumption(identity_consumption_fields(
         endpoint,
         principal,
         consumed_agent_id,
         manager_channel_check_relied_on_claimed_header,
-    );
+    ));
+}
 
+pub(crate) fn emit_identity_consumption(fields: IdentityConsumptionFields) {
     tracing::info!(
         target: LOG_TARGET,
         endpoint = fields.endpoint,
@@ -189,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn log_identity_consumption_emits_expected_fields_without_authorization() {
+    fn identity_consumption_fields_projection_excludes_authorization() {
         let principal = RequestPrincipal {
             auth_strength: AuthStrength::ServerAdmin,
             claimed_agent_id: Some("codex".to_string()),

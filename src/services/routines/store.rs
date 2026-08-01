@@ -6,7 +6,10 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::api_caller_observability::{RequestPrincipal, log_identity_consumption};
+use crate::api_caller_observability::{
+    IdentityConsumptionFields, RequestPrincipal, emit_identity_consumption,
+    identity_consumption_fields,
+};
 use crate::services::automation_candidate_contract::{
     PIPELINE_STAGE_ID, has_complete_loop_contract,
 };
@@ -500,12 +503,10 @@ fn routine_delete_scope_gate(
     caller_agent_id: Option<&str>,
     principal: Option<&RequestPrincipal>,
 ) -> RoutineDeleteScopeGate {
-    log_identity_consumption(
-        "DELETE /api/routines/{id}",
+    emit_identity_consumption(routine_delete_identity_consumption_fields(
         principal,
         caller_agent_id,
-        false,
-    );
+    ));
 
     let Some(owner) = routine_agent_id
         .map(str::trim)
@@ -529,6 +530,18 @@ fn routine_delete_scope_gate(
             caller: caller.to_string(),
         }
     }
+}
+
+fn routine_delete_identity_consumption_fields(
+    principal: Option<&RequestPrincipal>,
+    caller_agent_id: Option<&str>,
+) -> IdentityConsumptionFields {
+    identity_consumption_fields(
+        "DELETE /api/routines/{id}",
+        principal,
+        caller_agent_id,
+        false,
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
@@ -3565,7 +3578,7 @@ mod tests {
         include_automation_candidate_card_observations, precomputed_observation_from_kv,
         preserve_fresh_context_evidence, resume_without_next_due_is_invalid, truncate_chars,
     };
-    use crate::api_caller_observability::{AuthStrength, RequestPrincipal};
+    use crate::api_caller_observability::{AuthStrength, LOG_TARGET, RequestPrincipal};
     use chrono::{TimeZone, Utc};
     use serde_json::Value;
 
@@ -4023,7 +4036,7 @@ mod tests {
     }
 
     #[test]
-    fn routine_delete_scope_gate_returns_other_agent_for_resolved_caller() {
+    fn routine_delete_scope_gate_preserves_typed_audit_projection() {
         let principal = RequestPrincipal {
             auth_strength: AuthStrength::ServerAdmin,
             claimed_agent_id: Some("codex".to_string()),
@@ -4040,6 +4053,31 @@ mod tests {
                 owner: "codex".to_string(),
                 caller: "resolved-codex".to_string()
             }
+        );
+
+        // This preserves the DELETE site's target and the exact typed fields
+        // passed to emission without the flaky formatted tracing capture. It
+        // does not inspect subscriber output or detect fields added directly
+        // inside `tracing::info!`; a single-source generated field list would
+        // be required to cover that broader contract.
+        assert_eq!(LOG_TARGET, "agentdesk::api_caller_observability");
+        assert_eq!(
+            super::routine_delete_identity_consumption_fields(
+                Some(&principal),
+                Some("resolved-codex")
+            )
+            .named_values(),
+            vec![
+                ("endpoint", "DELETE /api/routines/{id}".to_string()),
+                ("auth_strength", "ServerAdmin".to_string()),
+                ("claimed_agent_id", "codex".to_string()),
+                ("claimed_channel_id", "manager-channel".to_string()),
+                ("consumed_agent_id", "resolved-codex".to_string()),
+                (
+                    "manager_channel_check_relied_on_claimed_header",
+                    "false".to_string(),
+                ),
+            ]
         );
     }
 
