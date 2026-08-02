@@ -9,6 +9,20 @@ use sqlx::{PgPool, Row as SqlxRow};
 /// `pending`, which would let the next tick re-dispatch the same work.
 const USER_CANCEL_REASONS: &[&str] = &["turn_bridge_cancelled"];
 
+const RUN_OWNERS_FOR_DISPATCH: &str = r#"
+    SELECT e.run_id
+    FROM auto_queue_entries e
+    WHERE e.dispatch_id = td.id
+      AND e.status IN ('pending', 'dispatched', 'user_cancelled')
+    UNION ALL
+    SELECT pg.run_id
+    FROM auto_queue_phase_gates pg
+    WHERE pg.dispatch_id = td.id
+    UNION ALL
+    SELECT json_extract(td.context, '$.phase_gate.run_id')
+    WHERE json_extract(td.context, '$.phase_gate.run_id') IS NOT NULL
+"#;
+
 /// Returns true when the supplied cancel reason represents a user /
 /// external explicit stop. Matches either an exact reason in
 /// [`USER_CANCEL_REASONS`] or any reason with the `user_` prefix so
@@ -43,8 +57,14 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg(
 
     // On error the Transaction's Drop runs an implicit rollback, so any
     // partial writes from the helper are discarded automatically.
-    let outcome =
-        cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(&mut tx, dispatch_id, reason).await?;
+    let outcome = cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(
+        &mut tx,
+        dispatch_id,
+        reason,
+        None,
+        true,
+    )
+    .await?;
 
     tx.commit()
         .await
@@ -135,28 +155,66 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx(
     // own observability emission for the wider unit of work; we hand back only
     // the row count and discard the captured transition metadata (#3039).
     Ok(
-        cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(tx, dispatch_id, reason)
+        cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(tx, dispatch_id, reason, None, true)
             .await?
             .changed,
     )
 }
 
-pub(crate) async fn cancel_dispatch_on_pg_tx_with_meta(
+pub(crate) async fn cancel_dispatches_for_runs_on_pg_tx_with_meta(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    dispatch_id: &str,
+    run_ids: &[String],
     reason: Option<&str>,
-) -> Result<Option<CancelTransitionMeta>, String> {
-    let outcome =
-        cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(tx, dispatch_id, reason).await?;
-    Ok((outcome.changed > 0)
-        .then_some(outcome.transition)
-        .flatten())
+    reset_linked_entries: bool,
+) -> Result<Vec<CancelTransitionMeta>, String> {
+    if run_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // The candidate and foreign-owner veto use the same relation. Repeating the
+    // predicate in the UPDATE keeps the authority check and mutation atomic for
+    // owners represented on the dispatch row, without changing the outer lock order.
+    let candidate_sql = format!(
+        "SELECT td.id
+         FROM task_dispatches td
+         WHERE td.status IN ('pending', 'dispatched')
+           AND EXISTS (
+               SELECT 1 FROM ({RUN_OWNERS_FOR_DISPATCH}) owner(run_id)
+               WHERE run_id = ANY($1)
+           )
+         ORDER BY td.id"
+    );
+    let dispatch_ids = sqlx::query_scalar::<_, String>(&candidate_sql)
+        .bind(run_ids)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| format!("load postgres run-owned dispatches: {error}"))?;
+
+    let mut transitions = Vec::with_capacity(dispatch_ids.len());
+    for dispatch_id in dispatch_ids {
+        let outcome = cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(
+            tx,
+            &dispatch_id,
+            reason,
+            Some(run_ids),
+            reset_linked_entries,
+        )
+        .await?;
+        if outcome.changed > 0
+            && let Some(transition) = outcome.transition
+        {
+            transitions.push(transition);
+        }
+    }
+    Ok(transitions)
 }
 
 async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     dispatch_id: &str,
     reason: Option<&str>,
+    run_ids: Option<&[String]>,
+    reset_linked_entries: bool,
 ) -> Result<CancelOutcome, String> {
     let cancel_payload = reason.map(|value| json!({ "reason": value }));
 
@@ -188,38 +246,37 @@ async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(
         });
     }
 
-    let changed = match cancel_payload.as_ref() {
-        Some(payload) => sqlx::query(
-            "UPDATE task_dispatches
-             SET status = 'cancelled',
-                 result = $1,
-                 updated_at = NOW(),
-                 last_stuck_alert_at = NULL
-             WHERE id = $2
-               AND status = $3",
-        )
-        .bind(payload.to_string())
+    let update_sql = format!(
+        "UPDATE task_dispatches td
+         SET status = 'cancelled',
+             result = CASE WHEN $1::text IS NULL THEN result ELSE $1 END,
+             updated_at = NOW(),
+             last_stuck_alert_at = NULL
+         WHERE td.id = $2
+           AND td.status = $3
+           AND (
+               $4::text[] IS NULL
+               OR (
+                   EXISTS (
+                       SELECT 1 FROM ({RUN_OWNERS_FOR_DISPATCH}) owner(run_id)
+                       WHERE run_id = ANY($4)
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM ({RUN_OWNERS_FOR_DISPATCH}) owner(run_id)
+                       WHERE run_id IS NULL OR run_id <> ALL($4)
+                   )
+               )
+           )"
+    );
+    let changed = sqlx::query(&update_sql)
+        .bind(cancel_payload.as_ref().map(ToString::to_string))
         .bind(dispatch_id)
         .bind(&current_status)
+        .bind(run_ids.map(<[String]>::to_vec))
         .execute(&mut **tx)
         .await
         .map_err(|error| format!("cancel postgres dispatch {dispatch_id}: {error}"))?
-        .rows_affected() as usize,
-        None => sqlx::query(
-            "UPDATE task_dispatches
-             SET status = 'cancelled',
-                 updated_at = NOW(),
-                 last_stuck_alert_at = NULL
-             WHERE id = $1
-               AND status = $2",
-        )
-        .bind(dispatch_id)
-        .bind(&current_status)
-        .execute(&mut **tx)
-        .await
-        .map_err(|error| format!("cancel postgres dispatch {dispatch_id}: {error}"))?
-        .rows_affected() as usize,
-    };
+        .rows_affected() as usize;
 
     if changed == 0 {
         return Ok(CancelOutcome {
@@ -307,53 +364,59 @@ async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(
     .execute(&mut **tx)
     .await;
 
-    let entry_rows = sqlx::query(
-        "SELECT id, status
-         FROM auto_queue_entries
-         WHERE dispatch_id = $1
-           AND status IN ('pending', 'dispatched')",
-    )
-    .bind(dispatch_id)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| format!("load postgres queue entries for dispatch {dispatch_id}: {error}"))?;
-
-    // #815: user / external explicit stops must move the entry to a
-    // non-dispatchable terminal status so the next auto-queue tick does
-    // not immediately re-dispatch the same entry. System cancels keep
-    // the existing pending reset so re-dispatch proceeds.
-    //
-    // #815 P2: route both branches through the shared
-    // `update_entry_status_on_pg_tx` helper so the PG path validates
-    // the transition, records `auto_queue_entry_transitions` consistently,
-    // and (for system-terminal target statuses) invokes
-    // `maybe_finalize_run_after_terminal_entry_pg`. `user_cancelled` is
-    // intentionally non-finalizing per P1 — see the helper's comment.
-    let user_cancel = is_user_cancel_reason(reason);
-    let (target_status, trigger_source) = if user_cancel {
-        (
-            crate::db::auto_queue::ENTRY_STATUS_USER_CANCELLED,
-            "dispatch_cancel_user",
+    if reset_linked_entries {
+        let entry_rows = sqlx::query(
+            "SELECT id, status
+             FROM auto_queue_entries
+             WHERE dispatch_id = $1
+               AND status IN ('pending', 'dispatched')
+               AND ($2::text[] IS NULL OR run_id = ANY($2))",
         )
-    } else {
-        (
-            crate::db::auto_queue::ENTRY_STATUS_PENDING,
-            "dispatch_cancel",
-        )
-    };
-
-    for row in entry_rows {
-        let entry_id: String = row.try_get("id").map_err(|error| {
-            format!("decode postgres queue entry id for {dispatch_id}: {error}")
+        .bind(dispatch_id)
+        .bind(run_ids.map(<[String]>::to_vec))
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| {
+            format!("load postgres queue entries for dispatch {dispatch_id}: {error}")
         })?;
-        crate::db::auto_queue::update_entry_status_on_pg_tx(
-            tx,
-            &entry_id,
-            target_status,
-            trigger_source,
-            &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
-        )
-        .await?;
+
+        // #815: user / external explicit stops must move the entry to a
+        // non-dispatchable terminal status so the next auto-queue tick does
+        // not immediately re-dispatch the same entry. System cancels keep
+        // the existing pending reset so re-dispatch proceeds.
+        //
+        // #815 P2: route both branches through the shared
+        // `update_entry_status_on_pg_tx` helper so the PG path validates
+        // the transition, records `auto_queue_entry_transitions` consistently,
+        // and (for system-terminal target statuses) invokes
+        // `maybe_finalize_run_after_terminal_entry_pg`. `user_cancelled` is
+        // intentionally non-finalizing per P1 — see the helper's comment.
+        let user_cancel = is_user_cancel_reason(reason);
+        let (target_status, trigger_source) = if user_cancel {
+            (
+                crate::db::auto_queue::ENTRY_STATUS_USER_CANCELLED,
+                "dispatch_cancel_user",
+            )
+        } else {
+            (
+                crate::db::auto_queue::ENTRY_STATUS_PENDING,
+                "dispatch_cancel",
+            )
+        };
+
+        for row in entry_rows {
+            let entry_id: String = row.try_get("id").map_err(|error| {
+                format!("decode postgres queue entry id for {dispatch_id}: {error}")
+            })?;
+            crate::db::auto_queue::update_entry_status_on_pg_tx(
+                tx,
+                &entry_id,
+                target_status,
+                trigger_source,
+                &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+            )
+            .await?;
+        }
     }
 
     Ok(CancelOutcome {
