@@ -908,7 +908,8 @@
   boundary. A `pending` predecessor is eligible for local recovery only when
   its row age exceeds `forward_pre_claim_timeout_secs`, the owner is live-local,
   and the channel is explicitly unlisted; the row is atomically retired under
-  the channel advisory lock before local execution. Unknown config and
+  the channel advisory lock before local execution; that terminal reason is
+  operator-only and excluded from automatic retry. Unknown config and
   `claimed`/`accepted`/`spawned` routes remain fenced. Foreign-owner routing,
   worker claim, lease, migration, and gateway ownership remain unchanged.
 
