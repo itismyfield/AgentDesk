@@ -470,7 +470,12 @@ pub(crate) async fn sweep_stale_pre_accept_claims(
 /// states (notably `done` — codex Phase 5 P0 #2) are refused: a worker
 /// `mark_done` racing with operator force-fail could rewrite a
 /// completed row into `failed_post_accept` and double-emit on retry.
-const TRANSITION_12_ALLOWED: [&str; 3] = ["accepted", "spawned", "failed_post_accept"];
+const TRANSITION_12_ALLOWED: [&str; 4] = [
+    "accepted",
+    "spawned",
+    "failed_pre_accept",
+    "failed_post_accept",
+];
 
 /// Reasons `force_fail_and_retry_as_new` may refuse to operate.
 #[derive(Debug, thiserror::Error)]
@@ -479,7 +484,7 @@ pub(crate) enum ForceFailError {
     NotFound(i64),
     #[error(
         "intake_outbox row id={id} is in status='{status}'; force-fail is only allowed from \
-         accepted/spawned/failed_post_accept (running transition 12 from any other state could \
+         accepted/spawned/failed_pre_accept/failed_post_accept (running transition 12 from any other state could \
          double-emit a Discord turn)"
     )]
     DisallowedStatus { id: i64, status: String },
@@ -495,12 +500,14 @@ pub(crate) enum ForceFailError {
 }
 
 /// Operator-driven force-fail + retry-as-new. Phase 5 transition 12:
-/// when a row is stuck in `accepted`, `spawned`, or `failed_post_accept`
+/// when a row is stuck in `accepted`, `spawned`, `failed_pre_accept`, or
+/// `failed_post_accept`
 /// (worker hung mid-turn or post-accept failure pinged the operator
 /// alert), this single-transaction helper:
 ///
-///   1. Marks the stuck row as `failed_post_accept` with the operator's
-///      reason text (no-op if already `failed_post_accept`).
+///   1. Marks an open post-accept row as `failed_post_accept` with the
+///      operator's reason text. Existing failure terminals stay classified by
+///      their actual accept phase.
 ///   2. INSERTs a fresh row in the same `(channel_id, user_msg_id)`
 ///      family with `attempt_no = MAX + 1` and
 ///      `parent_outbox_id = <stuck_id>`, copying the original payload
@@ -511,13 +518,13 @@ pub(crate) enum ForceFailError {
 /// the stuck row AND the new row in OPEN states at the same moment —
 /// the stuck row is force-failed BEFORE the new row enters `pending`.
 ///
-/// Codex Phase 5 P0 #2: explicitly REFUSES `done`,
-/// `failed_pre_accept`, `pending`, and `claimed`. The `done` case is
+/// Codex Phase 5 P0 #2: explicitly REFUSES `done`, `pending`, and `claimed`.
+/// The `done` case is
 /// the dangerous one — a worker `mark_done` racing with the operator
 /// CLI could otherwise rewrite a completed row into
 /// `failed_post_accept` and trigger a double-execution. The other
-/// rejected statuses are not stuck (the natural retry path covers
-/// them) so refusing is the right semantic.
+/// rejected statuses are open pre-accept work, so refusing is the right
+/// semantic.
 ///
 /// Returns the new row's `id`. Errors with `ForceFailError::NotFound`
 /// if `stuck_id` does not exist, or `ForceFailError::DisallowedStatus`
@@ -556,10 +563,9 @@ pub(crate) async fn force_fail_and_retry_as_new(
         return Err(ForceFailError::UnknownProvider { id: stuck_id });
     }
 
-    // Force-terminate if not already terminal:
-    //   - 'accepted' / 'spawned': hung mid-turn; mark failed_post_accept.
-    //   - 'failed_post_accept': already terminal; just rebuild a new attempt.
-    if row.status != "failed_post_accept" {
+    // Force-terminate only open post-accept states. Existing failure terminals
+    // retain their phase classification and original error evidence.
+    if matches!(row.status.as_str(), "accepted" | "spawned") {
         sqlx::query(
             "UPDATE intake_outbox
              SET status = 'failed_post_accept',
@@ -1945,6 +1951,54 @@ mod postgres_tests {
                 .await
                 .expect("read new attempt");
         assert_eq!(new_attempt, 2);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn force_fail_and_retry_as_new_retries_failed_pre_accept_without_reclassifying_it() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_default_test_agent(&pool).await;
+
+        insert_pending(
+            &pool,
+            &payload("ch-pre-terminal", "msg-pre-terminal"),
+            1,
+            None,
+        )
+        .await
+        .expect("seed");
+        let claimed = claim_pending_for_target(&pool, "worker-1", "claude", "owner-1")
+            .await
+            .expect("claim")
+            .expect("row");
+        mark_failed_pre_accept(&pool, claimed.id, "owner-1", "payload conversion failed")
+            .await
+            .expect("fail pre-accept");
+
+        let new_id = force_fail_and_retry_as_new(&pool, claimed.id, "operator: retry approved")
+            .await
+            .expect("retry failed_pre_accept");
+
+        let source: (String, Option<String>) =
+            sqlx::query_as("SELECT status, last_error FROM intake_outbox WHERE id = $1")
+                .bind(claimed.id)
+                .fetch_one(&pool)
+                .await
+                .expect("read source");
+        assert_eq!(source.0, "failed_pre_accept");
+        assert_eq!(source.1.as_deref(), Some("payload conversion failed"));
+
+        let child: (String, i32, Option<i64>) = sqlx::query_as(
+            "SELECT status, attempt_no, parent_outbox_id FROM intake_outbox WHERE id = $1",
+        )
+        .bind(new_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read child");
+        assert_eq!(child, ("pending".to_string(), 2, Some(claimed.id)));
 
         pool.close().await;
         pg_db.drop().await;
