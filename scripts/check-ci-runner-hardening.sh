@@ -181,7 +181,9 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.high_risk_recovery == 'true'",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "9c3587d8664bdd63769c3306c016f241e851649a68a7c6a52b11e243c438df3d",
+    # #5034 re-pins after adding the bot-intake queue admission regressions to
+    # the existing required high-risk lane.
+    "job_sha256" => "b938793e47fe1fe232f463ae9f08607b1e0157ce7984c9c90394f4e2cc099b8c",
     "require_debug_env" => false,
     "cargo_steps" => {
       "Observe curated lane selections" => {
