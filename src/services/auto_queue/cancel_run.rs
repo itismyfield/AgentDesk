@@ -1246,7 +1246,7 @@ mod pg_tests {
         .bind(run_b)
         .execute(&pool)
         .await
-        .expect("seed second run");
+        .expect("seed second run"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
         sqlx::query(
             "INSERT INTO auto_queue_entries
                 (id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index)
@@ -1258,7 +1258,7 @@ mod pg_tests {
         .bind(&dispatch_id)
         .execute(&pool)
         .await
-        .expect("seed second entry sharing dispatch");
+        .expect("seed second entry sharing dispatch"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
         sqlx::query(
             "INSERT INTO sessions (session_key, agent_id, status, active_dispatch_id)
              VALUES ('shared-live-session', 'agent-cancel', 'turn_active', $1)",
@@ -1266,12 +1266,12 @@ mod pg_tests {
         .bind(&dispatch_id)
         .execute(&pool)
         .await
-        .expect("seed second run live session");
+        .expect("seed second run live session"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
 
         let response =
             cancel_selected_runs_with_pg(None, &pool, std::slice::from_ref(&run_a), "reset_run")
                 .await
-                .expect("cancel only run A");
+                .expect("cancel only run A"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
         assert_eq!(response["cancelled_dispatches"], 0);
 
         let state = sqlx::query_as::<
@@ -1303,7 +1303,7 @@ mod pg_tests {
         .bind(&dispatch_id)
         .fetch_one(&pool)
         .await
-        .expect("load both run states");
+        .expect("load both run states"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
         assert_eq!(state.0, "cancelled");
         assert_eq!(state.1, "skipped");
         assert_eq!(state.2, "active");
@@ -1322,12 +1322,12 @@ mod pg_tests {
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, entry_id, dispatch_id) = seed_cancel_fixture(&pool, "lock-order").await;
 
-        let mut completion_tx = pool.begin().await.expect("begin simulated completion");
+        let mut completion_tx = pool.begin().await.expect("begin simulated completion"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
         sqlx::query("SELECT id FROM task_dispatches WHERE id = $1 FOR UPDATE")
             .bind(&dispatch_id)
             .fetch_one(&mut *completion_tx)
             .await
-            .expect("completion locks dispatch first");
+            .expect("completion locks dispatch first"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
 
         let cancel_pool = pool.clone();
         let cancel_run_id = run_id.clone();
@@ -1347,7 +1347,7 @@ mod pg_tests {
             )
             .fetch_one(&pool)
             .await
-            .expect("inspect lock wait");
+            .expect("inspect lock wait"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
             if observed_dispatch_wait {
                 break;
             }
@@ -1362,15 +1362,15 @@ mod pg_tests {
             .bind(&entry_id)
             .fetch_one(&mut *completion_tx)
             .await
-            .expect("completion can lock entry without a deadlock");
+            .expect("completion can lock entry without a deadlock"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
         completion_tx
             .commit()
             .await
-            .expect("commit simulated completion");
+            .expect("commit simulated completion"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
         cancel_task
             .await
-            .expect("join run cancellation")
-            .expect("run cancellation completes without deadlock");
+            .expect("join run cancellation") // agentdesk-audit: allow-unwrap — test-only task join
+            .expect("run cancellation completes without deadlock"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
 
         pool.close().await;
         pg_db.drop().await;
@@ -1394,7 +1394,7 @@ mod pg_tests {
         )
         .execute(&pool)
         .await
-        .expect("create card rollback failure function");
+        .expect("create card rollback failure function"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
         sqlx::query(
             "CREATE TRIGGER reject_cancel_card_ready
              BEFORE UPDATE ON kanban_cards
@@ -1402,7 +1402,7 @@ mod pg_tests {
         )
         .execute(&pool)
         .await
-        .expect("create card rollback failure trigger");
+        .expect("create card rollback failure trigger"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
 
         let result =
             cancel_selected_runs_with_pg(None, &pool, std::slice::from_ref(&run_id), "reset_run")
@@ -1425,7 +1425,7 @@ mod pg_tests {
         .bind(&dispatch_id)
         .fetch_one(&pool)
         .await
-        .expect("load state after rejected card rollback");
+        .expect("load state after rejected card rollback"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
         assert_eq!(state.0, "active");
         assert_eq!(state.1, "dispatched");
         assert_eq!(state.2.as_deref(), Some(dispatch_id.as_str()));
