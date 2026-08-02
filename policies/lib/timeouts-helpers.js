@@ -4,10 +4,6 @@ function sendDeadlockAlert(message) {
   return notifyDeadlockManager(message, "timeouts");
 }
 
-function sendDeadlockNotice(message) {
-  return notifyDeadlockManagerNotice(message, "timeouts");
-}
-
 // Shared constant used by sections [A] and [J]
 var MAX_DISPATCH_RETRIES = 10;
 
@@ -392,7 +388,6 @@ function _flushPMDecisions() {
 
 module.exports = {
   sendDeadlockAlert: sendDeadlockAlert,
-  sendDeadlockNotice: sendDeadlockNotice,
   MAX_DISPATCH_RETRIES: MAX_DISPATCH_RETRIES,
   shadowTimeoutDecision: shadowTimeoutDecision,
   getTimeoutInterval: getTimeoutInterval,

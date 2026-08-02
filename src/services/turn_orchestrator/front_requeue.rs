@@ -3,9 +3,8 @@ use std::collections::HashSet;
 use poise::serenity_prelude::MessageId;
 
 use super::{
-    EnqueueInterventionResult, EnqueueRefusalReason, Intervention, MAX_INTERVENTIONS_PER_CHANNEL,
-    QueueExitEvent, QueueExitKind, drain_head_overflow, ensure_source_message_ids,
-    prune_interventions,
+    EnqueueInterventionResult, EnqueueRefusalReason, Intervention, ensure_source_message_ids,
+    overflow, prune_interventions,
 };
 
 pub(super) fn intervention_identity_ids(intervention: &Intervention) -> HashSet<MessageId> {
@@ -48,14 +47,21 @@ pub(super) fn requeue_intervention_front(
             persistence_error: None,
         };
     }
-    queue.insert(0, intervention);
-    if queue.len() > MAX_INTERVENTIONS_PER_CHANNEL {
-        queue_exit_events.extend(
-            queue
-                .drain(MAX_INTERVENTIONS_PER_CHANNEL..)
-                .map(|intervention| QueueExitEvent::new(intervention, QueueExitKind::Overflow)),
-        );
+    match overflow::prepare_bot_front_requeue(queue, &intervention) {
+        Ok(bot_exit_events) => queue_exit_events.extend(bot_exit_events),
+        Err(incoming_overflow) => {
+            queue_exit_events.push(incoming_overflow);
+            return EnqueueInterventionResult {
+                enqueued: false,
+                merged: false,
+                refusal_reason: None,
+                queue_exit_events,
+                persistence_error: None,
+            };
+        }
     }
+    queue.insert(0, intervention);
+    queue_exit_events.extend(overflow::drain_front_requeue_overflow(queue));
     EnqueueInterventionResult {
         enqueued: true,
         merged: false,

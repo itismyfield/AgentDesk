@@ -104,6 +104,8 @@ jobs:
               - 'src/services/message_outbox_recovery_tests.rs'
               - 'src/services/platform/tmux.rs'
               - 'src/services/tmux_common.rs'
+              - 'src/services/turn_orchestrator.rs'
+              - 'src/services/turn_orchestrator/**'
             pg_db:
               - '.github/workflows/**'
               - 'justfile'
@@ -753,6 +755,7 @@ jobs:
       - name: High-risk recovery lane
         run: |
           cargo test --lib services::discord::router::intake_gate::gate::tests -- --skip _pg --skip pg_ --skip postgres
+          cargo test --lib services::turn_orchestrator::overflow::tests -- --skip _pg --skip pg_ --skip postgres
           cargo test --lib high_risk_recovery:: -- --test-threads=1
           cargo test --lib services::discord::recovery_engine::state_extractors::tests -- --test-threads=1
           cargo test --lib services::discord::relay_health::tests -- --test-threads=1

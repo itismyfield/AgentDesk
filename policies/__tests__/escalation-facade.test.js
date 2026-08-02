@@ -119,48 +119,6 @@ test("00-escalation loadManualInterventionState handles missing cards and parses
   assert.strictEqual(funcs.loadManualInterventionState("missing"), null);
 });
 
-test("00-escalation keeps deadlock notices visible without announce turn intake", () => {
-  var fs = require("fs");
-  var content = fs.readFileSync(__dirname + "/../00-escalation.js", "utf8");
-
-  var getFunc = new Function(
-    "require", "module", "agentdesk",
-    content + "; return { notifyDeadlockManager, notifyDeadlockManagerNotice };"
-  );
-  var queued = [];
-  var mockAgentdesk = {
-    registerPolicy: function() {},
-    config: {
-      get: function(key) {
-        return key === "deadlock_manager_channel_id" ? "1479671298497183835" : null;
-      }
-    },
-    message: {
-      queue: function(target, message, bot, source) {
-        queued.push({ target: target, message: message, bot: bot, source: source });
-      }
-    }
-  };
-
-  var funcs = getFunc(require, {}, mockAgentdesk);
-  assert.strictEqual(funcs.notifyDeadlockManagerNotice("watchdog", "timeouts"), true);
-  assert.strictEqual(funcs.notifyDeadlockManager("DISPATCH:work", "handoff"), true);
-  assert.deepStrictEqual(queued, [
-    {
-      target: "channel:1479671298497183835",
-      message: "watchdog",
-      bot: "notify",
-      source: "timeouts"
-    },
-    {
-      target: "channel:1479671298497183835",
-      message: "DISPATCH:work",
-      bot: "announce",
-      source: "handoff"
-    }
-  ]);
-});
-
 test("00-escalation escalationCardTitle uses github issue number", () => {
   var fs = require("fs");
   var content = fs.readFileSync(__dirname + "/../00-escalation.js", "utf8");

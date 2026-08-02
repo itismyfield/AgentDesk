@@ -170,23 +170,23 @@ mod tests {
     }
 
     #[test]
-    fn watchdog_notice_cannot_reach_any_intervention_queue_path() {
+    fn non_turn_allowed_bot_cannot_reach_any_intervention_queue_path() {
         const ANNOUNCE_ID: u64 = 1001;
         const NOTIFY_ID: u64 = 2002;
-        let alarm = "⚠️ [장시간 턴] project-agentdesk\n경과: 90분 (90분 단계)";
+        let notice = "informational automation notice";
 
         let mut intervention_queue = Vec::new();
         if bot_turn_message_admitted_for_live_intake(
             &[ANNOUNCE_ID, NOTIFY_ID],
             Some(ANNOUNCE_ID),
             NOTIFY_ID,
-            alarm,
+            notice,
         ) {
-            intervention_queue.push(alarm);
+            intervention_queue.push(notice);
         }
         assert!(
             intervention_queue.is_empty(),
-            "notify-authored watchdog notices must be rejected before queue admission"
+            "allowed non-announce bots still require a dispatch or monitor turn marker"
         );
 
         let intake_source = include_str!("../intake_gate.rs");
@@ -202,6 +202,46 @@ mod tests {
             6,
             "all six intervention queue paths must remain behind bot admission"
         );
+    }
+
+    #[test]
+    fn watchdog_announce_turn_remains_queue_eligible_when_capacity_is_available() {
+        const ANNOUNCE_ID: u64 = 1001;
+        let alarm = "[system → project-agentdesk 핸드오프] 🚨 릴레이 갭 감지 (out-of-band 워치독)";
+
+        assert!(bot_turn_message_admitted_for_live_intake(
+            &[ANNOUNCE_ID],
+            Some(ANNOUNCE_ID),
+            ANNOUNCE_ID,
+            alarm,
+        ));
+
+        let mut queue = Vec::new();
+        let outcome = crate::services::turn_orchestrator::enqueue_intervention(
+            &mut queue,
+            crate::services::turn_orchestrator::Intervention {
+                author_id: serenity::UserId::new(ANNOUNCE_ID),
+                author_is_bot: true,
+                message_id: serenity::MessageId::new(3001),
+                queued_generation: 1,
+                source_message_ids: vec![serenity::MessageId::new(3001)],
+                source_message_queued_generations: Vec::new(),
+                source_text_segments: Vec::new(),
+                text: alarm.to_string(),
+                mode: crate::services::turn_orchestrator::InterventionMode::Soft,
+                created_at: std::time::Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
+                pending_uploads: Vec::new(),
+                voice_announcement: None,
+            },
+            None,
+        );
+
+        assert!(outcome.enqueued);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].text, alarm);
     }
 
     #[test]

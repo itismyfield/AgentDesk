@@ -1,5 +1,5 @@
 module.exports = function attachLongTurnMonitor(timeouts, helpers) {
-  var sendDeadlockNotice = helpers.sendDeadlockNotice;
+  var sendDeadlockAlert = helpers.sendDeadlockAlert;
   var MAX_DISPATCH_RETRIES = helpers.MAX_DISPATCH_RETRIES;
   var getTimeoutInterval = helpers.getTimeoutInterval;
   var latestCardActivityExpr = helpers.latestCardActivityExpr;
@@ -137,7 +137,7 @@ module.exports = function attachLongTurnMonitor(timeouts, helpers) {
             );
             if (agentRows.length > 0) agentId = agentRows[0].id;
           }
-          sendDeadlockNotice(
+          sendDeadlockAlert(
             "⚠️ [장시간 턴] " + (inf.channel_name || inf.channel_id) + "\n" +
             "agent_id: " + agentId + "\n" +
             "session_key: " + (inf.session_key || "?") + "\n" +

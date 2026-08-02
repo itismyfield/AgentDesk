@@ -181,9 +181,9 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.high_risk_recovery == 'true'",
     "runs_on" => "ubuntu-latest",
-    # #5034 re-pins after adding the bot-intake queue admission regressions to
-    # the existing required high-risk lane.
-    "job_sha256" => "b938793e47fe1fe232f463ae9f08607b1e0157ce7984c9c90394f4e2cc099b8c",
+    # #5034 re-pins after adding bot-intake admission plus bot-capacity
+    # regressions and their owning turn-orchestrator paths to this required lane.
+    "job_sha256" => "3b21578b35da81b4b2b07d2331f97ce0c21785f0b2db3dae18bb5e838cc09685",
     "require_debug_env" => false,
     "cargo_steps" => {
       "Observe curated lane selections" => {

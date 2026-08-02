@@ -574,11 +574,7 @@ function loadPolicy(relativePath, options) {
       },
       LOOP_GUARD_TTL_SEC: 3600,
       notifyDeadlockManager(message, sourceName) {
-        state.deadlockAlerts.push({ message, source: sourceName || null, bot: "announce" });
-        return true;
-      },
-      notifyDeadlockManagerNotice(message, sourceName) {
-        state.deadlockAlerts.push({ message, source: sourceName || null, bot: "notify" });
+        state.deadlockAlerts.push({ message, source: sourceName || null });
         return true;
       },
       notifyHumanAlert() {

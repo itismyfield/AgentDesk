@@ -67,6 +67,10 @@ use turn_finished_signal::{
 };
 
 pub(crate) const MAX_INTERVENTIONS_PER_CHANNEL: usize = 30;
+/// Bot-authored turns remain actionable, but cannot reserve more than one
+/// third of a normally admitted queue. Human input may still displace a bot
+/// below this ceiling when the shared capacity is full.
+pub(crate) const MAX_BOT_INTERVENTIONS_PER_CHANNEL: usize = 10;
 pub(crate) const INTERVENTION_DEDUP_WINDOW: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -186,8 +190,8 @@ pub(crate) enum QueueExitKind {
     #[allow(dead_code)]
     Expired,
     Superseded,
-    // #4260 dual r1: capacity-cap eviction (head drop-oldest + requeue tail
-    // drain) — the only genuine input-loss vector. Kept distinct from the
+    // #4260 dual r1: capacity-cap eviction — the only genuine input-loss
+    // vector. Bot entries now absorb overflow before user entries. Kept distinct from the
     // benign `Superseded` producers (Clear full drain, active-source purge)
     // because only `Overflow` is dead-lettered + channel-notified by the sink.
     Overflow,
@@ -444,7 +448,12 @@ pub(crate) fn enqueue_intervention(
         }
     }
 
+    let incoming_author_is_bot = intervention.author_is_bot;
     queue.push(intervention);
+    queue_exit_events.extend(overflow::drain_bot_admission_overflow(
+        queue,
+        incoming_author_is_bot,
+    ));
     queue_exit_events.extend(drain_head_overflow(queue));
     EnqueueInterventionResult {
         enqueued: true,

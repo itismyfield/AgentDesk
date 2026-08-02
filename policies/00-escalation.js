@@ -114,15 +114,6 @@ function notifyDeadlockManager(message, source) {
   return notifyHumanAlert(message, source || "system");
 }
 
-function notifyDeadlockManagerNotice(message, source) {
-  var target = getDeadlockManagerChannel();
-  if (target) {
-    agentdesk.message.queue(target, message, "notify", source || "system");
-    return true;
-  }
-  return notifyHumanAlert(message, source || "system");
-}
-
 function loopGuardNowIso() {
   return new Date().toISOString();
 }
