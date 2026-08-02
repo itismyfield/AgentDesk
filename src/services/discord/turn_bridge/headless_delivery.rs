@@ -298,6 +298,7 @@ pub(super) async fn enqueue_headless_delivery(
         // Explicit reason_code keeps dedupe consistent across PG/SQLite.
         reason_code: Some("headless.delivery"),
         session_key,
+        attachment: None,
     };
     if let Some(pool) = shared.pg_pool.as_ref() {
         let delivery_cancel_token = cancel_token.filter(|token| !token.is_completion_cleanup());

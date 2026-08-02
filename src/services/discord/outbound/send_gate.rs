@@ -8,7 +8,7 @@ use serenity::ChannelId;
 use sqlx::PgPool;
 
 use super::manual_delivery::{
-    ManualOutboundDeliveryId, SerenityManualOutboundClient,
+    ManualOutboundAttachment, ManualOutboundDeliveryId, SerenityManualOutboundClient,
     send_resolved_manual_message_with_client,
 };
 use super::send_target::{
@@ -131,6 +131,7 @@ pub(crate) struct ManualOutboundOptions {
     pub(crate) trusted_internal_outbox: bool,
     pub(crate) record_transcript: bool,
     pub(crate) transcript_source_label: Option<String>,
+    pub(crate) attachment: Option<ManualOutboundAttachment>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -373,6 +374,7 @@ async fn send_message_with_backends_and_delivery_options_for_caller(
         options.record_transcript,
         options.transcript_source_label.as_deref(),
         options.trusted_internal_outbox,
+        options.attachment.as_ref(),
     )
     .await
 }

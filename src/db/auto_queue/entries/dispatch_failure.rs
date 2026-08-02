@@ -76,6 +76,7 @@ async fn record_entry_dispatch_failure_impl(
                     source: &alert.source,
                     reason_code: alert.reason_code.as_deref(),
                     session_key: alert.session_key.as_deref(),
+                    attachment: None,
                 },
                 alert.dedupe_ttl_secs,
             )

@@ -116,6 +116,7 @@ pub(super) fn maybe_notify_orphan_queue_overflow(
                 source: "queue_overflow_notice",
                 reason_code: Some("queue_overflow.evict"),
                 session_key: Some(&target),
+                attachment: None,
             },
         )
         .await;

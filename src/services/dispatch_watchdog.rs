@@ -186,6 +186,7 @@ async fn enqueue_stuck_alert(
             source: "dispatch_watchdog",
             reason_code: Some("dispatch_stuck"),
             session_key: None,
+            attachment: None,
         },
         0,
     )

@@ -740,6 +740,7 @@ impl RoutineDiscordLogger {
                 source: "routine-runtime",
                 reason_code: Some(reason_code),
                 session_key: Some(session_key),
+                attachment: None,
             },
         )
         .await
@@ -773,6 +774,7 @@ impl RoutineDiscordLogger {
                 source: "routine-runtime",
                 reason_code: Some(reason_code),
                 session_key: Some(session_key),
+                attachment: None,
             },
             dedupe_ttl_secs,
         )

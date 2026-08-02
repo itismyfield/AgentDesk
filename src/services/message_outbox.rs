@@ -26,6 +26,16 @@ pub(crate) struct OutboxMessage<'a> {
     pub source: &'a str,
     pub reason_code: Option<&'a str>,
     pub session_key: Option<&'a str>,
+    /// Durable binary payload carried through the PostgreSQL outbox. The
+    /// worker owns the eventual Discord upload, so this must not be a path.
+    pub attachment: Option<OutboxAttachment<'a>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OutboxAttachment<'a> {
+    pub filename: &'a str,
+    pub content_type: &'a str,
+    pub data: &'a [u8],
 }
 
 #[derive(Debug)]
@@ -382,6 +392,17 @@ async fn release_expired_outbox_dedupe_key_pg(
     Ok(())
 }
 
+fn attachment_parts(message: OutboxMessage<'_>) -> (Option<&str>, Option<&str>, Option<&[u8]>) {
+    match message.attachment {
+        Some(attachment) => (
+            Some(attachment.filename),
+            Some(attachment.content_type),
+            Some(attachment.data),
+        ),
+        None => (None, None, None),
+    }
+}
+
 pub(crate) async fn enqueue_outbox_pg_returning_id(
     pool: &PgPool,
     message: OutboxMessage<'_>,
@@ -436,11 +457,13 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_persistent_dedupe(
         reason_code,
         session_key.as_deref(),
     );
+    let (attachment_filename, attachment_content_type, attachment_data) = attachment_parts(message);
 
     sqlx::query_scalar::<_, i64>(
         "INSERT INTO message_outbox
-         (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, NULL)
+         (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at,
+          attachment_filename, attachment_content_type, attachment_data)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, $10)
          ON CONFLICT (dedupe_key)
              WHERE dedupe_key IS NOT NULL AND status NOT IN ('failed', 'cancelled')
          DO UPDATE SET dedupe_expires_at = NULL
@@ -453,6 +476,9 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_persistent_dedupe(
     .bind(reason_code)
     .bind(session_key.as_deref())
     .bind(dedupe_key.as_deref())
+    .bind(attachment_filename)
+    .bind(attachment_content_type)
+    .bind(attachment_data)
     .fetch_one(pool)
     .await
     .map_err(Into::into)
@@ -476,11 +502,13 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_persistent_dedupe_on_tx(
         reason_code,
         session_key.as_deref(),
     );
+    let (attachment_filename, attachment_content_type, attachment_data) = attachment_parts(message);
 
     sqlx::query_scalar::<_, i64>(
         "INSERT INTO message_outbox
-         (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, NULL)
+         (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at,
+          attachment_filename, attachment_content_type, attachment_data)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, $10)
          ON CONFLICT (dedupe_key)
              WHERE dedupe_key IS NOT NULL AND status NOT IN ('failed', 'cancelled')
          DO UPDATE SET dedupe_expires_at = NULL
@@ -493,6 +521,9 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_persistent_dedupe_on_tx(
     .bind(reason_code)
     .bind(session_key.as_deref())
     .bind(dedupe_key.as_deref())
+    .bind(attachment_filename)
+    .bind(attachment_content_type)
+    .bind(attachment_data)
     .fetch_one(&mut **tx)
     .await
     .map_err(Into::into)
@@ -516,10 +547,12 @@ pub(crate) async fn enqueue_outbox_pg_returning_outcome_with_exact_dedupe_and_ca
         return Ok(OutboxEnqueueOutcome::Cancelled);
     }
     let reason_code = normalized_reason_code(message.reason_code);
+    let (attachment_filename, attachment_content_type, attachment_data) = attachment_parts(message);
     let id = sqlx::query_scalar::<_, i64>(
         "INSERT INTO message_outbox
-         (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() + INTERVAL '30 days')
+         (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at,
+          attachment_filename, attachment_content_type, attachment_data)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() + INTERVAL '30 days', $8, $9, $10)
          ON CONFLICT (dedupe_key)
              WHERE dedupe_key IS NOT NULL AND status NOT IN ('failed', 'cancelled')
          DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key
@@ -532,6 +565,9 @@ pub(crate) async fn enqueue_outbox_pg_returning_outcome_with_exact_dedupe_and_ca
     .bind(reason_code)
     .bind(message.session_key)
     .bind(dedupe_key)
+    .bind(attachment_filename)
+    .bind(attachment_content_type)
+    .bind(attachment_data)
     .fetch_one(pool)
     .await?;
     Ok(OutboxEnqueueOutcome::Enqueued { id })
@@ -641,14 +677,16 @@ pub(crate) async fn enqueue_outbox_pg_on_tx_with_ttl(
         })
         .flatten();
     release_expired_outbox_dedupe_key_pg(tx, dedupe_key.as_deref()).await?;
+    let (attachment_filename, attachment_content_type, attachment_data) = attachment_parts(message);
     Ok(sqlx::query_scalar::<_, i64>(
         "INSERT INTO message_outbox
-         (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at)
+         (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at,
+          attachment_filename, attachment_content_type, attachment_data)
          VALUES ($1, $2, $3, $4, $5, $6, $7,
                  CASE WHEN $8::BIGINT > 0
                       THEN NOW() + ($8::BIGINT * INTERVAL '1 second')
-                      ELSE NULL
-                 END)
+                      ELSE NULL END,
+                 $9, $10, $11)
          ON CONFLICT (dedupe_key)
              WHERE dedupe_key IS NOT NULL AND status NOT IN ('failed', 'cancelled')
          DO NOTHING
@@ -662,6 +700,9 @@ pub(crate) async fn enqueue_outbox_pg_on_tx_with_ttl(
     .bind(session_key.as_deref())
     .bind(dedupe_key.as_deref())
     .bind(dedupe_ttl_secs)
+    .bind(attachment_filename)
+    .bind(attachment_content_type)
+    .bind(attachment_data)
     .fetch_optional(&mut **tx)
     .await?)
 }
@@ -715,12 +756,14 @@ pub(crate) async fn stage_outbox_pg_with_ttl(
     })?;
     let mut tx = pool.begin().await?;
     release_expired_outbox_dedupe_key_pg(&mut tx, Some(&dedupe_key)).await?;
+    let (attachment_filename, attachment_content_type, attachment_data) = attachment_parts(message);
     let inserted = sqlx::query_scalar::<_, i64>(
         "INSERT INTO message_outbox
          (target, content, bot, source, status, reason_code, session_key,
-          dedupe_key, dedupe_expires_at)
+          dedupe_key, dedupe_expires_at, attachment_filename, attachment_content_type,
+          attachment_data)
          VALUES ($1,$2,$3,$4,'held',$5,$6,$7,
-                 NOW() + ($8::BIGINT * INTERVAL '1 second'))
+                 NOW() + ($8::BIGINT * INTERVAL '1 second'), $9, $10, $11)
          ON CONFLICT (dedupe_key)
              WHERE dedupe_key IS NOT NULL AND status NOT IN ('failed', 'cancelled')
          DO NOTHING
@@ -734,6 +777,9 @@ pub(crate) async fn stage_outbox_pg_with_ttl(
     .bind(session_key.as_deref())
     .bind(&dedupe_key)
     .bind(dedupe_ttl_secs)
+    .bind(attachment_filename)
+    .bind(attachment_content_type)
+    .bind(attachment_data)
     .fetch_optional(&mut *tx)
     .await?;
     let id = match inserted {
@@ -875,10 +921,12 @@ pub(crate) async fn enqueue_outbox_pg_on_tx(
     validate_outbox_source(message.source)?;
     let reason_code = normalized_reason_code(message.reason_code);
     let session_key = normalized_session_key(message.target, message.session_key);
+    let (attachment_filename, attachment_content_type, attachment_data) = attachment_parts(message);
     Ok(sqlx::query_scalar::<_, i64>(
         "INSERT INTO message_outbox
-         (target, content, bot, source, reason_code, session_key)
-         VALUES ($1, $2, $3, $4, $5, $6)
+         (target, content, bot, source, reason_code, session_key,
+          attachment_filename, attachment_content_type, attachment_data)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          RETURNING id",
     )
     .bind(message.target)
@@ -887,6 +935,9 @@ pub(crate) async fn enqueue_outbox_pg_on_tx(
     .bind(message.source)
     .bind(reason_code)
     .bind(session_key.as_deref())
+    .bind(attachment_filename)
+    .bind(attachment_content_type)
+    .bind(attachment_data)
     .fetch_one(&mut **tx)
     .await?)
 }
@@ -973,6 +1024,7 @@ mod postgres_source_contract_tests {
             source: "headless_turn",
             reason_code: Some("headless.delivery"),
             session_key: Some("issue-5191"),
+            attachment: None,
         }
     }
 
@@ -1027,6 +1079,7 @@ mod postgres_source_contract_tests {
             source: "unregistered_policy_source",
             reason_code: Some("issue_4424_test"),
             session_key: Some("issue-4424-forbidden"),
+            attachment: None,
         }
     }
 
@@ -1038,6 +1091,7 @@ mod postgres_source_contract_tests {
             source: "scheduled_message",
             reason_code: Some(reason_code),
             session_key: None,
+            attachment: None,
         }
     }
 
@@ -1132,6 +1186,7 @@ mod postgres_source_contract_tests {
                 source,
                 reason_code: None,
                 session_key: None,
+                attachment: None,
             };
             let worker_allows = crate::services::discord::outbound::send_gate::is_allowed_send_source_for(
                 source,
@@ -1238,6 +1293,7 @@ mod postgres_held_gc_tests {
             source: "long_turn_watchdog",
             reason_code: Some("relay_recovery.circuit_open"),
             session_key: Some(session_key),
+            attachment: None,
         }
     }
 
@@ -1310,6 +1366,7 @@ mod postgres_held_gc_tests {
                 source: "scheduled_message",
                 reason_code: Some("scheduled_message:v1:gc-test:slot"),
                 session_key: None,
+                attachment: None,
             },
         )
         .await
@@ -1323,6 +1380,7 @@ mod postgres_held_gc_tests {
                 source: "system",
                 reason_code: None,
                 session_key: None,
+                attachment: None,
             },
             0,
         )

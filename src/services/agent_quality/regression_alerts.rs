@@ -434,6 +434,7 @@ pub async fn dispatch_alert(
             source: "quality_regression_alerter",
             reason_code: Some("agent_quality.regression"),
             session_key: Some(&session_key),
+            attachment: None,
         },
         ALERT_COOLDOWN_MS / 1000,
     )

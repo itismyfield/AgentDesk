@@ -398,6 +398,7 @@ pub async fn enqueue_alert_pg(pool: &PgPool, target: &str, content: &str) -> Res
             source: "slo_alerter",
             reason_code: Some("slo_threshold_breach"),
             session_key: None,
+            attachment: None,
         },
         0,
     )

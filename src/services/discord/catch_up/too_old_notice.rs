@@ -86,6 +86,7 @@ fn outbox_message(
         source: request.source,
         reason_code: Some(request.reason_code),
         session_key: Some(&request.session_key),
+        attachment: None,
     }
 }
 

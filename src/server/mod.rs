@@ -2134,9 +2134,33 @@ struct PendingMessageOutboxRow {
     source: String,
     reason_code: Option<String>,
     session_key: Option<String>,
+    attachment_filename: Option<String>,
+    attachment_content_type: Option<String>,
+    attachment_data: Option<Vec<u8>>,
     retry_count: i64,
     claim_owner: String,
     claimed_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl PendingMessageOutboxRow {
+    fn binary_attachment(
+        &self,
+    ) -> Option<crate::services::discord::outbound::manual_delivery::ManualOutboundAttachment> {
+        match (
+            self.attachment_filename.as_deref(),
+            self.attachment_content_type.as_deref(),
+            self.attachment_data.as_ref(),
+        ) {
+            (Some(filename), Some(content_type), Some(data)) => Some(
+                crate::services::discord::outbound::manual_delivery::ManualOutboundAttachment {
+                    filename: filename.to_string(),
+                    content_type: content_type.to_string(),
+                    data: data.clone(),
+                },
+            ),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2303,6 +2327,9 @@ mod message_outbox_retry_tests {
             source: source.to_string(),
             reason_code: None,
             session_key: Some("sess-1".to_string()),
+            attachment_filename: None,
+            attachment_content_type: None,
+            attachment_data: None,
             retry_count: 5,
             claim_owner: "owner".to_string(),
             claimed_at: chrono::Utc::now(),
@@ -2550,6 +2577,7 @@ mod message_outbox_retry_tests {
                 source: "stall_watchdog",
                 reason_code: Some("stall_watchdog_suspected_stall"),
                 session_key: Some(session_key),
+                attachment: None,
             },
             1800,
         )
@@ -2645,6 +2673,7 @@ mod message_outbox_retry_tests {
                 source: "system",
                 reason_code: Some("fence"),
                 session_key: Some("channel:777"),
+                attachment: None,
             },
             &coord,
             300,
@@ -2933,7 +2962,9 @@ async fn claim_pending_message_outbox_batch_pg(
                error = NULL
           FROM claimed
          WHERE mo.id = claimed.id
-        RETURNING mo.id, mo.target, mo.content, mo.bot, mo.source, mo.reason_code, mo.session_key, mo.retry_count, mo.claim_owner, mo.claimed_at",
+        RETURNING mo.id, mo.target, mo.content, mo.bot, mo.source, mo.reason_code, mo.session_key,
+                  mo.attachment_filename, mo.attachment_content_type, mo.attachment_data,
+                  mo.retry_count, mo.claim_owner, mo.claimed_at",
     )
     .bind(MESSAGE_OUTBOX_CLAIM_STALE_SECS)
     .bind(claim_owner)
@@ -2958,6 +2989,13 @@ async fn claim_pending_message_outbox_batch_pg(
                 source: row.try_get::<String, _>("source").ok()?,
                 reason_code: row.try_get::<Option<String>, _>("reason_code").ok()?,
                 session_key: row.try_get::<Option<String>, _>("session_key").ok()?,
+                attachment_filename: row
+                    .try_get::<Option<String>, _>("attachment_filename")
+                    .ok()?,
+                attachment_content_type: row
+                    .try_get::<Option<String>, _>("attachment_content_type")
+                    .ok()?,
+                attachment_data: row.try_get::<Option<Vec<u8>>, _>("attachment_data").ok()?,
                 retry_count: row.try_get::<i64, _>("retry_count").unwrap_or(0),
                 claim_owner: row.try_get::<String, _>("claim_owner").ok()?,
                 claimed_at: row

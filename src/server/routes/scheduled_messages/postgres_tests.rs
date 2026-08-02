@@ -1,6 +1,78 @@
 use super::*;
 
 #[test]
+fn scheduled_image_attachment_requires_matching_image_bytes() {
+    let png = ScheduledMessageImageAttachmentBody {
+        filename: "family-thumbnail.png".to_string(),
+        content_type: "image/png".to_string(),
+        data_base64: "iVBORw0KGgo=".to_string(),
+    };
+    let attachment = validate_image_attachment(&png).expect("valid PNG header");
+    assert_eq!(attachment.filename, "family-thumbnail.png");
+    assert_eq!(attachment.content_type, "image/png");
+    assert_eq!(attachment.data, b"\x89PNG\r\n\x1a\n");
+
+    let mismatched = ScheduledMessageImageAttachmentBody {
+        content_type: "image/jpeg".to_string(),
+        ..png
+    };
+    let error = validate_image_attachment(&mismatched).expect_err("MIME/header mismatch");
+    assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn scheduled_image_attachment_rejects_paths_and_non_image_mime_types() {
+    let path = ScheduledMessageImageAttachmentBody {
+        filename: "../thumbnail.png".to_string(),
+        content_type: "image/png".to_string(),
+        data_base64: "iVBORw0KGgo=".to_string(),
+    };
+    assert!(validate_image_attachment(&path).is_err());
+
+    let mime = ScheduledMessageImageAttachmentBody {
+        filename: "thumbnail.txt".to_string(),
+        content_type: "text/plain".to_string(),
+        data_base64: "aGVsbG8=".to_string(),
+    };
+    assert!(validate_image_attachment(&mime).is_err());
+}
+
+#[test]
+fn scheduled_image_attachment_requires_discord_target() {
+    let error = validate_image_attachment_target(true, None)
+        .expect_err("image attachments cannot be delivered to external providers only");
+    assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error
+            .to_json_value()
+            .get("error")
+            .and_then(JsonValue::as_str),
+        Some(
+            "imageAttachment requires targetChannelId because attachments are delivered through Discord"
+        )
+    );
+    validate_image_attachment_target(false, None)
+        .expect("text-only external-provider delivery remains valid");
+}
+
+#[test]
+fn scheduled_image_attachment_rejects_oversized_discord_content() {
+    let content = "x".repeat(crate::services::discord::outbound::DISCORD_HARD_LIMIT_CHARS + 1);
+    let error = validate_image_attachment_content_length(&content, true)
+        .expect_err("an image-bearing Discord message must fit one message");
+    assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error
+            .to_json_value()
+            .get("error")
+            .and_then(JsonValue::as_str),
+        Some("content must not exceed 2000 characters when imageAttachment is provided")
+    );
+    validate_image_attachment_content_length(&content, false)
+        .expect("text-only delivery retains existing long-content handling");
+}
+
+#[test]
 fn scheduled_message_bot_defaults_to_non_triggering_notify() {
     assert_eq!(scheduled_message_bot_or_default(None), "notify");
     assert_eq!(scheduled_message_bot_or_default(Some("   ")), "notify");
@@ -80,11 +152,12 @@ async fn postgres_scheduled_message_create_persists_trimmed_explicit_bot() {
         created_by: Some("postgres_test".to_string()),
         dedupe_key: None,
         provider_targets: None,
+        image_attachment: None,
         context_strategy: None,
         on_context_failure: None,
     };
 
-    let new = validate_create(&pool, &body)
+    let new = validate_create(&pool, &body, false, 1)
         .await
         .expect("validate explicit bot create");
     assert_eq!(new.bot, "notify");
@@ -123,11 +196,12 @@ async fn postgres_scheduled_push_rejects_agent_id_before_foreign_key_insert() {
         created_by: Some("postgres_test".to_string()),
         dedupe_key: None,
         provider_targets: None,
+        image_attachment: None,
         context_strategy: None,
         on_context_failure: None,
     };
 
-    let err = validate_create(&pool, &body)
+    let err = validate_create(&pool, &body, false, 1)
         .await
         .expect_err("push agentId must fail as a request error before INSERT");
     assert_eq!(err.status(), StatusCode::BAD_REQUEST);
@@ -174,6 +248,7 @@ async fn postgres_scheduled_push_patch_distinguishes_values_from_null_clears() {
             dedupe_key: None,
             provider_targets: None,
             provider_target_summary: None,
+            image_attachment: None,
             context_strategy: "fresh".to_string(),
             context_snapshot_id: None,
             on_context_failure: "fail".to_string(),
@@ -187,6 +262,8 @@ async fn postgres_scheduled_push_patch_distinguishes_values_from_null_clears() {
         &pool,
         metadata_body.as_object().expect("metadata patch object"),
         &existing,
+        false,
+        1,
     )
     .await
     .expect("metadata-only PATCH must not treat stored default fail as explicit input");
@@ -200,6 +277,8 @@ async fn postgres_scheduled_push_patch_distinguishes_values_from_null_clears() {
         &pool,
         clear_body.as_object().expect("agent clear patch object"),
         &existing,
+        false,
+        1,
     )
     .await
     .expect("explicit null clears leave no effective agent-only value");
@@ -224,6 +303,8 @@ async fn postgres_scheduled_push_patch_distinguishes_values_from_null_clears() {
             &pool,
             body.as_object().expect("invalid push patch object"),
             &existing,
+            false,
+            1,
         )
         .await
         .expect_err("push PATCH must reject effective agent-only values");
