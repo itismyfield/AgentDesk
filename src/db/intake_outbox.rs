@@ -1427,7 +1427,7 @@ mod postgres_tests {
         .bind(json!({"intake_worker":{"enabled":true,"providers":["claude"]}}))
         .execute(pool)
         .await
-        .expect("seed provider-capable leader");
+        .expect("seed provider-capable leader"); // agentdesk-audit: allow-unwrap — test fixture setup
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1621,27 +1621,22 @@ mod postgres_tests {
     /// Review r2 P1: no capability leaves the source terminal; adding online W
     /// then targets W, never provider-incapable leader L.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn failed_pre_accept_sweep_targets_online_provider_capable_worker() {
+    async fn failed_pre_accept_sweep_targets_online_provider_capable_worker()
+    -> Result<(), Box<dyn std::error::Error>> {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         seed_default_test_agent(&pool).await;
         sqlx::query("UPDATE worker_nodes SET capabilities='{\"intake_worker\":{\"enabled\":true,\"providers\":[\"codex\"]}}'::JSONB WHERE instance_id='leader-1'")
         .execute(&pool)
-        .await
-        .expect("seed heterogeneous worker capabilities");
-        let source_id = insert_pending(&pool, &payload("ch-cap", "msg-cap"), 1, None)
-            .await
-            .expect("seed source");
+        .await?;
+        let source_id = insert_pending(&pool, &payload("ch-cap", "msg-cap"), 1, None).await?;
         sqlx::query("UPDATE intake_outbox SET status='failed_pre_accept' WHERE id=$1")
             .bind(source_id)
             .execute(&pool)
-            .await
-            .expect("fail source fixture");
+            .await?;
 
         assert_eq!(
-            sweep_failed_pre_accept_once(&pool, "leader-1", 5)
-                .await
-                .expect("no-capability sweep"),
+            sweep_failed_pre_accept_once(&pool, "leader-1", 5).await?,
             FailedPreAcceptSweepOutcome::NoCapableTarget {
                 source_id,
                 provider: "claude".to_string()
@@ -1649,24 +1644,23 @@ mod postgres_tests {
         );
         sqlx::query("INSERT INTO worker_nodes (instance_id,status,capabilities,last_heartbeat_at) VALUES ('worker-claude','online','{\"intake_worker\":{\"enabled\":true,\"providers\":[\"claude\"]}}'::JSONB,NOW())")
         .execute(&pool)
-        .await
-        .expect("seed capable worker");
+        .await?;
         let FailedPreAcceptSweepOutcome::Retried { new_id, .. } =
-            sweep_failed_pre_accept_once(&pool, "leader-1", 5)
-                .await
-                .expect("sweep")
+            sweep_failed_pre_accept_once(&pool, "leader-1", 5).await?
         else {
-            panic!("capable worker must receive retry");
+            return Err(std::io::Error::other("capable worker must receive retry").into());
         };
-        let claimed =
+        let Some(claimed) =
             claim_pending_for_target(&pool, "worker-claude", "claude", "worker-claude:claude")
-                .await
-                .expect("capable worker claim")
-                .expect("retry must be claimable");
+                .await?
+        else {
+            return Err(std::io::Error::other("retry must be claimable").into());
+        };
         assert_eq!(claimed.id, new_id);
 
         pool.close().await;
         pg_db.drop().await;
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2522,33 +2516,28 @@ mod postgres_tests {
     /// sweep appended attempt 2, and attempt 2 completed. Transition 12 against
     /// the old attempt-1 id must not append attempt 3.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn force_fail_refuses_ancestor_after_done_descendant() {
+    async fn force_fail_refuses_ancestor_after_done_descendant()
+    -> Result<(), Box<dyn std::error::Error>> {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         seed_default_test_agent(&pool).await;
 
-        let attempt_1 = insert_pending(&pool, &payload("ch-desc", "msg-desc"), 1, None)
-            .await
-            .expect("seed attempt 1");
+        let attempt_1 = insert_pending(&pool, &payload("ch-desc", "msg-desc"), 1, None).await?;
         sqlx::query("UPDATE intake_outbox SET status='failed_pre_accept' WHERE id=$1")
             .bind(attempt_1)
             .execute(&pool)
-            .await
-            .expect("fail attempt 1 fixture");
+            .await?;
 
         let FailedPreAcceptSweepOutcome::Retried {
             new_id: attempt_2, ..
-        } = sweep_failed_pre_accept_once(&pool, "leader-1", 5)
-            .await
-            .expect("automatic sweep")
+        } = sweep_failed_pre_accept_once(&pool, "leader-1", 5).await?
         else {
-            panic!("sweep must append attempt 2");
+            return Err(std::io::Error::other("sweep must append attempt 2").into());
         };
         sqlx::query("UPDATE intake_outbox SET status='done' WHERE id=$1")
             .bind(attempt_2)
             .execute(&pool)
-            .await
-            .expect("complete attempt 2 fixture");
+            .await?;
 
         assert!(matches!(
             force_fail_and_retry_as_new(&pool, attempt_1, "operator: stale id").await,
@@ -2561,6 +2550,7 @@ mod postgres_tests {
         ));
         pool.close().await;
         pg_db.drop().await;
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
