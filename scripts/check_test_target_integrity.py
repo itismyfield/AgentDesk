@@ -507,15 +507,14 @@ def main(argv: list[str] | None = None) -> int:
         # corrupting that log -- a nonzero exit or a broken pipe after a
         # complete, truthful summary -- leaves this verifier at zero and turns
         # the required job red through the observer step instead (the step runs
-        # under pipefail). Conversely, this verifier is what catches a log that
-        # is absent, malformed, or inconsistent with the detailed observations.
+        # under pipefail). Conversely, this verifier is what catches problems
+        # visible in the log itself.
         #
-        # For the exact set this verifier rejects, read the
-        # --verify-selection-evidence branch below end to end -- the rejection
-        # is spread across the log read, the summary parse, and the counter
-        # recomputation, so no single function holds it. This comment
-        # deliberately names neither the set nor the functions: four rounds of
-        # trying produced a wrong answer every time, in both directions.
+        # This comment does not describe the exact set this verifier rejects.
+        # Five rounds of trying produced a wrong or incomplete answer every
+        # time. To find out whether a particular evidence defect is caught,
+        # write it into a log and run --verify-selection-evidence on it; that
+        # answer does not go stale.
         #
         # What this verifier does not check is observation sufficiency. A caught
         # internal exception is reported truthfully as execution_errors/findings

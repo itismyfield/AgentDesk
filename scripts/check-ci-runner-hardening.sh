@@ -79,7 +79,7 @@ end
 targets = {
   # The independent explicit step-inventory layer was removed. What remains
   # splits into two mechanisms of very different strength, and conflating them
-  # has produced a wrong claim in this comment three rounds running.
+  # has produced a wrong claim in this comment five rounds running.
   #
   #   1. The whole-job semantic hash only *detects* structural change. Re-pinning
   #      it in the same diff accepts anything. Measured on test_fast: adding an
@@ -87,16 +87,13 @@ targets = {
   #      cache steps each fail against the stale pin (rc=1) and pass after a
   #      re-pin (rc=0), with no expected-step edit needed. Treat the hash as a
   #      review trigger, not a guarantee.
-  #   2. Every other assertion in this file is independent of the hash and
-  #      survives a re-pin -- the job-level pins, the per-step contracts for
-  #      steps named in a job's cargo_steps, and the constraints placed on
-  #      steps that are not named there.
+  #   2. The hash is compared in exactly one place. Every other assertion in
+  #      this file is independent of it and survives a re-pin.
   #
-  # Read the checks below for what mechanism 2 actually covers. This comment
-  # deliberately does not enumerate it: four rounds of trying produced an
-  # incomplete or wrong list every time. If you need to know whether a specific
-  # tamper is caught, mutate it, re-pin the hash, and run this script -- that is
-  # the only answer that does not go stale.
+  # This comment does not enumerate what mechanism 2 covers. Five rounds of
+  # trying produced an incomplete or wrong list every time. To find out whether
+  # a specific tamper is caught, apply it, re-pin the hash, and run this
+  # script -- that answer does not go stale.
   #
   # This registry does not discover new jobs automatically, and there is no
   # invocation-floor replacement in the selection-evidence verifier.
