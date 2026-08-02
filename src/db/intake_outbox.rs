@@ -1657,6 +1657,82 @@ mod postgres_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_pre_accept_sweep_ignores_family_with_unknown_provider() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_default_test_agent(&pool).await;
+
+        let source_id = insert_pending(&pool, &payload("ch-provider", "msg-provider"), 1, None)
+            .await
+            .expect("seed source"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+        sqlx::query(
+            "UPDATE intake_outbox SET status = 'failed_pre_accept', provider = '' WHERE id = $1",
+        )
+        .bind(source_id)
+        .execute(&pool)
+        .await
+        .expect("make provider unknowable"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+
+        assert_eq!(
+            sweep_failed_pre_accept_once(&pool, "leader-1", 5)
+                .await
+                .expect("sweep"), // agentdesk-audit: allow-unwrap — test assertion
+            FailedPreAcceptSweepOutcome::Empty
+        );
+        let family_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT FROM intake_outbox
+              WHERE channel_id = 'ch-provider' AND user_msg_id = 'msg-provider'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count family"); // agentdesk-audit: allow-unwrap — test assertion
+        assert_eq!(
+            family_count, 1,
+            "unknown provider must not create pending work"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_pre_accept_sweep_waits_for_same_channel_open_route() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_default_test_agent(&pool).await;
+
+        let source_id = insert_pending(&pool, &payload("ch-open", "msg-failed"), 1, None)
+            .await
+            .expect("seed source"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+        let source = claim_pending_for_target(&pool, "worker-1", "claude", "owner-1")
+            .await
+            .expect("claim source") // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+            .expect("source row"); // agentdesk-audit: allow-unwrap — test assertion
+        assert_eq!(source.id, source_id);
+        mark_failed_pre_accept(&pool, source_id, "owner-1", "failed before accept")
+            .await
+            .expect("fail source"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+        insert_pending(&pool, &payload("ch-open", "msg-current"), 1, None)
+            .await
+            .expect("seed open route"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+
+        assert_eq!(
+            sweep_failed_pre_accept_once(&pool, "leader-1", 5)
+                .await
+                .expect("sweep"), // agentdesk-audit: allow-unwrap — test assertion
+            FailedPreAcceptSweepOutcome::Empty
+        );
+        let row_count: i64 = sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM intake_outbox")
+            .fetch_one(&pool)
+            .await
+            .expect("count rows"); // agentdesk-audit: allow-unwrap — test assertion
+        assert_eq!(row_count, 2, "open-route guard must not add a retry child");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn claim_pending_for_target_picks_oldest_pending_and_promotes_to_claimed() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
