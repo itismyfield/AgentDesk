@@ -451,7 +451,8 @@ RETURNING id;
 --     This INSERT generates a new row with attempt_no = family_max
 --     + 1 in the same (channel_id, user_msg_id) family,
 --     parent_outbox_id pointing at the source terminal row,
---     status='pending', target_instance_id = leader.
+--     status='pending', targeting an online capable worker (leader preferred).
+--     Stale-local-retirement rows are operator-only and excluded.
 --
 --     Round-4 P0 #2 fix: cap is on the COMPUTED next attempt
 --     number against the family max, not on the parent row's
@@ -495,7 +496,7 @@ INSERT INTO intake_outbox (
     attempt_no, parent_outbox_id, retry_count
 )
 SELECT
-    $local_leader, $local_leader, required_labels,
+    $capable_target, $local_leader, required_labels,
     channel_id, user_msg_id, request_owner_id, request_owner_name,
     user_text, reply_context, has_reply_boundary, dm_hint, turn_kind,
     merge_consecutive, reply_to_user_message, defer_watcher_resume,
@@ -516,6 +517,7 @@ RETURNING id, attempt_no;
 --     in the same transaction so the partial unique index lets the
 --     new row in, and (b) requires explicit operator confirmation
 --     because user-visible state has already happened.
+--     Locks source + family tip; requires parent_attempt_no = family_max.
 --
 --     Two-step in one transaction:
 BEGIN;
@@ -916,9 +918,7 @@ order:
    `execute_intake_turn_core`, which posts placeholders, edits
    reactions, enqueues mailbox, etc.
 
-This ordering means `failed_pre_accept` rows never have associated
-user-visible state, so leader sweep can safely re-target them
-without duplicating anything.
+Worker-validation failures are retryable; stale-local rows are excluded because newer local work runs.
 
 Conversely, if any failure happens *after* the accepted transition,
 it's `failed_post_accept` and is terminal until an operator
@@ -963,8 +963,8 @@ explicitly intervenes via CLI.
 - `failed_pre_accept`: retry-eligible. **Leader sweep applies
   transition 10 to INSERT a fresh attempt** with `attempt_no =
   family_max + 1`, `parent_outbox_id` linked, `target_instance_id =
-  local_leader`. The production leader heartbeat processes one eligible family
-  per tick and caps it by `max_attempts_per_message`. Transitions
+  an online source-provider worker (leader preferred). No-capability and stale-local
+  rows stay terminal. The sweep caps one family per tick by `max_attempts_per_message`. Transitions
   7 and 8 only operate on still-OPEN rows (`pending`/`claimed`)
   and are unrelated to `failed_pre_accept` recovery — round-3 P0
   fix added transition 10 specifically for that lane. The implemented
@@ -1032,9 +1032,9 @@ which is REST-safe and identical on both sides.
 | Mode | Detection | Action |
 |---|---|---|
 | Worker offline (stale heartbeat) | leader-side `worker_nodes.last_heartbeat_at` check at `resolve_intake_target` | route falls through to `Local` |
-| Worker dies before claim | row stays `pending` past `forward_pre_claim_timeout_secs` (12s) | **Transition 7 is not implemented in the current runtime.** The current guard retires the stale row to `failed_pre_accept` before admitting the newer message locally; transition 10 later re-drives the retired payload on the leader. |
+| Worker dies before claim | row stays `pending` past `forward_pre_claim_timeout_secs` (12s) | **Transition 7 is not implemented in the current runtime.** The current guard retires the stale row to `failed_pre_accept` before admitting the newer message locally. That retirement reason is excluded from automatic transition 10 so the older payload cannot race the newer local turn; only explicit operator action can retry it. |
 | Worker dies in `claimed` (cwd validation in flight) | row stuck `claimed` past `stale_claim_recovery_secs` (60s) | **Transition 8 is not wired into a production leader loop.** The two existing claimed-row sweep helpers currently have test callers only. |
-| Worker validation fails (cwd missing, workspace unprovisioned) | worker writes `failed_pre_accept` via transition 6a | the leader heartbeat applies transition 10 to INSERT one fresh attempt per tick with `target_instance_id = local_leader` (linked via `parent_outbox_id`). If the family reaches `max_attempts_per_message`, transition 10 refuses and emits a structured warning. **Deduplicated Discord operator-alert delivery is not implemented.** Further operator retries are possible through transition 12, whose budget cap is also not yet implemented. |
+| Worker validation fails (cwd missing, workspace unprovisioned) | worker writes `failed_pre_accept` via transition 6a | the leader heartbeat applies transition 10 to INSERT one fresh attempt per tick, linked via `parent_outbox_id`, on an online node that advertises the source provider. If no capable node exists, no row is inserted and a structured warning leaves the terminal source available to the operator. If the family reaches `max_attempts_per_message`, transition 10 refuses and emits a structured warning. **Deduplicated Discord operator-alert delivery is not implemented.** Further operator retries are possible through transition 12, whose budget cap is also not yet implemented. |
 | Worker dies in `accepted` | accepted_at > `accepted_unspawned_sla_secs` (default 120s) without `spawned_at` (transition 11) | **No automatic detector or alert delivery is wired.** No auto recovery; the operator can run transition 12, which copies the source target. |
 | Worker dies in `spawned` | row stuck without `done` > 24h | **The planned slow alert is not implemented.** No auto recovery; the operator can run transition 12, which copies the source target. |
 | Worker post-accept turn failure (provider error, panic in tmux) | worker writes `failed_post_accept` via transition 6b | terminal; operator decides via CLI |
@@ -1257,7 +1257,9 @@ depend on 2-pre.3 specifically — it can ship in parallel with
     fresh row with
     `attempt_no = MAX + 1`, `parent_outbox_id = $row_id`, the source row's
     `target_instance_id`, and `status = 'pending'`. It refuses `pending`,
-    `claimed`, and `done`. **Its `max_attempts_per_message` guard remains
+    `claimed`, and `done`; it also refuses a non-latest source, including one with
+    an `accepted`/`spawned`/`done` descendant. **Its
+    `max_attempts_per_message` guard remains
     unimplemented; the automatic transition-10 sweep is the bounded path.**
   - `retry-as-new <row_id>` — operator-confirmed: works on
     `accepted/spawned/failed_post_accept` rows. Runs SQL

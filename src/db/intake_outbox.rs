@@ -14,6 +14,9 @@
 use serde_json::Value;
 use sqlx::{Executor, PgPool, Postgres};
 
+/// Stale-forward retirement origin; operator-only because newer local work runs.
+pub(crate) const STALE_LOCAL_RECOVERY_ERROR: &str = "stale route retired for local recovery";
+
 /// Owned snapshot of an `intake_outbox` row. The `Phase 3` worker poll
 /// claims a row, deserializes the payload columns into this struct, then
 /// hands it to `services::discord::execute_intake_turn_core` after
@@ -207,7 +210,7 @@ where
     Ok(max_attempt.unwrap_or(0))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FailedPreAcceptSweepOutcome {
     Empty,
     Retried {
@@ -218,6 +221,10 @@ pub(crate) enum FailedPreAcceptSweepOutcome {
     BudgetExhausted {
         source_id: i64,
         attempt_no: i32,
+    },
+    NoCapableTarget {
+        source_id: i64,
+        provider: String,
     },
 }
 
@@ -241,6 +248,7 @@ pub(crate) async fn sweep_failed_pre_accept_once(
           FROM intake_outbox parent
          WHERE parent.status = 'failed_pre_accept'
            AND btrim(parent.provider) <> ''
+           AND parent.last_error IS DISTINCT FROM $2
            AND parent.attempt_no = (
                 SELECT MAX(family.attempt_no)
                   FROM intake_outbox family
@@ -261,6 +269,7 @@ pub(crate) async fn sweep_failed_pre_accept_once(
         "#,
     )
     .bind(max_attempts)
+    .bind(STALE_LOCAL_RECOVERY_ERROR)
     .fetch_optional(&mut *tx)
     .await?;
 
@@ -279,6 +288,39 @@ pub(crate) async fn sweep_failed_pre_accept_once(
     }
     let next_attempt = family_max + 1;
 
+    // Leadership and provider-worker authority are independent. Lock the
+    // advertised candidates through the child INSERT.
+    let worker_nodes: Vec<(String, Value)> = sqlx::query_as(
+        "SELECT instance_id, capabilities
+           FROM worker_nodes
+          WHERE status = 'online' AND last_heartbeat_at IS NOT NULL
+          ORDER BY (instance_id = $1) DESC,
+                   last_heartbeat_at DESC,
+                   instance_id ASC
+          FOR SHARE",
+    )
+    .bind(local_leader)
+    .fetch_all(&mut *tx)
+    .await?;
+    let target_instance_id = worker_nodes
+        .into_iter()
+        .find_map(|(instance_id, capabilities)| {
+            let node = serde_json::json!({ "capabilities": capabilities });
+            crate::services::cluster::intake_worker_capabilities::node_supports_intake_request(
+                &node,
+                &source.provider,
+                source.preserve_on_cancel.unwrap_or(false),
+            )
+            .then_some(instance_id)
+        });
+    let Some(target_instance_id) = target_instance_id else {
+        tx.commit().await?;
+        return Ok(FailedPreAcceptSweepOutcome::NoCapableTarget {
+            source_id: source.id,
+            provider: source.provider,
+        });
+    };
+
     let new_id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO intake_outbox (
@@ -289,16 +331,17 @@ pub(crate) async fn sweep_failed_pre_accept_once(
             wait_for_completion, preserve_on_cancel, agent_id, provider,
             status, attempt_no, parent_outbox_id
         ) VALUES (
-            $1, $1, $2,
-            $3, $4, $5, $6,
-            $7, $8, $9, $10, $11,
-            $12, $13, $14,
-            $15, $16, $17, $18,
-            'pending', $19, $20
+            $1, $2, $3,
+            $4, $5, $6, $7,
+            $8, $9, $10, $11, $12,
+            $13, $14, $15,
+            $16, $17, $18, $19,
+            'pending', $20, $21
         )
         RETURNING id
         "#,
     )
+    .bind(&target_instance_id)
     .bind(local_leader)
     .bind(&source.required_labels)
     .bind(&source.channel_id)
@@ -612,6 +655,17 @@ pub(crate) enum ForceFailError {
     )]
     DisallowedStatus { id: i64, status: String },
     #[error(
+        "intake_outbox row id={id} attempt={attempt_no} is not the latest family attempt={family_max} \
+         (latest status='{latest_status}'); \
+         retrying an ancestor could re-execute a request after a descendant"
+    )]
+    NotLatestAttempt {
+        id: i64,
+        attempt_no: i32,
+        family_max: i32,
+        latest_status: String,
+    },
+    #[error(
         "intake_outbox row id={id} has no recorded provider; a retry would insert pending work \
          that no worker can claim (claim is scoped on intake_outbox.provider since #4349). This \
          row predates the provider column and its forwarding bot is unknowable — set \
@@ -684,6 +738,28 @@ pub(crate) async fn force_fail_and_retry_as_new(
     // unusable can reach here; 0080 recovers every other row.
     if row.provider.trim().is_empty() {
         return Err(ForceFailError::UnknownProvider { id: stuck_id });
+    }
+
+    // Auto-sweep locks this same family tip, serializing both retry producers.
+    let latest: (i64, i32, String) = sqlx::query_as(
+        "SELECT id, attempt_no, status FROM intake_outbox
+          WHERE channel_id = $1 AND user_msg_id = $2
+          ORDER BY attempt_no DESC, id DESC
+          LIMIT 1
+          FOR UPDATE",
+    )
+    .bind(&row.channel_id)
+    .bind(&row.user_msg_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    if latest.0 != stuck_id || latest.1 != row.attempt_no {
+        return Err(ForceFailError::NotLatestAttempt {
+            id: stuck_id,
+            attempt_no: row.attempt_no,
+            family_max: latest.1,
+            latest_status: latest.2,
+        });
     }
 
     // Force-terminate only open post-accept states. Existing failure terminals
@@ -1347,6 +1423,11 @@ mod postgres_tests {
         .execute(pool)
         .await
         .expect("seed default test agent");
+        sqlx::query("INSERT INTO worker_nodes (instance_id,status,capabilities,last_heartbeat_at) VALUES ('leader-1','online',$1,NOW()) ON CONFLICT (instance_id) DO UPDATE SET status='online',capabilities=$1,last_heartbeat_at=NOW()")
+        .bind(json!({"intake_worker":{"enabled":true,"providers":["claude"]}}))
+        .execute(pool)
+        .await
+        .expect("seed provider-capable leader");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1532,6 +1613,57 @@ mod postgres_tests {
                 "hello world".to_string(),
             )
         );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// Review r2 P1: no capability leaves the source terminal; adding online W
+    /// then targets W, never provider-incapable leader L.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_pre_accept_sweep_targets_online_provider_capable_worker() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_default_test_agent(&pool).await;
+        sqlx::query("UPDATE worker_nodes SET capabilities='{\"intake_worker\":{\"enabled\":true,\"providers\":[\"codex\"]}}'::JSONB WHERE instance_id='leader-1'")
+        .execute(&pool)
+        .await
+        .expect("seed heterogeneous worker capabilities");
+        let source_id = insert_pending(&pool, &payload("ch-cap", "msg-cap"), 1, None)
+            .await
+            .expect("seed source");
+        sqlx::query("UPDATE intake_outbox SET status='failed_pre_accept' WHERE id=$1")
+            .bind(source_id)
+            .execute(&pool)
+            .await
+            .expect("fail source fixture");
+
+        assert_eq!(
+            sweep_failed_pre_accept_once(&pool, "leader-1", 5)
+                .await
+                .expect("no-capability sweep"),
+            FailedPreAcceptSweepOutcome::NoCapableTarget {
+                source_id,
+                provider: "claude".to_string()
+            }
+        );
+        sqlx::query("INSERT INTO worker_nodes (instance_id,status,capabilities,last_heartbeat_at) VALUES ('worker-claude','online','{\"intake_worker\":{\"enabled\":true,\"providers\":[\"claude\"]}}'::JSONB,NOW())")
+        .execute(&pool)
+        .await
+        .expect("seed capable worker");
+        let FailedPreAcceptSweepOutcome::Retried { new_id, .. } =
+            sweep_failed_pre_accept_once(&pool, "leader-1", 5)
+                .await
+                .expect("sweep")
+        else {
+            panic!("capable worker must receive retry");
+        };
+        let claimed =
+            claim_pending_for_target(&pool, "worker-claude", "claude", "worker-claude:claude")
+                .await
+                .expect("capable worker claim")
+                .expect("retry must be claimable");
+        assert_eq!(claimed.id, new_id);
 
         pool.close().await;
         pg_db.drop().await;
@@ -2382,6 +2514,51 @@ mod postgres_tests {
         .expect("read child"); // agentdesk-audit: allow-unwrap — test assertion
         assert_eq!(child, ("pending".to_string(), 2, Some(claimed.id)));
 
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// Review r2 P0-2 counterexample: attempt 1 failed before accept, automatic
+    /// sweep appended attempt 2, and attempt 2 completed. Transition 12 against
+    /// the old attempt-1 id must not append attempt 3.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn force_fail_refuses_ancestor_after_done_descendant() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_default_test_agent(&pool).await;
+
+        let attempt_1 = insert_pending(&pool, &payload("ch-desc", "msg-desc"), 1, None)
+            .await
+            .expect("seed attempt 1");
+        sqlx::query("UPDATE intake_outbox SET status='failed_pre_accept' WHERE id=$1")
+            .bind(attempt_1)
+            .execute(&pool)
+            .await
+            .expect("fail attempt 1 fixture");
+
+        let FailedPreAcceptSweepOutcome::Retried {
+            new_id: attempt_2, ..
+        } = sweep_failed_pre_accept_once(&pool, "leader-1", 5)
+            .await
+            .expect("automatic sweep")
+        else {
+            panic!("sweep must append attempt 2");
+        };
+        sqlx::query("UPDATE intake_outbox SET status='done' WHERE id=$1")
+            .bind(attempt_2)
+            .execute(&pool)
+            .await
+            .expect("complete attempt 2 fixture");
+
+        assert!(matches!(
+            force_fail_and_retry_as_new(&pool, attempt_1, "operator: stale id").await,
+            Err(ForceFailError::NotLatestAttempt {
+                attempt_no: 1,
+                family_max: 2,
+                ref latest_status,
+                ..
+            }) if latest_status == "done"
+        ));
         pool.close().await;
         pg_db.drop().await;
     }

@@ -426,6 +426,18 @@ fn spawn_heartbeat_loop(
                                     "[cluster] failed_pre_accept intake retry budget exhausted; operator action required"
                                 );
                             }
+                            Ok(
+                                crate::db::intake_outbox::FailedPreAcceptSweepOutcome::NoCapableTarget {
+                                    source_id,
+                                    provider,
+                                },
+                            ) => {
+                                tracing::warn!(
+                                    source_id,
+                                    %provider,
+                                    "[cluster] failed_pre_accept intake retry has no online provider-capable target; source left terminal for operator action"
+                                );
+                            }
                             Err(error) => {
                                 tracing::warn!(
                                     %error,

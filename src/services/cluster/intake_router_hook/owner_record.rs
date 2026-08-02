@@ -20,7 +20,7 @@
 // only. Remove this allow when the activation slice wires a live caller.
 #![allow(dead_code)]
 
-use crate::db::intake_outbox::{InsertPendingPayload, IntakeOutboxRow};
+use crate::db::intake_outbox::{InsertPendingPayload, IntakeOutboxRow, STALE_LOCAL_RECOVERY_ERROR};
 use sqlx::{PgPool, Postgres, Transaction};
 use std::future::Future;
 
@@ -921,13 +921,14 @@ pub(crate) async fn retire_stale_pending_route_for_local(
     let result = sqlx::query(
         "UPDATE intake_outbox
             SET status = 'failed_pre_accept', completed_at = NOW(),
-                last_error = 'stale route retired for local recovery'
+                last_error = $4
           WHERE id = $1 AND channel_id = $2 AND status = 'pending'
             AND created_at <= NOW() - ($3::BIGINT * INTERVAL '1 second')",
     )
     .bind(route_id)
     .bind(channel_id)
     .bind(stale_after_secs.max(1) as i64)
+    .bind(STALE_LOCAL_RECOVERY_ERROR)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -938,6 +939,7 @@ pub(crate) async fn retire_stale_pending_route_for_local(
 mod tests {
     use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::db::intake_outbox::{FailedPreAcceptSweepOutcome, sweep_failed_pre_accept_once};
     use serde_json::json;
 
     // -- fixtures -----------------------------------------------------------
@@ -2044,6 +2046,13 @@ mod tests {
                 .unwrap();
         assert_eq!(retired.0, "failed_pre_accept");
         assert_eq!(retired.1, "hi", "retirement must preserve the user payload");
+        // Newer M2 now runs locally without an OPEN row; L must not revive M1.
+        assert_eq!(
+            sweep_failed_pre_accept_once(&pool, "cluster-leader-L", 5)
+                .await
+                .unwrap(),
+            FailedPreAcceptSweepOutcome::Empty
+        );
 
         insert_outbox(
             &pool,
