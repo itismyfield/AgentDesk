@@ -1,8 +1,8 @@
-/// Queue acceptance is represented by the source-message reaction lifecycle.
-/// Posting a separate waiting/retry card duplicates that state and can flood the
-/// channel when a busy follow-up is deferred more than once.
+/// Queue acceptance has one channel-scoped card. The card exposes the explicit
+/// manual-steer control; queue coalescing remains responsible for preventing
+/// duplicate cards.
 pub(in crate::services::discord) const fn queue_status_card_enabled() -> bool {
-    false
+    true
 }
 
 #[cfg(test)]
@@ -10,10 +10,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn queued_user_messages_never_render_status_cards() {
+    fn queued_user_messages_render_one_manual_steer_card() {
         assert!(
-            !queue_status_card_enabled(),
-            "queued state must stay reaction-only"
+            queue_status_card_enabled(),
+            "the queue card is the explicit manual steering control"
         );
     }
 }

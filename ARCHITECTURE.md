@@ -1082,6 +1082,7 @@ src/
 │   │   ├── internal_api.rs
 │   │   ├── jsonl_watcher.rs
 │   │   ├── mailbox_finish.rs
+│   │   ├── manual_steer_interaction.rs
 │   │   ├── mcp_credential_watcher.rs
 │   │   ├── meeting_artifact_store.rs
 │   │   ├── meeting_orchestrator.rs

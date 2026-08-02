@@ -28,6 +28,7 @@ const FIRST_RESPONSE_MESSAGE_ID: u64 = 940_487_400_000_021;
 struct DiscordMockState {
     placeholder_posts: Arc<AtomicUsize>,
     local_note_posts: Arc<AtomicUsize>,
+    message_patches: Arc<AtomicUsize>,
     first_placeholder_arrived: Arc<Notify>,
     release_first_placeholder: Arc<Notify>,
     second_placeholder_arrived: Arc<Notify>,
@@ -39,6 +40,7 @@ impl DiscordMockState {
         Self {
             placeholder_posts: Arc::new(AtomicUsize::new(0)),
             local_note_posts: Arc::new(AtomicUsize::new(0)),
+            message_patches: Arc::new(AtomicUsize::new(0)),
             first_placeholder_arrived: Arc::new(Notify::new()),
             release_first_placeholder: Arc::new(Notify::new()),
             second_placeholder_arrived: Arc::new(Notify::new()),
@@ -166,6 +168,21 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
         }
         let id = state.next_response_id.fetch_add(1, Ordering::SeqCst);
         return (StatusCode::OK, Json(discord_message_json(id, &content))).into_response();
+    }
+    if method == Method::PATCH
+        && path.starts_with(&format!("/api/v10/channels/{CHANNEL_ID}/messages/"))
+    {
+        state.message_patches.fetch_add(1, Ordering::SeqCst);
+        let id = path
+            .rsplit('/')
+            .next()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(FIRST_RESPONSE_MESSAGE_ID);
+        return (
+            StatusCode::OK,
+            Json(discord_message_json(id, "patched queue card")),
+        )
+            .into_response();
     }
 
     if (method == Method::PUT || method == Method::DELETE)
@@ -538,6 +555,26 @@ fn test_message(id: u64, text: &str) -> serenity::Message {
     message
 }
 
+fn queued_intervention(message_id: u64) -> crate::services::turn_orchestrator::Intervention {
+    crate::services::turn_orchestrator::Intervention {
+        author_id: UserId::new(USER_ID),
+        author_is_bot: false,
+        message_id: MessageId::new(message_id),
+        queued_generation: 1,
+        source_message_ids: vec![MessageId::new(message_id)],
+        source_message_queued_generations: Vec::new(),
+        source_text_segments: Vec::new(),
+        text: "queued manual steer".to_string(),
+        mode: crate::services::turn_orchestrator::InterventionMode::Soft,
+        created_at: std::time::Instant::now(),
+        reply_context: None,
+        has_reply_boundary: false,
+        merge_consecutive: false,
+        pending_uploads: Vec::new(),
+        voice_announcement: None,
+    }
+}
+
 fn test_watcher_handle(
     tmux_session_name: &str,
     output_path: &std::path::Path,
@@ -581,6 +618,72 @@ async fn wait_until(
     })
     .await
     .is_ok()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_steer_button_patch_completes_while_placeholder_lock_is_held() {
+    let env_lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let root = tempfile::tempdir().expect("isolated AgentDesk root");
+    let _root_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        root.path(),
+    );
+    let state = DiscordMockState::new();
+    let (proxy, gateway_url, server) = start_mock_discord(state.clone()).await;
+    let _server_guard = AbortOnDrop(Some(server));
+    let ctx = serenity_context(proxy, gateway_url).await;
+    let shared = super::super::make_shared_data_for_tests();
+    let channel_id = ChannelId::new(CHANNEL_ID);
+    shared
+        .mailbox(channel_id)
+        .restore_active_turn(
+            Arc::new(crate::services::provider::CancelToken::new()),
+            UserId::new(USER_ID),
+            MessageId::new(A_MESSAGE_ID),
+        )
+        .await;
+    let enqueue = super::super::mailbox_enqueue_intervention(
+        &shared,
+        &ProviderKind::Claude,
+        channel_id,
+        queued_intervention(B_MESSAGE_ID),
+    )
+    .await;
+    assert!(enqueue.enqueued, "fixture intervention must be queued");
+
+    let persist_lock = shared.queued_placeholders_persist_lock(channel_id);
+    let _persist_guard = persist_lock.lock_owned().await;
+    shared.insert_queued_placeholder_locked(
+        channel_id,
+        MessageId::new(B_MESSAGE_ID),
+        MessageId::new(FIRST_RESPONSE_MESSAGE_ID),
+    );
+    let data = Data {
+        shared,
+        token: "test-token".to_string(),
+        provider: ProviderKind::Claude,
+        voice_config: crate::voice::VoiceConfig::default(),
+        voice_receiver: crate::voice::VoiceReceiver::from_voice_config(
+            &crate::voice::VoiceConfig::default(),
+        ),
+    };
+    let rendered = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        super::super::manual_steer_interaction::attach_manual_steer_button(
+            &ctx,
+            &data,
+            channel_id,
+            MessageId::new(FIRST_RESPONSE_MESSAGE_ID),
+        ),
+    )
+    .await
+    .expect("successful PATCH must not re-acquire the held placeholder mutex");
+
+    assert!(rendered);
+    assert_eq!(state.message_patches.load(Ordering::SeqCst), 1);
+    drop(env_lock);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -676,6 +779,11 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
         .expect("B traverses FullEvent intake");
     let queued_b = mailbox_snapshot(&shared, channel_id).await;
     assert_eq!(
+        state.placeholder_posts.load(Ordering::SeqCst),
+        2,
+        "B intake adds exactly one visible manual-steer queue card after A's placeholder"
+    );
+    assert_eq!(
         queued_b.active_user_message_id,
         Some(MessageId::new(A_MESSAGE_ID))
     );
@@ -733,6 +841,11 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
     assert_eq!(a_release.channel_id, channel_id);
 
     let before_model = mailbox_snapshot(&shared, channel_id).await;
+    assert_eq!(
+        state.placeholder_posts.load(Ordering::SeqCst),
+        2,
+        "idle durable B must not start before the local-only observation"
+    );
     assert!(before_model.active_user_message_id.is_none());
     assert_eq!(
         before_model.intervention_queue[0].message_id,
@@ -803,12 +916,16 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
         durable_after.is_empty(),
         "production kickoff must durably dequeue B"
     );
-    assert_eq!(state.placeholder_posts.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        state.placeholder_posts.load(Ordering::SeqCst),
+        3,
+        "the one promoted turn adds one fresh active anchor after the queue card"
+    );
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert_eq!(
         state.placeholder_posts.load(Ordering::SeqCst),
-        2,
-        "coalesced two-half wake must not dispatch B twice"
+        3,
+        "coalesced two-half wake must not add a second active anchor"
     );
     assert_eq!(state.local_note_posts.load(Ordering::SeqCst), 2);
 
