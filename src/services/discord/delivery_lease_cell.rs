@@ -1,7 +1,264 @@
-use super::{
-    ChannelId, DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseOutcome, LeaseSnapshot,
-    LeaseState, TAG_COMMITTED, TAG_LEASED, TAG_UNLEASED,
-};
+use super::{ChannelId, DeliveryLeaseKey};
+
+// ===========================================================================
+// #3041 §2-§3 — Delivery-lease `DeliveryLeaseCell` state machine.
+//
+// As of P1-1 the WATCHER terminal-delivery path wires this LIVE: the watcher
+// acquires the cell before sending, heartbeat-renews it during the send, and
+// commits+advances+releases INLINE. The `relay_slot` field above is LEFT
+// UNTOUCHED for now (its guard migration is a later step). The SINK/BRIDGE
+// committers (P1-2) and the 3-way ACK reconciliation (P1-3) are not wired yet,
+// so the actor `CommitDelivery`/`ReleaseDelivery` messages and some helpers
+// remain dormant — those still carry targeted `#[allow(dead_code)]` attributes
+// tagged with this issue/phase, to be wired/removed by the follow-up phases.
+//
+// Design (faithful to #3041 §2-§3):
+//   lease = (delivery_lease_key, byte_range [start,end))
+//           → a "one-time terminal-delivery right".
+//   The lease key is deliberately separate from the finalizer's `TurnKey`: the
+//   finalizer keeps its id-0 channel-collapse semantics, while delivery leasing
+//   needs id-0 turns disambiguated by their inflight start identity.
+//   State machine:
+//     Unleased --(CAS acquire)--> Leased{holder, deadline, range}
+//               --(commit)-------> Committed{Delivered|NotDelivered|Unknown}
+//               --(release)------> Unleased
+//     deadline reclaim: Leased --(deadline elapsed)--> Unleased
+// ===========================================================================
+
+/// Who currently holds (or is attempting to hold) the delivery lease.
+///
+/// #3041 P1-0: dormant, wired in P1-1.. — the holder is matched on
+/// compare-and-release so an actor can only release a lease it actually owns.
+#[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::services) enum LeaseHolder {
+    /// A tmux watcher instance. `instance_id` distinguishes an outgoing
+    /// watcher from its successor across a reattach so a stale watcher cannot
+    /// release the live watcher's lease.
+    Watcher { instance_id: u64 },
+    /// The standby / output sink relay.
+    Sink,
+    /// The bridge (turn-bridge handoff path).
+    Bridge,
+}
+
+/// The three-way commit outcome (#3041 §3). `Unknown` is the safety value for
+/// any ambiguous terminal (drop / panic / partial write) and MUST NOT advance
+/// the confirmed-delivery offset — only `Delivered` does.
+///
+/// #3041 P1-0: dormant, wired in P1-1...
+#[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::services) enum LeaseOutcome {
+    /// Terminal output was confirmed delivered to Discord; the offset may
+    /// advance to `end`.
+    Delivered,
+    /// Delivery was intentionally suppressed / not performed; offset unchanged.
+    NotDelivered,
+    /// Ambiguous (drop / panic / partial). Offset MUST NOT advance.
+    Unknown,
+}
+
+/// The lease state machine value, owned behind the cell's mutex. The `AtomicU8`
+/// tag below is the single-winner CAS gate for acquire; this payload is only
+/// ever mutated by that winner (or by a deadline reclaim), and every mutation
+/// flips the tag AND writes the payload under the SAME mutex, so the tag and
+/// payload are always observed coherently (#3041 codex). `read()` also takes
+/// the mutex — there is no lock-free read fast path.
+///
+/// #3041 P1-0: dormant, wired in P1-1...
+#[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
+#[derive(Clone, Debug)]
+enum LeaseState {
+    /// No holder; the lease is available to acquire.
+    Unleased,
+    /// Held by `holder` for delivery identity `key` until `deadline` (monotonic ms
+    /// since process start); covers the half-open byte range `[start, end)`.
+    /// The lease key is the FULL `(DeliveryLeaseKey, [start,end))` identity
+    /// (#3041 §2): `commit`/`release` verify it so a stale commit or release
+    /// from an OLDER turn (or the same turn with a different range) cannot act
+    /// on a reacquired NEWER lease. `reclaim_if_expired` is intentionally
+    /// deadline-only (identity-agnostic) — it force-returns an expired lease
+    /// regardless of holder/key so a dead holder cannot strand the cell.
+    Leased {
+        holder: LeaseHolder,
+        key: DeliveryLeaseKey,
+        deadline_ms: u64,
+        start: u64,
+        end: u64,
+    },
+    /// Committed with a three-way outcome; carries the same `(holder, key,
+    /// range)` identity forward so a stale release is rejected. Awaits a
+    /// `release` to return to `Unleased`.
+    Committed {
+        holder: LeaseHolder,
+        key: DeliveryLeaseKey,
+        start: u64,
+        end: u64,
+        outcome: LeaseOutcome,
+    },
+}
+
+/// #3041 P1-1: process-monotonic millisecond clock for delivery-lease
+/// deadlines. The acquire deadline and the reconciler's `reclaim_if_expired`
+/// MUST read the SAME clock; a wall clock would jump on NTP steps and could
+/// reclaim a live holder or strand a dead one. Anchored to a process-start
+/// `Instant` so it is purely monotonic (never goes backwards). NOTE: this is a
+/// real wall-monotonic clock, not the Tokio test clock; gated-clock tests drive
+/// `reclaim_if_expired` with explicit `now_ms` arguments rather than this fn.
+pub(in crate::services) fn lease_now_ms() -> u64 {
+    use std::sync::OnceLock;
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
+}
+
+/// Internal CAS gate tag for the [`DeliveryLeaseCell`]. The CAS that flips
+/// `UNLEASED → LEASED` is the single-winner acquire primitive — exactly one
+/// acquirer wins; concurrent losers serialize on the payload mutex and observe
+/// a non-`UNLEASED` tag under the lock. The tag is taken/flipped under the
+/// payload mutex (never on its own); it is NOT a lock-free read fast path —
+/// `read()` always takes the mutex (#3041 R1 coherence fix).
+const TAG_UNLEASED: u8 = 0;
+const TAG_LEASED: u8 = 1;
+const TAG_COMMITTED: u8 = 2;
+
+/// One-time terminal-delivery right for a single `(channel, turn, byte_range)`
+/// (#3041 §2-§3). DORMANT in P1-0 — added alongside, NOT replacing,
+/// `TmuxRelayCoord::relay_slot`. The `state_tag` is the single-winner CAS
+/// acquire primitive; the `payload` mutex carries the rich lease state (holder
+/// / deadline / range / outcome). The tag flip, payload write, and `read()` all
+/// happen under the one mutex, so they are always mutually coherent.
+///
+/// #3041 P1-0: dormant, wired in P1-1...
+#[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
+pub(in crate::services) struct DeliveryLeaseCell {
+    /// The channel this lease coordinates. Part of the lease identity.
+    channel_id: ChannelId,
+    /// Internal CAS gate tag (`TAG_*`). The acquire CAS on this word is the
+    /// single-winner gate; it is flipped under the payload mutex, NOT lock-free
+    /// for readers — `read()` takes the mutex.
+    state_tag: std::sync::atomic::AtomicU8,
+    /// Rich lease payload. Mutated by the CAS winner or a deadline reclaim, and
+    /// read by `read()` — all under this one mutex (the coherence invariant).
+    payload: std::sync::Mutex<LeaseState>,
+}
+
+/// A point-in-time snapshot of a [`DeliveryLeaseCell`], returned by `read()`
+/// (which materializes it under the payload mutex).
+///
+/// #3041 P1-0: dormant, wired in P1-1...
+#[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
+#[derive(Clone, Debug)]
+pub(in crate::services) enum LeaseSnapshot {
+    Unleased,
+    Leased {
+        holder: LeaseHolder,
+        key: DeliveryLeaseKey,
+        deadline_ms: u64,
+        start: u64,
+        end: u64,
+    },
+    Committed {
+        holder: LeaseHolder,
+        key: DeliveryLeaseKey,
+        start: u64,
+        end: u64,
+        outcome: LeaseOutcome,
+    },
+}
+
+/// #3041 P1-1/P1-2: delivery-lease acquire deadline shared by BOTH the watcher
+/// and the bridge terminal-delivery paths. The deadline is a HOLDER-LIVENESS
+/// signal, NOT a hard cap on delivery duration — while a send future is in
+/// flight the holder keeps the lease alive with a background HEARTBEAT that
+/// `renew()`s the deadline every [`DELIVERY_LEASE_HEARTBEAT_MS`]. Because a LIVE
+/// holder always re-extends within one interval, a long multi-chunk send (which
+/// can exceed any FIXED deadline) is NEVER reclaimed mid-flight; a genuinely
+/// DEAD holder stops renewing, so the lease expires and a replacement reclaims
+/// it within ~one deadline. Picked as 3× the heartbeat (15s = 3 × 5s): one tick
+/// can be skipped entirely and the lease still survives to the next, while
+/// dead-holder recovery is ~15s. P1-2 reuses this so the WATCHER and the BRIDGE
+/// share one deadline against the one per-channel cell — whoever holds it blocks
+/// the other's acquire (cross-actor duplicate prevention).
+pub(in crate::services) const DELIVERY_LEASE_DEADLINE_MS: u64 = 15_000;
+
+/// #3041 P1-1/P1-2: how often an in-flight holder renews its delivery lease.
+/// Must be strictly less than (and a small fraction of)
+/// [`DELIVERY_LEASE_DEADLINE_MS`] so a live holder always re-extends before
+/// expiry even if one tick is delayed (the deadline is 3× this).
+pub(in crate::services) const DELIVERY_LEASE_HEARTBEAT_MS: u64 = 5_000;
+
+/// #3041 P1-1 (§3, codex R2 Issue-1) / P1-2: RAII handle for the in-flight
+/// delivery-lease heartbeat task, shared by the watcher and the bridge. The
+/// holder spawns the heartbeat right after a successful `try_acquire` and
+/// `stop()`s it BEFORE the inline commit (and the `Drop` impl aborts it on any
+/// early return / panic), so the renew loop can NEVER outlive the send and race
+/// the commit. While the holder task lives the heartbeat keeps the lease alive
+/// (`renew`); if the holder TASK dies the spawned heartbeat is dropped/aborted
+/// with it → the lease stops being renewed → it expires → a replacement reclaims
+/// it. A heartbeat tick can only ever `renew` THIS holder's OWN still-`Leased`
+/// lease (matched on holder+key), so a last tick that races `stop()`+commit
+/// merely extends our own deadline, which the immediately-following commit then
+/// flips to `Committed` — harmless.
+pub(in crate::services) struct DeliveryLeaseHeartbeat {
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl DeliveryLeaseHeartbeat {
+    /// Spawn a background task that renews `(holder, key)`'s lease on `cell`
+    /// every [`DELIVERY_LEASE_HEARTBEAT_MS`], each time pushing the deadline to
+    /// `lease_now_ms() + DELIVERY_LEASE_DEADLINE_MS`. The first tick fires AFTER
+    /// one interval (the acquire already set a fresh deadline). The loop exits on
+    /// its own as soon as a `renew` returns false (the lease is no longer ours —
+    /// committed, released, or reclaimed), so it self-terminates even before an
+    /// explicit `stop()`.
+    pub(in crate::services) fn spawn(
+        cell: std::sync::Arc<DeliveryLeaseCell>,
+        holder: LeaseHolder,
+        key: DeliveryLeaseKey,
+    ) -> Self {
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(
+                DELIVERY_LEASE_HEARTBEAT_MS,
+            ));
+            // Skip the immediate tick `interval` emits at t=0; the acquire just
+            // set a fresh deadline, so the first renew is one interval later.
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let renewed = cell.renew(
+                    holder,
+                    key.clone(),
+                    lease_now_ms().saturating_add(DELIVERY_LEASE_DEADLINE_MS),
+                );
+                if !renewed {
+                    // Lease is no longer ours (committed/released/reclaimed):
+                    // nothing left to keep alive.
+                    break;
+                }
+            }
+        });
+        Self { handle }
+    }
+
+    /// Stop the heartbeat. Idempotent. Called BEFORE the inline commit so the
+    /// renew loop is guaranteed not to race the commit.
+    pub(in crate::services) fn stop(self) {
+        self.handle.abort();
+    }
+}
+
+impl Drop for DeliveryLeaseHeartbeat {
+    fn drop(&mut self) {
+        // Safety net: if the send path returns early / panics before an explicit
+        // `stop()`, aborting on drop guarantees the heartbeat cannot outlive the
+        // owning holder frame.
+        self.handle.abort();
+    }
+}
 
 #[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
 impl DeliveryLeaseCell {
