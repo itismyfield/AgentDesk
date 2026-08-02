@@ -506,34 +506,21 @@ async fn transition_entry_to_skipped_pg(
 }
 
 async fn rollback_cancelled_run_cards_pg(
-    pool: &PgPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     card_ids: &[String],
     source: &str,
-) -> usize {
+) -> Result<usize, String> {
     let mut rolled_back = 0usize;
 
     for card_id in card_ids {
-        let status = match sqlx::query_scalar::<_, Option<String>>(
-            "SELECT status FROM kanban_cards WHERE id = $1",
+        let status = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT status FROM kanban_cards WHERE id = $1 FOR UPDATE",
         )
         .bind(card_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut **tx)
         .await
-        {
-            Ok(Some(status)) => status,
-            Ok(None) => continue,
-            Err(error) => {
-                crate::auto_queue_log!(
-                    warn,
-                    "run_cancel_card_status_pg_failed",
-                    AutoQueueLogContext::new().card(card_id),
-                    "[auto-queue] failed to load postgres card {} during run cancel rollback: {}",
-                    card_id,
-                    error
-                );
-                continue;
-            }
-        };
+        .map_err(|error| format!("load postgres card {card_id} for run cancel: {error}"))?
+        .flatten();
         if !matches!(status.as_deref(), Some("requested") | Some("in_progress")) {
             continue;
         }
@@ -544,84 +531,49 @@ async fn rollback_cancelled_run_cards_pg(
              WHERE kanban_card_id = $1 AND status IN ('pending', 'dispatched')",
         )
         .bind(card_id)
-        .fetch_one(pool)
+        .fetch_one(&mut **tx)
         .await
-        .ok()
-        .unwrap_or(0)
+        .map_err(|error| format!("load active dispatches for card {card_id}: {error}"))?
             > 0;
         if has_active_dispatch {
             continue;
         }
 
-        let mut tx = match pool.begin().await {
-            Ok(tx) => tx,
-            Err(error) => {
-                crate::auto_queue_log!(
-                    warn,
-                    "run_cancel_card_rollback_pg_begin_failed",
-                    AutoQueueLogContext::new().card(card_id),
-                    "[auto-queue] failed to open postgres rollback transaction for card {} during run cancel: {}",
-                    card_id,
-                    error
-                );
-                continue;
-            }
-        };
+        let from_status = status.clone().unwrap_or_default();
 
-        let rollback_result = async {
-            // #1081: route status + review/dispatch pointer clears through the
-            // canonical FSM executor (`execute_pg_transition_intent`) instead
-            // of a direct status write. The enclosing `tx` keeps the
-            // transition + ancillary field cleanup atomic.
-            let current_status: Option<String> = sqlx::query_scalar::<_, Option<String>>(
-                "SELECT status FROM kanban_cards WHERE id = $1 FOR UPDATE",
-            )
-            .bind(card_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|error| format!("reload postgres card status {card_id}: {error}"))?
-            .flatten();
-            match current_status.as_deref() {
-                Some("requested") | Some("in_progress") => {}
-                _ => return Ok(false),
-            }
-            let from_status = current_status
-                .or_else(|| status.clone())
-                .unwrap_or_default();
+        crate::engine::transition_executor_pg::execute_pg_transition_intent(
+            tx,
+            &crate::engine::transition::TransitionIntent::UpdateStatus {
+                card_id: card_id.to_string(),
+                from: from_status.clone(),
+                to: "ready".to_string(),
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
 
-            crate::engine::transition_executor_pg::execute_pg_transition_intent(
-                &mut tx,
-                &crate::engine::transition::TransitionIntent::UpdateStatus {
-                    card_id: card_id.to_string(),
-                    from: from_status.clone(),
-                    to: "ready".to_string(),
-                },
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+        crate::engine::transition_executor_pg::execute_pg_transition_intent(
+            tx,
+            &crate::engine::transition::TransitionIntent::SetLatestDispatchId {
+                card_id: card_id.to_string(),
+                dispatch_id: None,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
 
-            crate::engine::transition_executor_pg::execute_pg_transition_intent(
-                &mut tx,
-                &crate::engine::transition::TransitionIntent::SetLatestDispatchId {
-                    card_id: card_id.to_string(),
-                    dispatch_id: None,
-                },
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+        crate::engine::transition_executor_pg::execute_pg_transition_intent(
+            tx,
+            &crate::engine::transition::TransitionIntent::SetReviewStatus {
+                card_id: card_id.to_string(),
+                review_status: None,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
 
-            crate::engine::transition_executor_pg::execute_pg_transition_intent(
-                &mut tx,
-                &crate::engine::transition::TransitionIntent::SetReviewStatus {
-                    card_id: card_id.to_string(),
-                    review_status: None,
-                },
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-
-            sqlx::query(
-                "UPDATE kanban_cards
+        sqlx::query(
+            "UPDATE kanban_cards
                  SET review_round = 0,
                      review_notes = NULL,
                      suggestion_pending_at = NULL,
@@ -630,13 +582,13 @@ async fn rollback_cancelled_run_cards_pg(
                      blocked_reason = NULL,
                      updated_at = NOW()
                  WHERE id = $1",
-            )
-            .bind(card_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| format!("reset postgres card cleanup fields {card_id}: {error}"))?;
+        )
+        .bind(card_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("reset postgres card cleanup fields {card_id}: {error}"))?;
 
-            sqlx::query(
+        sqlx::query(
                 "INSERT INTO card_review_state (
                     card_id, review_round, state, pending_dispatch_id, last_verdict, last_decision,
                     decided_by, decided_at, approach_change_round, session_reset_round, review_entered_at, updated_at
@@ -658,30 +610,30 @@ async fn rollback_cancelled_run_cards_pg(
                     updated_at = NOW()",
             )
             .bind(card_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(|error| format!("reset postgres card review state {card_id}: {error}"))?;
 
-            sqlx::query("DELETE FROM kv_meta WHERE key = $1 OR key = $2")
-                .bind(format!("pm_pending:{card_id}"))
-                .bind(format!("pm_decision_sent:{card_id}"))
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| format!("clear postgres card escalation state {card_id}: {error}"))?;
-
-            sqlx::query(
-                "INSERT INTO kanban_audit_logs (card_id, from_status, to_status, source, result)
-                 VALUES ($1, $2, 'ready', $3, 'OK (run cancel rollback)')",
-            )
-            .bind(card_id)
-            .bind(&status)
-            .bind(source)
-            .execute(&mut *tx)
+        sqlx::query("DELETE FROM kv_meta WHERE key = $1 OR key = $2")
+            .bind(format!("pm_pending:{card_id}"))
+            .bind(format!("pm_decision_sent:{card_id}"))
+            .execute(&mut **tx)
             .await
-            .map_err(|error| format!("insert postgres kanban audit log {card_id}: {error}"))?;
+            .map_err(|error| format!("clear postgres card escalation state {card_id}: {error}"))?;
 
-            sqlx::query(
-                "UPDATE task_dispatches
+        sqlx::query(
+            "INSERT INTO kanban_audit_logs (card_id, from_status, to_status, source, result)
+                 VALUES ($1, $2, 'ready', $3, 'OK (run cancel rollback)')",
+        )
+        .bind(card_id)
+        .bind(&status)
+        .bind(source)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("insert postgres kanban audit log {card_id}: {error}"))?;
+
+        sqlx::query(
+            "UPDATE task_dispatches
                  SET context = CASE
                          WHEN context IS NULL OR context = '' THEN context
                          ELSE NULLIF(
@@ -721,42 +673,16 @@ async fn rollback_cancelled_run_cards_pg(
                            OR (result::jsonb) ? 'completed_branch'
                        ))
                    )",
-            )
-            .bind(card_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| {
-                format!("scrub postgres dispatch worktree metadata {card_id}: {error}")
-            })?;
+        )
+        .bind(card_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("scrub postgres dispatch worktree metadata {card_id}: {error}"))?;
 
-            Ok::<bool, String>(true)
-        }
-        .await;
-
-        match rollback_result {
-            Ok(true) => {
-                if tx.commit().await.is_ok() {
-                    rolled_back += 1;
-                }
-            }
-            Ok(false) => {
-                let _ = tx.rollback().await;
-            }
-            Err(error) => {
-                let _ = tx.rollback().await;
-                crate::auto_queue_log!(
-                    warn,
-                    "run_cancel_card_rollback_pg_failed",
-                    AutoQueueLogContext::new().card(card_id),
-                    "[auto-queue] failed to roll back postgres card {} during run cancel: {}",
-                    card_id,
-                    error
-                );
-            }
-        }
+        rolled_back += 1;
     }
 
-    rolled_back
+    Ok(rolled_back)
 }
 
 pub(crate) async fn clear_and_release_slots_for_runs_pg(
@@ -940,6 +866,47 @@ pub(crate) async fn cancel_selected_runs_with_pg(
     .await
     .map_err(|error| format!("load postgres cancellation dispatch ids: {error}"))?;
 
+    // Normal dispatch completion locks task_dispatches before entries. Take
+    // the same order here so completion and run cancellation cannot deadlock.
+    let locked_dispatch_ids = sqlx::query_scalar::<_, String>(
+        "SELECT id
+         FROM task_dispatches
+         WHERE id = ANY($1)
+         ORDER BY id ASC
+         FOR UPDATE",
+    )
+    .bind(&live_dispatch_ids)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| format!("lock postgres cancellation dispatches: {error}"))?;
+
+    let entry_rows = sqlx::query_as::<_, (String, String, Option<String>)>(
+        "SELECT id, status, dispatch_id
+         FROM auto_queue_entries
+         WHERE run_id = ANY($1)
+           AND status IN ('pending', 'dispatched', 'user_cancelled')
+         ORDER BY id ASC
+         FOR UPDATE",
+    )
+    .bind(&locked_run_ids)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| format!("load postgres cancel entries: {error}"))?;
+
+    let mut cancel_metas = Vec::new();
+    for dispatch_id in &locked_dispatch_ids {
+        if let Some(meta) = crate::dispatch::cancel_dispatch_for_runs_on_pg_tx_with_meta(
+            &mut tx,
+            dispatch_id,
+            &locked_run_ids,
+            Some(reason),
+        )
+        .await?
+        {
+            cancel_metas.push(meta);
+        }
+    }
+
     // Delete gate rows in the same commit as the terminal state changes. This
     // prevents terminal-dispatch reconciliation from manufacturing a failure
     // alert while an operator-requested run cancellation is in flight.
@@ -964,35 +931,8 @@ pub(crate) async fn cancel_selected_runs_with_pg(
     .map_err(|error| format!("cancel postgres auto_queue_runs: {error}"))?
     .rows_affected() as usize;
 
-    let entry_rows = sqlx::query_as::<_, (String, String, Option<String>)>(
-        "SELECT id, status, dispatch_id
-         FROM auto_queue_entries
-         WHERE run_id = ANY($1)
-           AND status IN ('pending', 'dispatched', 'user_cancelled')
-         ORDER BY id ASC
-         FOR UPDATE",
-    )
-    .bind(&locked_run_ids)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(|error| format!("load postgres cancel entries: {error}"))?;
-
     let mut cancelled_entries = 0usize;
-    let mut cancel_metas = Vec::new();
-    let mut seen_dispatch_ids = HashSet::new();
-    for (entry_id, _entry_status, dispatch_id) in entry_rows {
-        if let Some(dispatch_id) = dispatch_id.as_deref()
-            && seen_dispatch_ids.insert(dispatch_id.to_string())
-            && let Some(meta) = crate::dispatch::cancel_dispatch_on_pg_tx_with_meta(
-                &mut tx,
-                dispatch_id,
-                Some(reason),
-            )
-            .await?
-        {
-            cancel_metas.push(meta);
-        }
-
+    for (entry_id, _entry_status, _dispatch_id) in entry_rows {
         let current_status =
             sqlx::query_scalar::<_, String>("SELECT status FROM auto_queue_entries WHERE id = $1")
                 .bind(&entry_id)
@@ -1013,19 +953,6 @@ pub(crate) async fn cancel_selected_runs_with_pg(
             .await?;
         }
         cancelled_entries += 1;
-    }
-
-    for dispatch_id in &live_dispatch_ids {
-        if seen_dispatch_ids.insert(dispatch_id.clone())
-            && let Some(meta) = crate::dispatch::cancel_dispatch_on_pg_tx_with_meta(
-                &mut tx,
-                dispatch_id,
-                Some(reason),
-            )
-            .await?
-        {
-            cancel_metas.push(meta);
-        }
     }
 
     let released_slot_rows = sqlx::query(
@@ -1054,6 +981,9 @@ pub(crate) async fn cancel_selected_runs_with_pg(
         })
         .collect::<Result<Vec<_>, String>>()?;
 
+    let rolled_back_cards =
+        rollback_cancelled_run_cards_pg(&mut tx, &rollback_candidate_card_ids, reason).await?;
+
     tx.commit()
         .await
         .map_err(|error| format!("commit postgres run cancel transaction: {error}"))?;
@@ -1068,8 +998,12 @@ pub(crate) async fn cancel_selected_runs_with_pg(
         );
     }
 
+    let cancelled_dispatch_ids = cancel_metas
+        .iter()
+        .map(|meta| meta.dispatch_id.clone())
+        .collect::<Vec<_>>();
     let mut cleared_slot_sessions =
-        clear_sessions_for_dispatches_pg(pool, &live_dispatch_ids).await?;
+        clear_sessions_for_dispatches_pg(pool, &cancelled_dispatch_ids).await?;
     let mut warnings = Vec::new();
     for (agent_id, slot_index) in released_slot_keys {
         match super::runtime::clear_slot_threads_for_slot_pg(
@@ -1086,8 +1020,6 @@ pub(crate) async fn cancel_selected_runs_with_pg(
             )),
         }
     }
-    let rolled_back_cards =
-        rollback_cancelled_run_cards_pg(pool, &rollback_candidate_card_ids, reason).await;
     let remaining_live_dispatches = count_live_dispatches_for_runs_pg(pool, target_run_ids).await?;
     let cleanup = LiveRunCleanupResult {
         cancelled_dispatches: cancel_metas.len(),
@@ -1294,6 +1226,211 @@ mod pg_tests {
                 None,
             )
         );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn cancel_selected_run_does_not_take_another_runs_shared_live_dispatch() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let (run_a, entry_a, dispatch_id) = seed_cancel_fixture(&pool, "shared-a").await;
+        let run_b = "run-cancel-shared-b";
+        let entry_b = "entry-cancel-shared-b";
+
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, agent_id, status)
+             VALUES ($1, 'agent-cancel', 'active')",
+        )
+        .bind(run_b)
+        .execute(&pool)
+        .await
+        .expect("seed second run");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index)
+             SELECT $1, $2, kanban_card_id, 'agent-cancel', 'dispatched', $3, 1
+             FROM task_dispatches WHERE id = $3",
+        )
+        .bind(entry_b)
+        .bind(run_b)
+        .bind(&dispatch_id)
+        .execute(&pool)
+        .await
+        .expect("seed second entry sharing dispatch");
+        sqlx::query(
+            "INSERT INTO sessions (session_key, agent_id, status, active_dispatch_id)
+             VALUES ('shared-live-session', 'agent-cancel', 'turn_active', $1)",
+        )
+        .bind(&dispatch_id)
+        .execute(&pool)
+        .await
+        .expect("seed second run live session");
+
+        let response =
+            cancel_selected_runs_with_pg(None, &pool, std::slice::from_ref(&run_a), "reset_run")
+                .await
+                .expect("cancel only run A");
+        assert_eq!(response["cancelled_dispatches"], 0);
+
+        let state = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                Option<String>,
+                String,
+                String,
+                Option<String>,
+            ),
+        >(
+            "SELECT ra.status, ea.status, rb.status, eb.dispatch_id,
+                    eb.status, d.status, s.active_dispatch_id
+             FROM auto_queue_runs ra
+             JOIN auto_queue_entries ea ON ea.id = $2
+             JOIN auto_queue_runs rb ON rb.id = $3
+             JOIN auto_queue_entries eb ON eb.id = $4
+             JOIN task_dispatches d ON d.id = $5
+             JOIN sessions s ON s.session_key = 'shared-live-session'
+             WHERE ra.id = $1",
+        )
+        .bind(&run_a)
+        .bind(&entry_a)
+        .bind(run_b)
+        .bind(entry_b)
+        .bind(&dispatch_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load both run states");
+        assert_eq!(state.0, "cancelled");
+        assert_eq!(state.1, "skipped");
+        assert_eq!(state.2, "active");
+        assert_eq!(state.3.as_deref(), Some(dispatch_id.as_str()));
+        assert_eq!(state.4, "dispatched");
+        assert_eq!(state.5, "dispatched");
+        assert_eq!(state.6.as_deref(), Some(dispatch_id.as_str()));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn cancel_selected_run_uses_dispatch_then_entry_lock_order() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let (run_id, entry_id, dispatch_id) = seed_cancel_fixture(&pool, "lock-order").await;
+
+        let mut completion_tx = pool.begin().await.expect("begin simulated completion");
+        sqlx::query("SELECT id FROM task_dispatches WHERE id = $1 FOR UPDATE")
+            .bind(&dispatch_id)
+            .fetch_one(&mut *completion_tx)
+            .await
+            .expect("completion locks dispatch first");
+
+        let cancel_pool = pool.clone();
+        let cancel_run_id = run_id.clone();
+        let cancel_task = tokio::spawn(async move {
+            cancel_selected_runs_with_pg(None, &cancel_pool, &[cancel_run_id], "reset_run").await
+        });
+
+        let mut observed_dispatch_wait = false;
+        for _ in 0..100 {
+            observed_dispatch_wait = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                     SELECT 1 FROM pg_stat_activity
+                     WHERE datname = current_database()
+                       AND wait_event_type = 'Lock'
+                       AND query LIKE '%task_dispatches%'
+                 )",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("inspect lock wait");
+            if observed_dispatch_wait {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(
+            observed_dispatch_wait,
+            "run cancellation must wait at dispatch before acquiring entry"
+        );
+
+        sqlx::query("SELECT id FROM auto_queue_entries WHERE id = $1 FOR UPDATE")
+            .bind(&entry_id)
+            .fetch_one(&mut *completion_tx)
+            .await
+            .expect("completion can lock entry without a deadlock");
+        completion_tx
+            .commit()
+            .await
+            .expect("commit simulated completion");
+        cancel_task
+            .await
+            .expect("join run cancellation")
+            .expect("run cancellation completes without deadlock");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn card_rollback_failure_rolls_back_the_core_run_cancellation() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let (run_id, entry_id, dispatch_id) = seed_cancel_fixture(&pool, "card-atomic").await;
+
+        sqlx::query(
+            "CREATE FUNCTION reject_cancel_card_ready() RETURNS trigger AS $$
+             BEGIN
+                 IF NEW.status = 'ready' THEN
+                     RAISE EXCEPTION 'injected card rollback failure';
+                 END IF;
+                 RETURN NEW;
+             END;
+             $$ LANGUAGE plpgsql",
+        )
+        .execute(&pool)
+        .await
+        .expect("create card rollback failure function");
+        sqlx::query(
+            "CREATE TRIGGER reject_cancel_card_ready
+             BEFORE UPDATE ON kanban_cards
+             FOR EACH ROW EXECUTE FUNCTION reject_cancel_card_ready()",
+        )
+        .execute(&pool)
+        .await
+        .expect("create card rollback failure trigger");
+
+        let result =
+            cancel_selected_runs_with_pg(None, &pool, std::slice::from_ref(&run_id), "reset_run")
+                .await;
+        assert!(
+            result.is_err(),
+            "card rollback failure must abort cancellation"
+        );
+
+        let state = sqlx::query_as::<_, (String, String, Option<String>, String, String)>(
+            "SELECT r.status, e.status, e.dispatch_id, d.status, c.status
+             FROM auto_queue_runs r
+             JOIN auto_queue_entries e ON e.id = $2
+             JOIN task_dispatches d ON d.id = $3
+             JOIN kanban_cards c ON c.id = d.kanban_card_id
+             WHERE r.id = $1",
+        )
+        .bind(&run_id)
+        .bind(&entry_id)
+        .bind(&dispatch_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load state after rejected card rollback");
+        assert_eq!(state.0, "active");
+        assert_eq!(state.1, "dispatched");
+        assert_eq!(state.2.as_deref(), Some(dispatch_id.as_str()));
+        assert_eq!(state.3, "dispatched");
+        assert_eq!(state.4, "in_progress");
 
         pool.close().await;
         pg_db.drop().await;

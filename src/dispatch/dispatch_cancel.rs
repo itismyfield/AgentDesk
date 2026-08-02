@@ -44,7 +44,8 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg(
     // On error the Transaction's Drop runs an implicit rollback, so any
     // partial writes from the helper are discarded automatically.
     let outcome =
-        cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(&mut tx, dispatch_id, reason).await?;
+        cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(&mut tx, dispatch_id, reason, None)
+            .await?;
 
     tx.commit()
         .await
@@ -135,19 +136,21 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx(
     // own observability emission for the wider unit of work; we hand back only
     // the row count and discard the captured transition metadata (#3039).
     Ok(
-        cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(tx, dispatch_id, reason)
+        cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(tx, dispatch_id, reason, None)
             .await?
             .changed,
     )
 }
 
-pub(crate) async fn cancel_dispatch_on_pg_tx_with_meta(
+pub(crate) async fn cancel_dispatch_for_runs_on_pg_tx_with_meta(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     dispatch_id: &str,
+    run_ids: &[String],
     reason: Option<&str>,
 ) -> Result<Option<CancelTransitionMeta>, String> {
     let outcome =
-        cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(tx, dispatch_id, reason).await?;
+        cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(tx, dispatch_id, reason, Some(run_ids))
+            .await?;
     Ok((outcome.changed > 0)
         .then_some(outcome.transition)
         .flatten())
@@ -157,6 +160,7 @@ async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     dispatch_id: &str,
     reason: Option<&str>,
+    run_ids: Option<&[String]>,
 ) -> Result<CancelOutcome, String> {
     let cancel_payload = reason.map(|value| json!({ "reason": value }));
 
@@ -188,8 +192,38 @@ async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(
         });
     }
 
-    let changed = match cancel_payload.as_ref() {
-        Some(payload) => sqlx::query(
+    let changed = match (cancel_payload.as_ref(), run_ids) {
+        (Some(payload), Some(run_ids)) => sqlx::query(
+            "UPDATE task_dispatches td
+             SET status = 'cancelled',
+                 result = $1,
+                 updated_at = NOW(),
+                 last_stuck_alert_at = NULL
+             WHERE td.id = $2
+               AND td.status = $3
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM auto_queue_entries e
+                   WHERE e.dispatch_id = td.id
+                     AND e.status IN ('pending', 'dispatched', 'user_cancelled')
+                     AND NOT (e.run_id = ANY($4))
+               )
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM auto_queue_phase_gates pg
+                   WHERE pg.dispatch_id = td.id
+                     AND NOT (pg.run_id = ANY($4))
+               )",
+        )
+        .bind(payload.to_string())
+        .bind(dispatch_id)
+        .bind(&current_status)
+        .bind(run_ids)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("cancel run-scoped postgres dispatch {dispatch_id}: {error}"))?
+        .rows_affected() as usize,
+        (Some(payload), None) => sqlx::query(
             "UPDATE task_dispatches
              SET status = 'cancelled',
                  result = $1,
@@ -205,7 +239,35 @@ async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(
         .await
         .map_err(|error| format!("cancel postgres dispatch {dispatch_id}: {error}"))?
         .rows_affected() as usize,
-        None => sqlx::query(
+        (None, Some(run_ids)) => sqlx::query(
+            "UPDATE task_dispatches td
+             SET status = 'cancelled',
+                 updated_at = NOW(),
+                 last_stuck_alert_at = NULL
+             WHERE td.id = $1
+               AND td.status = $2
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM auto_queue_entries e
+                   WHERE e.dispatch_id = td.id
+                     AND e.status IN ('pending', 'dispatched', 'user_cancelled')
+                     AND NOT (e.run_id = ANY($3))
+               )
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM auto_queue_phase_gates pg
+                   WHERE pg.dispatch_id = td.id
+                     AND NOT (pg.run_id = ANY($3))
+               )",
+        )
+        .bind(dispatch_id)
+        .bind(&current_status)
+        .bind(run_ids)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("cancel run-scoped postgres dispatch {dispatch_id}: {error}"))?
+        .rows_affected() as usize,
+        (None, None) => sqlx::query(
             "UPDATE task_dispatches
              SET status = 'cancelled',
                  updated_at = NOW(),
@@ -307,15 +369,29 @@ async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(
     .execute(&mut **tx)
     .await;
 
-    let entry_rows = sqlx::query(
-        "SELECT id, status
-         FROM auto_queue_entries
-         WHERE dispatch_id = $1
-           AND status IN ('pending', 'dispatched')",
-    )
-    .bind(dispatch_id)
-    .fetch_all(&mut **tx)
-    .await
+    let entry_rows = if let Some(run_ids) = run_ids {
+        sqlx::query(
+            "SELECT id, status
+             FROM auto_queue_entries
+             WHERE dispatch_id = $1
+               AND run_id = ANY($2)
+               AND status IN ('pending', 'dispatched')",
+        )
+        .bind(dispatch_id)
+        .bind(run_ids)
+        .fetch_all(&mut **tx)
+        .await
+    } else {
+        sqlx::query(
+            "SELECT id, status
+             FROM auto_queue_entries
+             WHERE dispatch_id = $1
+               AND status IN ('pending', 'dispatched')",
+        )
+        .bind(dispatch_id)
+        .fetch_all(&mut **tx)
+        .await
+    }
     .map_err(|error| format!("load postgres queue entries for dispatch {dispatch_id}: {error}"))?;
 
     // #815: user / external explicit stops must move the entry to a
