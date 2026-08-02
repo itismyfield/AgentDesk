@@ -430,6 +430,76 @@ class SessionAndCompletionChromeRegression(unittest.TestCase):
         self.assertEqual(assertions.relay_body(message), self.MARKER)
         assertions.text_present(_window(message), needle=self.MARKER)
 
+    def test_completion_footer_is_tail_anchored_after_mid_body_chrome_like_text(self):
+        message = _raw_bot_msg(
+            1,
+            "정상 응답: 아래는 UI 예시입니다.\n\n"
+            "-# ✅ 완료\n"
+            f"설명 계속 {self.MARKER}\n\n"
+            "-# ✅ 완료\n"
+            "-# 턴 시작 : anonymized",
+        )
+        window = _window(message)
+
+        expected = (
+            "정상 응답: 아래는 UI 예시입니다.\n\n"
+            "-# ✅ 완료\n"
+            f"설명 계속 {self.MARKER}"
+        )
+        self.assertEqual(assertions.relay_body(message), expected)
+        self.assertEqual(_wait_predicate(window, self.MARKER), True)
+        assertions.text_present(window, needle=self.MARKER)
+        assertions.ordered_text_present(
+            window,
+            needles=["정상 응답: 아래는 UI 예시입니다.", self.MARKER],
+        )
+        assertions.body_complete(
+            window,
+            head="정상 응답: 아래는 UI 예시입니다.",
+            tail=self.MARKER,
+        )
+
+    def test_non_chrome_tail_keeps_resume_prompt_visible_to_body_assertion(self):
+        message = _raw_bot_msg(
+            1,
+            f"{self.MARKER}\n\n-# ✅ 완료\nNo response requested.",
+        )
+        window = _window(message)
+
+        # Marker presence alone still passes; the body-scoped #2718 check must
+        # see the non-chrome tail instead of losing it to an early cut.
+        self.assertEqual(assertions.relay_body(message), message["content"])
+        self.assertEqual(_wait_predicate(window, self.MARKER), True)
+        assertions.text_present(window, needle=self.MARKER)
+        with self.assertRaisesRegex(assertions.AssertionError, "No response requested"):
+            assertions.no_resume_prompt_chrome(window)
+
+    def test_real_spinner_merged_footer_shapes_are_tail_chrome(self):
+        for footer in (
+            "-# ⠸ 완료",
+            "-# ⠸ monitor 대기",
+            "-# ⠸ 진행 중",
+            "⠸ 계속 처리 중",
+            "-# 🟡 응답 지연 · 조사 권장",
+        ):
+            with self.subTest(footer=footer):
+                body = f"{self.MARKER}\n\n{footer}"
+                self.assertEqual(
+                    assertions._strip_completion_chrome_tail(body), self.MARKER
+                )
+
+    def test_body_prose_with_subtext_and_completion_words_is_not_cut(self):
+        message = _raw_bot_msg(
+            1,
+            f"설명 속 리터럴 -# 줄과 ✅ 완료 문구\n{self.MARKER}",
+        )
+        window = _window(message)
+
+        self.assertEqual(assertions.relay_body(message), message["content"])
+        assertions.text_present(window, needle=self.MARKER)
+        assertions.ordered_text_present(window, needles=["-# ", "✅", self.MARKER])
+        assertions.body_complete(window, head="설명 속 리터럴", tail=self.MARKER)
+
     def test_repeated_banner_marker_is_not_body_evidence(self):
         message = _raw_bot_msg(
             1,

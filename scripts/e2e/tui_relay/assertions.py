@@ -46,26 +46,55 @@ _IDLE_RECAP_COMPLETION_PATTERN = re.compile(r"^📦 응답 완료 ·")
 
 # A single-message completion/status footer is appended at an exact ``\n\n``
 # boundary (``single_message_panel::compose_completion_footer_text``).  Keep
-# this list tied to the producer shapes rather than treating every ``-#`` line
-# as chrome: ordinary markdown in an answer is still relay body.  The first
-# two labels come from ``freshness::render_activity_line``; the remaining
-# shapes are the completion block's first lines after
+# this list tied to producer shapes rather than treating every ``-#`` line as
+# chrome: ordinary markdown in an answer is still relay body.  The footer's
+# first line may be a terminal status or a spinner-merged activity label; the
+# remaining shapes are the completion block's lines after
 # ``completion_footer_subtext`` adds Discord's ``-#`` prefix.
 _COMPLETION_FOOTER_HEAD_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^-# ✅ (?:완료|백그라운드 완료)$"),
-    re.compile(r"^-# (?:⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏) ✅ (?:완료|백그라운드 완료)$"),
+    # ``strip_panel_header_status_marker`` removes the leading status emoji
+    # before the spinner is prepended, so the live merged form is
+    # ``-# ⠸ 완료`` / ``-# ⠸ 진행 중`` rather than ``⠸ ✅ 완료``.
+    re.compile(
+        r"^-# (?:⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏) "
+        r"(?:진행 중(?: — [^\n]+)?|완료|백그라운드 완료|"
+        r"monitor 대기|scheduled wakeup(?: \([^\n]*\))?|"
+        r"응답 지연(?: · [^\n]+)?|"
+        r"마지막 도구 \([^\n]*\)|도구 실행 중 \([^\n]*\)|"
+        r"subagent 실행 중 \([^\n]*\)|workflow 실행 중 \([^\n]*\))$"
+    ),
+    # Non-merged status panels remain valid footer heads for providers that
+    # emit the activity label without the single-message spinner merge.
     re.compile(r"^-# (?:💤 monitor 대기|⏰ scheduled wakeup(?: \([^\n]*\))?)$"),
-    re.compile(r"^-# (?:🔧 마지막 도구|🧵 subagent 실행 중|🧬 workflow 실행 중) \([^\n]*\)$"),
-    re.compile(r"^-# (?:⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏) "
-               r"(?:💤 monitor 대기|⏰ scheduled wakeup(?: \([^\n]*\))?|"
-               r"🔧 마지막 도구|🧵 subagent 실행 중|🧬 workflow 실행 중)"
-               r"(?: \([^\n]*\))?$"),
+    re.compile(
+        r"^-# (?:🔧 마지막 도구|🧵 subagent 실행 중|🧬 workflow 실행 중) "
+        r"\([^\n]*\)$"
+    ),
+    re.compile(r"^-# 🟡 응답 지연(?: · [^\n]+)?$"),
+    re.compile(
+        r"^(?:⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏) 계속 처리 중$"
+    ),
     re.compile(r"^-# Task     "),
     re.compile(r"^-# 턴 트리거: https://discord\.com/channels/"),
     re.compile(r"^-# (?:📦|⚠️|⚠ ) .+ · auto-compact(?: |$)"),
-    re.compile(r"^-# (?:Tasks|Subagents|Background agents)$"),
+    re.compile(r"^-# (?:Tasks|Subagents|Background agents)(?: · .+)?$"),
     re.compile(r"^-# (?:⏱ |⏳ |🖥️ )"),
     re.compile(r"^-# ⚠️ \*\*턴을 완료하기 전에 커밋되지 않은 변경사항을 확인하세요\.\*\*$"),
+)
+
+# Lines that can continue a recognized footer head.  They are deliberately
+# narrower than a generic ``-#`` test: a provider may quote or author arbitrary
+# subtext in the answer, and that must not turn an interior paragraph into a
+# footer boundary.  These are the metadata/section/slot shapes emitted by the
+# completion-footer producers (plus the anonymized fixture form used by E-1).
+_COMPLETION_FOOTER_CONTINUATION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^-# (?:턴 시작|마지막 업데이트)\s*:\s*[^\n]+$"),
+    re.compile(r"^-# 턴 트리거: https://discord\.com/channels/"),
+    re.compile(r"^-# └ .+$"),
+    re.compile(r"^-# (?:📦|⚠️|⚠ ) .+$"),
+    re.compile(r"^-# (?:⏱ |⏳ |🖥️ )"),
+    re.compile(r"^-# Task     .+$"),
 )
 
 _STATUS_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -147,9 +176,10 @@ def relay_body(message: dict[str, Any]) -> str | None:
     other separator is treated as bodyless (fail closed for malformed relay
     output).  Messages without a banner retain their historical full-content
     behavior.  The product may append a completion/status footer to that same
-    post; only a recognized footer at the message tail is removed.  A prose
-    body that merely starts with a banner label but lacks the required blank
-    separator remains fail-closed, because no product path emits that shape.
+    post; only a recognized footer at the message tail is removed.  A
+    banner-shaped prefix without the required blank separator remains
+    fail-closed as a malformed boundary, while provider prose itself is allowed
+    to be arbitrary.
     """
 
     if not is_relay_response(message):
@@ -169,14 +199,37 @@ def _is_completion_footer_head(line: str) -> bool:
     return any(pattern.search(line) for pattern in _COMPLETION_FOOTER_HEAD_PATTERNS)
 
 
-def _strip_completion_chrome_tail(body: str) -> str:
-    """Drop a producer-shaped completion/status block after the answer body."""
+def _is_completion_footer_line(line: str) -> bool:
+    line = line.strip()
+    if not line:
+        return True
+    if _is_completion_footer_head(line):
+        return True
+    return any(
+        pattern.search(line) for pattern in _COMPLETION_FOOTER_CONTINUATION_PATTERNS
+    )
 
-    for boundary in re.finditer(r"\n\n(?=-# )", body):
+
+def _strip_completion_chrome_tail(body: str) -> str:
+    """Drop only the maximal producer-shaped completion/status run at the tail.
+
+    A footer-looking block quoted in the middle of an answer is followed by
+    non-footer prose and therefore fails the all-lines check.  When several
+    candidate boundaries are valid (for example, a status head followed by
+    blank-separated Tasks/Subagents sections), choose the earliest valid one
+    so the whole trailing chrome run is removed.
+    """
+
+    valid_boundaries: list[int] = []
+    for boundary in re.finditer(r"\n\n", body):
         footer = body[boundary.end() :]
         first = next((line for line in footer.splitlines() if line.strip()), "")
-        if _is_completion_footer_head(first):
-            return body[: boundary.start()].rstrip()
+        if _is_completion_footer_head(first) and all(
+            _is_completion_footer_line(line) for line in footer.splitlines()
+        ):
+            valid_boundaries.append(boundary.start())
+    if valid_boundaries:
+        return body[: min(valid_boundaries)].rstrip()
     return body
 
 
