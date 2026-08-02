@@ -75,8 +75,7 @@ def _wait_predicate(window: assertions.Window, needle: str) -> bool:
     """Mirror the driver's per-message relay wait predicate."""
 
     return any(
-        assertions.is_relay_response(message)
-        and needle in (message.get("content") or "")
+        (body := assertions.relay_body(message)) is not None and needle in body
         for message in window.raw_messages
     )
 
@@ -345,17 +344,88 @@ class SessionAndCompletionChromeRegression(unittest.TestCase):
 
     def test_resumed_banner_and_body_stay_one_relay_response(self):
         message = _raw_bot_msg(1, f"{self.RESUMED_BANNER}\n\n{self.MARKER}")
+        completion = _raw_bot_msg(2, "-# ✅ 완료\n-# 턴 시작 : anonymized")
 
         self.assertEqual(assertions.is_relay_response(message), True)
-        window = _window(message)
+        window = _window(message, completion)
         self.assertEqual(window.messages, [message])
+        self.assertEqual(_wait_predicate(window, self.MARKER), True)
         assertions.text_present(window, needle=self.MARKER)
+        assertions.completion_chrome_after_body(
+            window, body_marker=self.MARKER, required=True
+        )
 
     def test_fresh_banner_and_body_stay_one_relay_response(self):
         message = _raw_bot_msg(1, f"🆕 새 세션 시작\n\n{self.MARKER}")
 
         self.assertEqual(assertions.is_relay_response(message), True)
-        assertions.text_present(_window(message), needle=self.MARKER)
+        window = _window(message)
+        self.assertEqual(_wait_predicate(window, self.MARKER), True)
+        assertions.text_present(window, needle=self.MARKER)
+
+    def test_marker_attached_with_single_newline_is_not_a_relay_body(self):
+        message = _raw_bot_msg(1, f"기존 세션 복원\n{self.MARKER}")
+        completion = _raw_bot_msg(2, "-# ✅ 완료\n-# 턴 시작 : anonymized")
+        window = _window(message, completion)
+
+        # The malformed banner-shaped post is still observable raw output, but
+        # its marker is not evidence of a delivered answer body.
+        self.assertEqual(assertions.is_relay_response(message), True)
+        self.assertEqual(_wait_predicate(window, self.MARKER), False)
+        with self.assertRaises(assertions.AssertionError):
+            assertions.text_present(window, needle=self.MARKER)
+        with self.assertRaises(assertions.AssertionError):
+            assertions.completion_chrome_after_body(
+                window, body_marker=self.MARKER, required=True
+            )
+
+    def test_marker_in_banner_prefix_is_not_a_relay_body(self):
+        message = _raw_bot_msg(
+            1,
+            "기존 세션 복원 · provider session "
+            f"{self.MARKER}\n\nwrong response body",
+        )
+        completion = _raw_bot_msg(2, "-# ✅ 완료\n-# 턴 시작 : anonymized")
+        window = _window(message, completion)
+
+        self.assertEqual(_wait_predicate(window, self.MARKER), False)
+        with self.assertRaises(assertions.AssertionError):
+            assertions.text_present(window, needle=self.MARKER)
+        with self.assertRaises(assertions.AssertionError):
+            assertions.completion_chrome_after_body(
+                window, body_marker=self.MARKER, required=True
+            )
+
+    def test_marker_in_normal_body_without_banner_stays_a_relay_body(self):
+        message = _raw_bot_msg(1, self.MARKER)
+        completion = _raw_bot_msg(2, "-# ✅ 완료\n-# 턴 시작 : anonymized")
+        window = _window(message, completion)
+
+        self.assertEqual(_wait_predicate(window, self.MARKER), True)
+        assertions.text_present(window, needle=self.MARKER)
+        assertions.completion_chrome_after_body(
+            window, body_marker=self.MARKER, required=True
+        )
+
+    def test_response_completion_phrase_inside_normal_body_stays_a_relay(self):
+        message = _raw_bot_msg(
+            1,
+            f"정상 응답 본문: 응답 완료를 설명합니다 {self.MARKER}",
+        )
+        window = _window(message)
+
+        self.assertEqual(assertions.is_relay_response(message), True)
+        self.assertEqual(_wait_predicate(window, self.MARKER), True)
+        assertions.text_present(window, needle=self.MARKER)
+
+    def test_current_completion_producer_shapes_stay_chrome(self):
+        for content in (
+            "✅ **응답 완료**\n> **시작**: <t:1700000000:R>",
+            "📦 응답 완료 · resumed\n세션: claude · context unknown · idle 1분",
+        ):
+            message = _raw_bot_msg(1, content)
+            self.assertEqual(assertions.is_relay_response(message), False)
+            self.assertEqual(assertions.relay_body(message), None)
 
     def test_completion_panel_is_chrome_and_completion_after_body(self):
         body = _relay_msg(1, self.MARKER)

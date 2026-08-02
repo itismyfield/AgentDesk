@@ -2239,7 +2239,7 @@ def _marker_presence(
         relay_hits = [
             str(message.get("id") or "")
             for message in window.messages
-            if marker in (message.get("content") or "")
+            if (body := assertions.relay_body(message)) is not None and marker in body
         ]
         raw_hits = [
             str(message.get("id") or "")
@@ -2328,13 +2328,16 @@ def _classify_wait_timeout(
         return "prompt_not_submitted_input_buffer_still_contains_prompt"
 
     raw_has_needle = any(needle in (m.get("content") or "") for m in window.raw_messages)
-    relay_has_needle = any(needle in (m.get("content") or "") for m in window.messages)
+    relay_has_needle = any(
+        (body := assertions.relay_body(message)) is not None and needle in body
+        for message in window.messages
+    )
     if raw_has_needle and not relay_has_needle:
         return "relay_surface_filter_miss_raw_contains_needle"
 
     if head:
         for message in window.messages:
-            body = message.get("content") or ""
+            body = assertions.relay_body(message) or ""
             head_at = body.find(head)
             if head_at != -1 and body.find(needle, head_at + len(head)) == -1:
                 return "body_truncated_or_tail_missing_after_head"
@@ -2467,8 +2470,7 @@ def wait_for_discord_text_with_tui_idle_draft_guard(
     observed: list[dict[str, Any]] = []
     observed_by_id: dict[str, dict[str, Any]] = {}
     predicate = lambda message: (  # noqa: E731
-        assertions.is_relay_response(message)
-        and needle in (message.get("content") or "")
+        (body := assertions.relay_body(message)) is not None and needle in body
     )
     while time.monotonic() < deadline:
         messages = client.fetch_messages(channel_id, after_id=after_id, limit=100)

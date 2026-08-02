@@ -29,12 +29,20 @@ OUR_BOT_ID = os.environ.get("AGENTDESK_E2E_OUR_BOT_ID", "1479017284805722200")
 # Session banners are chrome only when the whole message has the panel shape.
 # The first answer message deliberately uses `<banner>\n\n<body>`, so this
 # anchored pattern must not consume a banner that has a non-empty body below it.
-_SESSION_PANEL_CHROME_PATTERN = re.compile(
+_SESSION_BANNER_PREFIX_PATTERN = re.compile(
     r"^(?:🆕 새 세션 시작|기존 세션 복원|Lifecycle fallback)"
     r"(?: · [^\n]+)?"
-    r"(?:\n\(최근 대화 \d+개를 읽어들였습니다\))?$"
+    r"(?:\n\(최근 대화 \d+개를 읽어들였습니다\))?"
+)
+_SESSION_PANEL_CHROME_PATTERN = re.compile(
+    _SESSION_BANNER_PREFIX_PATTERN.pattern + r"$"
 )
 _COMPLETION_PANEL_CHROME_PATTERN = re.compile(r"^-# ✅ 완료(?:\n|$)")
+# The only current non-emoji-led producer is the idle-recap card. Keep this
+# anchored to its complete header shape so prose such as "응답 완료를
+# 설명합니다" remains a relay body. Monitor-handoff completion is covered by
+# the leading `^✅` status family below.
+_IDLE_RECAP_COMPLETION_PATTERN = re.compile(r"^📦 응답 완료 ·")
 
 _STATUS_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"Processing\.\.\."),
@@ -48,7 +56,7 @@ _STATUS_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^▶️"),
     re.compile(r"^⚠️"),
     re.compile(r"진행 중"),
-    re.compile(r"응답 완료"),
+    _IDLE_RECAP_COMPLETION_PATTERN,
     _SESSION_PANEL_CHROME_PATTERN,
     _COMPLETION_PANEL_CHROME_PATTERN,
     re.compile(r"세션 초기화"),
@@ -57,7 +65,7 @@ _STATUS_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 _COMPLETION_CHROME_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^✅"),
-    re.compile(r"응답 완료"),
+    _IDLE_RECAP_COMPLETION_PATTERN,
     _COMPLETION_PANEL_CHROME_PATTERN,
 )
 
@@ -103,6 +111,30 @@ def is_relay_response(message: dict[str, Any]) -> bool:
     if is_status_chrome(message):
         return False
     return True
+
+
+def relay_body(message: dict[str, Any]) -> str | None:
+    """Return the body used by relay-marker assertions for one message.
+
+    A first answer may carry a session banner and body in one Discord post,
+    joined by the product's exact ``<banner>\n\n<body>`` contract.  Marker
+    assertions must search only the body: a marker in the banner is not
+    evidence that the answer was delivered.  A banner-shaped post with any
+    other separator is treated as bodyless (fail closed for malformed relay
+    output).  Messages without a banner retain their historical full-content
+    behavior.
+    """
+
+    if not is_relay_response(message):
+        return None
+    content = message.get("content") or ""
+    prefix = _SESSION_BANNER_PREFIX_PATTERN.match(content)
+    if prefix is None:
+        return content
+    remainder = content[prefix.end() :]
+    if not remainder.startswith("\n\n"):
+        return None
+    return remainder[2:]
 
 
 @dataclasses.dataclass
@@ -220,7 +252,7 @@ def no_duplicate_content(window: Window) -> None:
 
     seen: set[str] = set()
     for message in window.messages:
-        body = (message.get("content") or "").strip()
+        body = (relay_body(message) or "").strip()
         if not body:
             continue
         if body in seen:
@@ -230,7 +262,8 @@ def no_duplicate_content(window: Window) -> None:
 
 def text_present(window: Window, *, needle: str) -> None:
     for message in window.messages:
-        if needle in (message.get("content") or ""):
+        body = relay_body(message)
+        if body is not None and needle in body:
             return
     raise AssertionError(
         f"expected to find {needle!r} in relay window, got {len(window.messages)} "
@@ -266,7 +299,14 @@ def marker_absent(
         messages = _raw_assertion_messages(window, include_our_send=include_our_send)
     else:
         raise AssertionError(f"marker_absent surface must be relay or raw, got {surface!r}")
-    hits = [message for message in messages if marker in (message.get("content") or "")]
+    if surface == "relay":
+        hits = [
+            message
+            for message in messages
+            if (body := relay_body(message)) is not None and marker in body
+        ]
+    else:
+        hits = [message for message in messages if marker in (message.get("content") or "")]
     if hits:
         raise AssertionError(
             f"unexpected marker {marker!r} appeared on {surface} surface "
@@ -298,7 +338,7 @@ def ordered_text_present(window: Window, *, needles: Sequence[str]) -> None:
     and out-of-order delivery that single-needle :func:`text_present` passes.
     """
 
-    bodies = [(message.get("content") or "") for message in window.messages]
+    bodies = [relay_body(message) or "" for message in window.messages]
     cursor_msg = 0
     cursor_pos = 0
     for needle in needles:
@@ -329,7 +369,11 @@ def no_duplicate_marker(window: Window, *, marker: str) -> None:
     (e.g. ``[E2E:E2:TURN-2]``) is expected exactly once per turn.
     """
 
-    hits = sum(1 for m in window.messages if marker in (m.get("content") or ""))
+    hits = sum(
+        1
+        for message in window.messages
+        if (body := relay_body(message)) is not None and marker in body
+    )
     if hits > 1:
         raise AssertionError(
             f"E2E marker {marker!r} appeared in {hits} relay messages "
@@ -345,7 +389,7 @@ def body_complete(window: Window, *, head: str, tail: str) -> None:
     """
 
     for message in window.messages:
-        body = message.get("content") or ""
+        body = relay_body(message) or ""
         head_at = body.find(head)
         if head_at != -1:
             if body.find(tail, head_at + len(head)) != -1:
@@ -465,7 +509,7 @@ def status_panel_after_body(
     body_messages = [
         message
         for message in _raw_assertion_messages(window)
-        if body_marker in (message.get("content") or "")
+        if (body := relay_body(message)) is not None and body_marker in body
     ]
     if not body_messages:
         raise AssertionError(f"body marker {body_marker!r} not found in raw window")
@@ -525,7 +569,7 @@ def completion_chrome_after_body(
     body_messages = [
         message
         for message in _raw_assertion_messages(window)
-        if body_marker in (message.get("content") or "")
+        if (body := relay_body(message)) is not None and body_marker in body
     ]
     if not body_messages:
         raise AssertionError(f"body marker {body_marker!r} not found in raw window")
@@ -557,7 +601,7 @@ def body_not_overwritten(window: Window, *, marker: str) -> None:
     hits = [
         m
         for m in _raw_assertion_messages(window)
-        if marker in (m.get("content") or "")
+        if (body := relay_body(m)) is not None and marker in body
     ]
     if not hits:
         raise AssertionError(
@@ -580,7 +624,7 @@ def no_suppressed_label_chrome(window: Window) -> None:
 def no_control_chars(window: Window) -> None:
     forbidden = {chr(c) for c in (0x07, 0x08, 0x0C, 0x1B, 0x7F, 0x85)}
     for message in window.messages:
-        body = message.get("content") or ""
+        body = relay_body(message) or ""
         leaked = forbidden.intersection(body)
         if leaked:
             raise AssertionError(f"control byte leaked into Discord message: {sorted(leaked)!r}")
@@ -608,7 +652,7 @@ def no_resume_prompt_chrome(window: Window) -> None:
     """
 
     for message in window.messages:
-        body = message.get("content") or ""
+        body = relay_body(message) or ""
         for chrome in _RESUME_PROMPT_CHROME:
             if chrome in body:
                 raise AssertionError(
