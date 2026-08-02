@@ -1232,7 +1232,7 @@ mod pg_tests {
     }
 
     #[tokio::test]
-    async fn cancel_selected_run_does_not_take_another_runs_shared_live_dispatch() {
+    async fn cancel_selected_run_pg_does_not_take_another_runs_shared_live_dispatch() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_a, entry_a, dispatch_id) = seed_cancel_fixture(&pool, "shared-a").await;
@@ -1317,7 +1317,7 @@ mod pg_tests {
     }
 
     #[tokio::test]
-    async fn cancel_selected_run_uses_dispatch_then_entry_lock_order() {
+    async fn cancel_selected_run_pg_uses_dispatch_then_entry_lock_order() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, entry_id, dispatch_id) = seed_cancel_fixture(&pool, "lock-order").await;
@@ -1377,7 +1377,7 @@ mod pg_tests {
     }
 
     #[tokio::test]
-    async fn card_rollback_failure_rolls_back_the_core_run_cancellation() {
+    async fn card_rollback_failure_pg_rolls_back_the_core_run_cancellation() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, entry_id, dispatch_id) = seed_cancel_fixture(&pool, "card-atomic").await;
