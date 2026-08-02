@@ -98,6 +98,8 @@ jobs:
               - 'src/services/discord/outbound/source_registry.rs'
               - 'src/services/discord/**'
               - '!src/services/discord/placeholder_live_events/**'
+              - 'src/services/turn_orchestrator.rs'
+              - 'src/services/turn_orchestrator/**'
               - 'src/services/message_outbox.rs'
               - 'src/services/message_outbox_recovery.rs'
               - 'src/services/message_outbox_recovery_support.rs'
@@ -718,6 +720,9 @@ jobs:
       # non-PG lane, so test-only fixes could merge without executing it on PRs.
       - name: Local model durable queue wake regression
         run: env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1
+
+      - name: Manual steer regressions
+        run: just test-manual-steer
 
       - name: Stop PostgreSQL service
         if: always()

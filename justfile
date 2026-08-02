@@ -25,6 +25,11 @@ test-active-usage-4631:
     cargo test --lib claude_compact_trigger::tests
     cargo test --lib assistant_usage_emits_complete_active_snapshot_before_done
 
+# #4754: PR-time coverage for the core claim and Discord button interaction.
+test-manual-steer:
+    env -u AGENTDESK_ROOT_DIR cargo test --lib services::turn_orchestrator::active_turn_kind_tests::stale_manual_claim_cannot_skip_oldest_queued_head -- --exact --test-threads=1
+    env -u AGENTDESK_ROOT_DIR cargo test --lib manual_steer -- --test-threads=1
+
 # Stage 1 keeps the existing CI-safe subset. The broad non-PG sweep currently
 # fails legacy/full integration route tests; see docs/ci/rust-quality-gates.md.
 test-non-pg:

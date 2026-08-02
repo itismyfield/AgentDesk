@@ -337,6 +337,23 @@ class FastCheckCiWiringTests(unittest.TestCase):
             job_block(nightly, "full_windows"),
         )
 
+    def test_manual_steer_changes_run_the_pr_time_regressions(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("- 'src/services/turn_orchestrator.rs'", workflow)
+        self.assertIn("- 'src/services/turn_orchestrator/**'", workflow)
+        high_risk = job_block(workflow, "high-risk-recovery")
+        self.assertIn("- name: Manual steer regressions", high_risk)
+        self.assertIn("\n        run: just test-manual-steer\n", high_risk)
+
+        justfile = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
+        self.assertEqual(
+            just_recipe_commands(justfile, "test-manual-steer"),
+            (
+                "env -u AGENTDESK_ROOT_DIR cargo test --lib services::turn_orchestrator::active_turn_kind_tests::stale_manual_claim_cannot_skip_oldest_queued_head -- --exact --test-threads=1",
+                "env -u AGENTDESK_ROOT_DIR cargo test --lib manual_steer -- --test-threads=1",
+            ),
+        )
+
     def test_trusted_macos_runs_busy_retry_regressions_on_both_runner_paths(self) -> None:
         workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
         hosted = job_block(workflow, "macos_hosted")

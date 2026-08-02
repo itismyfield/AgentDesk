@@ -16,6 +16,7 @@ mod dispatch_cleanup;
 mod dispatch_reservation;
 mod episode_identity;
 mod front_requeue;
+mod manual_steer_claim;
 mod overflow;
 mod pending_queue_persistence;
 mod queue_cancellation;
@@ -619,6 +620,9 @@ pub(crate) enum EnqueueRefusalReason {
     /// A front-restored source is already reserved for dispatch or active.
     /// Re-inserting it would execute the same message again after that turn.
     SourceIdPendingOrActive,
+    /// A manual steering claim holds the final queue slot for a possible
+    /// front rollback. Accepting new work would make that rollback overflow.
+    QueueCapacityReserved,
     /// The queue's last entry matches the incoming intervention on
     /// `(author_id, text, reply_context, has_reply_boundary)` within
     /// `INTERVENTION_DEDUP_WINDOW` — rapid-resend dedup.
@@ -637,6 +641,7 @@ impl EnqueueRefusalReason {
             EnqueueRefusalReason::AlreadyActiveTurn => "already_active_turn",
             EnqueueRefusalReason::SourceIdAlreadyQueued => "source_id_already_queued",
             EnqueueRefusalReason::SourceIdPendingOrActive => "source_id_pending_or_active",
+            EnqueueRefusalReason::QueueCapacityReserved => "queue_capacity_reserved",
             EnqueueRefusalReason::LastItemDedup => "last_item_dedup",
             EnqueueRefusalReason::ActorUnreachable => "actor_unreachable",
             EnqueueRefusalReason::MailboxClosed => "mailbox_closed",
@@ -1074,7 +1079,7 @@ impl ChannelMailboxHandle {
         &self,
         persistence: QueuePersistenceContext,
     ) -> TakeNextSoftResult {
-        self.take_soft_matching(persistence, None).await
+        manual_steer_claim::take_next_soft(self, persistence).await
     }
 
     pub(crate) async fn take_soft_matching(
@@ -1082,20 +1087,18 @@ impl ChannelMailboxHandle {
         persistence: QueuePersistenceContext,
         primary_message_id: Option<MessageId>,
     ) -> TakeNextSoftResult {
-        self.request(
-            |reply| ChannelMailboxMsg::TakeNextSoft {
-                persistence,
-                primary_message_id,
-                reply,
-            },
-            TakeNextSoftResult {
-                intervention: None,
-                dispatch_lease: None,
-                has_more: false,
-                queue_len_after: 0,
-                queue_exit_events: Vec::new(),
-                persistence_error: None,
-            },
+        manual_steer_claim::take_soft_matching(self, persistence, primary_message_id).await
+    }
+
+    pub(crate) async fn take_queue_head_matching_while_active(
+        &self,
+        persistence: QueuePersistenceContext,
+        primary_message_id: MessageId,
+    ) -> TakeNextSoftResult {
+        manual_steer_claim::take_queue_head_matching_while_active(
+            self,
+            persistence,
+            primary_message_id,
         )
         .await
     }
@@ -1744,6 +1747,8 @@ enum ChannelMailboxMsg {
     TakeNextSoft {
         persistence: QueuePersistenceContext,
         primary_message_id: Option<MessageId>,
+        require_queue_head: bool,
+        require_active_turn: bool,
         reply: oneshot::Sender<TakeNextSoftResult>,
     },
     RequeueFront {
@@ -1945,6 +1950,9 @@ struct ChannelMailboxState {
     /// or by the bounded safety valve below.
     pending_user_dispatch: Option<MessageId>,
     pending_user_dispatch_lease: Option<Arc<DispatchLease>>,
+    /// A manual-steer claim temporarily reserves one queue slot so a failed
+    /// injection can restore its head without evicting newly accepted work.
+    manual_steer_capacity_lease: Option<Arc<DispatchLease>>,
     /// #3167 BLOCKER-2 SAFETY VALVE — consecutive `Background` starts refused
     /// SOLELY because of `pending_user_dispatch` (the queue is already empty).
     /// If a dequeued user turn is lost and never claims nor requeues, the
@@ -2582,6 +2590,16 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         });
                         continue;
                     }
+                    if manual_steer_claim::queue_capacity_is_reserved(&state) {
+                        let _ = reply.send(EnqueueInterventionResult {
+                            enqueued: false,
+                            merged: false,
+                            refusal_reason: Some(EnqueueRefusalReason::QueueCapacityReserved),
+                            queue_exit_events: Vec::new(),
+                            persistence_error: None,
+                        });
+                        continue;
+                    }
                     let previous_queue = state.intervention_queue.clone();
                     let mut enqueue_result = enqueue_intervention(
                         &mut state.intervention_queue,
@@ -2635,108 +2653,18 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 ChannelMailboxMsg::TakeNextSoft {
                     persistence,
                     primary_message_id,
+                    require_queue_head,
+                    require_active_turn,
                     reply,
                 } => {
-                    state.last_persistence = Some(persistence.clone());
-                    let _ = clear_stale_pending_dispatch_reservation(&mut state, channel_id);
-                    if let Some(result) = reconcile_pending_dispatch_marker_before_take_next(
+                    let result = manual_steer_claim::take_next_soft_actor(
                         &mut state,
                         channel_id,
-                        &persistence,
-                    ) {
-                        let _ = reply.send(result);
-                        continue;
-                    }
-                    let previous_queue = state.intervention_queue.clone();
-                    let next_result = dequeue_next_soft_intervention(
-                        &mut state.intervention_queue,
+                        persistence,
                         primary_message_id,
+                        require_queue_head,
+                        require_active_turn,
                     );
-                    let queue_len_after = state.intervention_queue.len();
-                    // #3167 BLOCKER-2 — capture the dispatched head id BEFORE the
-                    // intervention is moved into the reply, so we can reserve the
-                    // dequeue→claim window against a racing Background start.
-                    let dispatched_head = next_result.intervention.as_ref().map(|i| i.message_id);
-                    let marker_error = if let Some(intervention) = next_result.intervention.as_ref()
-                    {
-                        save_channel_pending_dispatch_marker(
-                            &persistence.provider,
-                            &persistence.token_hash,
-                            channel_id,
-                            intervention,
-                            persistence.dispatch_role_override,
-                        )
-                        .err()
-                    } else {
-                        None
-                    };
-                    let result = if let Some(error) = marker_error {
-                        state.intervention_queue = previous_queue;
-                        log_queue_persistence_rollback(
-                            "take_next_soft_marker",
-                            channel_id,
-                            &persistence,
-                            &error,
-                        );
-                        TakeNextSoftResult {
-                            intervention: None,
-                            dispatch_lease: None,
-                            has_more: state
-                                .intervention_queue
-                                .iter()
-                                .any(|item| item.mode == InterventionMode::Soft),
-                            queue_len_after: state.intervention_queue.len(),
-                            queue_exit_events: Vec::new(),
-                            persistence_error: Some(error),
-                        }
-                    } else if let Err(error) = persist_queue_or_restore(
-                        &mut state,
-                        channel_id,
-                        &persistence,
-                        previous_queue,
-                        "take_next_soft",
-                    ) {
-                        // Persistence failed → `persist_queue_or_restore` rolled
-                        // the dequeue back (head re-inserted); no dispatch happens,
-                        // so do NOT set the reservation. The marker remains the
-                        // durable backstop for this head until the queue-without-head
-                        // write succeeds.
-                        TakeNextSoftResult {
-                            intervention: None,
-                            dispatch_lease: None,
-                            has_more: state
-                                .intervention_queue
-                                .iter()
-                                .any(|item| item.mode == InterventionMode::Soft),
-                            queue_len_after: state.intervention_queue.len(),
-                            queue_exit_events: Vec::new(),
-                            persistence_error: Some(error),
-                        }
-                    } else {
-                        // #3167 BLOCKER-2 — a head was handed out for dispatch but
-                        // the slot is not claimed until `intake_turn` runs. Reserve
-                        // the window so a Background start cannot slip in ahead.
-                        if let Some(head) = dispatched_head {
-                            let dispatch_lease = set_pending_user_dispatch(&mut state, head);
-                            TakeNextSoftResult {
-                                intervention: next_result.intervention,
-                                dispatch_lease: Some(dispatch_lease),
-                                has_more: next_result.has_more,
-                                queue_len_after,
-                                queue_exit_events: next_result.queue_exit_events,
-                                persistence_error: None,
-                            }
-                        } else {
-                            TakeNextSoftResult {
-                                intervention: next_result.intervention,
-                                dispatch_lease: None,
-                                has_more: next_result.has_more,
-                                queue_len_after,
-                                queue_exit_events: next_result.queue_exit_events,
-                                persistence_error: None,
-                            }
-                        }
-                    };
                     let _ = reply.send(result);
                 }
                 ChannelMailboxMsg::RequeueFront {
@@ -2791,6 +2719,10 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             );
                             clear_pending_user_dispatch(&mut state);
                         }
+                        manual_steer_claim::clear_manual_capacity_if_matches(
+                            &mut state,
+                            dispatch_lease.as_ref(),
+                        );
                         RequeueInterventionResult {
                             enqueued: true,
                             refusal_reason: None,
@@ -2828,6 +2760,10 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             } else {
                                 "clear_pending_dispatch_reservation"
                             },
+                        );
+                        manual_steer_claim::clear_manual_capacity_if_matches(
+                            &mut state,
+                            dispatch_lease.as_ref(),
                         );
                     }
                     let _ = reply.send(authorized);
@@ -4751,6 +4687,89 @@ mod active_turn_kind_tests {
         assert!(
             !bg.cancel_active_background_turn_if_current().await,
             "repeated supersede of an already-cancelling slot stays false"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_manual_claim_cannot_skip_oldest_queued_head() {
+        let _lock = lock_test_env();
+        let _env_guard = EnvGuard;
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(ChannelId::new(4_754_001));
+        for message_id in [101, 102, 103] {
+            assert!(
+                handle
+                    .enqueue(test_intervention(message_id), test_persistence())
+                    .await
+                    .enqueued
+            );
+        }
+
+        let active = Arc::new(CancelToken::new());
+        handle
+            .restore_active_turn(active, UserId::new(1), MessageId::new(99))
+            .await;
+        let stale = handle
+            .take_queue_head_matching_while_active(test_persistence(), MessageId::new(102))
+            .await;
+        assert!(
+            stale.intervention.is_none(),
+            "a card for a later item must not skip the oldest queued message"
+        );
+        assert_eq!(
+            handle
+                .snapshot()
+                .await
+                .intervention_queue
+                .iter()
+                .map(|item| item.message_id)
+                .collect::<Vec<_>>(),
+            vec![
+                MessageId::new(101),
+                MessageId::new(102),
+                MessageId::new(103)
+            ]
+        );
+
+        let first =
+            handle.take_queue_head_matching_while_active(test_persistence(), MessageId::new(101));
+        let second =
+            handle.take_queue_head_matching_while_active(test_persistence(), MessageId::new(101));
+        let (first, second) = tokio::join!(first, second);
+        let results = [first, second];
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result.intervention.is_some())
+                .count(),
+            1,
+            "two clicks for the head must have exactly one atomic claimant"
+        );
+        let winner = results
+            .iter()
+            .find(|result| result.intervention.is_some())
+            .expect("one claimant");
+        assert_eq!(
+            winner.intervention.as_ref().map(|item| item.message_id),
+            Some(MessageId::new(101))
+        );
+        assert!(
+            winner.dispatch_lease.is_some(),
+            "the winner needs the rollback lease"
+        );
+        assert_eq!(
+            handle
+                .snapshot()
+                .await
+                .intervention_queue
+                .iter()
+                .map(|item| item.message_id)
+                .collect::<Vec<_>>(),
+            vec![MessageId::new(102), MessageId::new(103)],
+            "head claim must preserve FIFO among remaining entries"
         );
     }
 

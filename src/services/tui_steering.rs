@@ -28,7 +28,8 @@ pub(crate) enum SteeringOutcome {
     ExistingMailbox,
     Injected,
     Unsafe(&'static str),
-    Failed(String),
+    NotDelivered(String),
+    PossiblyDelivered(String),
 }
 
 pub(crate) fn route_input_by_session_driver(selection: &ProviderSessionSelection) -> SteeringRoute {
@@ -61,14 +62,27 @@ fn capture_snapshot(provider: &ProviderKind, session_name: &str) -> Option<Steer
     }
 }
 
-fn inject_once(provider: &ProviderKind, session_name: &str, prompt: &str) -> Result<(), String> {
+fn inject_once(
+    provider: &ProviderKind,
+    session_name: &str,
+    prompt: &str,
+) -> Result<(), SteeringOutcome> {
     match provider {
-        ProviderKind::Claude => claude_tui::input::inject_steering_prompt(session_name, prompt),
-        ProviderKind::Codex => codex_tui::input::inject_steering_prompt(session_name, prompt),
-        _ => Err(format!(
+        ProviderKind::Claude => claude_tui::input::inject_steering_prompt(session_name, prompt)
+            .map_err(SteeringOutcome::NotDelivered),
+        ProviderKind::Codex => codex_tui::input::inject_steering_prompt(session_name, prompt)
+            .map_err(|error| match error {
+                codex_tui::input::SteeringPromptInjectionError::NotDelivered(error) => {
+                    SteeringOutcome::NotDelivered(error)
+                }
+                codex_tui::input::SteeringPromptInjectionError::PossiblyDelivered(error) => {
+                    SteeringOutcome::PossiblyDelivered(error)
+                }
+            }),
+        _ => Err(SteeringOutcome::NotDelivered(format!(
             "native TUI steering unsupported for provider {}",
             provider.as_str()
-        )),
+        ))),
     }
 }
 
@@ -79,7 +93,7 @@ fn inject_with_bounded_retry_using<C, I>(
 ) -> SteeringOutcome
 where
     C: FnMut() -> Option<SteeringSnapshot>,
-    I: FnMut() -> Result<(), String>,
+    I: FnMut() -> Result<(), SteeringOutcome>,
 {
     if route_input_by_session_driver(selection) == SteeringRoute::ExistingMailbox {
         return SteeringOutcome::ExistingMailbox;
@@ -97,7 +111,7 @@ where
             Ok(()) => {
                 return match inject() {
                     Ok(()) => SteeringOutcome::Injected,
-                    Err(error) => SteeringOutcome::Failed(error),
+                    Err(outcome) => outcome,
                 };
             }
             Err(reason) => last_unsafe = reason,
