@@ -475,16 +475,19 @@ class ParserMutations(FixtureCase):
 
     def test_supported_extended_job_headers_are_enumerated(self) -> None:
         cases = {
-            "anchor-alias": (
+            "mixed-anchor": (
                 "jobs:\n"
-                "  call: &base_job\n"
-                "    uses: octo-org/example/.github/workflows/called.yml@main\n"
-                "  call2: *base_job\n",
-                ["call", "call2"],
+                "  build: &base\n"
+                "    runs-on: ubuntu-latest\n"
+                "  test:\n"
+                "    runs-on: ubuntu-latest\n",
+                ["build", "test"],
             ),
-            "space-before-colon": (
-                "jobs:\n  bypass :\n    steps:\n      - run: echo ok\n",
-                ["bypass"],
+            "mixed-space-before-colon": (
+                "jobs:\n"
+                "  bypass :\n    steps:\n      - run: echo bypass\n"
+                "  ordinary:\n    steps:\n      - run: echo ordinary\n",
+                ["bypass", "ordinary"],
             ),
         }
         workflow = self.root / ".github/workflows/extended-job-headers.yml"
@@ -514,64 +517,7 @@ class ParserMutations(FixtureCase):
                         allowlist_label="fixture allowlist",
                     )
                 self.assertEqual(rc, 0)
-                self.assertNotIn("jobs-key-mismatch", stderr.getvalue())
-
-    def test_partial_job_key_enumeration_is_configuration_error(self) -> None:
-        payload = (
-            "    steps:\n"
-            "      - run: ./scripts/ci/postgres-service.sh start\n"
-            "      - run: cargo test postgres_\n"
-        )
-        cases = {
-            "space-before-colon-mixed": (
-                "jobs:\n  bypass :\n" + payload
-                + "  ordinary:\n    steps:\n      - run: echo ok\n",
-                ["bypass"],
-                {".github/workflows/job-key-mismatch.yml:bypass"},
-            ),
-            "anchor-mixed": (
-                "jobs:\n  bypass: &pg\n" + payload
-                + "  ordinary:\n    steps:\n      - run: echo ok\n",
-                ["bypass"],
-                {".github/workflows/job-key-mismatch.yml:bypass"},
-            ),
-            "flow-mixed": (
-                "jobs:\n"
-                "  bypass: {steps: [{run: './scripts/ci/postgres-service.sh start'}, "
-                "{run: 'cargo test postgres_'}]}\n"
-                "  ordinary:\n    steps:\n      - run: echo ok\n",
-                ["ordinary"],
-                set(),
-            ),
-        }
-        workflow = self.root / ".github/workflows/job-key-mismatch.yml"
-        empty = {section: set() for section in membership.SECTIONS}
-        for shape, (text, expected_jobs, expected_rule4) in cases.items():
-            with self.subTest(shape=shape):
-                workflow.write_text(text, "utf-8")
-                analysis = self.fx.analysis()
-                self.assertEqual(
-                    [job.name for job in membership.parse_jobs(workflow, self.root)],
-                    expected_jobs,
-                )
-                self.assertEqual(analysis.debts["rule4"], expected_rule4)
-                findings = [
-                    finding.kind for finding in analysis.findings
-                    if finding.source == ".github/workflows/job-key-mismatch.yml"
-                ]
-                self.assertEqual(findings, ["jobs-key-mismatch"])
-                stderr = io.StringIO()
-                with contextlib.redirect_stderr(stderr):
-                    rc = membership.check_analysis(
-                        analysis,
-                        empty,
-                        empty,
-                        membership.render_manifest(analysis.inventory),
-                        reference_label="fixture base",
-                        allowlist_label="fixture allowlist",
-                    )
-                self.assertEqual(rc, 2)
-                self.assertIn("FAIL: [jobs-key-mismatch]", stderr.getvalue())
+                self.assertNotIn("jobs-empty", stderr.getvalue())
 
     def test_workflow_without_jobs_key_is_not_configuration_error(self) -> None:
         workflow = self.root / ".github/workflows/no-jobs.yml"

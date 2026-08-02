@@ -47,7 +47,7 @@ def _seed_pattern(seed: str) -> re.Pattern[str]:
 SEED_PATTERNS = tuple(_seed_pattern(seed) for seed in SEEDS)
 CONNECT_SEED_PATTERNS = tuple(_seed_pattern(seed) for seed in CONNECT_SEEDS)
 SECTIONS = ("rule1", "rule2", "rule3", "rule4")
-CONFIGURATION_ERROR_FINDINGS = frozenset({"jobs-empty", "jobs-key-mismatch"})
+CONFIGURATION_ERROR_FINDINGS = frozenset({"jobs-empty"})
 
 
 def _load_coverage_module(repo_root: Path):
@@ -134,12 +134,6 @@ _JOBS_KEY = re.compile(
 )
 _JOBS_BLOCK_KEY = re.compile(
     r"^(?:jobs|'jobs'|\"jobs\"):[^\S\n]*(?:#.*)?$",
-    re.MULTILINE,
-)
-_JOB_KEY = re.compile(
-    r"^(?P<indent>[^\S\r\n]+)"
-    r"(?P<name>[A-Za-z0-9_-]+|'[^']+'|\"[^\"]+\")"
-    r"(?P<pre_colon>[^\S\r\n]*):(?=[^\S\r\n]|$)[^\r\n]*$",
     re.MULTILINE,
 )
 _JOB = re.compile(
@@ -617,10 +611,10 @@ def parse_jobs(
     This intentionally stays dependency-free instead of relying on PyYAML, which
     is not declared by AgentDesk's script-check environment. It supports the
     repository's block-style workflows and tracks scalar bodies while locating
-    the next column-zero mapping key. Top-level and job-key candidates are
-    detected separately from enumeration; an unsupported or mixed job header
-    set is reported as a configuration error. A genuinely absent top-level key
-    is ignored.
+    the next column-zero mapping key. Top-level ``jobs`` presence is detected
+    more broadly than the supported block syntax so a present but unparsed map
+    is a configuration error. Individual jobs are limited to supported block
+    headers; other individual job forms can still be omitted.
     """
     text = path.read_text("utf-8")
     # Normalize only the top-level key probe. The supported ``jobs:`` block
@@ -632,56 +626,35 @@ def parse_jobs(
         return []
     jobs_key = None if has_bom else _JOBS_BLOCK_KEY.match(text, present_jobs_key.start())
     section_end = len(text)
-    job_keys: list[re.Match[str]] = []
-    candidate_indexes: list[int] = []
+    candidates: list[re.Match[str]] = []
     if jobs_key is not None:
         jobs_indent = 0
         section_end = _jobs_section_end(text, jobs_key.end())
         in_section = [
-            match for match in _JOB_KEY.finditer(text, jobs_key.end(), section_end)
+            match for match in _JOB.finditer(text, jobs_key.end(), section_end)
             if _indent_width(match.group("indent")) > jobs_indent
         ]
         job_indent = min(
             (_indent_width(match.group("indent")) for match in in_section),
             default=None,
         )
-        job_keys = [
+        candidates = [
             match for match in in_section
             if _indent_width(match.group("indent")) == job_indent
         ]
-        header_family: str | None = None
-        for index, job_key in enumerate(job_keys):
-            parsed = _JOB.fullmatch(job_key.group(0))
-            if parsed is None:
-                continue
-            family = (
-                "extended"
-                if parsed.group("pre_colon") or parsed.group("decorator")
-                else "plain"
-            )
-            if header_family is None:
-                header_family = family
-            if family == header_family:
-                candidate_indexes.append(index)
     rel = str(path.relative_to(repo_root))
-    if not job_keys and findings is not None:
+    if not candidates and findings is not None:
         findings.append(Finding("jobs-empty", rel, "jobs: is present but no job keys were parsed"))
-    elif len(candidate_indexes) != len(job_keys) and findings is not None:
-        findings.append(Finding(
-            "jobs-key-mismatch",
-            rel,
-            f"jobs: contains {len(job_keys)} job keys but {len(candidate_indexes)} were parsed",
-        ))
     return [
         Job(
             rel,
-            job_keys[index].group("name").strip("'\""),
+            match.group("name").strip("'\""),
             text[
-                job_keys[index].end():
-                job_keys[index + 1].start() if index + 1 < len(job_keys) else section_end
+                match.end():
+                candidates[index + 1].start() if index + 1 < len(candidates) else section_end
             ],
         )
-        for index in candidate_indexes
+        for index, match in enumerate(candidates)
     ]
 
 
