@@ -668,7 +668,9 @@ def parse_jobs(
                 "top-level jobs: found but no job keys parsed; this gate reads a "
                 "plain block header (optionally one anchor) with block-style job "
                 "keys under it, so flow mappings, tags, and a space before the "
-                "colon are not read — rewrite the jobs block in that form",
+                "colon are not read — rewrite the jobs block in that form. A "
+                "leading UTF-8 BOM also lands here even when the block itself is "
+                "already plain; strip the BOM in that case",
             )
         )
     return [
