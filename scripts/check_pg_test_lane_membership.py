@@ -661,7 +661,16 @@ def parse_jobs(
         ]
     rel = str(path.relative_to(repo_root))
     if not candidates and findings is not None:
-        findings.append(Finding("jobs-empty", rel, "jobs: is present but no job keys were parsed"))
+        findings.append(
+            Finding(
+                "jobs-empty",
+                rel,
+                "top-level jobs: found but no job keys parsed; this gate reads a "
+                "plain block header (optionally one anchor) with block-style job "
+                "keys under it, so flow mappings, tags, and a space before the "
+                "colon are not read — rewrite the jobs block in that form",
+            )
+        )
     return [
         Job(
             rel,
