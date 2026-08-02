@@ -402,11 +402,149 @@ class ParserMutations(FixtureCase):
                     ["pg_lane"],
                 )
 
-    def test_empty_jobs_map_is_warn_only(self) -> None:
+    def test_empty_jobs_shapes_are_configuration_errors(self) -> None:
+        cases = {
+            "comment": "jobs: # parsed, but empty\n",
+            "quoted": "\"jobs\": # quoted and empty\n",
+            "four-space": "jobs:\n    # indented comment, but no job key\n",
+            "tab": "jobs:\n\t# tab-indented comment, but no job key\n",
+        }
         workflow = self.root / ".github/workflows/empty.yml"
-        workflow.write_text("jobs: # parsed, but empty\n", "utf-8")
+        empty = {section: set() for section in membership.SECTIONS}
+        for shape, text in cases.items():
+            with self.subTest(shape=shape):
+                workflow.write_text(text, "utf-8")
+                analysis = self.fx.analysis()
+                findings = [
+                    finding for finding in analysis.findings if finding.kind == "jobs-empty"
+                ]
+                self.assertEqual(len(findings), 1)
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    rc = membership.check_analysis(
+                        analysis,
+                        empty,
+                        empty,
+                        membership.render_manifest(analysis.inventory),
+                        reference_label="fixture base",
+                        allowlist_label="fixture allowlist",
+                    )
+                self.assertEqual(rc, 2)
+                self.assertIn("FAIL: [jobs-empty]", stderr.getvalue())
+
+    def test_unsupported_top_level_jobs_shapes_are_configuration_errors(self) -> None:
+        payload = (
+            "    steps:\n"
+            "      - run: ./scripts/ci/postgres-service.sh start\n"
+            "      - run: cargo test postgres_\n"
+        )
+        cases = {
+            "flow-empty": "jobs: {}\n",
+            "bom-nonempty": "\ufeffjobs:\n  bypass:\n" + payload,
+            "flow-nonempty": (
+                "jobs: {bypass: {steps: "
+                "[{run: './scripts/ci/postgres-service.sh start'}, "
+                "{run: 'cargo test postgres_'}]}}\n"
+            ),
+            "space-before-colon": "jobs :\n  bypass:\n" + payload,
+        }
+        workflow = self.root / ".github/workflows/unsupported.yml"
+        empty = {section: set() for section in membership.SECTIONS}
+        for shape, text in cases.items():
+            with self.subTest(shape=shape):
+                workflow.write_text(text, "utf-8")
+                analysis = self.fx.analysis()
+                findings = [
+                    finding.kind for finding in analysis.findings
+                    if finding.source == ".github/workflows/unsupported.yml"
+                ]
+                self.assertEqual(findings, ["jobs-empty"])
+                self.assertEqual(membership.parse_jobs(workflow, self.root), [])
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    rc = membership.check_analysis(
+                        analysis,
+                        empty,
+                        empty,
+                        membership.render_manifest(analysis.inventory),
+                        reference_label="fixture base",
+                        allowlist_label="fixture allowlist",
+                    )
+                self.assertEqual(rc, 2)
+                self.assertIn("FAIL: [jobs-empty]", stderr.getvalue())
+
+    def test_supported_extended_job_headers_are_enumerated(self) -> None:
+        cases = {
+            "mixed-anchor": (
+                "jobs:\n"
+                "  build: &base\n"
+                "    runs-on: ubuntu-latest\n"
+                "  test:\n"
+                "    runs-on: ubuntu-latest\n",
+                ["build", "test"],
+            ),
+            "mixed-space-before-colon": (
+                "jobs:\n"
+                "  bypass :\n    steps:\n      - run: echo bypass\n"
+                "  ordinary:\n    steps:\n      - run: echo ordinary\n",
+                ["bypass", "ordinary"],
+            ),
+        }
+        workflow = self.root / ".github/workflows/extended-job-headers.yml"
+        empty = {section: set() for section in membership.SECTIONS}
+        for shape, (text, expected_jobs) in cases.items():
+            with self.subTest(shape=shape):
+                loaded = yaml.safe_load(text)
+                self.assertEqual(list(loaded["jobs"]), expected_jobs)
+                workflow.write_text(text, "utf-8")
+                analysis = self.fx.analysis()
+                self.assertEqual(
+                    [job.name for job in membership.parse_jobs(workflow, self.root)],
+                    expected_jobs,
+                )
+                self.assertFalse(any(
+                    finding.source == ".github/workflows/extended-job-headers.yml"
+                    for finding in analysis.findings
+                ))
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    rc = membership.check_analysis(
+                        analysis,
+                        empty,
+                        empty,
+                        membership.render_manifest(analysis.inventory),
+                        reference_label="fixture base",
+                        allowlist_label="fixture allowlist",
+                    )
+                self.assertEqual(rc, 0)
+                self.assertNotIn("jobs-empty", stderr.getvalue())
+
+    def test_top_level_jobs_anchor_is_enumerated(self) -> None:
+        workflow = self.root / ".github/workflows/anchored-jobs-map.yml"
+        text = (
+            "name: anchored-jobs-map\n"
+            "on: push\n"
+            "jobs: &workflow_jobs\n"
+            "  build:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: echo build\n"
+            "  test:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: echo test\n"
+        )
+        expected_jobs = list(yaml.safe_load(text)["jobs"])
+        workflow.write_text(text, "utf-8")
         analysis = self.fx.analysis()
-        self.assertTrue(any(finding.kind == "jobs-empty" for finding in analysis.findings))
+        self.assertEqual(
+            [job.name for job in membership.parse_jobs(workflow, self.root)],
+            expected_jobs,
+        )
+        self.assertFalse(any(
+            finding.source == ".github/workflows/anchored-jobs-map.yml"
+            for finding in analysis.findings
+        ))
         empty = {section: set() for section in membership.SECTIONS}
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
@@ -419,7 +557,73 @@ class ParserMutations(FixtureCase):
                 allowlist_label="fixture allowlist",
             )
         self.assertEqual(rc, 0)
-        self.assertIn("WARN: [jobs-empty]", stderr.getvalue())
+        self.assertNotIn("jobs-empty", stderr.getvalue())
+
+    def test_workflow_without_jobs_key_is_not_configuration_error(self) -> None:
+        workflow = self.root / ".github/workflows/no-jobs.yml"
+        workflow.write_text("on:\n  push:\n", "utf-8")
+        analysis = self.fx.analysis()
+        self.assertFalse(any(finding.kind == "jobs-empty" for finding in analysis.findings))
+        empty = {section: set() for section in membership.SECTIONS}
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            rc = membership.check_analysis(
+                analysis,
+                empty,
+                empty,
+                membership.render_manifest(analysis.inventory),
+                reference_label="fixture base",
+                allowlist_label="fixture allowlist",
+            )
+        self.assertEqual(rc, 0)
+        self.assertNotIn("jobs-empty", stderr.getvalue())
+
+    def test_non_top_level_jobs_text_is_not_configuration_error(self) -> None:
+        cases = {
+            "indented": (
+                "  jobs:\n    bypass:\n      steps:\n        - run: echo ok\n",
+                [],
+            ),
+            "nested-run": (
+                "jobs:\n  lane:\n    steps:\n      - run: |\n"
+                "          printf '%s\\n' 'jobs:'\n",
+                ["lane"],
+            ),
+            "jobs-summary": ("jobs_summary:\n  bypass:\n", []),
+            "jobs-prefix": ("jobsfoo:\n  bypass:\n", []),
+            "comment": ("# jobs:\n#   bypass:\n", []),
+            "quoted-and-block-scalars": (
+                "name: \"jobs:\"\ndescription: |\n  jobs:\n    bypass:\n",
+                [],
+            ),
+        }
+        workflow = self.root / ".github/workflows/non-top-level.yml"
+        empty = {section: set() for section in membership.SECTIONS}
+        for shape, (text, expected_jobs) in cases.items():
+            with self.subTest(shape=shape):
+                workflow.write_text(text, "utf-8")
+                analysis = self.fx.analysis()
+                self.assertFalse(any(
+                    finding.kind == "jobs-empty"
+                    and finding.source == ".github/workflows/non-top-level.yml"
+                    for finding in analysis.findings
+                ))
+                self.assertEqual(
+                    [job.name for job in membership.parse_jobs(workflow, self.root)],
+                    expected_jobs,
+                )
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    rc = membership.check_analysis(
+                        analysis,
+                        empty,
+                        empty,
+                        membership.render_manifest(analysis.inventory),
+                        reference_label="fixture base",
+                        allowlist_label="fixture allowlist",
+                    )
+                self.assertEqual(rc, 0)
+                self.assertNotIn("jobs-empty", stderr.getvalue())
 
     def test_jobs_comment_rule4_debt_is_warn_only_with_real_analysis(self) -> None:
         workflow = self.root / ".github/workflows/ci-main.yml"

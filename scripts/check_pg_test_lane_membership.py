@@ -47,6 +47,7 @@ def _seed_pattern(seed: str) -> re.Pattern[str]:
 SEED_PATTERNS = tuple(_seed_pattern(seed) for seed in SEEDS)
 CONNECT_SEED_PATTERNS = tuple(_seed_pattern(seed) for seed in CONNECT_SEEDS)
 SECTIONS = ("rule1", "rule2", "rule3", "rule4")
+CONFIGURATION_ERROR_FINDINGS = frozenset({"jobs-empty"})
 
 
 def _load_coverage_module(repo_root: Path):
@@ -128,11 +129,18 @@ _TEST_ATTR = re.compile(
 _STRUCT = re.compile(r"\bstruct\s+([A-Za-z_][A-Za-z0-9_]*)\b")
 _IMPL = re.compile(r"\bimpl(?:\s*<[^>{}]*>)?\s+(?:[^{}]*?\s+for\s+)?([A-Za-z_][A-Za-z0-9_]*)\b[^{};]*\{")
 _JOBS_KEY = re.compile(
-    r"^(?:jobs|'jobs'|\"jobs\"):[^\S\n]*(?:#.*)?$",
+    r"^(?:jobs|'jobs'|\"jobs\")[^\S\n]*:(?=[^\S\n]|$)",
+    re.MULTILINE,
+)
+_JOBS_BLOCK_KEY = re.compile(
+    r"^(?:jobs|'jobs'|\"jobs\"):[^\S\n]*(?:&[^\s\[\]{},]+[^\S\n]*)?(?:#.*)?$",
     re.MULTILINE,
 )
 _JOB = re.compile(
-    r"^(?P<indent>[^\S\n]+)(?P<name>[A-Za-z0-9_-]+|'[^']+'|\"[^\"]+\"):[^\S\n]*(?:#.*)?$",
+    r"^(?P<indent>[^\S\r\n]+)"
+    r"(?P<name>[A-Za-z0-9_-]+|'[^']+'|\"[^\"]+\")"
+    r"(?P<pre_colon>[^\S\r\n]*):[^\S\r\n]*"
+    r"(?P<decorator>[&*][^\s\[\]{},]+)?[^\S\r\n]*(?:#.*)?$",
     re.MULTILINE,
 )
 _FN = re.compile(r"\b(?:async\s+)?(?:unsafe\s+)?fn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)")
@@ -603,30 +611,68 @@ def parse_jobs(
     This intentionally stays dependency-free instead of relying on PyYAML, which
     is not declared by AgentDesk's script-check environment. It supports the
     repository's block-style workflows and tracks scalar bodies while locating
-    the next column-zero mapping key. An empty top-level job map is reported as a
-    warn-only finding by ``analyze``; an absent top-level ``jobs:`` key is ignored.
+    the next column-zero mapping key. A literal top-level ``jobs:`` may carry
+    one anchor after the colon; a tag in that slot (``jobs: !!map &a``) remains
+    unsupported and is reported as ``jobs-empty``.
+
+    Two distinct gaps follow from parsing YAML with regexes, and neither is
+    closed here. First, top-level ``jobs`` presence is detected by *spelling*:
+    the probe matches the literal characters, so a key that YAML resolves to
+    ``jobs`` without spelling it that way — ``"jo\\u0062s"``, ``? jobs``,
+    ``!!str jobs`` — is not seen at all. Such a file returns no jobs and no
+    finding, so the whole membership check silently passes it. Second, once a
+    literal ``jobs:`` block is found, individual jobs are limited to supported
+    block headers; other individual job forms can still be returned under
+    their uninterpreted names rather than omitted. That can put a name YAML
+    did not resolve into the list and silently skew name-based comparisons,
+    while their siblings are still reported.
+
+    So the ``jobs-empty`` finding means "spelled ``jobs`` was found but nothing
+    under it parsed", not "this file has no unparsed job map". Do not read a
+    clean result as proof that the file was understood. Both gaps are tracked
+    as sites on umbrella #5071; closing either needs a real YAML parser, which
+    the script-check environment does not guarantee.
     """
     text = path.read_text("utf-8")
-    jobs_key = _JOBS_KEY.search(text)
-    if jobs_key is None:
+    # Normalize only the top-level key probe. Escaped, explicit, and tagged
+    # top-level key forms do not match the literal probe, so they return no
+    # jobs and no finding rather than a configuration error.
+    has_bom = text.startswith("\ufeff")
+    present_jobs_key = _JOBS_KEY.search(text.removeprefix("\ufeff"))
+    if present_jobs_key is None:
         return []
-    jobs_indent = 0
-    section_end = _jobs_section_end(text, jobs_key.end())
-    in_section = [
-        match for match in _JOB.finditer(text, jobs_key.end(), section_end)
-        if _indent_width(match.group("indent")) > jobs_indent
-    ]
-    job_indent = min(
-        (_indent_width(match.group("indent")) for match in in_section),
-        default=None,
-    )
-    candidates = [
-        match for match in in_section
-        if _indent_width(match.group("indent")) == job_indent
-    ]
+    jobs_key = None if has_bom else _JOBS_BLOCK_KEY.match(text, present_jobs_key.start())
+    section_end = len(text)
+    candidates: list[re.Match[str]] = []
+    if jobs_key is not None:
+        jobs_indent = 0
+        section_end = _jobs_section_end(text, jobs_key.end())
+        in_section = [
+            match for match in _JOB.finditer(text, jobs_key.end(), section_end)
+            if _indent_width(match.group("indent")) > jobs_indent
+        ]
+        job_indent = min(
+            (_indent_width(match.group("indent")) for match in in_section),
+            default=None,
+        )
+        candidates = [
+            match for match in in_section
+            if _indent_width(match.group("indent")) == job_indent
+        ]
     rel = str(path.relative_to(repo_root))
     if not candidates and findings is not None:
-        findings.append(Finding("jobs-empty", rel, "jobs: is present but no job keys were parsed"))
+        findings.append(
+            Finding(
+                "jobs-empty",
+                rel,
+                "top-level jobs: found but no job keys parsed; this gate reads a "
+                "plain block header (optionally one anchor) with block-style job "
+                "keys under it, so flow mappings, tags, and a space before the "
+                "colon are not read — rewrite the jobs block in that form. A "
+                "leading UTF-8 BOM also lands here even when the block itself is "
+                "already plain; strip the BOM in that case",
+            )
+        )
     return [
         Job(
             rel,
@@ -842,6 +888,13 @@ def reference_baseline(repo_root: Path, ref: str) -> tuple[str, dict[str, set[st
     return sha, parse_baseline(blob.stdout, f"{sha}:{BASELINE_REL}")
 
 
+def _configuration_errors(findings: Iterable[Finding]) -> tuple[Finding, ...]:
+    return tuple(
+        finding for finding in findings
+        if finding.kind in CONFIGURATION_ERROR_FINDINGS
+    )
+
+
 def check_analysis(
     analysis: Analysis,
     baseline: dict[str, set[str]],
@@ -852,9 +905,15 @@ def check_analysis(
     allowlist_label: str,
 ) -> int:
     """Apply manifest and one-way baseline contracts to a supplied analysis."""
+    configuration_errors = _configuration_errors(analysis.findings)
     failed = False
     for finding in analysis.findings:
-        print(f"WARN: [{finding.kind}] {finding.source}: {finding.detail}", file=sys.stderr)
+        if finding.kind in CONFIGURATION_ERROR_FINDINGS:
+            print(f"FAIL: [{finding.kind}] {finding.source}: {finding.detail}", file=sys.stderr)
+        else:
+            print(f"WARN: [{finding.kind}] {finding.source}: {finding.detail}", file=sys.stderr)
+    if configuration_errors:
+        return 2
     expected_manifest = render_manifest(analysis.inventory)
     if actual_manifest != expected_manifest:
         print("FAIL: PG test-lane manifest drift.", file=sys.stderr)
@@ -958,6 +1017,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.write_snapshots:
             analysis = analyze(root, allowlist)
+            configuration_errors = _configuration_errors(analysis.findings)
+            for finding in configuration_errors:
+                print(f"FAIL: [{finding.kind}] {finding.source}: {finding.detail}", file=sys.stderr)
+            if configuration_errors:
+                return 2
             manifest.write_text(render_manifest(analysis.inventory), "utf-8")
             baseline.write_text(render_baseline(analysis.debts), "utf-8")
             print(f"wrote {manifest} and {baseline}")
