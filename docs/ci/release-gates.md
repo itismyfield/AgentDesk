@@ -24,12 +24,15 @@ Selection observer required gate가 red로 만드는 observer 사망은 **프로
 제거했으므로 truthful all-zero summary도 통과한다.
 
 `scripts/check-ci-runner-hardening.sh`의 `targets`에 등재된 `test_fast`,
-`high-risk-recovery`, `check_fast_cross_os`는 whole-job semantic hash가 step의
-추가·삭제·순서 변경을 막는다. observer/verifier step은 expected-step 계약으로
-각각 exact occurrence와 `continue-on-error` 부재도 고정한다. 따라서 observer step
-삭제나 미등록 step 추가는 checker의 expected-step 계약과 semantic hash를 함께
-고치는 coordinated 변경이어야 하며 코드 리뷰 책임이다. 독립적인 명시적 step
-inventory 층은 없지만 기존 whole-job semantic hash 보호는 유지된다. 다만
+`high-risk-recovery`, `check_fast_cross_os`는 whole-job semantic hash로 step의
+추가·삭제·순서 변경을 **탐지**한다. 다만 이 hash는 같은 diff 안에서 재핀하면
+통과하므로 구조 보장이 아니라 변경 탐지기다 — `test_fast` 실측: 미등록 step 추가,
+`Start PostgreSQL service` 삭제, 캐시 step 2개 순서 변경이 모두 기존 pin 대비
+rc=1 이지만 정상 재핀 후 rc=0 이다. 재핀으로 우회되지 않는 구조 보장은
+observer/verifier step 뿐이다 — expected-step 계약이 각각 exact occurrence와
+`continue-on-error` 부재를 고정하므로 이 두 step 삭제는 재핀 후에도 rc=1 이다.
+반면 미등록 step 추가는 expected-step 계약을 고칠 필요조차 없다. 독립적인 명시적
+step inventory 층은 없다. 다만
 `targets`에 없는 신규 job 경계, job ID 인용이나 표현 변형으로 인한 추출량 붕괴,
 invocation 하한은 이 게이트가 보장하지 않는다.
 
@@ -144,7 +147,7 @@ high_risk_recovery: # ci-pr.yml only additions
 
 ## 4. Resource Contention Policy
 
-`PostgreSQL tests` 와 `High-risk recovery` 는 공유 리소스(동일 Postgres 서비스 컨테이너)를 사용하므로 다음 정책을 조합한다.
+`PostgreSQL tests` 와 `High-risk recovery` 는 **각자의 job 에서 `Start PostgreSQL service` 를 따로 실행한다**(`ci-main.yml:153`, `ci-main.yml:234`) — 컨테이너를 공유하지 않는다. 공유되는 것은 job 내부에서 여러 테스트가 같은 PG 인스턴스를 CREATE/DROP DATABASE 로 나눠 쓴다는 점이고, 아래 정책은 그 job-내 경합을 다룬다.
 
 ### Serial execution
 
@@ -156,11 +159,12 @@ high_risk_recovery: # ci-pr.yml only additions
 
 - `PgRecoveryTestDatabase::create` 는 test마다 `agentdesk_pg_recovery_<uuid>` 데이터베이스를 신규 생성 → 독립 pool → drop 순으로 정리.
 - `crate::db::postgres::lock_test_lifecycle()` lifecycle guard 로 동시 create/drop 직렬화.
-- `seed_*` 헬퍼는 in-memory SQLite `test_db()` fixture 를 사용 — PG 가 필요 없는 recovery 시나리오는 PG 서비스와 독립.
+- `seed_*` 헬퍼(`seed_agent_pg`, `seed_card_pg` — `src/high_risk_recovery.rs:207`, `:232`)는 `&sqlx::PgPool` 을 받아 **PostgreSQL 에 직접 INSERT 한다.** SQLite `test_db()` fixture 를 쓰지 않는다.
 
 ### Pool sizing
 
-- Recovery test의 `pg_recovery_test_config` 는 `pool_max = 1` 로 설정. 단일 connection 으로 startup reconcile 이 runtime pool 을 점유하지 않고 completion 되는지 검증 (`scenario_969_pg_boot_reconcile_uses_startup_pool_without_pool_timeout_logs`).
+- pool=1 은 공용 상수 `TEST_POSTGRES_POOL_MAX_CONNECTIONS`(`src/db/postgres.rs:1174`)가 강제한다. 단일 connection 이므로 startup reconcile 이 runtime pool 을 점유한 채 끝나면 곧바로 pool timeout 으로 드러난다.
+- ⚠️ 이전 판이 인용하던 `pg_recovery_test_config` 와 `scenario_969_pg_boot_reconcile_uses_startup_pool_without_pool_timeout_logs` 는 **코드에 존재하지 않는다**(`git grep` 0건). 이 문서에 심볼을 적을 때는 실재를 확인하고 적는다.
 
 ## 5. Triage 분류 규약
 

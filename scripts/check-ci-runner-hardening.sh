@@ -77,12 +77,18 @@ unless trigger_events == ["pull_request"]
 end
 
 targets = {
-  # The independent explicit step-inventory layer was removed, but each
-  # registered job's whole-job semantic hash still rejects step additions,
-  # deletions, and reordering. Observer/verifier entries below also retain exact
-  # occurrence and explicit nil continue-on-error contracts. This registry does
-  # not discover new jobs automatically, and there is no invocation-floor
-  # replacement in the selection-evidence verifier.
+  # The independent explicit step-inventory layer was removed. Each registered
+  # job's whole-job semantic hash *detects* step additions, deletions, and
+  # reordering, but it is a change-detector, not a structural guarantee: the
+  # same diff can re-pin it. Measured on test_fast -- adding an unregistered
+  # step, deleting "Start PostgreSQL service", and swapping two cache steps each
+  # fail against the stale pin (rc=1) and pass once the hash is re-pinned
+  # (rc=0). The only structural guarantees that survive a re-pin are per-step:
+  # the observer/verifier entries below retain exact occurrence and explicit nil
+  # continue-on-error contracts, so deleting either step stays rc=1 after a
+  # re-pin. Adding an unregistered step needs no expected-step edit at all. This
+  # registry does not discover new jobs automatically, and there is no
+  # invocation-floor replacement in the selection-evidence verifier.
   "check_fast_cross_os" => {
     "label" => "cross-OS job",
     "name" => 'Fast check + non-PG tests (${{ matrix.os }})',

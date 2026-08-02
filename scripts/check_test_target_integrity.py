@@ -499,17 +499,24 @@ def main(argv: list[str] | None = None) -> int:
         workflow = Path(workflows[0])
         if not workflow.is_absolute():
             workflow = repo_root / workflow
-        # Scope is deliberately narrow: process-level observer failure (nonzero
-        # exit/signal, a missing/duplicate summary, or a missing log/tee failure)
-        # makes the required verifier red, as does a dishonest five-counter
-        # summary. A caught internal exception is instead reported truthfully as
-        # execution_errors/findings while this process returns zero; the verifier
-        # checks truthfulness, not observation sufficiency. With no invocation
-        # floor, a truthful all-zero summary passes. Registered jobs retain
-        # whole-job semantic hashes plus exact observer/verifier occurrences;
-        # only a coordinated checker update can remove those steps or add/reorder
-        # steps. New jobs outside the hardening target registry, quoted job ids,
-        # and syntax changes that shrink extraction remain review responsibilities.
+        # Scope is deliberately narrow, and the observer step and this verifier
+        # go red for different reasons -- do not attribute one to the other. The
+        # observer step goes red on its own process failure (nonzero exit or
+        # signal), which turns the required job red without this verifier ever
+        # objecting: an observer that writes a complete, truthful summary and
+        # then exits nonzero leaves this verifier at zero. This verifier goes red
+        # only on evidence it can read as wrong -- a missing log or tee failure,
+        # a missing or duplicated summary line, or five counters that disagree
+        # with the detailed observations. A caught internal exception is not a
+        # failure here: it is reported truthfully as execution_errors/findings
+        # while this process returns zero, because the verifier checks
+        # truthfulness, not observation sufficiency. With no invocation floor, a
+        # truthful all-zero summary passes. Structurally, only the observer and
+        # verifier steps are pinned by exact occurrence; the registered jobs'
+        # whole-job semantic hashes detect other step additions, deletions, and
+        # reordering but accept them once re-pinned in the same diff. New jobs
+        # outside the hardening target registry, quoted job ids, and syntax
+        # changes that shrink extraction remain review responsibilities.
         try:
             observations = observe_curated(
                 repo_root, workflow.resolve(), set(args.job)
