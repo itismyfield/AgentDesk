@@ -101,8 +101,13 @@ pub async fn reset_slot_thread(
 
 /// POST /api/queue/reset
 /// Reset exactly one run selected by `run_id`. Optional repo/agent values are
-/// defensive consistency constraints, not authorization: when supplied they
-/// must match the run and every entry to reduce operator targeting mistakes.
+/// defensive consistency constraints, not authorization — the handler takes no
+/// `RequestPrincipal`, and the only access check is the global one in
+/// `server/routes/auth.rs`. They narrow operator targeting mistakes, and the
+/// narrowing is partial: the repo check joins through cards and compares only
+/// non-null `repo_id`, and the agent check skips empty or null `agent_id`, so
+/// entries missing a card, repo, or agent satisfy either constraint whatever
+/// the caller supplies. `run_id` is what actually bounds the blast radius.
 pub async fn reset(
     State(state): State<AppState>,
     body: Bytes,
