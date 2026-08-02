@@ -107,17 +107,6 @@ targets = {
     # #5025 and #4985 retain their production bridge and footer-marker coverage
     # in the same job block, so the pin covers the merged command inventory.
     "job_sha256" => "0995b8496416accb68d636a3d115508298b457d035be9dc48e07b9fac6e2a51b",
-    # Each exception must map a stable step name to its reviewable reason.
-    "continue_on_error_allowlist" => {},
-    "step_inventory" => [
-      "uses: actions/checkout@v4", "Start PostgreSQL service",
-      "Install Rust toolchain", "Install just",
-      "Setup sccache", "Cache Cargo dependencies", "Observe curated lane selections",
-      "Require observer summary", "Footer-only marker regressions",
-      "Trusted session forwarding tests", "Telemetry-only intake authority regressions",
-      "Terminal delivery evidence regressions", "just test-postgres",
-      "Stop PostgreSQL service", "sccache stats",
-    ],
     "cargo_steps" => {
       "Observe curated lane selections" => {
         "commands" => [
@@ -125,6 +114,7 @@ targets = {
           "python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job test_fast --job high-risk-recovery | tee \"$RUNNER_TEMP/selection-evidence-test-fast.log\"",
         ],
         "timeout_minutes" => 20,
+        "continue_on_error" => nil,
       },
       "Require observer summary" => {
         "commands" => [
@@ -133,6 +123,7 @@ targets = {
         ],
         "timeout_minutes" => 1,
         "if_condition" => "always()",
+        "continue_on_error" => nil,
       },
       "Footer-only marker regressions" => {
         "commands" => [
@@ -172,15 +163,6 @@ targets = {
     "runs_on" => "ubuntu-latest",
     "job_sha256" => "9c3587d8664bdd63769c3306c016f241e851649a68a7c6a52b11e243c438df3d",
     "require_debug_env" => false,
-    "continue_on_error_allowlist" => {},
-    "step_inventory" => [
-      "uses: actions/checkout@v4", "Start PostgreSQL service",
-      "Install Rust toolchain", "Setup sccache",
-      "Cache Cargo dependencies", "Observe curated lane selections",
-      "Require observer summary", "High-risk recovery lane",
-      "Local model durable queue wake regression", "Stop PostgreSQL service",
-      "sccache stats",
-    ],
     "cargo_steps" => {
       "Observe curated lane selections" => {
         "commands" => [
@@ -188,6 +170,7 @@ targets = {
           "python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job high-risk-recovery | tee \"$RUNNER_TEMP/selection-evidence-high-risk.log\"",
         ],
         "timeout_minutes" => 20,
+        "continue_on_error" => nil,
       },
       "Require observer summary" => {
         "commands" => [
@@ -196,6 +179,7 @@ targets = {
         ],
         "timeout_minutes" => 1,
         "if_condition" => "always()",
+        "continue_on_error" => nil,
       },
     },
   },
@@ -252,33 +236,13 @@ targets.each do |job_id, spec|
   end
 
   expected_steps = spec.fetch("cargo_steps")
-  coe_allowlist = spec.fetch("continue_on_error_allowlist", {})
-  job_steps = Array(job["steps"])
-  step_names = job_steps.map { |step| step.is_a?(Hash) ? step["name"] : nil }
-  step_inventory = job_steps.map do |step|
-    step.is_a?(Hash) ? step["name"] || "uses: #{step["uses"]}" : nil
-  end
-  if spec.key?("step_inventory") && step_inventory != spec.fetch("step_inventory")
-    errors << "#{label} must retain the exact registered step inventory"
-  end
-  coe_allowlist.each do |name, reason|
-    unless name.is_a?(String) && !name.empty? && reason.is_a?(String) && !reason.strip.empty?
-      errors << "#{label} continue-on-error allowlist entries require a step name and reason"
-    end
-    unless step_names.count(name) == 1
-      errors << "#{label} continue-on-error allowlist entry #{name.inspect} must match exactly one step occurrence"
-    end
-  end
   seen_steps = []
-  job_steps.each_with_index do |step, index|
+  Array(job["steps"]).each_with_index do |step, index|
     next unless step.is_a?(Hash)
 
     name = step["name"]
     run = step["run"]
     step_env = step["env"]
-    if step["continue-on-error"] && !coe_allowlist.key?(name)
-      errors << "#{label} step #{index + 1} #{name.inspect} uses continue-on-error without an allowlisted reason"
-    end
     if expected_steps.key?(name)
       step_spec = expected_steps.fetch(name)
       seen_steps << name
@@ -291,6 +255,10 @@ targets.each do |job_id, spec|
       end
       unless step["if"] == step_spec.fetch("if_condition", nil)
         errors << "#{label} #{name.inspect} must retain exact if policy"
+      end
+      if step_spec.key?("continue_on_error") &&
+         step["continue-on-error"] != step_spec.fetch("continue_on_error")
+        errors << "#{label} #{name.inspect} must retain exact continue-on-error policy"
       end
       unless step["timeout-minutes"] == step_spec.fetch("timeout_minutes")
         errors << "#{label} #{name.inspect} must retain exact timeout policy"

@@ -14,7 +14,12 @@
 | **PostgreSQL tests** | `postgres` job | `test_fast` job의 PG 서비스 | `postgres` | main/nightly는 항상 실행. PR의 `test_fast`와 selection observer는 `pg_db` path filter가 true일 때만 실행하며, false이면 required mirror가 명시적으로 green을 반환. |
 | **High-risk recovery** | `high-risk-recovery` job | `high-risk-recovery` job | `high_risk_recovery_full` | path filter hit 시에만 실행. nightly full job은 무조건. |
 
-새 required PR job은 `scripts/check-ci-runner-hardening.sh`의 `targets`에 수동 등재하고, semantic hash와 전체 step inventory를 함께 핀해야 한다. 등재 변경은 required context를 추가하는 PR에서 같은 diff로 리뷰한다.
+Selection observer 게이트의 의도된 범위는 observer가 죽거나 상세 관측과 다른
+5필드 summary를 출력할 때 required lane을 red로 만드는 것이다. 고의적 무력화,
+예를 들어 job ID 인용, observer/verifier step 삭제, `check_fast_cross_os` 같은 미등록
+경계 추가, 표현 변형으로 인한 추출량 붕괴는 이 게이트가 막지 않으며 코드 리뷰가
+잡아야 한다. 세 차례 리뷰에서 열거 기반 anti-tamper 층을 다르게 확장할 때마다 새
+우회가 확인됐고, 열거 기반 방어는 열거 밖의 형태를 보장할 수 없기 때문이다.
 
 ### Gate ↔ 실제 커맨드
 

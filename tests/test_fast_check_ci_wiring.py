@@ -479,19 +479,6 @@ jobs:
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_hardening_rejects_unregistered_or_duplicate_protected_steps(self) -> None:
-        source = PR_WORKFLOW.read_text(encoding="utf-8")
-        marker = "      - name: Stop PostgreSQL service\n"
-        for step in (
-            "      - name: Unregistered boundary probe\n        run: just test-postgres --foo\n\n",
-            "      - name: Stop PostgreSQL service\n        run: cargo test --lib bypassed_gate\n\n",
-        ):
-            with self.subTest(step=step):
-                mutated = source.replace(marker, step + marker, 1)
-                result = self.run_hardening_fixture(mutated)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("exact registered step inventory", result.stderr)
-
     def test_hardening_accepts_unrelated_matrix_job_name(self) -> None:
         workflow = """\
 name: Matrix workflow

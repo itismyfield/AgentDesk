@@ -47,13 +47,6 @@ JOB_HEADER = re.compile(r"^  ([A-Za-z0-9_-]+):(?:\s*#.*)?$")
 RECIPE_HEADER = re.compile(r"^([A-Za-z0-9_-]+):(?:\s.*)?$")
 EVIDENCE_LINE = re.compile(r"^selection-evidence: selected=(\d+) command=(.*)$")
 SUMMARY_KEYS = {"invocations", "nonzero", "findings", "extraction_errors", "execution_errors"}
-CURATED_MIN_INVOCATIONS = {
-    ("high-risk-recovery",): 8,
-    ("high-risk-recovery", "test_fast"): 17,
-}
-EVIDENCE_CONTRACT = re.compile(
-    r"^selection-evidence contract: jobs=([A-Za-z0-9_,-]+) minimum_invocations=(\d+)$"
-)
 
 
 @dataclass(frozen=True)
@@ -368,24 +361,6 @@ def observe_curated(repo_root: Path, workflow: Path, jobs: set[str], runner=None
 def evidence_verification_errors(rendered: str) -> list[str]:
     """Recompute the observer summary from its detailed evidence lines."""
     errors: list[str] = []
-    contract_lines = [line for line in rendered.splitlines()
-                      if line.startswith("selection-evidence contract:")]
-    minimum_invocations = None
-    if len(contract_lines) != 1:
-        errors.append(
-            f"expected exactly one selection contract, found {len(contract_lines)}"
-        )
-    else:
-        contract = EVIDENCE_CONTRACT.fullmatch(contract_lines[0])
-        if not contract:
-            errors.append("malformed selection contract")
-        else:
-            jobs = tuple(contract.group(1).split(","))
-            minimum_invocations = CURATED_MIN_INVOCATIONS.get(jobs)
-            if minimum_invocations is None:
-                errors.append(f"unrecognized curated job selector: {','.join(jobs)}")
-            elif int(contract.group(2)) != minimum_invocations:
-                errors.append("selection contract minimum does not match the pinned value")
     summary_lines = [line for line in rendered.splitlines()
                      if line.startswith("selection-evidence summary:")]
     if len(summary_lines) != 1:
@@ -451,11 +426,6 @@ def evidence_verification_errors(rendered: str) -> list[str]:
     }
     if fields != expected:
         errors.append(f"summary counters {fields} do not match evidence {expected}")
-    if minimum_invocations is not None and len(observations) < minimum_invocations:
-        errors.append(
-            f"observed {len(observations)} invocations, below pinned minimum "
-            f"{minimum_invocations}"
-        )
     if internal_errors > 1 or (internal_errors and observations):
         errors.append("internal-error evidence cannot accompany observations")
     return errors
@@ -529,13 +499,13 @@ def main(argv: list[str] | None = None) -> int:
         workflow = Path(workflows[0])
         if not workflow.is_absolute():
             workflow = repo_root / workflow
-        selected_jobs = tuple(sorted(set(args.job)))
-        minimum_invocations = CURATED_MIN_INVOCATIONS.get(selected_jobs)
-        if minimum_invocations is None:
-            parser.error("no pinned invocation minimum for this --job selector")
-        print("selection-evidence contract: "
-              f"jobs={','.join(selected_jobs)} "
-              f"minimum_invocations={minimum_invocations}")
+        # Scope is deliberately narrow: the required verifier turns observer
+        # death or a dishonest five-counter summary red. It does not prevent
+        # deliberate disablement via quoted job ids, deleted steps, new
+        # unregistered boundaries, or syntax changes that shrink extraction;
+        # those remain code-review responsibilities. Three review rounds found
+        # a new bypass each time enumeration-based anti-tamper was expanded, so
+        # enumerating known shapes is not treated as complete protection here.
         try:
             observations = observe_curated(
                 repo_root, workflow.resolve(), set(args.job)
