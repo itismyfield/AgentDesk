@@ -474,6 +474,41 @@ class SessionAndCompletionChromeRegression(unittest.TestCase):
         with self.assertRaisesRegex(assertions.AssertionError, "No response requested"):
             assertions.no_resume_prompt_chrome(window)
 
+    def test_resume_chrome_inside_footer_shaped_line_is_never_stripped(self):
+        # `-# └ {label} {summary}` and the icon-led metadata lines render
+        # provider free text, so a forbidden string can sit on a line that is
+        # otherwise footer-shaped.  Stripping it would hide #2718 chrome from
+        # the body-scoped detector, so the whole suffix stops being a strip
+        # candidate.
+        for footer in (
+            "-# Tasks\n-# └ Bash No response requested. ✓",
+            "-# ⏱ No response requested.",
+            "-# Task     No response requested.",
+            "-# Tasks\n-# └ Bash Continue from where you left off. ✓",
+        ):
+            with self.subTest(footer=footer):
+                message = _raw_bot_msg(1, f"{self.MARKER}\n\n{footer}")
+                window = _window(message)
+
+                self.assertEqual(assertions.relay_body(message), message["content"])
+                assertions.text_present(window, needle=self.MARKER)
+                with self.assertRaises(assertions.AssertionError):
+                    assertions.no_resume_prompt_chrome(window)
+
+    def test_clean_footer_of_same_shape_is_still_stripped(self):
+        # The guard must key on the forbidden string, not on the footer shape:
+        # the identical shapes without resume chrome still strip normally.
+        for footer in (
+            "-# Tasks\n-# └ Bash (3s) ✓",
+            "-# ⏱ 2m 34s",
+            "-# Task     빌드",
+        ):
+            with self.subTest(footer=footer):
+                body = f"{self.MARKER}\n\n{footer}"
+                self.assertEqual(
+                    assertions._strip_completion_chrome_tail(body), self.MARKER
+                )
+
     def test_real_spinner_merged_footer_shapes_are_tail_chrome(self):
         for footer in (
             "-# ⠸ 완료",

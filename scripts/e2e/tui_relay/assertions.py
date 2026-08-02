@@ -218,11 +218,22 @@ def _strip_completion_chrome_tail(body: str) -> str:
     candidate boundaries are valid (for example, a status head followed by
     blank-separated Tasks/Subagents sections), choose the earliest valid one
     so the whole trailing chrome run is removed.
+
+    Stripping takes evidence away from the body-scoped detectors, so it fails
+    closed: a candidate suffix carrying #2718 resume-prompt chrome is never a
+    strip candidate.  Some footer shapes (`-# └ {label} {summary}`, the icon-led
+    metadata lines) render provider-supplied free text, so without this guard a
+    forbidden string placed on such a line would be cut away before
+    `no_resume_prompt_chrome` ever sees it.  Keeping it means a tool label that
+    happens to quote the phrase turns the smoke red — the safe direction for a
+    leak detector.
     """
 
     valid_boundaries: list[int] = []
     for boundary in re.finditer(r"\n\n", body):
         footer = body[boundary.end() :]
+        if any(chrome in footer for chrome in _RESUME_PROMPT_CHROME):
+            continue
         first = next((line for line in footer.splitlines() if line.strip()), "")
         if _is_completion_footer_head(first) and all(
             _is_completion_footer_line(line) for line in footer.splitlines()
