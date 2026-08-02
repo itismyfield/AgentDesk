@@ -600,6 +600,30 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Observe curated lane selections
+        timeout-minutes: 20
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: |
+          set -o pipefail
+          python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job test_fast --job high-risk-recovery | tee "$RUNNER_TEMP/selection-evidence-test-fast.log"
+
+      - name: Require observer summary
+        if: always()
+        timeout-minutes: 1
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: |
+          set -euo pipefail
+          count=$(awk '/^selection-evidence summary:/{count++} END{print count+0}' "$RUNNER_TEMP/selection-evidence-test-fast.log")
+          test "$count" -eq 1
+
       - name: Footer-only marker regressions
         timeout-minutes: 10
         shell: bash
@@ -703,6 +727,30 @@ jobs:
           cache-bin: false
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Observe curated lane selections
+        timeout-minutes: 20
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: |
+          set -o pipefail
+          python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job high-risk-recovery | tee "$RUNNER_TEMP/selection-evidence-high-risk.log"
+
+      - name: Require observer summary
+        if: always()
+        timeout-minutes: 1
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: |
+          set -euo pipefail
+          count=$(awk '/^selection-evidence summary:/{count++} END{print count+0}' "$RUNNER_TEMP/selection-evidence-high-risk.log")
+          test "$count" -eq 1
 
       - name: High-risk recovery lane
         run: |

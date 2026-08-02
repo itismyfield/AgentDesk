@@ -107,8 +107,26 @@ targets = {
     # to this existing toolchain-provisioned lane whose mirror is required.
     # #5025 and #4985 retain their production bridge and footer-marker coverage
     # in the same job block, so the pin covers the merged command inventory.
-    "job_sha256" => "45379287c8cd87d4dae3a9733b92cb65984dc042972e0e12046125f18664e3a9",
+    "job_sha256" => "4cbf71d46b2a0ad8324627f1a938f6214f9dd1733a7d1e8047b920afe0c714b3",
     "cargo_steps" => {
+      "Observe curated lane selections" => {
+        "commands" => [
+          "set -o pipefail",
+          "python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job test_fast --job high-risk-recovery | tee \"$RUNNER_TEMP/selection-evidence-test-fast.log\"",
+        ],
+        "continue_on_error" => nil,
+        "timeout_minutes" => 20,
+      },
+      "Require observer summary" => {
+        "commands" => [
+          "set -euo pipefail",
+          "count=$(awk '/^selection-evidence summary:/{count++} END{print count+0}' \"$RUNNER_TEMP/selection-evidence-test-fast.log\")",
+          "test \"$count\" -eq 1",
+        ],
+        "continue_on_error" => nil,
+        "timeout_minutes" => 1,
+        "if_condition" => "always()",
+      },
       "Footer-only marker regressions" => {
         "commands" => [
           "cargo test --lib task_notification -- --skip _pg --skip pg_ --skip postgres",
@@ -141,6 +159,36 @@ targets = {
         "commands" => ["just test-postgres"],
         "continue_on_error" => nil,
         "timeout_minutes" => 20,
+      },
+    },
+  },
+  "high-risk-recovery" => {
+    "label" => "High-risk recovery job",
+    "name" => "High-risk recovery",
+    "needs" => "changes",
+    "if" => "needs.changes.outputs.high_risk_recovery == 'true'",
+    "runs_on" => "ubuntu-latest",
+    "job_sha256" => "95199428fb6dc74b870ea4685506220b3901726a48c3dc67f6f62a8d81ca4ed9",
+    "require_debug_env" => false,
+    "reject_unregistered_boundaries" => false,
+    "cargo_steps" => {
+      "Observe curated lane selections" => {
+        "commands" => [
+          "set -o pipefail",
+          "python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job high-risk-recovery | tee \"$RUNNER_TEMP/selection-evidence-high-risk.log\"",
+        ],
+        "continue_on_error" => nil,
+        "timeout_minutes" => 20,
+      },
+      "Require observer summary" => {
+        "commands" => [
+          "set -euo pipefail",
+          "count=$(awk '/^selection-evidence summary:/{count++} END{print count+0}' \"$RUNNER_TEMP/selection-evidence-high-risk.log\")",
+          "test \"$count\" -eq 1",
+        ],
+        "continue_on_error" => nil,
+        "timeout_minutes" => 1,
+        "if_condition" => "always()",
       },
     },
   },
@@ -185,12 +233,13 @@ targets.each do |job_id, spec|
     end
   end
 
-  env = job["env"]
-  keys.each do |key|
-    unless env.is_a?(Hash) && env[key] == "0"
-      errors << "#{label} must set job-level #{key} to the string \"0\""
+  unless spec["require_debug_env"] == false
+    env = job["env"]
+    keys.each do |key|
+      unless env.is_a?(Hash) && env[key] == "0"
+        errors << "#{label} must set job-level #{key} to the string \"0\""
+      end
     end
-
   end
 
   expected_steps = spec.fetch("cargo_steps")
@@ -211,7 +260,9 @@ targets.each do |job_id, spec|
       unless step["shell"] == "bash"
         errors << "#{label} #{name.inspect} must use explicit bash"
       end
-      errors << "#{label} #{name.inspect} must not be conditionally skipped" unless step["if"].nil?
+      unless step["if"] == step_spec.fetch("if_condition", nil)
+        errors << "#{label} #{name.inspect} must retain exact if policy"
+      end
       unless step["continue-on-error"] == step_spec.fetch("continue_on_error")
         errors << "#{label} #{name.inspect} must retain exact continue-on-error policy"
       end
@@ -231,7 +282,11 @@ targets.each do |job_id, spec|
         errors << "#{label} step #{index + 1} must not set #{key}" if step_env.is_a?(Hash) && step_env.key?(key)
         errors << "#{label} step #{index + 1} must not mutate #{key} at runtime" if run.is_a?(String) && run.include?(key)
       end
-      if run.is_a?(String) && run.match?(/(^|[[:space:]])cargo[[:space:]]|(^|[[:space:]])just[[:space:]]+test-postgres/)
+      cargo_boundary = run.is_a?(String) && run.match?(/(^|[[:space:]])cargo[[:space:]]|(^|[[:space:]])just[[:space:]]+test-postgres/)
+      if cargo_boundary && !step["continue-on-error"].nil?
+        errors << "#{label} step #{index + 1} must not be allowed to continue on error"
+      end
+      if spec.fetch("reject_unregistered_boundaries", true) && cargo_boundary
         errors << "#{label} step #{index + 1} adds an unprotected cargo/test boundary"
       end
     end
