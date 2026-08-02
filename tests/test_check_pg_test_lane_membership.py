@@ -519,6 +519,46 @@ class ParserMutations(FixtureCase):
                 self.assertEqual(rc, 0)
                 self.assertNotIn("jobs-empty", stderr.getvalue())
 
+    def test_top_level_jobs_anchor_is_enumerated(self) -> None:
+        workflow = self.root / ".github/workflows/anchored-jobs-map.yml"
+        text = (
+            "name: anchored-jobs-map\n"
+            "on: push\n"
+            "jobs: &workflow_jobs\n"
+            "  build:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: echo build\n"
+            "  test:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: echo test\n"
+        )
+        expected_jobs = list(yaml.safe_load(text)["jobs"])
+        workflow.write_text(text, "utf-8")
+        analysis = self.fx.analysis()
+        self.assertEqual(
+            [job.name for job in membership.parse_jobs(workflow, self.root)],
+            expected_jobs,
+        )
+        self.assertFalse(any(
+            finding.source == ".github/workflows/anchored-jobs-map.yml"
+            for finding in analysis.findings
+        ))
+        empty = {section: set() for section in membership.SECTIONS}
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            rc = membership.check_analysis(
+                analysis,
+                empty,
+                empty,
+                membership.render_manifest(analysis.inventory),
+                reference_label="fixture base",
+                allowlist_label="fixture allowlist",
+            )
+        self.assertEqual(rc, 0)
+        self.assertNotIn("jobs-empty", stderr.getvalue())
+
     def test_workflow_without_jobs_key_is_not_configuration_error(self) -> None:
         workflow = self.root / ".github/workflows/no-jobs.yml"
         workflow.write_text("on:\n  push:\n", "utf-8")

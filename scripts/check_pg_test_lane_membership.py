@@ -133,7 +133,7 @@ _JOBS_KEY = re.compile(
     re.MULTILINE,
 )
 _JOBS_BLOCK_KEY = re.compile(
-    r"^(?:jobs|'jobs'|\"jobs\"):[^\S\n]*(?:#.*)?$",
+    r"^(?:jobs|'jobs'|\"jobs\"):[^\S\n]*(?:&[^\s\[\]{},]+[^\S\n]*)?(?:#.*)?$",
     re.MULTILINE,
 )
 _JOB = re.compile(
@@ -611,7 +611,9 @@ def parse_jobs(
     This intentionally stays dependency-free instead of relying on PyYAML, which
     is not declared by AgentDesk's script-check environment. It supports the
     repository's block-style workflows and tracks scalar bodies while locating
-    the next column-zero mapping key.
+    the next column-zero mapping key. A literal top-level ``jobs:`` may carry
+    one anchor after the colon; a tag in that slot (``jobs: !!map &a``) remains
+    unsupported and is reported as ``jobs-empty``.
 
     Two distinct gaps follow from parsing YAML with regexes, and neither is
     closed here. First, top-level ``jobs`` presence is detected by *spelling*:
@@ -620,8 +622,10 @@ def parse_jobs(
     ``!!str jobs`` — is not seen at all. Such a file returns no jobs and no
     finding, so the whole membership check silently passes it. Second, once a
     literal ``jobs:`` block is found, individual jobs are limited to supported
-    block headers; other individual job forms are omitted from the returned
-    list while their siblings are still reported.
+    block headers; other individual job forms can still be returned under
+    their uninterpreted names rather than omitted. That can put a name YAML
+    did not resolve into the list and silently skew name-based comparisons,
+    while their siblings are still reported.
 
     So the ``jobs-empty`` finding means "spelled ``jobs`` was found but nothing
     under it parsed", not "this file has no unparsed job map". Do not read a
@@ -630,9 +634,9 @@ def parse_jobs(
     the script-check environment does not guarantee.
     """
     text = path.read_text("utf-8")
-    # Normalize only the top-level key probe. The supported ``jobs:`` block
-    # header still matches the original text, so other top-level forms are
-    # reported as configuration errors.
+    # Normalize only the top-level key probe. Escaped, explicit, and tagged
+    # top-level key forms do not match the literal probe, so they return no
+    # jobs and no finding rather than a configuration error.
     has_bom = text.startswith("\ufeff")
     present_jobs_key = _JOBS_KEY.search(text.removeprefix("\ufeff"))
     if present_jobs_key is None:
