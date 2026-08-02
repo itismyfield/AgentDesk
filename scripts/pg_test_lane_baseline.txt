@@ -123,7 +123,6 @@ server::routes::memory_api::request_body_tests::memory_recall_forget_handlers_us
 server::routes::message_outbox::tests::monitor_alert_action_id_is_durable_and_idempotent_pg
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests::quality_channel_uses_db_precedence_and_no_target_off_switch_pg
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests::regression_outbox_and_cooldown_commit_or_roll_back_together_pg
-services::auto_queue::cancel_run::pg_tests::concurrent_existing_dispatch_attach_prevents_run_scoped_cancel_pg
 services::auto_queue::route::phase_gate::pg_tests::cancelled_run_rejects_dispatch_attach
 services::auto_queue::route::planning::failed_entry_alert_tests::failed_entry_transition_and_alert_share_commit_with_explicit_ttl_pg
 services::auto_queue::route::planning::failed_entry_alert_tests::production_failure_wrapper_preserves_restoring_slot_binding_pg
@@ -217,7 +216,6 @@ services::maintenance::jobs::db_retention::tests::db_retention_prunes_old_rows_a
 services::maintenance::jobs::db_retention::tests::db_retention_turns_window_is_strict_with_no_archive_less_delete
 services::observability::queries::alert_authority_tests::rollup_is_aggregation_only_and_rule_engine_is_sole_alerter_pg
 services::pipeline_routes::tests::replace_stages_persists_backoff_round_trip_pg
-services::review_decision::worktree_stale::pg_lock_order_tests::run_cancel_and_scope_cleanup_share_dispatch_then_card_lock_order_pg
 services::session_forwarding::tests::cancel_owner_does_not_fall_back_to_agent_binding_pg
 services::session_forwarding::tests::cancel_owner_ignores_disconnected_sessions_pg
 services::session_forwarding::tests::cancel_owner_matches_exact_channel_not_session_key_text_pg
@@ -287,7 +285,6 @@ src/services/discord/turn_bridge/completion_guard/completion_postgres.rs
 src/services/discord/turn_bridge/recovery_text.rs
 src/services/maintenance/jobs/db_retention.rs
 src/services/pipeline_routes.rs
-src/services/review_decision/worktree_stale.rs
 src/services/session_resume.rs
 src/services/settings.rs
 src/services/stale_turn_reconciler.rs

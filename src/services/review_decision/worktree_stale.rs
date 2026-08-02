@@ -748,11 +748,11 @@ mod pg_lock_order_tests {
     }
 
     #[tokio::test]
-    async fn run_cancel_and_scope_cleanup_share_dispatch_then_card_lock_order_pg() {
+    async fn run_cancel_and_scope_cleanup_pg_share_dispatch_then_card_lock_order() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, entry_id, dispatch_id) =
-            crate::services::auto_queue::cancel_run::seed_cancel_fixture_for_pg_test(
+            crate::services::auto_queue::cancel_run::tests::seed_cancel_fixture_for_pg_test(
                 &pool,
                 "card-deadlock",
             )

@@ -124,6 +124,7 @@ jobs:
               - 'src/services/auto_queue.rs'
               - 'src/services/auto_queue/**'
               - 'src/services/dispatches/**'
+              - 'src/services/review_decision/**'
               - 'src/services/queue.rs'
               - 'src/services/session_forwarding.rs'
               - 'src/services/session_forwarding/**'

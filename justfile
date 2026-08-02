@@ -122,6 +122,7 @@ test-non-pg:
 # PostgreSQL tests belong in the library harness. Integration and doctest targets
 # are intentionally excluded; add a separate PG lane command if either gains PG coverage.
 test-postgres:
+    cargo test --lib services::auto_queue::cancel_run::tests -- --test-threads=1
     cargo test --lib -- _pg pg_ postgres --nocapture --test-threads=1
 
 check: fmt-check lint cargo-check test

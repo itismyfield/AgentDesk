@@ -1130,125 +1130,127 @@ pub(crate) async fn cancel_with_pg(
 }
 
 #[cfg(test)]
-pub(crate) async fn seed_cancel_fixture_for_pg_test(
-    pool: &PgPool,
-    suffix: &str,
-) -> (String, String, String) {
-    let run_id = format!("run-cancel-{suffix}");
-    let entry_id = format!("entry-cancel-{suffix}");
-    let dispatch_id = format!("dispatch-cancel-{suffix}");
-    sqlx::query(
-        "INSERT INTO agents (id, name, provider, discord_channel_id)
+pub(crate) mod tests {
+    use super::*;
+
+    pub(crate) async fn seed_cancel_fixture_for_pg_test(
+        pool: &PgPool,
+        suffix: &str,
+    ) -> (String, String, String) {
+        let run_id = format!("run-cancel-{suffix}");
+        let entry_id = format!("entry-cancel-{suffix}");
+        let dispatch_id = format!("dispatch-cancel-{suffix}");
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
          VALUES ('agent-cancel', 'Cancel Agent', 'claude', '123')
          ON CONFLICT (id) DO NOTHING",
-    )
-    .execute(pool)
-    .await
-    .expect("seed cancel agent");
-    let card_id = format!("card-cancel-{suffix}");
-    sqlx::query(
-        "INSERT INTO kanban_cards (id, title, status, assigned_agent_id)
+        )
+        .execute(pool)
+        .await
+        .expect("seed cancel agent");
+        let card_id = format!("card-cancel-{suffix}");
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id)
          VALUES ($1, 'Cancel Card', 'in_progress', 'agent-cancel')",
-    )
-    .bind(&card_id)
-    .execute(pool)
-    .await
-    .expect("seed cancel card");
-    sqlx::query(
-        "INSERT INTO auto_queue_runs (id, agent_id, status)
-         VALUES ($1, 'agent-cancel', 'active')",
-    )
-    .bind(&run_id)
-    .execute(pool)
-    .await
-    .expect("seed cancel run");
-    sqlx::query(
-        "INSERT INTO task_dispatches
-            (id, kanban_card_id, to_agent_id, dispatch_type, status, title)
-         VALUES ($1, $2, 'agent-cancel', 'implementation', 'dispatched', 'Cancel Dispatch')",
-    )
-    .bind(&dispatch_id)
-    .bind(&card_id)
-    .execute(pool)
-    .await
-    .expect("seed cancel dispatch");
-    sqlx::query(
-        "INSERT INTO auto_queue_entries
-            (id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index)
-         VALUES ($1, $2, $3, 'agent-cancel', 'dispatched', $4, 0)",
-    )
-    .bind(&entry_id)
-    .bind(&run_id)
-    .bind(&card_id)
-    .bind(&dispatch_id)
-    .execute(pool)
-    .await
-    .expect("seed cancel entry");
-    sqlx::query(
-        "INSERT INTO auto_queue_slots
-            (agent_id, slot_index, assigned_run_id, assigned_thread_group)
-         VALUES ('agent-cancel', 0, $1, 0)",
-    )
-    .bind(&run_id)
-    .execute(pool)
-    .await
-    .expect("seed cancel slot");
-    (run_id, entry_id, dispatch_id)
-}
-
-// #4953: every test here needs a live PostgreSQL server, so the module name
-// must carry the `pg_` marker that `just test-postgres` and the test-lane
-// coverage gate select on. Naming it `tests` put it outside the PG lane's
-// module-level match while the non-PG lane still ran it, so the PG-less
-// `full_non_pg` CI job executed it and failed with a 15s pool timeout.
-#[cfg(test)]
-mod pg_tests {
-    use super::*;
-    use crate::db::auto_queue::lock_live_dispatch_for_entry_attach_on_pg_tx as lock_dispatch;
-    use crate::db::auto_queue::test_support::TestPostgresDb;
-
-    #[tokio::test]
-    async fn concurrent_existing_dispatch_attach_prevents_run_scoped_cancel_pg() {
-        let pg_db = TestPostgresDb::create().await;
-        let pool = pg_db.connect_and_migrate().await;
-        let (run_a, entry_a, dispatch_id) =
-            seed_cancel_fixture_for_pg_test(&pool, "attach-race").await;
-        let run_b = "run-cancel-attach-race-b";
-        let entry_b = "entry-cancel-attach-race-b";
+        )
+        .bind(&card_id)
+        .execute(pool)
+        .await
+        .expect("seed cancel card");
         sqlx::query(
             "INSERT INTO auto_queue_runs (id, agent_id, status)
-             VALUES ($1, 'agent-cancel', 'active')",
+         VALUES ($1, 'agent-cancel', 'active')",
         )
-        .bind(run_b)
-        .execute(&pool)
+        .bind(&run_id)
+        .execute(pool)
         .await
-        .expect("seed attaching run");
+        .expect("seed cancel run");
+        sqlx::query(
+            "INSERT INTO task_dispatches
+            (id, kanban_card_id, to_agent_id, dispatch_type, status, title)
+         VALUES ($1, $2, 'agent-cancel', 'implementation', 'dispatched', 'Cancel Dispatch')",
+        )
+        .bind(&dispatch_id)
+        .bind(&card_id)
+        .execute(pool)
+        .await
+        .expect("seed cancel dispatch");
         sqlx::query(
             "INSERT INTO auto_queue_entries
+            (id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index)
+         VALUES ($1, $2, $3, 'agent-cancel', 'dispatched', $4, 0)",
+        )
+        .bind(&entry_id)
+        .bind(&run_id)
+        .bind(&card_id)
+        .bind(&dispatch_id)
+        .execute(pool)
+        .await
+        .expect("seed cancel entry");
+        sqlx::query(
+            "INSERT INTO auto_queue_slots
+            (agent_id, slot_index, assigned_run_id, assigned_thread_group)
+         VALUES ('agent-cancel', 0, $1, 0)",
+        )
+        .bind(&run_id)
+        .execute(pool)
+        .await
+        .expect("seed cancel slot");
+        (run_id, entry_id, dispatch_id)
+    }
+
+    // #4953: every test here needs a live PostgreSQL server, so the module name
+    // must carry the `pg_` marker that `just test-postgres` and the test-lane
+    // coverage gate select on. Naming it `tests` put it outside the PG lane's
+    // module-level match while the non-PG lane still ran it, so the PG-less
+    // `full_non_pg` CI job executed it and failed with a 15s pool timeout.
+    mod pg_tests {
+        use super::*;
+        use crate::db::auto_queue::lock_live_dispatch_for_entry_attach_on_pg_tx as lock_dispatch;
+        use crate::db::auto_queue::test_support::TestPostgresDb;
+
+        #[tokio::test]
+        async fn concurrent_existing_dispatch_attach_pg_prevents_run_scoped_cancel() {
+            let pg_db = TestPostgresDb::create().await;
+            let pool = pg_db.connect_and_migrate().await;
+            let (run_a, entry_a, dispatch_id) =
+                seed_cancel_fixture_for_pg_test(&pool, "attach-race").await;
+            let run_b = "run-cancel-attach-race-b";
+            let entry_b = "entry-cancel-attach-race-b";
+            sqlx::query(
+                "INSERT INTO auto_queue_runs (id, agent_id, status)
+             VALUES ($1, 'agent-cancel', 'active')",
+            )
+            .bind(run_b)
+            .execute(&pool)
+            .await
+            .expect("seed attaching run");
+            sqlx::query(
+                "INSERT INTO auto_queue_entries
                 (id, run_id, kanban_card_id, agent_id, status)
              SELECT $1, $2, kanban_card_id, 'agent-cancel', 'pending'
              FROM task_dispatches WHERE id = $3",
-        )
-        .bind(entry_b)
-        .bind(run_b)
-        .bind(&dispatch_id)
-        .execute(&pool)
-        .await
-        .expect("seed pending attaching entry");
-        sqlx::query(
-            "INSERT INTO sessions (session_key, agent_id, status, active_dispatch_id)
-             VALUES ('attach-race-session', 'agent-cancel', 'turn_active', $1)",
-        )
-        .bind(&dispatch_id)
-        .execute(&pool)
-        .await
-        .expect("seed attach race live session");
-
-        let mut attach_tx = pool.begin().await.expect("begin concurrent attach");
-        lock_dispatch(&mut attach_tx, &dispatch_id)
+            )
+            .bind(entry_b)
+            .bind(run_b)
+            .bind(&dispatch_id)
+            .execute(&pool)
             .await
-            .expect("lock dispatch before entry attach");
-        sqlx::query(
+            .expect("seed pending attaching entry");
+            sqlx::query(
+                "INSERT INTO sessions (session_key, agent_id, status, active_dispatch_id)
+             VALUES ('attach-race-session', 'agent-cancel', 'turn_active', $1)",
+            )
+            .bind(&dispatch_id)
+            .execute(&pool)
+            .await
+            .expect("seed attach race live session");
+
+            let mut attach_tx = pool.begin().await.expect("begin concurrent attach");
+            lock_dispatch(&mut attach_tx, &dispatch_id)
+                .await
+                .expect("lock dispatch before entry attach");
+            sqlx::query(
             "UPDATE auto_queue_entries SET status = 'dispatched', dispatch_id = $1, slot_index = 1, dispatched_at = NOW() WHERE id = $2 AND status = 'pending'",
         )
         .bind(&dispatch_id)
@@ -1257,21 +1259,20 @@ mod pg_tests {
         .await
         .expect("leave exact entry attach update uncommitted");
 
-        let cancel_pool = pool.clone();
-        let cancel_run_id = run_a.clone();
-        let cancel_task = tokio::spawn(async move {
-            cancel_selected_runs_with_pg(None, &cancel_pool, &[cancel_run_id], "reset_run").await
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        attach_tx.commit().await.expect("commit concurrent attach");
+            let cancel_pool = pool.clone();
+            let cancel_run_id = run_a.clone();
+            let cancel_task = tokio::spawn(async move {
+                cancel_selected_runs_with_pg(None, &cancel_pool, &[cancel_run_id], "reset_run")
+                    .await
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            attach_tx.commit().await.expect("commit concurrent attach");
 
-        let response = cancel_task
-            .await
-            .expect("join run cancellation")
-            .expect("cancel run A after attach commits");
-        assert_eq!(response["cancelled_dispatches"], 0);
-
-        let state = sqlx::query_as::<
+            let response = cancel_task
+                .await
+                .expect("join run cancellation")
+                .expect("cancel run A after attach commits");
+            let state = sqlx::query_as::<
             _,
             (
                 String,
@@ -1297,85 +1298,85 @@ mod pg_tests {
         .fetch_one(&pool)
         .await
         .expect("load attach race state");
-        assert_eq!(
-            (state.0.as_str(), state.1.as_str()),
-            ("cancelled", "skipped")
-        );
-        assert_eq!(
-            (state.2.as_str(), state.3.as_deref()),
-            ("dispatched", Some(dispatch_id.as_str()))
-        );
-        assert_eq!(
-            (state.4.as_str(), state.5.as_deref()),
-            ("dispatched", Some(dispatch_id.as_str()))
-        );
+            assert_eq!(
+                (state.0.as_str(), state.1.as_str()),
+                ("cancelled", "skipped")
+            );
+            assert_eq!(
+                (state.2.as_str(), state.3.as_deref()),
+                ("dispatched", Some(dispatch_id.as_str()))
+            );
+            assert_eq!(
+                (state.4.as_str(), state.5.as_deref()),
+                ("dispatched", Some(dispatch_id.as_str()))
+            );
 
-        pool.close().await;
-        pg_db.drop().await;
-    }
+            pool.close().await;
+            pg_db.drop().await;
+        }
 
-    #[tokio::test]
-    async fn force_pause_cleanup_pg_does_not_take_another_runs_shared_live_dispatch() {
-        let pg_db = TestPostgresDb::create().await;
-        let pool = pg_db.connect_and_migrate().await;
-        let (run_a, entry_a, dispatch_id) =
-            seed_cancel_fixture_for_pg_test(&pool, "shared-a").await;
-        let run_b = "run-cancel-shared-b";
-        let entry_b = "entry-cancel-shared-b";
+        #[tokio::test]
+        async fn force_pause_cleanup_pg_does_not_take_another_runs_shared_live_dispatch() {
+            let pg_db = TestPostgresDb::create().await;
+            let pool = pg_db.connect_and_migrate().await;
+            let (run_a, entry_a, dispatch_id) =
+                seed_cancel_fixture_for_pg_test(&pool, "shared-a").await;
+            let run_b = "run-cancel-shared-b";
+            let entry_b = "entry-cancel-shared-b";
 
-        sqlx::query(
-            "INSERT INTO auto_queue_runs (id, agent_id, status)
+            sqlx::query(
+                "INSERT INTO auto_queue_runs (id, agent_id, status)
              VALUES ($1, 'agent-cancel', 'active')",
-        )
-        .bind(run_b)
-        .execute(&pool)
-        .await
-        .expect("seed second run"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
-        sqlx::query(
-            "INSERT INTO auto_queue_entries
+            )
+            .bind(run_b)
+            .execute(&pool)
+            .await
+            .expect("seed second run"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+            sqlx::query(
+                "INSERT INTO auto_queue_entries
                 (id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index)
              SELECT $1, $2, kanban_card_id, 'agent-cancel', 'dispatched', $3, 1
              FROM task_dispatches WHERE id = $3",
-        )
-        .bind(entry_b)
-        .bind(run_b)
-        .bind(&dispatch_id)
-        .execute(&pool)
-        .await
-        .expect("seed second entry sharing dispatch"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
-        sqlx::query(
-            "INSERT INTO sessions (session_key, agent_id, status, active_dispatch_id)
+            )
+            .bind(entry_b)
+            .bind(run_b)
+            .bind(&dispatch_id)
+            .execute(&pool)
+            .await
+            .expect("seed second entry sharing dispatch"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+            sqlx::query(
+                "INSERT INTO sessions (session_key, agent_id, status, active_dispatch_id)
              VALUES ('shared-live-session', 'agent-cancel', 'turn_active', $1)",
-        )
-        .bind(&dispatch_id)
-        .execute(&pool)
-        .await
-        .expect("seed second run live session"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+            )
+            .bind(&dispatch_id)
+            .execute(&pool)
+            .await
+            .expect("seed second run live session"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
 
-        let cleanup = cancel_and_release_runs_with_pg(
-            None,
-            &pool,
-            std::slice::from_ref(&run_a),
-            "auto_queue_pause",
-            None,
-        )
-        .await
-        .expect("force-pause cleanup only run A"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
-        assert_eq!(cleanup.cancelled_dispatches, 0);
+            let cleanup = cancel_and_release_runs_with_pg(
+                None,
+                &pool,
+                std::slice::from_ref(&run_a),
+                "auto_queue_pause",
+                None,
+            )
+            .await
+            .expect("force-pause cleanup only run A"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
+            assert_eq!(cleanup.cancelled_dispatches, 0);
 
-        let state = sqlx::query_as::<
-            _,
-            (
-                String,
-                String,
-                String,
-                Option<String>,
-                String,
-                String,
-                Option<String>,
-            ),
-        >(
-            "SELECT ra.status, ea.status, rb.status, eb.dispatch_id,
+            let state = sqlx::query_as::<
+                _,
+                (
+                    String,
+                    String,
+                    String,
+                    Option<String>,
+                    String,
+                    String,
+                    Option<String>,
+                ),
+            >(
+                "SELECT ra.status, ea.status, rb.status, eb.dispatch_id,
                     eb.status, d.status, s.active_dispatch_id
              FROM auto_queue_runs ra
              JOIN auto_queue_entries ea ON ea.id = $2
@@ -1384,36 +1385,36 @@ mod pg_tests {
              JOIN task_dispatches d ON d.id = $5
              JOIN sessions s ON s.session_key = 'shared-live-session'
              WHERE ra.id = $1",
-        )
-        .bind(&run_a)
-        .bind(&entry_a)
-        .bind(run_b)
-        .bind(entry_b)
-        .bind(&dispatch_id)
-        .fetch_one(&pool)
-        .await
-        .expect("load both run states"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
-        assert_eq!(state.0, "active");
-        assert_eq!(state.1, "dispatched");
-        assert_eq!(state.2, "active");
-        assert_eq!(state.3.as_deref(), Some(dispatch_id.as_str()));
-        assert_eq!(state.4, "dispatched");
-        assert_eq!(state.5, "dispatched");
-        assert_eq!(state.6.as_deref(), Some(dispatch_id.as_str()));
+            )
+            .bind(&run_a)
+            .bind(&entry_a)
+            .bind(run_b)
+            .bind(entry_b)
+            .bind(&dispatch_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load both run states"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
+            assert_eq!(state.0, "active");
+            assert_eq!(state.1, "dispatched");
+            assert_eq!(state.2, "active");
+            assert_eq!(state.3.as_deref(), Some(dispatch_id.as_str()));
+            assert_eq!(state.4, "dispatched");
+            assert_eq!(state.5, "dispatched");
+            assert_eq!(state.6.as_deref(), Some(dispatch_id.as_str()));
 
-        pool.close().await;
-        pg_db.drop().await;
-    }
+            pool.close().await;
+            pg_db.drop().await;
+        }
 
-    #[tokio::test]
-    async fn card_rollback_failure_pg_rolls_back_the_core_run_cancellation() {
-        let pg_db = TestPostgresDb::create().await;
-        let pool = pg_db.connect_and_migrate().await;
-        let (run_id, entry_id, dispatch_id) =
-            seed_cancel_fixture_for_pg_test(&pool, "card-atomic").await;
+        #[tokio::test]
+        async fn card_rollback_failure_pg_rolls_back_the_core_run_cancellation() {
+            let pg_db = TestPostgresDb::create().await;
+            let pool = pg_db.connect_and_migrate().await;
+            let (run_id, entry_id, dispatch_id) =
+                seed_cancel_fixture_for_pg_test(&pool, "card-atomic").await;
 
-        sqlx::query(
-            "CREATE FUNCTION reject_cancel_card_ready() RETURNS trigger AS $$
+            sqlx::query(
+                "CREATE FUNCTION reject_cancel_card_ready() RETURNS trigger AS $$
              BEGIN
                  IF NEW.status = 'ready' THEN
                      RAISE EXCEPTION 'injected card rollback failure';
@@ -1421,48 +1422,53 @@ mod pg_tests {
                  RETURN NEW;
              END;
              $$ LANGUAGE plpgsql",
-        )
-        .execute(&pool)
-        .await
-        .expect("create card rollback failure function"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
-        sqlx::query(
-            "CREATE TRIGGER reject_cancel_card_ready
+            )
+            .execute(&pool)
+            .await
+            .expect("create card rollback failure function"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+            sqlx::query(
+                "CREATE TRIGGER reject_cancel_card_ready
              BEFORE UPDATE ON kanban_cards
              FOR EACH ROW EXECUTE FUNCTION reject_cancel_card_ready()",
-        )
-        .execute(&pool)
-        .await
-        .expect("create card rollback failure trigger"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+            )
+            .execute(&pool)
+            .await
+            .expect("create card rollback failure trigger"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
 
-        let result =
-            cancel_selected_runs_with_pg(None, &pool, std::slice::from_ref(&run_id), "reset_run")
-                .await;
-        assert!(
-            result.is_err(),
-            "card rollback failure must abort cancellation"
-        );
+            let result = cancel_selected_runs_with_pg(
+                None,
+                &pool,
+                std::slice::from_ref(&run_id),
+                "reset_run",
+            )
+            .await;
+            assert!(
+                result.is_err(),
+                "card rollback failure must abort cancellation"
+            );
 
-        let state = sqlx::query_as::<_, (String, String, Option<String>, String, String)>(
-            "SELECT r.status, e.status, e.dispatch_id, d.status, c.status
+            let state = sqlx::query_as::<_, (String, String, Option<String>, String, String)>(
+                "SELECT r.status, e.status, e.dispatch_id, d.status, c.status
              FROM auto_queue_runs r
              JOIN auto_queue_entries e ON e.id = $2
              JOIN task_dispatches d ON d.id = $3
              JOIN kanban_cards c ON c.id = d.kanban_card_id
              WHERE r.id = $1",
-        )
-        .bind(&run_id)
-        .bind(&entry_id)
-        .bind(&dispatch_id)
-        .fetch_one(&pool)
-        .await
-        .expect("load state after rejected card rollback"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
-        assert_eq!(state.0, "active");
-        assert_eq!(state.1, "dispatched");
-        assert_eq!(state.2.as_deref(), Some(dispatch_id.as_str()));
-        assert_eq!(state.3, "dispatched");
-        assert_eq!(state.4, "in_progress");
+            )
+            .bind(&run_id)
+            .bind(&entry_id)
+            .bind(&dispatch_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load state after rejected card rollback"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
+            assert_eq!(state.0, "active");
+            assert_eq!(state.1, "dispatched");
+            assert_eq!(state.2.as_deref(), Some(dispatch_id.as_str()));
+            assert_eq!(state.3, "dispatched");
+            assert_eq!(state.4, "in_progress");
 
-        pool.close().await;
-        pg_db.drop().await;
+            pool.close().await;
+            pg_db.drop().await;
+        }
     }
 }

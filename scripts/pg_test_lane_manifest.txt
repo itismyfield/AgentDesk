@@ -107,7 +107,7 @@ server::routes::message_outbox::tests
 server::routes::stats::memento_feedback_stats_pg_tests
 server::task_dispatch_claims::task_dispatch_claims_pg_tests
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests
-services::auto_queue::cancel_run::pg_tests
+services::auto_queue::cancel_run::tests::pg_tests
 services::auto_queue::route::activate_command::tests::depth_gate_activate_pg_tests
 services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests
 services::auto_queue::route::phase_gate::pg_tests
@@ -367,9 +367,9 @@ server::task_dispatch_claims::task_dispatch_claims_pg_tests::claim_waits_when_al
 server::task_dispatch_claims::task_dispatch_claims_pg_tests::claim_waits_when_per_cluster_semaphore_is_exhausted
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests::quality_channel_uses_db_precedence_and_no_target_off_switch_pg
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests::regression_outbox_and_cooldown_commit_or_roll_back_together_pg
-services::auto_queue::cancel_run::pg_tests::card_rollback_failure_pg_rolls_back_the_core_run_cancellation
-services::auto_queue::cancel_run::pg_tests::concurrent_existing_dispatch_attach_prevents_run_scoped_cancel_pg
-services::auto_queue::cancel_run::pg_tests::force_pause_cleanup_pg_does_not_take_another_runs_shared_live_dispatch
+services::auto_queue::cancel_run::tests::pg_tests::card_rollback_failure_pg_rolls_back_the_core_run_cancellation
+services::auto_queue::cancel_run::tests::pg_tests::concurrent_existing_dispatch_attach_pg_prevents_run_scoped_cancel
+services::auto_queue::cancel_run::tests::pg_tests::force_pause_cleanup_pg_does_not_take_another_runs_shared_live_dispatch
 services::auto_queue::route::activate_command::tests::depth_gate_activate_pg_tests::absent_scope_depth_never_creates_plan_no_regression_pg
 services::auto_queue::route::activate_command::tests::depth_gate_activate_pg_tests::card_without_scope_assessment_entry_binds_no_regression_pg
 services::auto_queue::route::activate_command::tests::depth_gate_activate_pg_tests::late_entry_direct_depth_creates_impl_no_plan_pg
@@ -529,7 +529,7 @@ services::pipeline_override::pipeline_override_pg_tests::repo_write_accepts_unas
 services::pipeline_override::pipeline_override_pg_tests::repo_write_rejects_malformed_existing_agent_override
 services::pipeline_override::pipeline_override_pg_tests::repo_write_rejects_state_id_that_would_fail_kanban_status_check
 services::pipeline_routes::tests::replace_stages_persists_backoff_round_trip_pg
-services::review_decision::worktree_stale::pg_lock_order_tests::run_cancel_and_scope_cleanup_share_dispatch_then_card_lock_order_pg
+services::review_decision::worktree_stale::pg_lock_order_tests::run_cancel_and_scope_cleanup_pg_share_dispatch_then_card_lock_order
 services::scheduled_messages::context_snapshot::postgres_tests::capture_refuses_empty_channel_pg
 services::scheduled_messages::context_snapshot::postgres_tests::capture_respects_clear_boundary_pg
 services::scheduled_messages::context_snapshot::postgres_tests::capture_then_validate_roundtrip_pg
