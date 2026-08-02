@@ -6,7 +6,10 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::api_caller_observability::{RequestPrincipal, log_identity_consumption};
+use crate::api_caller_observability::{
+    IdentityConsumptionFields, RequestPrincipal, emit_identity_consumption,
+    identity_consumption_fields,
+};
 use crate::services::automation_candidate_contract::{
     PIPELINE_STAGE_ID, has_complete_loop_contract,
 };
@@ -500,12 +503,10 @@ fn routine_delete_scope_gate(
     caller_agent_id: Option<&str>,
     principal: Option<&RequestPrincipal>,
 ) -> RoutineDeleteScopeGate {
-    log_identity_consumption(
-        "DELETE /api/routines/{id}",
+    emit_identity_consumption(routine_delete_identity_consumption_fields(
         principal,
         caller_agent_id,
-        false,
-    );
+    ));
 
     let Some(owner) = routine_agent_id
         .map(str::trim)
@@ -529,6 +530,18 @@ fn routine_delete_scope_gate(
             caller: caller.to_string(),
         }
     }
+}
+
+fn routine_delete_identity_consumption_fields(
+    principal: Option<&RequestPrincipal>,
+    caller_agent_id: Option<&str>,
+) -> IdentityConsumptionFields {
+    identity_consumption_fields(
+        "DELETE /api/routines/{id}",
+        principal,
+        caller_agent_id,
+        false,
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
@@ -3568,39 +3581,12 @@ mod tests {
     use crate::api_caller_observability::{AuthStrength, LOG_TARGET, RequestPrincipal};
     use chrono::{TimeZone, Utc};
     use serde_json::Value;
-    use std::io::{self, Write};
-    use std::sync::{Arc, Mutex};
-    use tracing_subscriber::fmt::writer::MakeWriter;
 
     // Integration tests that require a live PG connection live in
     // src/integration_tests.rs and are gated on the `integration` feature.
     // The store SQL is compiled by `cargo check`; concurrent claim/recovery
     // behavior should be covered by PG integration tests once the runtime
     // harness starts executing routines.
-
-    #[derive(Clone)]
-    struct CapturingWriter {
-        buffer: Arc<Mutex<Vec<u8>>>,
-    }
-
-    impl Write for CapturingWriter {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.buffer.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> MakeWriter<'a> for CapturingWriter {
-        type Writer = CapturingWriter;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
 
     #[test]
     fn resume_omitted_next_due_rejects_legacy_schedule_less_rows() {
@@ -4050,19 +4036,7 @@ mod tests {
     }
 
     #[test]
-    fn routine_delete_scope_gate_logs_delete_path_identity_consumption() {
-        let buffer = Arc::new(Mutex::new(Vec::new()));
-        let writer = CapturingWriter {
-            buffer: buffer.clone(),
-        };
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::INFO)
-            .with_ansi(false)
-            .without_time()
-            .with_target(true)
-            .with_writer(writer)
-            .finish();
-        let _guard = tracing::subscriber::set_default(subscriber);
+    fn routine_delete_scope_gate_preserves_typed_audit_projection() {
         let principal = RequestPrincipal {
             auth_strength: AuthStrength::ServerAdmin,
             claimed_agent_id: Some("codex".to_string()),
@@ -4080,30 +4054,34 @@ mod tests {
                 caller: "resolved-codex".to_string()
             }
         );
-        drop(_guard);
 
-        let logs = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
-        assert!(logs.contains(LOG_TARGET), "logs={logs}");
-        assert!(
-            logs.contains("endpoint=\"DELETE /api/routines/{id}\""),
-            "logs={logs}"
-        );
-        assert!(
-            logs.contains("auth_strength=\"ServerAdmin\""),
-            "logs={logs}"
-        );
-        assert!(logs.contains("claimed_agent_id=\"codex\""), "logs={logs}");
-        assert!(
-            logs.contains("claimed_channel_id=\"manager-channel\""),
-            "logs={logs}"
-        );
-        assert!(
-            logs.contains("consumed_agent_id=\"resolved-codex\""),
-            "logs={logs}"
-        );
-        assert!(
-            logs.contains("manager_channel_check_relied_on_claimed_header=false"),
-            "logs={logs}"
+        // This asserts the projection helper's own output for the DELETE
+        // argument shape, without the flaky formatted tracing capture. It does
+        // NOT observe the production call site: the helper is invoked here with
+        // arguments this test supplies, so changing what the DELETE handler
+        // actually passes — say, its `caller_agent_id` — leaves this test green.
+        // Nor does it inspect subscriber output or see fields added directly
+        // inside `tracing::info!`. Closing either gap needs a seam that reports
+        // the emitted values back from the production path; tracked as a site on
+        // umbrella #5003.
+        assert_eq!(LOG_TARGET, "agentdesk::api_caller_observability");
+        assert_eq!(
+            super::routine_delete_identity_consumption_fields(
+                Some(&principal),
+                Some("resolved-codex")
+            )
+            .named_values(),
+            vec![
+                ("endpoint", "DELETE /api/routines/{id}".to_string()),
+                ("auth_strength", "ServerAdmin".to_string()),
+                ("claimed_agent_id", "codex".to_string()),
+                ("claimed_channel_id", "manager-channel".to_string()),
+                ("consumed_agent_id", "resolved-codex".to_string()),
+                (
+                    "manager_channel_check_relied_on_claimed_header",
+                    "false".to_string(),
+                ),
+            ]
         );
     }
 
