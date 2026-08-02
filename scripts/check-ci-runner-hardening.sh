@@ -109,6 +109,15 @@ targets = {
     "job_sha256" => "0995b8496416accb68d636a3d115508298b457d035be9dc48e07b9fac6e2a51b",
     # Each exception must map a stable step name to its reviewable reason.
     "continue_on_error_allowlist" => {},
+    "step_inventory" => [
+      "uses: actions/checkout@v4", "Start PostgreSQL service",
+      "Install Rust toolchain", "Install just",
+      "Setup sccache", "Cache Cargo dependencies", "Observe curated lane selections",
+      "Require observer summary", "Footer-only marker regressions",
+      "Trusted session forwarding tests", "Telemetry-only intake authority regressions",
+      "Terminal delivery evidence regressions", "just test-postgres",
+      "Stop PostgreSQL service", "sccache stats",
+    ],
     "cargo_steps" => {
       "Observe curated lane selections" => {
         "commands" => [
@@ -164,6 +173,14 @@ targets = {
     "job_sha256" => "9c3587d8664bdd63769c3306c016f241e851649a68a7c6a52b11e243c438df3d",
     "require_debug_env" => false,
     "continue_on_error_allowlist" => {},
+    "step_inventory" => [
+      "uses: actions/checkout@v4", "Start PostgreSQL service",
+      "Install Rust toolchain", "Setup sccache",
+      "Cache Cargo dependencies", "Observe curated lane selections",
+      "Require observer summary", "High-risk recovery lane",
+      "Local model durable queue wake regression", "Stop PostgreSQL service",
+      "sccache stats",
+    ],
     "cargo_steps" => {
       "Observe curated lane selections" => {
         "commands" => [
@@ -236,13 +253,24 @@ targets.each do |job_id, spec|
 
   expected_steps = spec.fetch("cargo_steps")
   coe_allowlist = spec.fetch("continue_on_error_allowlist", {})
+  job_steps = Array(job["steps"])
+  step_names = job_steps.map { |step| step.is_a?(Hash) ? step["name"] : nil }
+  step_inventory = job_steps.map do |step|
+    step.is_a?(Hash) ? step["name"] || "uses: #{step["uses"]}" : nil
+  end
+  if spec.key?("step_inventory") && step_inventory != spec.fetch("step_inventory")
+    errors << "#{label} must retain the exact registered step inventory"
+  end
   coe_allowlist.each do |name, reason|
     unless name.is_a?(String) && !name.empty? && reason.is_a?(String) && !reason.strip.empty?
       errors << "#{label} continue-on-error allowlist entries require a step name and reason"
     end
+    unless step_names.count(name) == 1
+      errors << "#{label} continue-on-error allowlist entry #{name.inspect} must match exactly one step occurrence"
+    end
   end
   seen_steps = []
-  Array(job["steps"]).each_with_index do |step, index|
+  job_steps.each_with_index do |step, index|
     next unless step.is_a?(Hash)
 
     name = step["name"]

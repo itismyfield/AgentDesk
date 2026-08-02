@@ -273,7 +273,7 @@ class ExecutionEvidenceSummaryContract(unittest.TestCase):
             rc = integrity.main([
                 "--repo-root", str(REPO_ROOT), "--observe-selection",
                 "--workflow", str(REPO_ROOT / ".github/workflows/ci-pr.yml"),
-                "--job", "test_fast",
+                "--job", "test_fast", "--job", "high-risk-recovery",
             ])
         self.assertEqual(rc, 0)
         return output.getvalue()
@@ -283,10 +283,11 @@ class ExecutionEvidenceSummaryContract(unittest.TestCase):
             (["cargo", "test", "--lib", "good"], 3, None),
             (["cargo", "test", "--lib", "failed"], 0,
              "list execution failed (plain rc=101, ignored rc=101)"),
-        ]
+        ] + [(["cargo", "test", "--lib", f"good-{index}"], 1, None)
+             for index in range(15)]
         rendered = self._render(observations)
         self.assertEqual(self._summary_fields(rendered), {
-            "invocations": 2, "nonzero": 1, "findings": 1,
+            "invocations": 17, "nonzero": 16, "findings": 1,
             "extraction_errors": 0, "execution_errors": 1,
         }, "fixture self-assert: summary counters must match observer state")
         self.assertEqual(integrity.evidence_verification_errors(rendered), [])
@@ -300,7 +301,25 @@ class ExecutionEvidenceSummaryContract(unittest.TestCase):
                                    "nonzero=1 findings=0")
         errors = integrity.evidence_verification_errors(mutated)
         self.assertTrue(errors, "fixture self-assert: contradictory summary must fail")
-        self.assertIn("do not match evidence", errors[-1])
+        self.assertTrue(any("do not match evidence" in error for error in errors))
+
+    def test_verifier_rejects_duplicate_summary_counter(self) -> None:
+        rendered = self._render([
+            (["cargo", "test", "--lib", f"good-{index}"], 1, None)
+            for index in range(17)
+        ])
+        mutated = rendered.replace("invocations=17", "invocations=999 invocations=17")
+        self.assertIn(
+            "duplicate summary counter: invocations",
+            integrity.evidence_verification_errors(mutated),
+        )
+
+    def test_verifier_rejects_extraction_below_selector_minimum(self) -> None:
+        rendered = self._render([])
+        self.assertIn(
+            "observed 0 invocations, below pinned minimum 17",
+            integrity.evidence_verification_errors(rendered),
+        )
 
     def test_internal_error_summary_is_truthful(self) -> None:
         output = io.StringIO()
@@ -310,7 +329,7 @@ class ExecutionEvidenceSummaryContract(unittest.TestCase):
             rc = integrity.main([
                 "--repo-root", str(REPO_ROOT), "--observe-selection",
                 "--workflow", str(REPO_ROOT / ".github/workflows/ci-pr.yml"),
-                "--job", "test_fast",
+                "--job", "test_fast", "--job", "high-risk-recovery",
             ])
         self.assertEqual(rc, 0)
         rendered = output.getvalue()
@@ -318,7 +337,10 @@ class ExecutionEvidenceSummaryContract(unittest.TestCase):
             "invocations": 0, "nonzero": 0, "findings": 1,
             "extraction_errors": 0, "execution_errors": 1,
         })
-        self.assertEqual(integrity.evidence_verification_errors(rendered), [])
+        self.assertIn(
+            "observed 0 invocations, below pinned minimum 17",
+            integrity.evidence_verification_errors(rendered),
+        )
 
 
 class KnownOffenderRegression(unittest.TestCase):

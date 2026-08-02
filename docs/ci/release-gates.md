@@ -11,8 +11,10 @@
 | Gate | ci-main.yml job | ci-pr.yml job | ci-nightly.yml 대응 | 실행 조건 |
 | --- | --- | --- | --- | --- |
 | **Full tests** | `full_non_pg` | `check_fast` (compile/policy only) + `test_fast` | `full_macos` + `full_windows` | main/nightly always run non-PG tests; the path-filtered PR lane is compile/policy only. |
-| **PostgreSQL tests** | `postgres` (line 94) | `test_fast` PG 서비스 (line 115) | `postgres` | main/nightly는 항상 실행. PR의 `test_fast`와 selection observer는 `pg_db` path filter가 true일 때만 실행하며, false이면 required mirror가 명시적으로 green을 반환. |
-| **High-risk recovery** | `high-risk-recovery` (line 151) | `high-risk-recovery` (line 173) | `high_risk_recovery_full` | path filter hit 시에만 실행. nightly full job은 무조건. |
+| **PostgreSQL tests** | `postgres` job | `test_fast` job의 PG 서비스 | `postgres` | main/nightly는 항상 실행. PR의 `test_fast`와 selection observer는 `pg_db` path filter가 true일 때만 실행하며, false이면 required mirror가 명시적으로 green을 반환. |
+| **High-risk recovery** | `high-risk-recovery` job | `high-risk-recovery` job | `high_risk_recovery_full` | path filter hit 시에만 실행. nightly full job은 무조건. |
+
+새 required PR job은 `scripts/check-ci-runner-hardening.sh`의 `targets`에 수동 등재하고, semantic hash와 전체 step inventory를 함께 핀해야 한다. 등재 변경은 required context를 추가하는 PR에서 같은 diff로 리뷰한다.
 
 ### Gate ↔ 실제 커맨드
 
