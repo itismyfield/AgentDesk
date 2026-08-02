@@ -32,7 +32,8 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                         "enabled": false,
                         "mode": "observe",
                         "forward_pre_claim_timeout_secs": 12,
-                        "stale_claim_recovery_secs": 60
+                        "stale_claim_recovery_secs": 60,
+                        "max_attempts_per_message": 5
                     },
                     "env_override": null,
                     "warning_count": 0,
@@ -95,7 +96,8 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                         "enabled": true,
                         "mode": "observe",
                         "forward_pre_claim_timeout_secs": 12,
-                        "stale_claim_recovery_secs": 60
+                        "stale_claim_recovery_secs": 60,
+                        "max_attempts_per_message": 5
                     },
                     "env_override": null,
                     "warning_count": 0,

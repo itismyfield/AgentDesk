@@ -210,6 +210,8 @@ pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> Clust
     let base_capabilities = cluster_capabilities_with_worker_api(&config.cluster);
     let capabilities = capabilities_with_runtime_state(&base_capabilities);
     let pid = std::process::id() as i32;
+    let effective_intake_routing =
+        crate::services::cluster::intake_router_hook::effective_intake_routing_config();
 
     if let Err(error) = upsert_worker_node(
         &pool,
@@ -259,6 +261,8 @@ pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> Clust
         leader_active.clone(),
         leader_lease.take(),
         auto_leader_eligible,
+        effective_intake_routing.worker_consumer_should_spawn(),
+        effective_intake_routing.max_attempts_per_message,
     );
 
     let runtime = ClusterRuntime {
@@ -290,6 +294,8 @@ fn spawn_heartbeat_loop(
     leader_active: Arc<AtomicBool>,
     mut leader_lease: Option<AdvisoryLockLease>,
     leader_eligible: bool,
+    intake_retry_sweep_enabled: bool,
+    max_attempts_per_message: u32,
 ) {
     let interval_secs = heartbeat_interval_secs.max(1);
     let stale_threshold_secs = lease_ttl_secs.max(interval_secs * 3);
@@ -376,10 +382,58 @@ fn spawn_heartbeat_loop(
                         tracing::debug!("[cluster] stale GC yielding under pool pressure");
                         last_pressure_log = Instant::now();
                     }
-                } else if let Err(error) =
-                    mark_stale_worker_nodes_offline(&pool, stale_threshold_secs, &instance_id).await
-                {
-                    tracing::warn!("[cluster] stale worker_node GC failed: {error}");
+                } else {
+                    if let Err(error) =
+                        mark_stale_worker_nodes_offline(&pool, stale_threshold_secs, &instance_id)
+                            .await
+                    {
+                        tracing::warn!("[cluster] stale worker_node GC failed: {error}");
+                    }
+                    if intake_retry_sweep_enabled {
+                        match crate::db::intake_outbox::sweep_failed_pre_accept_once(
+                            &pool,
+                            &instance_id,
+                            max_attempts_per_message,
+                        )
+                        .await
+                        {
+                            Ok(crate::db::intake_outbox::FailedPreAcceptSweepOutcome::Empty) => {}
+                            Ok(
+                                crate::db::intake_outbox::FailedPreAcceptSweepOutcome::Retried {
+                                    source_id,
+                                    new_id,
+                                    attempt_no,
+                                },
+                            ) => {
+                                tracing::info!(
+                                    source_id,
+                                    new_id,
+                                    attempt_no,
+                                    target_instance_id = instance_id,
+                                    "[cluster] retried failed_pre_accept intake on leader"
+                                );
+                            }
+                            Ok(
+                                crate::db::intake_outbox::FailedPreAcceptSweepOutcome::BudgetExhausted {
+                                    source_id,
+                                    attempt_no,
+                                },
+                            ) => {
+                                tracing::warn!(
+                                    source_id,
+                                    attempt_no,
+                                    max_attempts_per_message,
+                                    "[cluster] failed_pre_accept intake retry budget exhausted; operator action required"
+                                );
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    "[cluster] failed_pre_accept intake retry sweep failed"
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }

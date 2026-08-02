@@ -930,7 +930,8 @@ explicitly intervenes via CLI.
   `target_instance_id = local_leader_id`, leaves `status='pending'`,
   bumps `retry_count`. Leader's own poll then claims it.
 - Bounded by `max_retries` (default 3); on exhaustion, transition
-  9 in §B-bis promotes to `failed_pre_accept` for operator action.
+  9 in §B-bis would promote to `failed_pre_accept` for operator action.
+  **Transitions 7 and 9 are not implemented in the current runtime.**
 
 **Claimed phase** (`claimed`):
 - Worker has SELECTed FOR UPDATE and UPDATEd to claimed.
@@ -938,9 +939,9 @@ explicitly intervenes via CLI.
   side effects yet.**
 - If validation fails → transition 6a → `failed_pre_accept`.
 - If worker dies before reaching `accepted` (process kill, panic
-  in validation), `claimed_at` becomes stale → leader sweep
-  (`stale_claim_recovery_secs`, default 60s) → transition 8 resets
-  to `pending`.
+  in validation), `claimed_at` becomes stale. **Transition 8 is not wired into
+  a production leader loop yet**; both stale-claim helpers currently have only
+  test callers.
 
 **Accepted phase** (`accepted`):
 - Worker has validated everything that can be validated cheaply and
@@ -949,31 +950,33 @@ explicitly intervenes via CLI.
   `done`, or `failed_post_accept`** — auto-retry forbidden.
 - Round-3 P1 #3 fast SLA: a row stuck in `accepted` past
   `accepted_unspawned_sla_secs` (default 120s) without
-  `spawned_at` triggers an operator alert via transition 11. The
-  alert is the recovery signal; CLI `force-fail <row>` writes
-  `failed_post_accept` + audit. No auto recovery.
+  `spawned_at` is queryable by the transition-11 helper, but that helper has no
+  production caller or Discord alert delivery yet. No auto recovery.
 
 **Spawned phase** (`spawned`):
 - Tmux session created, turn_bridge running.
 - Completion callback writes `done`; panic / process death leaves
-  `spawned` indefinitely. A row stuck in `spawned` past 24h with
-  no completion triggers a slow operator alert (worker-side panic
-  suspected). Same CLI tooling as `accepted` stuck.
+  `spawned` indefinitely. The planned 24h slow operator alert is not
+  implemented. The transition-12 operator helper is the current manual path.
 
 **Failure terminals**:
 - `failed_pre_accept`: retry-eligible. **Leader sweep applies
   transition 10 to INSERT a fresh attempt** with `attempt_no =
   family_max + 1`, `parent_outbox_id` linked, `target_instance_id =
-  local_leader`. Capped by `max_attempts_per_message`. Transitions
+  local_leader`. The production leader heartbeat processes one eligible family
+  per tick and caps it by `max_attempts_per_message`. Transitions
   7 and 8 only operate on still-OPEN rows (`pending`/`claimed`)
   and are unrelated to `failed_pre_accept` recovery — round-3 P0
-  fix added transition 10 specifically for that lane. CLI
-  `retry-local <row>` is the operator-driven equivalent.
+  fix added transition 10 specifically for that lane. The implemented
+  `intake-outbox force-fail --id <row>` command is the operator-driven retry
+  path and preserves the `failed_pre_accept` classification.
 - `failed_post_accept`: terminal. Operator decides. CLI provides
   `force-fail <row>` (audit only) and `retry-as-new <row>` which
   runs **transition 12** in a single transaction: force-fail the
   source + INSERT a fresh attempt linked via `parent_outbox_id`.
-  Same `family_max + 1 <= max_attempts_per_message` cap.
+  **The transition-12 operator helper does not yet enforce
+  `max_attempts_per_message`; that cap is currently enforced only by the
+  automatic transition-10 sweep.**
 
 **Why this split matters**: under v2 a single `failed` status
 created the contradiction codex flagged — the doc allowed retry
@@ -1029,11 +1032,11 @@ which is REST-safe and identical on both sides.
 | Mode | Detection | Action |
 |---|---|---|
 | Worker offline (stale heartbeat) | leader-side `worker_nodes.last_heartbeat_at` check at `resolve_intake_target` | route falls through to `Local` |
-| Worker dies before claim | row stays `pending` past `forward_pre_claim_timeout_secs` (12s) | **Transition 7 is not implemented in the current runtime.** The current guard moves the stale row to `failed_pre_accept`; no local re-target/attempt INSERT occurs, and no automatic consumer currently re-drives this state. Tracked by issue #5057. |
-| Worker dies in `claimed` (cwd validation in flight) | row stuck `claimed` past `stale_claim_recovery_secs` (60s) | transition 8: leader resets to `pending`, increments retry; on exhaustion → `failed_pre_accept` + alert |
-| Worker validation fails (cwd missing, workspace unprovisioned) | worker writes `failed_pre_accept` via transition 6a | leader sweep applies transition 10 to INSERT a fresh attempt with `target_instance_id = local_leader` (linked via `parent_outbox_id`). If `attempt_no >= max_attempts_per_message`, transition 10 refuses → operator alert; further retries require `retry-as-new` via transition 12 |
-| Worker dies in `accepted` | accepted_at > `accepted_unspawned_sla_secs` (default 120s) without `spawned_at` (transition 11) | fast operator alert; **no auto recovery** (round-2 P0 #2). Operator runs `force-fail <row>` (terminal failure) or `retry-as-new <row>` (transition 12, fresh row leader-targeted) |
-| Worker dies in `spawned` | row stuck without `done` > 24h | operator alert; **no auto recovery** (round-2 P0 #2). Operator runs `force-fail <row>` (terminal failure) or `retry-as-new <row>` (fresh row, leader-targeted) |
+| Worker dies before claim | row stays `pending` past `forward_pre_claim_timeout_secs` (12s) | **Transition 7 is not implemented in the current runtime.** The current guard retires the stale row to `failed_pre_accept` before admitting the newer message locally; transition 10 later re-drives the retired payload on the leader. |
+| Worker dies in `claimed` (cwd validation in flight) | row stuck `claimed` past `stale_claim_recovery_secs` (60s) | **Transition 8 is not wired into a production leader loop.** The two existing claimed-row sweep helpers currently have test callers only. |
+| Worker validation fails (cwd missing, workspace unprovisioned) | worker writes `failed_pre_accept` via transition 6a | the leader heartbeat applies transition 10 to INSERT one fresh attempt per tick with `target_instance_id = local_leader` (linked via `parent_outbox_id`). If the family reaches `max_attempts_per_message`, transition 10 refuses and emits a structured warning. **Deduplicated Discord operator-alert delivery is not implemented.** Further operator retries are possible through transition 12, whose budget cap is also not yet implemented. |
+| Worker dies in `accepted` | accepted_at > `accepted_unspawned_sla_secs` (default 120s) without `spawned_at` (transition 11) | **No automatic detector or alert delivery is wired.** No auto recovery; the operator can run transition 12, which copies the source target. |
+| Worker dies in `spawned` | row stuck without `done` > 24h | **The planned slow alert is not implemented.** No auto recovery; the operator can run transition 12, which copies the source target. |
 | Worker post-accept turn failure (provider error, panic in tmux) | worker writes `failed_post_accept` via transition 6b | terminal; operator decides via CLI |
 | Discord token revoked on worker (REST 401) | worker writes `failed_post_accept` (we already POSTed placeholder under that token) | terminal; operator rotates token + `retry-as-new` |
 | PG pool/owner query unavailable in `Enforce` | central admission dependency guard | block local execution and emit a throttled operator-facing notice; retry after PG/owner visibility recovers |
@@ -1070,14 +1073,15 @@ failures). New event types:
 Daily aggregation gives operators a per-agent latency / fallback
 rate that drives Phase 7 promotion decisions.
 
-Discord operator alerts (24h dedupe, mirror of #1994's
-`enqueue_outbox_pg_with_ttl`) fire on:
+The following Discord operator alerts are design targets. **The 24h-deduplicated
+Discord delivery path is not implemented for these intake states.** Transition
+10 currently emits a structured warning when its family budget is exhausted:
 
 - A row reaches `failed_post_accept` (terminal; user-visible state
   changed; manual operator decision needed).
-- A row reaches `failed_pre_accept` after exhausting
-  `max_attempts_per_message` via transition 10 (the audit chain has
-  no more retry budget).
+- A `failed_pre_accept` family has exhausted
+  `max_attempts_per_message` (the audit chain has no more automatic retry
+  budget).
 - A row stays in `accepted` past `accepted_unspawned_sla_secs`
   (default 120s) without `spawned_at` — round-3 P1 #3 fast-SLA
   detector. Auto-retry forbidden, so the alert IS the recovery
@@ -1244,18 +1248,17 @@ depend on 2-pre.3 specifically — it can ship in parallel with
     state. Round-2 P1 #6.
   - `clear-session-pin <channel_id>` — manual recovery for stale
     affinity (rule 5).
-  - `force-fail <row_id>` — write `failed_post_accept` with audit
-    note. Round-2 P1 #6. Allowed in any non-terminal state; refuses
-    if row is already `done`.
-  - `retry-local <row_id>` — operates on `failed_pre_accept` rows
-    only (no user-visible state change occurred). Runs SQL
-    transition 10 in §B-bis: INSERTs a fresh row with
-    `attempt_no = MAX + 1`, `parent_outbox_id = $row_id`,
-    `target_instance_id = local_leader`, `status = 'pending'`.
-    Refuses if the source row is `pending`/`claimed` (use
-    `force-fail` first), `accepted`/`spawned` (use `retry-as-new`),
-    or already `done`. Refuses if `attempt_no >=
-    max_attempts_per_message`.
+  - `force-fail <row_id>` — for `accepted`/`spawned`, write
+    `failed_post_accept` with an audit note and enqueue a child attempt. It also
+    retries either failure terminal; it refuses `pending`, `claimed`, and
+    `done`.
+  - The implemented `intake-outbox force-fail <row_id>` operator path also
+    accepts `failed_pre_accept` rows without reclassifying them. It INSERTs a
+    fresh row with
+    `attempt_no = MAX + 1`, `parent_outbox_id = $row_id`, the source row's
+    `target_instance_id`, and `status = 'pending'`. It refuses `pending`,
+    `claimed`, and `done`. **Its `max_attempts_per_message` guard remains
+    unimplemented; the automatic transition-10 sweep is the bounded path.**
   - `retry-as-new <row_id>` — operator-confirmed: works on
     `accepted/spawned/failed_post_accept` rows. Runs SQL
     transition 12 in §B-bis as a single transaction:
@@ -1271,8 +1274,9 @@ depend on 2-pre.3 specifically — it can ship in parallel with
     outside the transaction see the source as OPEN until commit
     but cannot see the new pending row until commit either, so
     they too never observe both simultaneously.
-    Confirm prompt + audit log entry. Refuses if
-    `family_max + 1 > max_attempts_per_message`.
+    Confirm prompt + audit log entry. **The implemented helper does not yet
+    refuse `family_max + 1 > max_attempts_per_message`; this remains follow-up
+    work shared with the operator alert path.**
 - `migrate-session-to <node>` is **NOT** in v1 (would need careful
   tmux handoff). Documented as future work; for now operators must
   terminate the foreign session via existing tools and let the next

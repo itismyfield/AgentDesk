@@ -2635,7 +2635,8 @@ mod tests {
                     "mode": "observe",
                     "owner_authority_allowlist_size": 2,
                     "forward_pre_claim_timeout_secs": 12,
-                    "stale_claim_recovery_secs": 60
+                    "stale_claim_recovery_secs": 60,
+                    "max_attempts_per_message": 5
                 },
                 "env_override": null,
                 "warning_count": 0,

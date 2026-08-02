@@ -12,7 +12,7 @@
 //! by leader and worker code paths without coupling.
 
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{Executor, PgPool, Postgres};
 
 /// Owned snapshot of an `intake_outbox` row. The `Phase 3` worker poll
 /// claims a row, deserializes the payload columns into this struct, then
@@ -188,23 +188,146 @@ pub(crate) fn classify_insert_pending_error(error: &sqlx::Error) -> Option<Intak
 /// Compute `MAX(attempt_no)` for a `(channel_id, user_msg_id)` family,
 /// or 0 if no row exists yet. Used by retry-on-`failed_pre_accept` to
 /// allocate `attempt_no = family_max + 1` (round-4 P0 — monotonic).
-// reason: intake-outbox retry helper exercised only by the pg-integration test
-// suite; production retry path wired on select routes. See #3034.
-#[allow(dead_code)]
-pub(crate) async fn family_max_attempt(
-    pool: &PgPool,
+pub(crate) async fn family_max_attempt<'e, E>(
+    executor: E,
     channel_id: &str,
     user_msg_id: &str,
-) -> Result<i32, sqlx::Error> {
+) -> Result<i32, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     let max_attempt: Option<i32> = sqlx::query_scalar(
         "SELECT MAX(attempt_no) FROM intake_outbox
          WHERE channel_id = $1 AND user_msg_id = $2",
     )
     .bind(channel_id)
     .bind(user_msg_id)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
     Ok(max_attempt.unwrap_or(0))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FailedPreAcceptSweepOutcome {
+    Empty,
+    Retried {
+        source_id: i64,
+        new_id: i64,
+        attempt_no: i32,
+    },
+    BudgetExhausted {
+        source_id: i64,
+        attempt_no: i32,
+    },
+}
+
+/// Transition 10: retry one latest `failed_pre_accept` family on the current
+/// leader. The source row remains terminal audit history; the new attempt copies
+/// its immutable payload and points back through `parent_outbox_id`.
+///
+/// The source row lock serializes automatic and operator retry from that latest
+/// attempt. A different open message on the same channel keeps the family out of
+/// the sweep until the channel's open-route fence clears.
+pub(crate) async fn sweep_failed_pre_accept_once(
+    pool: &PgPool,
+    local_leader: &str,
+    max_attempts_per_message: u32,
+) -> Result<FailedPreAcceptSweepOutcome, sqlx::Error> {
+    let max_attempts = max_attempts_per_message.clamp(1, i32::MAX as u32) as i32;
+    let mut tx = pool.begin().await?;
+    let source: Option<IntakeOutboxRow> = sqlx::query_as(
+        r#"
+        SELECT parent.*
+          FROM intake_outbox parent
+         WHERE parent.status = 'failed_pre_accept'
+           AND btrim(parent.provider) <> ''
+           AND parent.attempt_no = (
+                SELECT MAX(family.attempt_no)
+                  FROM intake_outbox family
+                 WHERE family.channel_id = parent.channel_id
+                   AND family.user_msg_id = parent.user_msg_id
+           )
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM intake_outbox open_row
+                 WHERE open_row.channel_id = parent.channel_id
+                   AND open_row.status IN ('pending', 'claimed', 'accepted', 'spawned')
+           )
+         ORDER BY (parent.attempt_no < $1) DESC,
+                  parent.updated_at ASC,
+                  parent.id ASC
+         LIMIT 1
+         FOR UPDATE OF parent SKIP LOCKED
+        "#,
+    )
+    .bind(max_attempts)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some(source) = source else {
+        tx.commit().await?;
+        return Ok(FailedPreAcceptSweepOutcome::Empty);
+    };
+
+    let family_max = family_max_attempt(&mut *tx, &source.channel_id, &source.user_msg_id).await?;
+    if family_max >= max_attempts {
+        tx.commit().await?;
+        return Ok(FailedPreAcceptSweepOutcome::BudgetExhausted {
+            source_id: source.id,
+            attempt_no: family_max,
+        });
+    }
+    let next_attempt = family_max + 1;
+
+    let new_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO intake_outbox (
+            target_instance_id, forwarded_by_instance_id, required_labels,
+            channel_id, user_msg_id, request_owner_id, request_owner_name,
+            user_text, reply_context, has_reply_boundary, dm_hint, turn_kind,
+            merge_consecutive, reply_to_user_message, defer_watcher_resume,
+            wait_for_completion, preserve_on_cancel, agent_id, provider,
+            status, attempt_no, parent_outbox_id
+        ) VALUES (
+            $1, $1, $2,
+            $3, $4, $5, $6,
+            $7, $8, $9, $10, $11,
+            $12, $13, $14,
+            $15, $16, $17, $18,
+            'pending', $19, $20
+        )
+        RETURNING id
+        "#,
+    )
+    .bind(local_leader)
+    .bind(&source.required_labels)
+    .bind(&source.channel_id)
+    .bind(&source.user_msg_id)
+    .bind(&source.request_owner_id)
+    .bind(source.request_owner_name.as_deref())
+    .bind(&source.user_text)
+    .bind(source.reply_context.as_deref())
+    .bind(source.has_reply_boundary)
+    .bind(source.dm_hint)
+    .bind(&source.turn_kind)
+    .bind(source.merge_consecutive)
+    .bind(source.reply_to_user_message)
+    .bind(source.defer_watcher_resume)
+    .bind(source.wait_for_completion)
+    .bind(source.preserve_on_cancel)
+    .bind(&source.agent_id)
+    .bind(&source.provider)
+    .bind(next_attempt)
+    .bind(source.id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(FailedPreAcceptSweepOutcome::Retried {
+        source_id: source.id,
+        new_id,
+        attempt_no: next_attempt,
+    })
 }
 
 /// Worker-side claim. Atomically promotes a single `pending` row owned
@@ -1345,6 +1468,189 @@ mod postgres_tests {
             .await
             .expect("read max");
         assert_eq!(max, 2);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_pre_accept_sweep_inserts_leader_targeted_child() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_default_test_agent(&pool).await;
+
+        let source_id = insert_pending(&pool, &payload("ch-sweep", "msg-sweep"), 1, None)
+            .await
+            .expect("seed source");
+        let claimed = claim_pending_for_target(&pool, "worker-1", "claude", "owner-1")
+            .await
+            .expect("claim")
+            .expect("source row");
+        assert_eq!(claimed.id, source_id);
+        assert!(
+            mark_failed_pre_accept(&pool, source_id, "owner-1", "pre-accept validation failed")
+                .await
+                .expect("fail source")
+        );
+
+        let outcome = sweep_failed_pre_accept_once(&pool, "leader-1", 5)
+            .await
+            .expect("sweep");
+        let FailedPreAcceptSweepOutcome::Retried {
+            source_id: retried_source,
+            new_id,
+            attempt_no,
+        } = outcome
+        else {
+            panic!("expected retry, got {outcome:?}");
+        };
+        assert_eq!(retried_source, source_id);
+        assert_eq!(attempt_no, 2);
+
+        let source_status: String =
+            sqlx::query_scalar("SELECT status FROM intake_outbox WHERE id = $1")
+                .bind(source_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read source");
+        assert_eq!(source_status, "failed_pre_accept");
+        let child: (String, String, i32, Option<i64>, String) = sqlx::query_as(
+            "SELECT status, target_instance_id, attempt_no, parent_outbox_id, user_text
+               FROM intake_outbox WHERE id = $1",
+        )
+        .bind(new_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read child");
+        assert_eq!(
+            child,
+            (
+                "pending".to_string(),
+                "leader-1".to_string(),
+                2,
+                Some(source_id),
+                "hello".to_string(),
+            )
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_pre_accept_sweep_stops_when_family_budget_is_exhausted() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_default_test_agent(&pool).await;
+
+        let first_id = insert_pending(&pool, &payload("ch-budget", "msg-budget"), 1, None)
+            .await
+            .expect("seed first");
+        let first = claim_pending_for_target(&pool, "worker-1", "claude", "owner-1")
+            .await
+            .expect("claim first")
+            .expect("first row");
+        assert_eq!(first.id, first_id);
+        mark_failed_pre_accept(&pool, first_id, "owner-1", "first failure")
+            .await
+            .expect("fail first");
+
+        let second_id = match sweep_failed_pre_accept_once(&pool, "leader-1", 2)
+            .await
+            .expect("first sweep")
+        {
+            FailedPreAcceptSweepOutcome::Retried {
+                new_id,
+                attempt_no: 2,
+                ..
+            } => new_id,
+            other => panic!("expected attempt 2, got {other:?}"),
+        };
+        let second = claim_pending_for_target(&pool, "leader-1", "claude", "owner-2")
+            .await
+            .expect("claim second")
+            .expect("second row");
+        assert_eq!(second.id, second_id);
+        mark_failed_pre_accept(&pool, second_id, "owner-2", "second failure")
+            .await
+            .expect("fail second");
+
+        let exhausted = sweep_failed_pre_accept_once(&pool, "leader-1", 2)
+            .await
+            .expect("exhausted sweep");
+        assert_eq!(
+            exhausted,
+            FailedPreAcceptSweepOutcome::BudgetExhausted {
+                source_id: second_id,
+                attempt_no: 2,
+            }
+        );
+        let family_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT FROM intake_outbox
+              WHERE channel_id = 'ch-budget' AND user_msg_id = 'msg-budget'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count family");
+        assert_eq!(family_count, 2, "budget must forbid attempt 3");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_pre_accept_sweep_ignores_done_and_accepted_rows() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_default_test_agent(&pool).await;
+
+        insert_pending(&pool, &payload("ch-done-sweep", "msg-done-sweep"), 1, None)
+            .await
+            .expect("seed done");
+        let done = claim_pending_for_target(&pool, "worker-1", "claude", "owner-done")
+            .await
+            .expect("claim done")
+            .expect("done row");
+        mark_accepted(&pool, done.id, "owner-done")
+            .await
+            .expect("accept done");
+        mark_spawned(&pool, done.id, "owner-done")
+            .await
+            .expect("spawn done");
+        mark_done(&pool, done.id, "owner-done")
+            .await
+            .expect("finish done");
+
+        insert_pending(
+            &pool,
+            &payload("ch-accepted-sweep", "msg-accepted-sweep"),
+            1,
+            None,
+        )
+        .await
+        .expect("seed accepted");
+        let accepted = claim_pending_for_target(&pool, "worker-1", "claude", "owner-accepted")
+            .await
+            .expect("claim accepted")
+            .expect("accepted row");
+        mark_accepted(&pool, accepted.id, "owner-accepted")
+            .await
+            .expect("accept row");
+
+        assert_eq!(
+            sweep_failed_pre_accept_once(&pool, "leader-1", 5)
+                .await
+                .expect("sweep"),
+            FailedPreAcceptSweepOutcome::Empty
+        );
+        let row_count: i64 = sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM intake_outbox")
+            .fetch_one(&pool)
+            .await
+            .expect("count rows");
+        assert_eq!(
+            row_count, 2,
+            "non-target states must not gain retry children"
+        );
 
         pool.close().await;
         pg_db.drop().await;
