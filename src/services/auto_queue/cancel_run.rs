@@ -888,9 +888,14 @@ pub(crate) async fn cancel_selected_runs_with_pg(
     // removes them. But it is not free: this statement locks several runs, and
     // `ORDER BY id ASC` orders by run id, not by lock key. Two cancellations
     // over different run sets can therefore acquire the *same* two hash keys in
-    // opposite order and deadlock; PostgreSQL aborts one of them. Reproduced on
-    // PG17 with the colliding pairs 248961/52834 and 32829/293472. Callers must
-    // treat a cancellation abort as retryable rather than as a lost run.
+    // opposite order and deadlock; PostgreSQL aborts one of them with 40P01.
+    // Reproduced on PG17.9 by interleaving the colliding pairs 202051/509634
+    // and 111418/403214 (values verified against this expression, not against
+    // hashtext of the bare id).
+    //
+    // No caller retries: every path converts the error and returns it, up to
+    // the HTTP handler, so an aborted cancellation surfaces as a failed request
+    // and the run stays live until someone re-issues it.
     let locked_run_ids = sqlx::query_scalar::<_, String>(
         "WITH target_runs AS (
              SELECT id
