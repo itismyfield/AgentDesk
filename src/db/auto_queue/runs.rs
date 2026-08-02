@@ -254,6 +254,12 @@ pub(super) async fn maybe_finalize_run_after_terminal_entry_pg(
     maybe_finalize_run_if_ready_pg(tx, run_id).await
 }
 
+/// The policy sweep's `LIMIT 50` caps writer invocations, not SQL statements.
+/// `pg_stat_statements` measurements excluding transaction control recorded
+/// 801 statements for the old unfiltered 200-writer scenario and at least 401
+/// for one prefilter plus 50 ready writers. There is no fixed SQL upper bound:
+/// notification routing varies with agent/fallback channel lookup, entry-count
+/// lookup, and one outbox insert per resolved target.
 pub(crate) async fn maybe_finalize_run_if_ready_pg(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,

@@ -92,17 +92,27 @@ function completeRunAndNotify(runId) {
     // gate. Return it to `active`; the bounded tick owns both dispatch and
     // completion retries from here. Do not activate inline because the writer
     // reason may be grace rather than runnable work.
-    try {
-      agentdesk.autoQueue.resumeRun(runId, "phase_gate_completion_deferred");
-    } catch (resumeError) {
-      autoQueueLog("warn", "Failed to resume deferred final phase-gate run " + runId + ": " + resumeError, {
-        run_id: runId,
-        reason: completed ? completed.reason : null
-      });
-    }
+    resumeFinalPhaseRunForTickRecovery(runId, completed ? completed.reason : null);
   } catch (e) {
     autoQueueLog("warn", "Failed to complete final phase-gate run " + runId + ": " + e, {
       run_id: runId
+    });
+    // Completion can fail before returning a typed readiness outcome (for
+    // example, notification enqueue can roll the transaction back). The gate
+    // row has already been cleared, so leaving the run paused would remove it
+    // from dispatch recovery. Resume only; the bounded tick remains the sole
+    // activation/completion retry owner.
+    resumeFinalPhaseRunForTickRecovery(runId, "completion_error");
+  }
+}
+
+function resumeFinalPhaseRunForTickRecovery(runId, reason) {
+  try {
+    agentdesk.autoQueue.resumeRun(runId, "phase_gate_completion_deferred");
+  } catch (resumeError) {
+    autoQueueLog("warn", "Failed to resume deferred final phase-gate run " + runId + ": " + resumeError, {
+      run_id: runId,
+      reason: reason
     });
   }
 }

@@ -847,6 +847,23 @@ test("final-phase readiness block resumes paused run for bounded tick recovery",
   assert.deepEqual(state.autoQueueActivations, []);
 });
 
+test("final-phase completion exception resumes paused run without inline activation", () => {
+  const { module, state } = loadPolicy("policies/lib/auto-queue-lifecycle.js", {
+    autoQueueFinalizeRunIfReady() {
+      throw new Error("notification enqueue failed");
+    }
+  });
+
+  module.completeRunAndNotify("run-final-phase-error");
+
+  assert.deepEqual(state.autoQueueCompletes, [{ runId: "run-final-phase-error" }]);
+  assert.deepEqual(state.autoQueueResumes, [{
+    runId: "run-final-phase-error",
+    source: "phase_gate_completion_deferred"
+  }]);
+  assert.deepEqual(state.autoQueueActivations, []);
+});
+
 test("auto-queue rotates saturated active runs in bounded tick sweep", () => {
   const { policy, state } = loadPolicy("policies/auto-queue.js", {
     dbQuery: createSqlRouter([
