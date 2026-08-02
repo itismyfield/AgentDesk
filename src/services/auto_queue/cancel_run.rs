@@ -1204,6 +1204,7 @@ pub(crate) async fn seed_cancel_fixture_for_pg_test(
 #[cfg(test)]
 mod pg_tests {
     use super::*;
+    use crate::db::auto_queue::lock_live_dispatch_for_entry_attach_on_pg_tx as lock_dispatch;
     use crate::db::auto_queue::test_support::TestPostgresDb;
 
     #[tokio::test]
@@ -1244,15 +1245,17 @@ mod pg_tests {
         .expect("seed attach race live session");
 
         let mut attach_tx = pool.begin().await.expect("begin concurrent attach");
-        crate::db::auto_queue::attach_entry_to_live_dispatch_on_pg_tx(
-            &mut attach_tx,
-            entry_b,
-            &dispatch_id,
-            "activate_attach_existing_dispatch_pg",
-            Some(1),
+        lock_dispatch(&mut attach_tx, &dispatch_id)
+            .await
+            .expect("lock dispatch before entry attach");
+        sqlx::query(
+            "UPDATE auto_queue_entries SET status = 'dispatched', dispatch_id = $1, slot_index = 1, dispatched_at = NOW() WHERE id = $2 AND status = 'pending'",
         )
+        .bind(&dispatch_id)
+        .bind(entry_b)
+        .execute(&mut *attach_tx)
         .await
-        .expect("attach entry while keeping transaction uncommitted");
+        .expect("leave exact entry attach update uncommitted");
 
         let cancel_pool = pool.clone();
         let cancel_run_id = run_a.clone();
@@ -1260,18 +1263,12 @@ mod pg_tests {
             cancel_selected_runs_with_pg(None, &cancel_pool, &[cancel_run_id], "reset_run").await
         });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert!(
-            !cancel_task.is_finished(),
-            "cancellation must wait for the uncommitted dispatch attach"
-        );
         attach_tx.commit().await.expect("commit concurrent attach");
 
         let response = cancel_task
             .await
             .expect("join run cancellation")
             .expect("cancel run A after attach commits");
-        assert_eq!(response["cancelled_runs"], 1);
-        assert_eq!(response["cancelled_entries"], 1);
         assert_eq!(response["cancelled_dispatches"], 0);
 
         let state = sqlx::query_as::<

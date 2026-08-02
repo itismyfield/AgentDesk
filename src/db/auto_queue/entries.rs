@@ -644,20 +644,7 @@ pub async fn attach_entry_to_live_dispatch_on_pg_tx(
     trigger_source: &str,
     slot_index: Option<i64>,
 ) -> Result<EntryStatusUpdateResult, String> {
-    let status = sqlx::query_scalar::<_, String>(
-        "SELECT status FROM task_dispatches WHERE id = $1 FOR UPDATE",
-    )
-    .bind(dispatch_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|error| format!("lock postgres dispatch {dispatch_id} for entry attach: {error}"))?
-    .ok_or_else(|| format!("postgres dispatch {dispatch_id} not found for entry attach"))?;
-    if !matches!(status.as_str(), "pending" | "dispatched") {
-        return Err(format!(
-            "postgres dispatch {dispatch_id} is {status}: refusing entry attach"
-        ));
-    }
-
+    lock_live_dispatch_for_entry_attach_on_pg_tx(tx, dispatch_id).await?;
     update_entry_status_on_pg_tx(
         tx,
         entry_id,
@@ -669,6 +656,23 @@ pub async fn attach_entry_to_live_dispatch_on_pg_tx(
         },
     )
     .await
+}
+
+pub(crate) async fn lock_live_dispatch_for_entry_attach_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    dispatch_id: &str,
+) -> Result<(), String> {
+    let status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM task_dispatches WHERE id = $1 FOR UPDATE",
+    )
+    .bind(dispatch_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| format!("lock postgres dispatch {dispatch_id} for entry attach: {error}"))?;
+    if !matches!(status.as_str(), "pending" | "dispatched") {
+        return Err(format!("dispatch {dispatch_id} is not live: {status}"));
+    }
+    Ok(())
 }
 
 /// Transaction-scoped variant of [`update_entry_status_on_pg`].
