@@ -44,6 +44,30 @@ _COMPLETION_PANEL_CHROME_PATTERN = re.compile(r"^-# ✅ 완료(?:\n|$)")
 # the leading `^✅` status family below.
 _IDLE_RECAP_COMPLETION_PATTERN = re.compile(r"^📦 응답 완료 ·")
 
+# A single-message completion/status footer is appended at an exact ``\n\n``
+# boundary (``single_message_panel::compose_completion_footer_text``).  Keep
+# this list tied to the producer shapes rather than treating every ``-#`` line
+# as chrome: ordinary markdown in an answer is still relay body.  The first
+# two labels come from ``freshness::render_activity_line``; the remaining
+# shapes are the completion block's first lines after
+# ``completion_footer_subtext`` adds Discord's ``-#`` prefix.
+_COMPLETION_FOOTER_HEAD_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^-# ✅ (?:완료|백그라운드 완료)$"),
+    re.compile(r"^-# (?:⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏) ✅ (?:완료|백그라운드 완료)$"),
+    re.compile(r"^-# (?:💤 monitor 대기|⏰ scheduled wakeup(?: \([^\n]*\))?)$"),
+    re.compile(r"^-# (?:🔧 마지막 도구|🧵 subagent 실행 중|🧬 workflow 실행 중) \([^\n]*\)$"),
+    re.compile(r"^-# (?:⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏) "
+               r"(?:💤 monitor 대기|⏰ scheduled wakeup(?: \([^\n]*\))?|"
+               r"🔧 마지막 도구|🧵 subagent 실행 중|🧬 workflow 실행 중)"
+               r"(?: \([^\n]*\))?$"),
+    re.compile(r"^-# Task     "),
+    re.compile(r"^-# 턴 트리거: https://discord\.com/channels/"),
+    re.compile(r"^-# (?:📦|⚠️|⚠ ) .+ · auto-compact(?: |$)"),
+    re.compile(r"^-# (?:Tasks|Subagents|Background agents)$"),
+    re.compile(r"^-# (?:⏱ |⏳ |🖥️ )"),
+    re.compile(r"^-# ⚠️ \*\*턴을 완료하기 전에 커밋되지 않은 변경사항을 확인하세요\.\*\*$"),
+)
+
 _STATUS_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"Processing\.\.\."),
     re.compile(r"^🟢"),
@@ -122,7 +146,10 @@ def relay_body(message: dict[str, Any]) -> str | None:
     evidence that the answer was delivered.  A banner-shaped post with any
     other separator is treated as bodyless (fail closed for malformed relay
     output).  Messages without a banner retain their historical full-content
-    behavior.
+    behavior.  The product may append a completion/status footer to that same
+    post; only a recognized footer at the message tail is removed.  A prose
+    body that merely starts with a banner label but lacks the required blank
+    separator remains fail-closed, because no product path emits that shape.
     """
 
     if not is_relay_response(message):
@@ -130,11 +157,43 @@ def relay_body(message: dict[str, Any]) -> str | None:
     content = message.get("content") or ""
     prefix = _SESSION_BANNER_PREFIX_PATTERN.match(content)
     if prefix is None:
-        return content
+        return _strip_relay_body_chrome(content)
     remainder = content[prefix.end() :]
     if not remainder.startswith("\n\n"):
         return None
-    return remainder[2:]
+    return _strip_relay_body_chrome(remainder[2:])
+
+
+def _is_completion_footer_head(line: str) -> bool:
+    line = line.strip()
+    return any(pattern.search(line) for pattern in _COMPLETION_FOOTER_HEAD_PATTERNS)
+
+
+def _strip_completion_chrome_tail(body: str) -> str:
+    """Drop a producer-shaped completion/status block after the answer body."""
+
+    for boundary in re.finditer(r"\n\n(?=-# )", body):
+        footer = body[boundary.end() :]
+        first = next((line for line in footer.splitlines() if line.strip()), "")
+        if _is_completion_footer_head(first):
+            return body[: boundary.start()].rstrip()
+    return body
+
+
+def _strip_relay_body_chrome(body: str) -> str:
+    body = _strip_completion_chrome_tail(body)
+    # Session-banner claims are one-shot in the product, but a repeated banner
+    # is a useful fail-closed regression fixture.  Remove only another exact
+    # banner + blank separator at the *start* of the already-isolated body; a
+    # normal body mentioning a banner later is untouched.
+    while True:
+        prefix = _SESSION_BANNER_PREFIX_PATTERN.match(body)
+        if prefix is None:
+            return body
+        remainder = body[prefix.end() :]
+        if not remainder.startswith("\n\n"):
+            return body
+        body = _strip_completion_chrome_tail(remainder[2:])
 
 
 @dataclasses.dataclass
@@ -624,8 +683,10 @@ def no_suppressed_label_chrome(window: Window) -> None:
 def no_control_chars(window: Window) -> None:
     forbidden = {chr(c) for c in (0x07, 0x08, 0x0C, 0x1B, 0x7F, 0x85)}
     for message in window.messages:
-        body = relay_body(message) or ""
-        leaked = forbidden.intersection(body)
+        # This is a wire-surface invariant, not a body-marker invariant.  A
+        # control byte in a session banner is still leaked Discord content.
+        content = message.get("content") or ""
+        leaked = forbidden.intersection(content)
         if leaked:
             raise AssertionError(f"control byte leaked into Discord message: {sorted(leaked)!r}")
 
@@ -648,7 +709,10 @@ def no_resume_prompt_chrome(window: Window) -> None:
     auto-prompt was still being prepended every turn — the assistant would
     answer the meta prompt with \"No response requested.\" and glue the real
     marker onto the same Discord message. Substring `text_present` still
-    passed, masking the regression.
+    passed, masking the regression.  Unlike control-byte scanning, this stays
+    body-scoped: the CLI chrome is emitted after the session-banner separator
+    and is exactly the answer-surface leak the marker contract is meant to
+    reject.
     """
 
     for message in window.messages:

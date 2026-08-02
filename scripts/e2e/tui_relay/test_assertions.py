@@ -407,6 +407,78 @@ class SessionAndCompletionChromeRegression(unittest.TestCase):
             window, body_marker=self.MARKER, required=True
         )
 
+    def test_normal_body_marker_with_completion_footer_stays_body(self):
+        message = _raw_bot_msg(
+            1,
+            f"normal answer {self.MARKER}\n\n"
+            "-# ✅ 완료\n"
+            "-# Tasks\n"
+            "-# └ Bash finished ✓",
+        )
+
+        self.assertEqual(assertions.relay_body(message), f"normal answer {self.MARKER}")
+        assertions.text_present(_window(message), needle=self.MARKER)
+
+    def test_banner_body_marker_with_completion_footer_stays_body(self):
+        message = _raw_bot_msg(
+            1,
+            f"{self.RESUMED_BANNER}\n\n{self.MARKER}\n\n"
+            "-# ✅ 완료\n"
+            "-# 턴 시작 : anonymized",
+        )
+
+        self.assertEqual(assertions.relay_body(message), self.MARKER)
+        assertions.text_present(_window(message), needle=self.MARKER)
+
+    def test_repeated_banner_marker_is_not_body_evidence(self):
+        message = _raw_bot_msg(
+            1,
+            "기존 세션 복원\n\n"
+            f"{self.RESUMED_BANNER} {self.MARKER}\n\n",
+        )
+        window = _window(message)
+
+        # This shape is not product-emitted (session claims are one-shot), but
+        # the body boundary remains fail-closed if a regression recreates it.
+        self.assertEqual(assertions.relay_body(message), "")
+        self.assertEqual(_wait_predicate(window, self.MARKER), False)
+        with self.assertRaises(assertions.AssertionError):
+            assertions.text_present(window, needle=self.MARKER)
+
+    def test_completion_panel_marker_is_not_body_evidence(self):
+        message = _raw_bot_msg(
+            1,
+            f"wrong body\n\n-# ✅ 완료\n-# Tasks · {self.MARKER}",
+        )
+        window = _window(message)
+
+        self.assertEqual(assertions.relay_body(message), "wrong body")
+        self.assertEqual(_wait_predicate(window, self.MARKER), False)
+        with self.assertRaises(assertions.AssertionError):
+            assertions.text_present(window, needle=self.MARKER)
+
+    def test_no_control_chars_scans_full_wire_message_including_banner(self):
+        message = _raw_bot_msg(
+            1,
+            f"기존 세션 복원 · provider session claude#bad\x1b\n\n{self.MARKER}",
+        )
+        window = _window(message)
+
+        # The marker body is valid; the wire-level ESC must still fail.
+        self.assertEqual(assertions.relay_body(message), self.MARKER)
+        with self.assertRaisesRegex(assertions.AssertionError, "control byte"):
+            assertions.no_control_chars(window)
+
+    def test_no_resume_prompt_chrome_remains_body_scoped(self):
+        message = _raw_bot_msg(
+            1,
+            f"기존 세션 복원\n\nNo response requested. {self.MARKER}",
+        )
+        window = _window(message)
+
+        with self.assertRaisesRegex(assertions.AssertionError, "No response requested"):
+            assertions.no_resume_prompt_chrome(window)
+
     def test_response_completion_phrase_inside_normal_body_stays_a_relay(self):
         message = _raw_bot_msg(
             1,
