@@ -77,6 +77,12 @@ unless trigger_events == ["pull_request"]
 end
 
 targets = {
+  # The independent explicit step-inventory layer was removed, but each
+  # registered job's whole-job semantic hash still rejects step additions,
+  # deletions, and reordering. Observer/verifier entries below also retain exact
+  # occurrence and explicit nil continue-on-error contracts. This registry does
+  # not discover new jobs automatically, and there is no invocation-floor
+  # replacement in the selection-evidence verifier.
   "check_fast_cross_os" => {
     "label" => "cross-OS job",
     "name" => 'Fast check + non-PG tests (${{ matrix.os }})',

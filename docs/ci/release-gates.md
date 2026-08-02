@@ -10,24 +10,36 @@
 
 | Gate | ci-main.yml job | ci-pr.yml job | ci-nightly.yml 대응 | 실행 조건 |
 | --- | --- | --- | --- | --- |
-| **Full tests** | `full_non_pg` | `check_fast` (compile/policy only) + `test_fast` | `full_macos` + `full_windows` | main/nightly always run non-PG tests; the path-filtered PR lane is compile/policy only. |
-| **PostgreSQL tests** | `postgres` job | `test_fast` job의 PG 서비스 | `postgres` | main/nightly는 항상 실행. PR의 `test_fast`와 selection observer는 `pg_db` path filter가 true일 때만 실행하며, false이면 required mirror가 명시적으로 green을 반환. |
-| **High-risk recovery** | `high-risk-recovery` job | `high-risk-recovery` job | `high_risk_recovery_full` | path filter hit 시에만 실행. nightly full job은 무조건. |
+| **Full tests** | `full_non_pg` | `check_fast` (compile/policy only) | `full_macos` + `full_windows` | main/nightly always run non-PG tests; the path-filtered PR lane is compile/policy only. |
+| **PostgreSQL tests** | `postgres` | `test_fast`의 PG 서비스 | `postgres_full` | main/nightly는 항상 실행. PR의 `test_fast`와 selection observer는 `pg_db` path filter가 true일 때만 실행하며, false이면 required mirror가 명시적으로 green을 반환. |
+| **High-risk recovery** | `high-risk-recovery` | `high-risk-recovery` | `high_risk_recovery_full` | path filter hit 시에만 실행. nightly full job은 무조건. |
 
-Selection observer 게이트의 의도된 범위는 observer가 죽거나 상세 관측과 다른
-5필드 summary를 출력할 때 required lane을 red로 만드는 것이다. 고의적 무력화,
-예를 들어 job ID 인용, observer/verifier step 삭제, `check_fast_cross_os` 같은 미등록
-경계 추가, 표현 변형으로 인한 추출량 붕괴는 이 게이트가 막지 않으며 코드 리뷰가
-잡아야 한다. 세 차례 리뷰에서 열거 기반 anti-tamper 층을 다르게 확장할 때마다 새
-우회가 확인됐고, 열거 기반 방어는 열거 밖의 형태를 보장할 수 없기 때문이다.
+Selection observer required gate가 red로 만드는 observer 사망은 **프로세스 수준
+사망**이다. observer의 비정상 종료 코드나 시그널, summary 0줄 또는 2줄 이상,
+로그 파일 부재나 `tee` 실패, verifier 자체 사망은 required lane을 red로 만든다.
+상세 관측과 다른 5필드 summary도 verifier가 red로 만든다. 반면 observer가 내부
+예외를 잡아 `execution_errors`와 `findings`로 truthful하게 보고하면 observer는 0으로
+종료하고 verifier도 통과한다. 이 verifier는 summary가 상세 evidence에 비추어
+**참인지**만 검사하며 관측이 충분한지는 검사하지 않는다. invocation 하한을
+제거했으므로 truthful all-zero summary도 통과한다.
+
+`scripts/check-ci-runner-hardening.sh`의 `targets`에 등재된 `test_fast`,
+`high-risk-recovery`, `check_fast_cross_os`는 whole-job semantic hash가 step의
+추가·삭제·순서 변경을 막는다. observer/verifier step은 expected-step 계약으로
+각각 exact occurrence와 `continue-on-error` 부재도 고정한다. 따라서 observer step
+삭제나 미등록 step 추가는 checker의 expected-step 계약과 semantic hash를 함께
+고치는 coordinated 변경이어야 하며 코드 리뷰 책임이다. 독립적인 명시적 step
+inventory 층은 없지만 기존 whole-job semantic hash 보호는 유지된다. 다만
+`targets`에 없는 신규 job 경계, job ID 인용이나 표현 변형으로 인한 추출량 붕괴,
+invocation 하한은 이 게이트가 보장하지 않는다.
 
 ### Gate ↔ 실제 커맨드
 
 | Gate | main 커맨드 | 재현 커맨드 (로컬) |
 | --- | --- | --- |
-| Full tests | `cargo test --all-targets -- --skip _pg --skip pg_ --skip postgres` | 동일 |
-| PostgreSQL tests | `cargo test _pg / pg_ / postgres -- --test-threads=1` (3회) | `DATABASE_URL=... cargo test _pg -- --test-threads=1` |
-| High-risk recovery | `cargo test --bin agentdesk high_risk_recovery:: -- --test-threads=1` | 동일 |
+| Full tests | `full_non_pg`의 `just check` step: `just check` | `just check` |
+| PostgreSQL tests | `postgres`의 `just test-postgres` step: `just test-postgres` | workflow와 같은 PostgreSQL 환경에서 `just test-postgres` |
+| High-risk recovery | `high-risk-recovery`의 `High-risk recovery lane` step: `cargo test --lib high_risk_recovery:: -- --test-threads=1` | 동일 |
 
 ## 2. Path Filter Policy
 
@@ -38,7 +50,9 @@ Selection observer 게이트의 의도된 범위는 observer가 죽거나 상세
 
 ### Conditional (`high_risk_recovery` path filter)
 
-`high-risk-recovery` job은 `needs: changes` + `if: needs.changes.outputs.high_risk_recovery == 'true'` 로 실행되며, 필터 대상은 restart/reconcile/outbox/delayed-worker 경로 전체를 포괄한다:
+`ci-main.yml`과 `ci-pr.yml`의 `high-risk-recovery` job은 `needs: changes` +
+`if: needs.changes.outputs.high_risk_recovery == 'true'` 로 실행된다. 두 workflow의
+`changes` job / `Detect changed areas` step에 공통인 필터는 다음과 같다:
 
 ```yaml
 high_risk_recovery:
@@ -53,20 +67,40 @@ high_risk_recovery:
   - 'src/dispatch/**'
   - 'src/engine/**'
   - 'src/high_risk_recovery.rs'
-  - 'src/kanban.rs'                      # 카드 상태 전이가 reconcile 입력
+  - 'src/kanban/**'
   - 'src/reconcile.rs'
   - 'src/server/routes/auto_queue.rs'
   - 'src/server/routes/dispatched_sessions.rs'
   - 'src/server/routes/dispatches/**'
-  - 'src/services/auto_queue.rs'         # auto_queue 단일 파일 경로
-  - 'src/services/auto_queue/**'         # auto_queue 하위 디렉터리
+  - 'src/server/routes/scheduled_messages.rs'
+  - 'src/server/worker_registry.rs'
+  - 'src/services/auto_queue.rs'
+  - 'src/services/auto_queue/**'
+  - 'src/services/scheduled_messages.rs'
   - 'src/services/discord/**'
-  - 'src/services/message_outbox.rs'     # outbox 전달 경계
+  - '!src/services/discord/placeholder_live_events/**'
+  - 'src/services/message_outbox.rs'
   - 'src/services/platform/tmux.rs'
   - 'src/services/tmux_common.rs'
 ```
 
-중요: `src/services/auto_queue.rs` (파일) 과 `src/services/auto_queue/**` (디렉터리) 는 서로 다른 경로다. 둘 다 있어야 auto_queue 변경이 recovery lane을 확실히 트리거한다. 마찬가지로 `src/kanban.rs`, `src/services/message_outbox.rs` 는 recovery 경로에 영향을 주므로 포함한다.
+`ci-pr.yml`의 같은 filter에는 PR required lane이 소유하는 아래 경계가 추가로
+등재돼 있다:
+
+```yaml
+high_risk_recovery: # ci-pr.yml only additions
+  - 'src/server/routes/message_outbox.rs'
+  - 'src/services/scheduled_messages/**'
+  - 'src/services/discord/outbound/source_registry.rs'
+  - 'src/services/message_outbox_recovery.rs'
+  - 'src/services/message_outbox_recovery_support.rs'
+  - 'src/services/message_outbox_recovery_tests.rs'
+```
+
+중요: `src/services/auto_queue.rs` (파일)과 `src/services/auto_queue/**`
+(디렉터리), `src/services/scheduled_messages.rs`와
+`src/services/scheduled_messages/**`는 서로 다른 경로다. `src/kanban/**`와
+`src/services/message_outbox.rs`도 recovery 경계로 포함한다.
 
 ### Generated docs / architecture drift
 
@@ -81,9 +115,9 @@ high_risk_recovery:
   freshness drift is not the hard gate. The hard failures are the generator's
   source-of-truth invariants, such as giant-file registry drift, missing
   metadata, parse errors, or other explicitly coded maintainability errors.
-- `ci-nightly.yml` runs `scripts/generate_inventory_docs.py --check` as
-  `Generated docs drift (warn)` and emits a GitHub warning when inventory docs
-  are stale.
+- `ci-nightly.yml`의 `scripts` job은 `Generated tracked-doc drift (warn)` step에서
+  `python3 scripts/generate_inventory_docs.py`를 실행하고 inventory docs가 stale이면
+  명시적으로 GitHub warning을 내보낸다. 이 step은 `--check`를 사용하지 않는다.
 - `.github/workflows/regen-docs.yml` owns the scheduled refresh path. It runs
   weekly, commits regenerated `ARCHITECTURE.md` / `docs/generated/**` output to a
   maintenance branch, and opens a reviewable PR. This keeps generated docs useful
@@ -114,8 +148,8 @@ high_risk_recovery:
 
 ### Serial execution
 
-- `postgres` job: `cargo test _pg -- --test-threads=1` / `cargo test pg_ -- --test-threads=1` / `cargo test postgres -- --test-threads=1` — 모두 **단일 스레드** 강제.
-- `high-risk-recovery` job: `cargo test --bin agentdesk high_risk_recovery:: -- --test-threads=1` — 동일.
+- `postgres` job의 `just test-postgres` step은 `just test-postgres`를 실행한다. 이 recipe는 `cargo test --lib -- _pg pg_ postgres --nocapture --test-threads=1`로 세 필터를 한 번에 선택하고 **단일 스레드**를 강제한다.
+- `high-risk-recovery` job의 `High-risk recovery lane` step은 `cargo test --lib high_risk_recovery:: -- --test-threads=1`을 실행한다 — 동일.
 - 이유: PG 테스트는 같은 `postgres` DB 인스턴스 위에서 CREATE/DROP DATABASE 로 격리하므로, parallel 실행 시 테스트 간 lifecycle race 가 재현되는 사고가 #973/#974 에서 확인됨.
 
 ### Fixture isolation
@@ -160,7 +194,7 @@ Self-test (`bash scripts/main-ci-triage.sh --self-test`) 는 위 분류가 red �
 ## 7. 변경 이력 힌트
 
 - #973 / #974: release gate B-12 도입.
-- #1011 (이 문서): path filter gap 보강 (`src/kanban.rs`, `src/services/auto_queue.rs`, `src/services/message_outbox.rs`), triage classifier self-test 확장, 4 축 (live turn / watcher reattach / dispatch-outbox idempotency / queue loss) 명시.
+- #1011 (이 문서): path filter gap 보강 (`src/kanban/**`, `src/services/auto_queue.rs`, `src/services/message_outbox.rs`), triage classifier self-test 확장, 4 축 (live turn / watcher reattach / dispatch-outbox idempotency / queue loss) 명시.
 - #3991: job-level 폴백에서 인프라 종료(SIGTERM/signal 15/exit 143/canceled) 로그를 flaky 로 분류해 ci-red 미승격 (`log_has_infra_termination`), self-test 2건 추가.
 - #3996: flaky skip 에 real-failure 우선 가드 추가 (`log_has_real_failure`) — 인프라 종료 skip 은 `log_has_infra_termination && ! log_has_real_failure` 일 때만 적용. `error[E…]`/`could not compile`/`test result: FAILED`/`panicked at`/failed assertion 등 결정적 실패 신호가 섞이면 (SIGTERM 노이즈 무관) 정상 승격. 컴파일 회귀 job-level 폴백이 SIGTERM 혼재로 오분류되던 false-negative 차단, self-test 1건 추가 (`scenario_compile_error_with_sigterm_noise_still_creates_issue`).
 

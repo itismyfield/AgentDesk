@@ -499,13 +499,17 @@ def main(argv: list[str] | None = None) -> int:
         workflow = Path(workflows[0])
         if not workflow.is_absolute():
             workflow = repo_root / workflow
-        # Scope is deliberately narrow: the required verifier turns observer
-        # death or a dishonest five-counter summary red. It does not prevent
-        # deliberate disablement via quoted job ids, deleted steps, new
-        # unregistered boundaries, or syntax changes that shrink extraction;
-        # those remain code-review responsibilities. Three review rounds found
-        # a new bypass each time enumeration-based anti-tamper was expanded, so
-        # enumerating known shapes is not treated as complete protection here.
+        # Scope is deliberately narrow: process-level observer failure (nonzero
+        # exit/signal, a missing/duplicate summary, or a missing log/tee failure)
+        # makes the required verifier red, as does a dishonest five-counter
+        # summary. A caught internal exception is instead reported truthfully as
+        # execution_errors/findings while this process returns zero; the verifier
+        # checks truthfulness, not observation sufficiency. With no invocation
+        # floor, a truthful all-zero summary passes. Registered jobs retain
+        # whole-job semantic hashes plus exact observer/verifier occurrences;
+        # only a coordinated checker update can remove those steps or add/reorder
+        # steps. New jobs outside the hardening target registry, quoted job ids,
+        # and syntax changes that shrink extraction remain review responsibilities.
         try:
             observations = observe_curated(
                 repo_root, workflow.resolve(), set(args.job)
