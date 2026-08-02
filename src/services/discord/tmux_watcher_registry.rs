@@ -1,5 +1,98 @@
 use super::*;
 
+/// Shared state for the Discord bot (multi-channel: each channel has its own session)
+/// Handle for a background tmux output watcher
+pub(in crate::services::discord) struct TmuxWatcherHandle {
+    /// Tmux session this watcher owns. Used to enforce the single-watcher
+    /// policy when the same session is reattached through another path.
+    pub(in crate::services::discord) tmux_session_name: String,
+    /// JSONL/transcript path this watcher tails for the session. A single tmux
+    /// session can change relay files when it graduates from the prelaunch
+    /// wrapper to a provider-native TUI handoff.
+    pub(in crate::services::discord) output_path: String,
+    /// Signal to pause monitoring (while Discord handler reads its own turn)
+    pub(in crate::services::discord) paused: Arc<std::sync::atomic::AtomicBool>,
+    /// After Discord handler finishes its turn, set this offset so watcher resumes from here
+    pub(in crate::services::discord) resume_offset: Arc<std::sync::Mutex<Option<u64>>>,
+    /// Signal to cancel the watcher (quiet exit, no "session ended" message)
+    pub(in crate::services::discord) cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// Epoch counter: incremented each time paused is set to true.
+    /// Watcher snapshots this before reading; if it changed, the read is stale.
+    pub(in crate::services::discord) pause_epoch: Arc<std::sync::atomic::AtomicU64>,
+    /// Set by turn_bridge when it delivers the response directly (non-handoff path).
+    /// Watcher checks this before relay to avoid duplicate messages.
+    pub(in crate::services::discord) turn_delivered: Arc<std::sync::atomic::AtomicBool>,
+    /// Updated by the watcher task loop. If this stops moving while the registry
+    /// still has a slot, the slot is stale and must not suppress a new watcher.
+    pub(in crate::services::discord) last_heartbeat_ts_ms: Arc<std::sync::atomic::AtomicI64>,
+}
+
+// #3016 phase-5b2: the per-handle `mailbox_finalize_owed: Arc<AtomicBool>` field
+// (#1452 turn-scoped bridge→watcher finalization debt) has been removed. Phase-5b1
+// replaced every finalize-decision consumer of the flag — the watcher's
+// normal-completion finalize now fires on the confirmed-completion / structural
+// signal (`normal_completion = true`), and the bridge-handoff invariant uses the
+// ledger's `register_start(RelayOwnerKind::Watcher)` authority — so the flag was
+// write-only and is now deleted entirely with identical behaviour.
+
+pub(in crate::services::discord) const TMUX_WATCHER_STALE_HEARTBEAT_MS: i64 = 60_000;
+
+pub(in crate::services::discord) fn tmux_watcher_now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+impl TmuxWatcherHandle {
+    pub(in crate::services::discord) fn heartbeat_stale(&self) -> bool {
+        let last = self
+            .last_heartbeat_ts_ms
+            .load(std::sync::atomic::Ordering::Acquire);
+        last <= 0 || tmux_watcher_now_ms().saturating_sub(last) > TMUX_WATCHER_STALE_HEARTBEAT_MS
+    }
+}
+
+pub(in crate::services::discord) type TmuxWatcherRegistryGuard = std::sync::MutexGuard<'static, ()>;
+
+static TMUX_WATCHER_REGISTRY_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
+pub(in crate::services::discord) fn lock_tmux_watcher_registry() -> TmuxWatcherRegistryGuard {
+    TMUX_WATCHER_REGISTRY_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Registry for active tmux output watchers.
+///
+/// Ownership is keyed by tmux session name so duplicate attaches for the same
+/// live session converge before a second relay can spawn. A channel index is
+/// retained for existing routing and diagnostics callers that ask "does this
+/// Discord channel currently have watcher coverage?".
+pub(in crate::services::discord) struct TmuxWatcherRegistry {
+    pub(in crate::services::discord) by_tmux_session: dashmap::DashMap<String, TmuxWatcherHandle>,
+    tmux_session_by_channel: dashmap::DashMap<ChannelId, String>,
+    owner_channel_by_tmux_session: dashmap::DashMap<String, ChannelId>,
+    /// #3105: authoritative owner-channel bindings re-registered for LIVE tmux
+    /// sessions that currently have no live watcher handle — e.g. a Claude TUI
+    /// session the user is typing into directly whose watcher slot was evicted
+    /// by a compact/restart/rebind and never re-claimed (no foreground turn).
+    ///
+    /// This is part of the authoritative registry, NOT the `tui_prompt_dedupe`
+    /// mirror: it is sourced only from the configured channel→provider bindings
+    /// (`settings::list_registered_channel_bindings`), which deterministically
+    /// resolve a session's owner channel from its (base or thread-suffixed)
+    /// tmux name. Kept in a separate map so the strict 1:1 watcher-handle
+    /// invariant across the three maps above is untouched; the live watcher map
+    /// always wins on lookup, and a real watcher claim for the session clears
+    /// the restored entry so it can never shadow live truth.
+    restored_owner_by_tmux_session: dashmap::DashMap<String, ChannelId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::services::discord) struct TmuxWatcherBinding {
+    pub(in crate::services::discord) owner_channel_id: ChannelId,
+    pub(in crate::services::discord) tmux_session_name: String,
+}
+
 #[rustfmt::skip]
 impl TmuxWatcherRegistry {
     pub(in crate::services::discord) fn new() -> Self {
