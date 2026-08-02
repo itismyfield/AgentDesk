@@ -67,7 +67,7 @@ pub(in crate::services::discord) fn lock_tmux_watcher_registry() -> TmuxWatcherR
 /// live session converge before a second relay can spawn. A channel index is
 /// retained for existing routing and diagnostics callers that ask "does this
 /// Discord channel currently have watcher coverage?".
-pub(in crate::services::discord) struct TmuxWatcherRegistry {
+pub(in crate::services) struct TmuxWatcherRegistry {
     pub(in crate::services::discord) by_tmux_session: dashmap::DashMap<String, TmuxWatcherHandle>,
     tmux_session_by_channel: dashmap::DashMap<ChannelId, String>,
     owner_channel_by_tmux_session: dashmap::DashMap<String, ChannelId>,
