@@ -1529,7 +1529,7 @@ mod postgres_tests {
                 "leader-1".to_string(),
                 2,
                 Some(source_id),
-                "hello".to_string(),
+                "hello world".to_string(),
             )
         );
 
