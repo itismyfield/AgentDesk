@@ -611,10 +611,23 @@ def parse_jobs(
     This intentionally stays dependency-free instead of relying on PyYAML, which
     is not declared by AgentDesk's script-check environment. It supports the
     repository's block-style workflows and tracks scalar bodies while locating
-    the next column-zero mapping key. Top-level ``jobs`` presence is detected
-    more broadly than the supported block syntax so a present but unparsed map
-    is a configuration error. Individual jobs are limited to supported block
-    headers; other individual job forms can still be omitted.
+    the next column-zero mapping key.
+
+    Two distinct gaps follow from parsing YAML with regexes, and neither is
+    closed here. First, top-level ``jobs`` presence is detected by *spelling*:
+    the probe matches the literal characters, so a key that YAML resolves to
+    ``jobs`` without spelling it that way — ``"jo\\u0062s"``, ``? jobs``,
+    ``!!str jobs`` — is not seen at all. Such a file returns no jobs and no
+    finding, so the whole membership check silently passes it. Second, once a
+    literal ``jobs:`` block is found, individual jobs are limited to supported
+    block headers; other individual job forms are omitted from the returned
+    list while their siblings are still reported.
+
+    So the ``jobs-empty`` finding means "spelled ``jobs`` was found but nothing
+    under it parsed", not "this file has no unparsed job map". Do not read a
+    clean result as proof that the file was understood. Both gaps are tracked
+    as sites on umbrella #5071; closing either needs a real YAML parser, which
+    the script-check environment does not guarantee.
     """
     text = path.read_text("utf-8")
     # Normalize only the top-level key probe. The supported ``jobs:`` block
