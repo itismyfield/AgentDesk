@@ -26,6 +26,77 @@ OUR_BOT_ID = os.environ.get("AGENTDESK_E2E_OUR_BOT_ID", "1479017284805722200")
 # legitimate ADK output but they repeat across turns by design, so excluding
 # them from `no_duplicate_content` keeps the assertion focused on actual
 # response bodies. (See #2702 / #2625 for the chrome format.)
+# Session banners are chrome only when the whole message has the panel shape.
+# The first answer message deliberately uses `<banner>\n\n<body>`, so this
+# anchored pattern must not consume a banner that has a non-empty body below it.
+_SESSION_BANNER_PREFIX_PATTERN = re.compile(
+    r"^(?:🆕 새 세션 시작|기존 세션 복원|Lifecycle fallback)"
+    r"(?: · [^\n]+)?"
+    r"(?:\n\(최근 대화 \d+개를 읽어들였습니다\))?"
+)
+_SESSION_PANEL_CHROME_PATTERN = re.compile(
+    _SESSION_BANNER_PREFIX_PATTERN.pattern + r"$"
+)
+_COMPLETION_PANEL_CHROME_PATTERN = re.compile(r"^-# ✅ 완료(?:\n|$)")
+# The only current non-emoji-led producer is the idle-recap card. Keep this
+# anchored to its complete header shape so prose such as "응답 완료를
+# 설명합니다" remains a relay body. Monitor-handoff completion is covered by
+# the leading `^✅` status family below.
+_IDLE_RECAP_COMPLETION_PATTERN = re.compile(r"^📦 응답 완료 ·")
+
+# A single-message completion/status footer is appended at an exact ``\n\n``
+# boundary (``single_message_panel::compose_completion_footer_text``).  Keep
+# this list tied to producer shapes rather than treating every ``-#`` line as
+# chrome: ordinary markdown in an answer is still relay body.  The footer's
+# first line may be a terminal status or a spinner-merged activity label; the
+# remaining shapes are the completion block's lines after
+# ``completion_footer_subtext`` adds Discord's ``-#`` prefix.
+_COMPLETION_FOOTER_HEAD_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^-# ✅ (?:완료|백그라운드 완료)$"),
+    # ``strip_panel_header_status_marker`` removes the leading status emoji
+    # before the spinner is prepended, so the live merged form is
+    # ``-# ⠸ 완료`` / ``-# ⠸ 진행 중`` rather than ``⠸ ✅ 완료``.
+    re.compile(
+        r"^-# (?:⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏) "
+        r"(?:진행 중(?: — [^\n]+)?|완료|백그라운드 완료|"
+        r"monitor 대기|scheduled wakeup(?: \([^\n]*\))?|"
+        r"응답 지연(?: · [^\n]+)?|"
+        r"마지막 도구 \([^\n]*\)|도구 실행 중 \([^\n]*\)|"
+        r"subagent 실행 중 \([^\n]*\)|workflow 실행 중 \([^\n]*\))$"
+    ),
+    # Non-merged status panels remain valid footer heads for providers that
+    # emit the activity label without the single-message spinner merge.
+    re.compile(r"^-# (?:💤 monitor 대기|⏰ scheduled wakeup(?: \([^\n]*\))?)$"),
+    re.compile(
+        r"^-# (?:🔧 마지막 도구|🧵 subagent 실행 중|🧬 workflow 실행 중) "
+        r"\([^\n]*\)$"
+    ),
+    re.compile(r"^-# 🟡 응답 지연(?: · [^\n]+)?$"),
+    re.compile(
+        r"^(?:⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏) 계속 처리 중$"
+    ),
+    re.compile(r"^-# Task     "),
+    re.compile(r"^-# 턴 트리거: https://discord\.com/channels/"),
+    re.compile(r"^-# (?:📦|⚠️|⚠ ) .+ · auto-compact(?: |$)"),
+    re.compile(r"^-# (?:Tasks|Subagents|Background agents)(?: · .+)?$"),
+    re.compile(r"^-# (?:⏱ |⏳ |🖥️ )"),
+    re.compile(r"^-# ⚠️ \*\*턴을 완료하기 전에 커밋되지 않은 변경사항을 확인하세요\.\*\*$"),
+)
+
+# Lines that can continue a recognized footer head.  They are deliberately
+# narrower than a generic ``-#`` test: a provider may quote or author arbitrary
+# subtext in the answer, and that must not turn an interior paragraph into a
+# footer boundary.  These are the metadata/section/slot shapes emitted by the
+# completion-footer producers (plus the anonymized fixture form used by E-1).
+_COMPLETION_FOOTER_CONTINUATION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^-# (?:턴 시작|마지막 업데이트)\s*:\s*[^\n]+$"),
+    re.compile(r"^-# 턴 트리거: https://discord\.com/channels/"),
+    re.compile(r"^-# └ .+$"),
+    re.compile(r"^-# (?:📦|⚠️|⚠ ) .+$"),
+    re.compile(r"^-# (?:⏱ |⏳ |🖥️ )"),
+    re.compile(r"^-# Task     .+$"),
+)
+
 _STATUS_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"Processing\.\.\."),
     re.compile(r"^🟢"),
@@ -38,15 +109,17 @@ _STATUS_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^▶️"),
     re.compile(r"^⚠️"),
     re.compile(r"진행 중"),
-    re.compile(r"응답 완료"),
-    re.compile(r"세션 복원"),
+    _IDLE_RECAP_COMPLETION_PATTERN,
+    _SESSION_PANEL_CHROME_PATTERN,
+    _COMPLETION_PANEL_CHROME_PATTERN,
     re.compile(r"세션 초기화"),
     re.compile(r"\[Stopped\]"),
 )
 
 _COMPLETION_CHROME_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^✅"),
-    re.compile(r"응답 완료"),
+    _IDLE_RECAP_COMPLETION_PATTERN,
+    _COMPLETION_PANEL_CHROME_PATTERN,
 )
 
 _SUPPRESSED_LABEL_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -91,6 +164,100 @@ def is_relay_response(message: dict[str, Any]) -> bool:
     if is_status_chrome(message):
         return False
     return True
+
+
+def relay_body(message: dict[str, Any]) -> str | None:
+    """Return the body used by relay-marker assertions for one message.
+
+    A first answer may carry a session banner and body in one Discord post,
+    joined by the product's exact ``<banner>\n\n<body>`` contract.  Marker
+    assertions must search only the body: a marker in the banner is not
+    evidence that the answer was delivered.  A banner-shaped post with any
+    other separator is treated as bodyless (fail closed for malformed relay
+    output).  Messages without a banner retain their historical full-content
+    behavior.  The product may append a completion/status footer to that same
+    post; only a recognized footer at the message tail is removed.  A
+    banner-shaped prefix without the required blank separator remains
+    fail-closed as a malformed boundary, while provider prose itself is allowed
+    to be arbitrary.
+    """
+
+    if not is_relay_response(message):
+        return None
+    content = message.get("content") or ""
+    prefix = _SESSION_BANNER_PREFIX_PATTERN.match(content)
+    if prefix is None:
+        return _strip_relay_body_chrome(content)
+    remainder = content[prefix.end() :]
+    if not remainder.startswith("\n\n"):
+        return None
+    return _strip_relay_body_chrome(remainder[2:])
+
+
+def _is_completion_footer_head(line: str) -> bool:
+    line = line.strip()
+    return any(pattern.search(line) for pattern in _COMPLETION_FOOTER_HEAD_PATTERNS)
+
+
+def _is_completion_footer_line(line: str) -> bool:
+    line = line.strip()
+    if not line:
+        return True
+    if _is_completion_footer_head(line):
+        return True
+    return any(
+        pattern.search(line) for pattern in _COMPLETION_FOOTER_CONTINUATION_PATTERNS
+    )
+
+
+def _strip_completion_chrome_tail(body: str) -> str:
+    """Drop only the maximal producer-shaped completion/status run at the tail.
+
+    A footer-looking block quoted in the middle of an answer is followed by
+    non-footer prose and therefore fails the all-lines check.  When several
+    candidate boundaries are valid (for example, a status head followed by
+    blank-separated Tasks/Subagents sections), choose the earliest valid one
+    so the whole trailing chrome run is removed.
+
+    Stripping takes evidence away from the body-scoped detectors, so it fails
+    closed: a candidate suffix carrying #2718 resume-prompt chrome is never a
+    strip candidate.  Some footer shapes (`-# └ {label} {summary}`, the icon-led
+    metadata lines) render provider-supplied free text, so without this guard a
+    forbidden string placed on such a line would be cut away before
+    `no_resume_prompt_chrome` ever sees it.  Keeping it means a tool label that
+    happens to quote the phrase turns the smoke red — the safe direction for a
+    leak detector.
+    """
+
+    valid_boundaries: list[int] = []
+    for boundary in re.finditer(r"\n\n", body):
+        footer = body[boundary.end() :]
+        if any(chrome in footer for chrome in _RESUME_PROMPT_CHROME):
+            continue
+        first = next((line for line in footer.splitlines() if line.strip()), "")
+        if _is_completion_footer_head(first) and all(
+            _is_completion_footer_line(line) for line in footer.splitlines()
+        ):
+            valid_boundaries.append(boundary.start())
+    if valid_boundaries:
+        return body[: min(valid_boundaries)].rstrip()
+    return body
+
+
+def _strip_relay_body_chrome(body: str) -> str:
+    body = _strip_completion_chrome_tail(body)
+    # Session-banner claims are one-shot in the product, but a repeated banner
+    # is a useful fail-closed regression fixture.  Remove only another exact
+    # banner + blank separator at the *start* of the already-isolated body; a
+    # normal body mentioning a banner later is untouched.
+    while True:
+        prefix = _SESSION_BANNER_PREFIX_PATTERN.match(body)
+        if prefix is None:
+            return body
+        remainder = body[prefix.end() :]
+        if not remainder.startswith("\n\n"):
+            return body
+        body = _strip_completion_chrome_tail(remainder[2:])
 
 
 @dataclasses.dataclass
@@ -208,7 +375,7 @@ def no_duplicate_content(window: Window) -> None:
 
     seen: set[str] = set()
     for message in window.messages:
-        body = (message.get("content") or "").strip()
+        body = (relay_body(message) or "").strip()
         if not body:
             continue
         if body in seen:
@@ -218,7 +385,8 @@ def no_duplicate_content(window: Window) -> None:
 
 def text_present(window: Window, *, needle: str) -> None:
     for message in window.messages:
-        if needle in (message.get("content") or ""):
+        body = relay_body(message)
+        if body is not None and needle in body:
             return
     raise AssertionError(
         f"expected to find {needle!r} in relay window, got {len(window.messages)} "
@@ -254,7 +422,14 @@ def marker_absent(
         messages = _raw_assertion_messages(window, include_our_send=include_our_send)
     else:
         raise AssertionError(f"marker_absent surface must be relay or raw, got {surface!r}")
-    hits = [message for message in messages if marker in (message.get("content") or "")]
+    if surface == "relay":
+        hits = [
+            message
+            for message in messages
+            if (body := relay_body(message)) is not None and marker in body
+        ]
+    else:
+        hits = [message for message in messages if marker in (message.get("content") or "")]
     if hits:
         raise AssertionError(
             f"unexpected marker {marker!r} appeared on {surface} surface "
@@ -286,7 +461,7 @@ def ordered_text_present(window: Window, *, needles: Sequence[str]) -> None:
     and out-of-order delivery that single-needle :func:`text_present` passes.
     """
 
-    bodies = [(message.get("content") or "") for message in window.messages]
+    bodies = [relay_body(message) or "" for message in window.messages]
     cursor_msg = 0
     cursor_pos = 0
     for needle in needles:
@@ -317,7 +492,11 @@ def no_duplicate_marker(window: Window, *, marker: str) -> None:
     (e.g. ``[E2E:E2:TURN-2]``) is expected exactly once per turn.
     """
 
-    hits = sum(1 for m in window.messages if marker in (m.get("content") or ""))
+    hits = sum(
+        1
+        for message in window.messages
+        if (body := relay_body(message)) is not None and marker in body
+    )
     if hits > 1:
         raise AssertionError(
             f"E2E marker {marker!r} appeared in {hits} relay messages "
@@ -333,7 +512,7 @@ def body_complete(window: Window, *, head: str, tail: str) -> None:
     """
 
     for message in window.messages:
-        body = message.get("content") or ""
+        body = relay_body(message) or ""
         head_at = body.find(head)
         if head_at != -1:
             if body.find(tail, head_at + len(head)) != -1:
@@ -453,7 +632,7 @@ def status_panel_after_body(
     body_messages = [
         message
         for message in _raw_assertion_messages(window)
-        if body_marker in (message.get("content") or "")
+        if (body := relay_body(message)) is not None and body_marker in body
     ]
     if not body_messages:
         raise AssertionError(f"body marker {body_marker!r} not found in raw window")
@@ -513,7 +692,7 @@ def completion_chrome_after_body(
     body_messages = [
         message
         for message in _raw_assertion_messages(window)
-        if body_marker in (message.get("content") or "")
+        if (body := relay_body(message)) is not None and body_marker in body
     ]
     if not body_messages:
         raise AssertionError(f"body marker {body_marker!r} not found in raw window")
@@ -545,7 +724,7 @@ def body_not_overwritten(window: Window, *, marker: str) -> None:
     hits = [
         m
         for m in _raw_assertion_messages(window)
-        if marker in (m.get("content") or "")
+        if (body := relay_body(m)) is not None and marker in body
     ]
     if not hits:
         raise AssertionError(
@@ -568,8 +747,10 @@ def no_suppressed_label_chrome(window: Window) -> None:
 def no_control_chars(window: Window) -> None:
     forbidden = {chr(c) for c in (0x07, 0x08, 0x0C, 0x1B, 0x7F, 0x85)}
     for message in window.messages:
-        body = message.get("content") or ""
-        leaked = forbidden.intersection(body)
+        # This is a wire-surface invariant, not a body-marker invariant.  A
+        # control byte in a session banner is still leaked Discord content.
+        content = message.get("content") or ""
+        leaked = forbidden.intersection(content)
         if leaked:
             raise AssertionError(f"control byte leaked into Discord message: {sorted(leaked)!r}")
 
@@ -592,11 +773,14 @@ def no_resume_prompt_chrome(window: Window) -> None:
     auto-prompt was still being prepended every turn — the assistant would
     answer the meta prompt with \"No response requested.\" and glue the real
     marker onto the same Discord message. Substring `text_present` still
-    passed, masking the regression.
+    passed, masking the regression.  Unlike control-byte scanning, this stays
+    body-scoped: the CLI chrome is emitted after the session-banner separator
+    and is exactly the answer-surface leak the marker contract is meant to
+    reject.
     """
 
     for message in window.messages:
-        body = message.get("content") or ""
+        body = relay_body(message) or ""
         for chrome in _RESUME_PROMPT_CHROME:
             if chrome in body:
                 raise AssertionError(

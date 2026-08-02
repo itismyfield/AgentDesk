@@ -873,8 +873,7 @@ def run_cross_channel_scenario(
             key = _participant_key(participant)
             marker = participant["marker"]
             predicate = lambda message: (  # noqa: E731
-                assertions.is_relay_response(message)
-                and marker in (message.get("content") or "")
+                (body := assertions.relay_body(message)) is not None and marker in body
             )
             found, observed = clients[key].wait_for_message(
                 participant["channel_id"],
