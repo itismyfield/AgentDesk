@@ -931,6 +931,11 @@ test("timeouts long turn monitor module alerts every 30-minute threshold", () =>
   assert.equal(state.deadlockAlerts.length, 1);
   assert.match(state.deadlockAlerts[0].message, /장시간 턴/);
   assert.match(state.deadlockAlerts[0].message, /90분 단계/);
+  assert.equal(
+    state.deadlockAlerts[0].bot,
+    "notify",
+    "long-turn watchdog notices must not use the turn-triggering announce bot"
+  );
   assert.match(state.executions[0].sql, /INSERT OR REPLACE INTO kv_meta/);
   assert.deepEqual(toPlain(state.executions[0].params), ["long_turn_tier:codex:channel-1", "90"]);
 });

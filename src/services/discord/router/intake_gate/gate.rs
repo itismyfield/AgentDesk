@@ -55,6 +55,22 @@ pub(in crate::services::discord) fn bot_author_allowed_for_live_intake(
     allowed_bot_ids.contains(&author_id) || announce_bot_id.is_some_and(|id| id == author_id)
 }
 
+pub(super) fn bot_turn_message_admitted_for_live_intake(
+    allowed_bot_ids: &[u64],
+    announce_bot_id: Option<u64>,
+    author_id: u64,
+    text: &str,
+) -> bool {
+    bot_author_allowed_for_live_intake(allowed_bot_ids, announce_bot_id, author_id)
+        && crate::services::discord::is_allowed_turn_sender(
+            allowed_bot_ids,
+            announce_bot_id,
+            author_id,
+            true,
+            text,
+        )
+}
+
 pub(super) fn live_sender_excluded_from_human_preservation(
     allowed_bot_ids: &[u64],
     author_id: u64,
@@ -151,5 +167,67 @@ mod tests {
             UtilityBotUserIdResolution::Unconfigured,
             UtilityBotUserIdResolution::Unconfigured,
         ));
+    }
+
+    #[test]
+    fn watchdog_notice_cannot_reach_any_intervention_queue_path() {
+        const ANNOUNCE_ID: u64 = 1001;
+        const NOTIFY_ID: u64 = 2002;
+        let alarm = "⚠️ [장시간 턴] project-agentdesk\n경과: 90분 (90분 단계)";
+
+        let mut intervention_queue = Vec::new();
+        if bot_turn_message_admitted_for_live_intake(
+            &[ANNOUNCE_ID, NOTIFY_ID],
+            Some(ANNOUNCE_ID),
+            NOTIFY_ID,
+            alarm,
+        ) {
+            intervention_queue.push(alarm);
+        }
+        assert!(
+            intervention_queue.is_empty(),
+            "notify-authored watchdog notices must be rejected before queue admission"
+        );
+
+        let intake_source = include_str!("../intake_gate.rs");
+        let admission = "bot_turn_message_admitted_for_live_intake(";
+        let admission_pos = intake_source
+            .find(admission)
+            .expect("live bot admission guard is wired into intake");
+        let queue_tail = &intake_source[admission_pos + admission.len()..];
+        assert_eq!(
+            queue_tail
+                .matches("commit_soft_intervention_transaction(")
+                .count(),
+            6,
+            "all six intervention queue paths must remain behind bot admission"
+        );
+    }
+
+    #[test]
+    fn dispatch_and_monitor_bot_turns_remain_queue_eligible() {
+        const ANNOUNCE_ID: u64 = 1001;
+        const AUTOMATION_ID: u64 = 2002;
+        let dispatch = "DISPATCH:1f3c2b1a-0000-4000-8000-000000000000";
+        let monitor =
+            crate::services::discord::prepend_monitor_auto_turn_origin("check the active turn");
+        let mut intervention_queue = Vec::new();
+
+        for text in [dispatch, monitor.as_str()] {
+            if bot_turn_message_admitted_for_live_intake(
+                &[ANNOUNCE_ID, AUTOMATION_ID],
+                Some(ANNOUNCE_ID),
+                AUTOMATION_ID,
+                text,
+            ) {
+                intervention_queue.push(text);
+            }
+        }
+
+        assert_eq!(
+            intervention_queue,
+            vec![dispatch, monitor.as_str()],
+            "legitimate DISPATCH and monitor-origin bot turns must remain queue eligible"
+        );
     }
 }
