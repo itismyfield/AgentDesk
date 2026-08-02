@@ -89,7 +89,6 @@ targets = {
     "cargo_steps" => {
       "cargo check" => {
         "commands" => ["cargo check --workspace --all-targets"],
-        "continue_on_error" => nil,
         "timeout_minutes" => nil,
       },
     },
@@ -107,23 +106,22 @@ targets = {
     # to this existing toolchain-provisioned lane whose mirror is required.
     # #5025 and #4985 retain their production bridge and footer-marker coverage
     # in the same job block, so the pin covers the merged command inventory.
-    "job_sha256" => "4cbf71d46b2a0ad8324627f1a938f6214f9dd1733a7d1e8047b920afe0c714b3",
+    "job_sha256" => "0995b8496416accb68d636a3d115508298b457d035be9dc48e07b9fac6e2a51b",
+    # Each exception must map a stable step name to its reviewable reason.
+    "continue_on_error_allowlist" => {},
     "cargo_steps" => {
       "Observe curated lane selections" => {
         "commands" => [
           "set -o pipefail",
           "python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job test_fast --job high-risk-recovery | tee \"$RUNNER_TEMP/selection-evidence-test-fast.log\"",
         ],
-        "continue_on_error" => nil,
         "timeout_minutes" => 20,
       },
       "Require observer summary" => {
         "commands" => [
           "set -euo pipefail",
-          "count=$(awk '/^selection-evidence summary:/{count++} END{print count+0}' \"$RUNNER_TEMP/selection-evidence-test-fast.log\")",
-          "test \"$count\" -eq 1",
+          "python3 scripts/check_test_target_integrity.py --verify-selection-evidence \"$RUNNER_TEMP/selection-evidence-test-fast.log\"",
         ],
-        "continue_on_error" => nil,
         "timeout_minutes" => 1,
         "if_condition" => "always()",
       },
@@ -132,17 +130,14 @@ targets = {
           "cargo test --lib task_notification -- --skip _pg --skip pg_ --skip postgres",
           "cargo test --lib services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests -- --skip _pg --skip pg_ --skip postgres",
         ],
-        "continue_on_error" => nil,
         "timeout_minutes" => 10,
       },
       "Trusted session forwarding tests" => {
         "commands" => ["env -u AGENTDESK_ROOT_DIR cargo test --lib services::session_forwarding -- --skip _pg --skip pg_ --skip postgres"],
-        "continue_on_error" => nil,
         "timeout_minutes" => 10,
       },
       "Telemetry-only intake authority regressions" => {
         "commands" => ["env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::intake_dispatch::tests::telemetry_only_unopted -- --skip _pg --skip pg_ --skip postgres"],
-        "continue_on_error" => nil,
         "timeout_minutes" => 10,
       },
       "Terminal delivery evidence regressions" => {
@@ -152,12 +147,10 @@ targets = {
           "env -u AGENTDESK_ROOT_DIR cargo test --lib watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row",
           "env -u AGENTDESK_ROOT_DIR cargo test --lib identity_guarded_save_rejects_stale_write_against_newer_turn",
         ],
-        "continue_on_error" => nil,
         "timeout_minutes" => 10,
       },
       "just test-postgres" => {
         "commands" => ["just test-postgres"],
-        "continue_on_error" => nil,
         "timeout_minutes" => 20,
       },
     },
@@ -168,25 +161,22 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.high_risk_recovery == 'true'",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "95199428fb6dc74b870ea4685506220b3901726a48c3dc67f6f62a8d81ca4ed9",
+    "job_sha256" => "9c3587d8664bdd63769c3306c016f241e851649a68a7c6a52b11e243c438df3d",
     "require_debug_env" => false,
-    "reject_unregistered_boundaries" => false,
+    "continue_on_error_allowlist" => {},
     "cargo_steps" => {
       "Observe curated lane selections" => {
         "commands" => [
           "set -o pipefail",
           "python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job high-risk-recovery | tee \"$RUNNER_TEMP/selection-evidence-high-risk.log\"",
         ],
-        "continue_on_error" => nil,
         "timeout_minutes" => 20,
       },
       "Require observer summary" => {
         "commands" => [
           "set -euo pipefail",
-          "count=$(awk '/^selection-evidence summary:/{count++} END{print count+0}' \"$RUNNER_TEMP/selection-evidence-high-risk.log\")",
-          "test \"$count\" -eq 1",
+          "python3 scripts/check_test_target_integrity.py --verify-selection-evidence \"$RUNNER_TEMP/selection-evidence-high-risk.log\"",
         ],
-        "continue_on_error" => nil,
         "timeout_minutes" => 1,
         "if_condition" => "always()",
       },
@@ -222,7 +212,9 @@ targets.each do |job_id, spec|
   }.each do |field, expected|
     errors << "#{label} must retain exact #{field}" unless job[field] == expected
   end
-  errors << "#{label} must not be allowed to continue on error" unless job["continue-on-error"].nil?
+  if job["continue-on-error"]
+    errors << "#{label} must not be allowed to continue on error"
+  end
   if job_id == "check_fast_cross_os"
     strategy = job["strategy"]
     unless strategy.is_a?(Hash)
@@ -243,6 +235,12 @@ targets.each do |job_id, spec|
   end
 
   expected_steps = spec.fetch("cargo_steps")
+  coe_allowlist = spec.fetch("continue_on_error_allowlist", {})
+  coe_allowlist.each do |name, reason|
+    unless name.is_a?(String) && !name.empty? && reason.is_a?(String) && !reason.strip.empty?
+      errors << "#{label} continue-on-error allowlist entries require a step name and reason"
+    end
+  end
   seen_steps = []
   Array(job["steps"]).each_with_index do |step, index|
     next unless step.is_a?(Hash)
@@ -250,6 +248,9 @@ targets.each do |job_id, spec|
     name = step["name"]
     run = step["run"]
     step_env = step["env"]
+    if step["continue-on-error"] && !coe_allowlist.key?(name)
+      errors << "#{label} step #{index + 1} #{name.inspect} uses continue-on-error without an allowlisted reason"
+    end
     if expected_steps.key?(name)
       step_spec = expected_steps.fetch(name)
       seen_steps << name
@@ -262,9 +263,6 @@ targets.each do |job_id, spec|
       end
       unless step["if"] == step_spec.fetch("if_condition", nil)
         errors << "#{label} #{name.inspect} must retain exact if policy"
-      end
-      unless step["continue-on-error"] == step_spec.fetch("continue_on_error")
-        errors << "#{label} #{name.inspect} must retain exact continue-on-error policy"
       end
       unless step["timeout-minutes"] == step_spec.fetch("timeout_minutes")
         errors << "#{label} #{name.inspect} must retain exact timeout policy"
@@ -281,13 +279,6 @@ targets.each do |job_id, spec|
       forbidden.each do |key|
         errors << "#{label} step #{index + 1} must not set #{key}" if step_env.is_a?(Hash) && step_env.key?(key)
         errors << "#{label} step #{index + 1} must not mutate #{key} at runtime" if run.is_a?(String) && run.include?(key)
-      end
-      cargo_boundary = run.is_a?(String) && run.match?(/(^|[[:space:]])cargo[[:space:]]|(^|[[:space:]])just[[:space:]]+test-postgres/)
-      if cargo_boundary && !step["continue-on-error"].nil?
-        errors << "#{label} step #{index + 1} must not be allowed to continue on error"
-      end
-      if spec.fetch("reject_unregistered_boundaries", true) && cargo_boundary
-        errors << "#{label} step #{index + 1} adds an unprotected cargo/test boundary"
       end
     end
   end

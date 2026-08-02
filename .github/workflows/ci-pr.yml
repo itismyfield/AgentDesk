@@ -621,8 +621,7 @@ jobs:
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: |
           set -euo pipefail
-          count=$(awk '/^selection-evidence summary:/{count++} END{print count+0}' "$RUNNER_TEMP/selection-evidence-test-fast.log")
-          test "$count" -eq 1
+          python3 scripts/check_test_target_integrity.py --verify-selection-evidence "$RUNNER_TEMP/selection-evidence-test-fast.log"
 
       - name: Footer-only marker regressions
         timeout-minutes: 10
@@ -749,8 +748,7 @@ jobs:
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: |
           set -euo pipefail
-          count=$(awk '/^selection-evidence summary:/{count++} END{print count+0}' "$RUNNER_TEMP/selection-evidence-high-risk.log")
-          test "$count" -eq 1
+          python3 scripts/check_test_target_integrity.py --verify-selection-evidence "$RUNNER_TEMP/selection-evidence-high-risk.log"
 
       - name: High-risk recovery lane
         run: |
@@ -776,7 +774,7 @@ jobs:
         run: sccache --show-stats || true
 
   high_risk_recovery_required_context:
-    name: High-risk recovery required context (ubuntu-latest)
+    name: High-risk recovery path-filter mirror (ubuntu-latest)
     needs:
       - changes
       - high-risk-recovery
@@ -785,7 +783,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Mirror high-risk recovery result for branch protection
+      - name: Mirror high-risk recovery result across path-filter skips
         env:
           CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
           FILTER_NAME: high_risk_recovery

@@ -45,6 +45,8 @@ UNSUPPORTED_TARGET_OPTIONS = {"--bins", "--tests", "--bench", "--benches",
 LIST_SUMMARY = re.compile(r"(\d+) tests?, \d+ benchmarks")
 JOB_HEADER = re.compile(r"^  ([A-Za-z0-9_-]+):(?:\s*#.*)?$")
 RECIPE_HEADER = re.compile(r"^([A-Za-z0-9_-]+):(?:\s.*)?$")
+EVIDENCE_LINE = re.compile(r"^selection-evidence: selected=(\d+) command=(.*)$")
+SUMMARY_KEYS = {"invocations", "nonzero", "findings", "extraction_errors", "execution_errors"}
 
 
 @dataclass(frozen=True)
@@ -356,6 +358,77 @@ def observe_curated(repo_root: Path, workflow: Path, jobs: set[str], runner=None
     return observations
 
 
+def evidence_verification_errors(rendered: str) -> list[str]:
+    """Recompute the observer summary from its detailed evidence lines."""
+    errors: list[str] = []
+    summary_lines = [line for line in rendered.splitlines()
+                     if line.startswith("selection-evidence summary:")]
+    if len(summary_lines) != 1:
+        return [f"expected exactly one summary, found {len(summary_lines)}"]
+    fields = {}
+    for word in summary_lines[0].split():
+        key, separator, value = word.partition("=")
+        if separator and value.isdigit():
+            fields[key] = int(value)
+    if set(fields) != SUMMARY_KEYS:
+        errors.append("summary must contain exactly the five required counters")
+    observations = []
+    warnings = []
+    for line in rendered.splitlines():
+        if line.startswith("selection-evidence:"):
+            match = EVIDENCE_LINE.fullmatch(line)
+            if not match:
+                errors.append(f"malformed evidence line: {line}")
+            else:
+                observations.append((int(match.group(1)), match.group(2)))
+        elif line.startswith("::warning "):
+            warnings.append(line.split("::", 2)[-1])
+    unmatched = set(range(len(observations)))
+    finding_observations: set[int] = set()
+    execution_errors = 0
+    internal_errors = 0
+    for warning in warnings:
+        if warning.startswith("observer internal error:"):
+            internal_errors += 1
+            execution_errors += 1
+            continue
+        candidates = sorted(unmatched,
+                            key=lambda index: len(observations[index][1]),
+                            reverse=True)
+        matched = next((index for index in candidates
+                        if warning.endswith(": " + observations[index][1])), None)
+        if matched is None:
+            errors.append(f"warning has no matching observation: {warning}")
+            continue
+        detail = warning[:-(len(observations[matched][1]) + 2)]
+        selected = observations[matched][0]
+        if detail == "selection has 0 non-ignored test ids":
+            if selected != 0:
+                errors.append("zero-selection warning contradicts selected count")
+        elif detail.startswith(("list execution failed ",
+                                "process could not start:")):
+            execution_errors += 1
+        else:
+            errors.append(f"unknown observer warning: {detail}")
+        unmatched.remove(matched)
+        finding_observations.add(matched)
+    for index in unmatched:
+        if observations[index][0] == 0:
+            errors.append("selected=0 observation is missing its warning")
+    expected = {
+        "invocations": len(observations),
+        "nonzero": len(observations) - len(finding_observations),
+        "findings": len(warnings),
+        "extraction_errors": 0,
+        "execution_errors": execution_errors,
+    }
+    if fields != expected:
+        errors.append(f"summary counters {fields} do not match evidence {expected}")
+    if internal_errors > 1 or (internal_errors and observations):
+        errors.append("internal-error evidence cannot accompany observations")
+    return errors
+
+
 def check_workflows(repo_root: Path, workflows: list[Path], allowlist: set[str],
                     with_list_check: bool) -> list[Violation]:
     inventories = {
@@ -400,11 +473,24 @@ def main(argv: list[str] | None = None) -> int:
                         help="also run `cargo test ... -- --list` (compiles)")
     parser.add_argument("--observe-selection", action="store_true",
                         help="warn-only execution evidence for curated jobs")
+    parser.add_argument("--verify-selection-evidence", type=Path,
+                        help="fail unless an observer log has a truthful summary")
     parser.add_argument("--job", action="append", default=None)
     args = parser.parse_args(argv)
     repo_root = args.repo_root.resolve()
     workflows = args.workflow or sorted(
         (repo_root / ".github/workflows").glob("*.yml"))
+    if args.verify_selection_evidence:
+        try:
+            rendered = args.verify_selection_evidence.read_text("utf-8")
+        except OSError as error:
+            print(f"selection-evidence verifier could not read log: {error}",
+                  file=sys.stderr)
+            return 2
+        errors = evidence_verification_errors(rendered)
+        for error in errors:
+            print(f"selection-evidence verifier: {error}", file=sys.stderr)
+        return 1 if errors else 0
     if args.observe_selection:
         if len(workflows) != 1 or not args.job:
             parser.error("--observe-selection requires one --workflow and --job")
@@ -423,16 +509,19 @@ def main(argv: list[str] | None = None) -> int:
         else:
             internal_errors = 0
         findings = internal_errors
+        execution_errors = internal_errors
         for words, selected, detail in observations:
             command = " ".join(words)
             print(f"selection-evidence: selected={selected} command={command}")
             if detail:
                 findings += 1
+                execution_errors += detail != "selection has 0 non-ignored test ids"
                 print(f"::warning file={workflow}::{detail}: {command}")
         print("selection-evidence summary: "
               f"invocations={len(observations)} "
               f"nonzero={sum(detail is None for _, _, detail in observations)} "
-              f"findings={findings} execution_errors={internal_errors} "
+              f"findings={findings} extraction_errors=0 "
+              f"execution_errors={execution_errors} "
               "[warn-only #5008]")
         return 0
     allowlist = load_allowlist(args.allowlist or (
