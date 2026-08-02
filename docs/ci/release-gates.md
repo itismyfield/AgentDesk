@@ -32,14 +32,14 @@ Selection observer required gate가 red로 만드는 observer 사망은 **프로
    PostgreSQL service` 삭제, 캐시 step 2개 순서 변경이 모두 기존 pin 대비 rc=1
    이지만 정상 재핀 후 rc=0 이고, expected-step 계약을 고칠 필요조차 없었다.
    리뷰를 부르는 트리거로만 취급한다.
-2. **per-job / per-step 계약 — 재핀과 무관하게 유지된다.** job 수준
-   `name`/`needs`/`if`/`runs-on` 핀과, 각 job 의 `cargo_steps` 에 등재된 **모든**
-   step 의 exact occurrence·shell·if·timeout·step env·명령 목록(spec 이 값을
-   지정한 경우 `continue-on-error` 포함). 실측: `just test-postgres` step 삭제는
-   재핀 후에도 rc=1.
+2. **그 밖의 모든 단언 — 재핀과 무관하게 유지된다.** job 수준 핀, `cargo_steps` 에
+   등재된 step 의 계약, 그리고 등재되지 않은 step 에 걸리는 제약이 여기 속한다.
+   실측: `just test-postgres` step 삭제는 재핀 후에도 rc=1.
 
-어느 step 이 등재돼 있는지는 **스크립트를 직접 읽어라** — 이 문서에 목록을 적으면
-낡는다(실제로 세 라운드 연속 틀렸다). 독립적인 명시적 step inventory 층은 없다. 다만
+2번이 정확히 무엇을 덮는지는 **스크립트를 직접 읽어라.** 이 문서에 목록을 적지
+않는다 — 네 라운드 연속으로 불완전하거나 틀린 목록이 나왔다. 특정 조작이 잡히는지
+알아야 하면 **그 조작을 넣고 hash 를 재핀한 뒤 스크립트를 돌려라.** 그것만이 낡지
+않는 답이다. 독립적인 명시적 step inventory 층은 없다. 다만
 `targets`에 없는 신규 job 경계, job ID 인용이나 표현 변형으로 인한 추출량 붕괴,
 invocation 하한은 이 게이트가 보장하지 않는다.
 

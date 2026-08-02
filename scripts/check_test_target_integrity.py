@@ -510,10 +510,12 @@ def main(argv: list[str] | None = None) -> int:
         # under pipefail). Conversely, this verifier is what catches a log that
         # is absent, malformed, or inconsistent with the detailed observations.
         #
-        # For the exact set this verifier rejects, read
-        # evidence_verification_errors(). This comment deliberately does not
-        # enumerate it: three rounds of enumerating it here produced a wrong
-        # list each time, in both directions.
+        # For the exact set this verifier rejects, read the
+        # --verify-selection-evidence branch below end to end -- the rejection
+        # is spread across the log read, the summary parse, and the counter
+        # recomputation, so no single function holds it. This comment
+        # deliberately names neither the set nor the functions: four rounds of
+        # trying produced a wrong answer every time, in both directions.
         #
         # What this verifier does not check is observation sufficiency. A caught
         # internal exception is reported truthfully as execution_errors/findings

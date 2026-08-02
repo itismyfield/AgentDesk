@@ -87,14 +87,17 @@ targets = {
   #      cache steps each fail against the stale pin (rc=1) and pass after a
   #      re-pin (rc=0), with no expected-step edit needed. Treat the hash as a
   #      review trigger, not a guarantee.
-  #   2. The per-job and per-step contracts checked below are independent of the
-  #      hash and survive a re-pin: the job-level name/needs/if/runs-on pins,
-  #      and for every step named in a job's cargo_steps its exact occurrence
-  #      count, shell, if policy, timeout, step env, and command list -- plus an
-  #      explicit continue-on-error value where the spec pins one.
+  #   2. Every other assertion in this file is independent of the hash and
+  #      survives a re-pin -- the job-level pins, the per-step contracts for
+  #      steps named in a job's cargo_steps, and the constraints placed on
+  #      steps that are not named there.
   #
-  # Read the checks themselves for which steps are covered. This comment does
-  # not enumerate that set, because the enumeration is what keeps going stale.
+  # Read the checks below for what mechanism 2 actually covers. This comment
+  # deliberately does not enumerate it: four rounds of trying produced an
+  # incomplete or wrong list every time. If you need to know whether a specific
+  # tamper is caught, mutate it, re-pin the hash, and run this script -- that is
+  # the only answer that does not go stale.
+  #
   # This registry does not discover new jobs automatically, and there is no
   # invocation-floor replacement in the selection-evidence verifier.
   "check_fast_cross_os" => {
