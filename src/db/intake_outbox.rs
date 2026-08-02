@@ -1481,28 +1481,28 @@ mod postgres_tests {
 
         let source_id = insert_pending(&pool, &payload("ch-sweep", "msg-sweep"), 1, None)
             .await
-            .expect("seed source");
+            .expect("seed source"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
         let claimed = claim_pending_for_target(&pool, "worker-1", "claude", "owner-1")
             .await
-            .expect("claim")
-            .expect("source row");
+            .expect("claim") // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+            .expect("source row"); // agentdesk-audit: allow-unwrap — test assertion
         assert_eq!(claimed.id, source_id);
         assert!(
             mark_failed_pre_accept(&pool, source_id, "owner-1", "pre-accept validation failed")
                 .await
-                .expect("fail source")
+                .expect("fail source") // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
         );
 
         let outcome = sweep_failed_pre_accept_once(&pool, "leader-1", 5)
             .await
-            .expect("sweep");
+            .expect("sweep"); // agentdesk-audit: allow-unwrap — test assertion
         let FailedPreAcceptSweepOutcome::Retried {
             source_id: retried_source,
             new_id,
             attempt_no,
         } = outcome
         else {
-            panic!("expected retry, got {outcome:?}");
+            panic!("expected retry, got {outcome:?}"); // agentdesk-audit: allow-unwrap — test assertion
         };
         assert_eq!(retried_source, source_id);
         assert_eq!(attempt_no, 2);
@@ -1512,7 +1512,7 @@ mod postgres_tests {
                 .bind(source_id)
                 .fetch_one(&pool)
                 .await
-                .expect("read source");
+                .expect("read source"); // agentdesk-audit: allow-unwrap — test assertion
         assert_eq!(source_status, "failed_pre_accept");
         let child: (String, String, i32, Option<i64>, String) = sqlx::query_as(
             "SELECT status, target_instance_id, attempt_no, parent_outbox_id, user_text
@@ -1521,7 +1521,7 @@ mod postgres_tests {
         .bind(new_id)
         .fetch_one(&pool)
         .await
-        .expect("read child");
+        .expect("read child"); // agentdesk-audit: allow-unwrap — test assertion
         assert_eq!(
             child,
             (
@@ -1545,39 +1545,39 @@ mod postgres_tests {
 
         let first_id = insert_pending(&pool, &payload("ch-budget", "msg-budget"), 1, None)
             .await
-            .expect("seed first");
+            .expect("seed first"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
         let first = claim_pending_for_target(&pool, "worker-1", "claude", "owner-1")
             .await
-            .expect("claim first")
-            .expect("first row");
+            .expect("claim first") // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+            .expect("first row"); // agentdesk-audit: allow-unwrap — test assertion
         assert_eq!(first.id, first_id);
         mark_failed_pre_accept(&pool, first_id, "owner-1", "first failure")
             .await
-            .expect("fail first");
+            .expect("fail first"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
 
         let second_id = match sweep_failed_pre_accept_once(&pool, "leader-1", 2)
             .await
-            .expect("first sweep")
+            .expect("first sweep") // agentdesk-audit: allow-unwrap — test assertion
         {
             FailedPreAcceptSweepOutcome::Retried {
                 new_id,
                 attempt_no: 2,
                 ..
             } => new_id,
-            other => panic!("expected attempt 2, got {other:?}"),
+            other => panic!("expected attempt 2, got {other:?}"), // agentdesk-audit: allow-unwrap — test assertion
         };
         let second = claim_pending_for_target(&pool, "leader-1", "claude", "owner-2")
             .await
-            .expect("claim second")
-            .expect("second row");
+            .expect("claim second") // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+            .expect("second row"); // agentdesk-audit: allow-unwrap — test assertion
         assert_eq!(second.id, second_id);
         mark_failed_pre_accept(&pool, second_id, "owner-2", "second failure")
             .await
-            .expect("fail second");
+            .expect("fail second"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
 
         let exhausted = sweep_failed_pre_accept_once(&pool, "leader-1", 2)
             .await
-            .expect("exhausted sweep");
+            .expect("exhausted sweep"); // agentdesk-audit: allow-unwrap — test assertion
         assert_eq!(
             exhausted,
             FailedPreAcceptSweepOutcome::BudgetExhausted {
@@ -1591,7 +1591,7 @@ mod postgres_tests {
         )
         .fetch_one(&pool)
         .await
-        .expect("count family");
+        .expect("count family"); // agentdesk-audit: allow-unwrap — test assertion
         assert_eq!(family_count, 2, "budget must forbid attempt 3");
 
         pool.close().await;
@@ -1606,20 +1606,20 @@ mod postgres_tests {
 
         insert_pending(&pool, &payload("ch-done-sweep", "msg-done-sweep"), 1, None)
             .await
-            .expect("seed done");
+            .expect("seed done"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
         let done = claim_pending_for_target(&pool, "worker-1", "claude", "owner-done")
             .await
-            .expect("claim done")
-            .expect("done row");
+            .expect("claim done") // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+            .expect("done row"); // agentdesk-audit: allow-unwrap — test assertion
         mark_accepted(&pool, done.id, "owner-done")
             .await
-            .expect("accept done");
+            .expect("accept done"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
         mark_spawned(&pool, done.id, "owner-done")
             .await
-            .expect("spawn done");
+            .expect("spawn done"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
         mark_done(&pool, done.id, "owner-done")
             .await
-            .expect("finish done");
+            .expect("finish done"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
 
         insert_pending(
             &pool,
@@ -1628,25 +1628,25 @@ mod postgres_tests {
             None,
         )
         .await
-        .expect("seed accepted");
+        .expect("seed accepted"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
         let accepted = claim_pending_for_target(&pool, "worker-1", "claude", "owner-accepted")
             .await
-            .expect("claim accepted")
-            .expect("accepted row");
+            .expect("claim accepted") // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+            .expect("accepted row"); // agentdesk-audit: allow-unwrap — test assertion
         mark_accepted(&pool, accepted.id, "owner-accepted")
             .await
-            .expect("accept row");
+            .expect("accept row"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
 
         assert_eq!(
             sweep_failed_pre_accept_once(&pool, "leader-1", 5)
                 .await
-                .expect("sweep"),
+                .expect("sweep"), // agentdesk-audit: allow-unwrap — test assertion
             FailedPreAcceptSweepOutcome::Empty
         );
         let row_count: i64 = sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM intake_outbox")
             .fetch_one(&pool)
             .await
-            .expect("count rows");
+            .expect("count rows"); // agentdesk-audit: allow-unwrap — test assertion
         assert_eq!(
             row_count, 2,
             "non-target states must not gain retry children"
@@ -2275,25 +2275,25 @@ mod postgres_tests {
             None,
         )
         .await
-        .expect("seed");
+        .expect("seed"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
         let claimed = claim_pending_for_target(&pool, "worker-1", "claude", "owner-1")
             .await
-            .expect("claim")
-            .expect("row");
+            .expect("claim") // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+            .expect("row"); // agentdesk-audit: allow-unwrap — test assertion
         mark_failed_pre_accept(&pool, claimed.id, "owner-1", "payload conversion failed")
             .await
-            .expect("fail pre-accept");
+            .expect("fail pre-accept"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
 
         let new_id = force_fail_and_retry_as_new(&pool, claimed.id, "operator: retry approved")
             .await
-            .expect("retry failed_pre_accept");
+            .expect("retry failed_pre_accept"); // agentdesk-audit: allow-unwrap — test assertion
 
         let source: (String, Option<String>) =
             sqlx::query_as("SELECT status, last_error FROM intake_outbox WHERE id = $1")
                 .bind(claimed.id)
                 .fetch_one(&pool)
                 .await
-                .expect("read source");
+                .expect("read source"); // agentdesk-audit: allow-unwrap — test assertion
         assert_eq!(source.0, "failed_pre_accept");
         assert_eq!(source.1.as_deref(), Some("payload conversion failed"));
 
@@ -2303,7 +2303,7 @@ mod postgres_tests {
         .bind(new_id)
         .fetch_one(&pool)
         .await
-        .expect("read child");
+        .expect("read child"); // agentdesk-audit: allow-unwrap — test assertion
         assert_eq!(child, ("pending".to_string(), 2, Some(claimed.id)));
 
         pool.close().await;
