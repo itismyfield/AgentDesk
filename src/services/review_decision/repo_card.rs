@@ -446,6 +446,12 @@ pub(super) async fn atomic_finalize_scope_mismatch_close_pg(
             .await
             .map_err(|e| ScopeMismatchCloseError::Internal(format!("begin tx: {e}")))?;
 
+        sqlx::query("SELECT id FROM task_dispatches WHERE id = $1 FOR UPDATE")
+            .bind(rd_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| ScopeMismatchCloseError::Internal(format!("lock rd: {e}")))?;
+
         // Stale re-check inside tx.
         let actual_latest_dispatch_id: Option<String> = sqlx::query_scalar::<_, Option<String>>(
             "SELECT latest_dispatch_id FROM kanban_cards WHERE id = $1 FOR UPDATE",

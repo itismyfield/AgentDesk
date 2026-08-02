@@ -612,6 +612,65 @@ pub async fn update_entry_status_on_pg(
     }
 }
 
+pub async fn attach_entry_to_live_dispatch_on_pg(
+    pool: &PgPool,
+    entry_id: &str,
+    dispatch_id: &str,
+    trigger_source: &str,
+    slot_index: Option<i64>,
+) -> Result<EntryStatusUpdateResult, String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("open postgres existing dispatch attach transaction: {error}"))?;
+    let result = attach_entry_to_live_dispatch_on_pg_tx(
+        &mut tx,
+        entry_id,
+        dispatch_id,
+        trigger_source,
+        slot_index,
+    )
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|e| format!("commit existing dispatch attach {dispatch_id}: {e}"))?;
+    Ok(result)
+}
+
+pub async fn attach_entry_to_live_dispatch_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entry_id: &str,
+    dispatch_id: &str,
+    trigger_source: &str,
+    slot_index: Option<i64>,
+) -> Result<EntryStatusUpdateResult, String> {
+    let status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM task_dispatches WHERE id = $1 FOR UPDATE",
+    )
+    .bind(dispatch_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| format!("lock postgres dispatch {dispatch_id} for entry attach: {error}"))?
+    .ok_or_else(|| format!("postgres dispatch {dispatch_id} not found for entry attach"))?;
+    if !matches!(status.as_str(), "pending" | "dispatched") {
+        return Err(format!(
+            "postgres dispatch {dispatch_id} is {status}: refusing entry attach"
+        ));
+    }
+
+    update_entry_status_on_pg_tx(
+        tx,
+        entry_id,
+        ENTRY_STATUS_DISPATCHED,
+        trigger_source,
+        &EntryStatusUpdateOptions {
+            dispatch_id: Some(dispatch_id.to_string()),
+            slot_index,
+        },
+    )
+    .await
+}
+
 /// Transaction-scoped variant of [`update_entry_status_on_pg`].
 ///
 /// Mirrors the pool-scoped helper's semantics — transition validation,

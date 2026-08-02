@@ -460,6 +460,20 @@ pub(super) async fn cancel_stale_review_dispatches_for_scope_mismatch_pg_first(
         format!("begin guarded scope-mismatch cleanup tx for {card_id}: {error}")
     })?;
 
+    let dispatch_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id
+         FROM task_dispatches
+         WHERE kanban_card_id = $1
+           AND dispatch_type = 'review'
+           AND status IN ('pending', 'dispatched')
+         ORDER BY id
+         FOR UPDATE",
+    )
+    .bind(card_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| format!("lock guarded stale review dispatches for {card_id}: {error}"))?;
+
     let actual_latest_dispatch_id: Option<String> = sqlx::query_scalar::<_, Option<String>>(
         "SELECT latest_dispatch_id FROM kanban_cards WHERE id = $1 FOR UPDATE",
     )
@@ -505,19 +519,6 @@ pub(super) async fn cancel_stale_review_dispatches_for_scope_mismatch_pg_first(
         );
         return Ok(0);
     }
-
-    let dispatch_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT id
-         FROM task_dispatches
-         WHERE kanban_card_id = $1
-           AND dispatch_type = 'review'
-           AND status IN ('pending', 'dispatched')
-         FOR UPDATE",
-    )
-    .bind(card_id)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(|error| format!("load guarded stale review dispatches for {card_id}: {error}"))?;
 
     let mut cancelled = 0usize;
     let mut changed_dispatch_ids = Vec::new();
@@ -724,5 +725,84 @@ mod tests {
             Some(r#"{"reviewed_commit": 42}"#.to_string()),
         );
         assert_eq!(dispatch.reviewed_commit, None);
+    }
+}
+
+#[cfg(test)]
+mod pg_lock_order_tests {
+    use super::*;
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+
+    fn state_with_postgres(pool: sqlx::PgPool) -> AppState {
+        let config = crate::config::Config::default();
+        let broadcast_tx = crate::eventbus::new_broadcast();
+        AppState {
+            pg_pool: Some(pool),
+            engine: crate::engine::PolicyEngine::new(&config).expect("construct policy engine"),
+            config: std::sync::Arc::new(config),
+            batch_buffer: crate::eventbus::spawn_batch_flusher(broadcast_tx.clone()),
+            broadcast_tx,
+            health_registry: None,
+            cluster_instance_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn run_cancel_and_scope_cleanup_share_dispatch_then_card_lock_order_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let (run_id, entry_id, dispatch_id) =
+            crate::services::auto_queue::cancel_run::seed_cancel_fixture_for_pg_test(
+                &pool,
+                "card-deadlock",
+            )
+            .await;
+        sqlx::query("UPDATE task_dispatches SET dispatch_type = 'review' WHERE id = $1")
+            .bind(&dispatch_id)
+            .execute(&pool)
+            .await
+            .expect("make fixture a review dispatch");
+        let mut entry_blocker = pool.begin().await.expect("begin entry blocker");
+        sqlx::query("SELECT id FROM auto_queue_entries WHERE id = $1 FOR UPDATE")
+            .bind(&entry_id)
+            .fetch_one(&mut *entry_blocker)
+            .await
+            .expect("block cancellation after it locks dispatch");
+
+        let cancel_pool = pool.clone();
+        let cancel_task = tokio::spawn(async move {
+            crate::services::auto_queue::cancel_run::cancel_selected_runs_with_pg(
+                None,
+                &cancel_pool,
+                &[run_id],
+                "reset_run",
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!cancel_task.is_finished());
+
+        let review_state = state_with_postgres(pool.clone());
+        let review_task = tokio::spawn(async move {
+            cancel_stale_review_dispatches_for_scope_mismatch_pg_first(
+                &review_state,
+                "card-cancel-card-deadlock",
+                "scope_mismatch",
+                &CardLifecycleSnapshot::default(),
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!review_task.is_finished());
+        entry_blocker.commit().await.expect("release entry blocker");
+
+        cancel_task
+            .await
+            .expect("join cancellation")
+            .expect("cancellation succeeds");
+        review_task
+            .await
+            .expect("join review cleanup")
+            .expect("review cleanup succeeds or observes stale lifecycle");
     }
 }

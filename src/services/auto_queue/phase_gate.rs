@@ -7,6 +7,61 @@ pub(super) struct ActivateDispatchEntryAttachment {
     pub trigger_source: String,
 }
 
+async fn lock_pending_entry_for_dispatch_attach_pg(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    attachment: &ActivateDispatchEntryAttachment,
+    card_id: &str,
+) -> Result<Option<String>, String> {
+    let row = sqlx::query(
+        "SELECT status, dispatch_id
+         FROM auto_queue_entries
+         WHERE id = $1
+           AND kanban_card_id = $2
+         FOR UPDATE",
+    )
+    .bind(&attachment.entry_id)
+    .bind(card_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| {
+        format!(
+            "lock postgres auto-queue entry {} for dispatch attach: {error}",
+            attachment.entry_id
+        )
+    })?
+    .ok_or_else(|| {
+        format!(
+            "auto-queue entry {} for card {card_id} not found during dispatch attach",
+            attachment.entry_id
+        )
+    })?;
+    let status: String = row.try_get("status").map_err(|error| {
+        format!(
+            "decode postgres auto-queue entry {} status during dispatch attach: {error}",
+            attachment.entry_id
+        )
+    })?;
+    let dispatch_id: Option<String> = row.try_get("dispatch_id").map_err(|error| {
+        format!(
+            "decode postgres auto-queue entry {} dispatch_id during dispatch attach: {error}",
+            attachment.entry_id
+        )
+    })?;
+    match status.as_str() {
+        crate::db::auto_queue::ENTRY_STATUS_PENDING => Ok(None),
+        crate::db::auto_queue::ENTRY_STATUS_DISPATCHED => dispatch_id.map(Some).ok_or_else(|| {
+            format!(
+                "auto-queue entry {} is dispatched without dispatch_id",
+                attachment.entry_id
+            )
+        }),
+        other => Err(format!(
+            "auto-queue entry {} is no longer pending for dispatch attach (status: {other})",
+            attachment.entry_id
+        )),
+    }
+}
+
 impl ActivateDispatchEntryAttachment {
     pub(super) fn new(entry_id: &str, slot_index: Option<i64>, trigger_source: &str) -> Self {
         Self {
@@ -396,63 +451,6 @@ async fn create_activate_dispatch_pg_inner(
         }
     }
 
-    if let Some(attachment) = entry_attachment.as_ref() {
-        let row = sqlx::query(
-            "SELECT status, dispatch_id
-             FROM auto_queue_entries
-             WHERE id = $1
-               AND kanban_card_id = $2
-             FOR UPDATE",
-        )
-        .bind(&attachment.entry_id)
-        .bind(card_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|error| {
-            format!(
-                "lock postgres auto-queue entry {} for dispatch attach: {error}",
-                attachment.entry_id
-            )
-        })?
-        .ok_or_else(|| {
-            format!(
-                "auto-queue entry {} for card {card_id} not found during dispatch attach",
-                attachment.entry_id
-            )
-        })?;
-        let entry_status: String = row.try_get("status").map_err(|error| {
-            format!(
-                "decode postgres auto-queue entry {} status during dispatch attach: {error}",
-                attachment.entry_id
-            )
-        })?;
-        let entry_dispatch_id: Option<String> = row.try_get("dispatch_id").map_err(|error| {
-            format!(
-                "decode postgres auto-queue entry {} dispatch_id during dispatch attach: {error}",
-                attachment.entry_id
-            )
-        })?;
-        match entry_status.as_str() {
-            crate::db::auto_queue::ENTRY_STATUS_PENDING => {}
-            crate::db::auto_queue::ENTRY_STATUS_DISPATCHED => {
-                tx.rollback().await.ok();
-                return entry_dispatch_id.ok_or_else(|| {
-                    format!(
-                        "auto-queue entry {} is dispatched without dispatch_id",
-                        attachment.entry_id
-                    )
-                });
-            }
-            other => {
-                tx.rollback().await.ok();
-                return Err(format!(
-                    "auto-queue entry {} is no longer pending for dispatch attach (status: {other})",
-                    attachment.entry_id
-                ));
-            }
-        }
-    }
-
     if dispatch_type != "review-decision"
         && let Some(existing_id) = sqlx::query_scalar::<_, String>(
             "SELECT id
@@ -461,7 +459,8 @@ async fn create_activate_dispatch_pg_inner(
                AND dispatch_type = $2
                AND status IN ('pending', 'dispatched')
              ORDER BY created_at DESC
-             LIMIT 1",
+             LIMIT 1
+             FOR UPDATE",
         )
         .bind(card_id)
         .bind(dispatch_type)
@@ -472,15 +471,18 @@ async fn create_activate_dispatch_pg_inner(
         })?
     {
         if let Some(attachment) = entry_attachment.as_ref() {
-            crate::db::auto_queue::update_entry_status_on_pg_tx(
+            if let Some(attached_id) =
+                lock_pending_entry_for_dispatch_attach_pg(&mut tx, attachment, card_id).await?
+            {
+                tx.rollback().await.ok();
+                return Ok(attached_id);
+            }
+            crate::db::auto_queue::attach_entry_to_live_dispatch_on_pg_tx(
                 &mut tx,
                 &attachment.entry_id,
-                crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
+                &existing_id,
                 &attachment.trigger_source,
-                &crate::db::auto_queue::EntryStatusUpdateOptions {
-                    dispatch_id: Some(existing_id.clone()),
-                    slot_index: attachment.slot_index,
-                },
+                attachment.slot_index,
             )
             .await?;
             tx.commit().await.map_err(|error| {
@@ -493,6 +495,14 @@ async fn create_activate_dispatch_pg_inner(
             tx.rollback().await.ok();
         }
         return Ok(existing_id);
+    }
+
+    if let Some(attachment) = entry_attachment.as_ref()
+        && let Some(attached_id) =
+            lock_pending_entry_for_dispatch_attach_pg(&mut tx, attachment, card_id).await?
+    {
+        tx.rollback().await.ok();
+        return Ok(attached_id);
     }
 
     sqlx::query(

@@ -206,13 +206,13 @@ async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(
                    FROM auto_queue_entries e
                    WHERE e.dispatch_id = td.id
                      AND e.status IN ('pending', 'dispatched', 'user_cancelled')
-                     AND NOT (e.run_id = ANY($4))
+                     AND (e.run_id IS NULL OR e.run_id <> ALL($4))
                )
                AND NOT EXISTS (
                    SELECT 1
                    FROM auto_queue_phase_gates pg
                    WHERE pg.dispatch_id = td.id
-                     AND NOT (pg.run_id = ANY($4))
+                     AND (pg.run_id IS NULL OR pg.run_id <> ALL($4))
                )",
         )
         .bind(payload.to_string())
@@ -251,13 +251,13 @@ async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(
                    FROM auto_queue_entries e
                    WHERE e.dispatch_id = td.id
                      AND e.status IN ('pending', 'dispatched', 'user_cancelled')
-                     AND NOT (e.run_id = ANY($3))
+                     AND (e.run_id IS NULL OR e.run_id <> ALL($3))
                )
                AND NOT EXISTS (
                    SELECT 1
                    FROM auto_queue_phase_gates pg
                    WHERE pg.dispatch_id = td.id
-                     AND NOT (pg.run_id = ANY($3))
+                     AND (pg.run_id IS NULL OR pg.run_id <> ALL($3))
                )",
         )
         .bind(dispatch_id)

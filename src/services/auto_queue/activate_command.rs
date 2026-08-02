@@ -271,15 +271,12 @@ pub(crate) async fn activate_with_deps_pg(
                 card_id,
                 dispatch_id
             );
-            if let Err(error) = crate::db::auto_queue::update_entry_status_on_pg(
+            if let Err(error) = crate::db::auto_queue::attach_entry_to_live_dispatch_on_pg(
                 pool,
                 &entry_id,
-                crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
+                &dispatch_id,
                 "activate_attach_existing_dispatch_pg",
-                &crate::db::auto_queue::EntryStatusUpdateOptions {
-                    dispatch_id: Some(dispatch_id.clone()),
-                    slot_index: None,
-                },
+                None,
             )
             .await
             {
@@ -590,17 +587,15 @@ pub(crate) async fn activate_with_deps_pg(
                     .filter(|state| state.has_active_dispatch())
                     .and_then(|state| state.latest_dispatch_id.clone())
                 {
-                    if let Err(update_error) = crate::db::auto_queue::update_entry_status_on_pg(
-                        pool,
-                        &entry_id,
-                        crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
-                        "activate_dispatch_error_recover_pg",
-                        &crate::db::auto_queue::EntryStatusUpdateOptions {
-                            dispatch_id: Some(dispatch_id),
+                    if let Err(update_error) =
+                        crate::db::auto_queue::attach_entry_to_live_dispatch_on_pg(
+                            pool,
+                            &entry_id,
+                            &dispatch_id,
+                            "activate_dispatch_error_recover_pg",
                             slot_index,
-                        },
-                    )
-                    .await
+                        )
+                        .await
                     {
                         crate::auto_queue_log!(
                             warn,

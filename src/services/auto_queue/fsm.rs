@@ -516,6 +516,18 @@ pub(super) fn update_entry_status_prefer_pg(
     crate::utils::async_bridge::block_on_pg_result(
         pool,
         move |bridge_pool| async move {
+            if new_status == crate::db::auto_queue::ENTRY_STATUS_DISPATCHED
+                && let Some(dispatch_id) = options.dispatch_id.as_deref()
+            {
+                return crate::db::auto_queue::attach_entry_to_live_dispatch_on_pg(
+                    &bridge_pool,
+                    &entry_id_owned,
+                    dispatch_id,
+                    &trigger_source,
+                    options.slot_index,
+                )
+                .await;
+            }
             crate::db::auto_queue::update_entry_status_on_pg(
                 &bridge_pool,
                 &entry_id_owned,
