@@ -710,14 +710,13 @@ pub(in crate::services::discord) async fn handle_event(
                 announce_bot_id,
                 user_id.get(),
             );
-            if new_message.author.bot
-                && !gate::bot_turn_message_admitted_for_live_intake(
-                    &settings_snapshot.allowed_bot_ids,
-                    announce_bot_id,
-                    user_id.get(),
-                    raw_text,
-                )
-            {
+            if gate::should_skip_bot_message_for_live_intake(
+                new_message.author.bot,
+                &settings_snapshot.allowed_bot_ids,
+                announce_bot_id,
+                user_id.get(),
+                raw_text,
+            ) {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
                     "  [{ts}] ⏭ BOT-INTAKE: skipping non-turn bot message {} in channel {}",
