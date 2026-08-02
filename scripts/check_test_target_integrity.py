@@ -500,23 +500,31 @@ def main(argv: list[str] | None = None) -> int:
         if not workflow.is_absolute():
             workflow = repo_root / workflow
         # Scope is deliberately narrow, and the observer step and this verifier
-        # go red for different reasons -- do not attribute one to the other. The
-        # observer step goes red on its own process failure (nonzero exit or
-        # signal), which turns the required job red without this verifier ever
-        # objecting: an observer that writes a complete, truthful summary and
-        # then exits nonzero leaves this verifier at zero. This verifier goes red
-        # only on evidence it can read as wrong -- a missing log or tee failure,
-        # a missing or duplicated summary line, or five counters that disagree
-        # with the detailed observations. A caught internal exception is not a
-        # failure here: it is reported truthfully as execution_errors/findings
-        # while this process returns zero, because the verifier checks
-        # truthfulness, not observation sufficiency. With no invocation floor, a
-        # truthful all-zero summary passes. Structurally, only the observer and
-        # verifier steps are pinned by exact occurrence; the registered jobs'
-        # whole-job semantic hashes detect other step additions, deletions, and
-        # reordering but accept them once re-pinned in the same diff. New jobs
-        # outside the hardening target registry, quoted job ids, and syntax
-        # changes that shrink extraction remain review responsibilities.
+        # fail independently -- do not attribute one to the other.
+        #
+        # This verifier's only input is the evidence log. It never sees the
+        # observer's exit code, so anything that kills the observer without
+        # corrupting that log -- a nonzero exit or a broken pipe after a
+        # complete, truthful summary -- leaves this verifier at zero and turns
+        # the required job red through the observer step instead (the step runs
+        # under pipefail). Conversely, this verifier is what catches a log that
+        # is absent, malformed, or inconsistent with the detailed observations.
+        #
+        # For the exact set this verifier rejects, read
+        # evidence_verification_errors(). This comment deliberately does not
+        # enumerate it: three rounds of enumerating it here produced a wrong
+        # list each time, in both directions.
+        #
+        # What this verifier does not check is observation sufficiency. A caught
+        # internal exception is reported truthfully as execution_errors/findings
+        # while this process returns zero, and with no invocation floor a
+        # truthful all-zero summary passes.
+        #
+        # Structural tamper-resistance lives in check-ci-runner-hardening.sh,
+        # not here -- see the comment above its `targets` table for what a
+        # re-pinned semantic hash does and does not accept. New jobs outside
+        # that registry, quoted job ids, and syntax changes that shrink
+        # extraction remain review responsibilities.
         try:
             observations = observe_curated(
                 repo_root, workflow.resolve(), set(args.job)

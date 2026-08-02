@@ -24,15 +24,22 @@ Selection observer required gate가 red로 만드는 observer 사망은 **프로
 제거했으므로 truthful all-zero summary도 통과한다.
 
 `scripts/check-ci-runner-hardening.sh`의 `targets`에 등재된 `test_fast`,
-`high-risk-recovery`, `check_fast_cross_os`는 whole-job semantic hash로 step의
-추가·삭제·순서 변경을 **탐지**한다. 다만 이 hash는 같은 diff 안에서 재핀하면
-통과하므로 구조 보장이 아니라 변경 탐지기다 — `test_fast` 실측: 미등록 step 추가,
-`Start PostgreSQL service` 삭제, 캐시 step 2개 순서 변경이 모두 기존 pin 대비
-rc=1 이지만 정상 재핀 후 rc=0 이다. 재핀으로 우회되지 않는 구조 보장은
-observer/verifier step 뿐이다 — expected-step 계약이 각각 exact occurrence와
-`continue-on-error` 부재를 고정하므로 이 두 step 삭제는 재핀 후에도 rc=1 이다.
-반면 미등록 step 추가는 expected-step 계약을 고칠 필요조차 없다. 독립적인 명시적
-step inventory 층은 없다. 다만
+`high-risk-recovery`, `check_fast_cross_os`에는 **강도가 다른 두 층**이 있다.
+섞어 읽으면 안 된다.
+
+1. **whole-job semantic hash — 변경 탐지기이지 보장이 아니다.** 같은 diff 안에서
+   재핀하면 무엇이든 통과한다. `test_fast` 실측: 미등록 step 추가, `Start
+   PostgreSQL service` 삭제, 캐시 step 2개 순서 변경이 모두 기존 pin 대비 rc=1
+   이지만 정상 재핀 후 rc=0 이고, expected-step 계약을 고칠 필요조차 없었다.
+   리뷰를 부르는 트리거로만 취급한다.
+2. **per-job / per-step 계약 — 재핀과 무관하게 유지된다.** job 수준
+   `name`/`needs`/`if`/`runs-on` 핀과, 각 job 의 `cargo_steps` 에 등재된 **모든**
+   step 의 exact occurrence·shell·if·timeout·step env·명령 목록(spec 이 값을
+   지정한 경우 `continue-on-error` 포함). 실측: `just test-postgres` step 삭제는
+   재핀 후에도 rc=1.
+
+어느 step 이 등재돼 있는지는 **스크립트를 직접 읽어라** — 이 문서에 목록을 적으면
+낡는다(실제로 세 라운드 연속 틀렸다). 독립적인 명시적 step inventory 층은 없다. 다만
 `targets`에 없는 신규 job 경계, job ID 인용이나 표현 변형으로 인한 추출량 붕괴,
 invocation 하한은 이 게이트가 보장하지 않는다.
 
@@ -153,7 +160,8 @@ high_risk_recovery: # ci-pr.yml only additions
 
 - `postgres` job의 `just test-postgres` step은 `just test-postgres`를 실행한다. 이 recipe는 `cargo test --lib -- _pg pg_ postgres --nocapture --test-threads=1`로 세 필터를 한 번에 선택하고 **단일 스레드**를 강제한다.
 - `high-risk-recovery` job의 `High-risk recovery lane` step은 `cargo test --lib high_risk_recovery:: -- --test-threads=1`을 실행한다 — 동일.
-- 이유: PG 테스트는 같은 `postgres` DB 인스턴스 위에서 CREATE/DROP DATABASE 로 격리하므로, parallel 실행 시 테스트 간 lifecycle race 가 재현되는 사고가 #973/#974 에서 확인됨.
+- 이유(#974, `683db919f`): `PgRecoveryTestDatabase::create()` 가 시나리오마다 admin PG connection 을 열어 새 DB 를 만드는데, 기본 병렬 executor 에서는 **admin pool 이 고갈**되어 `pool timed out while waiting for an open connection` 으로 실패했다. `--test-threads=1` 이 순차 실행을 강제해 admin connection 을 재사용하게 한다. 즉 원인은 "테스트 간 lifecycle race" 가 아니라 **connection pool 고갈**이다.
+- #973(`24a0e1cb0`)은 이 항목의 근거가 아니다 — non-PG lane 의 skip 필터가 너무 좁아(`_pg_`, `postgres_`) `*_pg`/`pg_*`/`*postgres` 가 새어 들어간 것과 brittle assertion 을 고친 건이다.
 
 ### Fixture isolation
 

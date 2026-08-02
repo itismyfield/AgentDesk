@@ -77,17 +77,25 @@ unless trigger_events == ["pull_request"]
 end
 
 targets = {
-  # The independent explicit step-inventory layer was removed. Each registered
-  # job's whole-job semantic hash *detects* step additions, deletions, and
-  # reordering, but it is a change-detector, not a structural guarantee: the
-  # same diff can re-pin it. Measured on test_fast -- adding an unregistered
-  # step, deleting "Start PostgreSQL service", and swapping two cache steps each
-  # fail against the stale pin (rc=1) and pass once the hash is re-pinned
-  # (rc=0). The only structural guarantees that survive a re-pin are per-step:
-  # the observer/verifier entries below retain exact occurrence and explicit nil
-  # continue-on-error contracts, so deleting either step stays rc=1 after a
-  # re-pin. Adding an unregistered step needs no expected-step edit at all. This
-  # registry does not discover new jobs automatically, and there is no
+  # The independent explicit step-inventory layer was removed. What remains
+  # splits into two mechanisms of very different strength, and conflating them
+  # has produced a wrong claim in this comment three rounds running.
+  #
+  #   1. The whole-job semantic hash only *detects* structural change. Re-pinning
+  #      it in the same diff accepts anything. Measured on test_fast: adding an
+  #      unregistered step, deleting "Start PostgreSQL service", and swapping two
+  #      cache steps each fail against the stale pin (rc=1) and pass after a
+  #      re-pin (rc=0), with no expected-step edit needed. Treat the hash as a
+  #      review trigger, not a guarantee.
+  #   2. The per-job and per-step contracts checked below are independent of the
+  #      hash and survive a re-pin: the job-level name/needs/if/runs-on pins,
+  #      and for every step named in a job's cargo_steps its exact occurrence
+  #      count, shell, if policy, timeout, step env, and command list -- plus an
+  #      explicit continue-on-error value where the spec pins one.
+  #
+  # Read the checks themselves for which steps are covered. This comment does
+  # not enumerate that set, because the enumeration is what keeps going stale.
+  # This registry does not discover new jobs automatically, and there is no
   # invocation-floor replacement in the selection-evidence verifier.
   "check_fast_cross_os" => {
     "label" => "cross-OS job",
