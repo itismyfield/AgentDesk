@@ -1230,6 +1230,7 @@ fn set_dispatch_status_with_backends_and_sync(
     })
 }
 
+#[allow(dead_code)] // retained generic writer; run-bound cleanup now uses the scoped transaction API
 pub(crate) fn set_dispatch_status_without_queue_sync_with_backends(
     pg_pool: Option<&PgPool>,
     dispatch_id: &str,

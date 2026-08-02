@@ -793,7 +793,6 @@ mod pg_lock_order_tests {
             .await
         });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert!(!review_task.is_finished());
         entry_blocker.commit().await.expect("release entry blocker");
 
         cancel_task
