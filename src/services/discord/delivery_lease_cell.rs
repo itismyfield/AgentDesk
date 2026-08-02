@@ -31,7 +31,7 @@ use super::{ChannelId, DeliveryLeaseKey};
 /// compare-and-release so an actor can only release a lease it actually owns.
 #[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(in crate::services) enum LeaseHolder {
+pub(in crate::services::discord) enum LeaseHolder {
     /// A tmux watcher instance. `instance_id` distinguishes an outgoing
     /// watcher from its successor across a reattach so a stale watcher cannot
     /// release the live watcher's lease.
@@ -49,7 +49,7 @@ pub(in crate::services) enum LeaseHolder {
 /// #3041 P1-0: dormant, wired in P1-1...
 #[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(in crate::services) enum LeaseOutcome {
+pub(in crate::services::discord) enum LeaseOutcome {
     /// Terminal output was confirmed delivered to Discord; the offset may
     /// advance to `end`.
     Delivered,
@@ -106,7 +106,7 @@ enum LeaseState {
 /// `Instant` so it is purely monotonic (never goes backwards). NOTE: this is a
 /// real wall-monotonic clock, not the Tokio test clock; gated-clock tests drive
 /// `reclaim_if_expired` with explicit `now_ms` arguments rather than this fn.
-pub(in crate::services) fn lease_now_ms() -> u64 {
+pub(in crate::services::discord) fn lease_now_ms() -> u64 {
     use std::sync::OnceLock;
     static START: OnceLock<std::time::Instant> = OnceLock::new();
     START
@@ -134,7 +134,7 @@ const TAG_COMMITTED: u8 = 2;
 ///
 /// #3041 P1-0: dormant, wired in P1-1...
 #[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
-pub(in crate::services) struct DeliveryLeaseCell {
+pub(in crate::services::discord) struct DeliveryLeaseCell {
     /// The channel this lease coordinates. Part of the lease identity.
     channel_id: ChannelId,
     /// Internal CAS gate tag (`TAG_*`). The acquire CAS on this word is the
@@ -152,7 +152,7 @@ pub(in crate::services) struct DeliveryLeaseCell {
 /// #3041 P1-0: dormant, wired in P1-1...
 #[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
 #[derive(Clone, Debug)]
-pub(in crate::services) enum LeaseSnapshot {
+pub(in crate::services::discord) enum LeaseSnapshot {
     Unleased,
     Leased {
         holder: LeaseHolder,
@@ -183,13 +183,13 @@ pub(in crate::services) enum LeaseSnapshot {
 /// dead-holder recovery is ~15s. P1-2 reuses this so the WATCHER and the BRIDGE
 /// share one deadline against the one per-channel cell — whoever holds it blocks
 /// the other's acquire (cross-actor duplicate prevention).
-pub(in crate::services) const DELIVERY_LEASE_DEADLINE_MS: u64 = 15_000;
+pub(in crate::services::discord) const DELIVERY_LEASE_DEADLINE_MS: u64 = 15_000;
 
 /// #3041 P1-1/P1-2: how often an in-flight holder renews its delivery lease.
 /// Must be strictly less than (and a small fraction of)
 /// [`DELIVERY_LEASE_DEADLINE_MS`] so a live holder always re-extends before
 /// expiry even if one tick is delayed (the deadline is 3× this).
-pub(in crate::services) const DELIVERY_LEASE_HEARTBEAT_MS: u64 = 5_000;
+pub(in crate::services::discord) const DELIVERY_LEASE_HEARTBEAT_MS: u64 = 5_000;
 
 /// #3041 P1-1 (§3, codex R2 Issue-1) / P1-2: RAII handle for the in-flight
 /// delivery-lease heartbeat task, shared by the watcher and the bridge. The
@@ -203,7 +203,7 @@ pub(in crate::services) const DELIVERY_LEASE_HEARTBEAT_MS: u64 = 5_000;
 /// lease (matched on holder+key), so a last tick that races `stop()`+commit
 /// merely extends our own deadline, which the immediately-following commit then
 /// flips to `Committed` — harmless.
-pub(in crate::services) struct DeliveryLeaseHeartbeat {
+pub(in crate::services::discord) struct DeliveryLeaseHeartbeat {
     handle: tokio::task::JoinHandle<()>,
 }
 
@@ -215,7 +215,7 @@ impl DeliveryLeaseHeartbeat {
     /// its own as soon as a `renew` returns false (the lease is no longer ours —
     /// committed, released, or reclaimed), so it self-terminates even before an
     /// explicit `stop()`.
-    pub(in crate::services) fn spawn(
+    pub(in crate::services::discord) fn spawn(
         cell: std::sync::Arc<DeliveryLeaseCell>,
         holder: LeaseHolder,
         key: DeliveryLeaseKey,
@@ -246,7 +246,7 @@ impl DeliveryLeaseHeartbeat {
 
     /// Stop the heartbeat. Idempotent. Called BEFORE the inline commit so the
     /// renew loop is guaranteed not to race the commit.
-    pub(in crate::services) fn stop(self) {
+    pub(in crate::services::discord) fn stop(self) {
         self.handle.abort();
     }
 }
