@@ -26,6 +26,16 @@ OUR_BOT_ID = os.environ.get("AGENTDESK_E2E_OUR_BOT_ID", "1479017284805722200")
 # legitimate ADK output but they repeat across turns by design, so excluding
 # them from `no_duplicate_content` keeps the assertion focused on actual
 # response bodies. (See #2702 / #2625 for the chrome format.)
+# Session banners are chrome only when the whole message has the panel shape.
+# The first answer message deliberately uses `<banner>\n\n<body>`, so this
+# anchored pattern must not consume a banner that has a non-empty body below it.
+_SESSION_PANEL_CHROME_PATTERN = re.compile(
+    r"^(?:🆕 새 세션 시작|기존 세션 복원|Lifecycle fallback)"
+    r"(?: · [^\n]+)?"
+    r"(?:\n\(최근 대화 \d+개를 읽어들였습니다\))?$"
+)
+_COMPLETION_PANEL_CHROME_PATTERN = re.compile(r"^-# ✅ 완료(?:\n|$)")
+
 _STATUS_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"Processing\.\.\."),
     re.compile(r"^🟢"),
@@ -39,7 +49,8 @@ _STATUS_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^⚠️"),
     re.compile(r"진행 중"),
     re.compile(r"응답 완료"),
-    re.compile(r"세션 복원"),
+    _SESSION_PANEL_CHROME_PATTERN,
+    _COMPLETION_PANEL_CHROME_PATTERN,
     re.compile(r"세션 초기화"),
     re.compile(r"\[Stopped\]"),
 )
@@ -47,6 +58,7 @@ _STATUS_PATTERNS: tuple[re.Pattern[str], ...] = (
 _COMPLETION_CHROME_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^✅"),
     re.compile(r"응답 완료"),
+    _COMPLETION_PANEL_CHROME_PATTERN,
 )
 
 _SUPPRESSED_LABEL_PATTERNS: tuple[re.Pattern[str], ...] = (
