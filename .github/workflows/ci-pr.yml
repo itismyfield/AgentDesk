@@ -600,6 +600,29 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Observe curated lane selections
+        timeout-minutes: 20
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: |
+          set -o pipefail
+          python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job test_fast --job high-risk-recovery | tee "$RUNNER_TEMP/selection-evidence-test-fast.log"
+
+      - name: Require observer summary
+        if: always()
+        timeout-minutes: 1
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: |
+          set -euo pipefail
+          python3 scripts/check_test_target_integrity.py --verify-selection-evidence "$RUNNER_TEMP/selection-evidence-test-fast.log"
+
       - name: Footer-only marker regressions
         timeout-minutes: 10
         shell: bash
@@ -704,6 +727,29 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Observe curated lane selections
+        timeout-minutes: 20
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: |
+          set -o pipefail
+          python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job high-risk-recovery | tee "$RUNNER_TEMP/selection-evidence-high-risk.log"
+
+      - name: Require observer summary
+        if: always()
+        timeout-minutes: 1
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: |
+          set -euo pipefail
+          python3 scripts/check_test_target_integrity.py --verify-selection-evidence "$RUNNER_TEMP/selection-evidence-high-risk.log"
+
       - name: High-risk recovery lane
         run: |
           cargo test --lib high_risk_recovery:: -- --test-threads=1
@@ -728,7 +774,7 @@ jobs:
         run: sccache --show-stats || true
 
   high_risk_recovery_required_context:
-    name: High-risk recovery required context (ubuntu-latest)
+    name: High-risk recovery path-filter mirror (ubuntu-latest)
     needs:
       - changes
       - high-risk-recovery
@@ -737,7 +783,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Mirror high-risk recovery result for branch protection
+      - name: Mirror high-risk recovery result across path-filter skips
         env:
           CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
           FILTER_NAME: high_risk_recovery

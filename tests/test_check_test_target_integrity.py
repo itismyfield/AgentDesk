@@ -250,6 +250,87 @@ class RunListCheckContract(unittest.TestCase):
         self.assertIn("rc=101", detail)
 
 
+class ExecutionEvidenceSummaryContract(unittest.TestCase):
+    def _summary_fields(self, rendered: str) -> dict[str, int]:
+        lines = [line for line in rendered.splitlines()
+                 if line.startswith("selection-evidence summary:")]
+        self.assertEqual(
+            len(lines), 1,
+            "fixture self-assert: exactly one observer summary must be emitted",
+        )
+        fields = {}
+        for word in lines[0].split():
+            key, separator, value = word.partition("=")
+            if separator and value.isdigit():
+                fields[key] = int(value)
+        return fields
+
+    def _render(self, observations) -> str:
+        output = io.StringIO()
+        with mock.patch.object(
+            integrity, "observe_curated", return_value=observations
+        ), contextlib.redirect_stdout(output):
+            rc = integrity.main([
+                "--repo-root", str(REPO_ROOT), "--observe-selection",
+                "--workflow", str(REPO_ROOT / ".github/workflows/ci-pr.yml"),
+                "--job", "test_fast",
+            ])
+        self.assertEqual(rc, 0)
+        return output.getvalue()
+
+    def test_summary_matches_observer_state_and_verifier(self) -> None:
+        observations = [
+            (["cargo", "test", "--lib", "good"], 3, None),
+            (["cargo", "test", "--lib", "failed"], 0,
+             "list execution failed (plain rc=101, ignored rc=101)"),
+        ]
+        rendered = self._render(observations)
+        self.assertEqual(self._summary_fields(rendered), {
+            "invocations": 2, "nonzero": 1, "findings": 1,
+            "extraction_errors": 0, "execution_errors": 1,
+        }, "fixture self-assert: summary counters must match observer state")
+        self.assertEqual(integrity.evidence_verification_errors(rendered), [])
+
+    def test_verifier_rejects_summary_observation_contradiction(self) -> None:
+        rendered = self._render([
+            (["cargo", "test", "--lib", "empty"], 0,
+             "selection has 0 non-ignored test ids"),
+        ])
+        mutated = rendered.replace("nonzero=0 findings=1",
+                                   "nonzero=1 findings=0")
+        errors = integrity.evidence_verification_errors(mutated)
+        self.assertTrue(errors, "fixture self-assert: contradictory summary must fail")
+        self.assertTrue(any("do not match evidence" in error for error in errors))
+
+    def test_verifier_rejects_duplicate_summary_counter(self) -> None:
+        rendered = self._render([
+            (["cargo", "test", "--lib", "good"], 1, None),
+        ])
+        mutated = rendered.replace("invocations=1", "invocations=999 invocations=1")
+        self.assertIn(
+            "duplicate summary counter: invocations",
+            integrity.evidence_verification_errors(mutated),
+        )
+
+    def test_internal_error_summary_is_truthful(self) -> None:
+        output = io.StringIO()
+        with mock.patch.object(
+            integrity, "observe_curated", side_effect=RuntimeError("boom")
+        ), contextlib.redirect_stdout(output):
+            rc = integrity.main([
+                "--repo-root", str(REPO_ROOT), "--observe-selection",
+                "--workflow", str(REPO_ROOT / ".github/workflows/ci-pr.yml"),
+                "--job", "test_fast",
+            ])
+        self.assertEqual(rc, 0)
+        rendered = output.getvalue()
+        self.assertEqual(self._summary_fields(rendered), {
+            "invocations": 0, "nonzero": 0, "findings": 1,
+            "extraction_errors": 0, "execution_errors": 1,
+        })
+        self.assertEqual(integrity.evidence_verification_errors(rendered), [])
+
+
 class KnownOffenderRegression(unittest.TestCase):
     """Upper-bound ratchet over the real-repo offenders (#5003).
 

@@ -43,6 +43,10 @@ TARGET_VALUE_OPTIONS = {"--bin", "--test"}
 UNSUPPORTED_TARGET_OPTIONS = {"--bins", "--tests", "--bench", "--benches",
                               "--example", "--examples", "--doc"}
 LIST_SUMMARY = re.compile(r"(\d+) tests?, \d+ benchmarks")
+JOB_HEADER = re.compile(r"^  ([A-Za-z0-9_-]+):(?:\s*#.*)?$")
+RECIPE_HEADER = re.compile(r"^([A-Za-z0-9_-]+):(?:\s.*)?$")
+EVIDENCE_LINE = re.compile(r"^selection-evidence: selected=(\d+) command=(.*)$")
+SUMMARY_KEYS = {"invocations", "nonzero", "findings", "extraction_errors", "execution_errors"}
 
 
 @dataclass(frozen=True)
@@ -267,6 +271,166 @@ def run_list_check(words: list[str], repo_root: Path) -> str | None:
         "command selects 0 tests (`-- --list` reported no matches)"
 
 
+def _command_lines(text: str) -> list[list[str]]:
+    commands: list[list[str]] = []
+    for line in text.splitlines():
+        try:
+            words = shlex.split(line.strip(), comments=True)
+        except ValueError as error:
+            raise RuntimeError(f"could not parse command: {line.strip()}") from error
+        if words[:1] == ["run:"]:
+            words = words[1:]
+        if any(words[index:index + 2] == ["cargo", "test"]
+               for index in range(len(words) - 1)):
+            commands.append(words)
+    return commands
+
+
+def _recipe_commands(justfile: Path, recipe: str) -> list[list[str]]:
+    body: list[str] = []
+    active = False
+    for line in justfile.read_text("utf-8").splitlines():
+        header = RECIPE_HEADER.match(line)
+        if header and not line[0].isspace():
+            if active:
+                break
+            active = header.group(1) == recipe
+        elif active:
+            body.append(line)
+    return _command_lines("\n".join(body))
+
+
+def curated_commands(repo_root: Path, workflow: Path,
+                     jobs: set[str]) -> list[list[str]]:
+    selected: list[str] = []
+    active = False
+    for line in workflow.read_text("utf-8").splitlines():
+        header = JOB_HEADER.match(line)
+        if header:
+            active = header.group(1) in jobs
+        if active:
+            selected.append(line)
+    text = "\n".join(selected)
+    commands = _command_lines(text)
+    for line in text.splitlines():
+        try:
+            words = shlex.split(line.strip(), comments=True)
+        except ValueError:
+            continue
+        if words[:1] == ["run:"]:
+            words = words[1:]
+        if words[:2] == ["just", "test-postgres"]:
+            commands.extend(_recipe_commands(repo_root / "justfile", words[1]))
+    return commands
+
+
+def _test_ids(output: str) -> set[str]:
+    return {line.rsplit(": ", 1)[0].strip() for line in output.splitlines()
+            if line.strip().endswith(": test")}
+
+
+def observe_curated(repo_root: Path, workflow: Path, jobs: set[str], runner=None
+                    ) -> list[tuple[list[str], int, str | None]]:
+    runner = runner or subprocess.run
+    observations = []
+    for words in curated_commands(repo_root, workflow, jobs):
+        cargo_index = next(index for index in range(len(words) - 1)
+                           if words[index:index + 2] == ["cargo", "test"])
+        argv = list(words)
+        if "--" not in argv[cargo_index + 2:]:
+            argv.append("--")
+        try:
+            plain = runner(argv + ["--list"], cwd=repo_root,
+                           capture_output=True, text=True)
+            ignored = runner(argv + ["--list", "--ignored"], cwd=repo_root,
+                             capture_output=True, text=True)
+        except OSError as error:
+            observations.append((words, 0, f"process could not start: {error}"))
+            continue
+        selected = _test_ids(plain.stdout) - _test_ids(ignored.stdout)
+        detail = None
+        if plain.returncode or ignored.returncode:
+            detail = (f"list execution failed (plain rc={plain.returncode}, "
+                      f"ignored rc={ignored.returncode})")
+        elif not selected:
+            detail = "selection has 0 non-ignored test ids"
+        observations.append((words, len(selected), detail))
+    return observations
+
+
+def evidence_verification_errors(rendered: str) -> list[str]:
+    """Recompute the observer summary from its detailed evidence lines."""
+    errors: list[str] = []
+    summary_lines = [line for line in rendered.splitlines()
+                     if line.startswith("selection-evidence summary:")]
+    if len(summary_lines) != 1:
+        return [f"expected exactly one summary, found {len(summary_lines)}"]
+    fields = {}
+    for word in summary_lines[0].split():
+        key, separator, value = word.partition("=")
+        if separator and value.isdigit():
+            if key in fields:
+                errors.append(f"duplicate summary counter: {key}")
+            fields[key] = int(value)
+    if set(fields) != SUMMARY_KEYS:
+        errors.append("summary must contain exactly the five required counters")
+    observations = []
+    warnings = []
+    for line in rendered.splitlines():
+        if line.startswith("selection-evidence:"):
+            match = EVIDENCE_LINE.fullmatch(line)
+            if not match:
+                errors.append(f"malformed evidence line: {line}")
+            else:
+                observations.append((int(match.group(1)), match.group(2)))
+        elif line.startswith("::warning "):
+            warnings.append(line.split("::", 2)[-1])
+    unmatched = set(range(len(observations)))
+    finding_observations: set[int] = set()
+    execution_errors = 0
+    internal_errors = 0
+    for warning in warnings:
+        if warning.startswith("observer internal error:"):
+            internal_errors += 1
+            execution_errors += 1
+            continue
+        candidates = sorted(unmatched,
+                            key=lambda index: len(observations[index][1]),
+                            reverse=True)
+        matched = next((index for index in candidates
+                        if warning.endswith(": " + observations[index][1])), None)
+        if matched is None:
+            errors.append(f"warning has no matching observation: {warning}")
+            continue
+        detail = warning[:-(len(observations[matched][1]) + 2)]
+        selected = observations[matched][0]
+        if detail == "selection has 0 non-ignored test ids":
+            if selected != 0:
+                errors.append("zero-selection warning contradicts selected count")
+        elif detail.startswith(("list execution failed ",
+                                "process could not start:")):
+            execution_errors += 1
+        else:
+            errors.append(f"unknown observer warning: {detail}")
+        unmatched.remove(matched)
+        finding_observations.add(matched)
+    for index in unmatched:
+        if observations[index][0] == 0:
+            errors.append("selected=0 observation is missing its warning")
+    expected = {
+        "invocations": len(observations),
+        "nonzero": len(observations) - len(finding_observations),
+        "findings": len(warnings),
+        "extraction_errors": 0,
+        "execution_errors": execution_errors,
+    }
+    if fields != expected:
+        errors.append(f"summary counters {fields} do not match evidence {expected}")
+    if internal_errors > 1 or (internal_errors and observations):
+        errors.append("internal-error evidence cannot accompany observations")
+    return errors
+
+
 def check_workflows(repo_root: Path, workflows: list[Path], allowlist: set[str],
                     with_list_check: bool) -> list[Violation]:
     inventories = {
@@ -309,10 +473,86 @@ def main(argv: list[str] | None = None) -> int:
                         help="exit 1 on violations (default: warn only)")
     parser.add_argument("--run-list-check", action="store_true",
                         help="also run `cargo test ... -- --list` (compiles)")
+    parser.add_argument("--observe-selection", action="store_true",
+                        help="warn-only execution evidence for curated jobs")
+    parser.add_argument("--verify-selection-evidence", type=Path,
+                        help="fail unless an observer log has a truthful summary")
+    parser.add_argument("--job", action="append", default=None)
     args = parser.parse_args(argv)
     repo_root = args.repo_root.resolve()
     workflows = args.workflow or sorted(
         (repo_root / ".github/workflows").glob("*.yml"))
+    if args.verify_selection_evidence:
+        try:
+            rendered = args.verify_selection_evidence.read_text("utf-8")
+        except OSError as error:
+            print(f"selection-evidence verifier could not read log: {error}",
+                  file=sys.stderr)
+            return 2
+        errors = evidence_verification_errors(rendered)
+        for error in errors:
+            print(f"selection-evidence verifier: {error}", file=sys.stderr)
+        return 1 if errors else 0
+    if args.observe_selection:
+        if len(workflows) != 1 or not args.job:
+            parser.error("--observe-selection requires one --workflow and --job")
+        workflow = Path(workflows[0])
+        if not workflow.is_absolute():
+            workflow = repo_root / workflow
+        # Scope is deliberately narrow, and the observer step and this verifier
+        # fail independently -- do not attribute one to the other.
+        #
+        # This verifier's only input is the evidence log. It never sees the
+        # observer's exit code, so anything that kills the observer without
+        # corrupting that log -- a nonzero exit or a broken pipe after a
+        # complete, truthful summary -- leaves this verifier at zero and turns
+        # the required job red through the observer step instead (the step runs
+        # under pipefail). Conversely, this verifier is what catches problems
+        # visible in the log itself.
+        #
+        # This comment does not describe the exact set this verifier rejects.
+        # Five rounds of trying produced a wrong or incomplete answer every
+        # time. To find out whether a particular evidence defect is caught,
+        # write it into a log and run --verify-selection-evidence on it; that
+        # answer does not go stale.
+        #
+        # What this verifier does not check is observation sufficiency. A caught
+        # internal exception is reported truthfully as execution_errors/findings
+        # while this process returns zero, and with no invocation floor a
+        # truthful all-zero summary passes.
+        #
+        # Structural tamper-resistance lives in check-ci-runner-hardening.sh,
+        # not here -- see the comment above its `targets` table for what a
+        # re-pinned semantic hash does and does not accept. New jobs outside
+        # that registry, quoted job ids, and syntax changes that shrink
+        # extraction remain review responsibilities.
+        try:
+            observations = observe_curated(
+                repo_root, workflow.resolve(), set(args.job)
+            )
+        except Exception as error:
+            print(f"::warning file={workflow}::observer internal error: "
+                  f"{type(error).__name__}: {error}")
+            observations = []
+            internal_errors = 1
+        else:
+            internal_errors = 0
+        findings = internal_errors
+        execution_errors = internal_errors
+        for words, selected, detail in observations:
+            command = " ".join(words)
+            print(f"selection-evidence: selected={selected} command={command}")
+            if detail:
+                findings += 1
+                execution_errors += detail != "selection has 0 non-ignored test ids"
+                print(f"::warning file={workflow}::{detail}: {command}")
+        print("selection-evidence summary: "
+              f"invocations={len(observations)} "
+              f"nonzero={sum(detail is None for _, _, detail in observations)} "
+              f"findings={findings} extraction_errors=0 "
+              f"execution_errors={execution_errors} "
+              "[warn-only #5008]")
+        return 0
     allowlist = load_allowlist(args.allowlist or (
         repo_root / "scripts/test_target_integrity_allowlist.txt"))
     violations = check_workflows(repo_root,
