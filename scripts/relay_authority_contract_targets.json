@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "condition3_mutations_present": false,
   "lanes": [
     {
       "name": "t1-sink-terminal-handoff",

@@ -34,17 +34,29 @@ def active_lane(*, command: list[str] | None = None, minimum: int = 2) -> dict[s
     }
 
 
-def manifest_path(lanes: list[dict[str, object]]) -> tuple[tempfile.TemporaryDirectory[str], Path]:
+def manifest_path(
+    lanes: list[dict[str, object]],
+    *,
+    condition3_mutations_present: bool = False,
+) -> tuple[tempfile.TemporaryDirectory[str], Path]:
     temporary = tempfile.TemporaryDirectory()
     path = Path(temporary.name) / "targets.json"
-    path.write_text(json.dumps({"schema_version": 1, "lanes": lanes}), encoding="utf-8")
+    path.write_text(
+        json.dumps({
+            "schema_version": 1,
+            "condition3_mutations_present": condition3_mutations_present,
+            "lanes": lanes,
+        }),
+        encoding="utf-8",
+    )
     return temporary, path
 
 
 class ManifestContract(unittest.TestCase):
     def test_checked_in_manifest_declares_active_and_gap_rows(self) -> None:
         lanes, gaps = contract.load_active_lanes(
-            REPO_ROOT / "scripts" / "relay_authority_contract_targets.json"
+            REPO_ROOT / "scripts" / "relay_authority_contract_targets.json",
+            REPO_ROOT,
         )
         self.assertEqual([lane.name for lane in lanes], [
             "t1-sink-terminal-handoff",
@@ -53,6 +65,30 @@ class ManifestContract(unittest.TestCase):
         ])
         self.assertEqual({gap["boundary"] for gap in gaps}, {"T2", "T3", "T5"})
         self.assertTrue(all(lane.minimum > 0 for lane in lanes))
+
+    def test_condition3_false_rejects_existing_mutation_script(self) -> None:
+        temporary, path = manifest_path([active_lane()])
+        with temporary:
+            repo_root = Path(temporary.name)
+            mutation_script = repo_root / "scripts" / "run_relay_authority_mutations.sh"
+            mutation_script.parent.mkdir()
+            mutation_script.touch()
+            with self.assertRaisesRegex(
+                contract.ManifestError,
+                "condition3_mutations_present is false but .*run_relay_authority_mutations.sh exists",
+            ):
+                contract.load_active_lanes(path, repo_root)
+
+    def test_condition3_true_rejects_missing_mutation_script(self) -> None:
+        temporary, path = manifest_path(
+            [active_lane()], condition3_mutations_present=True
+        )
+        with temporary:
+            with self.assertRaisesRegex(
+                contract.ManifestError,
+                "condition3_mutations_present is true but .*run_relay_authority_mutations.sh is missing",
+            ):
+                contract.load_active_lanes(path, Path(temporary.name))
 
     def test_unfiltered_command_is_rejected(self) -> None:
         temporary, path = manifest_path([active_lane(command=["cargo", "test", "--lib"])])

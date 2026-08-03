@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 DEFAULT_MANIFEST = Path("scripts/relay_authority_contract_targets.json")
+CONDITION3_MUTATION_SCRIPT = Path("scripts/run_relay_authority_mutations.sh")
 TEST_ID_SUFFIX = ": test"
 
 
@@ -38,7 +39,10 @@ class LaneResult:
     output: str
 
 
-def load_active_lanes(path: Path) -> tuple[list[Lane], list[dict[str, object]]]:
+def load_active_lanes(
+    path: Path,
+    repo_root: Path | None = None,
+) -> tuple[list[Lane], list[dict[str, object]]]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -46,6 +50,21 @@ def load_active_lanes(path: Path) -> tuple[list[Lane], list[dict[str, object]]]:
 
     if payload.get("schema_version") != 1 or not isinstance(payload.get("lanes"), list):
         raise ManifestError("manifest must contain schema_version=1 and a lanes array")
+
+    mutations_present = payload.get("condition3_mutations_present")
+    if not isinstance(mutations_present, bool):
+        raise ManifestError("manifest condition3_mutations_present must be boolean")
+    if repo_root is not None:
+        mutation_script = repo_root / CONDITION3_MUTATION_SCRIPT
+        script_exists = mutation_script.is_file()
+        if mutations_present and not script_exists:
+            raise ManifestError(
+                f"condition3_mutations_present is true but {CONDITION3_MUTATION_SCRIPT} is missing"
+            )
+        if not mutations_present and script_exists:
+            raise ManifestError(
+                f"condition3_mutations_present is false but {CONDITION3_MUTATION_SCRIPT} exists"
+            )
 
     active: list[Lane] = []
     gaps: list[dict[str, object]] = []
@@ -170,7 +189,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         manifest = repo_root / manifest
 
     try:
-        lanes, gaps = load_active_lanes(manifest)
+        lanes, gaps = load_active_lanes(manifest, repo_root)
     except ManifestError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2
