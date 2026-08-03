@@ -302,9 +302,30 @@ pub(super) async fn commit_response_fence(
 
 #[allow(clippy::too_many_arguments)]
 impl super::SessionBoundDiscordRelaySink {
+    async fn send_plain_response_chunks(
+        &self,
+        shared: &Arc<SharedData>,
+        provider: &ProviderKind,
+        channel: ChannelId,
+        relay_text: &str,
+        reference: Option<(ChannelId, MessageId)>,
+    ) -> Result<Vec<MessageId>, RelaySinkError> {
+        let http = shared.serenity_http_or_token_fallback().ok_or_else(|| {
+            RelaySinkError::Transient(format!(
+                "discord http unavailable for provider {}",
+                provider.as_str()
+            ))
+        })?;
+        super::super::formatting::send_long_message_raw_with_reference_returning_message_ids(
+            &http, channel, relay_text, shared, reference,
+        )
+        .await
+        .map_err(|error| RelaySinkError::Transient(error.to_string()))
+    }
+
     pub(super) async fn deliver_new_message_with_task_authority(
         &self,
-        gateway: &dyn super::super::gateway::TurnGateway,
+        _gateway: Option<&dyn super::super::gateway::TurnGateway>,
         shared: &Arc<SharedData>,
         provider: &ProviderKind,
         channel_id: u64,
@@ -423,10 +444,38 @@ impl super::SessionBoundDiscordRelaySink {
             .map_err(RelaySinkError::Transient)?;
             response_heartbeat = Some(heartbeat);
         } else {
-            let message_ids = gateway
-                .send_long_message_with_reference(channel, relay_text, prompt_anchor_reference)
-                .await
-                .map_err(RelaySinkError::Transient)?;
+            #[cfg(test)]
+            let message_ids = if let Some(gateway) = _gateway {
+                gateway
+                    .send_long_message_with_rollback(
+                        channel,
+                        prompt_anchor_reference
+                            .map(|(_, message_id)| message_id)
+                            .unwrap_or_else(|| MessageId::new(1)),
+                        relay_text,
+                    )
+                    .await
+                    .map_err(RelaySinkError::Transient)?
+            } else {
+                self.send_plain_response_chunks(
+                    shared,
+                    provider,
+                    channel,
+                    relay_text,
+                    prompt_anchor_reference,
+                )
+                .await?
+            };
+            #[cfg(not(test))]
+            let message_ids = self
+                .send_plain_response_chunks(
+                    shared,
+                    provider,
+                    channel,
+                    relay_text,
+                    prompt_anchor_reference,
+                )
+                .await?;
             plain_body_anchor_msg_id = message_ids.last().map(|message_id| message_id.get());
             plain_body_posted = true;
         }

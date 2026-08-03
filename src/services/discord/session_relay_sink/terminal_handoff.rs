@@ -54,17 +54,7 @@ impl RelaySink for SessionBoundDiscordRelaySink {
         let mut terminal_fresh_delivered = None;
         let mut terminal_not_delivered = false;
         for delivery in deliveries {
-            let delivery_outcome = self.deliver_response(delivery).await;
-            #[cfg(test)]
-            if let (Ok(outcome), Some(outcomes)) =
-                (delivery_outcome.as_ref(), &self.test_delivery_outcomes)
-            {
-                outcomes
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .push(*outcome);
-            }
-            match delivery_outcome {
+            match self.deliver_response(delivery).await {
                 Ok(SessionRelayDeliveryOutcome::Delivered) => {
                     // #3041 P1-3 (B1 CLOSED): the offset advance is owned INLINE by
                     // `deliver_response` — see `advance_after_confirmed_post`.

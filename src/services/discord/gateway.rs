@@ -119,22 +119,6 @@ pub(super) trait TurnGateway: Send + Sync {
         })
     }
 
-    fn send_long_message_with_reference<'a>(
-        &'a self,
-        channel_id: ChannelId,
-        content: &'a str,
-        _reference: Option<(ChannelId, MessageId)>,
-    ) -> GatewayFuture<'a, Result<Vec<MessageId>, String>> {
-        Box::pin(async move {
-            let chunks = formatting::split_message(content);
-            let mut sent = Vec::with_capacity(chunks.len());
-            for chunk in chunks {
-                sent.push(TurnGateway::send_message(self, channel_id, &chunk).await?);
-            }
-            Ok(sent)
-        })
-    }
-
     fn edit_message<'a>(
         &'a self,
         channel_id: ChannelId,
@@ -156,28 +140,6 @@ pub(super) trait TurnGateway: Send + Sync {
         message_id: MessageId,
         content: &'a str,
     ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>>;
-
-    fn replace_message_with_anchor<'a>(
-        &'a self,
-        channel_id: ChannelId,
-        message_id: MessageId,
-        content: &'a str,
-    ) -> GatewayFuture<
-        'a,
-        Result<
-            (
-                ReplaceLongMessageOutcome,
-                Option<formatting::ReplaceLastChunkAnchor>,
-            ),
-            String,
-        >,
-    > {
-        Box::pin(async move {
-            self.replace_message_with_outcome(channel_id, message_id, content)
-                .await
-                .map(|outcome| (outcome, None))
-        })
-    }
 
     /// Attempt only the edit phase of a replace. An edit failure is returned as a
     /// typed outcome so a range owner can revalidate durable delivery authority
@@ -644,25 +606,6 @@ impl TurnGateway for DiscordGateway {
         })
     }
 
-    fn send_long_message_with_reference<'a>(
-        &'a self,
-        channel_id: ChannelId,
-        content: &'a str,
-        reference: Option<(ChannelId, MessageId)>,
-    ) -> GatewayFuture<'a, Result<Vec<MessageId>, String>> {
-        Box::pin(async move {
-            formatting::send_long_message_raw_with_reference_returning_message_ids(
-                &self.http,
-                channel_id,
-                content,
-                &self.shared,
-                reference,
-            )
-            .await
-            .map_err(|error| error.to_string())
-        })
-    }
-
     fn edit_message<'a>(
         &'a self,
         channel_id: ChannelId,
@@ -690,40 +633,16 @@ impl TurnGateway for DiscordGateway {
         content: &'a str,
     ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
         Box::pin(async move {
-            self.replace_message_with_anchor(channel_id, message_id, content)
-                .await
-                .map(|(outcome, _)| outcome)
-        })
-    }
-
-    fn replace_message_with_anchor<'a>(
-        &'a self,
-        channel_id: ChannelId,
-        message_id: MessageId,
-        content: &'a str,
-    ) -> GatewayFuture<
-        'a,
-        Result<
-            (
-                ReplaceLongMessageOutcome,
-                Option<formatting::ReplaceLastChunkAnchor>,
-            ),
-            String,
-        >,
-    > {
-        Box::pin(async move {
-            let mut last_chunk_anchor = None;
-            let outcome = formatting::replace_long_message_raw_with_outcome(
+            formatting::replace_long_message_raw_with_outcome(
                 &self.http,
                 channel_id,
                 message_id,
                 content,
                 &self.shared,
-                &mut last_chunk_anchor,
+                &mut None,
             )
             .await
-            .map_err(|error| watcher_classified_error_string(error.as_ref()))?;
-            Ok((outcome, last_chunk_anchor))
+            .map_err(|error| watcher_classified_error_string(error.as_ref()))
         })
     }
 

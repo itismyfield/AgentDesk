@@ -768,7 +768,9 @@ src/
 │   │   │   ├── startup_doctor.rs
 │   │   │   └── voice.rs
 │   │   ├── session_relay_sink/
+│   │   │   ├── delivery_commit.rs
 │   │   │   ├── delivery_frontier.rs
+│   │   │   ├── delivery_orchestration_tests.rs
 │   │   │   ├── delivery_outcome_classify.rs
 │   │   │   ├── idle_jsonl.rs
 │   │   │   ├── orphan_reclaim.rs
