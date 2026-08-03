@@ -193,6 +193,11 @@ jobs:
         with:
           toolchain: "1.94.1"
 
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@1.51.0
+
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10
 
