@@ -9,7 +9,7 @@ mod dispatch_summary;
 pub(crate) mod test_support;
 mod types;
 
-pub(crate) use dispatch_cancel::cancel_dispatch_on_pg_tx_with_meta;
+pub(crate) use dispatch_cancel::cancel_dispatches_for_runs_on_pg_tx_with_meta;
 pub use dispatch_cancel::{
     cancel_dispatch_and_reset_auto_queue_on_pg, cancel_dispatch_and_reset_auto_queue_on_pg_tx,
 };
