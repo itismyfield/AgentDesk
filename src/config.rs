@@ -1135,6 +1135,10 @@ pub struct ClusterIntakeRoutingConfig {
     pub forward_pre_claim_timeout_secs: u64,
     #[serde(default = "default_intake_stale_claim_recovery_secs")]
     pub stale_claim_recovery_secs: u64,
+    #[serde(default = "default_intake_max_attempts_per_message")]
+    pub max_attempts_per_message: u32,
+    #[serde(default = "default_intake_retry_authorization_secs")]
+    pub retry_authorization_secs: u64,
 }
 
 impl Default for ClusterIntakeRoutingConfig {
@@ -1145,6 +1149,8 @@ impl Default for ClusterIntakeRoutingConfig {
             owner_authority_channel_ids: Vec::new(),
             forward_pre_claim_timeout_secs: default_intake_forward_pre_claim_timeout_secs(),
             stale_claim_recovery_secs: default_intake_stale_claim_recovery_secs(),
+            max_attempts_per_message: default_intake_max_attempts_per_message(),
+            retry_authorization_secs: default_intake_retry_authorization_secs(),
         }
     }
 }
@@ -1184,6 +1190,13 @@ fn default_intake_forward_pre_claim_timeout_secs() -> u64 {
 
 fn default_intake_stale_claim_recovery_secs() -> u64 {
     60
+}
+
+fn default_intake_max_attempts_per_message() -> u32 {
+    5
+}
+fn default_intake_retry_authorization_secs() -> u64 {
+    300
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -1339,6 +1352,8 @@ dispatch_routing:
             12
         );
         assert_eq!(default_config.intake_routing.stale_claim_recovery_secs, 60);
+        assert_eq!(default_config.intake_routing.max_attempts_per_message, 5);
+        assert_eq!(default_config.intake_routing.retry_authorization_secs, 300);
         assert!(
             default_config
                 .intake_routing
@@ -1357,6 +1372,7 @@ intake_routing:
     - "223456789012345678"
   forward_pre_claim_timeout_secs: 13
   stale_claim_recovery_secs: 61
+  max_attempts_per_message: 7
 "#,
         )
         .expect("cluster intake routing config parses");
@@ -1372,6 +1388,8 @@ intake_routing:
         );
         assert_eq!(config.intake_routing.forward_pre_claim_timeout_secs, 13);
         assert_eq!(config.intake_routing.stale_claim_recovery_secs, 61);
+        assert_eq!(config.intake_routing.max_attempts_per_message, 7);
+        assert_eq!(config.intake_routing.retry_authorization_secs, 300);
 
         let invalid: Result<ClusterConfig, _> = serde_yaml::from_str(
             r#"

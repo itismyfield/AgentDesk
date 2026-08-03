@@ -45,6 +45,8 @@ cluster:
     owner_authority_channel_ids: []
     forward_pre_claim_timeout_secs: 12
     stale_claim_recovery_secs: 60
+    max_attempts_per_message: 5
+    retry_authorization_secs: 300
   # #4351. The gateway node is the node every conversational tmux session runs
   # on. Left unset, the Discord gateway lease is pure first-come, so restart
   # ordering silently decides where sessions live. Set it to pin the gateway to

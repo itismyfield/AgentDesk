@@ -276,6 +276,39 @@ fn should_wake_wait_queue_after_node_join(leader_active: &AtomicBool) -> bool {
     leader_active.load(Ordering::Acquire)
 }
 
+pub(crate) async fn run_leader_intake_retry_maintenance_once(
+    pool: &PgPool,
+    instance_id: &str,
+    stale_threshold_secs: u64,
+    lease_ttl_secs: u64,
+    retry: impl FnOnce() -> Option<(u32, u64)>,
+) -> Result<Option<crate::db::intake_outbox::FailedPreAcceptSweepOutcome>, String> {
+    mark_stale_worker_nodes_offline(pool, stale_threshold_secs, instance_id).await?;
+    let Some((max_attempts, retry_authorization_secs)) = retry() else {
+        return Ok(None);
+    };
+    crate::db::intake_outbox::sweep_failed_pre_accept_once(
+        pool,
+        instance_id,
+        max_attempts,
+        lease_ttl_secs,
+        Some(retry_authorization_secs),
+    )
+    .await
+    .map(Some)
+    .map_err(|error| format!("sweep failed pre-accept intake routes: {error}"))
+}
+
+fn current_intake_retry_config() -> Option<(u32, u64)> {
+    let config = crate::services::cluster::intake_routing_config::effective_intake_routing_config();
+    config.mode_is_enforce().then(|| {
+        (
+            config.max_attempts_per_message,
+            config.retry_authorization_secs,
+        )
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_heartbeat_loop(
     pool: PgPool,
@@ -376,10 +409,28 @@ fn spawn_heartbeat_loop(
                         tracing::debug!("[cluster] stale GC yielding under pool pressure");
                         last_pressure_log = Instant::now();
                     }
-                } else if let Err(error) =
-                    mark_stale_worker_nodes_offline(&pool, stale_threshold_secs, &instance_id).await
-                {
-                    tracing::warn!("[cluster] stale worker_node GC failed: {error}");
+                } else {
+                    match run_leader_intake_retry_maintenance_once(
+                        &pool,
+                        &instance_id,
+                        stale_threshold_secs,
+                        lease_ttl_secs,
+                        current_intake_retry_config,
+                    )
+                    .await
+                    {
+                        Ok(
+                            None
+                            | Some(crate::db::intake_outbox::FailedPreAcceptSweepOutcome::Empty),
+                        ) => {}
+                        Ok(Some(outcome)) => tracing::debug!(
+                            ?outcome,
+                            "[cluster] swept failed pre-accept intake route"
+                        ),
+                        Err(error) => tracing::warn!(
+                            "[cluster] leader intake retry maintenance failed: {error}"
+                        ),
+                    }
                 }
             }
         }
@@ -751,12 +802,12 @@ pub(crate) async fn list_worker_nodes(
         })
         .collect())
 }
-
 #[cfg(test)]
 mod tests {
     use super::{
-        ClusterRole, ClusterRuntime, auto_node_can_attempt_leadership, explain_capability_match,
-        resolve_instance_id, select_capability_route, should_wake_wait_queue_after_node_join,
+        ClusterRole, ClusterRuntime, auto_node_can_attempt_leadership, current_intake_retry_config,
+        explain_capability_match, resolve_instance_id, select_capability_route,
+        should_wake_wait_queue_after_node_join,
     };
     use crate::config::{ClusterConfig, Config};
     use serde_json::json;
@@ -769,6 +820,22 @@ mod tests {
         assert_eq!(ClusterRole::parse("leader"), ClusterRole::Leader);
         assert_eq!(ClusterRole::parse("WORKER"), ClusterRole::Worker);
         assert_eq!(ClusterRole::parse("anything-else"), ClusterRole::Auto);
+    }
+
+    #[test]
+    fn intake_retry_tick_reads_each_hot_reload_snapshot() {
+        let mut config = Config::default();
+        config.cluster.intake_routing.enabled = true;
+        config.cluster.intake_routing.mode = crate::config::ClusterIntakeRoutingMode::Enforce;
+        for (mode, expected) in [
+            (crate::config::ClusterIntakeRoutingMode::Enforce, true),
+            (crate::config::ClusterIntakeRoutingMode::Observe, false),
+            (crate::config::ClusterIntakeRoutingMode::Enforce, true),
+        ] {
+            config.cluster.intake_routing.mode = mode;
+            crate::config_live_reload::install(config.clone());
+            assert_eq!(current_intake_retry_config().is_some(), expected);
+        }
     }
 
     #[test]

@@ -524,6 +524,9 @@ mod tests {
             attempt_no: 1,
             parent_outbox_id: None,
             retry_count: 0,
+            owner_generation: None,
+            owner_instance_id: None,
+            admission_kind: "forwarded".to_string(),
         }
     }
 
