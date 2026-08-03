@@ -205,13 +205,9 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: cargo test (postgres bootstrap)
-        timeout-minutes: 15
-        run: cargo test postgres_ -- --nocapture --test-threads=1
-
-      - name: cargo test (PG routes)
-        timeout-minutes: 15
-        run: cargo test _pg_ -- --nocapture --test-threads=1
+      - name: PostgreSQL library tests
+        timeout-minutes: 30
+        run: just test-postgres
 
       - name: Stop PostgreSQL service
         if: always()
