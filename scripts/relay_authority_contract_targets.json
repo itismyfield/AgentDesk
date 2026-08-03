@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "lanes": [
+    {
+      "name": "t1-sink-terminal-handoff",
+      "boundary": "T1",
+      "status": "active",
+      "module": "services::discord::session_relay_sink",
+      "command": [
+        "cargo",
+        "test",
+        "--lib",
+        "services::discord::session_relay_sink"
+      ],
+      "minimum": 94,
+      "derivation": "Measured on origin/main 0ae1c5b77 with the declared command plus -- --list. This is the current sink handoff and delivery-authority test surface; the future DeliveryJournal single-writer mutation contract is not present yet."
+    },
+    {
+      "name": "t2-intake-dispatched-terminal-receipt",
+      "boundary": "T2",
+      "status": "gap",
+      "module": "services::cluster::intake_worker",
+      "reason": "No T2 contract target exists yet: the current worker still advances spawned directly to done after execute_intake_turn_core returns, and neither dispatched nor a terminal-receipt-owned done transition exists."
+    },
+    {
+      "name": "t3-execution-registry-nonce",
+      "boundary": "T3",
+      "status": "gap",
+      "module": "services::discord::inflight",
+      "reason": "No T3 contract target exists yet: the current InflightTurnIdentity seam has no durable execution_id registry or nonce contract."
+    },
+    {
+      "name": "t4-single-actor-recovery-decision",
+      "boundary": "T4",
+      "status": "active",
+      "module": "services::discord::relay_recovery::tests",
+      "command": [
+        "cargo",
+        "test",
+        "--lib",
+        "services::discord::relay_recovery::tests"
+      ],
+      "minimum": 43,
+      "derivation": "Measured on origin/main 0ae1c5b77 with the declared command plus -- --list. This is the existing recovery planner/apply contract module around plan_relay_recovery."
+    },
+    {
+      "name": "t5-structural-signal-authority-teardown",
+      "boundary": "T5",
+      "status": "gap",
+      "module": "services::discord::inflight",
+      "reason": "No T5 contract target exists yet: structural signals and inflight still participate in recovery/lifecycle authority, so authority teardown has not been implemented or tested."
+    },
+    {
+      "name": "relay-e2e-local-model-queue-wake",
+      "boundary": "relay-e2e",
+      "status": "active",
+      "module": "services::discord::tui_prompt_relay::local_model_queue_wake_e2e",
+      "command": [
+        "cargo",
+        "test",
+        "--lib",
+        "services::discord::tui_prompt_relay::local_model_queue_wake_e2e"
+      ],
+      "minimum": 5,
+      "derivation": "Measured on origin/main 0ae1c5b77 with the declared command plus -- --list. This Rust production-path E2E drives the local Discord mock, mailbox lifecycle, durable queue wake, and production workers; dashboard Playwright is unrelated and nightly-only."
+    }
+  ]
+}

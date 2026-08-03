@@ -371,11 +371,6 @@ services::discord::runtime_store::atomic_write_logging_tests
 services::discord::runtime_store::runtime_root_tests
 services::discord::session_banner::tests
 services::discord::session_identity::tests
-services::discord::session_relay_sink::delivery_outcome_classify::tests
-services::discord::session_relay_sink::idle_jsonl::tests
-services::discord::session_relay_sink::orphan_reclaim::tests
-services::discord::session_relay_sink::relay_state_contract_refs
-services::discord::session_relay_sink::tests
 services::discord::session_runtime::channel_routing::tests
 services::discord::session_runtime::resume_launch_binding_tests
 services::discord::session_runtime::select_restored_session_path_tests

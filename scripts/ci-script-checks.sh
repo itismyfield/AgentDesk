@@ -117,6 +117,10 @@ echo "=== Relay recovery targeted-lane wiring contract (#4423) ==="
 echo "=== TUI relay assertion unit tests (#5065) ==="
 "$PYTHON" -m unittest scripts.e2e.tui_relay.test_assertions
 
+echo "=== Relay-authority named-target floor contract (#5071) ==="
+"$PYTHON" scripts/check_relay_authority_contract.py --check-manifest
+"$PYTHON" -m unittest tests.test_check_relay_authority_contract
+
 echo "=== Fast compile check PR/main/nightly split contract (#4747) ==="
 "$PYTHON" -m unittest tests.test_fast_check_ci_wiring
 

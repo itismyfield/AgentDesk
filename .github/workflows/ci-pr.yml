@@ -954,3 +954,56 @@ jobs:
           path: target/maintainability-audit.yaml
           if-no-files-found: ignore
           retention-days: 14
+
+  # #5071 T0: this required-context candidate is intentionally unconditional.
+  # Its version-controlled manifest names every current T1-T5 contract target,
+  # records explicit GAP rows, and owns the selection floors. Condition-3 fixed
+  # mutations attach as a later step in this same job after target verification.
+  relay-authority-contract:
+    name: relay-authority-contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Verify named relay-authority targets and selection floors
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: python3 scripts/check_relay_authority_contract.py
+
+      - name: Run named relay-authority contract targets
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: |
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::session_relay_sink -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1
+
+      # Condition-3 fixed mutations attach here. They must mutate production
+      # wiring, rerun the named targets above, require red, then restore sources.
+      # Keeping the hook after the positive run prevents mutation failures from
+      # being confused with baseline target failures.
+      - name: Run fixed relay-authority mutations
+        if: ${{ hashFiles('scripts/run_relay_authority_mutations.sh') != '' }}
+        run: bash scripts/run_relay_authority_mutations.sh
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
