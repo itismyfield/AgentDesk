@@ -2,6 +2,7 @@ use super::tests::{inflight_with_identity_offset, matched, terminal_frame_offset
 use super::*;
 use crate::services::discord::inflight::RelayOwnerKind;
 
+// Kills M6: removing the fenced-terminal disjunct must lose this terminal outcome.
 #[tokio::test]
 async fn fenced_terminal_without_parser_delivery_is_terminal_not_delivered() {
     let binding = matched("44001");
@@ -24,6 +25,7 @@ async fn fenced_terminal_without_parser_delivery_is_terminal_not_delivered() {
     assert_eq!(outcome, RelaySinkOutcome::TerminalNotDelivered);
 }
 
+// Kills M8: transport errors must escape instead of folding into NotDelivered.
 #[tokio::test]
 async fn relay_deliver_propagates_injected_transport_error() {
     let temp = tempfile::tempdir().expect("temp runtime root");
@@ -68,6 +70,7 @@ async fn relay_deliver_propagates_injected_transport_error() {
     crate::services::discord::inflight::clear_inflight_state(&ProviderKind::Claude, channel_id);
 }
 
+// Kills M10 and anchor-drop: persisted proof stays Delivered and records the tail anchor.
 #[tokio::test]
 async fn relay_deliver_preserves_tail_anchor_and_observes_persisted_proof() {
     let temp = tempfile::tempdir().expect("temp runtime root");
@@ -95,8 +98,15 @@ async fn relay_deliver_preserves_tail_anchor_and_observes_persisted_proof() {
         .register(ProviderKind::Claude.as_str().to_string(), shared.clone())
         .await;
     let gateway = Arc::new(RelayContractFakeGateway::edited());
+    let outcomes = Arc::new(Mutex::new(Vec::new()));
     let mut sink = SessionBoundDiscordRelaySink::new(registry);
     sink.test_gateway = Some(gateway.clone());
+    sink.test_replace_anchor = Some(formatting::ReplaceLastChunkAnchor {
+        msg_id: 99_003,
+        text: "tail chunk".to_string(),
+    });
+    sink.test_delivery_outcomes = Some(outcomes.clone());
+    sink.test_force_legacy_replace = true;
     let payload = concat!(
         "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]}}\n",
         "{\"type\":\"result\",\"result\":\"answer\"}\n"
@@ -107,16 +117,22 @@ async fn relay_deliver_preserves_tail_anchor_and_observes_persisted_proof() {
     let outcome = sink.deliver(&terminal).await.expect("persisted delivery");
 
     assert_eq!(outcome, RelaySinkOutcome::TerminalDelivered);
+    assert_eq!(
+        outcomes.lock().expect("outcome probe").as_slice(),
+        &[SessionRelayDeliveryOutcome::Delivered],
+        "M10: persisted proof must remain a typed Delivered outcome"
+    );
     let record = dr::read_record(&ProviderKind::Claude, channel_id).expect("delivery record");
     assert_eq!(
         record.delivered_frontier.expect("frontier").panel_msg_id,
-        Some(88_003),
-        "single-chunk legacy replace must retain its edited placeholder anchor"
+        Some(99_003),
+        "anchor-drop: legacy replace must retain the formatter tail anchor"
     );
     assert_eq!(gateway.replace_calls.load(Ordering::Acquire), 1);
     crate::services::discord::inflight::clear_inflight_state(&ProviderKind::Claude, channel_id);
 }
 
+// Kills M11: stale proof must remain distinguishable from Delivered before public folding.
 #[tokio::test]
 async fn relay_deliver_observes_landed_stale_proof() {
     let temp = tempfile::tempdir().expect("temp runtime root");
@@ -152,8 +168,10 @@ async fn relay_deliver_observes_landed_stale_proof() {
         })),
         ..RelayContractFakeGateway::edited()
     });
+    let outcomes = Arc::new(Mutex::new(Vec::new()));
     let mut sink = SessionBoundDiscordRelaySink::new(registry);
     sink.test_gateway = Some(gateway);
+    sink.test_delivery_outcomes = Some(outcomes.clone());
     let payload = concat!(
         "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]}}\n",
         "{\"type\":\"result\",\"result\":\"answer\"}\n"
@@ -167,6 +185,11 @@ async fn relay_deliver_observes_landed_stale_proof() {
         .expect("landed stale delivery");
 
     assert_eq!(outcome, RelaySinkOutcome::TerminalDelivered);
+    assert_eq!(
+        outcomes.lock().expect("outcome probe").as_slice(),
+        &[SessionRelayDeliveryOutcome::LandedStale],
+        "M11: stale proof must remain a typed LandedStale outcome"
+    );
     assert!(
         dr::read_record(&ProviderKind::Claude, channel_id)
             .and_then(|record| record.delivered_frontier)

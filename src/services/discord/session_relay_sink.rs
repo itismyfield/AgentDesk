@@ -515,6 +515,12 @@ pub(in crate::services::discord) struct SessionBoundDiscordRelaySink {
     lease_test_probe: Option<Arc<SinkLeaseTestProbe>>,
     #[cfg(test)]
     test_gateway: Option<Arc<dyn super::gateway::TurnGateway>>,
+    #[cfg(test)]
+    test_replace_anchor: Option<formatting::ReplaceLastChunkAnchor>,
+    #[cfg(test)]
+    test_delivery_outcomes: Option<Arc<Mutex<Vec<SessionRelayDeliveryOutcome>>>>,
+    #[cfg(test)]
+    test_force_legacy_replace: bool,
 }
 
 impl SessionBoundDiscordRelaySink {
@@ -528,6 +534,12 @@ impl SessionBoundDiscordRelaySink {
             lease_test_probe: None,
             #[cfg(test)]
             test_gateway: None,
+            #[cfg(test)]
+            test_replace_anchor: None,
+            #[cfg(test)]
+            test_delivery_outcomes: None,
+            #[cfg(test)]
+            test_force_legacy_replace: false,
         }
     }
 
@@ -792,7 +804,17 @@ impl SessionBoundDiscordRelaySink {
             && cutover_range.is_some()
             && !relay_text.is_empty()
             && matches!(route, SessionBoundTerminalDeliveryRoute::PlaceholderEdit(_))
-            && !session_bound_should_send_new_chunks_for_placeholder(&relay_text);
+            && !session_bound_should_send_new_chunks_for_placeholder(&relay_text)
+            && {
+                #[cfg(test)]
+                {
+                    !self.test_force_legacy_replace
+                }
+                #[cfg(not(test))]
+                {
+                    true
+                }
+            };
         let (lease_range, lease_fallback_start) = sink_delivery_lease_coordinate(&delivery);
         let sink_lease_key = delivery_lease_key_for_frame(
             channel,
@@ -1005,6 +1027,9 @@ impl SessionBoundDiscordRelaySink {
                 );
                 return Ok(SessionRelayDeliveryOutcome::from_proof(proof));
             }
+            #[cfg(test)]
+            let mut last_chunk_anchor = self.test_replace_anchor.clone();
+            #[cfg(not(test))]
             let mut last_chunk_anchor = None;
             let replace_outcome = if let Some(gateway) = gateway {
                 gateway
