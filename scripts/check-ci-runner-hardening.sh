@@ -76,6 +76,24 @@ unless trigger_events == ["pull_request"]
   exit 1
 end
 
+# The required Script checks job is intentionally high-churn: concurrent lanes
+# regularly add gates to its step inventory. Protect only the job-level fields
+# that can silently disable the required context, rather than whole-job hashing
+# that would force unrelated hash re-pins for every new script check.
+script_checks_job = jobs["scripts"]
+unless script_checks_job.is_a?(Hash)
+  warn "#{path}: Script checks job (scripts) must be a YAML mapping"
+  exit 1
+end
+if script_checks_job.key?("if")
+  warn "#{path}: Script checks job must not define a job-level if condition"
+  exit 1
+end
+if script_checks_job["continue-on-error"]
+  warn "#{path}: Script checks job must not be allowed to continue on error"
+  exit 1
+end
+
 targets = {
   # The independent explicit step-inventory layer was removed. What remains
   # splits into two mechanisms of very different strength, and conflating them
