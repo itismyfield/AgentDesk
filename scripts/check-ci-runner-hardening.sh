@@ -77,9 +77,9 @@ unless trigger_events == ["pull_request"]
 end
 
 # The required Script checks job is intentionally high-churn: concurrent lanes
-# regularly add gates to its step inventory. Protect only the job-level fields
-# that can silently disable the required context, rather than whole-job hashing
-# that would force unrelated hash re-pins for every new script check.
+# regularly add gates to its step inventory. Protect only the job and aggregate
+# step fields that can silently disable the required context, rather than
+# whole-job hashing that would force unrelated hash re-pins for every new check.
 script_checks_job = jobs["scripts"]
 unless script_checks_job.is_a?(Hash)
   warn "#{path}: Script checks job (scripts) must be a YAML mapping"
@@ -91,6 +91,30 @@ if script_checks_job.key?("if")
 end
 if script_checks_job["continue-on-error"]
   warn "#{path}: Script checks job must not be allowed to continue on error"
+  exit 1
+end
+unless script_checks_job["needs"] == "changes"
+  warn "#{path}: Script checks job must retain exact needs: changes"
+  exit 1
+end
+script_check_steps = Array(script_checks_job["steps"]).select do |step|
+  step.is_a?(Hash) && step["name"] == "Run script checks"
+end
+unless script_check_steps.length == 1
+  warn "#{path}: Script checks job must retain exactly one \"Run script checks\" step"
+  exit 1
+end
+script_check_step = script_check_steps.fetch(0)
+if script_check_step.key?("if")
+  warn "#{path}: Script checks job \"Run script checks\" step must not define if"
+  exit 1
+end
+if script_check_step["continue-on-error"]
+  warn "#{path}: Script checks job \"Run script checks\" step must not continue on error"
+  exit 1
+end
+unless script_check_step["run"] == "./scripts/ci-script-checks.sh"
+  warn "#{path}: Script checks job \"Run script checks\" step must run exactly ./scripts/ci-script-checks.sh"
   exit 1
 end
 

@@ -105,6 +105,7 @@ def validate_workflow_contract(
         if isinstance(step, dict)
         and step.get("run") == CONDITION3_MUTATION_COMMAND
         and "if" not in step
+        and not step.get("continue-on-error")
     ]
     if mutations_present and len(mutation_steps) != 1:
         raise ManifestError(
