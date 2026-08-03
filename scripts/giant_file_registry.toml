@@ -705,6 +705,8 @@ decompose_issue = "#4712"
 # output-offset relay-dedup authority: the idle-JSONL relay loop now consults
 # `committed_relay_offset` (read-only) with generation-aware watermark resets to
 # de-duplicate inflight-less wake/background relays against the tmux watcher.
+# #5071 T0-S4 moved the terminal outcome fold and RelaySink::deliver to
+# session_relay_sink/terminal_handoff.rs; the root remains giant at 1499 prod LoC.
 # Active relay-dedup surface; decompose the idle-relay loop out once stabilized.
 file = "src/services/discord/session_relay_sink.rs"
 owner = "discord-relay"

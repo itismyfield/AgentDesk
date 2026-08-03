@@ -2000,7 +2000,14 @@ these contextual numbers to match ordinary LoC churn.
   from #3864 moving SIGTERM queue-restore merge inside the mailbox actor; +10
   from #4018 round-2 adding the distinct `MonitorAutoTurn` active-turn marker
   while keeping monitor turns background for queue-yield/cancel semantics).
-- `src/services/discord/session_relay_sink.rs` (frozen giant surface; #4623
+- `src/services/discord/session_relay_sink.rs` (frozen giant surface; #5071 T0-S4
+  moves the 100-physical-line sink-local terminal outcome fold and `RelaySink::deliver`
+  implementation to `session_relay_sink/terminal_handoff.rs` with `continue 0`, one
+  sequential `deliver_response` await, two early returns (`TerminalUnknown`, `Err`),
+  and the four local fold values
+  (`fenced_terminal_without_delivery`, `terminal_delivered`,
+  `terminal_fresh_delivered`, `terminal_not_delivered`) crossing the handoff; the
+  transport/commit authority remains in root `deliver_response`; #4623
   replaces the #4046 provisional fresh-send rejection with typed confirmed-fresh
   provenance carried through the exact-sequence watcher ACK; -59 from #3998 S1-f2
   retiring the A2b rollout getter/cache
