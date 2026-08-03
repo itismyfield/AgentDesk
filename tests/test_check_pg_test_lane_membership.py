@@ -151,7 +151,46 @@ class DetectionMutation(FixtureCase):
         )
         self.assertEqual(membership.discover_pg_inventory(self.root).tests, {})
 
-    def test_associated_impl_seed_and_qualified_helper_are_detected(self) -> None:
+    def test_impl_wide_seed_is_retained_and_sibling_method_debt_is_explicit(self) -> None:
+        """F9/C3 remains deferred: impl-wide identity can over-classify siblings."""
+        self.fx.write_source(
+            "src/service.rs",
+            "#[cfg(test)] mod tests {\n"
+            "struct TestDatabase;\n"
+            "impl TestDatabase { async fn create() { create_test_database(); } fn pure() {} }\n"
+            "#[test] fn direct_assoc() { let _db = TestDatabase::create().await; }\n"
+            "#[test] fn sibling_pure() { TestDatabase::pure(); }\n"
+            "}\n",
+            "mod service;\n",
+        )
+        found = set(membership.discover_pg_inventory(self.root).tests)
+        self.assertEqual(found, {
+            "service::tests::direct_assoc",
+            "service::tests::sibling_pure",
+        })
+
+    def test_qualified_free_helpers_are_detected(self) -> None:
+        self.fx.write_source(
+            "src/service.rs",
+            "#[cfg(test)] mod tests {\n"
+            "fn through_assoc() { TestDatabase::create(); }\n"
+            "#[test] fn transitive_assoc() { through_assoc(); }\n"
+            "}\n",
+            "mod service;\n",
+        )
+        self.assertEqual(membership.discover_pg_inventory(self.root).tests, {})
+
+    def test_impl_method_positive_is_not_claimed_fail_open(self) -> None:
+        """The known impl sibling false positive is an explicit deferred debt."""
+        self.fx.write_source(
+            "src/service.rs",
+            "#[cfg(test)] mod tests { struct T; impl T { fn pg() { create_test_database(); } fn pure() {} } #[test] fn case() { T::pure(); } }\n",
+            "mod service;\n",
+        )
+        self.assertEqual(set(membership.discover_pg_inventory(self.root).tests), {"service::tests::case"})
+
+    def test_impl_wide_identity_and_qualified_free_helpers_are_detected(self) -> None:
+        """Impl identity is deliberately type-wide; method dispatch remains deferred."""
         self.fx.write_source(
             "src/service.rs",
             "#[cfg(test)] mod tests {\n"
@@ -180,6 +219,46 @@ class DetectionMutation(FixtureCase):
             {"tests::qualified"},
         )
 
+    def test_module_scoped_short_helper_collision_is_negative(self) -> None:
+        self.fx.write_source(
+            "src/lib.rs",
+            "#[cfg(test)] mod pg_support { fn create() { create_test_database(); } }\n"
+            "#[cfg(test)] mod unrelated { fn create() {} #[test] fn plain() { create(); } }\n",
+        )
+        self.assertEqual(membership.discover_pg_inventory(self.root).tests, {})
+
+    def test_two_hop_cross_file_helper_is_positive(self) -> None:
+        self.fx.write_source(
+            "src/a.rs",
+            "#[cfg(test)] mod tests { use crate::b::helpers::middle; fn outer() { middle(); } #[test] fn case() { outer(); } }\n",
+            "mod a; mod b;\n",
+        )
+        self.fx.write_source(
+            "src/b.rs",
+            "#[cfg(test)] pub mod helpers { pub fn middle() { seeded(); } fn seeded() { create_test_database(); } }\n",
+        )
+        self.assertEqual(
+            set(membership.discover_pg_inventory(self.root).tests),
+            {"a::tests::case"},
+        )
+
+    def test_brace_ownership_excludes_adjacent_helper_body(self) -> None:
+        self.fx.write_source(
+            "src/service.rs",
+            "#[cfg(test)] mod tests { fn plain() {} fn seeded() { create_test_database(); } #[test] fn case() { plain(); } }\n",
+            "mod service;\n",
+        )
+        self.assertEqual(membership.discover_pg_inventory(self.root).tests, {})
+
+    def test_block_local_helper_and_impl_method_are_negative(self) -> None:
+        self.fx.write_source(
+            "src/service.rs",
+            "#[cfg(test)] mod tests { #[test] fn block() { fn h() { create_test_database(); } h(); } #[test] fn impl_case() { struct T; impl T { fn h() { create_test_database(); } } T::h(); } }\n",
+            "mod service;\n",
+        )
+        self.assertEqual(membership.discover_pg_inventory(self.root).tests, {})
+
+
     def test_multi_segment_associated_and_ufcs_transitive_calls(self) -> None:
         self.fx.write_source(
             "src/lib.rs",
@@ -196,12 +275,30 @@ class DetectionMutation(FixtureCase):
         with mock.patch.object(membership, "_CALL", legacy_call), mock.patch.object(
             membership, "_UFCS_CALL", no_ufcs
         ):
-            with self.assertRaises(AssertionError):
-                self.assertEqual(
-                    set(membership.discover_pg_inventory(self.root).tests), expected
-                )
+            self.assertEqual(
+                set(membership.discover_pg_inventory(self.root).tests),
+                {"tests::ufcs_case"},
+            )
+            self.assertNotEqual({"tests::ufcs_case"}, expected)
+
+    def test_function_signature_braces_do_not_steal_body_ownership(self) -> None:
+        self.fx.write_source(
+            "src/service.rs",
+            "#[cfg(test)] mod tests {\n"
+            "fn generic<const N: usize>() where [(); { N }]: Sized { }\n"
+            "fn seeded() { create_test_database(); }\n"
+            "#[test] fn plain() { generic::<1>(); }\n"
+            "#[test] fn case() { seeded(); }\n"
+            "}\n",
+            "mod service;\n",
+        )
+        self.assertEqual(
+            set(membership.discover_pg_inventory(self.root).tests),
+            {"service::tests::case"},
+        )
 
     def test_nested_impl_mask_starts_at_the_consumed_opening_brace(self) -> None:
+        """Block-local impls remain fail-open while their braces stay owned."""
         body = (
             "{ impl Local { fn pure() {} fn pg() { create_test_database(); } } "
             "after(); }"
@@ -677,11 +774,20 @@ class ParserMutations(FixtureCase):
         for section in ("rule1", "rule2", "rule3"):
             self.assertIn(f"WARN: [{section}] baseline drift: 1 new", stderr.getvalue())
 
+    def test_brace_cache_has_hits_and_preserves_counter_contract(self) -> None:
+        membership._matching_brace_cached.cache_clear()
+        clean = "{ nested { body(); } }"
+        membership._matching_brace(clean, 0)
+        membership._matching_brace(clean, 0)
+        info = membership._matching_brace_cached.cache_info()
+        self.assertEqual(info.hits, 1)
+        self.assertEqual(info.misses, 1)
+
     def test_operation_counter_is_warn_only(self) -> None:
         analysis = self.fx.analysis()
         counters = [finding for finding in analysis.findings if finding.kind == "operation-counter"]
         self.assertEqual(len(counters), 1)
-        self.assertRegex(counters[0].detail, r"_matching_brace calls=\d+")
+        self.assertRegex(counters[0].detail, r"_matching_brace calls=\d+ cache_hits=\d+ cache_misses=\d+")
         empty = {section: set() for section in membership.SECTIONS}
         synthetic = membership.Analysis(
             membership.PgInventory({}), empty, 0, tuple(counters)

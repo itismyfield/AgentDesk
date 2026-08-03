@@ -19,6 +19,7 @@ import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
@@ -164,9 +165,8 @@ _BLOCK_SCALAR_HEADER = re.compile(
 )
 
 
-def _matching_brace(clean: str, opening: int, counter: list[int] | None = None) -> int:
-    if counter is not None:
-        counter[0] += 1
+@lru_cache(maxsize=128)
+def _matching_brace_cached(clean: str, opening: int) -> int:
     depth = 0
     for index in range(opening, len(clean)):
         if clean[index] == "{":
@@ -178,12 +178,50 @@ def _matching_brace(clean: str, opening: int, counter: list[int] | None = None) 
     raise ValueError(f"unclosed brace at byte {opening}")
 
 
+def _matching_brace(clean: str, opening: int, counter: list[int] | None = None) -> int:
+    """Return a brace boundary while caching repeated ownership lookups."""
+    if counter is not None:
+        counter[0] += 1
+    return _matching_brace_cached(clean, opening)
+
+
+_matching_brace_cached.cache_clear()
+
+
 def _opening_brace(clean: str, start: int) -> int | None:
     brace = clean.find("{", start)
     semicolon = clean.find(";", start)
     if brace < 0 or (semicolon >= 0 and semicolon < brace):
         return None
     return brace
+
+
+def _function_body_opening(clean: str, start: int) -> int | None:
+    """Find a function body brace without mistaking const-generic braces for it."""
+    angle_depth = 0
+    paren_depth = 0
+    bracket_depth = 0
+    index = start
+    while index < len(clean):
+        char = clean[index]
+        if char == "<":
+            angle_depth += 1
+        elif char == ">" and angle_depth:
+            angle_depth -= 1
+        elif char == "(" and angle_depth == 0:
+            paren_depth += 1
+        elif char == ")" and paren_depth:
+            paren_depth -= 1
+        elif char == "[" and angle_depth == 0 and paren_depth == 0:
+            bracket_depth += 1
+        elif char == "]" and bracket_depth:
+            bracket_depth -= 1
+        elif char == ";" and angle_depth == 0 and paren_depth == 0 and bracket_depth == 0:
+            return None
+        elif char == "{" and angle_depth == 0 and paren_depth == 0 and bracket_depth == 0:
+            return index
+        index += 1
+    return None
 
 
 def _edge_boundary(clean: str, opening: int, counter: list[int] | None = None) -> str:
@@ -198,7 +236,7 @@ def _mask_nested_items(
     spans: list[tuple[int, int]] = []
     for pattern in (_FN, _IMPL):
         for match in pattern.finditer(body):
-            opening = match.end() - 1 if pattern is _IMPL else _opening_brace(body, match.end())
+            opening = match.end() - 1 if pattern is _IMPL else _function_body_opening(body, match.end())
             if opening is None:
                 continue
             spans.append((match.start(), _matching_brace(body, opening, counter) + 1))
@@ -329,6 +367,7 @@ def discover_pg_inventory(
     positives.
     """
     repo_root = repo_root.resolve()
+    _matching_brace_cached.cache_clear()
     coverage = _load_coverage_module(repo_root)
     src_root = (repo_root / "src").resolve()
     aliases = _aliases(repo_root, coverage)
@@ -382,7 +421,7 @@ def discover_pg_inventory(
 
         fn_ranges: list[tuple[int, int, re.Match[str], int]] = []
         for match in _FN.finditer(clean):
-            opening = _opening_brace(clean, match.end())
+            opening = _function_body_opening(clean, match.end())
             if opening is not None:
                 fn_ranges.append(
                     (match.start(), _matching_brace(clean, opening, brace_counter), match, opening)
@@ -451,7 +490,7 @@ def discover_pg_inventory(
                 continue
             if nested(match.start(), all_fn_ranges) or nested(match.start(), impl_ranges):
                 continue
-            opening = _opening_brace(clean, match.end())
+            opening = _function_body_opening(clean, match.end())
             if opening is None:
                 continue
             body = _edge_boundary(clean, opening, brace_counter)
@@ -480,7 +519,7 @@ def discover_pg_inventory(
                 continue
             if not _inside_test_region(match.start(), ranges, external):
                 continue
-            opening = _opening_brace(clean, match.end())
+            opening = _function_body_opening(clean, match.end())
             if opening is None:
                 continue
             body = _edge_boundary(clean, opening, brace_counter)
@@ -566,12 +605,15 @@ def discover_pg_inventory(
         indirect = _transitive_closure(referenced, seeded, edges)
         if direct or indirect:
             tests[name] = path
+    cache_info = _matching_brace_cached.cache_info()
     if findings is not None:
         findings.append(Finding(
             "operation-counter",
             "discover_pg_inventory",
-            f"_matching_brace calls={brace_counter[0]}",
+            f"_matching_brace calls={brace_counter[0]} "
+            f"cache_hits={cache_info.hits} cache_misses={cache_info.misses}",
         ))
+    _matching_brace_cached.cache_clear()
     return PgInventory(tests)
 
 
