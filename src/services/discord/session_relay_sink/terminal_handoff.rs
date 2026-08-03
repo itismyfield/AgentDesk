@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 
-use super::*;
+use super::{SessionBoundDiscordRelaySink, SessionRelayDelivery, delivery_frontier};
+use crate::services::cluster::stream_relay::{
+    RelaySink, RelaySinkError, RelaySinkOutcome, StreamFrame,
+};
 
 /// #3041 P1-5: the SINK-LOCAL terminal outcome stays deliberately 2-way — the sink
 /// always KNOWS its result: confirmed POST/edit → `Delivered`; deterministic

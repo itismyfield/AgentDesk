@@ -2001,9 +2001,10 @@ these contextual numbers to match ordinary LoC churn.
   from #4018 round-2 adding the distinct `MonitorAutoTurn` active-turn marker
   while keeping monitor turns background for queue-yield/cancel semantics).
 - `src/services/discord/session_relay_sink.rs` (frozen giant surface; #5071 T0-S4
-  moves the 99-physical-line sink-local terminal outcome fold and `RelaySink::deliver`
+  moves the 100-physical-line sink-local terminal outcome fold and `RelaySink::deliver`
   implementation to `session_relay_sink/terminal_handoff.rs` with `continue 0`, one
-  sequential `deliver_response` await, and the four local fold values
+  sequential `deliver_response` await, two early returns (`TerminalUnknown`, `Err`),
+  and the four local fold values
   (`fenced_terminal_without_delivery`, `terminal_delivered`,
   `terminal_fresh_delivered`, `terminal_not_delivered`) crossing the handoff; the
   transport/commit authority remains in root `deliver_response`; #4623
