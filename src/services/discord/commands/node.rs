@@ -469,6 +469,8 @@ mod tests {
             owner_authority_config_known: true,
             forward_pre_claim_timeout_secs: 12,
             stale_claim_recovery_secs: 60,
+            max_attempts_per_message: 5,
+            retry_authorization_secs: 300,
         };
 
         let message = intake_routing_unavailable_message(&effective);

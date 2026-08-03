@@ -1,5 +1,7 @@
 # Multinode Transition
 
+### Audited touches
+- 2026-08-03 (#5057): failed pre-accept retry selection now matches the Rust intake capability contract and rotates no-capable sources without changing terminal status or error.
 > Source: [`docs/agent-maintenance/index.md`](index.md). Use this page before
 > moving any AgentDesk runtime, worker, dispatch, provider, MCP, merge, or test
 > execution path from one dcserver node to multiple nodes.

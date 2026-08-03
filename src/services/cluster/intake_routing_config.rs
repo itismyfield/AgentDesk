@@ -107,6 +107,8 @@ pub(crate) struct EffectiveIntakeRoutingConfig {
     pub(crate) owner_authority_config_known: bool,
     pub(crate) forward_pre_claim_timeout_secs: u64,
     pub(crate) stale_claim_recovery_secs: u64,
+    pub(crate) max_attempts_per_message: u32,
+    pub(crate) retry_authorization_secs: u64,
 }
 
 impl EffectiveIntakeRoutingConfig {
@@ -150,6 +152,7 @@ impl EffectiveIntakeRoutingConfig {
                 "owner_authority_allowlist_size": self.owner_authority_channel_ids.len(),
                 "forward_pre_claim_timeout_secs": self.forward_pre_claim_timeout_secs,
                 "stale_claim_recovery_secs": self.stale_claim_recovery_secs,
+                "retry_authorization_secs": self.retry_authorization_secs,
             },
             "env_override": self.env_override,
             "warning_count": self.warnings.len(),
@@ -200,6 +203,8 @@ fn effective_intake_routing_config_for_with_known(
         owner_authority_channel_ids: config.owner_authority_channel_ids.clone(),
         forward_pre_claim_timeout_secs: config.forward_pre_claim_timeout_secs,
         stale_claim_recovery_secs: config.stale_claim_recovery_secs,
+        max_attempts_per_message: config.max_attempts_per_message,
+        retry_authorization_secs: config.retry_authorization_secs,
     }
 }
 

@@ -53,6 +53,9 @@ pub(crate) struct IntakeOutboxRow {
     // not every compile target. See #3034.
     #[allow(dead_code)]
     pub retry_count: i32,
+    pub owner_generation: Option<i64>,
+    pub owner_instance_id: Option<String>,
+    pub admission_kind: String,
 }
 
 /// Per-message payload required to INSERT a fresh row. Mirrors the
@@ -205,6 +208,303 @@ pub(crate) async fn family_max_attempt(
     .fetch_one(pool)
     .await?;
     Ok(max_attempt.unwrap_or(0))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FailedPreAcceptSweepOutcome {
+    Empty,
+    Retried {
+        source_id: i64,
+        new_id: i64,
+        attempt_no: i32,
+    },
+    NoCapableTarget {
+        source_id: i64,
+    },
+    BudgetExhausted {
+        source_id: i64,
+        attempt_no: i32,
+    },
+}
+
+pub(crate) async fn sweep_failed_pre_accept_once(
+    pool: &PgPool,
+    local_leader: &str,
+    max_attempts_per_message: u32,
+    worker_lease_ttl_secs: u64,
+    retry_authorization_secs: Option<u64>,
+) -> Result<FailedPreAcceptSweepOutcome, sqlx::Error> {
+    let max_attempts = max_attempts_per_message.clamp(1, i32::MAX as u32) as i32;
+    let stale_after_secs = worker_lease_ttl_secs.max(1) as i64;
+    let retry_after_secs = retry_authorization_secs.map(|value| value.max(1) as i64);
+    let _ = local_leader;
+    let mut tx = pool.begin().await?;
+    let capable_source: Option<IntakeOutboxRow> = sqlx::query_as(
+        r#"
+        SELECT parent.*
+          FROM intake_outbox parent
+         WHERE parent.status = 'failed_pre_accept'
+           AND btrim(parent.provider) <> ''
+           AND ($3::BIGINT IS NULL OR parent.completed_at >= NOW() - ($3 * INTERVAL '1 second'))
+           AND parent.attempt_no < $2
+           AND parent.attempt_no = (
+                SELECT MAX(family.attempt_no)
+                  FROM intake_outbox family
+                 WHERE family.channel_id = parent.channel_id
+                   AND family.user_msg_id = parent.user_msg_id
+           )
+           AND NOT EXISTS (
+                SELECT 1 FROM intake_outbox open_row
+                 WHERE open_row.channel_id = parent.channel_id
+                   AND open_row.status IN ('pending', 'claimed', 'accepted', 'spawned')
+           )
+           AND EXISTS (
+                SELECT 1 FROM worker_nodes worker
+                 WHERE worker.status = 'online'
+                   AND worker.last_heartbeat_at >= NOW() - ($1::BIGINT * INTERVAL '1 second')
+                   AND jsonb_typeof(worker.capabilities) = 'object'
+                   AND jsonb_typeof(worker.capabilities->'intake_worker') = 'object'
+                   AND jsonb_typeof(worker.capabilities->'intake_worker'->'enabled') = 'boolean'
+                   AND worker.capabilities->'intake_worker'->'enabled' = 'true'::jsonb
+                   AND jsonb_typeof(worker.capabilities->'intake_worker'->'providers') = 'array'
+                   AND EXISTS (
+                       SELECT 1
+                         FROM jsonb_array_elements(worker.capabilities->'intake_worker'->'providers')
+                              AS provider_entry(value)
+                        WHERE jsonb_typeof(provider_entry.value) = 'string'
+                          AND lower(btrim(provider_entry.value #>> '{}')) = lower(btrim(parent.provider))
+                   )
+                   AND (COALESCE(parent.preserve_on_cancel, false) = false OR
+                        (jsonb_typeof(worker.capabilities->'intake_worker'->'features') = 'array' AND
+                         EXISTS (
+                             SELECT 1
+                               FROM jsonb_array_elements(worker.capabilities->'intake_worker'->'features')
+                                    AS feature_entry(value)
+                              WHERE jsonb_typeof(feature_entry.value) = 'string'
+                                AND lower(btrim(feature_entry.value #>> '{}')) = 'preserve_on_cancel_v1'
+                         )))
+                   AND jsonb_typeof(parent.required_labels) = 'array'
+                   AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(parent.required_labels) v
+                                    WHERE jsonb_typeof(v) <> 'string')
+                   AND jsonb_typeof(worker.labels) = 'array'
+                   AND worker.labels @> parent.required_labels
+                   AND ((parent.admission_kind IN ('local','forwarded')
+                         AND parent.owner_instance_id IS NULL AND parent.owner_generation IS NULL)
+                        OR (parent.admission_kind = 'forwarded'
+                         AND btrim(parent.owner_instance_id) <> '' AND parent.owner_generation >= 0
+                         AND worker.instance_id = parent.owner_instance_id
+                         AND EXISTS (
+                            SELECT 1 FROM intake_session_owners owner
+                             WHERE owner.provider = lower(btrim(parent.provider))
+                               AND owner.raw_channel_id = btrim(parent.channel_id)
+                               AND owner.status = 'active'
+                               AND owner.owner_instance_id = parent.owner_instance_id
+                               AND owner.generation = parent.owner_generation
+                        )))
+           )
+         ORDER BY parent.updated_at ASC, parent.id ASC
+         LIMIT 1
+         FOR UPDATE OF parent SKIP LOCKED
+        "#,
+    )
+    .bind(stale_after_secs)
+    .bind(max_attempts)
+    .bind(retry_after_secs)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let source = if capable_source.is_some() {
+        capable_source
+    } else {
+        sqlx::query_as(
+            r#"
+            SELECT parent.*
+              FROM intake_outbox parent
+             WHERE parent.status = 'failed_pre_accept'
+               AND btrim(parent.provider) <> ''
+               AND ($1::BIGINT IS NULL OR parent.completed_at >= NOW() - ($1 * INTERVAL '1 second'))
+               AND parent.attempt_no = (
+                    SELECT MAX(family.attempt_no)
+                      FROM intake_outbox family
+                     WHERE family.channel_id = parent.channel_id
+                       AND family.user_msg_id = parent.user_msg_id
+               )
+               AND NOT EXISTS (
+                    SELECT 1 FROM intake_outbox open_row
+                     WHERE open_row.channel_id = parent.channel_id
+                       AND open_row.status IN ('pending', 'claimed', 'accepted', 'spawned')
+               )
+             ORDER BY parent.updated_at ASC, parent.id ASC
+             LIMIT 1
+             FOR UPDATE OF parent SKIP LOCKED
+            "#,
+        )
+        .bind(retry_after_secs)
+        .fetch_optional(&mut *tx)
+        .await?
+    };
+
+    let Some(source) = source else {
+        tx.commit().await?;
+        return Ok(FailedPreAcceptSweepOutcome::Empty);
+    };
+    let family_max = sqlx::query_scalar::<_, Option<i32>>(
+        "SELECT MAX(attempt_no) FROM intake_outbox
+         WHERE channel_id = $1 AND user_msg_id = $2",
+    )
+    .bind(&source.channel_id)
+    .bind(&source.user_msg_id)
+    .fetch_one(&mut *tx)
+    .await?
+    .unwrap_or(0);
+    if family_max >= max_attempts {
+        tx.commit().await?;
+        return Ok(FailedPreAcceptSweepOutcome::BudgetExhausted {
+            source_id: source.id,
+            attempt_no: family_max,
+        });
+    }
+    let owner_fenced = source.admission_kind == "forwarded"
+        && source
+            .owner_instance_id
+            .as_ref()
+            .is_some_and(|id| !id.trim().is_empty())
+        && source
+            .owner_generation
+            .is_some_and(|generation| generation >= 0);
+    if owner_fenced {
+        let owner_key =
+            crate::services::cluster::intake_router_hook::owner_record::OwnerIdentity::new(
+                &source.provider,
+                &source.channel_id,
+            )
+            .advisory_key();
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(owner_key)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    // Re-check the capability snapshot after the source lock. A worker may
+    // have heartbeated a new snapshot between candidate selection and here.
+    let target: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT worker.instance_id
+          FROM worker_nodes worker
+         WHERE worker.status = 'online'
+           AND worker.last_heartbeat_at >= NOW() - ($1::BIGINT * INTERVAL '1 second')
+           AND jsonb_typeof(worker.capabilities) = 'object'
+           AND jsonb_typeof(worker.capabilities->'intake_worker') = 'object'
+           AND jsonb_typeof(worker.capabilities->'intake_worker'->'enabled') = 'boolean'
+           AND worker.capabilities->'intake_worker'->'enabled' = 'true'::jsonb
+           AND jsonb_typeof(worker.capabilities->'intake_worker'->'providers') = 'array'
+           AND EXISTS (
+               SELECT 1
+                 FROM jsonb_array_elements(worker.capabilities->'intake_worker'->'providers')
+                      AS provider_entry(value)
+                WHERE jsonb_typeof(provider_entry.value) = 'string'
+                  AND lower(btrim(provider_entry.value #>> '{}')) = lower(btrim($2))
+           )
+           AND (
+               COALESCE($3, false) = false
+               OR (
+                   jsonb_typeof(worker.capabilities->'intake_worker'->'features') = 'array'
+                   AND EXISTS (
+                       SELECT 1
+                         FROM jsonb_array_elements(worker.capabilities->'intake_worker'->'features')
+                              AS feature_entry(value)
+                        WHERE jsonb_typeof(feature_entry.value) = 'string'
+                          AND lower(btrim(feature_entry.value #>> '{}')) = 'preserve_on_cancel_v1'
+                   )
+               )
+           )
+           AND jsonb_typeof($8::JSONB) = 'array'
+           AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements($8::JSONB) v
+                            WHERE jsonb_typeof(v) <> 'string')
+           AND jsonb_typeof(worker.labels) = 'array'
+           AND worker.labels @> $8::JSONB
+           AND ((NOT $4 AND $5 IS NULL AND $6 IS NULL) OR ($4
+                AND worker.instance_id = $5
+                AND EXISTS (
+                    SELECT 1 FROM intake_session_owners owner
+                     WHERE owner.provider = lower(btrim($2))
+                       AND owner.raw_channel_id = btrim($7)
+                       AND owner.status = 'active'
+                       AND owner.owner_instance_id = $5
+                       AND owner.generation = $6
+                )))
+         ORDER BY worker.last_heartbeat_at DESC, worker.instance_id ASC
+         LIMIT 1
+         FOR SHARE
+        "#,
+    )
+    .bind(stale_after_secs)
+    .bind(&source.provider)
+    .bind(source.preserve_on_cancel)
+    .bind(owner_fenced)
+    .bind(source.owner_instance_id.as_deref())
+    .bind(source.owner_generation)
+    .bind(&source.channel_id)
+    .bind(&source.required_labels)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(target) = target else {
+        sqlx::query("UPDATE intake_outbox SET updated_at = NOW() WHERE id = $1")
+            .bind(source.id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        return Ok(FailedPreAcceptSweepOutcome::NoCapableTarget {
+            source_id: source.id,
+        });
+    };
+
+    let next_attempt = family_max + 1;
+    let new_id: i64 = sqlx::query_scalar(
+        r#"INSERT INTO intake_outbox (
+            target_instance_id, forwarded_by_instance_id, required_labels,
+            channel_id, user_msg_id, request_owner_id, request_owner_name,
+            user_text, reply_context, has_reply_boundary, dm_hint, turn_kind,
+            merge_consecutive, reply_to_user_message, defer_watcher_resume,
+            wait_for_completion, preserve_on_cancel, agent_id, provider,
+            owner_instance_id, owner_generation, admission_kind,
+            status, attempt_no, parent_outbox_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                  $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
+                  'pending', $23, $24)
+        RETURNING id"#,
+    )
+    .bind(&target)
+    .bind(&source.forwarded_by_instance_id)
+    .bind(&source.required_labels)
+    .bind(&source.channel_id)
+    .bind(&source.user_msg_id)
+    .bind(&source.request_owner_id)
+    .bind(source.request_owner_name.as_deref())
+    .bind(&source.user_text)
+    .bind(source.reply_context.as_deref())
+    .bind(source.has_reply_boundary)
+    .bind(source.dm_hint)
+    .bind(&source.turn_kind)
+    .bind(source.merge_consecutive)
+    .bind(source.reply_to_user_message)
+    .bind(source.defer_watcher_resume)
+    .bind(source.wait_for_completion)
+    .bind(source.preserve_on_cancel)
+    .bind(&source.agent_id)
+    .bind(&source.provider)
+    .bind(source.owner_instance_id.as_deref())
+    .bind(source.owner_generation)
+    .bind(&source.admission_kind)
+    .bind(next_attempt)
+    .bind(source.id)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(FailedPreAcceptSweepOutcome::Retried {
+        source_id: source.id,
+        new_id,
+        attempt_no: next_attempt,
+    })
 }
 
 /// Worker-side claim. Atomically promotes a single `pending` row owned
@@ -1558,6 +1858,379 @@ mod postgres_tests {
         assert_eq!(other_state.0, "claimed", "another row must not be reset");
         assert_eq!(other_state.1.as_deref(), Some("owner-other"));
 
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn issue_5057_pr1_skips_oldest_unsupported_family_for_capable_family() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_default_test_agent(&pool).await;
+        sqlx::query(
+            "INSERT INTO worker_nodes (instance_id,status,labels,capabilities,last_heartbeat_at)
+             VALUES ('worker-codex','online','[\"unreal\"]',$1,NOW())",
+        )
+        .bind(json!({"intake_worker":{"enabled":true,"providers":["codex"]}}))
+        .execute(&pool)
+        .await
+        .expect("seed codex-only worker"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+
+        let unsupported_id = insert_pending(&pool, &payload("ch-old", "msg-old"), 1, None)
+            .await
+            .expect("seed unsupported family"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+        sqlx::query(
+            "UPDATE intake_outbox
+                SET status='failed_pre_accept', admission_kind='local', provider='claude', last_error='unsupported',
+                    updated_at=NOW()-INTERVAL '2 hours'
+              WHERE id=$1",
+        )
+        .bind(unsupported_id)
+        .execute(&pool)
+        .await
+        .expect("fail unsupported family"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+
+        let mut capable = payload("ch-new", "msg-new");
+        capable.provider = "codex".to_string();
+        let capable_id = insert_pending(&pool, &capable, 1, None)
+            .await
+            .expect("seed capable family"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+        sqlx::query(
+            "UPDATE intake_outbox
+                SET status='failed_pre_accept', admission_kind='local', last_error='retryable',
+                    updated_at=NOW()-INTERVAL '1 hour'
+              WHERE id=$1",
+        )
+        .bind(capable_id)
+        .execute(&pool)
+        .await
+        .expect("fail capable family"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+
+        let outcome = sweep_failed_pre_accept_once(&pool, "leader-1", 5, 60, None)
+            .await
+            .expect("sweep capable family"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+        let FailedPreAcceptSweepOutcome::Retried {
+            source_id,
+            new_id,
+            attempt_no,
+        } = outcome
+        else {
+            panic!("expected capable retry, got {outcome:?}"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+        };
+        assert_eq!(source_id, capable_id);
+        assert_eq!(attempt_no, 2);
+        let child: (String, i32, Option<i64>) = sqlx::query_as(
+            "SELECT target_instance_id,attempt_no,parent_outbox_id FROM intake_outbox WHERE id=$1",
+        )
+        .bind(new_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read child"); // agentdesk-audit: allow-unwrap — test assertion
+        assert_eq!(child, ("worker-codex".into(), 2, Some(capable_id)));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn issue_5057_pr1_capability_loss_rotates_source_then_next_tick_progresses() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_default_test_agent(&pool).await;
+        sqlx::query(
+            "INSERT INTO worker_nodes (instance_id,status,labels,capabilities,last_heartbeat_at)
+             VALUES ('worker-shared','online','[\"unreal\"]',$1,NOW())",
+        )
+        .bind(json!({
+            "intake_worker": {
+                "enabled": true,
+                "providers": ["claude", "codex"]
+            }
+        }))
+        .execute(&pool)
+        .await
+        .expect("seed initially capable worker"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+
+        let rotated_id = insert_pending(&pool, &payload("ch-rotate", "msg-rotate"), 1, None)
+            .await
+            .expect("seed family whose capability disappears"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+        sqlx::query(
+            "UPDATE intake_outbox
+                SET status='failed_pre_accept', admission_kind='local', last_error='preserve-me',
+                    updated_at=NOW()-INTERVAL '2 hours'
+              WHERE id=$1",
+        )
+        .bind(rotated_id)
+        .execute(&pool)
+        .await
+        .expect("fail family whose capability disappears"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+
+        let mut later = payload("ch-later", "msg-later");
+        later.provider = "codex".to_string();
+        let later_id = insert_pending(&pool, &later, 1, None)
+            .await
+            .expect("seed later capable family"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+        sqlx::query(
+            "UPDATE intake_outbox
+                SET status='failed_pre_accept', admission_kind='local', last_error='later',
+                    updated_at=NOW()-INTERVAL '1 hour'
+              WHERE id=$1",
+        )
+        .bind(later_id)
+        .execute(&pool)
+        .await
+        .expect("fail later capable family"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+
+        let before: (String, Option<String>, chrono::DateTime<chrono::Utc>) =
+            sqlx::query_as("SELECT status,last_error,updated_at FROM intake_outbox WHERE id=$1")
+                .bind(rotated_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read source before capability race"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+
+        // Hold an uncommitted worker snapshot update. The sweep's first statement
+        // sees the prior capable version, then its FOR SHARE re-check waits here.
+        let mut capability_update = pool.begin().await.expect("begin capability update"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+        sqlx::query(
+            "UPDATE worker_nodes
+                SET capabilities=$1, last_heartbeat_at=NOW()
+              WHERE instance_id='worker-shared'",
+        )
+        .bind(json!({"intake_worker":{"enabled":true,"providers":["codex"]}}))
+        .execute(&mut *capability_update)
+        .await
+        .expect("remove claude capability without committing"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+
+        let sweep_pool = pool.clone();
+        let sweep = tokio::spawn(async move {
+            sweep_failed_pre_accept_once(&sweep_pool, "leader-1", 5, 60, None).await
+        });
+
+        // A NOWAIT probe makes the interleaving deterministic: do not release the
+        // worker update until the sweep owns the source row and is at its re-check.
+        let mut source_locked = false;
+        for _ in 0..200 {
+            let mut probe = pool.begin().await.expect("begin source-lock probe"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+            let result = sqlx::query_scalar::<_, i64>(
+                "SELECT id FROM intake_outbox WHERE id=$1 FOR UPDATE NOWAIT",
+            )
+            .bind(rotated_id)
+            .fetch_one(&mut *probe)
+            .await;
+            match result {
+                Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("55P03") => {
+                    source_locked = true;
+                    probe.rollback().await.expect("rollback blocked probe"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+                    break;
+                }
+                Ok(_) => {
+                    probe.rollback().await.expect("release probe lock"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("unexpected source-lock probe error: {error}"), // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+            }
+        }
+        if !source_locked {
+            capability_update
+                .rollback()
+                .await
+                .expect("release worker after failed probe"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+            let sweep_result = sweep.await.expect("join sweep after failed probe"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+            panic!("sweep never locked source; result={sweep_result:?}"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+        }
+
+        capability_update
+            .commit()
+            .await
+            .expect("publish capability loss"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+        assert_eq!(
+            sweep
+                .await
+                .expect("join capability-race sweep") // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+                .expect("sweep"), // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+            FailedPreAcceptSweepOutcome::NoCapableTarget {
+                source_id: rotated_id
+            }
+        );
+
+        let after: (String, Option<String>, chrono::DateTime<chrono::Utc>) =
+            sqlx::query_as("SELECT status,last_error,updated_at FROM intake_outbox WHERE id=$1")
+                .bind(rotated_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read rotated source"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+        assert_eq!(after.0, before.0, "terminal status must be preserved");
+        assert_eq!(after.1, before.1, "failure detail must be preserved");
+        assert!(
+            after.2 > before.2,
+            "fairness rotation must advance updated_at"
+        );
+
+        let next = sweep_failed_pre_accept_once(&pool, "leader-1", 5, 60, None)
+            .await
+            .expect("run next sweep tick"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
+        assert!(
+            matches!(next, FailedPreAcceptSweepOutcome::Retried { source_id, .. } if source_id == later_id),
+            "next tick must progress the later capable family, got {next:?}"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn issue_5057_pr1_leader_maintenance_inputs_route_to_current_owner() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_default_test_agent(&pool).await;
+        sqlx::query(
+            "INSERT INTO worker_nodes (instance_id,status,labels,capabilities,last_heartbeat_at)
+             VALUES ('stale-worker','online','[\"unreal\"]',$1,NOW()-INTERVAL '30 seconds'),
+                    ('fresh-owner','online','[\"unreal\"]',$1,NOW()-INTERVAL '2 seconds')",
+        )
+        .bind(json!({"intake_worker":{"enabled":true,"providers":["claude"]}}))
+        .execute(&pool)
+        .await
+        .expect("seed maintenance workers"); // agentdesk-audit: allow-unwrap — PG production-entry regression
+        let source = insert_pending(&pool, &payload("ch-entry", "msg-entry"), 1, None)
+            .await
+            .expect("production insert"); // agentdesk-audit: allow-unwrap — PG production-entry regression
+        let claimed = claim_pending_for_target(&pool, "worker-1", "claude", "legacy-worker")
+            .await
+            .expect("legacy claim") // agentdesk-audit: allow-unwrap — PG production-entry regression
+            .expect("claim row"); // agentdesk-audit: allow-unwrap — PG production-entry regression
+        assert!(
+            mark_failed_pre_accept(&pool, claimed.id, "legacy-worker", "retryable")
+                .await
+                .expect("fail pre-accept") // agentdesk-audit: allow-unwrap — PG production-entry regression
+        );
+        assert_eq!(
+            crate::services::cluster::node_registry::run_leader_intake_retry_maintenance_once(
+                &pool,
+                "leader-1",
+                10,
+                5,
+                || None
+            )
+            .await
+            .expect("observe maintenance"), // agentdesk-audit: allow-unwrap — GC-without-retry regression
+            None
+        );
+        let observe: (String, String, i64) = sqlx::query_as("SELECT (SELECT status FROM worker_nodes WHERE instance_id='stale-worker'),status,(SELECT COUNT(*) FROM intake_outbox WHERE parent_outbox_id=$1) FROM intake_outbox WHERE id=$1")
+            .bind(source).fetch_one(&pool).await.expect("observe state"); // agentdesk-audit: allow-unwrap — enforce gate regression
+        assert_eq!(observe, ("offline".into(), "failed_pre_accept".into(), 0));
+        let outcome =
+            crate::services::cluster::node_registry::run_leader_intake_retry_maintenance_once(
+                &pool,
+                "leader-1",
+                10,
+                5,
+                || Some((5, 300)),
+            )
+            .await
+            .expect("maintenance") // agentdesk-audit: allow-unwrap — PG production-entry regression
+            .unwrap(); // agentdesk-audit: allow-unwrap — PG production-entry regression
+        sqlx::query("INSERT INTO intake_session_owners (provider,raw_channel_id,owner_instance_id,generation,status) VALUES ('claude','ch-entry','fresh-owner',3,'active')")
+            .execute(&pool).await.expect("seed active owner"); // agentdesk-audit: allow-unwrap — owner-transfer regression
+
+        let FailedPreAcceptSweepOutcome::Retried { new_id, .. } = outcome else {
+            panic!("retry required") // agentdesk-audit: allow-unwrap — PG production-entry regression
+        };
+        let child: (String, String, Option<String>, Option<i64>) = sqlx::query_as("SELECT target_instance_id,admission_kind,owner_instance_id,owner_generation FROM intake_outbox WHERE id=$1")
+            .bind(new_id).fetch_one(&pool).await.expect("read child"); // agentdesk-audit: allow-unwrap — PG production-entry regression
+        assert_eq!(child.0, "fresh-owner");
+        assert_eq!(
+            (child.1, child.2, child.3),
+            ("forwarded".into(), None, None)
+        );
+        assert!(
+            claim_pending_for_target(&pool, "fresh-owner", "claude", "legacy-child")
+                .await
+                .expect("claim retry child") // agentdesk-audit: allow-unwrap — production worker compatibility
+                .is_some()
+        );
+        let stale: String =
+            sqlx::query_scalar("SELECT status FROM worker_nodes WHERE instance_id='stale-worker'")
+                .fetch_one(&pool)
+                .await
+                .expect("read stale"); // agentdesk-audit: allow-unwrap — PG production-entry regression
+        assert_eq!(stale, "offline");
+        sqlx::query("UPDATE intake_outbox SET status='done' WHERE id=$1")
+            .bind(new_id)
+            .execute(&pool)
+            .await
+            .expect("close child"); // agentdesk-audit: allow-unwrap — owner-transfer regression
+        let race_id = insert_pending(&pool, &payload("ch-entry", "msg-race"), 1, None)
+            .await
+            .expect("race source"); // agentdesk-audit: allow-unwrap — owner-transfer regression
+        sqlx::query("UPDATE intake_outbox SET status='failed_pre_accept',admission_kind='forwarded',owner_instance_id='fresh-owner',owner_generation=NULL,completed_at=NOW() WHERE id=$1").bind(race_id).execute(&pool).await.expect("partial stamp"); // agentdesk-audit: allow-unwrap — malformed owner regression
+        assert_eq!(
+            sweep_failed_pre_accept_once(&pool, "leader", 5, 5, Some(300))
+                .await
+                .expect("partial sweep"), // agentdesk-audit: allow-unwrap — malformed owner regression
+            FailedPreAcceptSweepOutcome::NoCapableTarget { source_id: race_id }
+        );
+        sqlx::query("UPDATE intake_outbox SET owner_generation=3 WHERE id=$1")
+            .bind(race_id)
+            .execute(&pool)
+            .await
+            .expect("complete stamp"); // agentdesk-audit: allow-unwrap — owner-transfer regression
+        let identity =
+            crate::services::cluster::intake_router_hook::owner_record::OwnerIdentity::new(
+                "claude", "ch-entry",
+            );
+        let mut transfer = pool.begin().await.expect("begin transfer"); // agentdesk-audit: allow-unwrap — owner-transfer regression
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(identity.advisory_key())
+            .execute(&mut *transfer)
+            .await
+            .expect("lock transfer"); // agentdesk-audit: allow-unwrap — owner-transfer regression
+        crate::services::cluster::intake_router_hook::owner_record::transfer_owner_in_tx(
+            &mut transfer,
+            &identity,
+            "fresh-owner",
+            3,
+            "stale-worker",
+        )
+        .await
+        .expect("transfer"); // agentdesk-audit: allow-unwrap — owner-transfer regression
+        let race_pool = pool.clone();
+        let race = tokio::spawn(async move {
+            sweep_failed_pre_accept_once(&race_pool, "leader", 5, 5, Some(300)).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert!(!race.is_finished());
+        transfer.commit().await.expect("commit transfer"); // agentdesk-audit: allow-unwrap — owner-transfer regression
+        assert_eq!(
+            race.await.expect("join").expect("sweep"), // agentdesk-audit: allow-unwrap — owner-transfer regression
+            FailedPreAcceptSweepOutcome::NoCapableTarget { source_id: race_id }
+        ); // agentdesk-audit: allow-unwrap — owner-transfer regression
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM intake_outbox WHERE parent_outbox_id=$1"
+            )
+            .bind(race_id)
+            .fetch_one(&pool)
+            .await
+            .expect("children"), // agentdesk-audit: allow-unwrap — owner-transfer regression
+            0
+        ); // agentdesk-audit: allow-unwrap — owner-transfer regression
+        sqlx::query("UPDATE intake_outbox SET status='done' WHERE id=$1")
+            .bind(race_id)
+            .execute(&pool)
+            .await
+            .expect("close race"); // agentdesk-audit: allow-unwrap — owner-transfer regression
+        let expired = insert_pending(&pool, &payload("ch-expired", "msg-expired"), 1, None)
+            .await
+            .expect("seed expired source"); // agentdesk-audit: allow-unwrap — PG production-entry regression
+        sqlx::query("UPDATE intake_outbox SET status='failed_pre_accept',admission_kind='local',completed_at=NOW()-INTERVAL '301 seconds' WHERE id=$1")
+            .bind(expired).execute(&pool).await.expect("expire source"); // agentdesk-audit: allow-unwrap — PG production-entry regression
+        assert_eq!(
+            sweep_failed_pre_accept_once(&pool, "leader-1", 5, 5, Some(300))
+                .await
+                .expect("bounded sweep"), // agentdesk-audit: allow-unwrap — PG production-entry regression
+            FailedPreAcceptSweepOutcome::Empty
+        );
         pool.close().await;
         pg_db.drop().await;
     }

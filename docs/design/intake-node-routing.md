@@ -260,8 +260,8 @@ CREATE INDEX IF NOT EXISTS idx_intake_outbox_pre_accept_sweep
     WHERE status = 'claimed';
 
 -- Round-3 P0 #2: leader sweep for `failed_pre_accept` rows that
--- still have retry budget remaining. These get re-issued as a fresh
--- attempt via SQL transition 10 below.
+-- still have retry budget. Autonomous capability-aware selection is enforce-only,
+-- recency-bounded, and rechecks required labels plus stamped owner generations.
 CREATE INDEX IF NOT EXISTS idx_intake_outbox_failed_pre_accept_sweep
     ON intake_outbox (status, retry_count, updated_at)
     WHERE status = 'failed_pre_accept';
@@ -450,8 +450,9 @@ RETURNING id;
 --
 --     This INSERT generates a new row with attempt_no = family_max
 --     + 1 in the same (channel_id, user_msg_id) family,
---     parent_outbox_id pointing at the source terminal row,
---     status='pending', target_instance_id = leader.
+--     parent_outbox_id pointing at the source terminal row, and
+--     status='pending'. Capability/labels are rechecked under lock; misses rotate updated_at.
+--     Complete owner stamps are fenced/copied; NULL/NULL stays legacy.
 --
 --     Round-4 P0 #2 fix: cap is on the COMPUTED next attempt
 --     number against the family max, not on the parent row's
