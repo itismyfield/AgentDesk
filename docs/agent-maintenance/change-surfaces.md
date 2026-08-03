@@ -153,9 +153,10 @@
     prompt observation/footer deferral; `session_relay_sink/task_notification_context.rs`
     owns card-before-answer promotion and exact reference selection.
   - `src/services/discord/gateway/outbound_messages.rs` adapts task-card
-    create/edit operations to outbound v3. `gateway.rs` maps structured Discord
-    errors while `outbound/transport.rs` owns the nonce-aware Serenity create
-    boundary and enforces the create nonce.
+    create/edit operations to outbound v3. `src/services/discord/gateway.rs`
+    (frozen giant surface; TurnGateway orchestration seam) maps structured
+    Discord errors while `outbound/transport.rs` owns the nonce-aware Serenity
+    create boundary and enforces the create nonce.
 - durable_state: PostgreSQL `task_notification_card_state` is cluster-shared
   authority. The process-local store is a test/non-PG fallback only.
 - invariants: one logical event row and stable nonce; ambiguous creates retry

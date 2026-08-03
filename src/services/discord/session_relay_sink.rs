@@ -512,6 +512,9 @@ pub(in crate::services::discord) struct SessionBoundDiscordRelaySink {
     by_session: Mutex<HashMap<String, SessionRelayParser>>,
     #[cfg(test)]
     lease_test_probe: Option<Arc<SinkLeaseTestProbe>>,
+    test_gateway: Option<Arc<dyn super::gateway::TurnGateway>>,
+    #[cfg(test)]
+    test_delivery_outcomes: Option<Arc<Mutex<Vec<SessionRelayDeliveryOutcome>>>>,
 }
 
 impl SessionBoundDiscordRelaySink {
@@ -523,6 +526,9 @@ impl SessionBoundDiscordRelaySink {
             by_session: Mutex::new(HashMap::new()),
             #[cfg(test)]
             lease_test_probe: None,
+            test_gateway: None,
+            #[cfg(test)]
+            test_delivery_outcomes: None,
         }
     }
 
@@ -772,6 +778,15 @@ impl SessionBoundDiscordRelaySink {
         &self,
         delivery: SessionRelayDelivery,
     ) -> Result<SessionRelayDeliveryOutcome, RelaySinkError> {
+        self.deliver_response_via_gateway(delivery, self.test_gateway.clone())
+            .await
+    }
+
+    async fn deliver_response_via_gateway(
+        &self,
+        delivery: SessionRelayDelivery,
+        injected_gateway: Option<Arc<dyn super::gateway::TurnGateway>>,
+    ) -> Result<SessionRelayDeliveryOutcome, RelaySinkError> {
         let channel_id = delivery.channel_id;
         let provider = delivery.provider.clone();
         let inflight = super::inflight::load_inflight_state(&provider, channel_id);
@@ -868,11 +883,13 @@ impl SessionBoundDiscordRelaySink {
         // route from PlaceholderEdit to NewMessage. Keep that entire operation on
         // the outer lease so both the card transport and the final answer remain
         // guarded even though the route mutates inside `ensure_card_and_route`.
+        let has_injected_gateway = injected_gateway.is_some();
         let cutover_short_replace = delivery.task_notification_context.is_none()
             && cutover_range.is_some()
             && !relay_text.is_empty()
             && matches!(route, SessionBoundTerminalDeliveryRoute::PlaceholderEdit(_))
-            && !session_bound_should_send_new_chunks_for_placeholder(&relay_text);
+            && !session_bound_should_send_new_chunks_for_placeholder(&relay_text)
+            && !has_injected_gateway;
         let (lease_range, lease_fallback_start) = sink_delivery_lease_coordinate(&delivery);
         let sink_lease_key = delivery_lease_key_for_frame(
             channel,
@@ -946,12 +963,26 @@ impl SessionBoundDiscordRelaySink {
             }
         }
 
-        let http = shared.serenity_http_or_token_fallback().ok_or_else(|| {
-            RelaySinkError::Transient(format!(
-                "discord http unavailable for provider {}",
-                provider.as_str()
-            ))
-        })?;
+        let http = shared.serenity_http_or_token_fallback();
+        let live_gateway;
+        let gateway: &dyn super::gateway::TurnGateway = match injected_gateway.as_deref() {
+            Some(gateway) => gateway,
+            None => {
+                let http = http.clone().ok_or_else(|| {
+                    RelaySinkError::Transient(format!(
+                        "discord http unavailable for provider {}",
+                        provider.as_str()
+                    ))
+                })?;
+                live_gateway = super::gateway::DiscordGateway::new(
+                    http,
+                    shared.clone(),
+                    provider.clone(),
+                    None,
+                );
+                &live_gateway
+            }
+        };
         let (route, task_card_message_id, task_response_claim_outcome) =
             ensure_card_and_route(&self.health_registry, &shared, &delivery, route).await?;
         let (task_response_claim, task_response_already_delivered): (
@@ -996,16 +1027,9 @@ impl SessionBoundDiscordRelaySink {
 
         if let SessionBoundTerminalDeliveryRoute::PlaceholderEdit(msg_id) = route {
             if let Some((start, end)) = cutover_range.filter(|_| cutover_short_replace) {
-                // Live path: the real `DiscordGateway` (the seam the ON-path test fakes).
-                let gateway = super::gateway::DiscordGateway::new(
-                    http.clone(),
-                    shared.clone(),
-                    provider.clone(),
-                    None,
-                );
                 return self
                     .deliver_short_replace_via_controller(
-                        &gateway,
+                        gateway,
                         short_controller::SinkShortReplaceCtx {
                             shared: &shared,
                             provider: &provider,
@@ -1025,16 +1049,11 @@ impl SessionBoundDiscordRelaySink {
                     .await;
             }
             if session_bound_should_send_new_chunks_for_placeholder(&relay_text) {
-                let message_ids = formatting::send_long_message_raw_with_rollback(
-                    &http,
-                    channel,
-                    msg_id,
-                    &relay_text,
-                    &shared,
-                )
-                .await
-                .map_err(|error| RelaySinkError::Transient(error.to_string()))?;
-                let _ = super::http::delete_channel_message(&http, channel, msg_id).await;
+                let message_ids = gateway
+                    .send_long_message_with_rollback(channel, msg_id, &relay_text)
+                    .await
+                    .map_err(RelaySinkError::Transient)?;
+                let _ = gateway.delete_message(channel, msg_id).await;
                 self.delivered_total.fetch_add(1, Ordering::AcqRel);
                 tracing::info!(
                     provider = provider.as_str(),
@@ -1072,18 +1091,11 @@ impl SessionBoundDiscordRelaySink {
                 );
                 return Ok(SessionRelayDeliveryOutcome::from_proof(proof));
             }
-            let mut last_chunk_anchor = None;
-            match formatting::replace_long_message_raw_with_outcome(
-                &http,
-                channel,
-                msg_id,
-                &relay_text,
-                &shared,
-                &mut last_chunk_anchor,
-            )
-            .await
+            match gateway
+                .replace_message_with_anchor(channel, msg_id, &relay_text)
+                .await
             {
-                Ok(ReplaceLongMessageOutcome::EditedOriginal) => {
+                Ok((ReplaceLongMessageOutcome::EditedOriginal, last_chunk_anchor)) => {
                     self.delivered_total.fetch_add(1, Ordering::AcqRel);
                     tracing::info!(
                         provider = provider.as_str(),
@@ -1127,10 +1139,13 @@ impl SessionBoundDiscordRelaySink {
                     );
                     Ok(SessionRelayDeliveryOutcome::from_proof(proof))
                 }
-                Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
-                    edit_error,
-                    replacement_anchor,
-                }) => {
+                Ok((
+                    ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
+                        edit_error,
+                        replacement_anchor,
+                    },
+                    _,
+                )) => {
                     // #2757 (A0 #3089): never delete msg_id — it is the bridge's
                     // current_msg_id, possibly holding streamed content a transient edit
                     // failure would vacuum. The shared policy pins this preserve decision.
@@ -1174,7 +1189,7 @@ impl SessionBoundDiscordRelaySink {
                     );
                     Ok(SessionRelayDeliveryOutcome::from_proof(proof))
                 }
-                Ok(ReplaceLongMessageOutcome::PartialContinuationFailure { error, .. }) => {
+                Ok((ReplaceLongMessageOutcome::PartialContinuationFailure { error, .. }, _)) => {
                     Err(RelaySinkError::Transient(
                         super::replace_outcome_policy::strip_watcher_send_failure_class_marker(
                             &error,
@@ -1194,7 +1209,7 @@ impl SessionBoundDiscordRelaySink {
             }
         } else {
             self.deliver_new_message_with_task_authority(
-                &http,
+                gateway,
                 &shared,
                 &provider,
                 channel_id,
@@ -2618,6 +2633,252 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fenced_terminal_without_parser_delivery_is_terminal_not_delivered() {
+        let binding = matched("44001");
+        let sink = SessionBoundDiscordRelaySink::new(Arc::new(HealthRegistry::new()));
+        let terminal = terminal_frame_offset(
+            &binding,
+            "{\"type\":\"result\",\"result\":\"\"}\n",
+            1,
+            256,
+            0,
+            "2026-08-03T00:00:00Z",
+            Some(64),
+        );
+
+        let outcome = sink
+            .deliver(&terminal)
+            .await
+            .expect("a fenced terminal without parser delivery is known");
+
+        assert_eq!(outcome, RelaySinkOutcome::TerminalNotDelivered);
+    }
+
+    #[tokio::test]
+    async fn relay_deliver_propagates_injected_transport_error() {
+        let temp = tempfile::tempdir().expect("temp runtime root");
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+        let channel_id = 44_002;
+        let binding = matched(&channel_id.to_string());
+        let session = &binding.expected_session_name;
+        let generation_path =
+            crate::services::tmux_common::session_temp_path(session, "generation");
+        std::fs::create_dir_all(
+            std::path::Path::new(&generation_path)
+                .parent()
+                .expect("generation parent"),
+        )
+        .expect("generation directory");
+        std::fs::write(&generation_path, b"transport-error").expect("generation marker");
+        let started_at = "2026-08-03T00:00:01Z";
+        let mut inflight =
+            inflight_with_identity_offset(channel_id, session, 700, started_at, Some(0));
+        inflight.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+        inflight.current_msg_id = 88_002;
+        super::super::inflight::save_inflight_state(&inflight).expect("persist inflight");
+        let registry = Arc::new(HealthRegistry::new());
+        let shared = super::super::make_shared_data_for_tests();
+        registry
+            .register(ProviderKind::Claude.as_str().to_string(), shared)
+            .await;
+        let gateway = Arc::new(RelayContractFakeGateway::failing("fake transport failure"));
+        let mut sink = SessionBoundDiscordRelaySink::new(registry);
+        sink.test_gateway = Some(gateway.clone());
+        let payload = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]}}\n",
+            "{\"type\":\"result\",\"result\":\"answer\"}\n"
+        );
+        let terminal = terminal_frame_offset(&binding, payload, 1, 256, 700, started_at, Some(0));
+
+        let error = sink
+            .deliver(&terminal)
+            .await
+            .expect_err("transport failure must escape RelaySink::deliver");
+
+        assert!(matches!(error, RelaySinkError::Transient(_)), "{error:?}");
+        assert_eq!(gateway.replace_calls.load(Ordering::Acquire), 1);
+        super::super::inflight::clear_inflight_state(&ProviderKind::Claude, channel_id);
+    }
+
+    #[tokio::test]
+    async fn relay_deliver_preserves_tail_anchor_and_observes_persisted_proof() {
+        let temp = tempfile::tempdir().expect("temp runtime root");
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+        let channel_id = 44_003;
+        let binding = matched(&channel_id.to_string());
+        let session = &binding.expected_session_name;
+        let generation_path =
+            crate::services::tmux_common::session_temp_path(session, "generation");
+        std::fs::create_dir_all(
+            std::path::Path::new(&generation_path)
+                .parent()
+                .expect("generation parent"),
+        )
+        .expect("generation directory");
+        std::fs::write(&generation_path, b"persisted-proof").expect("generation marker");
+        let generation = dr::current_generation_mtime_ns(session);
+        let started_at = "2026-08-03T00:00:02Z";
+        let mut inflight =
+            inflight_with_identity_offset(channel_id, session, 701, started_at, Some(0));
+        inflight.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+        inflight.current_msg_id = 88_003;
+        super::super::inflight::save_inflight_state(&inflight).expect("persist inflight");
+        let registry = Arc::new(HealthRegistry::new());
+        let shared = super::super::make_shared_data_for_tests();
+        registry
+            .register(ProviderKind::Claude.as_str().to_string(), shared.clone())
+            .await;
+        let gateway = Arc::new(RelayContractFakeGateway::edited(Some((
+            99_003,
+            "tail chunk",
+        ))));
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let mut sink = SessionBoundDiscordRelaySink::new(registry);
+        sink.test_gateway = Some(gateway.clone());
+        sink.test_delivery_outcomes = Some(outcomes.clone());
+        let payload = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]}}\n",
+            "{\"type\":\"result\",\"result\":\"answer\"}\n"
+        );
+        let mut terminal =
+            terminal_frame_offset(&binding, payload, 1, 256, 701, started_at, Some(0));
+        terminal.relay_generation_mtime_ns = Some(generation);
+
+        let outcome = sink.deliver(&terminal).await.expect("persisted delivery");
+
+        assert_eq!(outcome, RelaySinkOutcome::TerminalDelivered);
+        assert_eq!(
+            outcomes.lock().expect("outcome probe").as_slice(),
+            &[SessionRelayDeliveryOutcome::Delivered]
+        );
+        let record = dr::read_record(&ProviderKind::Claude, channel_id).expect("delivery record");
+        assert_eq!(
+            record.delivered_frontier.expect("frontier").panel_msg_id,
+            Some(99_003),
+            "legacy replace must retain the formatter tail anchor"
+        );
+        assert_eq!(gateway.replace_calls.load(Ordering::Acquire), 1);
+        super::super::inflight::clear_inflight_state(&ProviderKind::Claude, channel_id);
+    }
+
+    #[tokio::test]
+    async fn relay_deliver_observes_landed_stale_proof() {
+        let temp = tempfile::tempdir().expect("temp runtime root");
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+        let channel_id = 44_004;
+        let binding = matched(&channel_id.to_string());
+        let session = &binding.expected_session_name;
+        let generation_path =
+            crate::services::tmux_common::session_temp_path(session, "generation");
+        std::fs::create_dir_all(
+            std::path::Path::new(&generation_path)
+                .parent()
+                .expect("generation parent"),
+        )
+        .expect("generation directory");
+        std::fs::write(&generation_path, b"landed-stale").expect("generation marker");
+        let generation = dr::current_generation_mtime_ns(session);
+        let started_at = "2026-08-03T00:00:03Z";
+        let mut inflight =
+            inflight_with_identity_offset(channel_id, session, 702, started_at, Some(0));
+        inflight.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+        inflight.current_msg_id = 88_004;
+        super::super::inflight::save_inflight_state(&inflight).expect("persist inflight");
+        let registry = Arc::new(HealthRegistry::new());
+        let shared = super::super::make_shared_data_for_tests();
+        registry
+            .register(ProviderKind::Claude.as_str().to_string(), shared.clone())
+            .await;
+        let gateway = Arc::new(RelayContractFakeGateway {
+            on_transport: Some(Arc::new(move || {
+                super::super::inflight::clear_inflight_state(&ProviderKind::Claude, channel_id);
+            })),
+            ..RelayContractFakeGateway::edited(None)
+        });
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let mut sink = SessionBoundDiscordRelaySink::new(registry);
+        sink.test_gateway = Some(gateway);
+        sink.test_delivery_outcomes = Some(outcomes.clone());
+        let payload = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]}}\n",
+            "{\"type\":\"result\",\"result\":\"answer\"}\n"
+        );
+        let mut terminal =
+            terminal_frame_offset(&binding, payload, 1, 256, 702, started_at, Some(0));
+        terminal.relay_generation_mtime_ns = Some(generation);
+
+        let outcome = sink
+            .deliver(&terminal)
+            .await
+            .expect("landed stale delivery");
+
+        assert_eq!(outcome, RelaySinkOutcome::TerminalDelivered);
+        assert_eq!(
+            outcomes.lock().expect("outcome probe").as_slice(),
+            &[SessionRelayDeliveryOutcome::LandedStale]
+        );
+        super::super::inflight::clear_inflight_state(&ProviderKind::Claude, channel_id);
+    }
+
+    #[tokio::test]
+    async fn relay_deliver_observes_landed_unrecorded_proof() {
+        let temp = tempfile::tempdir().expect("temp runtime root");
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+        let channel_id = 44_005;
+        let binding = matched(&channel_id.to_string());
+        let session = &binding.expected_session_name;
+        let generation_path =
+            crate::services::tmux_common::session_temp_path(session, "generation");
+        std::fs::create_dir_all(
+            std::path::Path::new(&generation_path)
+                .parent()
+                .expect("generation parent"),
+        )
+        .expect("generation directory");
+        std::fs::write(&generation_path, b"landed-unrecorded").expect("generation marker");
+        let generation = dr::current_generation_mtime_ns(session);
+        let started_at = "2026-08-03T00:00:04Z";
+        let mut inflight =
+            inflight_with_identity_offset(channel_id, session, 703, started_at, Some(0));
+        inflight.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+        inflight.current_msg_id = 88_005;
+        super::super::inflight::save_inflight_state(&inflight).expect("persist inflight");
+        let runtime = temp.path().join("runtime");
+        std::fs::create_dir_all(&runtime).expect("runtime directory");
+        std::fs::write(runtime.join("discord_delivery_records"), b"not a directory")
+            .expect("block delivery record directory");
+        let registry = Arc::new(HealthRegistry::new());
+        let shared = super::super::make_shared_data_for_tests();
+        registry
+            .register(ProviderKind::Claude.as_str().to_string(), shared)
+            .await;
+        let gateway = Arc::new(RelayContractFakeGateway::edited(None));
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let mut sink = SessionBoundDiscordRelaySink::new(registry);
+        sink.test_gateway = Some(gateway);
+        sink.test_delivery_outcomes = Some(outcomes.clone());
+        let payload = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]}}\n",
+            "{\"type\":\"result\",\"result\":\"answer\"}\n"
+        );
+        let mut terminal =
+            terminal_frame_offset(&binding, payload, 1, 256, 703, started_at, Some(0));
+        terminal.relay_generation_mtime_ns = Some(generation);
+
+        let outcome = sink
+            .deliver(&terminal)
+            .await
+            .expect("landed unrecorded delivery");
+
+        assert_eq!(outcome, RelaySinkOutcome::TerminalDelivered);
+        assert_eq!(
+            outcomes.lock().expect("outcome probe").as_slice(),
+            &[SessionRelayDeliveryOutcome::LandedUnrecorded]
+        );
+        super::super::inflight::clear_inflight_state(&ProviderKind::Claude, channel_id);
+    }
+
+    #[tokio::test]
     async fn inflightless_ranged_frame_acquires_sink_lease_before_terminal_delivery_4277() {
         let channel_id = 4_277_003;
         let binding = matched(&channel_id.to_string());
@@ -3148,6 +3409,154 @@ mod tests {
         fn can_chain_locally(&self) -> bool {
             false
         }
+        fn bot_owner_provider(&self) -> Option<ProviderKind> {
+            None
+        }
+    }
+
+    struct RelayContractFakeGateway {
+        replace_outcome: ReplaceLongMessageOutcome,
+        replace_anchor: Option<super::super::formatting::ReplaceLastChunkAnchor>,
+        transport_error: Option<String>,
+        sent_message_id: MessageId,
+        replace_calls: AtomicU64,
+        send_calls: AtomicU64,
+        on_transport: Option<Arc<dyn Fn() + Send + Sync>>,
+    }
+
+    impl RelayContractFakeGateway {
+        fn edited(anchor: Option<(u64, &str)>) -> Self {
+            Self {
+                replace_outcome: ReplaceLongMessageOutcome::EditedOriginal,
+                replace_anchor: anchor.map(|(msg_id, text)| {
+                    super::super::formatting::ReplaceLastChunkAnchor {
+                        msg_id,
+                        text: text.to_string(),
+                    }
+                }),
+                transport_error: None,
+                sent_message_id: MessageId::new(91_001),
+                replace_calls: AtomicU64::new(0),
+                send_calls: AtomicU64::new(0),
+                on_transport: None,
+            }
+        }
+
+        fn failing(message: &str) -> Self {
+            let mut gateway = Self::edited(None);
+            gateway.transport_error = Some(message.to_string());
+            gateway
+        }
+    }
+
+    impl super::super::gateway::TurnGateway for RelayContractFakeGateway {
+        fn send_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _content: &'a str,
+        ) -> super::super::gateway::GatewayFuture<'a, Result<MessageId, String>> {
+            Box::pin(async move {
+                self.send_calls.fetch_add(1, Ordering::AcqRel);
+                if let Some(on_transport) = &self.on_transport {
+                    on_transport();
+                }
+                match &self.transport_error {
+                    Some(error) => Err(error.clone()),
+                    None => Ok(self.sent_message_id),
+                }
+            })
+        }
+
+        fn edit_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _content: &'a str,
+        ) -> super::super::gateway::GatewayFuture<'a, Result<(), String>> {
+            panic!("relay contract fake does not use edit_message")
+        }
+
+        fn replace_message_with_outcome<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _content: &'a str,
+        ) -> super::super::gateway::GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>>
+        {
+            Box::pin(async move {
+                self.replace_calls.fetch_add(1, Ordering::AcqRel);
+                if let Some(on_transport) = &self.on_transport {
+                    on_transport();
+                }
+                match &self.transport_error {
+                    Some(error) => Err(error.clone()),
+                    None => Ok(self.replace_outcome.clone()),
+                }
+            })
+        }
+
+        fn replace_message_with_anchor<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _content: &'a str,
+        ) -> super::super::gateway::GatewayFuture<
+            'a,
+            Result<
+                (
+                    ReplaceLongMessageOutcome,
+                    Option<super::super::formatting::ReplaceLastChunkAnchor>,
+                ),
+                String,
+            >,
+        > {
+            Box::pin(async move {
+                self.replace_calls.fetch_add(1, Ordering::AcqRel);
+                if let Some(on_transport) = &self.on_transport {
+                    on_transport();
+                }
+                match &self.transport_error {
+                    Some(error) => Err(error.clone()),
+                    None => Ok((self.replace_outcome.clone(), self.replace_anchor.clone())),
+                }
+            })
+        }
+
+        fn schedule_retry_with_history<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _user_message_id: MessageId,
+            _user_text: &'a str,
+        ) -> super::super::gateway::GatewayFuture<'a, ()> {
+            panic!("relay contract fake does not schedule retries")
+        }
+
+        fn dispatch_queued_turn<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _intervention: &'a super::super::Intervention,
+            _output_path: &'a str,
+            _skip_hook: bool,
+            _dispatch_lease: Option<Arc<crate::services::turn_orchestrator::DispatchLease>>,
+        ) -> super::super::gateway::GatewayFuture<'a, Result<(), String>> {
+            panic!("relay contract fake does not dispatch turns")
+        }
+
+        fn validate_live_routing<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+        ) -> super::super::gateway::GatewayFuture<'a, Result<(), String>> {
+            panic!("relay contract fake does not validate routing")
+        }
+
+        fn requester_mention(&self) -> Option<String> {
+            None
+        }
+
+        fn can_chain_locally(&self) -> bool {
+            false
+        }
+
         fn bot_owner_provider(&self) -> Option<ProviderKind> {
             None
         }
