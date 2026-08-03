@@ -34,13 +34,51 @@ def active_lane(*, command: list[str] | None = None, minimum: int = 2) -> dict[s
     }
 
 
+def write_workflow(
+    repo_root: Path,
+    lanes: list[dict[str, object]],
+    *,
+    mutation_step: str | None = None,
+) -> None:
+    commands = [
+        "env -u AGENTDESK_ROOT_DIR "
+        + " ".join(lane["command"])
+        + " -- --test-threads=1"
+        for lane in lanes
+        if lane.get("status") == "active"
+    ]
+    steps: list[dict[str, object]] = [{
+        "name": contract.RELAY_TARGET_STEP,
+        "run": "\n".join(commands) + "\n",
+    }]
+    if mutation_step is not None:
+        steps.append({"name": "Run condition-3 mutations", "run": mutation_step})
+    workflow = repo_root / contract.PR_WORKFLOW
+    workflow.parent.mkdir(parents=True, exist_ok=True)
+    workflow.write_text(
+        "jobs:\n"
+        f"  {contract.RELAY_AUTHORITY_JOB}:\n"
+        "    steps:\n"
+        + "".join(
+            f"      - name: {step['name']}\n        run:"
+            + (f" |\n          {str(step['run']).replace(chr(10), chr(10) + '          ').rstrip()}\n"
+               if "\n" in str(step["run"])
+               else f" {step['run']}\n")
+            for step in steps
+        ),
+        encoding="utf-8",
+    )
+
+
 def manifest_path(
     lanes: list[dict[str, object]],
     *,
     condition3_mutations_present: bool = False,
+    mutation_step: str | None = None,
 ) -> tuple[tempfile.TemporaryDirectory[str], Path]:
     temporary = tempfile.TemporaryDirectory()
-    path = Path(temporary.name) / "targets.json"
+    repo_root = Path(temporary.name)
+    path = repo_root / "targets.json"
     path.write_text(
         json.dumps({
             "schema_version": 1,
@@ -49,6 +87,7 @@ def manifest_path(
         }),
         encoding="utf-8",
     )
+    write_workflow(repo_root, lanes, mutation_step=mutation_step)
     return temporary, path
 
 
@@ -71,7 +110,7 @@ class ManifestContract(unittest.TestCase):
         with temporary:
             repo_root = Path(temporary.name)
             mutation_script = repo_root / "scripts" / "run_relay_authority_mutations.sh"
-            mutation_script.parent.mkdir()
+            mutation_script.parent.mkdir(exist_ok=True)
             mutation_script.touch()
             with self.assertRaisesRegex(
                 contract.ManifestError,
@@ -88,6 +127,133 @@ class ManifestContract(unittest.TestCase):
                 contract.ManifestError,
                 "condition3_mutations_present is true but .*run_relay_authority_mutations.sh is missing",
             ):
+                contract.load_active_lanes(path, Path(temporary.name))
+
+    def test_condition3_true_rejects_missing_unconditional_workflow_step(self) -> None:
+        temporary, path = manifest_path(
+            [active_lane()], condition3_mutations_present=True
+        )
+        with temporary:
+            repo_root = Path(temporary.name)
+            mutation_script = repo_root / contract.CONDITION3_MUTATION_SCRIPT
+            mutation_script.parent.mkdir(exist_ok=True)
+            mutation_script.write_text("#!/usr/bin/env bash\nset -euo pipefail\ntrue\n", encoding="utf-8")
+            mutation_script.chmod(0o755)
+            with self.assertRaisesRegex(
+                contract.ManifestError,
+                "must contain exactly one unconditional run step",
+            ):
+                contract.load_active_lanes(path, repo_root)
+
+    def test_condition3_true_accepts_script_and_unconditional_workflow_step(self) -> None:
+        temporary, path = manifest_path(
+            [active_lane()],
+            condition3_mutations_present=True,
+            mutation_step=contract.CONDITION3_MUTATION_COMMAND,
+        )
+        with temporary:
+            repo_root = Path(temporary.name)
+            mutation_script = repo_root / contract.CONDITION3_MUTATION_SCRIPT
+            mutation_script.parent.mkdir(exist_ok=True)
+            mutation_script.write_text("#!/usr/bin/env bash\nset -euo pipefail\ntrue\n", encoding="utf-8")
+            mutation_script.chmod(0o755)
+            lanes, _ = contract.load_active_lanes(path, repo_root)
+            self.assertEqual([lane.name for lane in lanes], ["t1-fixture"])
+
+    def test_condition3_true_rejects_if_guarded_workflow_step(self) -> None:
+        temporary, path = manifest_path(
+            [active_lane()], condition3_mutations_present=True
+        )
+        with temporary:
+            repo_root = Path(temporary.name)
+            mutation_script = repo_root / contract.CONDITION3_MUTATION_SCRIPT
+            mutation_script.parent.mkdir(exist_ok=True)
+            mutation_script.write_text("#!/usr/bin/env bash\nset -euo pipefail\ntrue\n", encoding="utf-8")
+            mutation_script.chmod(0o755)
+            workflow = repo_root / contract.PR_WORKFLOW
+            text = workflow.read_text(encoding="utf-8")
+            workflow.write_text(
+                text + (
+                    "      - name: Run condition-3 mutations\n"
+                    "        if: ${{ false }}\n"
+                    f"        run: {contract.CONDITION3_MUTATION_COMMAND}\n"
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                contract.ManifestError,
+                "must contain exactly one unconditional run step",
+            ):
+                contract.load_active_lanes(path, repo_root)
+
+    def test_condition3_true_rejects_empty_script(self) -> None:
+        temporary, path = manifest_path(
+            [active_lane()],
+            condition3_mutations_present=True,
+            mutation_step=contract.CONDITION3_MUTATION_COMMAND,
+        )
+        with temporary:
+            repo_root = Path(temporary.name)
+            mutation_script = repo_root / contract.CONDITION3_MUTATION_SCRIPT
+            mutation_script.parent.mkdir(exist_ok=True)
+            mutation_script.touch(mode=0o755)
+            with self.assertRaisesRegex(contract.ManifestError, "must not be empty"):
+                contract.load_active_lanes(path, repo_root)
+
+    def test_condition3_true_rejects_exit_zero_only_script(self) -> None:
+        temporary, path = manifest_path(
+            [active_lane()],
+            condition3_mutations_present=True,
+            mutation_step=contract.CONDITION3_MUTATION_COMMAND,
+        )
+        with temporary:
+            repo_root = Path(temporary.name)
+            mutation_script = repo_root / contract.CONDITION3_MUTATION_SCRIPT
+            mutation_script.parent.mkdir(exist_ok=True)
+            mutation_script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            mutation_script.chmod(0o755)
+            with self.assertRaisesRegex(contract.ManifestError, "exit-0-only placeholder"):
+                contract.load_active_lanes(path, repo_root)
+
+    def test_condition3_true_rejects_non_executable_script(self) -> None:
+        temporary, path = manifest_path(
+            [active_lane()],
+            condition3_mutations_present=True,
+            mutation_step=contract.CONDITION3_MUTATION_COMMAND,
+        )
+        with temporary:
+            repo_root = Path(temporary.name)
+            mutation_script = repo_root / contract.CONDITION3_MUTATION_SCRIPT
+            mutation_script.parent.mkdir(exist_ok=True)
+            mutation_script.write_text("#!/usr/bin/env bash\ntrue\n", encoding="utf-8")
+            mutation_script.chmod(0o644)
+            with self.assertRaisesRegex(contract.ManifestError, "must be executable"):
+                contract.load_active_lanes(path, repo_root)
+
+    def test_condition3_true_rejects_symlink_script(self) -> None:
+        temporary, path = manifest_path(
+            [active_lane()],
+            condition3_mutations_present=True,
+            mutation_step=contract.CONDITION3_MUTATION_COMMAND,
+        )
+        with temporary:
+            repo_root = Path(temporary.name)
+            target = repo_root / "unrelated.sh"
+            target.write_text("#!/usr/bin/env bash\ntrue\n", encoding="utf-8")
+            target.chmod(0o755)
+            mutation_script = repo_root / contract.CONDITION3_MUTATION_SCRIPT
+            mutation_script.parent.mkdir(exist_ok=True)
+            mutation_script.symlink_to(target)
+            with self.assertRaisesRegex(contract.ManifestError, "must not be a symlink"):
+                contract.load_active_lanes(path, repo_root)
+
+    def test_manifest_command_must_match_workflow_command(self) -> None:
+        temporary, path = manifest_path([active_lane()])
+        with temporary:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["lanes"][0]["command"][-1] = "fixture::other"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(contract.ManifestError, "must exactly match"):
                 contract.load_active_lanes(path, Path(temporary.name))
 
     def test_unfiltered_command_is_rejected(self) -> None:
@@ -154,7 +320,7 @@ class MainContract(unittest.TestCase):
             stdout, stderr = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 rc = contract.main([
-                    "--repo-root", str(REPO_ROOT),
+                    "--repo-root", str(Path(temporary.name)),
                     "--manifest", str(manifest),
                 ])
         return rc, stdout.getvalue(), stderr.getvalue()

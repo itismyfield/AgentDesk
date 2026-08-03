@@ -175,6 +175,30 @@ targets = {
       },
     },
   },
+  "relay-authority-contract" => {
+    "label" => "relay-authority contract job",
+    "name" => "relay-authority-contract",
+    "needs" => nil,
+    "if" => nil,
+    "runs_on" => "ubuntu-latest",
+    # #5071 registers this unconditional candidate in the existing semantic
+    # hardening registry so order-independent job keys cannot disable it silently.
+    "job_sha256" => "ab2b82266fde9b81d83ef4403435b66acf9c7336be454110d2e5e2ed4a34a553",
+    "cargo_steps" => {
+      "Verify named relay-authority targets and selection floors" => {
+        "commands" => ["python3 scripts/check_relay_authority_contract.py"],
+        "timeout_minutes" => 30,
+      },
+      "Run named relay-authority contract targets" => {
+        "commands" => [
+          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::session_relay_sink -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1",
+        ],
+        "timeout_minutes" => 30,
+      },
+    },
+  },
   "high-risk-recovery" => {
     "label" => "High-risk recovery job",
     "name" => "High-risk recovery",

@@ -347,6 +347,9 @@ class FastCheckCiWiringTests(unittest.TestCase):
             r"    name: relay-authority-contract\n"
             r"    runs-on: ubuntu-latest\n"
             r"    timeout-minutes: 30\n"
+            r"    env:\n"
+            r'      CARGO_PROFILE_DEV_DEBUG: "0"\n'
+            r'      CARGO_PROFILE_TEST_DEBUG: "0"\n'
             r"    steps:\n"
             r"      - uses: actions/checkout@v4\n\n"
             r"      - name: Install Rust toolchain\n"
@@ -358,8 +361,11 @@ class FastCheckCiWiringTests(unittest.TestCase):
             job,
             r"(?m)^      - name: Run named relay-authority contract targets\n"
             r"        env:\n"
+            r"          BASH_ENV: /dev/null\n"
             r'          CARGO_PROFILE_DEV_DEBUG: "0"\n'
             r'          CARGO_PROFILE_TEST_DEBUG: "0"\n'
+            r"        shell: bash\n"
+            r"        timeout-minutes: 30\n"
             r"        run: \|\n"
             r"          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::session_relay_sink -- --test-threads=1\n"
             r"          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1\n"
