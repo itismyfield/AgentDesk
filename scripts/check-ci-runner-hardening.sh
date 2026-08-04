@@ -28,7 +28,10 @@ def canonical_yaml(value)
   case value
   when Hash
     value.keys.sort_by(&:to_s).each_with_object({}) do |key, canonical|
-      canonical[key.to_s] = canonical_yaml(value[key])
+      item = value[key]
+      next if key.to_s == "continue-on-error" && (item.nil? || item == false)
+
+      canonical[key.to_s] = canonical_yaml(item)
     end
   when Array
     value.map { |item| canonical_yaml(item) }
@@ -114,7 +117,12 @@ if script_check_step["continue-on-error"]
   warn "#{path}: Script checks job \"Run script checks\" step must not continue on error"
   exit 1
 end
-unless script_check_step["run"] == "./scripts/ci-script-checks.sh"
+script_check_commands = if script_check_step["run"].is_a?(String)
+  script_check_step["run"].lines.map(&:strip).reject(&:empty?)
+else
+  []
+end
+unless script_check_commands == ["./scripts/ci-script-checks.sh"]
   warn "#{path}: Script checks job \"Run script checks\" step must run exactly ./scripts/ci-script-checks.sh"
   exit 1
 end
@@ -177,7 +185,6 @@ targets = {
           "python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job test_fast --job high-risk-recovery | tee \"$RUNNER_TEMP/selection-evidence-test-fast.log\"",
         ],
         "timeout_minutes" => 20,
-        "continue_on_error" => nil,
       },
       "Require observer summary" => {
         "commands" => [
@@ -186,7 +193,6 @@ targets = {
         ],
         "timeout_minutes" => 1,
         "if_condition" => "always()",
-        "continue_on_error" => nil,
       },
       "Footer-only marker regressions" => {
         "commands" => [
@@ -226,7 +232,7 @@ targets = {
     "runs_on" => "ubuntu-latest",
     # #5071 registers this unconditional candidate in the existing semantic
     # hardening registry so order-independent job keys cannot disable it silently.
-    "job_sha256" => "ab2b82266fde9b81d83ef4403435b66acf9c7336be454110d2e5e2ed4a34a553",
+    "job_sha256" => "20faba743fc3c5007680dba1c5b78938d6a82922c9ef879cbe45c043c1a2ee95",
     "cargo_steps" => {
       "Verify named relay-authority targets and selection floors" => {
         "commands" => ["python3 scripts/check_relay_authority_contract.py"],
@@ -238,6 +244,10 @@ targets = {
           "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1",
           "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1",
         ],
+        "timeout_minutes" => 30,
+      },
+      "Require relay-authority mutations to be killed" => {
+        "commands" => ["bash scripts/run_relay_authority_mutations.sh"],
         "timeout_minutes" => 30,
       },
     },
@@ -257,7 +267,6 @@ targets = {
           "python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job high-risk-recovery | tee \"$RUNNER_TEMP/selection-evidence-high-risk.log\"",
         ],
         "timeout_minutes" => 20,
-        "continue_on_error" => nil,
       },
       "Require observer summary" => {
         "commands" => [
@@ -266,7 +275,6 @@ targets = {
         ],
         "timeout_minutes" => 1,
         "if_condition" => "always()",
-        "continue_on_error" => nil,
       },
     },
   },
@@ -343,7 +351,9 @@ targets.each do |job_id, spec|
       unless step["if"] == step_spec.fetch("if_condition", nil)
         errors << "#{label} #{name.inspect} must retain exact if policy"
       end
-      unless step["continue-on-error"] == step_spec.fetch("continue_on_error", nil)
+      actual_continue_on_error = step["continue-on-error"] || nil
+      expected_continue_on_error = step_spec.fetch("continue_on_error", nil) || nil
+      unless actual_continue_on_error == expected_continue_on_error
         errors << "#{label} #{name.inspect} must retain exact continue-on-error policy"
       end
       unless step["timeout-minutes"] == step_spec.fetch("timeout_minutes")

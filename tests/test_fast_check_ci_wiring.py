@@ -374,6 +374,84 @@ class FastCheckCiWiringTests(unittest.TestCase):
             r"          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1\n"
             r"          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1$",
         )
+        self.assertRegex(
+            job,
+            r"(?m)^      - name: Require relay-authority mutations to be killed\n"
+            r"        env:\n"
+            r"          BASH_ENV: /dev/null\n"
+            r'          CARGO_PROFILE_DEV_DEBUG: "0"\n'
+            r'          CARGO_PROFILE_TEST_DEBUG: "0"\n'
+            r"        shell: bash\n"
+            r"        timeout-minutes: 30\n"
+            r"        run: bash scripts/run_relay_authority_mutations\.sh$",
+        )
+
+    def test_script_checks_aggregate_is_exactly_one_step(self) -> None:
+        hardening = (
+            REPO_ROOT / "scripts/check-ci-runner-hardening.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "unless script_check_steps.length == 1",
+            hardening,
+        )
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        scripts_job = job_block(workflow, "scripts")
+        aggregate = (
+            "      - name: Run script checks\n"
+            "        run: ./scripts/ci-script-checks.sh\n"
+            "        env:\n"
+            "          # Required Script checks only run on protected PR candidates. Their\n"
+            "          # synthetic merge first parent is the exact immutable base snapshot.\n"
+            "          TEST_LANE_BASELINE_REF: HEAD^1\n"
+        )
+        self.assertIn(aggregate, scripts_job)
+        mutated_job = scripts_job.replace(aggregate, aggregate + aggregate, 1)
+        mutated = workflow.replace(scripts_job, mutated_job, 1)
+        result = self.run_hardening_fixture(mutated)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            'must retain exactly one "Run script checks" step', result.stderr
+        )
+
+    def test_script_checks_aggregate_must_not_define_if(self) -> None:
+        hardening = (
+            REPO_ROOT / "scripts/check-ci-runner-hardening.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'if script_check_step.key?("if")',
+            hardening,
+        )
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        mutated = workflow.replace(
+            "      - name: Run script checks\n",
+            "      - name: Run script checks\n        if: ${{ false }}\n",
+            1,
+        )
+        result = self.run_hardening_fixture(mutated)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            '"Run script checks" step must not define if', result.stderr
+        )
+
+    def test_script_checks_aggregate_must_run_exact_command(self) -> None:
+        hardening = (
+            REPO_ROOT / "scripts/check-ci-runner-hardening.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'unless script_check_commands == ["./scripts/ci-script-checks.sh"]',
+            hardening,
+        )
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        mutated = workflow.replace(
+            "        run: ./scripts/ci-script-checks.sh\n",
+            "        run: ./scripts/ci-script-checks.sh --changed\n",
+            1,
+        )
+        result = self.run_hardening_fixture(mutated)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "must run exactly ./scripts/ci-script-checks.sh", result.stderr
+        )
 
     def test_required_pr_steps_cannot_be_silently_disabled(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
@@ -389,6 +467,10 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 ),
                 (
                     "Run named relay-authority contract targets",
+                    "must retain exact continue-on-error policy",
+                ),
+                (
+                    "Require relay-authority mutations to be killed",
                     "must retain exact continue-on-error policy",
                 ),
             ),
@@ -422,8 +504,9 @@ class FastCheckCiWiringTests(unittest.TestCase):
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         step_name = "Run named relay-authority contract targets"
         for label, yaml_value in (
-            ("boolean-false", "false"),
             ("string-false", '"false"'),
+            ("boolean-true", "true"),
+            ("string-true", '"true"'),
         ):
             with self.subTest(value=label):
                 mutated = workflow.replace(
@@ -438,6 +521,50 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 self.assertIn(
                     "must retain exact continue-on-error policy", result.stderr
                 )
+
+    def test_registered_step_continue_policy_accepts_absent_and_boolean_false(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        step_name = "Run named relay-authority contract targets"
+        for label, insertion in (
+            ("absent", ""),
+            ("boolean-false", "        continue-on-error: false\n"),
+        ):
+            with self.subTest(value=label):
+                mutated = workflow.replace(
+                    f"      - name: {step_name}\n",
+                    f"      - name: {step_name}\n{insertion}",
+                    1,
+                )
+                result = self.run_hardening_fixture(mutated)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_script_checks_run_accepts_equivalent_scalar_and_block_forms(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        scripts_job = job_block(workflow, "scripts")
+        cases = {
+            "scalar": "        run: ./scripts/ci-script-checks.sh\n",
+            "block": "        run: |\n          ./scripts/ci-script-checks.sh\n",
+        }
+        for form, replacement in cases.items():
+            with self.subTest(form=form):
+                mutated_job = scripts_job.replace(
+                    "        run: ./scripts/ci-script-checks.sh\n", replacement, 1
+                )
+                mutated = workflow.replace(scripts_job, mutated_job, 1)
+                result = self.run_hardening_fixture(mutated)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+        mutated_job = scripts_job.replace(
+            "        run: ./scripts/ci-script-checks.sh\n",
+            "        run: |\n          ./scripts/ci-script-checks.sh --changed\n",
+            1,
+        )
+        mutated = workflow.replace(scripts_job, mutated_job, 1)
+        result = self.run_hardening_fixture(mutated)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "must run exactly ./scripts/ci-script-checks.sh", result.stderr
+        )
 
     def test_script_checks_needs_accepts_equivalent_scalar_and_list_forms(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
