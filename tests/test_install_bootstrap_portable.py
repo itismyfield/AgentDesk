@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALL_SCRIPT = ROOT / "scripts" / "install.sh"
+DASHBOARD_TOOLCHAIN_SCRIPT = ROOT / "scripts" / "check-dashboard-toolchain.sh"
 
 
 class InstallBootstrapPortableTests(unittest.TestCase):
@@ -55,6 +56,61 @@ class InstallBootstrapPortableTests(unittest.TestCase):
         self.assertIn(".\\\\target\\\\release\\\\agentdesk.exe init", text)
         self.assertNotIn("agentdesk --init", text)
         self.assertNotIn("agentdesk.exe --init", text)
+
+    def test_dashboard_install_and_deploy_fail_closed_on_toolchain_drift(self):
+        install = self.read_script()
+        deploy = (ROOT / "scripts" / "deploy-release.sh").read_text(encoding="utf-8")
+        verify = (ROOT / "scripts" / "verify-dashboard.sh").read_text(encoding="utf-8")
+
+        guard_call = 'bash "$SCRIPT_DIR/check-dashboard-toolchain.sh" "$REPO"'
+        self.assertIn(guard_call, deploy)
+        self.assertIn(guard_call, verify)
+        self.assertIn('bash scripts/check-dashboard-toolchain.sh "$PWD"', install)
+        self.assertIn('npm ci --no-audit --no-fund', install)
+        self.assertNotIn('npm run build 2>&1 | tail -1) || true', install)
+        self.assertNotIn('node_modules/.bin/tsc', deploy)
+        self.assertIn('npm ci --no-audit --no-fund', deploy)
+
+    @unittest.skipIf(os.name == "nt", "behavioral dashboard toolchain guard uses POSIX paths")
+    def test_dashboard_toolchain_guard_rejects_an_old_node(self):
+        if shutil.which("bash") is None:
+            self.skipTest("bash is not available")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp = Path(tmp)
+            repo = temp / "repo"
+            fakebin = temp / "fakebin"
+            (repo / "dashboard").mkdir(parents=True)
+            fakebin.mkdir()
+            (repo / ".nvmrc").write_text("22.22.0\n", encoding="utf-8")
+            (repo / "dashboard" / "package.json").write_text("{}\n", encoding="utf-8")
+            (repo / "dashboard" / "package-lock.json").write_text("{}\n", encoding="utf-8")
+            self.write_executable(
+                fakebin / "node",
+                """
+                if [[ "${1:-}" == "-e" ]]; then
+                  exit 1
+                fi
+                echo v22.21.0
+                """,
+            )
+            self.write_executable(fakebin / "npm", "exit 0\n")
+
+            env = os.environ.copy()
+            env["PATH"] = f"{fakebin}:{env['PATH']}"
+            result = subprocess.run(
+                ["bash", str(DASHBOARD_TOOLCHAIN_SCRIPT), str(repo)],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("requires Node >=22.22.0", result.stderr)
+            self.assertIn("found v22.21.0", result.stderr)
 
     @unittest.skipIf(os.name == "nt", "behavioral bash installer smoke uses POSIX paths")
     def test_source_build_fallback_installs_into_fresh_sandbox(self):
