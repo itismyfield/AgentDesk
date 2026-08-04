@@ -13,7 +13,11 @@ pub(crate) fn redact_sensitive_for_placeholder(input: &str) -> String {
         Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b").expect("valid email regex")
     });
 
-    let redacted = OPENAI_KEY_RE.replace_all(input, "***");
+    // Keep the compact renderer's token-aware Bearer behavior (so command
+    // details after the token remain visible), while sharing the common
+    // whole-value Cookie/Set-Cookie contract with logs and recent output.
+    let redacted = crate::utils::redact::redact_cookie_headers(input, "***");
+    let redacted = OPENAI_KEY_RE.replace_all(&redacted, "***");
     let redacted = BEARER_RE.replace_all(&redacted, "Bearer ***");
     let redacted = ASSIGNMENT_RE.replace_all(&redacted, "${1}=***");
     EMAIL_RE.replace_all(&redacted, "***@***").into_owned()
@@ -296,28 +300,61 @@ pub(in crate::services::discord) fn shorten_path(path: &str) -> String {
 /// that is just `{`, which downstream live-event rendering collapses to a bare
 /// `[ToolSearch] {` / `[Monitor] {`. Re-serializing the already-parsed value
 /// compactly removes the newlines so the fallback is always informative.
-fn compact_json_fallback(v: &serde_json::Value, raw: &str) -> String {
-    let compact = serde_json::to_string(v).unwrap_or_else(|_| raw.to_string());
-    truncate_str(&compact, 200).to_string()
+fn compact_json_fallback(v: &serde_json::Value) -> String {
+    let compact = crate::utils::redact::serialize_json_with_redacted_cookie_headers(v, "***");
+    let redacted = redact_sensitive_for_placeholder(&compact);
+    truncate_str(&redacted, 200).to_string()
+}
+
+pub(in crate::services::discord) fn is_command_tool_name(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "bash" | "command_execution" | "exec" | "exec_command" | "run_cmd" | "shell_command"
+    )
+}
+
+fn format_command_tool_input(v: &serde_json::Value) -> String {
+    let desc = v
+        .get("description")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let cmd = v
+        .get("command")
+        .or_else(|| v.get("cmd"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    if desc.is_empty() && cmd.is_empty() {
+        return compact_json_fallback(v);
+    }
+
+    // Sanitize every direct consumer field before truncation or Markdown
+    // delimiters can split/block the shared header matcher.
+    let desc = redact_sensitive_for_placeholder(desc);
+    let cmd = redact_sensitive_for_placeholder(cmd);
+    if !desc.is_empty() {
+        if cmd.is_empty() {
+            truncate_str(&desc, 200)
+        } else {
+            format!("{}: `{}`", truncate_str(&desc, 45), truncate_str(&cmd, 150))
+        }
+    } else {
+        format!("`{}`", truncate_str(&cmd, 200))
+    }
 }
 
 /// Format tool input JSON into a human-readable summary (without tool name prefix).
 /// The caller adds the tool name, so this returns only the detail part.
 pub(in crate::services::discord) fn format_tool_input(name: &str, input: &str) -> String {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(input) else {
-        return truncate_str(input, 200).to_string();
+        let redacted = redact_sensitive_for_placeholder(input);
+        return truncate_str(&redacted, 200).to_string();
     };
 
-    match name {
-        "Bash" => {
-            let desc = v.get("description").and_then(|v| v.as_str()).unwrap_or("");
-            let cmd = v.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            if !desc.is_empty() {
-                format!("{}: `{}`", desc, truncate_str(cmd, 150))
-            } else {
-                format!("`{}`", truncate_str(cmd, 200))
-            }
-        }
+    if is_command_tool_name(name) {
+        return format_command_tool_input(&v);
+    }
+
+    let summary = match name {
         "Read" => {
             let fp = v.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
             shorten_path(fp).to_string()
@@ -400,28 +437,14 @@ pub(in crate::services::discord) fn format_tool_input(name: &str, input: &str) -
                 .or_else(|| v.get("limit"))
                 .and_then(|v| v.as_u64());
             if query.is_empty() {
-                compact_json_fallback(&v, input)
+                compact_json_fallback(&v)
             } else if let Some(limit) = limit {
                 format!("\"{}\" (limit {})", truncate_str(query, 150), limit)
             } else {
                 format!("\"{}\"", truncate_str(query, 180))
             }
         }
-        "Monitor" => {
-            let desc = v.get("description").and_then(|v| v.as_str()).unwrap_or("");
-            let cmd = v.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            if !desc.is_empty() {
-                if !cmd.is_empty() {
-                    format!("{}: `{}`", desc, truncate_str(cmd, 150))
-                } else {
-                    desc.to_string()
-                }
-            } else if !cmd.is_empty() {
-                format!("`{}`", truncate_str(cmd, 180))
-            } else {
-                compact_json_fallback(&v, input)
-            }
-        }
+        "Monitor" => format_command_tool_input(&v),
         "Task" | "Agent" => {
             let desc = v.get("description").and_then(|v| v.as_str()).unwrap_or("");
             let subagent_type = v
@@ -507,13 +530,17 @@ pub(in crate::services::discord) fn format_tool_input(name: &str, input: &str) -
                 // input (#2847) so pretty-printed JSON does not leak a bare
                 // `<short_name>: {` line through the live-event collapse.
                 let short_name = name.rsplit("__").next().unwrap_or(name);
-                let compact = serde_json::to_string(&v).unwrap_or_else(|_| input.to_string());
-                truncate_str(&format!("{}: {}", short_name, compact), 200).to_string()
+                let compact =
+                    crate::utils::redact::serialize_json_with_redacted_cookie_headers(&v, "***");
+                let redacted =
+                    redact_sensitive_for_placeholder(&format!("{}: {}", short_name, compact));
+                truncate_str(&redacted, 200).to_string()
             } else {
-                compact_json_fallback(&v, input)
+                compact_json_fallback(&v)
             }
         }
-    }
+    };
+    redact_sensitive_for_placeholder(&summary)
 }
 
 /// Convert markdown tables to Discord-friendly list format.

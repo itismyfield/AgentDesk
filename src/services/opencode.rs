@@ -287,6 +287,10 @@ fn is_auth_scheme_marker(token: &str) -> bool {
 /// public payload never carries this tail at all, so this is defense-in-depth
 /// for the authenticated/local surface.
 fn scrub_startup_secrets(raw: &str) -> String {
+    // Startup diagnostics are a separate authenticated/local projection rather
+    // than a tracing-log path, so apply the shared whole-cookie contract here
+    // explicitly before the existing token-aware assignment/auth scrubber.
+    let raw = crate::utils::redact::redact_cookie_headers(raw, "[REDACTED]");
     let mut out: Vec<String> = Vec::new();
     // When the previous token requested redaction of the following value
     // (`Basic`/`Bearer` scheme, or a secret key with the value in the next
@@ -3019,6 +3023,20 @@ mod tests {
         // A non-secret colon token (e.g. a URL) is left intact.
         let s = scrub_startup_secrets("listening http://127.0.0.1:8080 ready");
         assert!(s.contains("http://127.0.0.1:8080"), "mangled url: {s}");
+    }
+
+    #[test]
+    fn scrub_startup_secrets_redacts_entire_cookie_header_values() {
+        let s = scrub_startup_secrets(
+            "Cookie: sessionSecret trailing-data\nSet-Cookie: access=xyz; HttpOnly\nvisible",
+        );
+
+        assert!(s.contains("Cookie: [REDACTED]"), "got: {s}");
+        assert!(s.contains("Set-Cookie: [REDACTED]"), "got: {s}");
+        assert!(s.contains("visible"), "ordinary next line lost: {s}");
+        assert!(!s.contains("sessionSecret"), "cookie token leaked: {s}");
+        assert!(!s.contains("trailing-data"), "cookie tail leaked: {s}");
+        assert!(!s.contains("access=xyz"), "set-cookie leaked: {s}");
     }
 
     #[test]

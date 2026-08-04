@@ -201,16 +201,100 @@ fn events_from_json_redacts_and_normalizes_tool_use() {
 }
 
 #[test]
+fn events_from_json_redacts_cookie_headers_without_leaking_the_first_token() {
+    let events = events_from_json(&json!({
+        "type": "assistant",
+        "message": {
+            "content": [{
+                "type": "tool_use",
+                "name": "Bash",
+                "input": {"command": "Cookie: sessionSecret trailing-data"}
+            }]
+        }
+    }));
+
+    assert_eq!(events.len(), 1);
+    let line = events[0].render_line();
+    assert!(line.contains("Cookie: ***"), "rendered line: {line}");
+    assert!(!line.contains("sessionSecret"));
+    assert!(!line.contains("trailing-data"));
+}
+
+#[test]
+fn events_from_json_redacts_curl_attached_cookie_header_option() {
+    let events = events_from_json(&json!({
+        "type": "assistant",
+        "message": {
+            "content": [{
+                "type": "tool_use",
+                "name": "Bash",
+                "input": {"command": "curl -HCookie:session=secret https://example.test"}
+            }]
+        }
+    }));
+
+    assert_eq!(events.len(), 1);
+    let line = events[0].render_line();
+    assert!(line.contains("-HCookie:***"));
+    assert!(!line.contains("session=secret"));
+}
+
+#[test]
+fn events_from_json_redacts_quoted_curl_headers_for_bash_aliases() {
+    for name in [
+        "bash",
+        "command_execution",
+        "exec",
+        "exec_command",
+        "run_cmd",
+        "shell_command",
+    ] {
+        let command_key = if name == "exec_command" || name == "shell_command" {
+            "cmd"
+        } else {
+            "command"
+        };
+        let events = events_from_json(&json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "name": name,
+                    "input": {
+                        command_key: "curl -H 'Cookie: session=alias-secret' https://example.test",
+                        "description": "Cookie: description-secret"
+                    }
+                }]
+            }
+        }));
+
+        assert_eq!(events.len(), 1, "tool alias: {name}");
+        let line = events[0].render_line();
+        assert!(line.starts_with("[Bash]"), "tool alias {name}: {line}");
+        assert!(line.contains("Cookie: ***"), "tool alias {name}: {line}");
+        assert!(!line.contains("alias-secret"), "tool alias {name}: {line}");
+        assert!(
+            !line.contains("description-secret"),
+            "tool alias {name}: {line}"
+        );
+    }
+}
+
+#[test]
 fn redact_sensitive_for_placeholder_masks_required_patterns() {
     let redacted = redact_sensitive_for_placeholder(
-        "sk-abcdefghijklmnopqrstuvwxyz \
-         Authorization: Bearer live-token \
-         password=hunter2 token=secret api_key=key1 api-key=key2 \
+        "sk-abcdefghijklmnopqrstuvwxyz\n\
+         Authorization: Bearer live-token\n\
+         Cookie: sessionSecret trailing-data\n\
+         Set-Cookie: access=xyz;HttpOnly\n\
+         password=hunter2 token=secret api_key=key1 api-key=key2\n\
          alice@example.com",
     );
 
     assert!(redacted.contains("***"));
     assert!(redacted.contains("Bearer ***"));
+    assert!(redacted.contains("Cookie: ***"));
+    assert!(redacted.contains("Set-Cookie: ***"));
     assert!(redacted.contains("password=***"));
     assert!(redacted.contains("token=***"));
     assert!(redacted.contains("api_key=***"));
@@ -218,6 +302,9 @@ fn redact_sensitive_for_placeholder_masks_required_patterns() {
     assert!(redacted.contains("***@***"));
     assert!(!redacted.contains("sk-abcdefghijklmnopqrstuvwxyz"));
     assert!(!redacted.contains("live-token"));
+    assert!(!redacted.contains("sessionSecret"));
+    assert!(!redacted.contains("trailing-data"));
+    assert!(!redacted.contains("access=xyz"));
     assert!(!redacted.contains("hunter2"));
     assert!(!redacted.contains("alice@example.com"));
     assert!(!redacted.contains("secret"));
@@ -6684,6 +6771,95 @@ fn tool_use_unknown_pretty_json_falls_back_to_compact_not_brace() {
         .render_line();
     assert!(!line.trim_end().ends_with('{'), "got: {line}");
     assert!(line.contains("some_field"), "got: {line}");
+}
+
+#[test]
+fn compact_json_tool_summaries_redact_nested_cookie_strings_before_serializing() {
+    let pretty = serde_json::to_string_pretty(&json!({
+        "a": ["curl --cookie option=json-secret-two https://e.test"],
+        "b": "Cookie: session=json-secret",
+        "z": "X-Cookie: visible"
+    }))
+    .unwrap();
+
+    for tool_name in ["SomeUnknownTool", "mcp__vault__inspect"] {
+        let line = RecentPlaceholderEvent::tool_use(tool_name, &pretty)
+            .expect("non-empty summary")
+            .render_line();
+        assert!(line.contains("Cookie: ***"), "got: {line}");
+        assert!(line.contains("--cookie ***"), "got: {line}");
+        assert!(line.contains("X-Cookie: visible"), "got: {line}");
+        assert!(!line.contains("json-secret"), "got: {line}");
+    }
+}
+
+#[test]
+fn compact_json_tool_summaries_redact_cookie_header_map_and_pair_values() {
+    let pretty = serde_json::to_string_pretty(&json!({
+        "headers": {
+            "Cookie": "map-secret-one",
+            "Set-Cookie": ["map-secret-two"],
+            "X-Cookie": "visible"
+        },
+        "header_pairs": [
+            ["Cookie", "pair-secret-three"],
+            ["Set-Cookie", ["pair-secret-four"]],
+            ["X-Cookie", "pair-visible"]
+        ]
+    }))
+    .unwrap();
+
+    for tool_name in ["SomeUnknownTool", "mcp__vault__inspect"] {
+        let line = RecentPlaceholderEvent::tool_use(tool_name, &pretty)
+            .expect("non-empty summary")
+            .render_line();
+        assert!(line.contains("***"), "got: {line}");
+        assert!(line.contains("X-Cookie"), "got: {line}");
+        assert!(line.contains("pair-visible"), "got: {line}");
+        assert!(!line.contains("map-secret"), "got: {line}");
+        assert!(!line.contains("pair-secret"), "got: {line}");
+    }
+}
+
+#[test]
+fn command_tool_summaries_redact_curl_header_and_cookie_option_spellings() {
+    let commands = [
+        "curl -sHCookie:cluster-secret https://example.test",
+        "curl --header 'Cookie: long-header-secret' https://example.test",
+        "curl --cookie cookie-option-secret https://example.test",
+        "curl -sb$'ansi-cookie-secret' https://example.test",
+    ];
+
+    for command in commands {
+        let input = json!({ "command": command }).to_string();
+        let line = RecentPlaceholderEvent::tool_use("Bash", &input)
+            .expect("non-empty summary")
+            .render_line();
+        assert!(line.contains("***"), "got: {line}");
+        assert!(line.contains("https://example.test"), "got: {line}");
+        assert!(!line.contains("secret"), "got: {line}");
+    }
+}
+
+#[test]
+fn monitor_tool_summaries_redact_command_fields_before_markdown() {
+    let inputs = [
+        json!({ "command": "Cookie: session=monitor-one" }).to_string(),
+        json!({
+            "description": "Cookie: session=monitor-description",
+            "command": "curl --cookie session=monitor-two https://example.test"
+        })
+        .to_string(),
+    ];
+
+    for input in inputs {
+        let line = RecentPlaceholderEvent::tool_use("Monitor", &input)
+            .expect("non-empty summary")
+            .render_line();
+        assert!(line.starts_with("[Monitor]"), "got: {line}");
+        assert!(line.contains("***"), "got: {line}");
+        assert!(!line.contains("monitor-"), "got: {line}");
+    }
 }
 
 #[test]

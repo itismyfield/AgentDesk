@@ -16,6 +16,126 @@ static AUTH_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .unwrap()
 });
+static COOKIE_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // Cookie values have no authentication-scheme prefix. Preserve only the
+    // header name, colon, and surrounding horizontal whitespace, then mask the
+    // entire value. Reusing the Authorization prefix rule here would leak the
+    // first whitespace-delimited cookie token as a false "scheme".
+    //
+    // Match the same RFC 7230 obs-fold shapes as AUTH_HEADER_RE while leaving
+    // an ordinary unindented following line untouched.
+    // The leading boundary rejects every RFC `tchar`, preventing a suffix
+    // match inside distinct names such as `X-Cookie` or `CookieJar`. Quoted
+    // header arguments are handled by quote-aware rules below so the closing
+    // delimiter and following shell command are not consumed as header value.
+    // Multiline mode lets `^` recognize each header line.
+    Regex::new(
+        r#"(?im)((?:^|[^"!#$%&'*+.^_`|~a-z0-9=\-\r\n])(?:set-cookie|cookie)[ \t]*:[ \t]*)(?:[^\r\n]+(?:\r?\n[ \t]+[^\r\n]+)*|(?:\r?\n[ \t]+[^\r\n]+)+)"#,
+    )
+    .unwrap()
+});
+const HEADER_OPTION_PATTERN: &str =
+    r"(?:-[A-Za-z]*?H[ \t]*(?:\\\r?\n[ \t]*)*|(?i:--header)(?:[ \t]+|=[ \t]*)(?:\\\r?\n[ \t]*)*)";
+const CURL_COOKIE_OPTION_PATTERN: &str =
+    r"(?:-[A-Za-z]*?b[ \t]*(?:\\\r?\n[ \t]*)*|(?i:--cookie)(?:[ \t]+|=[ \t]*)(?:\\\r?\n[ \t]*)*)";
+// A shell word can concatenate unquoted, single-quoted, double-quoted, and
+// ANSI-C-quoted fragments without whitespace. Backslash-newline is part of the
+// same logical word, and quoted fragments may contain literal newlines. Keep
+// this grammar shared so header and curl-cookie options cannot drift apart.
+const SHELL_WORD_FRAGMENT_PATTERN: &str = r#"(?:\\(?:\r?\n[ \t]*|[^\r\n])|[^ \t\r\n;&|()<>'"$\\]|'[^']*'|"(?:\\(?:\r?\n|[^\r\n])|[^"\\])*"|\$'(?:\\(?:\r?\n|[^\r\n])|[^'\\])*')"#;
+
+static SINGLE_QUOTED_COOKIE_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r"(?m)((?:^|[ \t;&|()<>])(?:{})?'(?i:set-cookie|cookie)[ \t]*:[ \t]*)[^']*('?)(?:{})*",
+        HEADER_OPTION_PATTERN, SHELL_WORD_FRAGMENT_PATTERN
+    ))
+    .unwrap()
+});
+static ANSI_C_QUOTED_COOKIE_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // Bash ANSI-C strings use `$'…'` and allow backslash escapes, including an
+    // escaped quote inside the header value. Keep this grammar separate from
+    // ordinary single quotes, where backslashes have no escape semantics.
+    Regex::new(&format!(
+        r"(?m)((?:^|[ \t;&|()<>])(?:{})?\$'(?i:set-cookie|cookie)[ \t]*:[ \t]*)(?:\\(?:\r?\n|[^\r\n])|[^'\\])*('?)(?:{})*",
+        HEADER_OPTION_PATTERN, SHELL_WORD_FRAGMENT_PATTERN
+    ))
+    .unwrap()
+});
+static DOUBLE_QUOTED_COOKIE_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r#"(?m)((?:^|[ \t;&|()<>])(?:{})?"(?i:set-cookie|cookie)[ \t]*:[ \t]*)(?:\\(?:\r?\n|[^\r\n])|[^"\\])*("?)(?:{})*"#,
+        HEADER_OPTION_PATTERN, SHELL_WORD_FRAGMENT_PATTERN
+    ))
+    .unwrap()
+});
+static COMMAND_UNQUOTED_COOKIE_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // curl accepts attached/clustered -H arguments and curl/wget share the
+    // long --header spelling. Keep this shell-word grammar separate from
+    // COOKIE_HEADER_RE: a real header extends to end-of-line and may obs-fold,
+    // while an unquoted command argument ends at an unescaped shell boundary.
+    Regex::new(&format!(
+        r#"(?m)((?:^|[ \t;&|()<>]){}(?i:set-cookie|cookie)[ \t]*:[ \t]*)(?:{})+"#,
+        HEADER_OPTION_PATTERN, SHELL_WORD_FRAGMENT_PATTERN
+    ))
+    .unwrap()
+});
+static SHELL_COOKIE_HEADER_OPTION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r#"(?m)(?:^|[ \t;&|()<>]){}(?:\$?'|")?(?i:set-cookie|cookie)[ \t]*:"#,
+        HEADER_OPTION_PATTERN
+    ))
+    .unwrap()
+});
+static CURL_COMMAND_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)(?:^|[ \t;&|()<>/'"\\])curl(?:\.exe)?(?:$|[ \t;&|()<>/'"\\])"#).unwrap()
+});
+static CURL_COOKIE_OPTION_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r"(?m)(?:^|[ \t;&|()<>]){}",
+        CURL_COOKIE_OPTION_PATTERN
+    ))
+    .unwrap()
+});
+static CURL_COOKIE_OPTION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r#"(?m)((?:^|[ \t;&|()<>]){})(?:\\[^\r\n]|[^ \t\r\n;&|()<>'"$\\])(?:{})*"#,
+        CURL_COOKIE_OPTION_PATTERN, SHELL_WORD_FRAGMENT_PATTERN
+    ))
+    .unwrap()
+});
+static SINGLE_QUOTED_CURL_COOKIE_OPTION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r"(?m)((?:^|[ \t;&|()<>]){}')[^']*('?)(?:{})*",
+        CURL_COOKIE_OPTION_PATTERN, SHELL_WORD_FRAGMENT_PATTERN
+    ))
+    .unwrap()
+});
+static ANSI_C_QUOTED_CURL_COOKIE_OPTION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r"(?m)((?:^|[ \t;&|()<>]){}\$')(?:\\(?:\r?\n|[^\r\n])|[^'\\])*('?)(?:{})*",
+        CURL_COOKIE_OPTION_PATTERN, SHELL_WORD_FRAGMENT_PATTERN
+    ))
+    .unwrap()
+});
+static DOUBLE_QUOTED_CURL_COOKIE_OPTION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r#"(?m)((?:^|[ \t;&|()<>]){}")(?:\\(?:\r?\n|[^\r\n])|[^"\\])*("?)(?:{})*"#,
+        CURL_COOKIE_OPTION_PATTERN, SHELL_WORD_FRAGMENT_PATTERN
+    ))
+    .unwrap()
+});
+static SENSITIVE_HEADER_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // Prefix-only detector for a relay tail that begins mid-line. It never
+    // materializes the matched value; callers use it only to decide whether an
+    // already-bounded partial line must be dropped. Quotes are accepted as
+    // shell delimiters, including clustered/long curl header options, so
+    // `X-Cookie` remains distinct from a sensitive header name.
+    Regex::new(&format!(
+        r#"(?m)(?:^|[^!#$%&*+.^_`|~a-z0-9\-])(?:(?i:authorization|set-cookie|cookie)[ \t]*:|{}(?:\$?'|")?(?i:set-cookie|cookie)[ \t]*:)"#,
+        HEADER_OPTION_PATTERN
+    ))
+    .unwrap()
+});
 // Capture group 1 = key (+ optional surrounding `"`/`'` quote) + `=`/`:`
 // separator; group 2 = the value, EITHER a quoted string (whole body incl.
 // inner spaces, escape-aware so a `\"` inside cannot end the match early and
@@ -119,6 +239,232 @@ pub(crate) fn register_common_env_secrets() {
     }
 }
 
+fn replace_header_value(input: &str, regex: &Regex, marker: &str) -> String {
+    regex
+        .replace_all(input, |captures: &regex::Captures<'_>| {
+            let prefix = captures.get(1).map(|m| m.as_str()).unwrap_or_default();
+            format!("{prefix}{marker}")
+        })
+        .into_owned()
+}
+
+fn replace_quoted_header_value(input: &str, regex: &Regex, marker: &str) -> String {
+    regex
+        .replace_all(input, |captures: &regex::Captures<'_>| {
+            let prefix = captures.get(1).map(|m| m.as_str()).unwrap_or_default();
+            let closing_quote = captures.get(2).map(|m| m.as_str()).unwrap_or_default();
+            format!("{prefix}{marker}{closing_quote}")
+        })
+        .into_owned()
+}
+
+fn shell_line_continues(line: &str) -> bool {
+    let trimmed = line.trim_end_matches(['\r', '\n']).trim_end();
+    trimmed
+        .as_bytes()
+        .iter()
+        .rev()
+        .take_while(|&&byte| byte == b'\\')
+        .count()
+        % 2
+        == 1
+}
+
+fn redact_curl_cookie_option_chunk(input: &str, marker: &str) -> String {
+    let redacted = replace_quoted_header_value(input, &ANSI_C_QUOTED_CURL_COOKIE_OPTION_RE, marker);
+    let redacted =
+        replace_quoted_header_value(&redacted, &SINGLE_QUOTED_CURL_COOKIE_OPTION_RE, marker);
+    let redacted =
+        replace_quoted_header_value(&redacted, &DOUBLE_QUOTED_CURL_COOKIE_OPTION_RE, marker);
+    replace_header_value(&redacted, &CURL_COOKIE_OPTION_RE, marker)
+}
+
+fn redact_curl_cookie_options(input: &str, marker: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut logical_command = String::new();
+    let mut contains_curl = false;
+
+    let flush = |output: &mut String, command: &mut String, contains_curl: bool| {
+        if contains_curl {
+            output.push_str(&redact_curl_cookie_option_chunk(command, marker));
+        } else {
+            output.push_str(command);
+        }
+        command.clear();
+    };
+
+    for line in input.split_inclusive('\n') {
+        contains_curl |= CURL_COMMAND_RE.is_match(line);
+        logical_command.push_str(line);
+        if shell_line_continues(line) {
+            continue;
+        }
+
+        flush(&mut output, &mut logical_command, contains_curl);
+        contains_curl = false;
+    }
+
+    if !logical_command.is_empty() {
+        flush(&mut output, &mut logical_command, contains_curl);
+    }
+
+    output
+}
+
+fn replace_generic_cookie_headers(input: &str, marker: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0;
+
+    // The specialized passes have already sanitized curl header arguments.
+    // Protect only their option/header prefix from the generic header matcher:
+    // the value and every surrounding span stay visible to generic matching,
+    // so a distinct Cookie header on the same physical line cannot be skipped.
+    for option_prefix in SHELL_COOKIE_HEADER_OPTION_RE.find_iter(input) {
+        output.push_str(&replace_header_value(
+            &input[cursor..option_prefix.start()],
+            &COOKIE_HEADER_RE,
+            marker,
+        ));
+        output.push_str(option_prefix.as_str());
+        cursor = option_prefix.end();
+    }
+    output.push_str(&replace_header_value(
+        &input[cursor..],
+        &COOKIE_HEADER_RE,
+        marker,
+    ));
+    output
+}
+
+/// Redact sensitive HTTP header values while preserving useful header context.
+///
+/// Authorization keeps a recognized authentication scheme (for example,
+/// `Bearer`) so diagnostics remain actionable. Cookie and Set-Cookie values are
+/// always masked in full because their first token is secret material, not a
+/// scheme. `marker` lets each presentation surface retain its existing
+/// redaction vocabulary without duplicating the parsing rules.
+pub(crate) fn redact_sensitive_headers(input: &str, marker: &str) -> String {
+    let redacted = replace_header_value(input, &AUTH_HEADER_RE, marker);
+    redact_cookie_headers(&redacted, marker)
+}
+
+/// Redact Cookie and Set-Cookie values without applying Authorization parsing.
+///
+/// Compact command renderers use their own token-aware Authorization display
+/// rules, but still share this stricter whole-cookie contract.
+pub(crate) fn redact_cookie_headers(input: &str, marker: &str) -> String {
+    let redacted = replace_quoted_header_value(input, &ANSI_C_QUOTED_COOKIE_HEADER_RE, marker);
+    let redacted = replace_quoted_header_value(&redacted, &SINGLE_QUOTED_COOKIE_HEADER_RE, marker);
+    let redacted = replace_quoted_header_value(&redacted, &DOUBLE_QUOTED_COOKIE_HEADER_RE, marker);
+    let redacted = replace_header_value(&redacted, &COMMAND_UNQUOTED_COOKIE_HEADER_RE, marker);
+    let redacted = redact_curl_cookie_options(&redacted, marker);
+    replace_generic_cookie_headers(&redacted, marker)
+}
+
+pub(crate) fn contains_sensitive_header_prefix(input: &str) -> bool {
+    SENSITIVE_HEADER_PREFIX_RE.is_match(input)
+        || (CURL_COMMAND_RE.is_match(input) && CURL_COOKIE_OPTION_PREFIX_RE.is_match(input))
+}
+
+fn is_cookie_header_name(name: &str) -> bool {
+    let name = name.trim();
+    name.eq_ignore_ascii_case("cookie") || name.eq_ignore_ascii_case("set-cookie")
+}
+
+/// Serialize a JSON value compactly after redacting Cookie-bearing strings.
+///
+/// Redacting before serialization avoids JSON quote/escape boundaries blocking
+/// the text matcher. Cookie/Set-Cookie map values and contextual array values
+/// (for example `["Cookie", "session=secret"]`) are opaque credentials even
+/// when the value itself lacks a header prefix. Writing directly to the output
+/// also avoids cloning the complete Value, and sanitizes object keys without
+/// key-collision loss.
+pub(crate) fn serialize_json_with_redacted_cookie_headers(
+    value: &serde_json::Value,
+    marker: &str,
+) -> String {
+    fn push_redacted_cookie_value(output: &mut String, value: &serde_json::Value, marker: &str) {
+        match value {
+            // Header maps commonly represent repeated Set-Cookie values as an
+            // array. Preserve its arity for useful diagnostics while treating
+            // every element as credential material. Objects remain opaque as a
+            // whole because their keys can themselves contain cookie data.
+            serde_json::Value::Array(values) => {
+                output.push('[');
+                for (index, value) in values.iter().enumerate() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    push_redacted_cookie_value(output, value, marker);
+                }
+                output.push(']');
+            }
+            _ => output.push_str(
+                &serde_json::to_string(marker).expect("serializing a JSON marker cannot fail"),
+            ),
+        }
+    }
+
+    fn push_value(output: &mut String, value: &serde_json::Value, marker: &str) {
+        match value {
+            serde_json::Value::Null => output.push_str("null"),
+            serde_json::Value::Bool(value) => {
+                output.push_str(if *value { "true" } else { "false" })
+            }
+            serde_json::Value::Number(value) => output.push_str(&value.to_string()),
+            serde_json::Value::String(value) => {
+                let redacted = redact_cookie_headers(value, marker);
+                output.push_str(
+                    &serde_json::to_string(&redacted)
+                        .expect("serializing a JSON string cannot fail"),
+                );
+            }
+            serde_json::Value::Array(values) => {
+                output.push('[');
+                for (index, value) in values.iter().enumerate() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    let follows_cookie_header_name = index
+                        .checked_sub(1)
+                        .and_then(|previous| values[previous].as_str())
+                        .is_some_and(is_cookie_header_name);
+                    if follows_cookie_header_name {
+                        push_redacted_cookie_value(output, value, marker);
+                    } else {
+                        push_value(output, value, marker);
+                    }
+                }
+                output.push(']');
+            }
+            serde_json::Value::Object(values) => {
+                output.push('{');
+                for (index, (key, value)) in values.iter().enumerate() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    let redacted_key = redact_cookie_headers(key, marker);
+                    output.push_str(
+                        &serde_json::to_string(&redacted_key)
+                            .expect("serializing a JSON object key cannot fail"),
+                    );
+                    output.push(':');
+                    if is_cookie_header_name(key) {
+                        push_redacted_cookie_value(output, value, marker);
+                    } else {
+                        push_value(output, value, marker);
+                    }
+                }
+                output.push('}');
+            }
+        }
+    }
+
+    let mut output = String::new();
+    push_value(&mut output, value, marker);
+    output
+}
+
 pub(crate) fn redact_known_secrets(input: &str) -> String {
     // Mask whole PEM private-key blocks first so later single-token rules cannot
     // leave the key body behind, and so the registered-secret pass is unaffected.
@@ -126,7 +472,7 @@ pub(crate) fn redact_known_secrets(input: &str) -> String {
     let redacted = POSTGRES_DSN_RE.replace_all(&redacted, |captures: &regex::Captures<'_>| {
         mask_dsn_password(captures.get(0).map(|m| m.as_str()).unwrap_or_default())
     });
-    let redacted = AUTH_HEADER_RE.replace_all(&redacted, "${1}***");
+    let redacted = redact_sensitive_headers(&redacted, "***");
     let mut redacted = ASSIGNMENT_RE
         .replace_all(&redacted, |captures: &regex::Captures<'_>| {
             let key_sep = captures.get(1).map(|m| m.as_str()).unwrap_or_default();
@@ -169,8 +515,9 @@ pub(crate) fn redact_known_secrets(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        dsn_password, mask_dsn_password, redact_known_secrets, register_known_secret,
-        register_secret_or_dsn,
+        contains_sensitive_header_prefix, dsn_password, mask_dsn_password, redact_known_secrets,
+        redact_sensitive_headers, register_known_secret, register_secret_or_dsn,
+        serialize_json_with_redacted_cookie_headers,
     };
 
     fn redact_known_secret(input: &str) -> String {
@@ -216,6 +563,425 @@ mod tests {
         assert!(!redacted.contains("plain-secret"), "leaked: {redacted}");
         assert!(redacted.contains("authorization: ***"));
         assert!(redacted.contains("visible next line"));
+    }
+
+    #[test]
+    fn cookie_headers_mask_the_entire_value_without_treating_a_token_as_a_scheme() {
+        let redacted = redact_known_secrets(
+            "Cookie: session=abc; theme=dark\n\
+             set-cookie\t:\taccess=xyz; HttpOnly; Secure\n\
+             COOKIE: sessionSecret trailing-data\n\
+             visible next line",
+        );
+
+        assert!(redacted.contains("Cookie: ***"));
+        assert!(redacted.contains("set-cookie\t:\t***"));
+        assert!(redacted.contains("COOKIE: ***"));
+        assert!(redacted.contains("visible next line"));
+        for secret in [
+            "session=abc",
+            "theme=dark",
+            "access=xyz",
+            "sessionSecret",
+            "trailing-data",
+        ] {
+            assert!(
+                !redacted.contains(secret),
+                "cookie leak ({secret}): {redacted}"
+            );
+        }
+    }
+
+    #[test]
+    fn folded_cookie_headers_are_fully_masked_without_consuming_the_next_header() {
+        let redacted = redact_known_secrets(
+            "Cookie: first=secret\r\n second=secret-two\nX-Trace: visible\n\
+             Set-Cookie:\r\n session=empty-first-line\nContent-Type: text/plain",
+        );
+
+        assert!(redacted.contains("Cookie: ***\nX-Trace: visible"));
+        assert!(redacted.contains("Set-Cookie:***\nContent-Type: text/plain"));
+        assert!(!redacted.contains("first=secret"));
+        assert!(!redacted.contains("second=secret-two"));
+        assert!(!redacted.contains("session=empty-first-line"));
+    }
+
+    #[test]
+    fn sensitive_header_redaction_supports_surface_specific_markers() {
+        let redacted = redact_sensitive_headers(
+            "Authorization: Bearer auth-secret\nCookie: cookie-secret",
+            "[REDACTED]",
+        );
+
+        assert_eq!(
+            redacted,
+            "Authorization: Bearer [REDACTED]\nCookie: [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn cookie_header_names_do_not_match_distinct_header_suffixes() {
+        let redacted = redact_known_secrets(
+            "X-Cookie: visible-one\nCookieJar: visible-two\nX-Set-Cookie: visible-three",
+        );
+
+        assert_eq!(
+            redacted,
+            "X-Cookie: visible-one\nCookieJar: visible-two\nX-Set-Cookie: visible-three"
+        );
+    }
+
+    #[test]
+    fn attached_curl_header_option_redacts_cookie_without_matching_distinct_names() {
+        let redacted = redact_sensitive_headers(
+            "curl -HCookie:session=secret -HSet-Cookie:access=secret-two -HX-Cookie:visible-one -HCookieJar:visible-two",
+            "***",
+        );
+
+        assert!(redacted.contains("-HCookie:***"));
+        assert!(redacted.contains("-HSet-Cookie:***"));
+        assert!(redacted.contains("-HX-Cookie:visible-one"));
+        assert!(redacted.contains("-HCookieJar:visible-two"));
+        assert!(!redacted.contains("session=secret"));
+        assert!(!redacted.contains("access=secret-two"));
+    }
+
+    #[test]
+    fn quoted_cookie_header_arguments_preserve_delimiters_and_following_command() {
+        let redacted = redact_sensitive_headers(
+            "curl -H 'Cookie: session=secret one' -H\"Set-Cookie: access=secret-two\" https://example.test && echo done; printf 'X-Cookie: visible'",
+            "***",
+        );
+
+        assert!(redacted.contains("-H 'Cookie: ***'"));
+        assert!(redacted.contains("-H\"Set-Cookie: ***\""));
+        assert!(redacted.contains("https://example.test && echo done"));
+        assert!(redacted.contains("'X-Cookie: visible'"));
+        assert!(!redacted.contains("session=secret"));
+        assert!(!redacted.contains("access=secret-two"));
+    }
+
+    #[test]
+    fn adjacent_shell_word_fragments_are_consumed_with_quoted_cookie_values() {
+        let redacted = redact_sensitive_headers(
+            r#"curl -H 'Cookie: 'session=adjacent-one https://one.test
+curl --header="Set-Cookie: "access=adjacent-two https://two.test
+curl -H $'Cookie: 'session=adjacent-three https://three.test
+curl --cookie 'session='adjacent-four https://four.test"#,
+            "***",
+        );
+
+        assert!(redacted.contains("-H 'Cookie: ***'"));
+        assert!(redacted.contains("--header=\"Set-Cookie: ***\""));
+        assert!(redacted.contains("-H $'Cookie: ***'"));
+        assert!(redacted.contains("--cookie '***'"));
+        for url in [
+            "https://one.test",
+            "https://two.test",
+            "https://three.test",
+            "https://four.test",
+        ] {
+            assert!(redacted.contains(url), "missing URL ({url}): {redacted}");
+        }
+        assert!(!redacted.contains("adjacent-"), "got: {redacted}");
+    }
+
+    #[test]
+    fn ansi_c_quoted_cookie_headers_preserve_delimiters_and_following_command() {
+        let redacted = redact_sensitive_headers(
+            r#"curl -H $'Cookie: session=secret\'tail=secret-two' -H$'Set-Cookie: access=secret-three' -H $'X-Cookie: visible' https://example.test && echo done"#,
+            "***",
+        );
+
+        assert!(redacted.contains("-H $'Cookie: ***'"));
+        assert!(redacted.contains("-H$'Set-Cookie: ***'"));
+        assert!(redacted.contains("-H $'X-Cookie: visible'"));
+        assert!(redacted.contains("https://example.test && echo done"));
+        assert!(!redacted.contains("session=secret"));
+        assert!(!redacted.contains("tail=secret-two"));
+        assert!(!redacted.contains("access=secret-three"));
+    }
+
+    #[test]
+    fn curl_header_option_spellings_share_whole_cookie_redaction() {
+        let redacted = redact_sensitive_headers(
+            r#"curl -sHCookie:cluster-secret --header 'Set-Cookie: long-secret' --header=$'Cookie: ansi-secret\'tail-secret' --header="Cookie: double-secret" --header=Cookie:equals-secret -HX-Cookie:visible https://example.test"#,
+            "***",
+        );
+
+        assert!(redacted.contains("-sHCookie:***"));
+        assert!(redacted.contains("--header 'Set-Cookie: ***'"));
+        assert!(redacted.contains("--header=$'Cookie: ***'"));
+        assert!(redacted.contains("--header=\"Cookie: ***\""));
+        assert!(redacted.contains("--header=Cookie:***"));
+        assert!(
+            redacted.contains("-HX-Cookie:visible"),
+            "distinct header was changed: {redacted}"
+        );
+        assert!(redacted.contains("https://example.test"));
+        for secret in [
+            "cluster-secret",
+            "long-secret",
+            "ansi-secret",
+            "tail-secret",
+            "double-secret",
+            "equals-secret",
+        ] {
+            assert!(
+                !redacted.contains(secret),
+                "cookie leak ({secret}): {redacted}"
+            );
+        }
+    }
+
+    #[test]
+    fn curl_cookie_data_options_are_redacted_without_matching_unrelated_flags() {
+        let redacted = redact_sensitive_headers(
+            "curl --cookie session=one -b \"access=two\" -sb$'third=three\\'tail=four' --cookie='fifth=five' --cookie=sixth=six --cookie-jar visible.jar -c visible-two.jar https://example.test\nother -b visible-non-curl",
+            "***",
+        );
+
+        assert!(redacted.contains("--cookie ***"));
+        assert!(redacted.contains("-b \"***\""));
+        assert!(
+            redacted.contains("-sb$'***'"),
+            "ANSI-C delimiter was changed: {redacted}"
+        );
+        assert!(redacted.contains("--cookie='***'"));
+        assert!(redacted.contains("--cookie=***"));
+        assert!(redacted.contains("--cookie-jar visible.jar"));
+        assert!(redacted.contains("-c visible-two.jar"));
+        assert!(redacted.contains("other -b visible-non-curl"));
+        assert!(redacted.contains("https://example.test"));
+        for secret in [
+            "session=one",
+            "access=two",
+            "third=three",
+            "tail=four",
+            "fifth=five",
+            "sixth=six",
+        ] {
+            assert!(
+                !redacted.contains(secret),
+                "cookie leak ({secret}): {redacted}"
+            );
+        }
+    }
+
+    #[test]
+    fn curl_cookie_data_options_follow_shell_line_continuations() {
+        let redacted = redact_sensitive_headers(
+            "curl --cookie \\\n session=continued-one https://one.test\ncurl -b \\\r\n \"access=continued-two\" https://two.test",
+            "***",
+        );
+
+        assert!(redacted.contains("--cookie \\\n ***"), "got: {redacted:?}");
+        assert!(redacted.contains("-b \\\r\n \"***\""), "got: {redacted:?}");
+        assert!(redacted.contains("https://one.test"), "got: {redacted:?}");
+        assert!(redacted.contains("https://two.test"), "got: {redacted:?}");
+        assert!(!redacted.contains("continued-one"), "got: {redacted:?}");
+        assert!(!redacted.contains("continued-two"), "got: {redacted:?}");
+    }
+
+    #[test]
+    fn mixed_generic_and_curl_cookie_headers_are_all_redacted() {
+        let redacted = redact_sensitive_headers(
+            "Cookie: first=secret && curl -H 'Cookie: second=secret' https://one.test\ncurl -H Cookie:third=secret https://two.test && Cookie: fourth=secret",
+            "***",
+        );
+
+        assert!(redacted.contains("-H 'Cookie: ***'"));
+        assert!(redacted.contains("-H Cookie:***"));
+        assert!(redacted.contains("https://one.test"));
+        assert!(redacted.contains("https://two.test"));
+        for secret in [
+            "first=secret",
+            "second=secret",
+            "third=secret",
+            "fourth=secret",
+        ] {
+            assert!(
+                !redacted.contains(secret),
+                "mixed Cookie leak ({secret}): {redacted}"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_escaped_curl_header_arguments_redact_the_complete_word() {
+        let redacted = redact_sensitive_headers(
+            r"curl -H Cookie:\ session=escaped-one --header=Set-Cookie:access\ token=escaped-two https://example.test",
+            "***",
+        );
+
+        assert!(redacted.contains("-H Cookie:***"));
+        assert!(redacted.contains("--header=Set-Cookie:***"));
+        assert!(redacted.contains("https://example.test"));
+        assert!(!redacted.contains("escaped-one"));
+        assert!(!redacted.contains("escaped-two"));
+    }
+
+    #[test]
+    fn unquoted_cookie_header_values_accept_continuations_and_quoted_first_fragments() {
+        let redacted = redact_sensitive_headers(
+            "curl -H Cookie:\\\nsession=continued-one https://one.test\n\
+             curl -H Cookie:'session=quoted-two' https://two.test\n\
+             wget --header=Set-Cookie:\\\r\n\"access=continued-three\" https://three.test",
+            "***",
+        );
+
+        assert!(redacted.contains("-H Cookie:***"), "got: {redacted:?}");
+        assert!(
+            redacted.contains("--header=Set-Cookie:***"),
+            "got: {redacted:?}"
+        );
+        for url in ["https://one.test", "https://two.test", "https://three.test"] {
+            assert!(redacted.contains(url), "missing URL ({url}): {redacted:?}");
+        }
+        for secret in ["continued-one", "quoted-two", "continued-three"] {
+            assert!(
+                !redacted.contains(secret),
+                "continued Cookie leak ({secret}): {redacted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn multiline_quoted_cookie_header_arguments_are_redacted_as_one_shell_word() {
+        let redacted = redact_sensitive_headers(
+            "curl -H 'Cookie: session=multiline-one\ncontinued=multiline-two' https://one.test\n\
+             curl --header=\"Set-Cookie: access=multiline-three\ncontinued=multiline-four\" https://two.test\n\
+             curl -H $'Cookie: session=multiline-five\ncontinued=multiline-six' https://three.test",
+            "***",
+        );
+
+        assert!(redacted.contains("-H 'Cookie: ***'"), "got: {redacted:?}");
+        assert!(
+            redacted.contains("--header=\"Set-Cookie: ***\""),
+            "got: {redacted:?}"
+        );
+        assert!(redacted.contains("-H $'Cookie: ***'"), "got: {redacted:?}");
+        for url in ["https://one.test", "https://two.test", "https://three.test"] {
+            assert!(redacted.contains(url), "missing URL ({url}): {redacted:?}");
+        }
+        assert!(!redacted.contains("multiline-"), "got: {redacted:?}");
+    }
+
+    #[test]
+    fn wget_header_equals_arguments_share_cookie_redaction() {
+        let redacted = redact_sensitive_headers(
+            "wget --header=Cookie:session=wget-one --header='Set-Cookie: access=wget-two' https://example.test",
+            "***",
+        );
+
+        assert!(redacted.contains("--header=Cookie:***"));
+        assert!(redacted.contains("--header='Set-Cookie: ***'"));
+        assert!(redacted.contains("https://example.test"));
+        assert!(!redacted.contains("wget-one"));
+        assert!(!redacted.contains("wget-two"));
+    }
+
+    #[test]
+    fn compact_json_serialization_redacts_nested_cookie_strings_and_keys() {
+        let value = serde_json::json!({
+            "headers": "Cookie: json-secret",
+            "nested": ["curl --cookie option=json-secret-two https://example.test"],
+            "Cookie: key-secret": "Set-Cookie: value-secret",
+            "safe": "X-Cookie: visible"
+        });
+
+        let serialized = serialize_json_with_redacted_cookie_headers(&value, "***");
+        let reparsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+
+        assert!(serialized.contains("Cookie: ***"));
+        assert!(serialized.contains("--cookie ***"));
+        assert!(serialized.contains("X-Cookie: visible"));
+        assert!(reparsed.is_object());
+        for secret in [
+            "json-secret",
+            "json-secret-two",
+            "key-secret",
+            "value-secret",
+        ] {
+            assert!(
+                !serialized.contains(secret),
+                "JSON cookie leak ({secret}): {serialized}"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_json_serialization_redacts_values_owned_by_cookie_header_keys() {
+        let value = serde_json::json!({
+            "headers": {
+                "Cookie": "session=json-map-one",
+                "Set-Cookie": ["access=json-map-two"],
+                "cookie": {"nested": "json-map-three"},
+                "X-Cookie": "visible"
+            }
+        });
+
+        let serialized = serialize_json_with_redacted_cookie_headers(&value, "***");
+        let reparsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(reparsed["headers"]["Cookie"], "***");
+        assert_eq!(
+            reparsed["headers"]["Set-Cookie"],
+            serde_json::json!(["***"])
+        );
+        assert_eq!(reparsed["headers"]["cookie"], "***");
+        assert_eq!(reparsed["headers"]["X-Cookie"], "visible");
+        assert!(!serialized.contains("json-map-"), "got: {serialized}");
+    }
+
+    #[test]
+    fn compact_json_serialization_redacts_cookie_values_in_contextual_arrays() {
+        let value = serde_json::json!({
+            "headers": [
+                ["Cookie", "session=json-pair-one"],
+                ["set-cookie", ["access=json-pair-two", "refresh=json-pair-three"]],
+                ["X-Cookie", "visible"]
+            ],
+            "argv_style": ["Cookie", "session=json-argv-four", "safe"]
+        });
+
+        let serialized = serialize_json_with_redacted_cookie_headers(&value, "***");
+        let reparsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(reparsed["headers"][0], serde_json::json!(["Cookie", "***"]));
+        assert_eq!(
+            reparsed["headers"][1],
+            serde_json::json!(["set-cookie", ["***", "***"]])
+        );
+        assert_eq!(
+            reparsed["headers"][2],
+            serde_json::json!(["X-Cookie", "visible"])
+        );
+        assert_eq!(
+            reparsed["argv_style"],
+            serde_json::json!(["Cookie", "***", "safe"])
+        );
+        assert!(!serialized.contains("json-pair-"), "got: {serialized}");
+        assert!(!serialized.contains("json-argv-"), "got: {serialized}");
+    }
+
+    #[test]
+    fn sensitive_header_prefix_detector_distinguishes_suffix_names() {
+        assert!(contains_sensitive_header_prefix("Cookie: partial"));
+        assert!(contains_sensitive_header_prefix("curl -H'Cookie: partial"));
+        assert!(contains_sensitive_header_prefix("curl -sHCookie: partial"));
+        assert!(contains_sensitive_header_prefix(
+            "curl --header=$'Cookie: partial"
+        ));
+        assert!(contains_sensitive_header_prefix(
+            "curl --cookie session=partial"
+        ));
+        assert!(contains_sensitive_header_prefix(
+            "Authorization: Bearer partial"
+        ));
+        assert!(!contains_sensitive_header_prefix("X-Cookie: visible"));
+        assert!(!contains_sensitive_header_prefix("CookieJar: visible"));
+        assert!(!contains_sensitive_header_prefix("other -b visible"));
     }
 
     #[test]
