@@ -25,6 +25,7 @@ pub const OVERSIZE_BYTE_THRESHOLD: usize = 8 * 1024;
 /// downstream pipelines can grep for oversized outputs without reparsing.
 pub const TRUNCATION_MARKER: &str = "[tool_output_oversize:truncated]";
 const ERROR_EDGE_BYTES: usize = 1024;
+const ERROR_HEADER_CONTEXT_BYTES: usize = 64 * 1024;
 
 static OVERSIZE_COUNT: AtomicU64 = AtomicU64::new(0);
 static TOTAL_OUTPUT_BYTES: AtomicU64 = AtomicU64::new(0);
@@ -105,6 +106,68 @@ fn utf8_tail(content: &str, max_bytes: usize) -> &str {
     &content[start..]
 }
 
+fn bounded_redacted_error_tail(content: &str, max_bytes: usize) -> (String, usize) {
+    let raw_tail = utf8_tail(content, max_bytes);
+    let tail_start = content.len().saturating_sub(raw_tail.len());
+    let mut safe_tail = raw_tail;
+    let mut skipped = 0;
+
+    // A tail that begins in the middle of a physical line can be retained when
+    // its borrowed prefix proves it is not a sensitive header. The prefix-only
+    // scan is allocation-free; if a Cookie/Authorization header or obs-fold
+    // continuation began in the omitted region, fail closed by dropping the
+    // partial line.
+    if tail_start > 0 && content.as_bytes().get(tail_start.wrapping_sub(1)) != Some(&b'\n') {
+        let context_start = tail_start.saturating_sub(ERROR_HEADER_CONTEXT_BYTES);
+        let context = &content[context_start..tail_start];
+        let newline = context.rfind('\n');
+        let has_complete_line_prefix = context_start == 0 || newline.is_some();
+        let line_prefix = newline.map_or(context, |position| &context[position + 1..]);
+        let may_continue_sensitive_header = !has_complete_line_prefix
+            || line_prefix.starts_with([' ', '\t'])
+            || crate::utils::redact::contains_sensitive_header_prefix(line_prefix);
+        if may_continue_sensitive_header {
+            if let Some(line_end) = safe_tail.find('\n') {
+                skipped += line_end + 1;
+                safe_tail = &safe_tail[line_end + 1..];
+            } else {
+                return (
+                    "[… truncated partial line redacted …]".to_string(),
+                    raw_tail.len(),
+                );
+            }
+        }
+    }
+
+    // Leading indented physical lines may be obs-fold continuations of a
+    // sensitive header that began in the omitted region. Fail closed until the
+    // first non-continuation line, then apply the normal redactor to that bounded
+    // suffix only.
+    while safe_tail.starts_with([' ', '\t']) {
+        if let Some(line_end) = safe_tail.find('\n') {
+            skipped += line_end + 1;
+            safe_tail = &safe_tail[line_end + 1..];
+        } else {
+            skipped += safe_tail.len();
+            safe_tail = "";
+            break;
+        }
+    }
+
+    let redacted =
+        crate::services::discord::formatting::redact_sensitive_for_placeholder(safe_tail);
+    if skipped == 0 {
+        (redacted, 0)
+    } else if redacted.is_empty() {
+        ("[… truncated partial line redacted …]".to_string(), skipped)
+    } else {
+        (
+            format!("[… truncated partial line redacted …]\n{redacted}"),
+            skipped,
+        )
+    }
+}
+
 fn normalized_tool_key(name: &str) -> String {
     name.chars()
         .filter(|ch| ch.is_ascii_alphanumeric())
@@ -163,18 +226,21 @@ pub fn project_for_relay<'a>(
         };
     }
 
-    // Redact the complete error before taking bounded edges. Splitting first
-    // can separate a Cookie header name from the remainder of its value, which
-    // leaves the tail without enough context to recognize and mask the secret.
-    let redacted = crate::services::discord::formatting::redact_sensitive_for_placeholder(content);
-    let excerpt = if redacted.len() <= ERROR_EDGE_BYTES * 2 {
-        redacted
+    // Keep both allocation and regex work bounded. Line-heavy errors below the
+    // combined edge budget are sanitized once without duplicating overlapping
+    // head/tail slices. Larger errors use a trusted head plus a tail that drops
+    // an untrusted partial first line and leading obs-fold continuations.
+    let excerpt = if report.bytes <= ERROR_EDGE_BYTES * 2 {
+        crate::services::discord::formatting::redact_sensitive_for_placeholder(content)
     } else {
-        let head = utf8_head(&redacted, ERROR_EDGE_BYTES);
-        let tail = utf8_tail(&redacted, ERROR_EDGE_BYTES);
-        let omitted = redacted
-            .len()
-            .saturating_sub(head.len().saturating_add(tail.len()));
+        let raw_head = utf8_head(content, ERROR_EDGE_BYTES);
+        let head = crate::services::discord::formatting::redact_sensitive_for_placeholder(raw_head);
+        let raw_tail = utf8_tail(content, ERROR_EDGE_BYTES);
+        let (tail, skipped_tail_bytes) = bounded_redacted_error_tail(content, ERROR_EDGE_BYTES);
+        let omitted = report
+            .bytes
+            .saturating_sub(raw_head.len().saturating_add(raw_tail.len()))
+            .saturating_add(skipped_tail_bytes);
         format!("{head}\n… {omitted} bytes omitted …\n{tail}")
     };
     RelayOutputProjection {
@@ -304,5 +370,44 @@ mod tests {
         assert!(projection.content.contains("Cookie: ***"));
         assert!(projection.content.contains("visible tail"));
         assert!(!projection.content.contains("boundary-cookie-secret"));
+    }
+
+    #[test]
+    fn very_large_single_line_error_keeps_projection_memory_bounded() {
+        let raw = format!("Cookie: {}", "bulk-secret".repeat(100_000));
+
+        let projection = project_for_relay(Some("Bash"), true, &raw);
+
+        assert_eq!(
+            projection.disposition,
+            RelayOutputDisposition::SummarizeError
+        );
+        assert!(projection.content.len() < ERROR_EDGE_BYTES * 2 + 512);
+        assert!(projection.content.contains("Cookie: ***"));
+        assert!(
+            projection
+                .content
+                .contains("truncated partial line redacted")
+        );
+        assert!(!projection.content.contains("bulk-secret"));
+    }
+
+    #[test]
+    fn line_heavy_small_error_is_sanitized_once_without_overlapping_edges() {
+        let raw = (0..=OVERSIZE_LINE_THRESHOLD)
+            .map(|index| format!("line-{index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(raw.len() < ERROR_EDGE_BYTES * 2);
+
+        let projection = project_for_relay(Some("Bash"), true, &raw);
+
+        assert_eq!(
+            projection.disposition,
+            RelayOutputDisposition::SummarizeError
+        );
+        assert_eq!(projection.content.matches("line-0\n").count(), 1);
+        assert!(projection.content.ends_with("line-100"));
+        assert!(!projection.content.contains("bytes omitted"));
     }
 }

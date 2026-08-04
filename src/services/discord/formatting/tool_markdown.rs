@@ -302,31 +302,59 @@ pub(in crate::services::discord) fn shorten_path(path: &str) -> String {
 /// compactly removes the newlines so the fallback is always informative.
 fn compact_json_fallback(v: &serde_json::Value, raw: &str) -> String {
     let compact = serde_json::to_string(v).unwrap_or_else(|_| raw.to_string());
-    truncate_str(&compact, 200).to_string()
+    let redacted = redact_sensitive_for_placeholder(&compact);
+    truncate_str(&redacted, 200).to_string()
+}
+
+pub(in crate::services::discord) fn is_command_tool_name(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "bash" | "command_execution" | "exec" | "exec_command" | "run_cmd" | "shell_command"
+    )
+}
+
+fn format_command_tool_input(v: &serde_json::Value, raw: &str) -> String {
+    let desc = v
+        .get("description")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let cmd = v
+        .get("command")
+        .or_else(|| v.get("cmd"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    if desc.is_empty() && cmd.is_empty() {
+        return compact_json_fallback(v, raw);
+    }
+
+    // Sanitize every direct consumer field before truncation or Markdown
+    // delimiters can split/block the shared header matcher.
+    let desc = redact_sensitive_for_placeholder(desc);
+    let cmd = redact_sensitive_for_placeholder(cmd);
+    if !desc.is_empty() {
+        if cmd.is_empty() {
+            truncate_str(&desc, 200)
+        } else {
+            format!("{}: `{}`", truncate_str(&desc, 45), truncate_str(&cmd, 150))
+        }
+    } else {
+        format!("`{}`", truncate_str(&cmd, 200))
+    }
 }
 
 /// Format tool input JSON into a human-readable summary (without tool name prefix).
 /// The caller adds the tool name, so this returns only the detail part.
 pub(in crate::services::discord) fn format_tool_input(name: &str, input: &str) -> String {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(input) else {
-        return truncate_str(input, 200).to_string();
+        let redacted = redact_sensitive_for_placeholder(input);
+        return truncate_str(&redacted, 200).to_string();
     };
 
-    match name {
-        "Bash" => {
-            let desc = v.get("description").and_then(|v| v.as_str()).unwrap_or("");
-            let cmd = v.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            // Redact the complete command before truncation and Markdown code
-            // delimiters are added. A delimiter such as backtick is a valid
-            // RFC header-name `tchar`, so wrapping first would intentionally
-            // block the shared suffix-safe Cookie matcher.
-            let cmd = redact_sensitive_for_placeholder(cmd);
-            if !desc.is_empty() {
-                format!("{}: `{}`", desc, truncate_str(&cmd, 150))
-            } else {
-                format!("`{}`", truncate_str(&cmd, 200))
-            }
-        }
+    if is_command_tool_name(name) {
+        return format_command_tool_input(&v, input);
+    }
+
+    let summary = match name {
         "Read" => {
             let fp = v.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
             shorten_path(fp).to_string()
@@ -517,12 +545,15 @@ pub(in crate::services::discord) fn format_tool_input(name: &str, input: &str) -
                 // `<short_name>: {` line through the live-event collapse.
                 let short_name = name.rsplit("__").next().unwrap_or(name);
                 let compact = serde_json::to_string(&v).unwrap_or_else(|_| input.to_string());
-                truncate_str(&format!("{}: {}", short_name, compact), 200).to_string()
+                let redacted =
+                    redact_sensitive_for_placeholder(&format!("{}: {}", short_name, compact));
+                truncate_str(&redacted, 200).to_string()
             } else {
                 compact_json_fallback(&v, input)
             }
         }
-    }
+    };
+    redact_sensitive_for_placeholder(&summary)
 }
 
 /// Convert markdown tables to Discord-friendly list format.

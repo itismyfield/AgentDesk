@@ -1,6 +1,8 @@
 use serde_json::Value;
 
-use super::super::formatting::{canonical_tool_name, redact_sensitive_for_placeholder};
+use super::super::formatting::{
+    canonical_tool_name, is_command_tool_name, redact_sensitive_for_placeholder,
+};
 
 pub(super) const CHANNEL_EVENT_CAPACITY: usize = 20;
 pub(super) const EVENT_RENDER_LIMIT: usize = 5;
@@ -102,9 +104,11 @@ pub(super) fn tool_prefix(name: &str) -> &'static str {
         return "[MCP]";
     }
 
+    if is_command_tool_name(trimmed) || matches!(lower.as_str(), "bashoutput" | "killbash") {
+        return "[Bash]";
+    }
+
     match lower.as_str() {
-        "bash" | "bashoutput" | "killbash" | "command_execution" | "exec" | "exec_command"
-        | "run_cmd" => "[Bash]",
         "edit" | "multiedit" | "write" | "notebookedit" => "[Edit]",
         "read" => "[Read]",
         "grep" => "[Grep]",

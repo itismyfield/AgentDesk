@@ -240,6 +240,47 @@ fn events_from_json_redacts_curl_attached_cookie_header_option() {
 }
 
 #[test]
+fn events_from_json_redacts_quoted_curl_headers_for_bash_aliases() {
+    for name in [
+        "bash",
+        "command_execution",
+        "exec",
+        "exec_command",
+        "run_cmd",
+        "shell_command",
+    ] {
+        let command_key = if name == "exec_command" || name == "shell_command" {
+            "cmd"
+        } else {
+            "command"
+        };
+        let events = events_from_json(&json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "name": name,
+                    "input": {
+                        command_key: "curl -H 'Cookie: session=alias-secret' https://example.test",
+                        "description": "Cookie: description-secret"
+                    }
+                }]
+            }
+        }));
+
+        assert_eq!(events.len(), 1, "tool alias: {name}");
+        let line = events[0].render_line();
+        assert!(line.starts_with("[Bash]"), "tool alias {name}: {line}");
+        assert!(line.contains("Cookie: ***"), "tool alias {name}: {line}");
+        assert!(!line.contains("alias-secret"), "tool alias {name}: {line}");
+        assert!(
+            !line.contains("description-secret"),
+            "tool alias {name}: {line}"
+        );
+    }
+}
+
+#[test]
 fn redact_sensitive_for_placeholder_masks_required_patterns() {
     let redacted = redact_sensitive_for_placeholder(
         "sk-abcdefghijklmnopqrstuvwxyz\n\
