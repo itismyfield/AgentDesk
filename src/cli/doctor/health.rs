@@ -14,6 +14,19 @@ pub(crate) struct ClassifiedReason {
     pub(crate) next_step: String,
 }
 
+impl ClassifiedReason {
+    fn evidence(&self) -> Value {
+        json!({
+            "raw": self.raw,
+            "subsystem": self.subsystem,
+            "severity": self.severity.as_str(),
+            "fix_safety": self.fix_safety.as_str(),
+            "summary": self.summary,
+            "next_step": self.next_step,
+        })
+    }
+}
+
 fn startup_doctor_report_next_step() -> String {
     format!("inspect the startup doctor report via {LATEST_STARTUP_DOCTOR_ENDPOINT}")
 }
@@ -270,14 +283,7 @@ pub(crate) fn reasons_evidence(reasons: &[ClassifiedReason]) -> Value {
     json!({
         "degraded_reasons": reasons
             .iter()
-            .map(|reason| {
-                json!({
-                    "raw": reason.raw,
-                    "subsystem": reason.subsystem,
-                    "severity": reason.severity.as_str(),
-                    "next_step": reason.next_step,
-                })
-            })
+            .map(ClassifiedReason::evidence)
             .collect::<Vec<_>>()
     })
 }
@@ -288,8 +294,10 @@ pub(crate) fn is_loopback_base_url(base: &str) -> bool {
 
 #[cfg(test)]
 mod health_classification_tests {
+    use serde_json::json;
+
     use super::super::contract::{FixSafety, Severity};
-    use super::{LATEST_STARTUP_DOCTOR_ENDPOINT, classify_degraded_reason};
+    use super::{LATEST_STARTUP_DOCTOR_ENDPOINT, classify_degraded_reason, reasons_evidence};
 
     #[test]
     fn startup_doctor_reasons_point_to_latest_report_endpoint() {
@@ -382,6 +390,25 @@ mod health_classification_tests {
         assert_eq!(
             reason.next_step,
             "inspect global active counter tracking in dcserver logs"
+        );
+    }
+
+    #[test]
+    fn reasons_evidence_preserves_actionable_reason_contract() {
+        let reason = classify_degraded_reason("db_unavailable");
+
+        assert_eq!(
+            reasons_evidence(&[reason]),
+            json!({
+                "degraded_reasons": [{
+                    "raw": "db_unavailable",
+                    "subsystem": "postgres",
+                    "severity": "error",
+                    "fix_safety": "not_fixable",
+                    "summary": "database is unavailable",
+                    "next_step": "check Postgres/SQLite availability and server logs",
+                }]
+            })
         );
     }
 }
