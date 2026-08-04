@@ -1,3 +1,13 @@
+function inactiveInflightKvKeys(rows, prefix, activeInflightSet) {
+  var keys = [];
+  for (var index = 0; index < rows.length; index++) {
+    var key = rows[index] && rows[index].key;
+    if (typeof key !== "string" || key.indexOf(prefix) !== 0) continue;
+    if (!activeInflightSet[key.slice(prefix.length)]) keys.push(key);
+  }
+  return keys;
+}
+
 module.exports = function attachLongTurnMonitor(timeouts, helpers) {
   var sendDeadlockAlert = helpers.sendDeadlockAlert;
   var MAX_DISPATCH_RETRIES = helpers.MAX_DISPATCH_RETRIES;
@@ -154,7 +164,7 @@ module.exports = function attachLongTurnMonitor(timeouts, helpers) {
           agentdesk.log.warn("[long-turn] " + (inf.channel_name || inf.channel_id) + " — " + Math.round(elapsedMin) + "min (" + currentThreshold + "min threshold)");
         }
         // Pre-compute active inflight keys for O(1) lookups
-        var activeInflightSet = {};
+        var activeInflightSet = Object.create(null);
         for (var si = 0; si < inflights.length; si++) {
           if (inflights[si].provider && inflights[si].channel_id) {
             activeInflightSet[inflights[si].provider + ":" + inflights[si].channel_id] = true;
@@ -163,25 +173,21 @@ module.exports = function attachLongTurnMonitor(timeouts, helpers) {
 
         // Clean up tier keys for inflights that no longer exist
         var tierKeys = agentdesk.db.query("SELECT key FROM kv_meta WHERE key LIKE 'long_turn_tier:%'");
-        for (var tk = 0; tk < tierKeys.length; tk++) {
-          var parts = tierKeys[tk].key.split(":");
-          var tkProvider = parts[1];
-          var tkChannel = parts[2];
-          if (!activeInflightSet[tkProvider + ":" + tkChannel]) {
-            agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [tierKeys[tk].key]);
-          }
+        var tierKeysToDelete = inactiveInflightKvKeys(tierKeys, "long_turn_tier:", activeInflightSet);
+        if (tierKeysToDelete.length > 0) {
+          agentdesk.kv.deleteMany(tierKeysToDelete);
         }
         // Also clean up old cooldown keys
         agentdesk.db.execute("DELETE FROM kv_meta WHERE key LIKE 'long_turn_alert:%'");
 
         var extensionKeys = agentdesk.db.query("SELECT key FROM kv_meta WHERE key LIKE 'long_turn_watchdog_extension:%'");
-        for (var ek = 0; ek < extensionKeys.length; ek++) {
-          var eParts = extensionKeys[ek].key.split(":");
-          var eProvider = eParts[1];
-          var eChannel = eParts[2];
-          if (!activeInflightSet[eProvider + ":" + eChannel]) {
-            agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [extensionKeys[ek].key]);
-          }
+        var extensionKeysToDelete = inactiveInflightKvKeys(
+          extensionKeys,
+          "long_turn_watchdog_extension:",
+          activeInflightSet
+        );
+        if (extensionKeysToDelete.length > 0) {
+          agentdesk.kv.deleteMany(extensionKeysToDelete);
         }
       } catch(de) {
         agentdesk.log.warn("[long-turn] inflight scan error: " + de);

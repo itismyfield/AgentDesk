@@ -6,6 +6,7 @@ use sqlx::PgPool;
 // agentdesk.kv.set(key, value, ttlSeconds) — set with optional TTL
 // agentdesk.kv.get(key) → value or null (filters expired)
 // agentdesk.kv.delete(key) — delete a key
+// agentdesk.kv.deleteMany(keys) — delete exact keys with one array-bound query
 
 pub(super) fn register_kv_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
@@ -50,6 +51,19 @@ pub(super) fn register_kv_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> J
         })?,
     )?;
 
+    // PostgreSQL receives one TEXT[] bind parameter, so the number of keys
+    // cannot exhaust the scalar bind-parameter limit.
+    let pg_delete_many = pg_pool.clone();
+    kv_obj.set(
+        "__deleteManyRaw",
+        Function::new(ctx.clone(), move |keys_json: String| -> String {
+            if let Some(pool) = pg_delete_many.as_ref() {
+                return kv_delete_many_raw_pg(pool, &keys_json);
+            }
+            r#"{"error":"postgres backend is required for kv.deleteMany"}"#.to_string()
+        })?,
+    )?;
+
     ad.set("kv", kv_obj)?;
 
     // JS wrappers for optional TTL and null semantics
@@ -62,6 +76,14 @@ pub(super) fn register_kv_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> J
             agentdesk.kv.get = function(key) {
                 var r = JSON.parse(agentdesk.kv.__getRaw(key));
                 return r.found ? r.value : null;
+            };
+            agentdesk.kv.deleteMany = function(keys) {
+                if (!Array.isArray(keys)) {
+                    throw new TypeError("kv.deleteMany expects an array of keys");
+                }
+                var r = JSON.parse(agentdesk.kv.__deleteManyRaw(JSON.stringify(keys)));
+                if (r.error) throw new Error(r.error);
+                return r;
             };
         })();
     "#,
@@ -198,5 +220,62 @@ fn kv_delete_raw_pg(pool: &PgPool, key: &str) -> String {
     ) {
         Ok(result) => result,
         Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
+    }
+}
+
+fn parse_delete_many_keys(keys_json: &str) -> Result<Vec<String>, String> {
+    serde_json::from_str(keys_json)
+        .map_err(|error| format!("invalid keys for kv.deleteMany: {error}"))
+}
+
+fn kv_delete_many_raw_pg(pool: &PgPool, keys_json: &str) -> String {
+    let keys = match parse_delete_many_keys(keys_json) {
+        Ok(keys) => keys,
+        Err(error) => return serde_json::json!({ "error": error }).to_string(),
+    };
+    if keys.is_empty() {
+        return r#"{"ok":true,"deleted":0}"#.to_string();
+    }
+
+    match crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            let deleted = sqlx::query("DELETE FROM kv_meta WHERE key = ANY($1)")
+                .bind(&keys)
+                .execute(&bridge_pool)
+                .await
+                .map_err(|error| format!("bulk delete postgres kv_meta keys: {error}"))?
+                .rows_affected();
+            Ok(serde_json::json!({ "ok": true, "deleted": deleted }).to_string())
+        },
+        |error| serde_json::json!({ "error": error }).to_string(),
+    ) {
+        Ok(result) => result,
+        Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_delete_many_keys;
+
+    #[test]
+    fn delete_many_payload_is_not_limited_by_scalar_bind_count() {
+        let keys: Vec<String> = (0..65_536)
+            .map(|index| format!("long_turn_tier:codex:channel-{index}"))
+            .collect();
+        let payload = serde_json::to_string(&keys).expect("serialize delete-many keys");
+
+        let parsed = parse_delete_many_keys(&payload).expect("parse delete-many keys");
+
+        assert_eq!(parsed, keys);
+    }
+
+    #[test]
+    fn delete_many_payload_rejects_non_string_keys() {
+        let error = parse_delete_many_keys(r#"["valid",42]"#)
+            .expect_err("non-string keys must be rejected");
+
+        assert!(error.contains("invalid keys for kv.deleteMany"));
     }
 }
