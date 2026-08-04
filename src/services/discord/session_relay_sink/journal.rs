@@ -17,7 +17,7 @@ const JOURNAL_NAMESPACE: Uuid = Uuid::from_u128(0xd9829c0b_8692_4ef0_9396_f7d83a
 const MAILBOX_CAPACITY: usize = 256;
 
 #[derive(Clone)]
-struct JournalEvent {
+pub(super) struct JournalEvent {
     event_id: Uuid,
     obligation_id: Uuid,
     attempt_id: Option<Uuid>,
@@ -120,7 +120,7 @@ impl JournalObserver {
         attempt: AttemptObservation,
         receipt: DiscordTransportReceipt,
         committed: bool,
-    ) {
+    ) -> Vec<JournalEvent> {
         let mismatch = receipt.requested_channel_id != receipt.returned_channel_id;
         let events = if committed && !mismatch {
             vec![
@@ -145,10 +145,12 @@ impl JournalObserver {
                        "message_id": receipt.message_id}),
             )]
         };
+        let emitted_events = events.clone();
         self.submit(AppendCommand {
             pool: attempt.pool,
             events,
         });
+        emitted_events
     }
 
     fn submit(&self, command: AppendCommand) {
@@ -420,5 +422,30 @@ mod tests {
         assert_eq!(classify_shadow_observation(&events, false), ShadowClassification::Unknown, "a commit without transport confirmation is not a candidate");
         let settled = vec![event(obligation_id, None, "O", 0, json!({"canonical_key_sha256":"fixture"})), event(obligation_id, None, "S", 1, json!({"reason":"suppressed"}))];
         assert_eq!(classify_shadow_observation(&settled, false), ShadowClassification::SettledWithoutTransport);
+    }
+
+    #[tokio::test]
+    async fn finish_fresh_emits_transport_and_commit_as_one_batch() {
+        let observer = JournalObserver::default();
+        let events = observer.finish_fresh(
+            AttemptObservation {
+                obligation_id: Uuid::from_u128(7),
+                attempt_id: Uuid::from_u128(8),
+                frontier: (10, 20),
+                pool: sqlx::PgPool::connect_lazy("postgres://localhost/agentdesk_test")
+                    .expect("lazy test pool URL is valid"),
+            },
+            DiscordTransportReceipt {
+                requested_channel_id: "10".into(),
+                returned_channel_id: "10".into(),
+                message_id: "30".into(),
+            },
+            true,
+        );
+        assert_eq!(events.len(), 2, "committed fresh delivery emits T and C");
+        assert_eq!(events[0].kind, "T");
+        assert!(events[0].receipt.is_some(), "T carries the transport receipt");
+        assert_eq!(events[1].kind, "C");
+        assert_eq!(events[1].seq, 3);
     }
 }
