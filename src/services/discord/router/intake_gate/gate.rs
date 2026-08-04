@@ -55,9 +55,11 @@ pub(in crate::services::discord) fn bot_author_allowed_for_live_intake(
     allowed_bot_ids.contains(&author_id) || announce_bot_id.is_some_and(|id| id == author_id)
 }
 
-/// Single intake admission predicate shared by every queue branch below the
-/// live message gate. Operational alerts are notifications, not turn input,
-/// even when an announce bot authors them with a dispatch-looking body.
+/// Apply the sender policy at the live-intake queue boundary and reject
+/// non-turn provenance before any queue branch. `is_allowed_turn_sender`
+/// already rejects operational-alert provenance; the additional effective
+/// suppression here is monitor-origin text, while the combined check keeps the
+/// alert rejection explicit at this outer boundary.
 pub(super) fn should_admit_turn_message(
     allowed_bot_ids: &[u64],
     announce_bot_id: Option<u64>,

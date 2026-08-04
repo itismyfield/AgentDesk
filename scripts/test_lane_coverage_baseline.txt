@@ -86,7 +86,6 @@ server::maintenance::registry_membership_tests
 server::maintenance::storage_jobs::tests
 server::message_outbox_retry_tests
 server::multinode_regression::tests
-server::outbox_actionable_delivery::tests
 server::policy_tick_schedule_tests
 server::rate_limit_header_tests
 server::routes::agents::tmux_relay_adoption_state_tests
@@ -355,7 +354,6 @@ services::discord::router::message_handler::voice_announcement_route::voice_rout
 services::discord::router::message_handler::voice_announcement_scope::tests
 services::discord::router::message_handler::watchdog::cold_start_retry_tests
 services::discord::router::message_handler::watchdog::relay_state_contract_refs
-services::discord::router::message_handler::watchdog::timeout_notice_tests
 services::discord::router::response_format::tests
 services::discord::runtime_bootstrap::bootstrap_tests
 services::discord::runtime_bootstrap::framework_setup::slash_command_registration_tests
@@ -553,7 +551,6 @@ services::memory::memento::tool_feedback_trigger_type_tests
 services::memory::memento::workspace_scope_tests
 services::memory::memento_instructions_cache::tests
 services::memory::memento_throttle::forget_ratio_tests
-services::message_outbox::dedupe_key_tests
 services::message_outbox::stop_turn_notify_removal_tests
 services::message_outbox_circuit_authority_tests
 services::message_outbox_recovery_tests

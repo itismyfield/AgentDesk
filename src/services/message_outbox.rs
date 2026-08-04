@@ -38,10 +38,6 @@ pub(crate) fn is_actionable_ops_alert(source: &str, reason_code: Option<&str>) -
 pub(crate) fn is_non_turn_operational_alert(source: &str, reason_code: Option<&str>) -> bool {
     is_actionable_ops_alert(source, reason_code)
         || matches!(
-            (source, reason_code),
-            ("auto-queue-monitor", Some("auto_queue.monitor_review_long"))
-        )
-        || matches!(
             source,
             "stall_watchdog" | "quality_regression_alerter" | "queue_overflow_notice"
         )
