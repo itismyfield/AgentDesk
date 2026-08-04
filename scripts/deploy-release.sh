@@ -43,7 +43,11 @@ fi
 #   AGENTDESK_DEPLOY_ALLOW_DIRTY=1     allow deploying with local changes.
 #   AGENTDESK_DEPLOY_SKIP_FRESHNESS=1  skip both source-identity and remote
 #                                      freshness gates for an intentional
-#                                      offline/emergency deploy.
+#                                      offline/emergency deploy. In this mode,
+#                                      dashboard dependencies are reused only
+#                                      when their installed lock exactly matches
+#                                      package-lock.json; no npm network access
+#                                      or destructive clean install is attempted.
 #   AGENTDESK_DEPLOY_FAST=1            opt into the release-fast Cargo profile
 #                                      for lower-latency dev-loop deploys.
 # Resource-contention pre-flight (#4255 — runs on every node before the build):
@@ -471,8 +475,19 @@ _ensure_dashboard_dependencies() {
     [ -d "$dashboard_dir" ] || return 0
 
     bash "$SCRIPT_DIR/check-dashboard-toolchain.sh" "$REPO"
+    if [ "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}" = "1" ]; then
+        echo "▸ Offline/emergency deploy: validating cached dashboard dependencies..."
+        if node "$SCRIPT_DIR/check-dashboard-install-state.mjs" "$dashboard_dir"; then
+            echo "✓ Reusing dashboard dependencies that exactly match package-lock.json"
+            return 0
+        fi
+        echo "✗ Offline/emergency deploy cannot prove cached dashboard dependencies match package-lock.json" >&2
+        echo "  Existing node_modules was preserved. Run npm ci while online, then retry." >&2
+        return 1
+    fi
     echo "▸ Installing dashboard dependencies from package-lock.json (npm ci)..."
     (cd "$dashboard_dir" && npm ci --no-audit --no-fund)
+    node "$SCRIPT_DIR/check-dashboard-install-state.mjs" "$dashboard_dir"
 }
 
 _resolve_default_release_binary() {
