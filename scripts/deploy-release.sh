@@ -470,23 +470,9 @@ _ensure_dashboard_dependencies() {
     local dashboard_dir="$REPO/dashboard"
     [ -d "$dashboard_dir" ] || return 0
 
-    if ! command -v node >/dev/null 2>&1; then
-        echo "✗ node is required to build dashboard before deploy"
-        exit 1
-    fi
-    if ! command -v npm >/dev/null 2>&1; then
-        echo "✗ npm is required to build dashboard before deploy"
-        exit 1
-    fi
-    if [ ! -f "$dashboard_dir/package-lock.json" ]; then
-        echo "✗ dashboard/package-lock.json missing — cannot install deterministic dashboard dependencies"
-        exit 1
-    fi
-
-    if [ ! -x "$dashboard_dir/node_modules/.bin/tsc" ]; then
-        echo "▸ Installing dashboard dependencies (npm ci)..."
-        (cd "$dashboard_dir" && npm ci --no-audit --no-fund)
-    fi
+    bash "$SCRIPT_DIR/check-dashboard-toolchain.sh" "$REPO"
+    echo "▸ Installing dashboard dependencies from package-lock.json (npm ci)..."
+    (cd "$dashboard_dir" && npm ci --no-audit --no-fund)
 }
 
 _resolve_default_release_binary() {
