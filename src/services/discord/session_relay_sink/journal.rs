@@ -104,7 +104,11 @@ impl JournalObserver {
                     Some(attempt_id),
                     "A",
                     1,
-                    json!({"attempt": 0}),
+                    json!({
+                        "attempt": 0,
+                        "frontier_start": key.frontier.0,
+                        "frontier_end": key.frontier.1,
+                    }),
                 ),
             ],
         });
@@ -279,6 +283,27 @@ fn execution_id(
     )
 }
 
+#[rustfmt::skip] #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ShadowClassification { CandidateDelivered, SettledWithoutTransport, Unknown, ObservationGap }
+
+/// Q3 classification for one obligation's shadow observation window.
+#[rustfmt::skip]
+pub(super) fn classify_shadow_observation(events: &[JournalEvent], grace_elapsed: bool) -> ShadowClassification {
+    let Some(first) = events.first() else { return ShadowClassification::ObservationGap };
+    if events.iter().any(|event| event.obligation_id != first.obligation_id) { return ShadowClassification::Unknown; }
+    let find = |kind: &'static str| events.iter().find(|event| event.kind == kind);
+    let count = |kind: &'static str| events.iter().filter(|event| event.kind == kind).count();
+    let (o, a, t, c, s, u) = (find("O"), find("A"), find("T"), find("C"), find("S"), find("U"));
+    if o.is_none() || count("O") != 1 { return ShadowClassification::ObservationGap; }
+    if s.is_some() && a.is_none() && t.is_none() && c.is_none() && u.is_none() && count("S") == 1 { return ShadowClassification::SettledWithoutTransport; }
+    let same_attempt = a.zip(c).is_some_and(|(a, c)| a.attempt_id.is_some() && a.attempt_id == c.attempt_id);
+    let same_frontier = a.zip(c).is_some_and(|(a, c)| ["frontier_start", "frontier_end"].iter().all(|field| a.canonical_payload.get(*field).zip(c.canonical_payload.get(*field)).is_some_and(|(left, right)| !left.is_null() && left == right)));
+    let receipt_confirmed = count("T") == 1 && t.and_then(|event| event.receipt.as_ref()).is_some_and(|r| !r.requested_channel_id.is_empty() && r.requested_channel_id == r.returned_channel_id && !r.message_id.is_empty());
+    if a.is_some() && c.is_some() && count("A") == 1 && count("C") == 1 && s.is_none() && u.is_none() && same_attempt && same_frontier && receipt_confirmed { return ShadowClassification::CandidateDelivered; }
+    if u.is_some() || (a.is_some() && s.is_none() && (t.is_some() || c.is_some() || grace_elapsed)) { return ShadowClassification::Unknown; }
+    ShadowClassification::ObservationGap
+}
+
 fn source_coordinate(path: Option<&str>) -> (u64, Option<(u64, u64)>) {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     path.unwrap_or("").hash(&mut hasher);
@@ -350,7 +375,6 @@ fn transport_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn delivery_journal_defaults_to_legacy() {
         let runtime = crate::config::RuntimeSettingsConfig::default();
@@ -358,7 +382,6 @@ mod tests {
         assert_eq!(runtime.delivery_journal_cohort_percent, 0);
         assert!(runtime.delivery_journal_internal_channel_ids.is_empty());
     }
-
     #[test]
     fn absent_file_id_has_one_canonical_sentinel_byte() {
         let (mut absent, mut present) = (vec![], vec![]);
@@ -366,14 +389,19 @@ mod tests {
         assert_eq!(absent, vec![0]);
         assert_eq!(present[0], 1); assert_ne!(absent, present);
     }
-
     #[test]
-    fn event_identity_is_cross_node_deterministic() {
-        let left = execution_id("adk-claude-a", 77, 3, 42, "now", Some(10));
-        let right = execution_id("adk-claude-a", 77, 3, 42, "now", Some(10));
-        assert_eq!(left, right);
+    fn execution_id_changes_for_each_canonical_component() {
+        let base = execution_id("adk-claude-a", 77, 3, 42, "now", Some(10));
+        assert_eq!(base, execution_id("adk-claude-a", 77, 3, 42, "now", Some(10)));
+        for (name, other) in [
+            ("session", execution_id("adk-claude-b", 77, 3, 42, "now", Some(10))),
+            ("generation", execution_id("adk-claude-a", 78, 3, 42, "now", Some(10))),
+            ("epoch", execution_id("adk-claude-a", 77, 4, 42, "now", Some(10))),
+            ("user_message", execution_id("adk-claude-a", 77, 3, 43, "now", Some(10))),
+            ("started_at", execution_id("adk-claude-a", 77, 3, 42, "later", Some(10))),
+            ("start", execution_id("adk-claude-a", 77, 3, 42, "now", Some(11))),
+        ] { assert_ne!(base, other, "{name} must participate in execution identity"); }
     }
-
     #[test]
     fn shadow_receipt_uses_returned_channel() {
         let receipt = DiscordTransportReceipt { requested_channel_id: "10".into(), returned_channel_id: "20".into(), message_id: "30".into() };
@@ -384,7 +412,13 @@ mod tests {
 
     #[test]
     fn shadow_candidate_delivered_requires_transport_confirmed() {
-        let candidate = |kinds: &[&str]| ["O", "A", "T", "C"].iter().all(|kind| kinds.contains(kind));
-        assert!(!candidate(&["O", "A", "C"])); assert!(candidate(&["O", "A", "T", "C"]));
+        let obligation_id = Uuid::nil();
+        let attempt_id = Uuid::from_u128(1);
+        let mut events = vec![event(obligation_id, None, "O", 0, json!({"canonical_key_sha256":"fixture"})), event(obligation_id, Some(attempt_id), "A", 1, json!({"frontier_start":10,"frontier_end":20})), transport_event(obligation_id, attempt_id, DiscordTransportReceipt { requested_channel_id:"10".into(), returned_channel_id:"10".into(), message_id:"30".into() }), event(obligation_id, Some(attempt_id), "C", 3, json!({"frontier_start":10,"frontier_end":20}))];
+        assert_eq!(classify_shadow_observation(&events, false), ShadowClassification::CandidateDelivered);
+        events.retain(|event| event.kind != "T");
+        assert_eq!(classify_shadow_observation(&events, false), ShadowClassification::Unknown, "a commit without transport confirmation is not a candidate");
+        let settled = vec![event(obligation_id, None, "O", 0, json!({"canonical_key_sha256":"fixture"})), event(obligation_id, None, "S", 1, json!({"reason":"suppressed"}))];
+        assert_eq!(classify_shadow_observation(&settled, false), ShadowClassification::SettledWithoutTransport);
     }
 }

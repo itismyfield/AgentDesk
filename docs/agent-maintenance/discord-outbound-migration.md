@@ -1,5 +1,7 @@
 # Discord Outbound Migration — Coverage Map (#1006 v3 / #1280 / #1436 / #1457)
 
+> Last refreshed: 2026-08-04 (#5071 T1 S1 r2 — `DiscordTransportReceipt` preserves requested/returned channel IDs and message ID for the shadow journal; outbound delivery callsite coverage remains unchanged).
+
 > Last refreshed: 2026-07-24 (#4508 review follow-up — watcher anchored short-replace now uses an edit-only deferred transport boundary in both controller and retained legacy paths. On edit failure, the range owner keeps the same delivery lease and suppresses fallback POST only after a locked, stable pre-edit-path/generation + EOF-bounded durable-frontier recheck; any rotate, marker, metadata, or frontier uncertainty remains fail-open. Already-committed reconciliation reuses delivered-anchor-aware guarded placeholder cleanup and drops local/orphan tracking only after cleanup commits. This changes A4 replacement authority and lifecycle parity, but adds no v3 producer or direct-send callsite; the coverage rows below are unchanged).
 >
 > Last refreshed: 2026-07-24 (#4536 — confirmed idle/catch-up ranged POSTs now persist a generation-scoped ordered JSONL frontier before advancing the in-memory watermark. This adds an internal delivery-record commit writer but no Discord transport verb or v3 producer callsite; the coverage map below is unchanged).
