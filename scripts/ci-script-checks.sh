@@ -111,6 +111,9 @@ echo "=== PR infrastructure failure rerun classifier (#4392) ==="
 echo "=== CI timeout wrapper tests (#4413) ==="
 "$PYTHON" -m unittest tests.test_ci_timeout
 
+echo "=== Relay-authority fixed mutation gate (#5071) ==="
+"$PYTHON" -m unittest tests.test_relay_authority_mutations
+
 echo "=== Relay recovery targeted-lane wiring contract (#4423) ==="
 "$PYTHON" -m unittest tests.test_relay_recovery_ci_wiring
 
