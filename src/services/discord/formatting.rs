@@ -175,16 +175,14 @@ mod status_panel_v2_formatter_tests;
 #[path = "formatting/replace_long_message.rs"]
 mod replace_long_message;
 
+#[cfg(test)]
+pub(in crate::services::discord) use self::replace_long_message::ReplaceLastChunkAnchor;
 pub(in crate::services::discord) use self::replace_long_message::{
     DeferredReplaceLongMessageOutcome, ReplaceLongMessageOutcome,
     cleanup_replace_continuations_after_failure, replace_long_message_outcome_to_result,
     replace_long_message_raw, replace_long_message_raw_deferred,
     replace_long_message_raw_with_outcome, watcher_completion_footer_anchor,
 };
-// The anchor struct is only named by in-file regression tests today; production
-// callers receive it through inferred `Option<ReplaceLastChunkAnchor>` locals.
-#[cfg(test)]
-pub(in crate::services::discord) use self::replace_long_message::ReplaceLastChunkAnchor;
 
 #[cfg(test)]
 mod relay_state_contract_refs {

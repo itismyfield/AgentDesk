@@ -37,6 +37,7 @@ pub(in crate::services::discord) const PURE_SUBAGENT_ZERO_DELIVERY_PAYLOAD: &str
     "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}\n"
 );
 
+mod delivery_commit;
 mod delivery_frontier;
 mod delivery_outcome_classify;
 mod idle_jsonl;
@@ -512,6 +513,14 @@ pub(in crate::services::discord) struct SessionBoundDiscordRelaySink {
     by_session: Mutex<HashMap<String, SessionRelayParser>>,
     #[cfg(test)]
     lease_test_probe: Option<Arc<SinkLeaseTestProbe>>,
+    #[cfg(test)]
+    test_gateway: Option<Arc<dyn super::gateway::TurnGateway>>,
+    #[cfg(test)]
+    test_replace_anchor: Option<formatting::ReplaceLastChunkAnchor>,
+    #[cfg(test)]
+    test_delivery_outcomes: Option<Arc<Mutex<Vec<SessionRelayDeliveryOutcome>>>>,
+    #[cfg(test)]
+    test_force_legacy_replace: bool,
 }
 
 impl SessionBoundDiscordRelaySink {
@@ -523,6 +532,14 @@ impl SessionBoundDiscordRelaySink {
             by_session: Mutex::new(HashMap::new()),
             #[cfg(test)]
             lease_test_probe: None,
+            #[cfg(test)]
+            test_gateway: None,
+            #[cfg(test)]
+            test_replace_anchor: None,
+            #[cfg(test)]
+            test_delivery_outcomes: None,
+            #[cfg(test)]
+            test_force_legacy_replace: false,
         }
     }
 
@@ -679,99 +696,14 @@ impl SessionBoundDiscordRelaySink {
         }
     }
 
-    fn advance_offset_for_confirmed_delegated_terminal(
-        &self,
-        shared: &super::SharedData,
-        provider: &ProviderKind,
-        channel_id: u64,
-        session_name: &str,
-        delivery: &SessionRelayDelivery,
-        inflight: Option<&super::inflight::InflightTurnState>,
-    ) -> bool {
-        let Some(end) = delivery.terminal_consumed_end.filter(|end| *end > 0) else {
-            return false;
-        };
-        // IDENTITY GATE: the frame's pinned turn identity must still match the
-        // channel's current inflight. A delayed frame from an already-replaced
-        // turn (or a cleared inflight) is ignored — never advances a wrong turn.
-        let Some(inflight) = inflight else {
-            tracing::debug!(
-                provider = provider.as_str(),
-                channel_id,
-                tmux_session = %session_name,
-                frame_user_msg_id = delivery.frame_turn_user_msg_id,
-                "session-bound sink: terminal frame carried a commit fence but inflight is gone; identity gate blocks advance"
-            );
-            return false;
-        };
-        // #3041 P1-3 (codex P1-3 issue 2 R4): STRICT `turn_start_offset` identity — a
-        // REQUIRED gate part with NO None fallback (two `user_msg_id == 0` turns in the same
-        // second collide on the weak `(user_msg_id, started_at)` pair). A fenced frame is
-        // GUARANTEED a real offset by the producer, so `None`/mismatch is a stale/wrong-turn
-        // frame → MUST NOT advance (the watcher's SendFull delivers — no black-hole).
-        let identity_matches = inflight.user_msg_id == delivery.frame_turn_user_msg_id
-            && inflight.started_at == delivery.frame_turn_started_at
-            && delivery.frame_turn_start_offset.is_some()
-            && inflight.turn_start_offset == delivery.frame_turn_start_offset;
-        if !identity_matches {
-            tracing::debug!(
-                provider = provider.as_str(),
-                channel_id,
-                tmux_session = %session_name,
-                frame_user_msg_id = delivery.frame_turn_user_msg_id,
-                inflight_user_msg_id = inflight.user_msg_id,
-                frame_turn_start_offset = delivery.frame_turn_start_offset,
-                inflight_turn_start_offset = inflight.turn_start_offset,
-                "session-bound sink: terminal frame identity != current inflight; identity gate blocks advance (delayed/wrong-turn frame)"
-            );
-            return false;
-        }
-        super::tmux::advance_watcher_confirmed_end(
-            shared,
-            provider,
-            ChannelId::new(channel_id),
-            session_name,
-            end,
-            "src/services/discord/session_relay_sink.rs:sink_confirmed_terminal_advance",
-        );
-        // #3976: stamp the durable per-row delivered marker ONLY here — past the
-        // identity gate, after the `confirmed_end_offset` watermark advance fired
-        // (so a refused/identity-mismatched advance, which returned above, never
-        // marks the row). The watermark is resettable and writes nothing else to
-        // the row, so without this durable marker a delivered-but-unmirrored row is
-        // indistinguishable from a never-delivered black-hole and orphan-reclaim
-        // would re-emit its tail on a watermark reset. The flock RMW re-gates the
-        // identity under the lock, so a turn replaced during the POST is never
-        // marked. Best-effort: a residual crash between the POST and this write
-        // reverts the row to orphan shape on reboot (same at-most-once residual the
-        // #3918 marker bounds) — acceptable and no worse than today.
-        super::inflight::mark_session_bound_relay_delivered_locked(
-            provider,
-            channel_id,
-            &super::inflight::InflightTurnIdentity::from_state(inflight),
-            session_name,
-        );
-        true
-    }
-
-    /// #3089 A2b: short-replace via the turn-output controller, behaviourally equal to legacy
-    /// `replace_long_message_raw_with_outcome` — SAME transport + `LeaseHolder::Sink` cell (one
-    /// acquire/commit/release, no double-acquire), #3151 heartbeat, #2757 `PreserveAlways`,
-    /// `CommitOnFallback`, identity-gated advance (FRESH post-POST reload): confirmed POST →
-    /// `Delivered`, ambiguous → `Err(Transient)` (I2); `Replace { Active }` → `post_send_finalize`
-    /// no-op. `gateway` seam (review-fix Medium-1): live = real gateway, test fakes it.
-    async fn deliver_short_replace_via_controller<G: super::gateway::TurnGateway + ?Sized>(
-        &self,
-        gateway: &G,
-        ctx: short_controller::SinkShortReplaceCtx<'_>,
-    ) -> Result<SessionRelayDeliveryOutcome, RelaySinkError> {
-        short_controller::deliver_short_replace_via_controller(gateway, ctx).await
-    }
-
     async fn deliver_response(
         &self,
         delivery: SessionRelayDelivery,
     ) -> Result<SessionRelayDeliveryOutcome, RelaySinkError> {
+        #[cfg(test)]
+        let gateway: Option<&dyn super::gateway::TurnGateway> = self.test_gateway.as_deref();
+        #[cfg(not(test))]
+        let gateway: Option<&dyn super::gateway::TurnGateway> = None;
         let channel_id = delivery.channel_id;
         let provider = delivery.provider.clone();
         let inflight = super::inflight::load_inflight_state(&provider, channel_id);
@@ -872,7 +804,17 @@ impl SessionBoundDiscordRelaySink {
             && cutover_range.is_some()
             && !relay_text.is_empty()
             && matches!(route, SessionBoundTerminalDeliveryRoute::PlaceholderEdit(_))
-            && !session_bound_should_send_new_chunks_for_placeholder(&relay_text);
+            && !session_bound_should_send_new_chunks_for_placeholder(&relay_text)
+            && {
+                #[cfg(test)]
+                {
+                    !self.test_force_legacy_replace
+                }
+                #[cfg(not(test))]
+                {
+                    true
+                }
+            };
         let (lease_range, lease_fallback_start) = sink_delivery_lease_coordinate(&delivery);
         let sink_lease_key = delivery_lease_key_for_frame(
             channel,
@@ -946,12 +888,16 @@ impl SessionBoundDiscordRelaySink {
             }
         }
 
-        let http = shared.serenity_http_or_token_fallback().ok_or_else(|| {
-            RelaySinkError::Transient(format!(
-                "discord http unavailable for provider {}",
-                provider.as_str()
-            ))
-        })?;
+        let http = if gateway.is_some() {
+            Arc::new(serenity::http::Http::new("test-gateway"))
+        } else {
+            shared.serenity_http_or_token_fallback().ok_or_else(|| {
+                RelaySinkError::Transient(format!(
+                    "discord http unavailable for provider {}",
+                    provider.as_str()
+                ))
+            })?
+        };
         let (route, task_card_message_id, task_response_claim_outcome) =
             ensure_card_and_route(&self.health_registry, &shared, &delivery, route).await?;
         let (task_response_claim, task_response_already_delivered): (
@@ -996,45 +942,54 @@ impl SessionBoundDiscordRelaySink {
 
         if let SessionBoundTerminalDeliveryRoute::PlaceholderEdit(msg_id) = route {
             if let Some((start, end)) = cutover_range.filter(|_| cutover_short_replace) {
-                // Live path: the real `DiscordGateway` (the seam the ON-path test fakes).
-                let gateway = super::gateway::DiscordGateway::new(
+                let live_gateway = super::gateway::DiscordGateway::new(
                     http.clone(),
                     shared.clone(),
                     provider.clone(),
                     None,
                 );
-                return self
-                    .deliver_short_replace_via_controller(
-                        &gateway,
-                        short_controller::SinkShortReplaceCtx {
-                            shared: &shared,
-                            provider: &provider,
-                            channel,
-                            channel_id,
-                            msg_id,
-                            relay_text: &relay_text,
-                            delivered_fingerprint_body: &raw_response_text,
-                            delivery: &delivery,
-                            sink_lease_key,
-                            sink_delivery_authority,
-                            trace: &trace,
-                            range: (start, end),
-                            delivered_total: &self.delivered_total,
-                        },
-                    )
-                    .await;
+                return short_controller::deliver_short_replace_via_controller(
+                    gateway.unwrap_or(&live_gateway),
+                    short_controller::SinkShortReplaceCtx {
+                        shared: &shared,
+                        provider: &provider,
+                        channel,
+                        channel_id,
+                        msg_id,
+                        relay_text: &relay_text,
+                        delivered_fingerprint_body: &raw_response_text,
+                        delivery: &delivery,
+                        sink_lease_key,
+                        sink_delivery_authority,
+                        trace: &trace,
+                        range: (start, end),
+                        delivered_total: &self.delivered_total,
+                    },
+                )
+                .await;
             }
             if session_bound_should_send_new_chunks_for_placeholder(&relay_text) {
-                let message_ids = formatting::send_long_message_raw_with_rollback(
-                    &http,
-                    channel,
-                    msg_id,
-                    &relay_text,
-                    &shared,
-                )
-                .await
-                .map_err(|error| RelaySinkError::Transient(error.to_string()))?;
-                let _ = super::http::delete_channel_message(&http, channel, msg_id).await;
+                let message_ids = if let Some(gateway) = gateway {
+                    gateway
+                        .send_long_message_with_rollback(channel, msg_id, &relay_text)
+                        .await
+                        .map_err(RelaySinkError::Transient)?
+                } else {
+                    formatting::send_long_message_raw_with_rollback(
+                        &http,
+                        channel,
+                        msg_id,
+                        &relay_text,
+                        &shared,
+                    )
+                    .await
+                    .map_err(|error| RelaySinkError::Transient(error.to_string()))?
+                };
+                if let Some(gateway) = gateway {
+                    let _ = gateway.delete_message(channel, msg_id).await;
+                } else {
+                    let _ = super::http::delete_channel_message(&http, channel, msg_id).await;
+                }
                 self.delivered_total.fetch_add(1, Ordering::AcqRel);
                 tracing::info!(
                     provider = provider.as_str(),
@@ -1072,17 +1027,27 @@ impl SessionBoundDiscordRelaySink {
                 );
                 return Ok(SessionRelayDeliveryOutcome::from_proof(proof));
             }
+            #[cfg(test)]
+            let mut last_chunk_anchor = self.test_replace_anchor.clone();
+            #[cfg(not(test))]
             let mut last_chunk_anchor = None;
-            match formatting::replace_long_message_raw_with_outcome(
-                &http,
-                channel,
-                msg_id,
-                &relay_text,
-                &shared,
-                &mut last_chunk_anchor,
-            )
-            .await
-            {
+            let replace_outcome = if let Some(gateway) = gateway {
+                gateway
+                    .replace_message_with_outcome(channel, msg_id, &relay_text)
+                    .await
+            } else {
+                formatting::replace_long_message_raw_with_outcome(
+                    &http,
+                    channel,
+                    msg_id,
+                    &relay_text,
+                    &shared,
+                    &mut last_chunk_anchor,
+                )
+                .await
+                .map_err(|error| error.to_string())
+            };
+            match replace_outcome {
                 Ok(ReplaceLongMessageOutcome::EditedOriginal) => {
                     self.delivered_total.fetch_add(1, Ordering::AcqRel);
                     tracing::info!(
@@ -1194,7 +1159,7 @@ impl SessionBoundDiscordRelaySink {
             }
         } else {
             self.deliver_new_message_with_task_authority(
-                &http,
+                gateway,
                 &shared,
                 &provider,
                 channel_id,
@@ -1510,13 +1475,16 @@ fn delivery_lease_key_for_frame(
 }
 
 #[cfg(test)]
+mod delivery_orchestration_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::services::cluster::session_matcher::{MatchedChannel, expected_rollout_path_for};
     use crate::services::discord::inflight::{RelayOwnerKind, TurnSource};
     use crate::services::tui_prompt_dedupe::{ExternalInputRelayLease, ExternalInputRelayOwner};
 
-    fn matched(channel_id: &str) -> MatchedChannel {
+    pub(super) fn matched(channel_id: &str) -> MatchedChannel {
         let session = ProviderKind::Claude.build_tmux_session_name(channel_id);
         MatchedChannel {
             channel_id: channel_id.to_string(),
@@ -1588,7 +1556,7 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn terminal_frame_offset(
+    pub(super) fn terminal_frame_offset(
         binding: &MatchedChannel,
         payload: &str,
         sequence: u64,
@@ -3371,7 +3339,7 @@ mod tests {
             (start, end),
         );
         let outcome = rt
-            .block_on(sink.deliver_short_replace_via_controller(
+            .block_on(short_controller::deliver_short_replace_via_controller(
                 &gateway,
                 short_controller::SinkShortReplaceCtx {
                     shared: &shared,
@@ -3440,7 +3408,7 @@ mod tests {
             (start, end),
         );
         let outcome2 = rt
-            .block_on(sink2.deliver_short_replace_via_controller(
+            .block_on(short_controller::deliver_short_replace_via_controller(
                 &gateway2,
                 short_controller::SinkShortReplaceCtx {
                     shared: &shared2,
@@ -3577,7 +3545,7 @@ mod tests {
         };
         let sink = SessionBoundDiscordRelaySink::new(Arc::new(HealthRegistry::new()));
         let outcome = rt
-            .block_on(sink.deliver_short_replace_via_controller(
+            .block_on(short_controller::deliver_short_replace_via_controller(
                 &gateway,
                 short_controller::SinkShortReplaceCtx {
                     shared: &shared,
@@ -3804,7 +3772,7 @@ mod tests {
         );
         assert!(
             module_src.contains(
-                "relay_text: &relay_text,\n                            delivered_fingerprint_body: &raw_response_text,"
+                "relay_text: &relay_text,\n                        delivered_fingerprint_body: &raw_response_text,"
             ),
             "session sink production cut-over call must thread the raw pre-format body into the fingerprint slot"
         );
@@ -3856,7 +3824,7 @@ mod tests {
         );
 
         let outcome = rt
-            .block_on(sink.deliver_short_replace_via_controller(
+            .block_on(short_controller::deliver_short_replace_via_controller(
                 &gateway,
                 short_controller::SinkShortReplaceCtx {
                     shared: &shared,
@@ -4030,7 +3998,7 @@ mod tests {
         inflight_with_identity_offset(channel_id, session_name, user_msg_id, started_at, None)
     }
 
-    fn inflight_with_identity_offset(
+    pub(super) fn inflight_with_identity_offset(
         channel_id: u64,
         session_name: &str,
         user_msg_id: u64,

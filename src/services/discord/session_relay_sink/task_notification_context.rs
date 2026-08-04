@@ -302,9 +302,30 @@ pub(super) async fn commit_response_fence(
 
 #[allow(clippy::too_many_arguments)]
 impl super::SessionBoundDiscordRelaySink {
+    async fn send_plain_response_chunks(
+        &self,
+        shared: &Arc<SharedData>,
+        provider: &ProviderKind,
+        channel: ChannelId,
+        relay_text: &str,
+        reference: Option<(ChannelId, MessageId)>,
+    ) -> Result<Vec<MessageId>, RelaySinkError> {
+        let http = shared.serenity_http_or_token_fallback().ok_or_else(|| {
+            RelaySinkError::Transient(format!(
+                "discord http unavailable for provider {}",
+                provider.as_str()
+            ))
+        })?;
+        super::super::formatting::send_long_message_raw_with_reference_returning_message_ids(
+            &http, channel, relay_text, shared, reference,
+        )
+        .await
+        .map_err(|error| RelaySinkError::Transient(error.to_string()))
+    }
+
     pub(super) async fn deliver_new_message_with_task_authority(
         &self,
-        http: &Arc<serenity::http::Http>,
+        _gateway: Option<&dyn super::super::gateway::TurnGateway>,
         shared: &Arc<SharedData>,
         provider: &ProviderKind,
         channel_id: u64,
@@ -358,11 +379,6 @@ impl super::SessionBoundDiscordRelaySink {
                     "task-card response omitted its exact delivery claim".to_string(),
                 ));
             }
-            let response_transport =
-                super::super::task_notification_delivery::DiscordResponseChunkTransport::new(
-                    http.as_ref(),
-                    shared,
-                );
             let context = delivery.task_notification_context.as_ref().ok_or_else(|| {
                 RelaySinkError::Permanent(
                     "missing task context prevents exact missing-card repair".to_string(),
@@ -391,6 +407,17 @@ impl super::SessionBoundDiscordRelaySink {
                     ),
             );
             let card_transport = DiscordTaskCardTransport::new(shared.clone());
+            let http = shared.serenity_http_or_token_fallback().ok_or_else(|| {
+                RelaySinkError::Transient(format!(
+                    "discord http unavailable for provider {}",
+                    provider.as_str()
+                ))
+            })?;
+            let response_transport =
+                super::super::task_notification_delivery::DiscordResponseChunkTransport::new(
+                    http.as_ref(),
+                    shared,
+                );
             let (_messages, rebound) = super::super::task_notification_delivery::send_task_response_chunks_with_card_repair(
                 shared.pg_pool.as_ref(),
                 &clients,
@@ -417,16 +444,38 @@ impl super::SessionBoundDiscordRelaySink {
             .map_err(RelaySinkError::Transient)?;
             response_heartbeat = Some(heartbeat);
         } else {
-            let message_ids =
-                super::super::formatting::send_long_message_raw_with_reference_returning_message_ids(
-                    http,
+            #[cfg(test)]
+            let message_ids = if let Some(gateway) = _gateway {
+                gateway
+                    .send_long_message_with_rollback(
+                        channel,
+                        prompt_anchor_reference
+                            .map(|(_, message_id)| message_id)
+                            .unwrap_or_else(|| MessageId::new(1)),
+                        relay_text,
+                    )
+                    .await
+                    .map_err(RelaySinkError::Transient)?
+            } else {
+                self.send_plain_response_chunks(
+                    shared,
+                    provider,
                     channel,
                     relay_text,
-                    shared,
                     prompt_anchor_reference,
                 )
-                .await
-                .map_err(|error| RelaySinkError::Transient(error.to_string()))?;
+                .await?
+            };
+            #[cfg(not(test))]
+            let message_ids = self
+                .send_plain_response_chunks(
+                    shared,
+                    provider,
+                    channel,
+                    relay_text,
+                    prompt_anchor_reference,
+                )
+                .await?;
             plain_body_anchor_msg_id = message_ids.last().map(|message_id| message_id.get());
             plain_body_posted = true;
         }
@@ -492,9 +541,7 @@ impl super::SessionBoundDiscordRelaySink {
             );
             None
         };
-        if let Some(proof) = plain_body_proof
-            && proof != super::delivery_frontier::SinkDeliveryProofResult::Persisted
-        {
+        if let Some(proof) = plain_body_proof {
             // The plain-body arm and the task-card arm are mutually exclusive, so
             // no task-response heartbeat can be running here; the bounded final
             // delivery CAS below belongs to the card path only.
