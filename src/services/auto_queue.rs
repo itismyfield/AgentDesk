@@ -536,20 +536,20 @@ impl AutoQueueService {
         Ok(cards.into_iter().map(GenerateCandidate::from).collect())
     }
 
-    pub async fn count_cards_by_status_with_pg(
+    pub async fn count_cards_by_statuses_with_pg(
         &self,
         pool: &PgPool,
         repo: Option<&str>,
         agent_id: Option<&str>,
-        status: &str,
-    ) -> ServiceResult<i64> {
-        auto_queue::count_cards_by_status_pg(pool, repo, agent_id, status)
+        statuses: &[String],
+    ) -> ServiceResult<HashMap<String, i64>> {
+        auto_queue::count_cards_by_statuses_pg(pool, repo, agent_id, statuses)
             .await
             .map_err(|error| {
-                ServiceError::internal(format!("count cards: {error}"))
+                ServiceError::internal(format!("count cards by statuses: {error}"))
                     .with_code(ErrorCode::Database)
-                    .with_operation("count_cards_by_status_with_pg")
-                    .with_context("status", status)
+                    .with_operation("count_cards_by_statuses_with_pg")
+                    .with_context("status_count", statuses.len())
             })
     }
 

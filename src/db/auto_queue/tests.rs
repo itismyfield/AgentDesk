@@ -31,6 +31,77 @@ mod resume_session_context_tests {
 }
 
 #[cfg(test)]
+mod grouped_card_count_pg_tests {
+    use super::count_cards_by_statuses_pg;
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+
+    #[tokio::test]
+    async fn grouped_counts_use_one_status_array_and_preserve_filters_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
+             VALUES
+                ('agent-1', 'Grouped Count Agent 1', 'claude', 'count-agent-1'),
+                ('agent-2', 'Grouped Count Agent 2', 'codex', 'count-agent-2')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed grouped count agents");
+        sqlx::query(
+            "INSERT INTO kanban_cards
+                (id, title, status, repo_id, assigned_agent_id)
+             VALUES
+                ('count-ready-a1-1', 'Ready A1 1', 'ready', 'repo-a', 'agent-1'),
+                ('count-ready-a1-2', 'Ready A1 2', 'ready', 'repo-a', 'agent-1'),
+                ('count-review-a1', 'Review A1', 'review', 'repo-a', 'agent-1'),
+                ('count-done-a1', 'Done A1', 'done', 'repo-a', 'agent-1'),
+                ('count-ready-a2', 'Ready A2', 'ready', 'repo-a', 'agent-2'),
+                ('count-ready-b1', 'Ready B1', 'ready', 'repo-b', 'agent-1')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed grouped count cards");
+        let statuses = vec![
+            "ready".to_string(),
+            "review".to_string(),
+            "requested".to_string(),
+        ];
+
+        let all_counts = count_cards_by_statuses_pg(&pool, None, None, &statuses)
+            .await
+            .expect("count all requested statuses");
+        assert_eq!(all_counts.get("ready"), Some(&4));
+        assert_eq!(all_counts.get("review"), Some(&1));
+        assert!(!all_counts.contains_key("requested"));
+        assert!(!all_counts.contains_key("done"));
+
+        let filtered_counts =
+            count_cards_by_statuses_pg(&pool, Some("repo-a"), Some("agent-1"), &statuses)
+                .await
+                .expect("count filtered requested statuses");
+        assert_eq!(filtered_counts.get("ready"), Some(&2));
+        assert_eq!(filtered_counts.get("review"), Some(&1));
+        assert!(!filtered_counts.contains_key("requested"));
+
+        let unfiltered_empty_values =
+            count_cards_by_statuses_pg(&pool, Some(""), Some(""), &statuses)
+                .await
+                .expect("empty filters retain unfiltered semantics");
+        assert_eq!(unfiltered_empty_values, all_counts);
+        assert!(
+            count_cards_by_statuses_pg(&pool, None, None, &[])
+                .await
+                .expect("empty status list is a no-op")
+                .is_empty()
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+}
+
+#[cfg(test)]
 mod dispatch_terminal_sync_pg_tests {
     use super::{
         ENTRY_STATUS_DONE, ENTRY_STATUS_FAILED, ENTRY_STATUS_SKIPPED, ENTRY_STATUS_USER_CANCELLED,

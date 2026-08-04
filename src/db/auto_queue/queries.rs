@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use sqlx::{PgPool, Row as SqlxRow};
 
 #[derive(Debug, Clone, Default)]
@@ -449,24 +451,31 @@ pub async fn list_generate_candidates_pg(
         .collect()
 }
 
-pub async fn count_cards_by_status_pg(
+pub async fn count_cards_by_statuses_pg(
     pool: &PgPool,
     repo: Option<&str>,
     agent_id: Option<&str>,
-    status: &str,
-) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::BIGINT
+    statuses: &[String],
+) -> Result<HashMap<String, i64>, sqlx::Error> {
+    if statuses.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = sqlx::query_as::<_, (String, i64)>(
+        "SELECT status, COUNT(*)::BIGINT
          FROM kanban_cards
-         WHERE status = $1
+         WHERE status = ANY($1::TEXT[])
            AND ($2::TEXT IS NULL OR repo_id = $2)
-           AND ($3::TEXT IS NULL OR assigned_agent_id = $3)",
+           AND ($3::TEXT IS NULL OR assigned_agent_id = $3)
+         GROUP BY status",
     )
-    .bind(status)
+    .bind(statuses)
     .bind(repo.filter(|value| !value.is_empty()))
     .bind(agent_id.filter(|value| !value.is_empty()))
-    .fetch_one(pool)
-    .await
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().collect())
 }
 
 fn auto_queue_run_record_from_pg_row(
