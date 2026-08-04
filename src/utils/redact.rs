@@ -40,6 +40,15 @@ static SINGLE_QUOTED_COOKIE_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .unwrap()
 });
+static ANSI_C_QUOTED_COOKIE_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // Bash ANSI-C strings use `$'…'` and allow backslash escapes, including an
+    // escaped quote inside the header value. Keep this grammar separate from
+    // ordinary single quotes, where backslashes have no escape semantics.
+    Regex::new(
+        r"(?im)((?:^|[ \t;&|()<>])(?:-H[ \t]*)?\$'(?:set-cookie|cookie)[ \t]*:[ \t]*)(?:\\.|[^'\\\r\n])*('?)",
+    )
+    .unwrap()
+});
 static DOUBLE_QUOTED_COOKIE_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r#"(?im)((?:^|[ \t;&|()<>])(?:-H[ \t]*)?"(?:set-cookie|cookie)[ \t]*:[ \t]*)(?:\\.|[^"\\\r\n])*("?)"#,
@@ -208,7 +217,8 @@ pub(crate) fn redact_sensitive_headers(input: &str, marker: &str) -> String {
 /// Compact command renderers use their own token-aware Authorization display
 /// rules, but still share this stricter whole-cookie contract.
 pub(crate) fn redact_cookie_headers(input: &str, marker: &str) -> String {
-    let redacted = replace_quoted_header_value(input, &SINGLE_QUOTED_COOKIE_HEADER_RE, marker);
+    let redacted = replace_quoted_header_value(input, &ANSI_C_QUOTED_COOKIE_HEADER_RE, marker);
+    let redacted = replace_quoted_header_value(&redacted, &SINGLE_QUOTED_COOKIE_HEADER_RE, marker);
     let redacted = replace_quoted_header_value(&redacted, &DOUBLE_QUOTED_COOKIE_HEADER_RE, marker);
     let redacted = replace_header_value(&redacted, &CURL_ATTACHED_COOKIE_HEADER_RE, marker);
     replace_header_value(&redacted, &COOKIE_HEADER_RE, marker)
@@ -411,6 +421,22 @@ mod tests {
         assert!(redacted.contains("'X-Cookie: visible'"));
         assert!(!redacted.contains("session=secret"));
         assert!(!redacted.contains("access=secret-two"));
+    }
+
+    #[test]
+    fn ansi_c_quoted_cookie_headers_preserve_delimiters_and_following_command() {
+        let redacted = redact_sensitive_headers(
+            r#"curl -H $'Cookie: session=secret\'tail=secret-two' -H$'Set-Cookie: access=secret-three' -H $'X-Cookie: visible' https://example.test && echo done"#,
+            "***",
+        );
+
+        assert!(redacted.contains("-H $'Cookie: ***'"));
+        assert!(redacted.contains("-H$'Set-Cookie: ***'"));
+        assert!(redacted.contains("-H $'X-Cookie: visible'"));
+        assert!(redacted.contains("https://example.test && echo done"));
+        assert!(!redacted.contains("session=secret"));
+        assert!(!redacted.contains("tail=secret-two"));
+        assert!(!redacted.contains("access=secret-three"));
     }
 
     #[test]

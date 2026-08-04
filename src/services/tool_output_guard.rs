@@ -118,8 +118,11 @@ fn bounded_redacted_error_tail(content: &str, max_bytes: usize) -> (String, usiz
     // continuation began in the omitted region, fail closed by dropping the
     // partial line.
     if tail_start > 0 && content.as_bytes().get(tail_start.wrapping_sub(1)) != Some(&b'\n') {
-        let context_start = tail_start.saturating_sub(ERROR_HEADER_CONTEXT_BYTES);
-        let context = &content[context_start..tail_start];
+        // Reuse the UTF-8-aware tail helper for the borrowed context window.
+        // Subtracting a byte budget directly can land inside a multibyte code
+        // point even though `tail_start` itself is a valid boundary.
+        let context = utf8_tail(&content[..tail_start], ERROR_HEADER_CONTEXT_BYTES);
+        let context_start = tail_start.saturating_sub(context.len());
         let newline = context.rfind('\n');
         let has_complete_line_prefix = context_start == 0 || newline.is_some();
         let line_prefix = newline.map_or(context, |position| &context[position + 1..]);
@@ -390,6 +393,23 @@ mod tests {
                 .contains("truncated partial line redacted")
         );
         assert!(!projection.content.contains("bulk-secret"));
+    }
+
+    #[test]
+    fn very_large_non_ascii_error_aligns_context_window_to_utf8() {
+        // 64 KiB before a valid tail boundary falls inside one of these
+        // three-byte code points. The bounded context scan must align forward
+        // instead of panicking while slicing the borrowed input.
+        let raw = "€".repeat(30_000);
+
+        let projection = project_for_relay(Some("Bash"), true, &raw);
+
+        assert_eq!(
+            projection.disposition,
+            RelayOutputDisposition::SummarizeError
+        );
+        assert!(projection.content.contains(TRUNCATION_MARKER));
+        assert!(projection.content.len() < ERROR_EDGE_BYTES * 2 + 512);
     }
 
     #[test]
