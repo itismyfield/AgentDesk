@@ -215,6 +215,38 @@ export async function updateAutoQueueRun(
   });
 }
 
+/** Start a pending run through the legacy fallback start path. */
+export async function startAutoQueueRun(id: string): Promise<{ ok: boolean }> {
+  return updateAutoQueueRun(id, "active");
+}
+
+export type AutoQueueRunLifecycleAction = "pause" | "resume" | "end";
+
+async function runAutoQueueLifecycle(
+  id: string,
+  action: AutoQueueRunLifecycleAction,
+): Promise<{ ok: boolean; run_id: string; status: AutoQueueRun["status"] }> {
+  return request(`/api/queue/runs/${id}/${action}`, { method: "POST" });
+}
+
+export async function pauseAutoQueueRun(
+  id: string,
+): Promise<{ ok: boolean; run_id: string; status: AutoQueueRun["status"] }> {
+  return runAutoQueueLifecycle(id, "pause");
+}
+
+export async function resumeAutoQueueRun(
+  id: string,
+): Promise<{ ok: boolean; run_id: string; status: AutoQueueRun["status"] }> {
+  return runAutoQueueLifecycle(id, "resume");
+}
+
+export async function endAutoQueueRun(
+  id: string,
+): Promise<{ ok: boolean; run_id: string; status: AutoQueueRun["status"] }> {
+  return runAutoQueueLifecycle(id, "end");
+}
+
 export async function reorderAutoQueueEntries(
   orderedIds: string[],
   agentId?: string | null,

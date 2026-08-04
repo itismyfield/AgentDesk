@@ -216,6 +216,42 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             json!({"ok": true, "ignored": ["unified_thread"]}),
         ),
         ep(
+            "POST",
+            "/api/queue/runs/{id}/pause",
+            "auto-queue",
+            "Pause one active auto-queue run through the canonical run lifecycle command. Releases its slot bindings atomically.",
+        )
+        .with_params([("id", path_param("Auto-queue run ID"))])
+        .with_example(
+            json!({"path": {"id": "run-1"}}),
+            json!({"ok": true, "run_id": "run-1", "status": "paused"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/queue/runs/run-1/pause"),
+        ep(
+            "POST",
+            "/api/queue/runs/{id}/resume",
+            "auto-queue",
+            "Resume one paused auto-queue run through the canonical run lifecycle command.",
+        )
+        .with_params([("id", path_param("Auto-queue run ID"))])
+        .with_example(
+            json!({"path": {"id": "run-1"}}),
+            json!({"ok": true, "run_id": "run-1", "status": "active"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/queue/runs/run-1/resume"),
+        ep(
+            "POST",
+            "/api/queue/runs/{id}/end",
+            "auto-queue",
+            "End one auto-queue run through the canonical completion command. Clears phase gates, releases slots, and queues completion notification.",
+        )
+        .with_params([("id", path_param("Auto-queue run ID"))])
+        .with_example(
+            json!({"path": {"id": "run-1"}}),
+            json!({"ok": true, "run_id": "run-1", "status": "completed"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/queue/runs/run-1/end"),
+        ep(
             "PATCH",
             "/api/queue/reorder",
             "auto-queue",

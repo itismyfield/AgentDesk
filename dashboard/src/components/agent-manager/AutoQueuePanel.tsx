@@ -295,7 +295,7 @@ export default function AutoQueuePanel({
     setActivating(true);
     setError(null);
     try {
-      await api.updateAutoQueueRun(runId, "active");
+      await api.startAutoQueueRun(runId);
       await api.activateAutoQueue(selectedRepo || null, selectedAgentId);
       await fetchStatus();
     } catch (e) {
@@ -329,10 +329,12 @@ export default function AutoQueuePanel({
 
   const handleRunAction = async (
     run: AutoQueueRun,
-    action: "paused" | "active" | "completed",
+    action: "pause" | "resume" | "end",
   ) => {
     try {
-      await api.updateAutoQueueRun(run.id, action);
+      if (action === "pause") await api.pauseAutoQueueRun(run.id);
+      if (action === "resume") await api.resumeAutoQueueRun(run.id);
+      if (action === "end") await api.endAutoQueueRun(run.id);
       await fetchStatus();
     } catch (e) {
       setError(

@@ -351,7 +351,7 @@ export default function AutoQueuePanelView({ ctx }: { ctx: any }) {
               </span>
               {run.status !== "completed" && (
                 <button
-                  onClick={() => void handleRunAction(run, "completed")}
+                  onClick={() => void handleRunAction(run, "end")}
                   className="underline"
                   style={{ color: "var(--th-text-muted)" }}
                 >

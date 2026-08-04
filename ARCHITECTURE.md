@@ -370,6 +370,7 @@ src/
 │   │   ├── dispatch_command.rs
 │   │   ├── dispatch_query.rs
 │   │   ├── fsm.rs
+│   │   ├── lifecycle_routes.rs
 │   │   ├── order_routes.rs
 │   │   ├── phase_gate.rs
 │   │   ├── phase_gate_catalog.rs

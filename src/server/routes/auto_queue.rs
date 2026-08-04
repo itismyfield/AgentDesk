@@ -134,6 +134,27 @@ pub async fn resume_run(
     route::resume_run(state).await
 }
 
+pub async fn pause_run(
+    state: State<AppState>,
+    id: Path<String>,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    route::pause_run(state, id).await
+}
+
+pub async fn resume_run_scoped(
+    state: State<AppState>,
+    id: Path<String>,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    route::resume_run_scoped(state, id).await
+}
+
+pub async fn end_run(
+    state: State<AppState>,
+    id: Path<String>,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    route::end_run(state, id).await
+}
+
 pub async fn repair_phase_gates(
     state: State<AppState>,
     id: Path<String>,

@@ -106,11 +106,11 @@ mod dispatch_terminal_sync_pg_tests {
     use super::{
         ENTRY_STATUS_DONE, ENTRY_STATUS_FAILED, ENTRY_STATUS_SKIPPED, ENTRY_STATUS_USER_CANCELLED,
         EntryStatusUpdateOptions, PhaseGateStateWrite, SlotAllocation,
-        allocate_slot_for_group_agent_pg, clear_phase_gate_state_on_pg,
-        finalize_completed_dispatch_terminal_entry_on_pg_tx, record_entry_dispatch_failure_on_pg,
-        save_phase_gate_state_on_pg, slot_has_active_dispatch_pg,
-        slot_has_recent_terminal_auto_queue_dispatch_pg, sync_dispatch_terminal_entries_on_pg_tx,
-        update_entry_status_on_pg,
+        allocate_slot_for_group_agent_pg, clear_phase_gate_state_on_pg, complete_run_on_pg,
+        finalize_completed_dispatch_terminal_entry_on_pg_tx, pause_run_on_pg,
+        record_entry_dispatch_failure_on_pg, resume_run_on_pg, save_phase_gate_state_on_pg,
+        slot_has_active_dispatch_pg, slot_has_recent_terminal_auto_queue_dispatch_pg,
+        sync_dispatch_terminal_entries_on_pg_tx, update_entry_status_on_pg,
     };
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use chrono::{DateTime, Utc};
@@ -356,6 +356,64 @@ mod dispatch_terminal_sync_pg_tests {
             .fetch_one(pool)
             .await
             .expect("message outbox count")
+    }
+
+    #[tokio::test]
+    async fn postgres_auto_queue_pause_run_releases_slots_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+
+        assert!(pause_run_on_pg(&pool, "run-1").await.expect("pause run"));
+        assert_eq!(run_status(&pool, "run-1").await, "paused");
+        assert_eq!(slot_run(&pool, "agent-1", 0).await, None);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_auto_queue_resume_run_changes_paused_status_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+
+        assert!(pause_run_on_pg(&pool, "run-1").await.expect("pause run"));
+        assert!(resume_run_on_pg(&pool, "run-1").await.expect("resume run"));
+        assert_eq!(run_status(&pool, "run-1").await, "active");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_auto_queue_complete_run_releases_slots_gates_and_notifies_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        sqlx::query(
+            "INSERT INTO auto_queue_phase_gates (run_id, phase, status)
+             VALUES ('run-1', 0, 'pending')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed phase gate");
+
+        assert!(
+            complete_run_on_pg(&pool, "run-1")
+                .await
+                .expect("complete run")
+        );
+        assert_eq!(run_status(&pool, "run-1").await, "completed");
+        assert_eq!(slot_run(&pool, "agent-1", 0).await, None);
+        let gate_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT FROM auto_queue_phase_gates WHERE run_id = 'run-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count phase gates");
+        assert_eq!(gate_count, 0);
+        assert_eq!(count_message_outbox(&pool).await, 1);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     async fn seed_phase_gate_dispatches(pool: &PgPool, dispatch_ids: &[&str]) {
