@@ -15,7 +15,7 @@ function manualChunks(id: string) {
     return "react";
   }
 
-  if (id.includes("react-router-dom")) {
+  if (id.includes("/react-router/")) {
     return "router";
   }
 

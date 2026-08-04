@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, RefreshCw, Wifi } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import {
   getHealth,
   getPromptManifestRetention,
