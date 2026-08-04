@@ -270,6 +270,7 @@ src/
 │   │   ├── analytics.rs
 │   │   ├── auth.rs
 │   │   ├── auto_queue.rs
+│   │   ├── auto_queue_lifecycle_pg_tests.rs
 │   │   ├── automation_candidates.rs
 │   │   ├── claude_accounts_api.rs
 │   │   ├── cluster.rs

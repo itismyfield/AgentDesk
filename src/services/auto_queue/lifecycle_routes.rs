@@ -25,6 +25,22 @@ impl LifecycleAction {
     }
 }
 
+pub(super) fn validate_patch_status(body: &UpdateRunBody) -> AppResult<()> {
+    if body
+        .status
+        .as_deref()
+        .is_some_and(|status| status != "active")
+    {
+        return Err(auto_queue_json_error(
+            StatusCode::BAD_REQUEST,
+            Json(
+                json!({"error": "PATCH status only supports starting a pending run; use the pause, resume, or end endpoint for lifecycle transitions"}),
+            ),
+        ));
+    }
+    Ok(())
+}
+
 async fn run_lifecycle_command(
     state: State<AppState>,
     run_id: String,

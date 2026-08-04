@@ -25,6 +25,7 @@ src/server/issue_specs.rs
 src/server/mod.rs
 src/server/multinode_regression.rs
 src/server/resource_locks.rs
+src/server/routes/auto_queue_lifecycle_pg_tests.rs
 src/server/routes/dispatches/crud.rs
 src/server/routes/escalation.rs
 src/server/routes/memory_api.rs
@@ -101,6 +102,7 @@ server::issue_specs::tests
 server::message_outbox_retry_tests
 server::multinode_regression::tests
 server::resource_locks::resource_locks_pg_tests
+server::routes::auto_queue_lifecycle_pg_tests::tests
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests
 server::routes::escalation::manual_decision_gate_tests
 server::routes::memory_api::request_body_tests
@@ -216,6 +218,8 @@ db::auto_queue::tests::dispatch_terminal_sync_pg_tests::phase_gate_state_save_ro
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_auto_queue_complete_run_releases_slots_gates_and_notifies_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_auto_queue_pause_run_releases_slots_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_auto_queue_resume_run_changes_paused_status_pg
+db::auto_queue::tests::dispatch_terminal_sync_pg_tests::review_4883_end_with_live_dispatch_blocks_competing_slot_pg
+db::auto_queue::tests::dispatch_terminal_sync_pg_tests::review_4883_stale_allocator_reclaims_slot_after_end_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::slot_has_recent_terminal_auto_queue_dispatch_pg_respects_cooldown
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::user_cancelled_entry_does_not_finalize_review_disabled_run_pg
 db::auto_queue::tests::grouped_card_count_pg_tests::grouped_counts_use_one_status_array_and_preserve_filters_pg
@@ -357,6 +361,9 @@ server::multinode_regression::tests::multinode_single_leader_lock_allows_one_hol
 server::multinode_regression::tests::multinode_unreal_resource_lock_is_exclusive
 server::resource_locks::resource_locks_pg_tests::resource_lock_allows_only_one_active_holder
 server::resource_locks::resource_locks_pg_tests::resource_lock_reclaims_expired_holder
+server::routes::auto_queue_lifecycle_pg_tests::tests::patch_completed_no_longer_skips_lifecycle_side_effects_pg
+server::routes::auto_queue_lifecycle_pg_tests::tests::patch_pending_start_and_metadata_updates_remain_supported_pg
+server::routes::auto_queue_lifecycle_pg_tests::tests::postgres_auto_queue_lifecycle_http_routes_use_canonical_writers_pg
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_events_route_returns_typed_rows_newest_first
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_reconcile_stats_route_returns_current_stats_and_metric_rows
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::publish_only_dispatch_patch_broadcasts_without_mutating_result_or_phase_gate_pg

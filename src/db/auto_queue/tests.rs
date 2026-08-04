@@ -416,6 +416,64 @@ mod dispatch_terminal_sync_pg_tests {
         pg_db.drop().await;
     }
 
+    #[tokio::test]
+    async fn review_4883_stale_allocator_reclaims_slot_after_end_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+
+        assert!(
+            complete_run_on_pg(&pool, "run-1")
+                .await
+                .expect("complete run before stale allocation")
+        );
+        let allocation = allocate_slot_for_group_agent_pg(&pool, "run-1", 0, "agent-1")
+            .await
+            .expect("completed run allocation is a clean no-op");
+
+        assert_eq!(allocation, None);
+        assert_eq!(run_status(&pool, "run-1").await, "completed");
+        assert_eq!(slot_run(&pool, "agent-1", 0).await, None);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn review_4883_end_with_live_dispatch_blocks_competing_slot_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        sqlx::query(
+            "INSERT INTO task_dispatches (id, to_agent_id, status, context)
+             VALUES ('dispatch-live-after-end', 'agent-1', 'dispatched', $1)",
+        )
+        .bind(serde_json::json!({"slot_index": 0}).to_string())
+        .execute(&pool)
+        .await
+        .expect("seed live dispatch");
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-2', 'repo-1', 'agent-1', 'active')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed competing run");
+
+        assert!(
+            complete_run_on_pg(&pool, "run-1")
+                .await
+                .expect("complete original run")
+        );
+        let allocation = allocate_slot_for_group_agent_pg(&pool, "run-2", 0, "agent-1")
+            .await
+            .expect("competing allocation is a clean no-op");
+
+        assert_eq!(allocation, None);
+        assert_eq!(slot_run(&pool, "agent-1", 0).await, None);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
     async fn seed_phase_gate_dispatches(pool: &PgPool, dispatch_ids: &[&str]) {
         for dispatch_id in dispatch_ids {
             sqlx::query(

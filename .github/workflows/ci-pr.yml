@@ -121,6 +121,7 @@ jobs:
               - 'src/kanban/**'
               - 'src/reconcile.rs'
               - 'src/server/routes/auto_queue.rs'
+              - 'src/server/routes/auto_queue_lifecycle_pg_tests.rs'
               - 'src/server/routes/dispatched_sessions.rs'
               - 'src/server/routes/dispatches/**'
               - 'src/server/routes/message_outbox.rs'
