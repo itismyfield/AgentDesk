@@ -7,11 +7,30 @@ use super::SharedData;
 use super::parse_dispatch_id;
 
 const MONITOR_AUTO_TURN_ORIGIN_LITERAL: &str = "[origin=monitor_auto_turn]";
+const OPERATIONAL_ALERT_ORIGIN_LITERAL: &str = "[origin=operational_alert]";
 
 fn hidden_monitor_auto_turn_origin_marker() -> &'static str {
     static MARKER: OnceLock<String> = OnceLock::new();
     MARKER.get_or_init(|| {
         MONITOR_AUTO_TURN_ORIGIN_LITERAL
+            .bytes()
+            .flat_map(|byte| {
+                (0..8).rev().map(move |shift| {
+                    if (byte >> shift) & 1 == 1 {
+                        '\u{200C}'
+                    } else {
+                        '\u{200B}'
+                    }
+                })
+            })
+            .collect()
+    })
+}
+
+fn hidden_operational_alert_origin_marker() -> &'static str {
+    static MARKER: OnceLock<String> = OnceLock::new();
+    MARKER.get_or_init(|| {
+        OPERATIONAL_ALERT_ORIGIN_LITERAL
             .bytes()
             .flat_map(|byte| {
                 (0..8).rev().map(move |shift| {
@@ -35,6 +54,21 @@ pub(in crate::services::discord) fn prepend_monitor_auto_turn_origin(text: &str)
     }
 }
 
+/// Prefix an operational alert with a provenance marker removed at intake.
+/// The marker is invisible in Discord while remaining stable in message text.
+pub(crate) fn prepend_operational_alert_origin(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        String::new()
+    } else if trimmed.starts_with(hidden_operational_alert_origin_marker())
+        || trimmed.starts_with(OPERATIONAL_ALERT_ORIGIN_LITERAL)
+    {
+        trimmed.to_string()
+    } else {
+        format!("{}{}", hidden_operational_alert_origin_marker(), trimmed)
+    }
+}
+
 pub(in crate::services::discord) fn strip_monitor_auto_turn_origin<'a>(
     text: &'a str,
 ) -> (Cow<'a, str>, bool) {
@@ -47,6 +81,28 @@ pub(in crate::services::discord) fn strip_monitor_auto_turn_origin<'a>(
     }
 
     (Cow::Borrowed(text), false)
+}
+
+pub(crate) fn strip_operational_alert_origin<'a>(text: &'a str) -> (Cow<'a, str>, bool) {
+    if let Some(rest) = text.strip_prefix(hidden_operational_alert_origin_marker()) {
+        return (Cow::Borrowed(rest), true);
+    }
+
+    if let Some(rest) = text.strip_prefix(OPERATIONAL_ALERT_ORIGIN_LITERAL) {
+        return (Cow::Owned(rest.trim_start().to_string()), true);
+    }
+
+    (Cow::Borrowed(text), false)
+}
+
+pub(crate) fn has_non_turn_provenance(text: &str) -> bool {
+    let (without_alert, has_operational_alert) = strip_operational_alert_origin(text);
+    let (_, has_monitor_origin) = strip_monitor_auto_turn_origin(without_alert.as_ref());
+    has_operational_alert || has_monitor_origin
+}
+
+fn has_operational_alert_provenance(text: &str) -> bool {
+    strip_operational_alert_origin(text).1
 }
 
 pub(super) fn should_process_allowed_bot_turn_text(text: &str) -> bool {
@@ -234,7 +290,9 @@ mod dispatch_turn_gate_tests {
 
 #[cfg(test)]
 mod allowed_turn_sender_tests {
-    use super::is_allowed_turn_sender;
+    use super::{
+        has_non_turn_provenance, is_allowed_turn_sender, prepend_operational_alert_origin,
+    };
 
     const ANNOUNCE_ID: u64 = 1001;
     const OTHER_BOT_ID: u64 = 2002;
@@ -261,6 +319,21 @@ mod allowed_turn_sender_tests {
             ANNOUNCE_ID,
             true,
             "DISPATCH:1f3c2b1a-0000-4000-8000-000000000000\n── implementation dispatch ──",
+        ));
+    }
+
+    #[test]
+    fn announce_authored_operational_alert_does_not_trigger() {
+        let marked = prepend_operational_alert_origin(
+            "DISPATCH:1f3c2b1a-0000-4000-8000-000000000000\nwatchdog alert",
+        );
+        assert!(has_non_turn_provenance(&marked));
+        assert!(!is_allowed_turn_sender(
+            &[ANNOUNCE_ID],
+            Some(ANNOUNCE_ID),
+            ANNOUNCE_ID,
+            true,
+            &marked,
         ));
     }
 
@@ -354,14 +427,17 @@ pub(in crate::services::discord) fn is_allowed_turn_sender(
     author_is_bot: bool,
     text: &str,
 ) -> bool {
+    if has_operational_alert_provenance(text) {
+        return false;
+    }
     if announce_bot_id.is_some_and(|id| id == author_id) {
         // #3576 (restores the announce branch removed by #3478): the
         // `announce` bot is the authoritative trigger source. Its live
         // traffic — dispatch envelopes, PM-triage / deadlock / escalation
         // cards, and agent-to-agent `/api/discord/send` messages — must
         // start turns WITHOUT requiring the `DISPATCH:` / monitor-origin
-        // marker that gates other allowed bots. The `should_process_*`
-        // marker gate (#706 security) only applies to non-announce bots.
+        // marker that gates other allowed bots. Explicit non-turn provenance
+        // remains a global suppression gate for every sender.
         //
         // The lone exception is the legacy issue-announcement / completion
         // card (📋/✅) shape: issue cards now route through notify-bot

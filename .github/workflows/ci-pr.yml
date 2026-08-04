@@ -764,6 +764,15 @@ jobs:
           cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1
           cargo test --lib services::discord::terminal_ui_obligation::tests -- --test-threads=1
 
+      # #5034: watchdog/operational alerts are notifications, not queued turns;
+      # run the sender-policy and single outer-admission-guard regressions in
+      # the same path-filtered required lane as the Discord production change.
+      - name: Operational alert intake admission regressions
+        run: |
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::dispatch_policy::allowed_turn_sender_tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::intake_gate::gate::tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::intake_gate::live_intake_preserve_wiring_tests::one_admission_guard_precedes_all_soft_intervention_entrypoints -- --exact --test-threads=1
+
       # #5003: this production-path E2E previously ran only in main's broad
       # non-PG lane, so test-only fixes could merge without executing it on PRs.
       - name: Local model durable queue wake regression

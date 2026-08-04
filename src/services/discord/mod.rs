@@ -14,7 +14,7 @@ mod delivery_lease_cell;
 mod delivery_lease_key;
 mod destructive_cancel_gate;
 mod discord_io;
-mod dispatch_policy;
+pub(crate) mod dispatch_policy;
 pub(crate) mod e2e_control;
 mod footer_view_reconciler;
 pub(crate) mod formatting;

@@ -5,16 +5,6 @@ pub(super) const WATCHDOG_DEADLOCK_PREALERT_BOT: &str =
     crate::services::discord::bot_role::UtilityBotRole::Announce.alias();
 pub(super) const WATCHDOG_TIMEOUT_REASON: &str = "watchdog timeout";
 pub(super) const WATCHDOG_TIMEOUT_CANCEL_SOURCE: &str = "watchdog_timeout";
-#[cfg(not(test))]
-const PAUSED_WATCHER_COLD_START_RETRY_ATTEMPTS: u32 = 180;
-#[cfg(test)]
-const PAUSED_WATCHER_COLD_START_RETRY_ATTEMPTS: u32 = 20;
-#[cfg(not(test))]
-const PAUSED_WATCHER_COLD_START_RETRY_DELAY: std::time::Duration =
-    std::time::Duration::from_secs(1);
-#[cfg(test)]
-const PAUSED_WATCHER_COLD_START_RETRY_DELAY: std::time::Duration =
-    std::time::Duration::from_millis(10);
 
 pub(super) fn parse_watchdog_alert_channel_id(raw: &str) -> Option<serenity::ChannelId> {
     let trimmed = raw.trim();
@@ -136,6 +126,10 @@ pub(super) fn build_watchdog_timeout_notice_message(elapsed_mins: i64, has_queue
     }
 }
 
+fn mark_watchdog_alert_message(message: String) -> String {
+    super::super::super::dispatch_policy::prepend_operational_alert_origin(&message)
+}
+
 pub(super) async fn send_watchdog_timeout_notice(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -147,7 +141,10 @@ pub(super) async fn send_watchdog_timeout_notice(
         super::super::super::mailbox_has_pending_soft_queue(shared, provider, channel_id)
             .await
             .has_pending;
-    let message = build_watchdog_timeout_notice_message(elapsed_mins, has_queued);
+    let message = mark_watchdog_alert_message(build_watchdog_timeout_notice_message(
+        elapsed_mins,
+        has_queued,
+    ));
     if let Err(error) = channel_id.say(http, message).await {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!(
@@ -451,7 +448,7 @@ pub(super) async fn maybe_send_watchdog_deadlock_prealert(
         }
     };
     let inflight = super::super::super::inflight::load_inflight_state(provider, channel_id.get());
-    let message = build_watchdog_deadlock_prealert_message(
+    let message = mark_watchdog_alert_message(build_watchdog_deadlock_prealert_message(
         provider,
         channel_id,
         now_ms,
@@ -459,7 +456,7 @@ pub(super) async fn maybe_send_watchdog_deadlock_prealert(
         turn_started_ms,
         max_deadline_ms,
         inflight.as_ref(),
-    );
+    ));
     match alert_channel_id.say(&*alert_http, message).await {
         Ok(_) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -610,6 +607,17 @@ impl PendingPausedWatcherAttachKey {
 static PENDING_PAUSED_WATCHER_ATTACHES: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashSet<PendingPausedWatcherAttachKey>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+#[cfg(not(test))]
+const PAUSED_WATCHER_COLD_START_RETRY_ATTEMPTS: u32 = 180;
+#[cfg(test)]
+const PAUSED_WATCHER_COLD_START_RETRY_ATTEMPTS: u32 = 20;
+#[cfg(not(test))]
+const PAUSED_WATCHER_COLD_START_RETRY_DELAY: std::time::Duration =
+    std::time::Duration::from_secs(1);
+#[cfg(test)]
+const PAUSED_WATCHER_COLD_START_RETRY_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(10);
 
 #[cfg(test)]
 static TEST_PAUSED_WATCHER_TMUX_LIVE_OVERRIDE: std::sync::OnceLock<
@@ -1036,6 +1044,22 @@ mod timeout_notice_tests {
             build_watchdog_timeout_notice_message(17, true),
             "⚠️ 턴이 17분 타임아웃으로 자동 중단되었습니다. 대기 중인 메시지로 다음 턴을 시작합니다."
         );
+    }
+
+    #[test]
+    fn watchdog_alert_messages_carry_non_turn_provenance() {
+        let timeout = mark_watchdog_alert_message(build_watchdog_timeout_notice_message(17, false));
+        let prealert = mark_watchdog_alert_message(build_watchdog_deadlock_prealert_message(
+            &ProviderKind::Claude,
+            serenity::ChannelId::new(42),
+            1_000,
+            61_000,
+            0,
+            120_000,
+            None,
+        ));
+        assert!(crate::services::discord::dispatch_policy::has_non_turn_provenance(&timeout));
+        assert!(crate::services::discord::dispatch_policy::has_non_turn_provenance(&prealert));
     }
 
     #[test]

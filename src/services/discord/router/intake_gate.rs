@@ -13,14 +13,13 @@ mod queue_effects;
 mod stale_turn;
 
 pub(in crate::services::discord) use gate::should_process_turn_message;
-#[cfg(test)]
-pub(super) use queue_effects::queue_pending_reaction_for;
 
 use gate::{
     bot_author_allowed_for_live_intake, live_sender_excluded_from_human_preservation,
-    should_merge_consecutive_messages, should_skip_for_missing_required_mention,
-    should_skip_human_slash_message, should_skip_self_authored_turn_message,
-    should_start_attachment_only_turn, strip_leading_bot_mention,
+    should_admit_turn_message, should_merge_consecutive_messages,
+    should_skip_for_missing_required_mention, should_skip_human_slash_message,
+    should_skip_self_authored_turn_message, should_start_attachment_only_turn,
+    strip_leading_bot_mention,
 };
 pub(in crate::services::discord::router) use queue_effects::should_schedule_post_enqueue_idle_drain;
 use queue_effects::{IntakeGateQueueEffects, render_visible_queued_ack};
@@ -701,8 +700,12 @@ pub(in crate::services::discord) async fn handle_event(
             }
 
             let raw_text = new_message.content.trim();
+            let (without_operational_alert_origin, _has_operational_alert_origin) =
+                super::super::dispatch_policy::strip_operational_alert_origin(raw_text);
             let (sanitized_text, has_monitor_auto_turn_origin) =
-                super::super::strip_monitor_auto_turn_origin(raw_text);
+                super::super::strip_monitor_auto_turn_origin(
+                    without_operational_alert_origin.as_ref(),
+                );
             let text = sanitized_text.trim();
 
             let is_allowed_bot_sender = bot_author_allowed_for_live_intake(
@@ -711,7 +714,7 @@ pub(in crate::services::discord) async fn handle_event(
                 user_id.get(),
             );
             if is_allowed_bot_sender
-                && !super::super::is_allowed_turn_sender(
+                && !should_admit_turn_message(
                     &settings_snapshot.allowed_bot_ids,
                     announce_bot_id,
                     user_id.get(),
@@ -1665,6 +1668,9 @@ pub(in crate::services::discord) async fn handle_event(
 }
 
 #[cfg(test)]
+pub(super) use queue_effects::queue_pending_reaction_for;
+
+#[cfg(test)]
 mod reply_context_tests {
     use super::gate::{should_start_attachment_only_turn, strip_leading_bot_mention};
     use super::{AttachmentReplyItem, format_attachment_reply_context};
@@ -1762,6 +1768,29 @@ mod live_intake_preserve_wiring_tests {
                 "origin: super::IntakeOrigin::LiveMessage,\n                    preserve_on_cancel,"
             ),
             "live IntakeSubmission must reuse the precomputed preservation value"
+        );
+    }
+
+    #[test]
+    fn one_admission_guard_precedes_all_soft_intervention_entrypoints() {
+        let module_src = include_str!("intake_gate.rs");
+        let production_end = module_src
+            .find("#[cfg(test)]\nmod reply_context_tests")
+            .expect("production intake gate ends before unit tests");
+        let production = &module_src[..production_end];
+        let guard = "if is_allowed_bot_sender\n                && !should_admit_turn_message(";
+        let guard_pos = production
+            .find(guard)
+            .expect("all intake queue branches share the outer admission guard");
+        let first_queue_entry = production
+            .find("SoftInterventionSpec {")
+            .expect("intake gate has a soft intervention queue entrypoint");
+
+        assert!(guard_pos < first_queue_entry);
+        assert_eq!(
+            production.matches("is_allowed_turn_sender(").count(),
+            0,
+            "queue branches must not make sender decisions independently"
         );
     }
 }

@@ -303,7 +303,9 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.high_risk_recovery == 'true'",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "9c3587d8664bdd63769c3306c016f241e851649a68a7c6a52b11e243c438df3d",
+    # #5034 re-pins after adding the path-filtered operational-alert admission
+    # regression step to the required high-risk Discord lane.
+    "job_sha256" => "214ab1a366a02fd2520aee9d001fd9f402bf685e487b2aaeb474650fbc316414",
     "require_debug_env" => false,
     "cargo_steps" => {
       "Observe curated lane selections" => {

@@ -218,7 +218,6 @@ services::discord::commands::tui_passthrough::tests
 services::discord::commands::voice::auto_join_tests
 services::discord::compact_turn_authority::tests
 services::discord::completion_footer_metadata::tests
-services::discord::dispatch_policy::allowed_turn_sender_tests
 services::discord::dispatch_policy::dispatch_turn_gate_tests
 services::discord::followup_retry_requeue_tests
 services::discord::footer_view_reconciler::tests
@@ -330,7 +329,6 @@ services::discord::router::dispatch_trigger::tests
 services::discord::router::intake_dispatch::notice::tests
 services::discord::router::intake_dispatch::tests
 services::discord::router::intake_gate::busy_duplicate_notice::tests
-services::discord::router::intake_gate::gate::tests
 services::discord::router::intake_gate::live_intake_preserve_wiring_tests
 services::discord::router::intake_gate::queue_effects::channel_queued_placeholder_pure_tests
 services::discord::router::intake_gate::queue_effects::duplicate_repair_interleaving_tests
