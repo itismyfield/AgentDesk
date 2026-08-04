@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -109,8 +110,6 @@ class InstallBootstrapPortableTests(unittest.TestCase):
                     },
                 },
             }
-            import json
-
             (dashboard / "package-lock.json").write_text(json.dumps(lock), encoding="utf-8")
             installed_lock = {"lockfileVersion": 3, "packages": dict(lock["packages"])}
             installed_lock["packages"].pop("")
@@ -143,6 +142,40 @@ class InstallBootstrapPortableTests(unittest.TestCase):
             )
             self.assertNotEqual(stale.returncode, 0)
             self.assertIn("version does not match package-lock.json", stale.stderr)
+
+    def test_dashboard_pnpm_importer_matches_manifest_specs(self):
+        manifest = json.loads((ROOT / "dashboard" / "package.json").read_text(encoding="utf-8"))
+        lines = (ROOT / "dashboard" / "pnpm-lock.yaml").read_text(encoding="utf-8").splitlines()
+        importer = {}
+        current_group = None
+        current_package = None
+        in_root_importer = False
+
+        for line in lines:
+            if line == "  .:":
+                in_root_importer = True
+                continue
+            if in_root_importer and line == "packages:":
+                break
+            if not in_root_importer:
+                continue
+            if line in ("    dependencies:", "    devDependencies:"):
+                current_group = line.strip().removesuffix(":")
+                importer[current_group] = {}
+                current_package = None
+                continue
+            if line.startswith("    ") and not line.startswith("      "):
+                current_group = None
+                current_package = None
+                continue
+            if current_group and line.startswith("      ") and not line.startswith("        "):
+                current_package = line.strip().removesuffix(":").strip("'\"")
+                continue
+            if current_group and current_package and line.startswith("        specifier: "):
+                importer[current_group][current_package] = line.split("specifier: ", 1)[1].strip("'\"")
+
+        for group in ("dependencies", "devDependencies"):
+            self.assertEqual(importer.get(group), manifest.get(group), f"pnpm importer drift: {group}")
 
     @unittest.skipIf(os.name == "nt", "behavioral dashboard toolchain guard uses POSIX paths")
     def test_dashboard_toolchain_guard_rejects_an_old_node(self):
