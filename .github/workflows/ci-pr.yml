@@ -888,6 +888,25 @@ jobs:
         with:
           fetch-depth: 0
 
+      # --verify-lib-inventory invokes `cargo test --lib -- --list`, so this
+      # required aggregate job must provision the same pinned toolchain and
+      # cache used by the other Rust lanes before running ci-script-checks.sh.
+      - name: Install Rust toolchain for lib inventory
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+
+      - name: Setup sccache for lib inventory
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache Cargo dependencies for lib inventory
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Setup Python for script checks
         uses: actions/setup-python@v5
         with:

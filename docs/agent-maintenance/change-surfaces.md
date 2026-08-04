@@ -60,6 +60,26 @@
   path already implemented (e.g. Discord outbound v3). For pre-migration giant
   files (no canonical replacement yet), the column is `n/a`.
 
+### CI lib-test identity inventory pin
+
+The source-of-truth for the static lib-test identity pin is
+`scripts/check_test_target_integrity.py`. Adding, deleting, or renaming a Rust
+lib test requires a reviewable companion update:
+
+1. Run `python3 scripts/check_test_target_integrity.py
+   --print-lib-inventory-digest` (this is read-only and does not compile).
+2. Review the source diff and the command's digest/count output. Update
+   `LIB_INVENTORY_STATIC_IDS_SHA256` and, when the signed count delta is not
+   zero, `LIB_INVENTORY_STATIC_IDS_COUNT` in the same diff.
+3. Re-run `--verify-lib-inventory`; its failure output repeats the digest,
+   count delta, and the exact re-pin command.
+
+The pin is a source constant, not an external immutable manifest. A deletion
+or rename can therefore pass if the same unreviewed diff re-pins it; the gate's
+guarantee is review visibility of the 64-hex digest/count change, not an
+unforgeable deletion block. Keep the named platform/include exceptions in the
+same file synchronized when a test moves across those compilation boundaries.
+
 ## Surface Map (by feature)
 
 ### `provider_output_guard`

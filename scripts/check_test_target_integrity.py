@@ -14,6 +14,10 @@ fatal, and opt-in `--run-list-check` additionally runs
 `cargo test ... -- --list` (compiles) to flag lanes selecting 0 tests.
 Legitimately-empty lanes (platform `#[cfg]`) are excused via
 scripts/test_target_integrity_allowlist.txt (normalized command per line).
+
+`--print-lib-inventory-digest` is the read-only re-pin path: it computes the
+static digest/count without invoking cargo so a test diff can be reviewed before
+the two source pin constants are updated.
 """
 
 from __future__ import annotations
@@ -84,9 +88,12 @@ LIB_INVENTORY_KNOWN_CARGO_ONLY = frozenset({
 # SHA-256 of UTF-8 "\n".join(sorted(static full test IDs)), without a trailing
 # newline. The identity is platform-independent because the parser includes
 # every cfg-gated source test; regenerate only after reviewing the named diff.
+# Keep the count beside the digest so a failed check reports a signed count
+# delta even though the compact pin deliberately does not embed every identity.
 LIB_INVENTORY_STATIC_IDS_SHA256 = (
     "700edad866962420a94acb7b8c5471625d6aba6368d9ea81859c89b085b873b6"
 )
+LIB_INVENTORY_STATIC_IDS_COUNT = 7410
 
 
 @dataclass(frozen=True)
@@ -754,6 +761,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="exit 1 on violations (default: warn only)")
     parser.add_argument("--run-list-check", action="store_true",
                         help="also run `cargo test ... -- --list` (compiles)")
+    parser.add_argument(
+        "--print-lib-inventory-digest",
+        action="store_true",
+        help=(
+            "print the current static lib-test digest and count without "
+            "running cargo (use to review and re-pin the source constant)"
+        ),
+    )
     parser.add_argument("--verify-lib-inventory", action="store_true",
                         help="compare static lib test IDs with compiled --list IDs")
     parser.add_argument("--observe-selection", action="store_true",
@@ -776,6 +791,27 @@ def main(argv: list[str] | None = None) -> int:
         for error in errors:
             print(f"selection-evidence verifier: {error}", file=sys.stderr)
         return 1 if errors else 0
+    if args.print_lib_inventory_digest:
+        target = discover_targets(repo_root).get("lib")
+        if target is None:
+            print("lib inventory digest: lib target not found", file=sys.stderr)
+            return 2
+        inventory = collect_static_tests(target, repo_root)
+        for module, site in sorted(inventory.module_errors.items()):
+            print(f"lib inventory module-resolution: {module} at {site}",
+                  file=sys.stderr)
+        static_ids = frozenset(inventory.tests)
+        digest = _identity_digest(static_ids)
+        delta = len(static_ids) - LIB_INVENTORY_STATIC_IDS_COUNT
+        print(f"lib inventory static digest: {digest}")
+        print("lib inventory static count: "
+              f"current={len(static_ids)} "
+              f"pinned={LIB_INVENTORY_STATIC_IDS_COUNT} "
+              f"delta={delta:+d}")
+        print("lib inventory re-pin: update "
+              "LIB_INVENTORY_STATIC_IDS_SHA256 (and COUNT when delta is "
+              "nonzero) after reviewing the test diff")
+        return 1 if inventory.module_errors else 0
     if args.verify_lib_inventory:
         # Contract boundary for this specific inventory check: it compares test
         # identities, not whether their bodies assert anything or whether a CI
@@ -800,22 +836,35 @@ def main(argv: list[str] | None = None) -> int:
             print(f"lib inventory static-only: {test_id}", file=sys.stderr)
         for test_id in sorted(comparison.cargo_only):
             print(f"lib inventory cargo-only: {test_id}", file=sys.stderr)
-        static_identity_matches = (
-            _identity_digest(comparison.static_ids)
-            == LIB_INVENTORY_STATIC_IDS_SHA256
+        static_digest = _identity_digest(comparison.static_ids)
+        static_identity_matches = static_digest == LIB_INVENTORY_STATIC_IDS_SHA256
+        static_count_delta = (
+            len(comparison.static_ids) - LIB_INVENTORY_STATIC_IDS_COUNT
         )
         print("lib inventory comparison: "
               f"static-only={len(comparison.static_only)} "
               f"cargo-only={len(comparison.cargo_only)} "
               f"module-errors={len(comparison.module_errors)}")
         print("lib inventory identity: "
-              f"static={'match' if static_identity_matches else 'changed'}")
-        return 1 if (
+              f"static={'match' if static_identity_matches else 'changed'} "
+              f"digest={static_digest} "
+              f"count={len(comparison.static_ids)} "
+              f"pinned-count={LIB_INVENTORY_STATIC_IDS_COUNT} "
+              f"delta={static_count_delta:+d}")
+        failed = (
             comparison.static_only != expected_static_only
             or comparison.cargo_only != LIB_INVENTORY_KNOWN_CARGO_ONLY
             or comparison.module_errors
+            or len(comparison.static_ids) != LIB_INVENTORY_STATIC_IDS_COUNT
             or not static_identity_matches
-        ) else 0
+        )
+        if failed:
+            print("lib inventory re-pin: run `python3 scripts/"
+                  "check_test_target_integrity.py "
+                  "--print-lib-inventory-digest`, review the reported "
+                  "count delta and source diff, then update the two pin "
+                  "constants")
+        return 1 if failed else 0
     if args.observe_selection:
         if len(workflows) != 1 or not args.job:
             parser.error("--observe-selection requires one --workflow and --job")

@@ -311,6 +311,8 @@ mod after_string_brace {
         ), mock.patch.object(
             integrity, "LIB_INVENTORY_STATIC_IDS_SHA256",
             integrity._identity_digest(pinned_ids),
+        ), mock.patch.object(
+            integrity, "LIB_INVENTORY_STATIC_IDS_COUNT", len(pinned_ids),
         ), contextlib.redirect_stdout(io.StringIO()):
             return integrity.main([
                 "--repo-root", str(REPO_ROOT), "--verify-lib-inventory",
@@ -335,6 +337,60 @@ mod after_string_brace {
         self.assertEqual(self._inventory_cli(
             self._comparison(renamed), baseline,
         ), 1, "same-count identity replacement must fail")
+
+    def test_print_flag_reports_digest_and_signed_count_delta(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._fixture(root)
+            output = io.StringIO()
+            with mock.patch.object(
+                integrity, "LIB_INVENTORY_STATIC_IDS_COUNT", 3,
+            ), contextlib.redirect_stdout(output):
+                rc = integrity.main([
+                    "--repo-root", str(root),
+                    "--print-lib-inventory-digest",
+                ])
+        self.assertEqual(rc, 0)
+        rendered = output.getvalue()
+        expected_ids = {
+            "nested::tests::plain_case",
+            "nested::tests::async_case",
+            "nested::after_string_brace::keeps_root_scope",
+        }
+        self.assertIn(
+            f"lib inventory static digest: {integrity._identity_digest(expected_ids)}",
+            rendered,
+        )
+        self.assertIn("lib inventory static count: current=3 pinned=3 delta=+0", rendered)
+        self.assertIn("LIB_INVENTORY_STATIC_IDS_SHA256", rendered)
+
+    def test_changed_pin_stays_red_and_reports_repin_command(self) -> None:
+        baseline = {"module::tests::kept", "module::tests::guard"}
+        added = baseline | {"module::tests::new_case"}
+        output = io.StringIO()
+        with mock.patch.object(
+            integrity, "compare_lib_inventory", return_value=self._comparison(added),
+        ), mock.patch.object(
+            integrity, "LIB_INVENTORY_STATIC_IDS_SHA256",
+            integrity._identity_digest(baseline),
+        ), mock.patch.object(
+            integrity, "LIB_INVENTORY_STATIC_IDS_COUNT", len(baseline),
+        ), contextlib.redirect_stdout(output):
+            rc = integrity.main([
+                "--repo-root", str(REPO_ROOT), "--verify-lib-inventory",
+            ])
+        self.assertEqual(rc, 1)
+        rendered = output.getvalue()
+        self.assertIn("static=changed", rendered)
+        self.assertIn(
+            f"digest={integrity._identity_digest(added)}", rendered,
+        )
+        self.assertIn("delta=+1", rendered)
+        self.assertIn(
+            "python3 scripts/check_test_target_integrity.py "
+            "--print-lib-inventory-digest",
+            rendered,
+        )
 
     def test_ci_script_runs_inventory_verifier_as_a_standalone_command(self) -> None:
         lines = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(
