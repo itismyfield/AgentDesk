@@ -8,6 +8,7 @@ use crate::services::routines::{
     RoutineStore, is_migrated_launchd_script_ref, validate_routine_runtime_config,
     validate_routine_schedule,
 };
+use crate::utils::api::clamp_api_limit;
 
 use super::super::AppState;
 use super::PARALLEL_SAFE_MIGRATED_LAUNCHD_SCRIPT_REF;
@@ -171,6 +172,15 @@ pub(super) fn validate_run_status_filter(status: &str) -> AppResult<()> {
     }
 }
 
+/// Applies the public routine-run paging policy before store-level clamping.
+pub(super) fn normalize_routine_run_limit(limit: Option<i64>) -> i64 {
+    const DEFAULT_LIMIT: i64 = 20;
+
+    let requested = limit.unwrap_or(DEFAULT_LIMIT).max(0);
+    let requested = usize::try_from(requested).unwrap_or(usize::MAX);
+    clamp_api_limit(Some(requested)) as i64
+}
+
 pub(super) fn validate_schedule_request(schedule: Option<&str>) -> AppResult<()> {
     let Some(schedule) = schedule else {
         return Ok(());
@@ -256,8 +266,8 @@ mod tests {
 
     use super::super::PARALLEL_SAFE_MIGRATED_LAUNCHD_SCRIPT_REF;
     use super::{
-        ensure_routine_runtime_runnable, initial_attach_status, normalize_script_ref,
-        validate_distinct_fallback_agent,
+        ensure_routine_runtime_runnable, initial_attach_status, normalize_routine_run_limit,
+        normalize_script_ref, validate_distinct_fallback_agent,
     };
     use crate::config::RoutinesConfig;
     use crate::error::ErrorCode;
@@ -313,6 +323,19 @@ mod tests {
         let err = normalize_script_ref(" \t ").expect_err("empty refs must be rejected");
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
         assert_eq!(err.message(), "script_ref is required");
+    }
+
+    #[test]
+    fn routine_run_limit_has_explicit_default_and_bounds() {
+        assert_eq!(normalize_routine_run_limit(None), 20);
+        assert_eq!(normalize_routine_run_limit(Some(i64::MIN)), 1);
+        assert_eq!(normalize_routine_run_limit(Some(-1)), 1);
+        assert_eq!(normalize_routine_run_limit(Some(0)), 1);
+        assert_eq!(normalize_routine_run_limit(Some(1)), 1);
+        assert_eq!(normalize_routine_run_limit(Some(250)), 250);
+        assert_eq!(normalize_routine_run_limit(Some(2_000)), 2_000);
+        assert_eq!(normalize_routine_run_limit(Some(2_001)), 2_000);
+        assert_eq!(normalize_routine_run_limit(Some(i64::MAX)), 2_000);
     }
 
     #[test]

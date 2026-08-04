@@ -5,29 +5,27 @@ use axum::{
 };
 use serde_json::{Value, json};
 
+use super::super::AppState;
+use super::audit::audit_routine_delete;
+use super::helpers::{
+    ensure_routine_runtime_runnable, fallback_name, initial_attach_status,
+    migrated_launchd_metadata_for_state, normalize_routine_run_limit, normalize_script_ref,
+    routine_agent_executor, routine_discord_logger, routine_session_controller, routine_store,
+    validate_agent_id_request, validate_distinct_fallback_agent,
+    validate_execution_strategy_request, validate_max_retries_request, validate_run_status_filter,
+    validate_schedule_request, validate_timeout_request,
+};
+use super::responses::{delete_routine_response, session_control_error, store_error};
+use super::{
+    AttachRoutineBody, ListRoutinesQuery, ListRunsQuery, PatchRoutineBody, ResumeRoutineBody,
+    RoutineMetricsQuery, SearchRoutineRunResultsQuery,
+};
 use crate::api_caller_observability::RequestPrincipal;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::services::routines::{
     NewRoutine, RoutineLifecycleEvent, RoutineScriptLoader, RoutineSessionCommand,
     execute_claimed_script_run, is_migrated_launchd_script_ref,
     validate_migrated_launchd_activation,
-};
-use crate::utils::api::clamp_api_limit;
-
-use super::super::AppState;
-use super::audit::audit_routine_delete;
-use super::helpers::{
-    ensure_routine_runtime_runnable, fallback_name, initial_attach_status,
-    migrated_launchd_metadata_for_state, normalize_script_ref, routine_agent_executor,
-    routine_discord_logger, routine_session_controller, routine_store, validate_agent_id_request,
-    validate_distinct_fallback_agent, validate_execution_strategy_request,
-    validate_max_retries_request, validate_run_status_filter, validate_schedule_request,
-    validate_timeout_request,
-};
-use super::responses::{delete_routine_response, session_control_error, store_error};
-use super::{
-    AttachRoutineBody, ListRoutinesQuery, ListRunsQuery, PatchRoutineBody, ResumeRoutineBody,
-    RoutineMetricsQuery, SearchRoutineRunResultsQuery,
 };
 
 pub async fn list_routines(
@@ -75,7 +73,7 @@ pub async fn search_routine_run_results(
         validate_run_status_filter(status)?;
     }
     let store = routine_store(&state)?;
-    let limit = clamp_api_limit(Some(query.limit.unwrap_or(20).max(0) as usize)) as i64;
+    let limit = normalize_routine_run_limit(query.limit);
     let runs = store
         .search_run_results(
             q,
@@ -130,8 +128,9 @@ pub async fn list_routine_runs(
             "routine {routine_id} not found"
         )));
     }
+    let limit = normalize_routine_run_limit(query.limit);
     let runs = store
-        .list_runs(&routine_id, query.limit.unwrap_or(20))
+        .list_runs(&routine_id, limit)
         .await
         .map_err(store_error)?;
     Ok(Json(json!({ "runs": runs })))
