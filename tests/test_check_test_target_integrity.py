@@ -250,6 +250,102 @@ class RunListCheckContract(unittest.TestCase):
         self.assertIn("rc=101", detail)
 
 
+class LibInventoryIdentityContract(unittest.TestCase):
+    def _fixture(self, root: Path) -> None:
+        (root / "src" / "nested").mkdir(parents=True)
+        (root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\n\n[lib]\npath = "src/lib.rs"\n',
+            encoding="utf-8",
+        )
+        (root / "src" / "lib.rs").write_text(
+            'mod nested;\nconst FAKE: &str = "#[test] fn string_case() {}";\n',
+            encoding="utf-8",
+        )
+        (root / "src" / "nested" / "mod.rs").write_text(
+            """// #[test] fn comment_case() {}
+#[cfg(test)]
+mod tests {
+    const OPEN_BRACE: &str = "{";
+
+    #[test]
+    fn plain_case() {}
+
+    #[tokio::test]
+    async fn async_case() {}
+}
+
+#[cfg(test)]
+mod after_string_brace {
+    #[test]
+    fn keeps_root_scope() {}
+}
+""",
+            encoding="utf-8",
+        )
+
+    def test_static_inventory_collects_full_ids_not_comment_or_string(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._fixture(root)
+            inventory = integrity.collect_static_tests(root / "src/lib.rs", root)
+        self.assertEqual(set(inventory.tests), {
+            "nested::tests::plain_case",
+            "nested::tests::async_case",
+            "nested::after_string_brace::keeps_root_scope",
+        })
+        self.assertEqual(inventory.module_errors, {})
+
+    def _comparison(self, static_ids: set[str]):
+        expected = integrity.expected_lib_static_only(sys.platform)
+        assert expected is not None
+        return integrity.InventoryComparison(
+            expected,
+            integrity.LIB_INVENTORY_KNOWN_CARGO_ONLY,
+            frozenset(static_ids),
+            frozenset(),
+        )
+
+    def _inventory_cli(self, comparison, pinned_ids: set[str]) -> int:
+        with mock.patch.object(
+            integrity, "compare_lib_inventory", return_value=comparison,
+        ), mock.patch.object(
+            integrity, "LIB_INVENTORY_STATIC_IDS_SHA256",
+            integrity._identity_digest(pinned_ids),
+        ), contextlib.redirect_stdout(io.StringIO()):
+            return integrity.main([
+                "--repo-root", str(REPO_ROOT), "--verify-lib-inventory",
+            ])
+
+    def test_cli_accepts_exact_pinned_static_identity(self) -> None:
+        baseline = {"module::tests::kept", "module::tests::guard"}
+        self.assertEqual(self._inventory_cli(
+            self._comparison(baseline), baseline,
+        ), 0)
+
+    def test_cli_rejects_identity_deleted_from_static_and_cargo(self) -> None:
+        baseline = {"module::tests::kept", "module::tests::guard"}
+        deleted = {"module::tests::kept"}
+        self.assertEqual(self._inventory_cli(
+            self._comparison(deleted), baseline,
+        ), 1, "identity deletion must fail even when static/cargo drift sets match")
+
+    def test_cli_rejects_same_count_identity_rename(self) -> None:
+        baseline = {"module::tests::kept", "module::tests::guard"}
+        renamed = {"module::tests::kept", "module::tests::renamed_guard"}
+        self.assertEqual(self._inventory_cli(
+            self._comparison(renamed), baseline,
+        ), 1, "same-count identity replacement must fail")
+
+    def test_ci_script_runs_inventory_verifier_as_a_standalone_command(self) -> None:
+        lines = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(
+            "utf-8"
+        ).splitlines()
+        self.assertIn(
+            '"$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory',
+            lines,
+        )
+
+
 class ExecutionEvidenceSummaryContract(unittest.TestCase):
     def _summary_fields(self, rendered: str) -> dict[str, int]:
         lines = [line for line in rendered.splitlines()

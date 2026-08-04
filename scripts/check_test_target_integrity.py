@@ -19,6 +19,7 @@ scripts/test_target_integrity_allowlist.txt (normalized command per line).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import shlex
 import subprocess
@@ -47,6 +48,45 @@ JOB_HEADER = re.compile(r"^  ([A-Za-z0-9_-]+):(?:\s*#.*)?$")
 RECIPE_HEADER = re.compile(r"^([A-Za-z0-9_-]+):(?:\s.*)?$")
 EVIDENCE_LINE = re.compile(r"^selection-evidence: selected=(\d+) command=(.*)$")
 SUMMARY_KEYS = {"invocations", "nonzero", "findings", "extraction_errors", "execution_errors"}
+
+# The static parser intentionally sees platform-gated tests from every host.
+# libtest only lists tests compiled for the current host, and include!()-based
+# tests are outside this parser. These exact, named differences are reviewed
+# data; any drift on either side fails --verify-lib-inventory.
+LIB_INVENTORY_STATIC_ONLY_BASE = frozenset({
+    "cli::discord_thread_create::tests::thread_create_lock_cancel_child_process",
+    "cli::discord_thread_create::tests::windows_async_waiter_recovers_abandoned_owner",
+    "cli::discord_thread_create::tests::windows_cancelled_async_holder_releases_before_runtime_exit",
+    "cli::discord_thread_create::tests::windows_lock_uses_global_current_sid_named_mutex",
+    "cli::discord_thread_create_lock::windows::tests::wait_status_accepts_normal_and_abandoned_but_reports_errors",
+    "services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_process_cleanup_is_fail_closed_without_unix_probe",
+})
+LIB_INVENTORY_STATIC_ONLY_BY_PLATFORM = {
+    "darwin": frozenset({
+        "services::process::simple_cancel_watcher_tests::linux_proc_stat_parser_handles_comm_with_spaces_and_parens",
+    }),
+    "linux": frozenset({
+        "cli::init::launchd_plist_tests::clamp_launchd_nofile_soft_limit_never_exceeds_host_hard_limit",
+        "cli::init::launchd_plist_tests::generate_launchd_plist_release_sets_clamped_soft_number_of_files_limit",
+        "cli::init::launchd_plist_tests::generate_launchd_plist_uses_requested_fresh_home_and_root_only",
+        "services::platform::binary_resolver::tests::codex_fallback_dirs_include_app_bundle_resources_on_macos",
+    }),
+}
+LIB_INVENTORY_KNOWN_CARGO_ONLY = frozenset({
+    "services::discord::tmux::restored_turn_injected_anchor_tests::task_notification_kind_restart_invariant_tests::task_notification_kind_restart_roundtrip_4253",
+    "services::discord::tmux::tmux_output_stream::tests::provider_output_guard_tests::invariant_4371_raw_claude_jsonl_reaches_last_mile_guard_without_leaking",
+    "services::discord::tmux::tmux_watcher::terminal_direct_fallback::tests::committed_cleanup_preserves_tracking_until_delete_commits_4508",
+    "services::discord::tmux::tmux_watcher::terminal_direct_fallback::tests::committed_edit_failure_cleanup_has_controller_legacy_parity_4508",
+    "services::discord::tmux::tmux_watcher::terminal_direct_fallback::tests::legacy_edit_failure_revalidation_precedes_fallback_post_4508",
+    "services::discord::tmux::tmux_watcher::terminal_direct_fallback::tests::recovered_task_response_identity_is_stable_without_inflight_or_context",
+    "services::discord::tmux::tmux_watcher::terminal_direct_fallback::tests::watcher_task_response_wiring_prepares_reference_before_send_and_marks_after_frontier",
+})
+# SHA-256 of UTF-8 "\n".join(sorted(static full test IDs)), without a trailing
+# newline. The identity is platform-independent because the parser includes
+# every cfg-gated source test; regenerate only after reviewing the named diff.
+LIB_INVENTORY_STATIC_IDS_SHA256 = (
+    "700edad866962420a94acb7b8c5471625d6aba6368d9ea81859c89b085b873b6"
+)
 
 
 @dataclass(frozen=True)
@@ -89,6 +129,200 @@ def discover_targets(repo_root: Path) -> dict[str, Path]:
     for auto_bin in sorted((repo_root / "src/bin").glob("*.rs")):
         targets.setdefault(f"bin:{auto_bin.stem}", auto_bin)
     return targets
+
+
+@dataclass(frozen=True)
+class RustToken:
+    value: str
+    line: int
+    kind: str = "punct"
+
+
+def _rust_tokens(text: str) -> list[RustToken]:
+    """Tokenize the Rust subset needed for attrs, items, and brace scopes."""
+    tokens: list[RustToken] = []
+    index = 0
+    line = 1
+    while index < len(text):
+        char = text[index]
+        if char.isspace():
+            line += char == "\n"
+            index += 1
+            continue
+        if text.startswith("//", index):
+            end = text.find("\n", index)
+            index = len(text) if end < 0 else end
+            continue
+        if text.startswith("/*", index):
+            depth = 1
+            index += 2
+            while index < len(text) and depth:
+                if text.startswith("/*", index):
+                    depth += 1
+                    index += 2
+                elif text.startswith("*/", index):
+                    depth -= 1
+                    index += 2
+                else:
+                    line += text[index] == "\n"
+                    index += 1
+            continue
+        raw = re.match(r'r(#{0,255})"', text[index:])
+        if raw:
+            marker = '"' + raw.group(1)
+            start_line = line
+            start = index + raw.end()
+            end = text.find(marker, start)
+            if end < 0:
+                end = len(text)
+                index = len(text)
+            else:
+                index = end + len(marker)
+            value = text[start:end]
+            line += value.count("\n")
+            tokens.append(RustToken(value, start_line, "string"))
+            continue
+        if char == '"':
+            start_line = line
+            index += 1
+            value = []
+            while index < len(text):
+                if text[index] == "\\" and index + 1 < len(text):
+                    value.extend(text[index:index + 2])
+                    line += text[index + 1] == "\n"
+                    index += 2
+                elif text[index] == '"':
+                    index += 1
+                    break
+                else:
+                    value.append(text[index])
+                    line += text[index] == "\n"
+                    index += 1
+            tokens.append(RustToken("".join(value), start_line, "string"))
+            continue
+        if char == "'":
+            literal = re.match(r"'(?:\\.|[^\\'\n])'", text[index:])
+            if literal:
+                index += literal.end()
+                continue
+        ident = re.match(r"[A-Za-z_][A-Za-z0-9_]*", text[index:])
+        if ident:
+            tokens.append(RustToken(ident.group(), line, "ident"))
+            index += ident.end()
+            continue
+        if char in "#[]{}();=:":
+            tokens.append(RustToken(char, line))
+        index += 1
+    return tokens
+
+
+@dataclass(frozen=True)
+class StaticTestInventory:
+    tests: dict[str, str]
+    module_errors: dict[str, str]
+
+
+def collect_static_tests(root: Path, repo_root: Path) -> StaticTestInventory:
+    """Collect full #[test]/#[tokio::test] identities without compiling."""
+    tests: dict[str, str] = {}
+    module_errors: dict[str, str] = {}
+    queue: list[tuple[Path, tuple[str, ...], Path]] = [(root, (), root.parent)]
+    seen: set[tuple[Path, tuple[str, ...]]] = set()
+    while queue:
+        source, outer, base_dir = queue.pop()
+        identity = (source.resolve(), outer)
+        if identity in seen or not source.is_file():
+            continue
+        seen.add(identity)
+        tokens = _rust_tokens(source.read_text("utf-8"))
+        scopes: list[tuple[int, str, Path]] = []
+        depth = 0
+        pending_path: str | None = None
+        pending_test = False
+        index = 0
+        while index < len(tokens):
+            token = tokens[index]
+            current_names = outer + tuple(scope[1] for scope in scopes)
+            current_dir = scopes[-1][2] if scopes else base_dir
+            if token.value == "#" and index + 1 < len(tokens) \
+                    and tokens[index + 1].value == "[":
+                end = index + 2
+                attr_depth = 1
+                while end < len(tokens) and attr_depth:
+                    attr_depth += tokens[end].value == "["
+                    attr_depth -= tokens[end].value == "]"
+                    end += 1
+                attr = tokens[index + 2:end - 1]
+                path_end = next((offset for offset, item in enumerate(attr)
+                                 if item.value in ("(", "=", "]")), len(attr))
+                attr_path = tuple(item.value for item in attr[:path_end]
+                                  if item.kind == "ident")
+                pending_test = pending_test or attr_path in {
+                    ("test",), ("tokio", "test"),
+                }
+                if attr_path == ("path",):
+                    string = next((item.value for item in attr
+                                   if item.kind == "string"), None)
+                    pending_path = string or pending_path
+                index = end
+                continue
+            if token.value == "fn" and token.kind == "ident" \
+                    and index + 1 < len(tokens):
+                name = tokens[index + 1]
+                if pending_test and name.kind == "ident":
+                    test_id = "::".join(current_names + (name.value,))
+                    tests[test_id] = f"{source.relative_to(repo_root)}:{token.line}"
+                pending_path = None
+                pending_test = False
+            elif token.value == "mod" and token.kind == "ident" \
+                    and index + 2 < len(tokens) \
+                    and tokens[index + 1].kind == "ident":
+                name = tokens[index + 1].value
+                cursor = index + 2
+                while cursor < len(tokens) and tokens[cursor].value not in (";", "{"):
+                    cursor += 1
+                if cursor < len(tokens):
+                    path_names = current_names + (name,)
+                    site = f"{source.relative_to(repo_root)}:{token.line}"
+                    if tokens[cursor].value == "{":
+                        depth += 1
+                        scopes.append((depth, name, current_dir / name))
+                        index = cursor + 1
+                        pending_path = None
+                        pending_test = False
+                        continue
+                    candidates = ((source.parent / pending_path,
+                                   current_dir / pending_path)
+                                  if pending_path else
+                                  (current_dir / f"{name}.rs",
+                                   current_dir / name / "mod.rs"))
+                    child = next((item for item in candidates if item.is_file()), None)
+                    if child:
+                        redirected = pending_path is not None
+                        child_dir = (child.parent
+                                     if redirected or child.name == "mod.rs"
+                                     else child.parent / child.stem)
+                        queue.append((child, path_names, child_dir))
+                    else:
+                        missing = ", ".join(
+                            str(item.relative_to(repo_root))
+                            if item.is_relative_to(repo_root) else str(item)
+                            for item in candidates
+                        )
+                        module_errors["::".join(path_names)] = f"{site} (missing {missing})"
+                    pending_path = None
+                    pending_test = False
+            if token.kind == "punct" and token.value == "{":
+                depth += 1
+            elif token.kind == "punct" and token.value == "}":
+                depth -= 1
+                while scopes and scopes[-1][0] > depth:
+                    scopes.pop()
+            elif token.kind == "punct" and token.value == ";":
+                pending_path = None
+                pending_test = False
+            index += 1
+    return StaticTestInventory(tests, module_errors)
 
 
 def collect_modules(root: Path, repo_root: Path) -> dict[str, str]:
@@ -329,6 +563,53 @@ def _test_ids(output: str) -> set[str]:
             if line.strip().endswith(": test")}
 
 
+@dataclass(frozen=True)
+class InventoryComparison:
+    static_only: frozenset[str]
+    cargo_only: frozenset[str]
+    static_ids: frozenset[str]
+    cargo_ids: frozenset[str]
+    module_errors: tuple[tuple[str, str], ...] = ()
+    execution_error: str | None = None
+
+
+def _identity_digest(test_ids: frozenset[str] | set[str]) -> str:
+    return hashlib.sha256("\n".join(sorted(test_ids)).encode()).hexdigest()
+
+
+def expected_lib_static_only(platform_name: str) -> frozenset[str] | None:
+    platform_only = LIB_INVENTORY_STATIC_ONLY_BY_PLATFORM.get(platform_name)
+    return None if platform_only is None else \
+        LIB_INVENTORY_STATIC_ONLY_BASE | platform_only
+
+
+def compare_lib_inventory(repo_root: Path, runner=None) -> InventoryComparison:
+    """Compare static full lib test IDs with compiled libtest `--list` IDs."""
+    inventory = collect_static_tests(discover_targets(repo_root)["lib"], repo_root)
+    static_ids = frozenset(inventory.tests)
+    module_errors = tuple(sorted(inventory.module_errors.items()))
+    runner = runner or subprocess.run
+    argv = ["cargo", "test", "--manifest-path", str(repo_root / "Cargo.toml"),
+            "--lib", "--", "--list"]
+    try:
+        proc = runner(argv, cwd=repo_root, capture_output=True, text=True)
+    except OSError as error:
+        return InventoryComparison(frozenset(), frozenset(), static_ids,
+                                   frozenset(), module_errors,
+                                   f"cargo could not start: {error}")
+    if proc.returncode:
+        detail = proc.stderr[-1000:].strip() or proc.stdout[-1000:].strip()
+        return InventoryComparison(
+            frozenset(), frozenset(), static_ids, frozenset(), module_errors,
+            f"cargo list failed (rc={proc.returncode}): {detail}",
+        )
+    cargo_ids = frozenset(_test_ids(proc.stdout))
+    return InventoryComparison(
+        static_ids - cargo_ids, cargo_ids - static_ids,
+        static_ids, cargo_ids, module_errors,
+    )
+
+
 def observe_curated(repo_root: Path, workflow: Path, jobs: set[str], runner=None
                     ) -> list[tuple[list[str], int, str | None]]:
     runner = runner or subprocess.run
@@ -473,6 +754,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="exit 1 on violations (default: warn only)")
     parser.add_argument("--run-list-check", action="store_true",
                         help="also run `cargo test ... -- --list` (compiles)")
+    parser.add_argument("--verify-lib-inventory", action="store_true",
+                        help="compare static lib test IDs with compiled --list IDs")
     parser.add_argument("--observe-selection", action="store_true",
                         help="warn-only execution evidence for curated jobs")
     parser.add_argument("--verify-selection-evidence", type=Path,
@@ -493,6 +776,46 @@ def main(argv: list[str] | None = None) -> int:
         for error in errors:
             print(f"selection-evidence verifier: {error}", file=sys.stderr)
         return 1 if errors else 0
+    if args.verify_lib_inventory:
+        # Contract boundary for this specific inventory check: it compares test
+        # identities, not whether their bodies assert anything or whether a CI
+        # lane executes them. Consequently it does not reject (1) #[ignore],
+        # (2) an empty but compiling test body, (3) `if: false` on the workflow
+        # test step after that job's semantic hash is re-pinned, or (4) a
+        # negative path-filter pattern that prevents the lane from being chosen.
+        expected_static_only = expected_lib_static_only(sys.platform)
+        if expected_static_only is None:
+            print(f"lib inventory comparison: unsupported platform {sys.platform}",
+                  file=sys.stderr)
+            return 2
+        comparison = compare_lib_inventory(repo_root)
+        if comparison.execution_error:
+            print(f"lib inventory comparison: {comparison.execution_error}",
+                  file=sys.stderr)
+            return 2
+        for module, site in comparison.module_errors:
+            print(f"lib inventory module-resolution: {module} at {site}",
+                  file=sys.stderr)
+        for test_id in sorted(comparison.static_only):
+            print(f"lib inventory static-only: {test_id}", file=sys.stderr)
+        for test_id in sorted(comparison.cargo_only):
+            print(f"lib inventory cargo-only: {test_id}", file=sys.stderr)
+        static_identity_matches = (
+            _identity_digest(comparison.static_ids)
+            == LIB_INVENTORY_STATIC_IDS_SHA256
+        )
+        print("lib inventory comparison: "
+              f"static-only={len(comparison.static_only)} "
+              f"cargo-only={len(comparison.cargo_only)} "
+              f"module-errors={len(comparison.module_errors)}")
+        print("lib inventory identity: "
+              f"static={'match' if static_identity_matches else 'changed'}")
+        return 1 if (
+            comparison.static_only != expected_static_only
+            or comparison.cargo_only != LIB_INVENTORY_KNOWN_CARGO_ONLY
+            or comparison.module_errors
+            or not static_identity_matches
+        ) else 0
     if args.observe_selection:
         if len(workflows) != 1 or not args.job:
             parser.error("--observe-selection requires one --workflow and --job")

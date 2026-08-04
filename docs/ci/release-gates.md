@@ -43,6 +43,26 @@ Selection observer required gate가 red로 만드는 observer 사망은 **프로
 `targets`에 없는 신규 job 경계, job ID 인용이나 표현 변형으로 인한 추출량 붕괴,
 invocation 하한은 이 게이트가 보장하지 않는다.
 
+`scripts/ci-script-checks.sh`가 독립 실행하는
+`check_test_target_integrity.py --verify-lib-inventory` 검사는 Rust 소스에서
+정적으로 수집한 lib 테스트의 전체 이름 집합을 고정된 identity digest와 비교하고,
+같은 트리에서 `cargo test --lib -- --list`가 연 집합과의 차이가 명시된
+platform/include 차이인지 비교한다. 따라서 기존 테스트를 삭제하거나 이름만 바꾸면
+개수가 같아도 이 inventory 검사가 red가 된다.
+
+이 inventory 검사는 테스트 identity만 확인하며 다음을 보장하지 않는다.
+
+- 대상 테스트에 `#[ignore]`를 붙여 실행에서 제외하는 조작은 identity를 유지하므로
+  이 inventory 검사가 거부하지 않는다.
+- 컴파일되고 통과하지만 아무것도 검증하지 않는 빈 테스트 본문은 정적 identity
+  검사로 원리적으로 판별할 수 없다.
+- workflow의 실제 test step에 `if: false`를 넣고 해당 job의 semantic hash를
+  재핀해도 Rust test identity는 바뀌지 않는다. 이 inventory 검사는 그 step의
+  실행 여부를 검증하지 않는다.
+- path filter에 `!src/...` 부정 패턴을 넣어 변경을 lane 선택에서 제외해도 Rust test
+  identity는 바뀌지 않는다. 이 inventory 검사는 path-filter의 lane 선택 의미론을
+  검증하지 않는다.
+
 ### Gate ↔ 실제 커맨드
 
 | Gate | main 커맨드 | 재현 커맨드 (로컬) |
