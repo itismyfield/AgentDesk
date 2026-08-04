@@ -316,7 +316,7 @@ if [ -z "$LATEST_TAG" ]; then
   if [ -d "dashboard" ]; then
     info "Building dashboard..."
     bash scripts/check-dashboard-toolchain.sh "$PWD"
-    (cd dashboard && npm ci --no-audit --no-fund)
+    bash scripts/install-dashboard-dependencies.sh "$PWD/dashboard"
     (cd dashboard && npm run build)
     if [ ! -f "dashboard/dist/index.html" ]; then
       fail "Dashboard build completed without dashboard/dist/index.html"
