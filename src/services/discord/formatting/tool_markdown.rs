@@ -300,8 +300,8 @@ pub(in crate::services::discord) fn shorten_path(path: &str) -> String {
 /// that is just `{`, which downstream live-event rendering collapses to a bare
 /// `[ToolSearch] {` / `[Monitor] {`. Re-serializing the already-parsed value
 /// compactly removes the newlines so the fallback is always informative.
-fn compact_json_fallback(v: &serde_json::Value, raw: &str) -> String {
-    let compact = serde_json::to_string(v).unwrap_or_else(|_| raw.to_string());
+fn compact_json_fallback(v: &serde_json::Value) -> String {
+    let compact = crate::utils::redact::serialize_json_with_redacted_cookie_headers(v, "***");
     let redacted = redact_sensitive_for_placeholder(&compact);
     truncate_str(&redacted, 200).to_string()
 }
@@ -313,7 +313,7 @@ pub(in crate::services::discord) fn is_command_tool_name(name: &str) -> bool {
     )
 }
 
-fn format_command_tool_input(v: &serde_json::Value, raw: &str) -> String {
+fn format_command_tool_input(v: &serde_json::Value) -> String {
     let desc = v
         .get("description")
         .and_then(|value| value.as_str())
@@ -324,7 +324,7 @@ fn format_command_tool_input(v: &serde_json::Value, raw: &str) -> String {
         .and_then(|value| value.as_str())
         .unwrap_or("");
     if desc.is_empty() && cmd.is_empty() {
-        return compact_json_fallback(v, raw);
+        return compact_json_fallback(v);
     }
 
     // Sanitize every direct consumer field before truncation or Markdown
@@ -351,7 +351,7 @@ pub(in crate::services::discord) fn format_tool_input(name: &str, input: &str) -
     };
 
     if is_command_tool_name(name) {
-        return format_command_tool_input(&v, input);
+        return format_command_tool_input(&v);
     }
 
     let summary = match name {
@@ -437,7 +437,7 @@ pub(in crate::services::discord) fn format_tool_input(name: &str, input: &str) -
                 .or_else(|| v.get("limit"))
                 .and_then(|v| v.as_u64());
             if query.is_empty() {
-                compact_json_fallback(&v, input)
+                compact_json_fallback(&v)
             } else if let Some(limit) = limit {
                 format!("\"{}\" (limit {})", truncate_str(query, 150), limit)
             } else {
@@ -456,7 +456,7 @@ pub(in crate::services::discord) fn format_tool_input(name: &str, input: &str) -
             } else if !cmd.is_empty() {
                 format!("`{}`", truncate_str(cmd, 180))
             } else {
-                compact_json_fallback(&v, input)
+                compact_json_fallback(&v)
             }
         }
         "Task" | "Agent" => {
@@ -544,12 +544,13 @@ pub(in crate::services::discord) fn format_tool_input(name: &str, input: &str) -
                 // input (#2847) so pretty-printed JSON does not leak a bare
                 // `<short_name>: {` line through the live-event collapse.
                 let short_name = name.rsplit("__").next().unwrap_or(name);
-                let compact = serde_json::to_string(&v).unwrap_or_else(|_| input.to_string());
+                let compact =
+                    crate::utils::redact::serialize_json_with_redacted_cookie_headers(&v, "***");
                 let redacted =
                     redact_sensitive_for_placeholder(&format!("{}: {}", short_name, compact));
                 truncate_str(&redacted, 200).to_string()
             } else {
-                compact_json_fallback(&v, input)
+                compact_json_fallback(&v)
             }
         }
     };

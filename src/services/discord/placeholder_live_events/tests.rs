@@ -6774,6 +6774,46 @@ fn tool_use_unknown_pretty_json_falls_back_to_compact_not_brace() {
 }
 
 #[test]
+fn compact_json_tool_summaries_redact_nested_cookie_strings_before_serializing() {
+    let pretty = serde_json::to_string_pretty(&json!({
+        "a": ["curl --cookie option=json-secret-two https://e.test"],
+        "b": "Cookie: session=json-secret",
+        "z": "X-Cookie: visible"
+    }))
+    .unwrap();
+
+    for tool_name in ["SomeUnknownTool", "mcp__vault__inspect"] {
+        let line = RecentPlaceholderEvent::tool_use(tool_name, &pretty)
+            .expect("non-empty summary")
+            .render_line();
+        assert!(line.contains("Cookie: ***"), "got: {line}");
+        assert!(line.contains("--cookie ***"), "got: {line}");
+        assert!(line.contains("X-Cookie: visible"), "got: {line}");
+        assert!(!line.contains("json-secret"), "got: {line}");
+    }
+}
+
+#[test]
+fn command_tool_summaries_redact_curl_header_and_cookie_option_spellings() {
+    let commands = [
+        "curl -sHCookie:cluster-secret https://example.test",
+        "curl --header 'Cookie: long-header-secret' https://example.test",
+        "curl --cookie cookie-option-secret https://example.test",
+        "curl -sb$'ansi-cookie-secret' https://example.test",
+    ];
+
+    for command in commands {
+        let input = json!({ "command": command }).to_string();
+        let line = RecentPlaceholderEvent::tool_use("Bash", &input)
+            .expect("non-empty summary")
+            .render_line();
+        assert!(line.contains("***"), "got: {line}");
+        assert!(line.contains("https://example.test"), "got: {line}");
+        assert!(!line.contains("secret"), "got: {line}");
+    }
+}
+
+#[test]
 fn status_events_toolsearch_pretty_json_args_summary_not_bare_brace() {
     // #2847: the status-panel path (status_events_from_tool_use) shares the same
     // format_tool_input fix, so the ToolStart args summary is no longer "{".
