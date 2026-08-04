@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
@@ -371,6 +373,97 @@ class FastCheckCiWiringTests(unittest.TestCase):
             r"          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1\n"
             r"          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1$",
         )
+
+    def test_required_pr_steps_cannot_be_silently_disabled(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        jobs = yaml.safe_load(workflow)["jobs"]
+        protected_steps = {
+            "scripts": (
+                ("Run script checks", "must not continue on error"),
+            ),
+            "relay-authority-contract": (
+                (
+                    "Verify named relay-authority targets and selection floors",
+                    "must retain exact continue-on-error policy",
+                ),
+                (
+                    "Run named relay-authority contract targets",
+                    "must retain exact continue-on-error policy",
+                ),
+            ),
+        }
+
+        for job_name, step_specs in protected_steps.items():
+            for step_name, expected_error in step_specs:
+                with self.subTest(job=job_name, step=step_name):
+                    step = next(
+                        candidate
+                        for candidate in jobs[job_name]["steps"]
+                        if candidate.get("name") == step_name
+                    )
+                    self.assertFalse(
+                        step.get("continue-on-error", False),
+                        f"required PR job {job_name!r} step {step_name!r} defines "
+                        "truthy key 'continue-on-error'",
+                    )
+
+                    mutated = workflow.replace(
+                        f"      - name: {step_name}\n",
+                        f"      - name: {step_name}\n        continue-on-error: true\n",
+                        1,
+                    )
+                    self.assertNotEqual(mutated, workflow)
+                    result = self.run_hardening_fixture(mutated)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(expected_error, result.stderr)
+
+    def test_registered_step_continue_policy_is_typed_and_exact(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        step_name = "Run named relay-authority contract targets"
+        for label, yaml_value in (
+            ("boolean-false", "false"),
+            ("string-false", '"false"'),
+        ):
+            with self.subTest(value=label):
+                mutated = workflow.replace(
+                    f"      - name: {step_name}\n",
+                    f"      - name: {step_name}\n"
+                    f"        continue-on-error: {yaml_value}\n",
+                    1,
+                )
+                self.assertNotEqual(mutated, workflow)
+                result = self.run_hardening_fixture(mutated)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "must retain exact continue-on-error policy", result.stderr
+                )
+
+    def test_script_checks_needs_accepts_equivalent_scalar_and_list_forms(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        scripts_job = job_block(workflow, "scripts")
+        cases = {
+            "scalar": "    needs: changes\n",
+            "single-element-list": "    needs: [changes]\n",
+        }
+        for form, replacement in cases.items():
+            with self.subTest(form=form):
+                mutated_job = scripts_job.replace(
+                    "    needs: changes\n", replacement, 1
+                )
+                if form != "scalar":
+                    self.assertNotEqual(mutated_job, scripts_job)
+                mutated = workflow.replace(scripts_job, mutated_job, 1)
+                result = self.run_hardening_fixture(mutated)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+        mutated_job = scripts_job.replace(
+            "    needs: changes\n", "    needs: [changes, other]\n", 1
+        )
+        self.assertNotEqual(mutated_job, scripts_job)
+        mutated = workflow.replace(scripts_job, mutated_job, 1)
+        result = self.run_hardening_fixture(mutated)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must retain exact needs: changes", result.stderr)
 
     def test_trusted_macos_runs_busy_retry_regressions_on_both_runner_paths(self) -> None:
         workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")

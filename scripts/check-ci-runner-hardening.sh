@@ -93,7 +93,8 @@ if script_checks_job["continue-on-error"]
   warn "#{path}: Script checks job must not be allowed to continue on error"
   exit 1
 end
-unless script_checks_job["needs"] == "changes"
+script_checks_needs = script_checks_job["needs"]
+unless script_checks_needs == "changes" || script_checks_needs == ["changes"]
   warn "#{path}: Script checks job must retain exact needs: changes"
   exit 1
 end
@@ -342,8 +343,7 @@ targets.each do |job_id, spec|
       unless step["if"] == step_spec.fetch("if_condition", nil)
         errors << "#{label} #{name.inspect} must retain exact if policy"
       end
-      if step_spec.key?("continue_on_error") &&
-         step["continue-on-error"] != step_spec.fetch("continue_on_error")
+      unless step["continue-on-error"] == step_spec.fetch("continue_on_error", nil)
         errors << "#{label} #{name.inspect} must retain exact continue-on-error policy"
       end
       unless step["timeout-minutes"] == step_spec.fetch("timeout_minutes")
