@@ -38,12 +38,16 @@ const HEADER_OPTION_PATTERN: &str =
     r"(?:-[A-Za-z]*?H[ \t]*(?:\\\r?\n[ \t]*)*|(?i:--header)(?:[ \t]+|=[ \t]*)(?:\\\r?\n[ \t]*)*)";
 const CURL_COOKIE_OPTION_PATTERN: &str =
     r"(?:-[A-Za-z]*?b[ \t]*(?:\\\r?\n[ \t]*)*|(?i:--cookie)(?:[ \t]+|=[ \t]*)(?:\\\r?\n[ \t]*)*)";
-const SHELL_WORD_SUFFIX_PATTERN: &str = r#"(?:\\(?:\r?\n[ \t]*|[^\r\n])|[^ \t\r\n;&|()<>'"$\\]|'(?:[^'\r\n]*)'|"(?:\\.|[^"\\\r\n])*"|\$'(?:\\.|[^'\\\r\n])*')*"#;
+// A shell word can concatenate unquoted, single-quoted, double-quoted, and
+// ANSI-C-quoted fragments without whitespace. Backslash-newline is part of the
+// same logical word, and quoted fragments may contain literal newlines. Keep
+// this grammar shared so header and curl-cookie options cannot drift apart.
+const SHELL_WORD_FRAGMENT_PATTERN: &str = r#"(?:\\(?:\r?\n[ \t]*|[^\r\n])|[^ \t\r\n;&|()<>'"$\\]|'[^']*'|"(?:\\(?:\r?\n|[^\r\n])|[^"\\])*"|\$'(?:\\(?:\r?\n|[^\r\n])|[^'\\])*')"#;
 
 static SINGLE_QUOTED_COOKIE_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
-        r"(?m)((?:^|[ \t;&|()<>])(?:{})?'(?i:set-cookie|cookie)[ \t]*:[ \t]*)[^'\r\n]*('?){}",
-        HEADER_OPTION_PATTERN, SHELL_WORD_SUFFIX_PATTERN
+        r"(?m)((?:^|[ \t;&|()<>])(?:{})?'(?i:set-cookie|cookie)[ \t]*:[ \t]*)[^']*('?)(?:{})*",
+        HEADER_OPTION_PATTERN, SHELL_WORD_FRAGMENT_PATTERN
     ))
     .unwrap()
 });
@@ -52,15 +56,15 @@ static ANSI_C_QUOTED_COOKIE_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
     // escaped quote inside the header value. Keep this grammar separate from
     // ordinary single quotes, where backslashes have no escape semantics.
     Regex::new(&format!(
-        r"(?m)((?:^|[ \t;&|()<>])(?:{})?\$'(?i:set-cookie|cookie)[ \t]*:[ \t]*)(?:\\.|[^'\\\r\n])*('?){}",
-        HEADER_OPTION_PATTERN, SHELL_WORD_SUFFIX_PATTERN
+        r"(?m)((?:^|[ \t;&|()<>])(?:{})?\$'(?i:set-cookie|cookie)[ \t]*:[ \t]*)(?:\\(?:\r?\n|[^\r\n])|[^'\\])*('?)(?:{})*",
+        HEADER_OPTION_PATTERN, SHELL_WORD_FRAGMENT_PATTERN
     ))
     .unwrap()
 });
 static DOUBLE_QUOTED_COOKIE_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
-        r#"(?m)((?:^|[ \t;&|()<>])(?:{})?"(?i:set-cookie|cookie)[ \t]*:[ \t]*)(?:\\.|[^"\\\r\n])*("?){}"#,
-        HEADER_OPTION_PATTERN, SHELL_WORD_SUFFIX_PATTERN
+        r#"(?m)((?:^|[ \t;&|()<>])(?:{})?"(?i:set-cookie|cookie)[ \t]*:[ \t]*)(?:\\(?:\r?\n|[^\r\n])|[^"\\])*("?)(?:{})*"#,
+        HEADER_OPTION_PATTERN, SHELL_WORD_FRAGMENT_PATTERN
     ))
     .unwrap()
 });
@@ -70,8 +74,8 @@ static COMMAND_UNQUOTED_COOKIE_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
     // COOKIE_HEADER_RE: a real header extends to end-of-line and may obs-fold,
     // while an unquoted command argument ends at an unescaped shell boundary.
     Regex::new(&format!(
-        r#"(?m)((?:^|[ \t;&|()<>]){}(?i:set-cookie|cookie)[ \t]*:[ \t]*)(?:\\[^\r\n]|[^ \t\r\n;&|()<>'"$\\])(?:\\(?:\r?\n[ \t]*|[^\r\n])|[^ \t\r\n;&|()<>'"$\\])*"#,
-        HEADER_OPTION_PATTERN
+        r#"(?m)((?:^|[ \t;&|()<>]){}(?i:set-cookie|cookie)[ \t]*:[ \t]*)(?:{})+"#,
+        HEADER_OPTION_PATTERN, SHELL_WORD_FRAGMENT_PATTERN
     ))
     .unwrap()
 });
@@ -94,29 +98,29 @@ static CURL_COOKIE_OPTION_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static CURL_COOKIE_OPTION_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
-        r#"(?m)((?:^|[ \t;&|()<>]){})(?:\\[^\r\n]|[^ \t\r\n;&|()<>'"$\\])(?:\\(?:\r?\n[ \t]*|[^\r\n])|[^ \t\r\n;&|()<>'"$\\])*"#,
-        CURL_COOKIE_OPTION_PATTERN
+        r#"(?m)((?:^|[ \t;&|()<>]){})(?:\\[^\r\n]|[^ \t\r\n;&|()<>'"$\\])(?:{})*"#,
+        CURL_COOKIE_OPTION_PATTERN, SHELL_WORD_FRAGMENT_PATTERN
     ))
     .unwrap()
 });
 static SINGLE_QUOTED_CURL_COOKIE_OPTION_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
-        r"(?m)((?:^|[ \t;&|()<>]){}')[^'\r\n]*('?){}",
-        CURL_COOKIE_OPTION_PATTERN, SHELL_WORD_SUFFIX_PATTERN
+        r"(?m)((?:^|[ \t;&|()<>]){}')[^']*('?)(?:{})*",
+        CURL_COOKIE_OPTION_PATTERN, SHELL_WORD_FRAGMENT_PATTERN
     ))
     .unwrap()
 });
 static ANSI_C_QUOTED_CURL_COOKIE_OPTION_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
-        r"(?m)((?:^|[ \t;&|()<>]){}\$')(?:\\.|[^'\\\r\n])*('?){}",
-        CURL_COOKIE_OPTION_PATTERN, SHELL_WORD_SUFFIX_PATTERN
+        r"(?m)((?:^|[ \t;&|()<>]){}\$')(?:\\(?:\r?\n|[^\r\n])|[^'\\])*('?)(?:{})*",
+        CURL_COOKIE_OPTION_PATTERN, SHELL_WORD_FRAGMENT_PATTERN
     ))
     .unwrap()
 });
 static DOUBLE_QUOTED_CURL_COOKIE_OPTION_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
-        r#"(?m)((?:^|[ \t;&|()<>]){}")(?:\\.|[^"\\\r\n])*("?){}"#,
-        CURL_COOKIE_OPTION_PATTERN, SHELL_WORD_SUFFIX_PATTERN
+        r#"(?m)((?:^|[ \t;&|()<>]){}")(?:\\(?:\r?\n|[^\r\n])|[^"\\])*("?)(?:{})*"#,
+        CURL_COOKIE_OPTION_PATTERN, SHELL_WORD_FRAGMENT_PATTERN
     ))
     .unwrap()
 });
@@ -370,7 +374,8 @@ fn is_cookie_header_name(name: &str) -> bool {
 /// Serialize a JSON value compactly after redacting Cookie-bearing strings.
 ///
 /// Redacting before serialization avoids JSON quote/escape boundaries blocking
-/// the text matcher. Cookie/Set-Cookie map values are opaque credentials even
+/// the text matcher. Cookie/Set-Cookie map values and contextual array values
+/// (for example `["Cookie", "session=secret"]`) are opaque credentials even
 /// when the value itself lacks a header prefix. Writing directly to the output
 /// also avoids cloning the complete Value, and sanitizes object keys without
 /// key-collision loss.
@@ -378,6 +383,28 @@ pub(crate) fn serialize_json_with_redacted_cookie_headers(
     value: &serde_json::Value,
     marker: &str,
 ) -> String {
+    fn push_redacted_cookie_value(output: &mut String, value: &serde_json::Value, marker: &str) {
+        match value {
+            // Header maps commonly represent repeated Set-Cookie values as an
+            // array. Preserve its arity for useful diagnostics while treating
+            // every element as credential material. Objects remain opaque as a
+            // whole because their keys can themselves contain cookie data.
+            serde_json::Value::Array(values) => {
+                output.push('[');
+                for (index, value) in values.iter().enumerate() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    push_redacted_cookie_value(output, value, marker);
+                }
+                output.push(']');
+            }
+            _ => output.push_str(
+                &serde_json::to_string(marker).expect("serializing a JSON marker cannot fail"),
+            ),
+        }
+    }
+
     fn push_value(output: &mut String, value: &serde_json::Value, marker: &str) {
         match value {
             serde_json::Value::Null => output.push_str("null"),
@@ -398,7 +425,15 @@ pub(crate) fn serialize_json_with_redacted_cookie_headers(
                     if index > 0 {
                         output.push(',');
                     }
-                    push_value(output, value, marker);
+                    let follows_cookie_header_name = index
+                        .checked_sub(1)
+                        .and_then(|previous| values[previous].as_str())
+                        .is_some_and(is_cookie_header_name);
+                    if follows_cookie_header_name {
+                        push_redacted_cookie_value(output, value, marker);
+                    } else {
+                        push_value(output, value, marker);
+                    }
                 }
                 output.push(']');
             }
@@ -415,10 +450,7 @@ pub(crate) fn serialize_json_with_redacted_cookie_headers(
                     );
                     output.push(':');
                     if is_cookie_header_name(key) {
-                        output.push_str(
-                            &serde_json::to_string(marker)
-                                .expect("serializing a JSON marker cannot fail"),
-                        );
+                        push_redacted_cookie_value(output, value, marker);
                     } else {
                         push_value(output, value, marker);
                     }
@@ -790,6 +822,52 @@ curl --cookie 'session='adjacent-four https://four.test"#,
     }
 
     #[test]
+    fn unquoted_cookie_header_values_accept_continuations_and_quoted_first_fragments() {
+        let redacted = redact_sensitive_headers(
+            "curl -H Cookie:\\\nsession=continued-one https://one.test\n\
+             curl -H Cookie:'session=quoted-two' https://two.test\n\
+             wget --header=Set-Cookie:\\\r\n\"access=continued-three\" https://three.test",
+            "***",
+        );
+
+        assert!(redacted.contains("-H Cookie:***"), "got: {redacted:?}");
+        assert!(
+            redacted.contains("--header=Set-Cookie:***"),
+            "got: {redacted:?}"
+        );
+        for url in ["https://one.test", "https://two.test", "https://three.test"] {
+            assert!(redacted.contains(url), "missing URL ({url}): {redacted:?}");
+        }
+        for secret in ["continued-one", "quoted-two", "continued-three"] {
+            assert!(
+                !redacted.contains(secret),
+                "continued Cookie leak ({secret}): {redacted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn multiline_quoted_cookie_header_arguments_are_redacted_as_one_shell_word() {
+        let redacted = redact_sensitive_headers(
+            "curl -H 'Cookie: session=multiline-one\ncontinued=multiline-two' https://one.test\n\
+             curl --header=\"Set-Cookie: access=multiline-three\ncontinued=multiline-four\" https://two.test\n\
+             curl -H $'Cookie: session=multiline-five\ncontinued=multiline-six' https://three.test",
+            "***",
+        );
+
+        assert!(redacted.contains("-H 'Cookie: ***'"), "got: {redacted:?}");
+        assert!(
+            redacted.contains("--header=\"Set-Cookie: ***\""),
+            "got: {redacted:?}"
+        );
+        assert!(redacted.contains("-H $'Cookie: ***'"), "got: {redacted:?}");
+        for url in ["https://one.test", "https://two.test", "https://three.test"] {
+            assert!(redacted.contains(url), "missing URL ({url}): {redacted:?}");
+        }
+        assert!(!redacted.contains("multiline-"), "got: {redacted:?}");
+    }
+
+    #[test]
     fn wget_header_equals_arguments_share_cookie_redaction() {
         let redacted = redact_sensitive_headers(
             "wget --header=Cookie:session=wget-one --header='Set-Cookie: access=wget-two' https://example.test",
@@ -847,10 +925,44 @@ curl --cookie 'session='adjacent-four https://four.test"#,
         let reparsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
 
         assert_eq!(reparsed["headers"]["Cookie"], "***");
-        assert_eq!(reparsed["headers"]["Set-Cookie"], "***");
+        assert_eq!(
+            reparsed["headers"]["Set-Cookie"],
+            serde_json::json!(["***"])
+        );
         assert_eq!(reparsed["headers"]["cookie"], "***");
         assert_eq!(reparsed["headers"]["X-Cookie"], "visible");
         assert!(!serialized.contains("json-map-"), "got: {serialized}");
+    }
+
+    #[test]
+    fn compact_json_serialization_redacts_cookie_values_in_contextual_arrays() {
+        let value = serde_json::json!({
+            "headers": [
+                ["Cookie", "session=json-pair-one"],
+                ["set-cookie", ["access=json-pair-two", "refresh=json-pair-three"]],
+                ["X-Cookie", "visible"]
+            ],
+            "argv_style": ["Cookie", "session=json-argv-four", "safe"]
+        });
+
+        let serialized = serialize_json_with_redacted_cookie_headers(&value, "***");
+        let reparsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(reparsed["headers"][0], serde_json::json!(["Cookie", "***"]));
+        assert_eq!(
+            reparsed["headers"][1],
+            serde_json::json!(["set-cookie", ["***", "***"]])
+        );
+        assert_eq!(
+            reparsed["headers"][2],
+            serde_json::json!(["X-Cookie", "visible"])
+        );
+        assert_eq!(
+            reparsed["argv_style"],
+            serde_json::json!(["Cookie", "***", "safe"])
+        );
+        assert!(!serialized.contains("json-pair-"), "got: {serialized}");
+        assert!(!serialized.contains("json-argv-"), "got: {serialized}");
     }
 
     #[test]

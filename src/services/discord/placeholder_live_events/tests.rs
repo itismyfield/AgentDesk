@@ -6794,13 +6794,18 @@ fn compact_json_tool_summaries_redact_nested_cookie_strings_before_serializing()
 }
 
 #[test]
-fn compact_json_tool_summaries_redact_cookie_header_map_values() {
+fn compact_json_tool_summaries_redact_cookie_header_map_and_pair_values() {
     let pretty = serde_json::to_string_pretty(&json!({
         "headers": {
             "Cookie": "map-secret-one",
             "Set-Cookie": ["map-secret-two"],
             "X-Cookie": "visible"
-        }
+        },
+        "header_pairs": [
+            ["Cookie", "pair-secret-three"],
+            ["Set-Cookie", ["pair-secret-four"]],
+            ["X-Cookie", "pair-visible"]
+        ]
     }))
     .unwrap();
 
@@ -6810,7 +6815,9 @@ fn compact_json_tool_summaries_redact_cookie_header_map_values() {
             .render_line();
         assert!(line.contains("***"), "got: {line}");
         assert!(line.contains("X-Cookie"), "got: {line}");
+        assert!(line.contains("pair-visible"), "got: {line}");
         assert!(!line.contains("map-secret"), "got: {line}");
+        assert!(!line.contains("pair-secret"), "got: {line}");
     }
 }
 
