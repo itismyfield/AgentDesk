@@ -55,7 +55,7 @@ class RelayAuthorityMutationScriptTests(unittest.TestCase):
         for relative in (TERMINAL_HANDOFF, SESSION_RELAY_SINK):
             test.assertEqual((root / relative).read_bytes(), (REPO_ROOT / relative).read_bytes())
 
-    def test_five_fixed_mutations_are_killed_and_sources_restore(self) -> None:
+    def test_four_fixed_mutations_are_killed_and_sources_restore(self) -> None:
         root = self.copy_fixture()
         runner = self.write_runner(root, "exit 101\n")
 
@@ -66,7 +66,7 @@ class RelayAuthorityMutationScriptTests(unittest.TestCase):
             line for line in result.stdout.splitlines() if line.startswith("MUTATION_COUNT ")
         )
         fields = dict(item.split("=", 1) for item in count_line.split()[1:])
-        self.assertGreaterEqual(int(fields["count"]), 4)
+        self.assertEqual(int(fields["count"]), 4)
         self.assertEqual(int(fields["minimum"]), 4)
         self.assertEqual(
             result.stdout.count("status=KILLED rc=101"), int(fields["count"]), result.stdout
@@ -75,6 +75,37 @@ class RelayAuthorityMutationScriptTests(unittest.TestCase):
             f"MUTATION_SUMMARY killed={fields['count']} survived=0 minimum=4 status=PASS",
             result.stdout,
         )
+        self.assert_sources_restored(self, root)
+
+    def test_concurrent_run_fails_closed_without_modifying_sources(self) -> None:
+        root = self.copy_fixture()
+        runner = self.write_runner(root, "exit 101\n")
+        lock_dir = root / "target/relay-authority-mutations.lock"
+        lock_dir.mkdir(parents=True)
+        before = {
+            relative: (root / relative).read_bytes()
+            for relative in (TERMINAL_HANDOFF, SESSION_RELAY_SINK)
+        }
+
+        result = self.run_script(root, runner)
+
+        self.assertEqual(result.returncode, 75, result.stdout + result.stderr)
+        self.assertIn("another relay-authority mutation run holds lock", result.stderr)
+        for relative, expected in before.items():
+            self.assertEqual((root / relative).read_bytes(), expected)
+
+    def test_normal_exit_releases_lock_for_subsequent_run(self) -> None:
+        root = self.copy_fixture()
+        runner = self.write_runner(root, "exit 101\n")
+        lock_dir = root / "target/relay-authority-mutations.lock"
+
+        first = self.run_script(root, runner)
+        second = self.run_script(root, runner)
+
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertFalse(lock_dir.exists())
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertFalse(lock_dir.exists())
         self.assert_sources_restored(self, root)
 
     def test_surviving_mutation_makes_the_gate_red_and_restores_sources(self) -> None:
@@ -89,6 +120,17 @@ class RelayAuthorityMutationScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("MUTATION_RESULT mutation=M6 status=SURVIVED rc=0", result.stderr)
         self.assertIn("ERROR mutation survived: M6", result.stderr)
+        self.assert_sources_restored(self, root)
+
+    def test_signal_exit_releases_lock_and_restores_sources(self) -> None:
+        root = self.copy_fixture()
+        runner = self.write_runner(root, 'kill -TERM "$PPID"\nsleep 1\nexit 101\n')
+        lock_dir = root / "target/relay-authority-mutations.lock"
+
+        result = self.run_script(root, runner)
+
+        self.assertEqual(result.returncode, 143, result.stdout + result.stderr)
+        self.assertFalse(lock_dir.exists())
         self.assert_sources_restored(self, root)
 
     def test_missing_mutation_anchor_fails_closed_and_restores_sources(self) -> None:
@@ -122,7 +164,7 @@ class RelayAuthorityMutationScriptTests(unittest.TestCase):
             line for line in result.stdout.splitlines() if line.startswith("MUTATION_COUNT ")
         )
         fields = dict(item.split("=", 1) for item in count_line.split()[1:])
-        self.assertGreaterEqual(int(fields["count"]), 4)
+        self.assertEqual(int(fields["count"]), 4)
         self.assertEqual(int(fields["minimum"]), 4)
         self.assertEqual(result.stdout.count("MUTATION_RESULT mutation="), int(fields["count"]))
 

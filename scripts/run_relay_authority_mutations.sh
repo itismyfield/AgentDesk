@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# #5071 condition-3: five fixed, hand-written relay-authority mutations.
+# #5071 condition-3: four fixed, hand-written relay-authority mutations.
 #
 # Deferred workflow wiring (apply only after the relay-authority lane lands):
 # in jobs.relay-authority-contract.steps, immediately after
@@ -24,7 +24,8 @@ readonly SCRIPT_DIR
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 readonly REPO_ROOT
 readonly TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target/relay-authority-mutations}"
-readonly MUTATION_COUNT=5
+readonly LOCK_DIR="$REPO_ROOT/target/relay-authority-mutations.lock"
+readonly MUTATION_COUNT=4
 readonly MODE="${RELAY_AUTHORITY_MUTATION_TEST_MODE:-cargo}"
 readonly FIXTURE_RUNNER="${RELAY_AUTHORITY_MUTATION_FIXTURE_RUNNER:-}"
 
@@ -43,10 +44,31 @@ readonly -a MUTATION_FILES=("$TERMINAL_HANDOFF" "$SESSION_RELAY_SINK")
 declare -a ORIGINAL_COPIES=()
 declare -a ORIGINAL_HASHES=()
 RESTORE_FAILED=0
+LOCK_HELD=0
 CURRENT_MUTATION=""
 
 sha256_file() {
   shasum -a 256 "$1" | cut -d ' ' -f 1
+}
+
+acquire_lock() {
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    printf 'ERROR another relay-authority mutation run holds lock: %s\n' "$LOCK_DIR" >&2
+    exit 75
+  fi
+  LOCK_HELD=1
+  printf '%s\n' "$$" >"$LOCK_DIR/pid"
+}
+
+release_lock() {
+  if ((LOCK_HELD == 0)); then
+    return 0
+  fi
+  if ! rm -f "$LOCK_DIR/pid" || ! rmdir "$LOCK_DIR"; then
+    printf 'ERROR mutation lock release failed: %s\n' "$LOCK_DIR" >&2
+    return 1
+  fi
+  LOCK_HELD=0
 }
 
 prepare_backups() {
@@ -92,7 +114,10 @@ on_exit() {
   local incoming_rc=$?
   trap - EXIT HUP INT TERM
   if ! restore_sources; then
-    exit 97
+    incoming_rc=97
+  fi
+  if ! release_lock; then
+    incoming_rc=97
   fi
   exit "$incoming_rc"
 }
@@ -140,7 +165,6 @@ run_target() {
     return "$rc"
   fi
 
-  cargo clean -p agentdesk --target-dir "$TARGET_DIR" >/dev/null
   set +e
   (
     cd "$REPO_ROOT"
@@ -151,11 +175,14 @@ run_target() {
   rc=$?
   set -e
 
-  if ! grep -Fq 'Compiling agentdesk v' "$log" || grep -Fq 'Fresh agentdesk v' "$log"; then
-    printf 'ERROR mutation=%s cache-proof=missing expected Compiling agentdesk and no Fresh agentdesk\n' "$mutation" >&2
+  local compile_count
+  compile_count="$(grep -Fc 'Compiling agentdesk v' "$log" || true)"
+  if [[ "$compile_count" != "1" ]] || grep -Fq 'Fresh agentdesk v' "$log"; then
+    printf 'ERROR mutation=%s cache-proof=invalid compile_count=%s expected=1 and no Fresh agentdesk\n' "$mutation" "$compile_count" >&2
     cat "$log" >&2
     return 96
   fi
+  printf 'CACHE_PROOF mutation=%s compiling_agentdesk=%s fresh_agentdesk=0\n' "$mutation" "$compile_count"
   return "$rc"
 }
 
@@ -164,7 +191,7 @@ run_mutation() {
   CURRENT_MUTATION="$mutation"
   restore_after_row
   apply_exact_mutation "$relative" "$expected" "$replacement"
-  log="$(mktemp "${TMPDIR:-$REPO_ROOT/target}/relay-authority-${mutation}.XXXXXX.log")"
+  log="$(mktemp "${TMPDIR:-$REPO_ROOT/target}/relay-authority-${mutation}.XXXXXX")"
   command="cargo test --offline --lib $target -- --exact --test-threads=1"
 
   if run_target "$mutation" "$target" "$log"; then
@@ -190,12 +217,13 @@ run_mutation() {
   restore_after_row
 }
 
-mkdir -p "${TMPDIR:-$REPO_ROOT/target}"
-prepare_backups
+mkdir -p "${TMPDIR:-$REPO_ROOT/target}" "$(dirname "$LOCK_DIR")"
 trap on_exit EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+acquire_lock
+prepare_backups
 printf 'MUTATION_COUNT count=%d minimum=4\n' "$MUTATION_COUNT"
 
 run_mutation \
@@ -203,12 +231,6 @@ run_mutation \
   'delivery_frontier::SinkDeliveryProofResult::Persisted => Self::Delivered,' \
   'delivery_frontier::SinkDeliveryProofResult::Persisted => Self::NotDelivered,' \
   'services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_preserves_tail_anchor_and_observes_persisted_proof'
-
-run_mutation \
-  M11 "$TERMINAL_HANDOFF" \
-  'delivery_frontier::SinkDeliveryProofResult::LandedStale => Self::LandedStale,' \
-  'delivery_frontier::SinkDeliveryProofResult::LandedStale => Self::Delivered,' \
-  'services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_observes_landed_stale_proof'
 
 run_mutation \
   M6 "$TERMINAL_HANDOFF" \

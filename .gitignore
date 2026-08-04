@@ -13,6 +13,7 @@ agentdesk.yaml
 /config/agents/
 
 # Generated/temp files
+target-seam/
 agentdesk.db
 data.db
 out/e2e/
