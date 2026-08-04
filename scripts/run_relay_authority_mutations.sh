@@ -169,7 +169,7 @@ run_target() {
   (
     cd "$REPO_ROOT"
     env -u RUSTC_WRAPPER -u AGENTDESK_ROOT_DIR \
-      CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="$TARGET_DIR" \
+      CARGO_TERM_COLOR=never CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="$TARGET_DIR" \
       cargo test --offline --lib "$target" -- --exact --test-threads=1
   ) >"$log" 2>&1
   rc=$?
@@ -182,6 +182,8 @@ run_target() {
     cat "$log" >&2
     return 96
   fi
+
+  # CARGO_TERM_COLOR=never above makes both cache-proof markers stable for grep.
   printf 'CACHE_PROOF mutation=%s compiling_agentdesk=%s fresh_agentdesk=0\n' "$mutation" "$compile_count"
   return "$rc"
 }

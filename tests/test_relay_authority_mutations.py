@@ -51,9 +51,55 @@ class RelayAuthorityMutationScriptTests(unittest.TestCase):
         return runner
 
     @staticmethod
+    def write_fake_cargo(root: Path) -> Path:
+        bin_dir = root / "fake-bin"
+        bin_dir.mkdir()
+        cargo = bin_dir / "cargo"
+        cargo.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${CARGO_TERM_COLOR-}" == "never" ]]; then
+    printf '   Compiling agentdesk v0.1.0 (fake)\\n'
+else
+    printf '\\033[1m\\033[92m   Compiling\\033[0m agentdesk v0.1.0 (fake)\\n'
+fi
+exit 101
+""",
+            encoding="utf-8",
+        )
+        cargo.chmod(0o755)
+        return cargo
+
+    @staticmethod
+    def run_script_with_fake_cargo(root: Path, cargo: Path) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        env.pop("RELAY_AUTHORITY_MUTATION_TEST_MODE", None)
+        env.pop("RELAY_AUTHORITY_MUTATION_FIXTURE_RUNNER", None)
+        env["CARGO_TERM_COLOR"] = "always"
+        env["PATH"] = str(cargo.parent) + os.pathsep + env.get("PATH", "")
+        return subprocess.run(
+            ["bash", str(root / MUTATION_SCRIPT)],
+            cwd=root,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    @staticmethod
     def assert_sources_restored(test: unittest.TestCase, root: Path) -> None:
         for relative in (TERMINAL_HANDOFF, SESSION_RELAY_SINK):
             test.assertEqual((root / relative).read_bytes(), (REPO_ROOT / relative).read_bytes())
+
+    def test_color_neutralization_keeps_cache_proof_color_proof(self) -> None:
+        root = self.copy_fixture()
+        cargo = self.write_fake_cargo(root)
+
+        result = self.run_script_with_fake_cargo(root, cargo)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.count("compiling_agentdesk=1"), 4, result.stdout)
+        self.assertNotIn("cache-proof=invalid", result.stderr)
 
     def test_four_fixed_mutations_are_killed_and_sources_restore(self) -> None:
         root = self.copy_fixture()
