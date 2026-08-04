@@ -167,6 +167,7 @@ pub(super) use self::delivery::{
 pub(in crate::services::discord) use self::delivery::{
     long_message_reply_builders, send_long_message_raw_with_reference,
     send_long_message_raw_with_reference_returning_message_ids, send_long_message_reply_ctx,
+    send_single_message_returning_receipt,
 };
 
 #[cfg(test)]

@@ -770,11 +770,14 @@ src/
 │   │   │   ├── startup_doctor.rs
 │   │   │   └── voice.rs
 │   │   ├── session_relay_sink/
+│   │   │   ├── journal/
+│   │   │   │   └── pg_store.rs
 │   │   │   ├── delivery_commit.rs
 │   │   │   ├── delivery_frontier.rs
 │   │   │   ├── delivery_orchestration_tests.rs
 │   │   │   ├── delivery_outcome_classify.rs
 │   │   │   ├── idle_jsonl.rs
+│   │   │   ├── journal.rs
 │   │   │   ├── orphan_reclaim.rs
 │   │   │   ├── relay_format.rs
 │   │   │   ├── short_controller.rs

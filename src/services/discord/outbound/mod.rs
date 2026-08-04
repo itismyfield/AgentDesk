@@ -32,7 +32,7 @@ pub(crate) use decision::{
 };
 pub(crate) use message::DiscordOutboundMessage;
 pub(crate) use policy::DiscordOutboundPolicy;
-pub(crate) use result::DeliveryResult;
+pub(crate) use result::{DeliveryResult, DiscordTransportReceipt};
 pub(crate) use transport::{
     DiscordOutboundClient, HttpOutboundClient, OutboundDedupClaim, OutboundDedupReservation,
     OutboundDedupWait, OutboundDeduper, outbound_fingerprint, post_serenity_message_with_nonce,

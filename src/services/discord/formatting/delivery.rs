@@ -241,6 +241,20 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
     Ok(sent_message_ids)
 }
 
+/// Fresh single-message sink path with an unreconstructed Discord receipt.
+pub(in crate::services::discord) async fn send_single_message_returning_receipt(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    text: &str,
+    shared: &Arc<SharedData>,
+    reference: Option<(ChannelId, MessageId)>,
+) -> Result<super::super::outbound::DiscordTransportReceipt, Error> {
+    rate_limit_wait(shared, channel_id).await;
+    let message =
+        send_channel_message_with_optional_reference(http, channel_id, text, reference).await?;
+    Ok(super::super::outbound::DiscordTransportReceipt::from_message(channel_id, &message))
+}
+
 pub(super) async fn send_channel_message_with_optional_reference(
     http: &serenity::Http,
     channel_id: ChannelId,

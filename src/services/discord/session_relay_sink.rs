@@ -41,6 +41,7 @@ mod delivery_commit;
 mod delivery_frontier;
 mod delivery_outcome_classify;
 mod idle_jsonl;
+mod journal;
 mod short_controller;
 // #3960: orphaned `SessionBoundRelay` TUI-direct reclaim (producer-liveness TOCTOU).
 mod orphan_reclaim;
@@ -511,6 +512,7 @@ pub(in crate::services::discord) struct SessionBoundDiscordRelaySink {
     frames_total: AtomicU64,
     delivered_total: AtomicU64,
     by_session: Mutex<HashMap<String, SessionRelayParser>>,
+    journal: journal::JournalObserver,
     #[cfg(test)]
     lease_test_probe: Option<Arc<SinkLeaseTestProbe>>,
     #[cfg(test)]
@@ -530,6 +532,7 @@ impl SessionBoundDiscordRelaySink {
             frames_total: AtomicU64::new(0),
             delivered_total: AtomicU64::new(0),
             by_session: Mutex::new(HashMap::new()),
+            journal: journal::JournalObserver::default(),
             #[cfg(test)]
             lease_test_probe: None,
             #[cfg(test)]

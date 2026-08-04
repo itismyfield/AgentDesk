@@ -13,7 +13,7 @@
         "--lib",
         "services::discord::session_relay_sink"
       ],
-      "minimum": 94,
+      "minimum": 99,
       "derivation": "Measured on origin/main 0ae1c5b77 with the declared command plus -- --list. This is the current sink handoff and delivery-authority test surface; the future DeliveryJournal single-writer mutation contract is not present yet."
     },
     {
