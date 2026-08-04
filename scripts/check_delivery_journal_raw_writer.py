@@ -18,8 +18,11 @@ FAMILY_REGISTRY = (
     ("recovery / fresh-send / orphan family", "src/services/discord/tmux_reaper.rs", "reap_fresh_routine_orphan"),
     ("pipe stream epoch", "src/services/discord/tmux_watcher/turn_stream_collector.rs", "collect_turn_stream_until_terminal"),
 )
-# A family is instrumented only when its anchor file calls self.journal's typed begin/finish facade.
+# A family is instrumented when its anchor file's non-test area calls self.journal's
+# typed begin/finish facade; this is file-level, not limited to the anchor function body.
 JOURNAL_FACADE_CALL = re.compile(r"\bself\.journal\.(?:begin_fresh|finish_fresh)\s*\(")
+TOP_LEVEL_TEST_CFG = re.compile(r"^#\[cfg\((?:test|all\(\s*test\b[^\]]*\))\)\]\s*$")
+TOP_LEVEL_MODULE = re.compile(r"(?:pub(?:\([^)]*\))?\s+)?mod\b")
 UNINSTRUMENTED_FAMILY_BASELINE = 5
 
 
@@ -44,10 +47,22 @@ def family_status(root: Path) -> tuple[list[tuple[str, bool]] | None, str]:
         path = root / rel
         if not path.is_file():
             return None, f"family anchor missing: {name} ({rel}:{symbol})"
-        text = path.read_text(encoding="utf-8")
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        for index, line in enumerate(lines):
+            candidate = line.split("//", 1)[0].rstrip()
+            if not line.startswith("#[") or not TOP_LEVEL_TEST_CFG.fullmatch(candidate):
+                continue
+            following = next((item.strip() for item in lines[index + 1:]
+                              if item.strip() and not item.strip().startswith(("//", "#["))), "")
+            if TOP_LEVEL_MODULE.match(following) and not following.endswith(";"):
+                lines = lines[:index]
+                break
+        text = "\n".join(line.split("//", 1)[0] for line in lines)
         if not re.search(rf"\b(?:async\s+)?fn\s+{re.escape(symbol)}\b", text):
             return None, f"family anchor symbol missing: {name} ({rel}:{symbol})"
-        status.append((name, bool(JOURNAL_FACADE_CALL.search(text))))
+        # Cheap quote parity is intentional; raw strings and escaped quotes are not handled.
+        instrumented = any(text[:match.start()].count('"') % 2 == 0 for match in JOURNAL_FACADE_CALL.finditer(text))
+        status.append((name, instrumented))
     return status, ""
 
 
@@ -62,7 +77,7 @@ def check(root: Path) -> tuple[bool, str]:
     if found != ALLOWLIST:
         return False, f"raw writer allowlist mismatch: expected={dict(ALLOWLIST)} actual={dict(found)} (scanned Rust files: {scanned_files})"
     uninstrumented = [name for name, instrumented in families if not instrumented]
-    summary = f"uninstrumented families: {len(uninstrumented)}/{len(families)} ({', '.join(uninstrumented) or 'none'})"
+    summary = f"uninstrumented families: {len(uninstrumented)}/{len(families)} (anchor-file non-test area; {', '.join(uninstrumented) or 'none'})"
     if len(uninstrumented) > UNINSTRUMENTED_FAMILY_BASELINE:
         return False, f"{summary}; exceeds baseline {UNINSTRUMENTED_FAMILY_BASELINE}: {', '.join(uninstrumented)}"
     if len(uninstrumented) < UNINSTRUMENTED_FAMILY_BASELINE:

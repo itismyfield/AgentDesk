@@ -48,6 +48,14 @@ class RawWriterAllowlistTests(unittest.TestCase):
         ok, message = guard.check(self.fixture("// append_delivery_journal_batch()\n"))
         self.assertTrue(ok, message)
 
+    def test_test_area_and_string_facade_markers_do_not_count(self):
+        root = self.fixture()
+        path = root / guard.FAMILY_REGISTRY[4][1]
+        path.write_text(path.read_text(encoding="utf-8") +
+                        'const STRING_MARKER: &str = "self.journal.finish_fresh(";\n#[cfg(all(test, unix))]\nmod tests {\n    fn dishonest() { self.journal.begin_fresh(); }\n    const TEST_MARKER: &str = "self.journal.begin_fresh(";\n}\n',
+                        encoding="utf-8")
+        self.assertTrue(*guard.check(root))
+
     def test_family_baseline_is_measured_and_named(self):
         ok, message = guard.check(self.fixture())
         self.assertTrue(ok, message)
