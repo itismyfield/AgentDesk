@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 INSTALL_SCRIPT = ROOT / "scripts" / "install.sh"
 DASHBOARD_TOOLCHAIN_SCRIPT = ROOT / "scripts" / "check-dashboard-toolchain.sh"
+DASHBOARD_INSTALL_STATE_SCRIPT = ROOT / "scripts" / "check-dashboard-install-state.mjs"
 
 
 class InstallBootstrapPortableTests(unittest.TestCase):
@@ -70,6 +71,78 @@ class InstallBootstrapPortableTests(unittest.TestCase):
         self.assertNotIn('npm run build 2>&1 | tail -1) || true', install)
         self.assertNotIn('node_modules/.bin/tsc', deploy)
         self.assertIn('npm ci --no-audit --no-fund', deploy)
+        self.assertIn('node "$SCRIPT_DIR/check-dashboard-install-state.mjs" "$dashboard_dir"', deploy)
+        self.assertIn('Existing node_modules was preserved', deploy)
+
+    def test_dashboard_filter_owns_all_toolchain_guard_inputs(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-pr.yml").read_text(encoding="utf-8")
+        dashboard_filter = workflow.split("            dashboard:\n", 1)[1].split(
+            "            high_risk_recovery:\n", 1
+        )[0]
+
+        for path in (
+            ".nvmrc",
+            "dashboard/**",
+            "scripts/check-dashboard-install-state.mjs",
+            "scripts/check-dashboard-toolchain.sh",
+            "scripts/verify-dashboard.sh",
+        ):
+            self.assertIn(f"- '{path}'", dashboard_filter)
+
+    @unittest.skipIf(shutil.which("node") is None, "dashboard cache validation requires Node")
+    def test_dashboard_install_state_requires_exact_lock_versions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dashboard = Path(tmp) / "dashboard"
+            package_dir = dashboard / "node_modules" / "example-package"
+            package_dir.mkdir(parents=True)
+            (dashboard / "package.json").write_text(
+                '{"devDependencies":{"example-package":"1.0.0"}}\n', encoding="utf-8"
+            )
+            lock = {
+                "lockfileVersion": 3,
+                "packages": {
+                    "": {"devDependencies": {"example-package": "1.0.0"}},
+                    "node_modules/example-package": {
+                        "version": "1.0.0",
+                        "resolved": "https://registry.example/example-package.tgz",
+                        "integrity": "sha512-test",
+                    },
+                },
+            }
+            import json
+
+            (dashboard / "package-lock.json").write_text(json.dumps(lock), encoding="utf-8")
+            installed_lock = {"lockfileVersion": 3, "packages": dict(lock["packages"])}
+            installed_lock["packages"].pop("")
+            (dashboard / "node_modules" / ".package-lock.json").write_text(
+                json.dumps(installed_lock), encoding="utf-8"
+            )
+            (package_dir / "package.json").write_text(
+                '{"name":"example-package","version":"1.0.0"}\n', encoding="utf-8"
+            )
+
+            exact = subprocess.run(
+                ["node", str(DASHBOARD_INSTALL_STATE_SCRIPT), str(dashboard)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(exact.returncode, 0, exact.stdout + exact.stderr)
+
+            installed_lock["packages"]["node_modules/example-package"]["version"] = "0.9.0"
+            (dashboard / "node_modules" / ".package-lock.json").write_text(
+                json.dumps(installed_lock), encoding="utf-8"
+            )
+            stale = subprocess.run(
+                ["node", str(DASHBOARD_INSTALL_STATE_SCRIPT), str(dashboard)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertNotEqual(stale.returncode, 0)
+            self.assertIn("version does not match package-lock.json", stale.stderr)
 
     @unittest.skipIf(os.name == "nt", "behavioral dashboard toolchain guard uses POSIX paths")
     def test_dashboard_toolchain_guard_rejects_an_old_node(self):
