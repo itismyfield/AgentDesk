@@ -6814,6 +6814,27 @@ fn command_tool_summaries_redact_curl_header_and_cookie_option_spellings() {
 }
 
 #[test]
+fn monitor_tool_summaries_redact_command_fields_before_markdown() {
+    let inputs = [
+        json!({ "command": "Cookie: session=monitor-one" }).to_string(),
+        json!({
+            "description": "Cookie: session=monitor-description",
+            "command": "curl --cookie session=monitor-two https://example.test"
+        })
+        .to_string(),
+    ];
+
+    for input in inputs {
+        let line = RecentPlaceholderEvent::tool_use("Monitor", &input)
+            .expect("non-empty summary")
+            .render_line();
+        assert!(line.starts_with("[Monitor]"), "got: {line}");
+        assert!(line.contains("***"), "got: {line}");
+        assert!(!line.contains("monitor-"), "got: {line}");
+    }
+}
+
+#[test]
 fn status_events_toolsearch_pretty_json_args_summary_not_bare_brace() {
     // #2847: the status-panel path (status_events_from_tool_use) shares the same
     // format_tool_input fix, so the ToolStart args summary is no longer "{".

@@ -444,21 +444,7 @@ pub(in crate::services::discord) fn format_tool_input(name: &str, input: &str) -
                 format!("\"{}\"", truncate_str(query, 180))
             }
         }
-        "Monitor" => {
-            let desc = v.get("description").and_then(|v| v.as_str()).unwrap_or("");
-            let cmd = v.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            if !desc.is_empty() {
-                if !cmd.is_empty() {
-                    format!("{}: `{}`", desc, truncate_str(cmd, 150))
-                } else {
-                    desc.to_string()
-                }
-            } else if !cmd.is_empty() {
-                format!("`{}`", truncate_str(cmd, 180))
-            } else {
-                compact_json_fallback(&v)
-            }
-        }
+        "Monitor" => format_command_tool_input(&v),
         "Task" | "Agent" => {
             let desc = v.get("description").and_then(|v| v.as_str()).unwrap_or("");
             let subagent_type = v
