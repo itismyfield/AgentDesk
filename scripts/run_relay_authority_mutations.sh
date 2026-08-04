@@ -1,0 +1,255 @@
+#!/usr/bin/env bash
+# #5071 condition-3: four fixed, hand-written relay-authority mutations.
+#
+# Deferred workflow wiring (apply only after the relay-authority lane lands):
+# in jobs.relay-authority-contract.steps, immediately after
+# "Run named relay-authority contract targets" and before "sccache stats", add:
+#
+#      - name: Require relay-authority mutations to be killed
+#        env:
+#          BASH_ENV: /dev/null
+#          CARGO_PROFILE_DEV_DEBUG: "0"
+#          CARGO_PROFILE_TEST_DEBUG: "0"
+#        shell: bash
+#        timeout-minutes: 30
+#        run: bash scripts/run_relay_authority_mutations.sh
+#
+# In that same follow-up commit, flip condition3_mutations_present to true in
+# scripts/relay_authority_contract_targets.json and re-pin the
+# relay-authority-contract job_sha256 in scripts/check-ci-runner-hardening.sh.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+readonly REPO_ROOT
+readonly TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target/relay-authority-mutations}"
+readonly LOCK_DIR="$REPO_ROOT/target/relay-authority-mutations.lock"
+readonly MUTATION_COUNT=4
+readonly MODE="${RELAY_AUTHORITY_MUTATION_TEST_MODE:-cargo}"
+readonly FIXTURE_RUNNER="${RELAY_AUTHORITY_MUTATION_FIXTURE_RUNNER:-}"
+
+if [[ "$MODE" != "cargo" && "$MODE" != "fixture" ]]; then
+  printf 'ERROR invalid RELAY_AUTHORITY_MUTATION_TEST_MODE=%q\n' "$MODE" >&2
+  exit 2
+fi
+if [[ "$MODE" == "fixture" && ! -x "$FIXTURE_RUNNER" ]]; then
+  printf 'ERROR fixture mode requires an executable RELAY_AUTHORITY_MUTATION_FIXTURE_RUNNER\n' >&2
+  exit 2
+fi
+
+readonly TERMINAL_HANDOFF="src/services/discord/session_relay_sink/terminal_handoff.rs"
+readonly SESSION_RELAY_SINK="src/services/discord/session_relay_sink.rs"
+readonly -a MUTATION_FILES=("$TERMINAL_HANDOFF" "$SESSION_RELAY_SINK")
+declare -a ORIGINAL_COPIES=()
+declare -a ORIGINAL_HASHES=()
+RESTORE_FAILED=0
+LOCK_HELD=0
+CURRENT_MUTATION=""
+
+sha256_file() {
+  shasum -a 256 "$1" | cut -d ' ' -f 1
+}
+
+acquire_lock() {
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    printf 'ERROR another relay-authority mutation run holds lock: %s\n' "$LOCK_DIR" >&2
+    exit 75
+  fi
+  LOCK_HELD=1
+  printf '%s\n' "$$" >"$LOCK_DIR/pid"
+}
+
+release_lock() {
+  if ((LOCK_HELD == 0)); then
+    return 0
+  fi
+  if ! rm -f "$LOCK_DIR/pid" || ! rmdir "$LOCK_DIR"; then
+    printf 'ERROR mutation lock release failed: %s\n' "$LOCK_DIR" >&2
+    return 1
+  fi
+  LOCK_HELD=0
+}
+
+prepare_backups() {
+  local index relative source backup
+  for index in "${!MUTATION_FILES[@]}"; do
+    relative="${MUTATION_FILES[$index]}"
+    source="$REPO_ROOT/$relative"
+    if [[ ! -f "$source" || -L "$source" ]]; then
+      printf 'ERROR mutation source must be a non-symlink regular file: %s\n' "$relative" >&2
+      exit 2
+    fi
+    backup="$(mktemp "${TMPDIR:-$REPO_ROOT/target}/relay-authority-mutation.XXXXXX")"
+    cp -p "$source" "$backup"
+    ORIGINAL_COPIES[$index]="$backup"
+    ORIGINAL_HASHES[$index]="$(sha256_file "$source")"
+  done
+}
+
+restore_sources() {
+  local index relative source backup restored_hash
+  set +e
+  for index in "${!MUTATION_FILES[@]}"; do
+    relative="${MUTATION_FILES[$index]}"
+    source="$REPO_ROOT/$relative"
+    backup="${ORIGINAL_COPIES[$index]:-}"
+    if [[ -n "$backup" && -f "$backup" ]]; then
+      cp -p "$backup" "$source" || RESTORE_FAILED=1
+      restored_hash="$(sha256_file "$source" 2>/dev/null)" || RESTORE_FAILED=1
+      if [[ "$restored_hash" != "${ORIGINAL_HASHES[$index]:-missing}" ]]; then
+        printf 'ERROR restoration hash mismatch: %s\n' "$relative" >&2
+        RESTORE_FAILED=1
+      fi
+      rm -f "$backup" || RESTORE_FAILED=1
+    fi
+  done
+  if ((RESTORE_FAILED != 0)); then
+    printf 'ERROR source restoration failed after mutation=%s\n' "${CURRENT_MUTATION:-none}" >&2
+  fi
+  return "$RESTORE_FAILED"
+}
+
+on_exit() {
+  local incoming_rc=$?
+  trap - EXIT HUP INT TERM
+  if ! restore_sources; then
+    incoming_rc=97
+  fi
+  if ! release_lock; then
+    incoming_rc=97
+  fi
+  exit "$incoming_rc"
+}
+
+apply_exact_mutation() {
+  local relative=$1 expected=$2 replacement=$3
+  python3 - "$REPO_ROOT/$relative" "$expected" "$replacement" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+expected = sys.argv[2]
+replacement = sys.argv[3]
+source = path.read_text(encoding="utf-8")
+count = source.count(expected)
+if count != 1:
+    raise SystemExit(
+        f"ERROR mutation anchor must match exactly once: path={path} matches={count} anchor={expected!r}"
+    )
+path.write_text(source.replace(expected, replacement, 1), encoding="utf-8")
+PY
+}
+
+restore_after_row() {
+  local index source backup restored_hash
+  for index in "${!MUTATION_FILES[@]}"; do
+    source="$REPO_ROOT/${MUTATION_FILES[$index]}"
+    backup="${ORIGINAL_COPIES[$index]}"
+    cp -p "$backup" "$source"
+    restored_hash="$(sha256_file "$source")"
+    if [[ "$restored_hash" != "${ORIGINAL_HASHES[$index]}" ]]; then
+      printf 'ERROR row restoration hash mismatch: %s\n' "${MUTATION_FILES[$index]}" >&2
+      exit 98
+    fi
+  done
+}
+
+run_target() {
+  local mutation=$1 target=$2 log=$3 rc
+  if [[ "$MODE" == "fixture" ]]; then
+    set +e
+    "$FIXTURE_RUNNER" "$mutation" "$target" >"$log" 2>&1
+    rc=$?
+    set -e
+    return "$rc"
+  fi
+
+  set +e
+  (
+    cd "$REPO_ROOT"
+    env -u RUSTC_WRAPPER -u AGENTDESK_ROOT_DIR \
+      CARGO_TERM_COLOR=never CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="$TARGET_DIR" \
+      cargo test --offline --lib "$target" -- --exact --test-threads=1
+  ) >"$log" 2>&1
+  rc=$?
+  set -e
+
+  local compile_count
+  compile_count="$(grep -Fc 'Compiling agentdesk v' "$log" || true)"
+  if [[ "$compile_count" != "1" ]] || grep -Fq 'Fresh agentdesk v' "$log"; then
+    printf 'ERROR mutation=%s cache-proof=invalid compile_count=%s expected=1 and no Fresh agentdesk\n' "$mutation" "$compile_count" >&2
+    cat "$log" >&2
+    return 96
+  fi
+
+  # CARGO_TERM_COLOR=never above makes both cache-proof markers stable for grep.
+  printf 'CACHE_PROOF mutation=%s compiling_agentdesk=%s fresh_agentdesk=0\n' "$mutation" "$compile_count"
+  return "$rc"
+}
+
+run_mutation() {
+  local mutation=$1 relative=$2 expected=$3 replacement=$4 target=$5 log rc command
+  CURRENT_MUTATION="$mutation"
+  restore_after_row
+  apply_exact_mutation "$relative" "$expected" "$replacement"
+  log="$(mktemp "${TMPDIR:-$REPO_ROOT/target}/relay-authority-${mutation}.XXXXXX")"
+  command="cargo test --offline --lib $target -- --exact --test-threads=1"
+
+  if run_target "$mutation" "$target" "$log"; then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  if ((rc == 0)); then
+    printf 'MUTATION_RESULT mutation=%s status=SURVIVED rc=0 target=%s\n' "$mutation" "$target" >&2
+    printf 'ERROR mutation survived: %s\nCOMMAND: %s\n' "$mutation" "$command" >&2
+    cat "$log" >&2
+    rm -f "$log"
+    exit 1
+  fi
+  if ((rc == 96)); then
+    rm -f "$log"
+    exit 96
+  fi
+
+  printf 'MUTATION_RESULT mutation=%s status=KILLED rc=%d target=%s\n' "$mutation" "$rc" "$target"
+  rm -f "$log"
+  restore_after_row
+}
+
+mkdir -p "${TMPDIR:-$REPO_ROOT/target}" "$(dirname "$LOCK_DIR")"
+trap on_exit EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+acquire_lock
+prepare_backups
+printf 'MUTATION_COUNT count=%d minimum=4\n' "$MUTATION_COUNT"
+
+run_mutation \
+  M10 "$TERMINAL_HANDOFF" \
+  'delivery_frontier::SinkDeliveryProofResult::Persisted => Self::Delivered,' \
+  'delivery_frontier::SinkDeliveryProofResult::Persisted => Self::NotDelivered,' \
+  'services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_preserves_tail_anchor_and_observes_persisted_proof'
+
+run_mutation \
+  M6 "$TERMINAL_HANDOFF" \
+  'terminal_not_delivered || fenced_terminal_without_delivery' \
+  'terminal_not_delivered' \
+  'services::discord::session_relay_sink::delivery_orchestration_tests::fenced_terminal_without_parser_delivery_is_terminal_not_delivered'
+
+run_mutation \
+  M8 "$TERMINAL_HANDOFF" \
+  'Err(error) => return Err(error),' \
+  'Err(_error) => { terminal_not_delivered = true; }' \
+  'services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_propagates_injected_transport_error'
+
+run_mutation \
+  anchor-drop "$SESSION_RELAY_SINK" \
+  $'formatting::watcher_completion_footer_anchor(\n                        last_chunk_anchor.as_ref(),\n                        msg_id,\n                        &relay_text,\n                    )' \
+  $'formatting::watcher_completion_footer_anchor(\n                        None,\n                        msg_id,\n                        &relay_text,\n                    )' \
+  'services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_preserves_tail_anchor_and_observes_persisted_proof'
+
+printf 'MUTATION_SUMMARY killed=%d survived=0 minimum=4 status=PASS\n' "$MUTATION_COUNT"

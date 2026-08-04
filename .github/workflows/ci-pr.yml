@@ -1006,10 +1006,14 @@ jobs:
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1
 
-      # Condition-3 fixed mutations attach here after the positive run. The same
-      # change must flip condition3_mutations_present to true and add an
-      # unconditional `bash scripts/run_relay_authority_mutations.sh` step.
-      # The Script checks lane rejects either the script or the flag landing alone.
+      - name: Require relay-authority mutations to be killed
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        shell: bash
+        timeout-minutes: 30
+        run: bash scripts/run_relay_authority_mutations.sh
 
       - name: sccache stats
         if: always()
