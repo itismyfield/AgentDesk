@@ -40,6 +40,15 @@ mod grouped_card_count_pg_tests {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
+             VALUES
+                ('agent-1', 'Grouped Count Agent 1', 'claude', 'count-agent-1'),
+                ('agent-2', 'Grouped Count Agent 2', 'codex', 'count-agent-2')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed grouped count agents");
+        sqlx::query(
             "INSERT INTO kanban_cards
                 (id, title, status, repo_id, assigned_agent_id)
              VALUES
