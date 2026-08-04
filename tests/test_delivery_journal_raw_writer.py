@@ -22,6 +22,9 @@ class RawWriterAllowlistTests(unittest.TestCase):
         subprocess.run(["git", "init", "-q"], cwd=root, check=True)
         write(root, "src/services/discord/session_relay_sink/journal/pg_store.rs", "fn append_delivery_journal_batch() {}\n")
         write(root, "src/services/discord/session_relay_sink/journal.rs", "fn actor() { append_delivery_journal_batch(); }\n")
+        for index, (_, rel, symbol) in enumerate(guard.FAMILY_REGISTRY):
+            call = " self.journal.begin_fresh();" if index == 0 else ""
+            write(root, rel, f"fn {symbol}() {{{call}}}\n")
         if extra:
             write(root, "src/services/discord/rogue.rs", extra)
         subprocess.run(["git", "add", "-A"], cwd=root, check=True)
@@ -44,9 +47,59 @@ class RawWriterAllowlistTests(unittest.TestCase):
     def test_comments_do_not_create_call_sites(self):
         ok, message = guard.check(self.fixture("// append_delivery_journal_batch()\n"))
         self.assertTrue(ok, message)
+
+    def test_family_baseline_is_measured_and_named(self):
+        ok, message = guard.check(self.fixture())
+        self.assertTrue(ok, message)
+        self.assertIn("uninstrumented families: 5/6", message)
+        self.assertIn("sink direct family", message)
+
+    def test_instrumentation_rule_is_mechanical(self):
+        root = self.fixture()
+        path = root / guard.FAMILY_REGISTRY[0][1]
+        path.write_text(path.read_text(encoding="utf-8").replace("self.journal.begin_fresh();", ""), encoding="utf-8")
+        ok, message = guard.check(root)
+        self.assertFalse(ok)
+        self.assertIn("exceeds baseline", message)
+
+    def test_missing_anchor_symbol_fails_closed(self):
+        root = self.fixture()
+        path = root / guard.FAMILY_REGISTRY[0][1]
+        path.write_text(path.read_text(encoding="utf-8").replace(guard.FAMILY_REGISTRY[0][2], "anchor_removed"), encoding="utf-8")
+        ok, message = guard.check(root)
+        self.assertFalse(ok)
+        self.assertIn("family anchor symbol missing", message)
+
+    def test_missing_anchor_file_fails_closed(self):
+        root = self.fixture()
+        path = root / guard.FAMILY_REGISTRY[0][1]
+        path.unlink()
+        subprocess.run(["git", "rm", "-q", "--cached", "--", guard.FAMILY_REGISTRY[0][1]], cwd=root, check=True)
+        ok, message = guard.check(root)
+        self.assertFalse(ok)
+        self.assertIn("family anchor missing", message)
+
+    def test_baseline_increase_names_families(self):
+        root = self.fixture()
+        old = guard.UNINSTRUMENTED_FAMILY_BASELINE
+        guard.UNINSTRUMENTED_FAMILY_BASELINE = 4
+        self.addCleanup(setattr, guard, "UNINSTRUMENTED_FAMILY_BASELINE", old)
+        ok, message = guard.check(root)
+        self.assertFalse(ok)
+        self.assertIn("sink direct family", message)
+
+    def test_baseline_decrease_requires_repin_command(self):
+        root = self.fixture()
+        old = guard.UNINSTRUMENTED_FAMILY_BASELINE
+        guard.UNINSTRUMENTED_FAMILY_BASELINE = 6
+        self.addCleanup(setattr, guard, "UNINSTRUMENTED_FAMILY_BASELINE", old)
+        ok, message = guard.check(root)
+        self.assertFalse(ok)
+        self.assertIn("re-pin with: python3", message)
     def test_live_repository_matches_exact_allowlist(self):
         result = subprocess.run(["python3", str(SCRIPT)], cwd=ROOT, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("scanned Rust files: 1312", result.stdout)
+        self.assertRegex(result.stdout, r"scanned Rust files: [1-9][0-9]*")
+        self.assertIn("uninstrumented families: 5/6", result.stdout)
 if __name__ == "__main__":
     unittest.main()
