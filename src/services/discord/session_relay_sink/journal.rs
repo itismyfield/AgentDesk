@@ -432,7 +432,7 @@ mod tests {
                 obligation_id: Uuid::from_u128(7),
                 attempt_id: Uuid::from_u128(8),
                 frontier: (10, 20),
-                pool: sqlx::PgPool::connect_lazy("postgres://localhost/agentdesk_test")
+                pool: sqlx::Pool::<sqlx::Postgres>::connect_lazy("postgres://localhost/agentdesk_test")
                     .expect("lazy test pool URL is valid"),
             },
             DiscordTransportReceipt {
