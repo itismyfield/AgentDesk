@@ -1,4 +1,4 @@
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import { ChevronRight, Flame, Gauge, Sparkles, Zap } from "lucide-react";
 
 import AgentAvatar from "../components/AgentAvatar";

@@ -1,5 +1,5 @@
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router";
 import type { Agent, CompanySettings } from "../types";
 import { DEFAULT_SETTINGS } from "../types";
 import * as api from "../api/client";

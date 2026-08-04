@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 DASHBOARD_DIR="$REPO/dashboard"
-REQUIRED_NODE_VERSION=22.15.0
+REQUIRED_NODE_VERSION=22.22.0
 
 if ! command -v node >/dev/null 2>&1; then
   echo "Error: node is required to verify the dashboard" >&2
