@@ -6,14 +6,21 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
+import yaml
+
 DEFAULT_MANIFEST = Path("scripts/relay_authority_contract_targets.json")
+PR_WORKFLOW = Path(".github/workflows/ci-pr.yml")
+RELAY_AUTHORITY_JOB = "relay-authority-contract"
 CONDITION3_MUTATION_SCRIPT = Path("scripts/run_relay_authority_mutations.sh")
+CONDITION3_MUTATION_COMMAND = f"bash {CONDITION3_MUTATION_SCRIPT}"
+RELAY_TARGET_STEP = "Run named relay-authority contract targets"
 TEST_ID_SUFFIX = ": test"
 
 
@@ -39,6 +46,102 @@ class LaneResult:
     output: str
 
 
+def load_relay_authority_job(repo_root: Path) -> dict[str, object]:
+    workflow = repo_root / PR_WORKFLOW
+    try:
+        payload = yaml.safe_load(workflow.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as error:
+        raise ManifestError(f"cannot read workflow {PR_WORKFLOW}: {error}") from error
+    jobs = payload.get("jobs") if isinstance(payload, dict) else None
+    job = jobs.get(RELAY_AUTHORITY_JOB) if isinstance(jobs, dict) else None
+    if not isinstance(job, dict):
+        raise ManifestError(
+            f"workflow {PR_WORKFLOW} must contain jobs.{RELAY_AUTHORITY_JOB}"
+        )
+    return job
+
+
+def expected_workflow_command(lane: Lane) -> str:
+    return f"env -u AGENTDESK_ROOT_DIR {shlex.join(lane.command)} -- --test-threads=1"
+
+
+def validate_workflow_contract(
+    repo_root: Path,
+    lanes: Sequence[Lane],
+    mutations_present: bool,
+) -> None:
+    job = load_relay_authority_job(repo_root)
+    steps = job.get("steps")
+    if not isinstance(steps, list):
+        raise ManifestError(
+            f"workflow jobs.{RELAY_AUTHORITY_JOB}.steps must be an array"
+        )
+
+    target_steps = [
+        step for step in steps
+        if isinstance(step, dict) and step.get("name") == RELAY_TARGET_STEP
+    ]
+    if len(target_steps) != 1:
+        raise ManifestError(
+            f"workflow jobs.{RELAY_AUTHORITY_JOB} must contain exactly one "
+            f"{RELAY_TARGET_STEP!r} step"
+        )
+    run = target_steps[0].get("run")
+    actual_commands = (
+        [line.strip() for line in run.splitlines() if line.strip()]
+        if isinstance(run, str)
+        else []
+    )
+    expected_commands = [expected_workflow_command(lane) for lane in lanes]
+    if actual_commands != expected_commands:
+        raise ManifestError(
+            f"workflow jobs.{RELAY_AUTHORITY_JOB} target commands must exactly match "
+            "the manifest argv with AGENTDESK_ROOT_DIR unset and "
+            "-- --test-threads=1 appended"
+        )
+
+    mutation_steps = [
+        step for step in steps
+        if isinstance(step, dict)
+        and step.get("run") == CONDITION3_MUTATION_COMMAND
+        and "if" not in step
+        and not step.get("continue-on-error")
+    ]
+    if mutations_present and len(mutation_steps) != 1:
+        raise ManifestError(
+            f"condition3_mutations_present is true but workflow "
+            f"jobs.{RELAY_AUTHORITY_JOB} must contain exactly one unconditional "
+            f"run step invoking {CONDITION3_MUTATION_COMMAND}"
+        )
+
+
+def validate_condition3_script(mutation_script: Path) -> None:
+    # This proves only that the checked path is a non-symlink, non-empty,
+    # executable regular file. It does not prove that the script mutates the
+    # intended contract or that its assertions are effective.
+    if mutation_script.is_symlink():
+        raise ManifestError(
+            f"{CONDITION3_MUTATION_SCRIPT} must not be a symlink"
+        )
+    if not mutation_script.is_file():
+        raise ManifestError(
+            f"condition3_mutations_present is true but {CONDITION3_MUTATION_SCRIPT} is missing"
+        )
+    if mutation_script.stat().st_size == 0:
+        raise ManifestError(f"{CONDITION3_MUTATION_SCRIPT} must not be empty")
+    if not os.access(mutation_script, os.X_OK):
+        raise ManifestError(f"{CONDITION3_MUTATION_SCRIPT} must be executable")
+    commands = [
+        line.strip()
+        for line in mutation_script.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if commands == ["exit 0"]:
+        raise ManifestError(
+            f"{CONDITION3_MUTATION_SCRIPT} must not be an exit-0-only placeholder"
+        )
+
+
 def load_active_lanes(
     path: Path,
     repo_root: Path | None = None,
@@ -56,12 +159,10 @@ def load_active_lanes(
         raise ManifestError("manifest condition3_mutations_present must be boolean")
     if repo_root is not None:
         mutation_script = repo_root / CONDITION3_MUTATION_SCRIPT
-        script_exists = mutation_script.is_file()
-        if mutations_present and not script_exists:
-            raise ManifestError(
-                f"condition3_mutations_present is true but {CONDITION3_MUTATION_SCRIPT} is missing"
-            )
-        if not mutations_present and script_exists:
+        script_path_present = mutation_script.exists() or mutation_script.is_symlink()
+        if mutations_present:
+            validate_condition3_script(mutation_script)
+        elif script_path_present:
             raise ManifestError(
                 f"condition3_mutations_present is false but {CONDITION3_MUTATION_SCRIPT} exists"
             )
@@ -116,6 +217,8 @@ def load_active_lanes(
 
     if not active:
         raise ManifestError("manifest must declare at least one active lane")
+    if repo_root is not None:
+        validate_workflow_contract(repo_root, active, mutations_present)
     return active, gaps
 
 
@@ -160,8 +263,6 @@ def failures_for(result: LaneResult) -> list[str]:
 
 
 def shell_join(command: Sequence[str]) -> str:
-    import shlex
-
     return shlex.join(command)
 
 

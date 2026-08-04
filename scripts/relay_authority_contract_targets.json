@@ -28,7 +28,7 @@
       "boundary": "T3",
       "status": "gap",
       "module": "services::discord::inflight",
-      "reason": "No T3 contract target exists yet: the current InflightTurnIdentity seam has no durable execution_id registry or nonce contract."
+      "reason": "No T3 contract target exists yet: durable turn_nonce values are persisted, but the execution registry and contract/registry admission wiring that T3 will add do not exist."
     },
     {
       "name": "t4-single-actor-recovery-decision",

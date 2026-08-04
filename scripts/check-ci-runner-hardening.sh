@@ -76,6 +76,49 @@ unless trigger_events == ["pull_request"]
   exit 1
 end
 
+# The required Script checks job is intentionally high-churn: concurrent lanes
+# regularly add gates to its step inventory. Protect only the job and aggregate
+# step fields that can silently disable the required context, rather than
+# whole-job hashing that would force unrelated hash re-pins for every new check.
+script_checks_job = jobs["scripts"]
+unless script_checks_job.is_a?(Hash)
+  warn "#{path}: Script checks job (scripts) must be a YAML mapping"
+  exit 1
+end
+if script_checks_job.key?("if")
+  warn "#{path}: Script checks job must not define a job-level if condition"
+  exit 1
+end
+if script_checks_job["continue-on-error"]
+  warn "#{path}: Script checks job must not be allowed to continue on error"
+  exit 1
+end
+script_checks_needs = script_checks_job["needs"]
+unless script_checks_needs == "changes" || script_checks_needs == ["changes"]
+  warn "#{path}: Script checks job must retain exact needs: changes"
+  exit 1
+end
+script_check_steps = Array(script_checks_job["steps"]).select do |step|
+  step.is_a?(Hash) && step["name"] == "Run script checks"
+end
+unless script_check_steps.length == 1
+  warn "#{path}: Script checks job must retain exactly one \"Run script checks\" step"
+  exit 1
+end
+script_check_step = script_check_steps.fetch(0)
+if script_check_step.key?("if")
+  warn "#{path}: Script checks job \"Run script checks\" step must not define if"
+  exit 1
+end
+if script_check_step["continue-on-error"]
+  warn "#{path}: Script checks job \"Run script checks\" step must not continue on error"
+  exit 1
+end
+unless script_check_step["run"] == "./scripts/ci-script-checks.sh"
+  warn "#{path}: Script checks job \"Run script checks\" step must run exactly ./scripts/ci-script-checks.sh"
+  exit 1
+end
+
 targets = {
   # The independent explicit step-inventory layer was removed. What remains
   # splits into two mechanisms of very different strength, and conflating them
@@ -172,6 +215,30 @@ targets = {
       "just test-postgres" => {
         "commands" => ["just test-postgres"],
         "timeout_minutes" => 20,
+      },
+    },
+  },
+  "relay-authority-contract" => {
+    "label" => "relay-authority contract job",
+    "name" => "relay-authority-contract",
+    "needs" => nil,
+    "if" => nil,
+    "runs_on" => "ubuntu-latest",
+    # #5071 registers this unconditional candidate in the existing semantic
+    # hardening registry so order-independent job keys cannot disable it silently.
+    "job_sha256" => "ab2b82266fde9b81d83ef4403435b66acf9c7336be454110d2e5e2ed4a34a553",
+    "cargo_steps" => {
+      "Verify named relay-authority targets and selection floors" => {
+        "commands" => ["python3 scripts/check_relay_authority_contract.py"],
+        "timeout_minutes" => 30,
+      },
+      "Run named relay-authority contract targets" => {
+        "commands" => [
+          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::session_relay_sink -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1",
+        ],
+        "timeout_minutes" => 30,
       },
     },
   },
@@ -276,8 +343,7 @@ targets.each do |job_id, spec|
       unless step["if"] == step_spec.fetch("if_condition", nil)
         errors << "#{label} #{name.inspect} must retain exact if policy"
       end
-      if step_spec.key?("continue_on_error") &&
-         step["continue-on-error"] != step_spec.fetch("continue_on_error")
+      unless step["continue-on-error"] == step_spec.fetch("continue_on_error", nil)
         errors << "#{label} #{name.inspect} must retain exact continue-on-error policy"
       end
       unless step["timeout-minutes"] == step_spec.fetch("timeout_minutes")

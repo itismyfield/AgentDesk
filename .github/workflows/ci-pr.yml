@@ -963,6 +963,9 @@ jobs:
     name: relay-authority-contract
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
 
@@ -984,14 +987,20 @@ jobs:
 
       - name: Verify named relay-authority targets and selection floors
         env:
+          BASH_ENV: /dev/null
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
+        shell: bash
+        timeout-minutes: 30
         run: python3 scripts/check_relay_authority_contract.py
 
       - name: Run named relay-authority contract targets
         env:
+          BASH_ENV: /dev/null
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
+        shell: bash
+        timeout-minutes: 30
         run: |
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::session_relay_sink -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1
