@@ -161,7 +161,8 @@ function createAgentdeskMock(options) {
     escalations: [],
     manualInterventions: [],
     flushedEscalations: 0,
-    kv: new Map()
+    kv: new Map(),
+    kvDeleteManyCalls: []
   };
 
   const dbQuery = settings.dbQuery || (() => []);
@@ -430,6 +431,21 @@ function createAgentdeskMock(options) {
       },
       delete(key) {
         state.kv.delete(key);
+      },
+      deleteMany(keys) {
+        if (!Array.isArray(keys)) {
+          throw new TypeError("kv.deleteMany expects an array of keys");
+        }
+        if (keys.some((key) => typeof key !== "string")) {
+          throw new TypeError("kv.deleteMany expects every key to be a string");
+        }
+        const copiedKeys = clone(keys);
+        state.kvDeleteManyCalls.push(copiedKeys);
+        let deleted = 0;
+        for (const key of copiedKeys) {
+          if (state.kv.delete(key)) deleted += 1;
+        }
+        return { ok: true, deleted };
       }
     },
     autoQueue: {

@@ -33,8 +33,8 @@ Measured on branch head with the command above (excludes `policies/__tests__/`):
 
 | op | count |
 |---|---|
-| `agentdesk.db.query` (read) | 120 |
-| `agentdesk.db.execute` (mutation) | 46 |
+| `agentdesk.db.query` (read) | 122 |
+| `agentdesk.db.execute` (mutation) | 44 |
 | **total** | **166** |
 
 These 166 callsites are spread across 29 policy files under `policies/`. One
@@ -52,6 +52,9 @@ migration debt total.
   moved 18 raw-DB callsites (7 reads, 11 mutations) behind
   `agentdesk.timeouts.*` and `agentdesk.kv.*`. Its adjacent capability
   manifest now sets `db.raw_sql.mode: forbidden`.
+- **Long-turn cleanup slice**: `policies/timeouts/long-turn-monitor.js` batches
+  stale tier and watchdog-extension exact-key deletes through
+  `agentdesk.kv.deleteMany`, removing two scalar raw-DB mutation callsites.
 - **Capability-manifest first rollout**: `policies/review-automation.js` and
   `policies/merge-automation.js` still have adjacent `*.cap.yaml` manifests in
   `db.raw_sql.mode: legacy` with pinned `no_silent_growth` baselines.
