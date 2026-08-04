@@ -163,16 +163,18 @@ pub fn project_for_relay<'a>(
         };
     }
 
-    let excerpt = if report.bytes <= ERROR_EDGE_BYTES * 2 {
-        crate::services::discord::formatting::redact_sensitive_for_placeholder(content)
+    // Redact the complete error before taking bounded edges. Splitting first
+    // can separate a Cookie header name from the remainder of its value, which
+    // leaves the tail without enough context to recognize and mask the secret.
+    let redacted = crate::services::discord::formatting::redact_sensitive_for_placeholder(content);
+    let excerpt = if redacted.len() <= ERROR_EDGE_BYTES * 2 {
+        redacted
     } else {
-        let head = crate::services::discord::formatting::redact_sensitive_for_placeholder(
-            utf8_head(content, ERROR_EDGE_BYTES),
-        );
-        let tail = crate::services::discord::formatting::redact_sensitive_for_placeholder(
-            utf8_tail(content, ERROR_EDGE_BYTES),
-        );
-        let omitted = report.bytes.saturating_sub(ERROR_EDGE_BYTES * 2);
+        let head = utf8_head(&redacted, ERROR_EDGE_BYTES);
+        let tail = utf8_tail(&redacted, ERROR_EDGE_BYTES);
+        let omitted = redacted
+            .len()
+            .saturating_sub(head.len().saturating_add(tail.len()));
         format!("{head}\n… {omitted} bytes omitted …\n{tail}")
     };
     RelayOutputProjection {
@@ -282,5 +284,25 @@ mod tests {
         assert!(projection.content.contains("password=*** 끝🙂"));
         assert!(!projection.content.contains("top-secret"));
         assert!(!projection.content.contains("hunter2"));
+    }
+
+    #[test]
+    fn large_error_redacts_cookie_before_extracting_head_and_tail() {
+        let cookie_value = "boundary-cookie-secret-".repeat(420);
+        let raw = format!(
+            "{}\nCookie: {cookie_value}\nvisible tail {}",
+            "x".repeat(ERROR_EDGE_BYTES - 16),
+            "y".repeat(64)
+        );
+
+        let projection = project_for_relay(Some("Bash"), true, &raw);
+
+        assert_eq!(
+            projection.disposition,
+            RelayOutputDisposition::SummarizeError
+        );
+        assert!(projection.content.contains("Cookie: ***"));
+        assert!(projection.content.contains("visible tail"));
+        assert!(!projection.content.contains("boundary-cookie-secret"));
     }
 }

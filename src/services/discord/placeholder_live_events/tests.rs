@@ -215,9 +215,28 @@ fn events_from_json_redacts_cookie_headers_without_leaking_the_first_token() {
 
     assert_eq!(events.len(), 1);
     let line = events[0].render_line();
-    assert!(line.contains("Cookie: ***"));
+    assert!(line.contains("Cookie: ***"), "rendered line: {line}");
     assert!(!line.contains("sessionSecret"));
     assert!(!line.contains("trailing-data"));
+}
+
+#[test]
+fn events_from_json_redacts_curl_attached_cookie_header_option() {
+    let events = events_from_json(&json!({
+        "type": "assistant",
+        "message": {
+            "content": [{
+                "type": "tool_use",
+                "name": "Bash",
+                "input": {"command": "curl -HCookie:session=secret https://example.test"}
+            }]
+        }
+    }));
+
+    assert_eq!(events.len(), 1);
+    let line = events[0].render_line();
+    assert!(line.contains("-HCookie:***"));
+    assert!(!line.contains("session=secret"));
 }
 
 #[test]

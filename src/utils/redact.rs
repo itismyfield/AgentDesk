@@ -33,6 +33,17 @@ static COOKIE_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .unwrap()
 });
+static CURL_ATTACHED_COOKIE_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // curl accepts an attached short-option argument (`-HCookie:value`). Keep
+    // this command-token rule separate from COOKIE_HEADER_RE: a real header
+    // value extends to end-of-line and may obs-fold, while an unquoted shell
+    // argument ends at whitespace or a shell control operator. The same RFC
+    // `tchar` boundary prevents suffix matches in tokens such as `X-HCookie`.
+    Regex::new(
+        r"(?im)((?:^|[^!#$%&'*+.^_`|~a-z0-9\-\r\n])-H(?:set-cookie|cookie)[ \t]*:[ \t]*)[^ \t\r\n;&|()<>]+",
+    )
+    .unwrap()
+});
 // Capture group 1 = key (+ optional surrounding `"`/`'` quote) + `=`/`:`
 // separator; group 2 = the value, EITHER a quoted string (whole body incl.
 // inner spaces, escape-aware so a `\"` inside cannot end the match early and
@@ -162,7 +173,8 @@ pub(crate) fn redact_sensitive_headers(input: &str, marker: &str) -> String {
 /// Compact command renderers use their own token-aware Authorization display
 /// rules, but still share this stricter whole-cookie contract.
 pub(crate) fn redact_cookie_headers(input: &str, marker: &str) -> String {
-    replace_header_value(input, &COOKIE_HEADER_RE, marker)
+    let redacted = replace_header_value(input, &CURL_ATTACHED_COOKIE_HEADER_RE, marker);
+    replace_header_value(&redacted, &COOKIE_HEADER_RE, marker)
 }
 
 pub(crate) fn redact_known_secrets(input: &str) -> String {
@@ -328,6 +340,21 @@ mod tests {
             redacted,
             "X-Cookie: visible-one\nCookieJar: visible-two\nX-Set-Cookie: visible-three"
         );
+    }
+
+    #[test]
+    fn attached_curl_header_option_redacts_cookie_without_matching_distinct_names() {
+        let redacted = redact_sensitive_headers(
+            "curl -HCookie:session=secret -HSet-Cookie:access=secret-two -HX-Cookie:visible-one -HCookieJar:visible-two",
+            "***",
+        );
+
+        assert!(redacted.contains("-HCookie:***"));
+        assert!(redacted.contains("-HSet-Cookie:***"));
+        assert!(redacted.contains("-HX-Cookie:visible-one"));
+        assert!(redacted.contains("-HCookieJar:visible-two"));
+        assert!(!redacted.contains("session=secret"));
+        assert!(!redacted.contains("access=secret-two"));
     }
 
     #[test]

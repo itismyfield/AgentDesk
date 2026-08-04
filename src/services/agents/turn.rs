@@ -401,7 +401,12 @@ fn tail_chars(text: &str, max_chars: usize) -> String {
 
 pub fn normalize_recent_output(text: &str) -> Option<String> {
     let stripped = strip_ansi(text);
-    let lines: Vec<&str> = stripped.lines().collect();
+    // Redact the complete capture before line selection. Header continuation
+    // lines do not repeat `Cookie:`/`Authorization:`, so sanitizing each
+    // physical line independently would expose obs-fold values—especially when
+    // the header begins just before the retained tail window.
+    let sanitized = sanitize_sensitive_text(&stripped);
+    let lines: Vec<&str> = sanitized.lines().collect();
     let start = lines.len().saturating_sub(TURN_CAPTURE_TAIL_LINES);
     let mut out = String::new();
     let mut prev_blank = false;
@@ -421,7 +426,7 @@ pub fn normalize_recent_output(text: &str) -> Option<String> {
         if !out.is_empty() {
             out.push('\n');
         }
-        out.push_str(&sanitize_sensitive_text(trimmed));
+        out.push_str(trimmed);
         prev_blank = false;
     }
 
@@ -792,6 +797,20 @@ mod tests {
         assert!(!output.contains("trailing-data"));
         assert!(!output.contains("access=xyz"));
         assert!(!output.contains("sk-secret"));
+    }
+
+    #[test]
+    fn normalize_recent_output_masks_folded_header_continuations_before_line_selection() {
+        let output = normalize_recent_output(
+            "visible before\nCookie: first=secret\r\n continuation=secret-two\nvisible after",
+        )
+        .expect("normalized folded header output");
+
+        assert!(output.contains("Cookie: [REDACTED]"));
+        assert!(output.contains("visible before"));
+        assert!(output.contains("visible after"));
+        assert!(!output.contains("first=secret"));
+        assert!(!output.contains("continuation=secret-two"));
     }
 
     #[test]

@@ -316,10 +316,15 @@ pub(in crate::services::discord) fn format_tool_input(name: &str, input: &str) -
         "Bash" => {
             let desc = v.get("description").and_then(|v| v.as_str()).unwrap_or("");
             let cmd = v.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            // Redact the complete command before truncation and Markdown code
+            // delimiters are added. A delimiter such as backtick is a valid
+            // RFC header-name `tchar`, so wrapping first would intentionally
+            // block the shared suffix-safe Cookie matcher.
+            let cmd = redact_sensitive_for_placeholder(cmd);
             if !desc.is_empty() {
-                format!("{}: `{}`", desc, truncate_str(cmd, 150))
+                format!("{}: `{}`", desc, truncate_str(&cmd, 150))
             } else {
-                format!("`{}`", truncate_str(cmd, 200))
+                format!("`{}`", truncate_str(&cmd, 200))
             }
         }
         "Read" => {
