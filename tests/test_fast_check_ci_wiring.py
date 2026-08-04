@@ -337,6 +337,35 @@ class FastCheckCiWiringTests(unittest.TestCase):
             job_block(nightly, "full_windows"),
         )
 
+    def test_relay_authority_contract_job_uses_pinned_recipe(self) -> None:
+        job = job_block(
+            PR_WORKFLOW.read_text(encoding="utf-8"), "relay-authority-contract"
+        )
+        self.assertRegex(
+            job,
+            r"(?m)^  relay-authority-contract:\n"
+            r"    name: relay-authority-contract\n"
+            r"    runs-on: ubuntu-latest\n"
+            r"    timeout-minutes: 30\n"
+            r"    steps:\n"
+            r"      - uses: actions/checkout@v4\n\n"
+            r"      - name: Install Rust toolchain\n"
+            r"        uses: dtolnay/rust-toolchain@master\n"
+            r"        with:\n"
+            r'          toolchain: "1\.94\.1"$',
+        )
+        self.assertRegex(
+            job,
+            r"(?m)^      - name: Run named relay-authority contract targets\n"
+            r"        env:\n"
+            r'          CARGO_PROFILE_DEV_DEBUG: "0"\n'
+            r'          CARGO_PROFILE_TEST_DEBUG: "0"\n'
+            r"        run: \|\n"
+            r"          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::session_relay_sink -- --test-threads=1\n"
+            r"          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1\n"
+            r"          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1$",
+        )
+
     def test_trusted_macos_runs_busy_retry_regressions_on_both_runner_paths(self) -> None:
         workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
         hosted = job_block(workflow, "macos_hosted")
