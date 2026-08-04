@@ -205,6 +205,66 @@ pub(in crate::services::discord) async fn stale_dispatch_turn_for_queued_interve
     filter_queued_dispatch_exit(intervention.preserve_on_cancel(), stale)
 }
 
+pub(in crate::services::discord) fn is_allowed_turn_sender(
+    allowed_bot_ids: &[u64],
+    announce_bot_id: Option<u64>,
+    author_id: u64,
+    author_is_bot: bool,
+    text: &str,
+) -> bool {
+    if announce_bot_id.is_some_and(|id| id == author_id) {
+        if has_operational_alert_provenance(text) {
+            return false;
+        }
+        // #3576 (restores the announce branch removed by #3478): the
+        // `announce` bot is the authoritative trigger source. Its live
+        // traffic — dispatch envelopes, PM-triage / deadlock / escalation
+        // cards, and agent-to-agent `/api/discord/send` messages — must
+        // start turns WITHOUT requiring the `DISPATCH:` / monitor-origin
+        // marker that gates other allowed bots. Explicit non-turn provenance
+        // suppresses only this bot branch; human messages are evaluated by the
+        // final branch below and are not rejected for carrying the literal.
+        //
+        // The lone exception is the legacy issue-announcement / completion
+        // card (📋/✅) shape: issue cards now route through notify-bot
+        // (#1448 follow-up, and #3478 removed the announce-token fallback
+        // in `issue_announcements.rs`), so announce never authors them in
+        // live traffic. This guard remains a conservative safety net for
+        // catch-up replays of pre-cutover announce-authored cards so they
+        // don't spawn spurious turns.
+        return !is_legacy_announce_issue_card(text);
+    }
+    if allowed_bot_ids.contains(&author_id) {
+        if has_operational_alert_provenance(text) {
+            return false;
+        }
+        return should_process_allowed_bot_turn_text(text);
+    }
+    !author_is_bot
+}
+
+/// Conservative guard (#3576) that suppresses announce-authored issue
+/// announcement / completion cards from triggering turns. Live issue cards
+/// route through notify-bot, which never reaches the announce branch above;
+/// this only catches catch-up replays of pre-cutover announce-authored cards.
+fn is_legacy_announce_issue_card(text: &str) -> bool {
+    let head = text.trim_start();
+    if head.starts_with("📋 **새 이슈 #") {
+        return true;
+    }
+    if let Some(rest) = head.strip_prefix("✅ **#") {
+        let digits_end = rest
+            .char_indices()
+            .find(|(_, ch)| !ch.is_ascii_digit())
+            .map(|(idx, _)| idx)
+            .unwrap_or(rest.len());
+        if digits_end > 0 && rest[digits_end..].starts_with(" 완료** —") {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod dispatch_turn_gate_tests {
     use super::{
@@ -396,6 +456,25 @@ mod allowed_turn_sender_tests {
             "spam",
         ));
     }
+
+    #[test]
+    fn human_visible_operational_marker_is_allowed_but_bot_marker_is_rejected() {
+        let visible_marker = "[origin=operational_alert]please resume my work";
+        assert!(is_allowed_turn_sender(
+            &[ANNOUNCE_ID],
+            Some(ANNOUNCE_ID),
+            HUMAN_ID,
+            false,
+            visible_marker,
+        ));
+        assert!(!is_allowed_turn_sender(
+            &[ANNOUNCE_ID],
+            Some(ANNOUNCE_ID),
+            ANNOUNCE_ID,
+            true,
+            visible_marker,
+        ));
+    }
 }
 
 pub(in crate::services::discord) async fn resolve_announce_bot_user_id(
@@ -418,62 +497,6 @@ pub(in crate::services::discord) async fn resolve_notify_bot_user_id(
     registry
         .utility_bot_user_id(super::bot_role::UtilityBotRole::Notify)
         .await
-}
-
-pub(in crate::services::discord) fn is_allowed_turn_sender(
-    allowed_bot_ids: &[u64],
-    announce_bot_id: Option<u64>,
-    author_id: u64,
-    author_is_bot: bool,
-    text: &str,
-) -> bool {
-    if has_operational_alert_provenance(text) {
-        return false;
-    }
-    if announce_bot_id.is_some_and(|id| id == author_id) {
-        // #3576 (restores the announce branch removed by #3478): the
-        // `announce` bot is the authoritative trigger source. Its live
-        // traffic — dispatch envelopes, PM-triage / deadlock / escalation
-        // cards, and agent-to-agent `/api/discord/send` messages — must
-        // start turns WITHOUT requiring the `DISPATCH:` / monitor-origin
-        // marker that gates other allowed bots. Explicit non-turn provenance
-        // remains a global suppression gate for every sender.
-        //
-        // The lone exception is the legacy issue-announcement / completion
-        // card (📋/✅) shape: issue cards now route through notify-bot
-        // (#1448 follow-up, and #3478 removed the announce-token fallback
-        // in `issue_announcements.rs`), so announce never authors them in
-        // live traffic. This guard remains a conservative safety net for
-        // catch-up replays of pre-cutover announce-authored cards so they
-        // don't spawn spurious turns.
-        return !is_legacy_announce_issue_card(text);
-    }
-    if allowed_bot_ids.contains(&author_id) {
-        return should_process_allowed_bot_turn_text(text);
-    }
-    !author_is_bot
-}
-
-/// Conservative guard (#3576) that suppresses announce-authored issue
-/// announcement / completion cards from triggering turns. Live issue cards
-/// route through notify-bot, which never reaches the announce branch above;
-/// this only catches catch-up replays of pre-cutover announce-authored cards.
-fn is_legacy_announce_issue_card(text: &str) -> bool {
-    let head = text.trim_start();
-    if head.starts_with("📋 **새 이슈 #") {
-        return true;
-    }
-    if let Some(rest) = head.strip_prefix("✅ **#") {
-        let digits_end = rest
-            .char_indices()
-            .find(|(_, ch)| !ch.is_ascii_digit())
-            .map(|(idx, _)| idx)
-            .unwrap_or(rest.len());
-        if digits_end > 0 && rest[digits_end..].starts_with(" 완료** —") {
-            return true;
-        }
-    }
-    false
 }
 
 pub(in crate::services::discord) fn should_phase2_recover_message(

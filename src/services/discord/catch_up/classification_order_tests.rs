@@ -16,9 +16,9 @@ use super::{
     CATCH_UP_RETRY_DEFERRED_REARM_LIMIT, CatchUpClassification, CatchUpClassificationDecision,
     CatchUpDeps, CatchUpDiscordApi, CatchUpMessageView, CatchUpTooOldOutboxRequest, ChannelId,
     MessageId, ProviderKind, RuntimeChannelBindingStatus, advance_catch_up_settled_frontier,
-    catch_up_source_generation, catch_up_too_old_drop, catch_up_too_old_notice,
-    classify_catch_up_message, classify_catch_up_message_with_utility_resolution,
-    run_catch_up_sweep,
+    catch_up_intervention_text, catch_up_source_generation, catch_up_too_old_drop,
+    catch_up_too_old_notice, classify_catch_up_message,
+    classify_catch_up_message_with_utility_resolution, run_catch_up_sweep,
 };
 use crate::services::discord::health::UtilityBotUserIdResolution;
 use crate::services::turn_orchestrator::{
@@ -308,6 +308,52 @@ fn notify_identity_is_terminal_before_age_even_when_discord_bot_flag_is_false() 
             "false-flag {label} identity must retain fresh eligible-trigger semantics"
         );
     }
+}
+
+#[test]
+fn catch_up_human_visible_marker_recovers_and_strips_but_bot_marker_is_rejected() {
+    let visible_marker = "[origin=operational_alert]please resume my work";
+    let human = view(HUMAN_ID, false, 60, visible_marker);
+    let bot = view(ANNOUNCE_BOT_ID, true, 60, visible_marker);
+
+    assert_eq!(
+        classify_catch_up_message(
+            &human,
+            Some(CURRENT_BOT_ID),
+            &HashSet::new(),
+            &HashSet::new(),
+            300,
+            &[ANNOUNCE_BOT_ID],
+            Some(ANNOUNCE_BOT_ID),
+            Some(NOTIFY_BOT_ID),
+        ),
+        CatchUpClassification::Recover,
+        "a human's visible provenance literal must not discard catch-up input"
+    );
+    assert_eq!(
+        catch_up_intervention_text(visible_marker, false),
+        "please resume my work",
+        "catch-up must strip the visible provenance literal before enqueueing human text"
+    );
+    assert_eq!(
+        catch_up_intervention_text(visible_marker, true),
+        visible_marker,
+        "bot text must retain its marker until the sender policy rejects it"
+    );
+    assert_eq!(
+        classify_catch_up_message(
+            &bot,
+            Some(CURRENT_BOT_ID),
+            &HashSet::new(),
+            &HashSet::new(),
+            300,
+            &[ANNOUNCE_BOT_ID],
+            Some(ANNOUNCE_BOT_ID),
+            Some(NOTIFY_BOT_ID),
+        ),
+        CatchUpClassification::NotAllowed,
+        "the same marker must continue to reject an announce-bot sender"
+    );
 }
 
 #[test]

@@ -766,11 +766,14 @@ jobs:
           cargo test --lib services::discord::terminal_ui_obligation::tests -- --test-threads=1
 
       # #5034: watchdog/operational alerts are notifications, not queued turns;
-      # run the sender-policy, outbox-delivery, watchdog, and intake-boundary
-      # regressions in the same path-filtered required lane as the production change.
+      # run the sender-policy, attachment-delivery, catch-up, outbox-delivery,
+      # watchdog, and intake-boundary regressions in the same path-filtered
+      # required lane as the production change.
       - name: Operational alert intake admission regressions
         run: |
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::dispatch_policy::allowed_turn_sender_tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::formatting::delivery::attachment_delivery_tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::catch_up::classification_order_tests::catch_up_human_visible_marker_recovers_and_strips_but_bot_marker_is_rejected -- --exact --test-threads=1
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::intake_gate::gate::tests -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR cargo test --lib server::outbox_actionable_delivery::tests -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::watchdog::timeout_notice_tests -- --test-threads=1
