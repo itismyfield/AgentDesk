@@ -13,7 +13,11 @@ pub(crate) fn redact_sensitive_for_placeholder(input: &str) -> String {
         Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b").expect("valid email regex")
     });
 
-    let redacted = OPENAI_KEY_RE.replace_all(input, "***");
+    // Keep the compact renderer's token-aware Bearer behavior (so command
+    // details after the token remain visible), while sharing the common
+    // whole-value Cookie/Set-Cookie contract with logs and recent output.
+    let redacted = crate::utils::redact::redact_cookie_headers(input, "***");
+    let redacted = OPENAI_KEY_RE.replace_all(&redacted, "***");
     let redacted = BEARER_RE.replace_all(&redacted, "Bearer ***");
     let redacted = ASSIGNMENT_RE.replace_all(&redacted, "${1}=***");
     EMAIL_RE.replace_all(&redacted, "***@***").into_owned()

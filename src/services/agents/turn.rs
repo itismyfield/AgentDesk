@@ -369,14 +369,6 @@ fn ansi_escape_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"\x1B\[[0-?]*[ -/]*[@-~]").expect("valid ANSI regex"))
 }
 
-fn auth_header_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"(?i)(authorization\s*:\s*(?:[a-z][a-z0-9._~+/-]*\s+)?)[^\r\n]+")
-            .expect("valid auth header regex")
-    })
-}
-
 fn secret_assignment_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -392,9 +384,9 @@ fn strip_ansi(text: &str) -> String {
 }
 
 fn sanitize_sensitive_text(text: &str) -> String {
-    let masked_auth = auth_header_re().replace_all(text, "$1[REDACTED]");
+    let masked_headers = crate::utils::redact::redact_sensitive_headers(text, "[REDACTED]");
     secret_assignment_re()
-        .replace_all(&masked_auth, "$1$2[REDACTED]")
+        .replace_all(&masked_headers, "$1$2[REDACTED]")
         .into_owned()
 }
 
@@ -775,9 +767,9 @@ mod tests {
     }
 
     #[test]
-    fn normalize_recent_output_masks_auth_headers_and_key_assignments() {
+    fn normalize_recent_output_masks_sensitive_headers_and_key_assignments() {
         let output = normalize_recent_output(
-            "\u{1b}[32mAuthorization: Bearer secret-token\u{1b}[0m\nAuthorization: Bot bot-secret\nauthorization: basic dXNlcjpwYXNz\nauthorization: Digest username=\"u\", nonce=\"nonce-secret\", response=\"digest-secret\"\nauthorization: plain-secret\nOPENAI_API_KEY=sk-secret\nvisible line",
+            "\u{1b}[32mAuthorization: Bearer secret-token\u{1b}[0m\nAuthorization: Bot bot-secret\nauthorization: basic dXNlcjpwYXNz\nauthorization: Digest username=\"u\", nonce=\"nonce-secret\", response=\"digest-secret\"\nauthorization: plain-secret\nCookie: sessionSecret trailing-data\nSet-Cookie: access=xyz; HttpOnly\nOPENAI_API_KEY=sk-secret\nvisible line",
         )
         .expect("normalized output");
 
@@ -786,6 +778,8 @@ mod tests {
         assert!(output.contains("authorization: basic [REDACTED]"));
         assert!(output.contains("authorization: Digest [REDACTED]"));
         assert!(output.contains("authorization: [REDACTED]"));
+        assert!(output.contains("Cookie: [REDACTED]"));
+        assert!(output.contains("Set-Cookie: [REDACTED]"));
         assert!(output.contains("OPENAI_API_KEY=[REDACTED]"));
         assert!(output.contains("visible line"));
         assert!(!output.contains("secret-token"));
@@ -794,6 +788,9 @@ mod tests {
         assert!(!output.contains("nonce-secret"));
         assert!(!output.contains("digest-secret"));
         assert!(!output.contains("plain-secret"));
+        assert!(!output.contains("sessionSecret"));
+        assert!(!output.contains("trailing-data"));
+        assert!(!output.contains("access=xyz"));
         assert!(!output.contains("sk-secret"));
     }
 

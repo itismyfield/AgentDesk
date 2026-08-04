@@ -201,16 +201,40 @@ fn events_from_json_redacts_and_normalizes_tool_use() {
 }
 
 #[test]
+fn events_from_json_redacts_cookie_headers_without_leaking_the_first_token() {
+    let events = events_from_json(&json!({
+        "type": "assistant",
+        "message": {
+            "content": [{
+                "type": "tool_use",
+                "name": "Bash",
+                "input": {"command": "Cookie: sessionSecret trailing-data"}
+            }]
+        }
+    }));
+
+    assert_eq!(events.len(), 1);
+    let line = events[0].render_line();
+    assert!(line.contains("Cookie: ***"));
+    assert!(!line.contains("sessionSecret"));
+    assert!(!line.contains("trailing-data"));
+}
+
+#[test]
 fn redact_sensitive_for_placeholder_masks_required_patterns() {
     let redacted = redact_sensitive_for_placeholder(
-        "sk-abcdefghijklmnopqrstuvwxyz \
-         Authorization: Bearer live-token \
-         password=hunter2 token=secret api_key=key1 api-key=key2 \
+        "sk-abcdefghijklmnopqrstuvwxyz\n\
+         Authorization: Bearer live-token\n\
+         Cookie: sessionSecret trailing-data\n\
+         Set-Cookie: access=xyz;HttpOnly\n\
+         password=hunter2 token=secret api_key=key1 api-key=key2\n\
          alice@example.com",
     );
 
     assert!(redacted.contains("***"));
     assert!(redacted.contains("Bearer ***"));
+    assert!(redacted.contains("Cookie: ***"));
+    assert!(redacted.contains("Set-Cookie: ***"));
     assert!(redacted.contains("password=***"));
     assert!(redacted.contains("token=***"));
     assert!(redacted.contains("api_key=***"));
@@ -218,6 +242,9 @@ fn redact_sensitive_for_placeholder_masks_required_patterns() {
     assert!(redacted.contains("***@***"));
     assert!(!redacted.contains("sk-abcdefghijklmnopqrstuvwxyz"));
     assert!(!redacted.contains("live-token"));
+    assert!(!redacted.contains("sessionSecret"));
+    assert!(!redacted.contains("trailing-data"));
+    assert!(!redacted.contains("access=xyz"));
     assert!(!redacted.contains("hunter2"));
     assert!(!redacted.contains("alice@example.com"));
     assert!(!redacted.contains("secret"));

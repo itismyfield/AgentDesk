@@ -16,6 +16,23 @@ static AUTH_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .unwrap()
 });
+static COOKIE_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // Cookie values have no authentication-scheme prefix. Preserve only the
+    // header name, colon, and surrounding horizontal whitespace, then mask the
+    // entire value. Reusing the Authorization prefix rule here would leak the
+    // first whitespace-delimited cookie token as a false "scheme".
+    //
+    // Match the same RFC 7230 obs-fold shapes as AUTH_HEADER_RE while leaving
+    // an ordinary unindented following line untouched.
+    // The leading boundary rejects every RFC `tchar`, preventing a suffix
+    // match inside distinct names such as `X-Cookie` or `CookieJar`. It is part
+    // of capture 1 so quotes/spacing that introduce an embedded header survive
+    // the replacement. Multiline mode lets `^` recognize each header line.
+    Regex::new(
+        r"(?im)((?:^|[^!#$%&'*+.^_`|~a-z0-9\-\r\n])(?:set-cookie|cookie)[ \t]*:[ \t]*)(?:[^\r\n]+(?:\r?\n[ \t]+[^\r\n]+)*|(?:\r?\n[ \t]+[^\r\n]+)+)",
+    )
+    .unwrap()
+});
 // Capture group 1 = key (+ optional surrounding `"`/`'` quote) + `=`/`:`
 // separator; group 2 = the value, EITHER a quoted string (whole body incl.
 // inner spaces, escape-aware so a `\"` inside cannot end the match early and
@@ -119,6 +136,35 @@ pub(crate) fn register_common_env_secrets() {
     }
 }
 
+fn replace_header_value(input: &str, regex: &Regex, marker: &str) -> String {
+    regex
+        .replace_all(input, |captures: &regex::Captures<'_>| {
+            let prefix = captures.get(1).map(|m| m.as_str()).unwrap_or_default();
+            format!("{prefix}{marker}")
+        })
+        .into_owned()
+}
+
+/// Redact sensitive HTTP header values while preserving useful header context.
+///
+/// Authorization keeps a recognized authentication scheme (for example,
+/// `Bearer`) so diagnostics remain actionable. Cookie and Set-Cookie values are
+/// always masked in full because their first token is secret material, not a
+/// scheme. `marker` lets each presentation surface retain its existing
+/// redaction vocabulary without duplicating the parsing rules.
+pub(crate) fn redact_sensitive_headers(input: &str, marker: &str) -> String {
+    let redacted = replace_header_value(input, &AUTH_HEADER_RE, marker);
+    redact_cookie_headers(&redacted, marker)
+}
+
+/// Redact Cookie and Set-Cookie values without applying Authorization parsing.
+///
+/// Compact command renderers use their own token-aware Authorization display
+/// rules, but still share this stricter whole-cookie contract.
+pub(crate) fn redact_cookie_headers(input: &str, marker: &str) -> String {
+    replace_header_value(input, &COOKIE_HEADER_RE, marker)
+}
+
 pub(crate) fn redact_known_secrets(input: &str) -> String {
     // Mask whole PEM private-key blocks first so later single-token rules cannot
     // leave the key body behind, and so the registered-secret pass is unaffected.
@@ -126,7 +172,7 @@ pub(crate) fn redact_known_secrets(input: &str) -> String {
     let redacted = POSTGRES_DSN_RE.replace_all(&redacted, |captures: &regex::Captures<'_>| {
         mask_dsn_password(captures.get(0).map(|m| m.as_str()).unwrap_or_default())
     });
-    let redacted = AUTH_HEADER_RE.replace_all(&redacted, "${1}***");
+    let redacted = redact_sensitive_headers(&redacted, "***");
     let mut redacted = ASSIGNMENT_RE
         .replace_all(&redacted, |captures: &regex::Captures<'_>| {
             let key_sep = captures.get(1).map(|m| m.as_str()).unwrap_or_default();
@@ -169,8 +215,8 @@ pub(crate) fn redact_known_secrets(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        dsn_password, mask_dsn_password, redact_known_secrets, register_known_secret,
-        register_secret_or_dsn,
+        dsn_password, mask_dsn_password, redact_known_secrets, redact_sensitive_headers,
+        register_known_secret, register_secret_or_dsn,
     };
 
     fn redact_known_secret(input: &str) -> String {
@@ -216,6 +262,72 @@ mod tests {
         assert!(!redacted.contains("plain-secret"), "leaked: {redacted}");
         assert!(redacted.contains("authorization: ***"));
         assert!(redacted.contains("visible next line"));
+    }
+
+    #[test]
+    fn cookie_headers_mask_the_entire_value_without_treating_a_token_as_a_scheme() {
+        let redacted = redact_known_secrets(
+            "Cookie: session=abc; theme=dark\n\
+             set-cookie\t:\taccess=xyz; HttpOnly; Secure\n\
+             COOKIE: sessionSecret trailing-data\n\
+             visible next line",
+        );
+
+        assert!(redacted.contains("Cookie: ***"));
+        assert!(redacted.contains("set-cookie\t:\t***"));
+        assert!(redacted.contains("COOKIE: ***"));
+        assert!(redacted.contains("visible next line"));
+        for secret in [
+            "session=abc",
+            "theme=dark",
+            "access=xyz",
+            "sessionSecret",
+            "trailing-data",
+        ] {
+            assert!(
+                !redacted.contains(secret),
+                "cookie leak ({secret}): {redacted}"
+            );
+        }
+    }
+
+    #[test]
+    fn folded_cookie_headers_are_fully_masked_without_consuming_the_next_header() {
+        let redacted = redact_known_secrets(
+            "Cookie: first=secret\r\n second=secret-two\nX-Trace: visible\n\
+             Set-Cookie:\r\n session=empty-first-line\nContent-Type: text/plain",
+        );
+
+        assert!(redacted.contains("Cookie: ***\nX-Trace: visible"));
+        assert!(redacted.contains("Set-Cookie:***\nContent-Type: text/plain"));
+        assert!(!redacted.contains("first=secret"));
+        assert!(!redacted.contains("second=secret-two"));
+        assert!(!redacted.contains("session=empty-first-line"));
+    }
+
+    #[test]
+    fn sensitive_header_redaction_supports_surface_specific_markers() {
+        let redacted = redact_sensitive_headers(
+            "Authorization: Bearer auth-secret\nCookie: cookie-secret",
+            "[REDACTED]",
+        );
+
+        assert_eq!(
+            redacted,
+            "Authorization: Bearer [REDACTED]\nCookie: [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn cookie_header_names_do_not_match_distinct_header_suffixes() {
+        let redacted = redact_known_secrets(
+            "X-Cookie: visible-one\nCookieJar: visible-two\nX-Set-Cookie: visible-three",
+        );
+
+        assert_eq!(
+            redacted,
+            "X-Cookie: visible-one\nCookieJar: visible-two\nX-Set-Cookie: visible-three"
+        );
     }
 
     #[test]
