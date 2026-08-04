@@ -76,6 +76,7 @@ db::auto_queue::entries::dispatch_failure::tests
 db::auto_queue::phase_gates::current_batch_phase_pg_tests
 db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests
+db::auto_queue::tests::grouped_card_count_pg_tests
 db::dispatched_session_rebind_override::tests
 db::dispatched_sessions::selector_cleanup_tests::session_authority_pg_tests
 db::dispatches::delivery_events::tests
@@ -212,6 +213,7 @@ db::auto_queue::tests::dispatch_terminal_sync_pg_tests::phase_gate_state_save_is
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::phase_gate_state_save_rolls_back_stale_cleanup_when_write_fails_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::slot_has_recent_terminal_auto_queue_dispatch_pg_respects_cooldown
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::user_cancelled_entry_does_not_finalize_review_disabled_run_pg
+db::auto_queue::tests::grouped_card_count_pg_tests::grouped_counts_use_one_status_array_and_preserve_filters_pg
 db::dispatched_session_rebind_override::tests::health_rebind_override_upserts_selectors_with_recorded_at_guard_pg
 db::dispatched_sessions::selector_cleanup_tests::session_authority_pg_tests::clearing_session_ids_resets_raw_transcript_watermark_evidence
 db::dispatched_sessions::selector_cleanup_tests::session_authority_pg_tests::disconnect_session_and_prepare_retry_pg_preserves_provider_selectors

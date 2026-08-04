@@ -268,24 +268,39 @@ pub async fn generate(
     }
 
     if cards.is_empty() {
-        let mut counts_map = serde_json::Map::new();
-        if let Some(pipeline) = crate::pipeline::try_get() {
-            for pipeline_state in &pipeline.states {
-                if !pipeline_state.terminal {
-                    let c = state
-                        .auto_queue_service()
-                        .count_cards_by_status_with_pg(
-                            pool,
-                            body.repo.as_deref(),
-                            body.agent_id.as_deref(),
-                            &pipeline_state.id,
-                        )
-                        .await
-                        .unwrap_or(0);
-                    counts_map.insert(pipeline_state.id.clone(), serde_json::json!(c));
-                }
+        let statuses: Vec<String> = crate::pipeline::try_get()
+            .map(|pipeline| {
+                pipeline
+                    .states
+                    .iter()
+                    .filter(|pipeline_state| !pipeline_state.terminal)
+                    .map(|pipeline_state| pipeline_state.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let counts = match state
+            .auto_queue_service()
+            .count_cards_by_statuses_with_pg(
+                pool,
+                body.repo.as_deref(),
+                body.agent_id.as_deref(),
+                &statuses,
+            )
+            .await
+        {
+            Ok(counts) => counts,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    status_count = statuses.len(),
+                    repo = ?body.repo,
+                    agent_id = ?body.agent_id,
+                    "failed to load empty-generate status counts"
+                );
+                HashMap::new()
             }
-        }
+        };
+        let counts_map = empty_generate_status_counts(&statuses, &counts);
         return Ok((
             StatusCode::OK,
             Json(json!({
@@ -592,6 +607,21 @@ pub async fn generate(
     ))
 }
 
+fn empty_generate_status_counts(
+    statuses: &[String],
+    counts: &HashMap<String, i64>,
+) -> serde_json::Map<String, serde_json::Value> {
+    statuses
+        .iter()
+        .map(|status| {
+            (
+                status.clone(),
+                serde_json::json!(counts.get(status).copied().unwrap_or(0)),
+            )
+        })
+        .collect()
+}
+
 /// Structured skip-reason breakdown for `/api/queue/generate` (#1442).
 #[derive(Debug, Default)]
 pub(crate) struct GenerateSkipBreakdown {
@@ -717,6 +747,25 @@ pub(crate) async fn active_dispatch_id_for_card_pg(
     .bind(card_id)
     .fetch_optional(pool)
     .await
+}
+
+#[cfg(test)]
+mod empty_generate_status_count_tests {
+    use super::empty_generate_status_counts;
+    use std::collections::HashMap;
+
+    #[test]
+    fn requested_states_keep_zero_counts_and_ignore_unrequested_rows() {
+        let statuses = vec!["ready".to_string(), "review".to_string()];
+        let counts = HashMap::from([("ready".to_string(), 3), ("done".to_string(), 9)]);
+
+        let result = empty_generate_status_counts(&statuses, &counts);
+
+        assert_eq!(
+            serde_json::Value::Object(result),
+            serde_json::json!({ "ready": 3, "review": 0 })
+        );
+    }
 }
 
 #[cfg(test)]
