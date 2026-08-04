@@ -485,8 +485,8 @@ _ensure_dashboard_dependencies() {
         echo "  Existing node_modules was preserved. Run npm ci while online, then retry." >&2
         return 1
     fi
-    echo "▸ Installing dashboard dependencies from package-lock.json (npm ci)..."
-    (cd "$dashboard_dir" && npm ci --no-audit --no-fund)
+    echo "▸ Installing dashboard dependencies from package-lock.json..."
+    bash "$SCRIPT_DIR/install-dashboard-dependencies.sh" "$dashboard_dir"
     node "$SCRIPT_DIR/check-dashboard-install-state.mjs" "$dashboard_dir"
 }
 

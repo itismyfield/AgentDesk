@@ -7,10 +7,9 @@ DASHBOARD_DIR="$REPO/dashboard"
 
 bash "$SCRIPT_DIR/check-dashboard-toolchain.sh" "$REPO"
 
-cd "$DASHBOARD_DIR"
+bash "$SCRIPT_DIR/install-dashboard-dependencies.sh" "$DASHBOARD_DIR"
 
-echo "==> Dashboard dependency install (npm ci)"
-npm ci --no-audit --no-fund
+cd "$DASHBOARD_DIR"
 
 echo "==> Dashboard security audit (high+)"
 # High/critical dashboard advisories fail CI by default. To waive a specific
