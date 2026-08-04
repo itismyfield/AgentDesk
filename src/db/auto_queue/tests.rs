@@ -473,7 +473,7 @@ mod dispatch_terminal_sync_pg_tests {
     }
 
     #[tokio::test]
-    async fn review_4883_end_with_live_dispatch_blocks_competing_slot_pg() {
+    async fn review_4883_end_cleans_live_dispatch_before_competing_slot_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = setup_pool(&pg_db).await;
         sqlx::query(
@@ -484,6 +484,15 @@ mod dispatch_terminal_sync_pg_tests {
         .execute(&pool)
         .await
         .expect("seed live dispatch");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, agent_id, status, dispatch_id, slot_index)
+             VALUES ('entry-live-after-end', 'run-1', 'agent-1', 'dispatched',
+                     'dispatch-live-after-end', 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed run-owned live entry");
         sqlx::query(
             "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
              VALUES ('run-2', 'repo-1', 'agent-1', 'active')",
@@ -497,12 +506,29 @@ mod dispatch_terminal_sync_pg_tests {
                 .await
                 .expect("complete original run")
         );
+        let dispatch_status: String = sqlx::query_scalar(
+            "SELECT status FROM task_dispatches WHERE id = 'dispatch-live-after-end'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load ended dispatch status");
+        assert_eq!(dispatch_status, "cancelled");
+        let entry_status: String = sqlx::query_scalar(
+            "SELECT status FROM auto_queue_entries WHERE id = 'entry-live-after-end'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load ended entry status");
+        assert_eq!(entry_status, "skipped");
         let allocation = allocate_slot_for_group_agent_pg(&pool, "run-2", 0, "agent-1")
             .await
-            .expect("competing allocation is a clean no-op");
+            .expect("competing allocation after end cleanup");
 
-        assert_eq!(allocation, None);
-        assert_eq!(slot_run(&pool, "agent-1", 0).await, None);
+        assert!(allocation.is_some());
+        assert_eq!(
+            slot_run(&pool, "agent-1", 0).await,
+            Some("run-2".to_string())
+        );
 
         pool.close().await;
         pg_db.drop().await;

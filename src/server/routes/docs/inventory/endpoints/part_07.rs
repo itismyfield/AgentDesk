@@ -190,13 +190,17 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "PATCH",
             "/api/queue/runs/{id}",
             "auto-queue",
-            "Update auto-queue run metadata",
+            "Update auto-queue run metadata or start a pending run. The status field only accepts active; use the scoped pause, resume, or end endpoints for other lifecycle transitions. API validation rejects unsupported status values.",
         )
         .with_params([
             ("id", path_param("Auto-queue run ID")),
             (
                 "status",
-                body_param("string", false, "New run status"),
+                body_param(
+                    "string",
+                    false,
+                    "Set active only when starting a pending run; use the lifecycle endpoints for pause/resume/end",
+                ),
             ),
             (
                 "max_concurrent_threads",
@@ -212,7 +216,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ),
         ])
         .with_example(
-            json!({"path": {"id": "run-1"}, "body": {"status": "completed", "max_concurrent_threads": 4, "unified_thread": true}}),
+            json!({"path": {"id": "run-1"}, "body": {"status": "active", "max_concurrent_threads": 4, "unified_thread": true}}),
             json!({"ok": true, "ignored": ["unified_thread"]}),
         ),
         ep(
@@ -231,7 +235,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/queue/runs/{id}/resume",
             "auto-queue",
-            "Resume one paused auto-queue run through the canonical run lifecycle command.",
+            "Resume one paused auto-queue run through the canonical run lifecycle command. A pending/failed phase gate leaves the run paused and returns the same 200 blocked_runs contract as global Resume.",
         )
         .with_params([("id", path_param("Auto-queue run ID"))])
         .with_example(
@@ -243,7 +247,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/queue/runs/{id}/end",
             "auto-queue",
-            "End one auto-queue run through the canonical completion command. Clears phase gates, releases slots, and queues completion notification.",
+            "End one auto-queue run through the canonical completion command. Reuses the cancel transaction to cancel live dispatches, skip pending entries, clear phase gates, release slots, and queue completion notification before marking the run completed.",
         )
         .with_params([("id", path_param("Auto-queue run ID"))])
         .with_example(

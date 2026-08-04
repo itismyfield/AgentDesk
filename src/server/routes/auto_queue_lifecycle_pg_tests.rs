@@ -4,7 +4,7 @@ mod tests {
 
     use axum::{
         Router,
-        body::Body,
+        body::{Body, to_bytes},
         http::{Method, Request, StatusCode, header},
     };
     use serde_json::{Value, json};
@@ -37,12 +37,12 @@ mod tests {
         domains::ops::router(state.clone()).with_state(state)
     }
 
-    async fn request_json(
+    async fn request_json_response(
         app: &Router,
         method: Method,
         path: &str,
         body: Option<Value>,
-    ) -> StatusCode {
+    ) -> (StatusCode, Value) {
         let mut builder = Request::builder()
             .method(method)
             .uri(path)
@@ -54,11 +54,26 @@ mod tests {
             }
             None => Body::empty(),
         };
-        app.clone()
+        let response = app
+            .clone()
             .oneshot(builder.body(body).expect("build lifecycle request"))
             .await
-            .expect("send lifecycle request")
-            .status()
+            .expect("send lifecycle request");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read lifecycle response");
+        let body = serde_json::from_slice(&bytes).expect("decode lifecycle response");
+        (status, body)
+    }
+
+    async fn request_json(
+        app: &Router,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> StatusCode {
+        request_json_response(app, method, path, body).await.0
     }
 
     async fn seed_agent(pool: &sqlx::PgPool) {
@@ -135,9 +150,27 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(run_status(&pool, "run-route").await, "paused");
         assert_eq!(slot_run(&pool).await, None);
+        let (status, response) =
+            request_json_response(&app, Method::POST, "/queue/runs/run-route/resume", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["resumed_runs"], 0);
+        assert_eq!(response["blocked_runs"], 1);
+        assert_eq!(response["message"], "No resumable runs");
+        assert_eq!(run_status(&pool, "run-route").await, "paused");
+        sqlx::query("DELETE FROM auto_queue_phase_gates WHERE run_id = 'run-route'")
+            .execute(&pool)
+            .await
+            .expect("clear route phase gate before resume");
         let status = request_json(&app, Method::POST, "/queue/runs/run-route/resume", None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(run_status(&pool, "run-route").await, "active");
+        sqlx::query(
+            "INSERT INTO auto_queue_phase_gates (run_id, phase, status)
+         VALUES ('run-route', 0, 'pending')",
+        )
+        .execute(&pool)
+        .await
+        .expect("reseed route phase gate before end");
         sqlx::query(
             "UPDATE auto_queue_slots
          SET assigned_run_id = 'run-route', assigned_thread_group = 0
@@ -236,6 +269,14 @@ mod tests {
         )
         .await;
         assert_eq!(max_concurrent_threads, 3);
+        let status = request_json(
+            &app,
+            Method::PATCH,
+            "/queue/runs/run-missing",
+            Some(json!({"max_concurrent_threads": 3})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
         sqlx::query("UPDATE auto_queue_runs SET status = 'paused' WHERE id = 'run-start'")
             .execute(&pool)
             .await

@@ -48,6 +48,16 @@ pub async fn update_run(
             StatusCode::CONFLICT,
             Json(json!({"error": format!("auto-queue run '{id}' is not pending")})),
         )),
+        Ok((0, None))
+            if body.status.is_some()
+                || body.deploy_phases.is_some()
+                || body.max_concurrent_threads.is_some() =>
+        {
+            Err(auto_queue_json_error(
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("auto-queue run '{id}' not found")})),
+            ))
+        }
         Ok(_) => Ok((
             StatusCode::OK,
             Json(json!({

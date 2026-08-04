@@ -26,6 +26,8 @@ impl LifecycleAction {
 }
 
 pub(super) fn validate_patch_status(body: &UpdateRunBody) -> AppResult<()> {
+    // AC4's DB CHECK is outside this migration-free round; keep the API-side
+    // allow-list explicit rather than implying database enforcement exists.
     if body
         .status
         .as_deref()
@@ -80,23 +82,48 @@ async fn run_lifecycle_command(
                     )
                 })?;
 
-        return match current_status {
-            None => Err(auto_queue_json_error(
+        let Some(status) = current_status else {
+            return Err(auto_queue_json_error(
                 StatusCode::NOT_FOUND,
                 Json(json!({"error": format!("auto-queue run '{run_id}' not found")})),
-            )),
-            Some(status) => Err(auto_queue_json_error(
-                StatusCode::CONFLICT,
-                Json(json!({
-                    "error": format!(
-                        "cannot {} auto-queue run '{run_id}' from status '{status}'",
-                        action.command_name()
-                    ),
-                    "run_id": run_id,
-                    "status": status,
-                })),
-            )),
+            ));
         };
+
+        if matches!(action, LifecycleAction::Resume) && status == "paused" {
+            let blocked = crate::db::auto_queue::run_has_blocking_phase_gate_pg(pool, &run_id)
+                .await
+                .map_err(|error| {
+                    auto_queue_json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("check blocking phase gates for run '{run_id}': {error}")})),
+                    )
+                })?;
+            if blocked {
+                // Match the global Resume contract: blocked runs stay paused,
+                // return 200, and are reported as non-resumable.
+                return Ok((
+                    StatusCode::OK,
+                    Json(json!({
+                        "ok": true,
+                        "resumed_runs": 0,
+                        "blocked_runs": 1,
+                        "message": "No resumable runs",
+                    })),
+                ));
+            }
+        }
+
+        return Err(auto_queue_json_error(
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!(
+                    "cannot {} auto-queue run '{run_id}' from status '{status}'",
+                    action.command_name()
+                ),
+                "run_id": run_id,
+                "status": status,
+            })),
+        ));
     }
 
     Ok((

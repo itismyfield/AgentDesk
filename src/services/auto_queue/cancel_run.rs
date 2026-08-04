@@ -868,6 +868,9 @@ pub(crate) async fn cancel_selected_runs_with_pg(
     target_run_ids: &[String],
     reason: &str,
 ) -> Result<Value, String> {
+    // End deliberately shares this transaction so its completed terminal
+    // state cannot get ahead of dispatch/entry/gate/slot cleanup.
+    let completes_run = reason == "auto_queue_end";
     if target_run_ids.is_empty() {
         return Ok(json!({
             "ok": true,
@@ -887,11 +890,17 @@ pub(crate) async fn cancel_selected_runs_with_pg(
         .await
         .map_err(|error| format!("begin postgres run cancel transaction: {error}"))?;
 
-    let locked_run_ids = sqlx::query_scalar::<_, String>(
+    let lock_status_filter = if completes_run {
+        "AND status IN ('active', 'paused', 'generated', 'pending')"
+    } else {
+        ""
+    };
+    let lock_runs_sql = format!(
         "WITH target_runs AS (
              SELECT id
              FROM auto_queue_runs
              WHERE id = ANY($1)
+               {lock_status_filter}
              ORDER BY id ASC
          ),
          locked AS (
@@ -899,12 +908,13 @@ pub(crate) async fn cancel_selected_runs_with_pg(
                     pg_advisory_xact_lock(hashtext('aq_run:' || id)) AS _lock
              FROM target_runs
          )
-         SELECT id FROM locked ORDER BY id ASC",
-    )
-    .bind(target_run_ids)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(|error| format!("lock postgres auto_queue_runs for cancel: {error}"))?;
+         SELECT id FROM locked ORDER BY id ASC"
+    );
+    let locked_run_ids = sqlx::query_scalar::<_, String>(&lock_runs_sql)
+        .bind(target_run_ids)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|error| format!("lock postgres auto_queue_runs for cancel: {error}"))?;
 
     let rollback_candidate_card_ids = sqlx::query_scalar::<_, String>(
         "SELECT DISTINCT kanban_card_id
@@ -952,18 +962,30 @@ pub(crate) async fn cancel_selected_runs_with_pg(
             .map_err(|error| format!("delete postgres auto_queue_phase_gates: {error}"))?
             .rows_affected() as usize;
 
-    let cancelled_runs = sqlx::query(
+    let run_status_filter = if completes_run {
+        "status IN ('active', 'paused', 'generated', 'pending')"
+    } else {
+        "status IN ('active', 'paused', 'restoring')"
+    };
+    let terminal_status = if completes_run {
+        "completed"
+    } else {
+        "cancelled"
+    };
+    let update_runs_sql = format!(
         "UPDATE auto_queue_runs
-         SET status = 'cancelled',
+         SET status = $2,
              completed_at = NOW()
          WHERE id = ANY($1)
-           AND status IN ('active', 'paused', 'restoring')",
-    )
-    .bind(&locked_run_ids)
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| format!("cancel postgres auto_queue_runs: {error}"))?
-    .rows_affected() as usize;
+           AND {run_status_filter}"
+    );
+    let cancelled_runs = sqlx::query(&update_runs_sql)
+        .bind(&locked_run_ids)
+        .bind(terminal_status)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("cancel postgres auto_queue_runs: {error}"))?
+        .rows_affected() as usize;
 
     let mut cancelled_entries = 0usize;
     for (entry_id, _entry_status, _dispatch_id) in entry_rows {
@@ -1014,6 +1036,12 @@ pub(crate) async fn cancel_selected_runs_with_pg(
             Ok((agent_id, slot_index))
         })
         .collect::<Result<Vec<_>, String>>()?;
+
+    if completes_run && cancelled_runs > 0 {
+        for run_id in &locked_run_ids {
+            crate::db::auto_queue::queue_run_completion_notify_on_pg(&mut tx, run_id).await?;
+        }
+    }
 
     tx.commit()
         .await
