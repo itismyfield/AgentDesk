@@ -6794,6 +6794,27 @@ fn compact_json_tool_summaries_redact_nested_cookie_strings_before_serializing()
 }
 
 #[test]
+fn compact_json_tool_summaries_redact_cookie_header_map_values() {
+    let pretty = serde_json::to_string_pretty(&json!({
+        "headers": {
+            "Cookie": "map-secret-one",
+            "Set-Cookie": ["map-secret-two"],
+            "X-Cookie": "visible"
+        }
+    }))
+    .unwrap();
+
+    for tool_name in ["SomeUnknownTool", "mcp__vault__inspect"] {
+        let line = RecentPlaceholderEvent::tool_use(tool_name, &pretty)
+            .expect("non-empty summary")
+            .render_line();
+        assert!(line.contains("***"), "got: {line}");
+        assert!(line.contains("X-Cookie"), "got: {line}");
+        assert!(!line.contains("map-secret"), "got: {line}");
+    }
+}
+
+#[test]
 fn command_tool_summaries_redact_curl_header_and_cookie_option_spellings() {
     let commands = [
         "curl -sHCookie:cluster-secret https://example.test",
