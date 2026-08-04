@@ -38,6 +38,7 @@ src/services/auto_queue/cancel_run.rs
 src/services/auto_queue/phase_gate.rs
 src/services/auto_queue/planning.rs
 src/services/auto_queue/route_generate.rs
+src/services/auto_queue/runtime/clear_slot_sessions_pg_tests.rs
 src/services/cluster/intake_preflight.rs
 src/services/cluster/intake_router_hook.rs
 src/services/cluster/intake_router_hook/owner_record.rs
@@ -112,6 +113,7 @@ services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests
 services::auto_queue::route::phase_gate::pg_tests
 services::auto_queue::route::planning::failed_entry_alert_tests
 services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::postgres_tests
+services::auto_queue::runtime::clear_slot_sessions_pg_tests::tests
 services::auto_queue::tests
 services::cluster::intake_preflight::tests
 services::cluster::intake_router_hook::owner_record::tests
@@ -390,6 +392,7 @@ services::auto_queue::route::phase_gate::pg_tests::cancelled_run_rejects_dispatc
 services::auto_queue::route::planning::failed_entry_alert_tests::failed_entry_transition_and_alert_share_commit_with_explicit_ttl_pg
 services::auto_queue::route::planning::failed_entry_alert_tests::production_failure_wrapper_preserves_restoring_slot_binding_pg
 services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::postgres_tests::unavailable_deploy_gate_creates_no_database_rows
+services::auto_queue::runtime::clear_slot_sessions_pg_tests::tests::clear_slot_sessions_pg_batches_unique_targets_and_preserves_ineligible_rows
 services::auto_queue::tests::auto_queue_status_query_uses_latest_review_clock_pg
 services::cluster::intake_preflight::tests::evaluation_does_not_mutate_production_handoff_state_pg
 services::cluster::intake_router_hook::owner_record::tests::acquire_covers_each_generation_rule
