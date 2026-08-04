@@ -439,6 +439,40 @@ mod dispatch_terminal_sync_pg_tests {
     }
 
     #[tokio::test]
+    async fn review_4883_restoring_run_keeps_allocating_its_live_slot_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+
+        for status in ["restoring", "paused"] {
+            sqlx::query("UPDATE auto_queue_runs SET status = $1 WHERE id = 'run-1'")
+                .bind(status)
+                .execute(&pool)
+                .await
+                .expect("set live run status");
+
+            let allocation = allocate_slot_for_group_agent_pg(&pool, "run-1", 0, "agent-1")
+                .await
+                .expect("live run allocation");
+            assert_eq!(
+                allocation,
+                Some(SlotAllocation {
+                    slot_index: 0,
+                    newly_assigned: false,
+                    reassigned_from_other_group: false,
+                })
+            );
+            assert_eq!(run_status(&pool, "run-1").await, status);
+            assert_eq!(
+                slot_run(&pool, "agent-1", 0).await,
+                Some("run-1".to_string())
+            );
+        }
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
     async fn review_4883_end_with_live_dispatch_blocks_competing_slot_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = setup_pool(&pg_db).await;

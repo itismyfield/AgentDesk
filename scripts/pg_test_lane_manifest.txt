@@ -219,6 +219,7 @@ db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_auto_queue_comp
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_auto_queue_pause_run_releases_slots_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_auto_queue_resume_run_changes_paused_status_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::review_4883_end_with_live_dispatch_blocks_competing_slot_pg
+db::auto_queue::tests::dispatch_terminal_sync_pg_tests::review_4883_restoring_run_keeps_allocating_its_live_slot_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::review_4883_stale_allocator_reclaims_slot_after_end_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::slot_has_recent_terminal_auto_queue_dispatch_pg_respects_cooldown
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::user_cancelled_entry_does_not_finalize_review_disabled_run_pg
