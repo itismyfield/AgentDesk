@@ -69,7 +69,11 @@ jobs:
         with:
           filters: |
             dashboard:
+              - '.nvmrc'
               - 'dashboard/**'
+              - 'scripts/check-dashboard-install-state.mjs'
+              - 'scripts/check-dashboard-toolchain.sh'
+              - 'scripts/install-dashboard-dependencies.sh'
               - 'scripts/verify-dashboard.sh'
             high_risk_recovery:
               - '.github/workflows/**'

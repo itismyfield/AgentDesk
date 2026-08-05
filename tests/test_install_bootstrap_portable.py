@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -9,6 +10,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALL_SCRIPT = ROOT / "scripts" / "install.sh"
+DASHBOARD_TOOLCHAIN_SCRIPT = ROOT / "scripts" / "check-dashboard-toolchain.sh"
+DASHBOARD_INSTALL_STATE_SCRIPT = ROOT / "scripts" / "check-dashboard-install-state.mjs"
+DASHBOARD_DEPENDENCY_INSTALL_SCRIPT = ROOT / "scripts" / "install-dashboard-dependencies.sh"
 
 
 class InstallBootstrapPortableTests(unittest.TestCase):
@@ -55,6 +59,216 @@ class InstallBootstrapPortableTests(unittest.TestCase):
         self.assertIn(".\\\\target\\\\release\\\\agentdesk.exe init", text)
         self.assertNotIn("agentdesk --init", text)
         self.assertNotIn("agentdesk.exe --init", text)
+
+    def test_dashboard_install_and_deploy_fail_closed_on_toolchain_drift(self):
+        install = self.read_script()
+        deploy = (ROOT / "scripts" / "deploy-release.sh").read_text(encoding="utf-8")
+        verify = (ROOT / "scripts" / "verify-dashboard.sh").read_text(encoding="utf-8")
+
+        guard_call = 'bash "$SCRIPT_DIR/check-dashboard-toolchain.sh" "$REPO"'
+        self.assertIn(guard_call, deploy)
+        self.assertIn(guard_call, verify)
+        self.assertIn('bash scripts/check-dashboard-toolchain.sh "$PWD"', install)
+        self.assertIn('bash scripts/install-dashboard-dependencies.sh "$PWD/dashboard"', install)
+        self.assertNotIn('npm run build 2>&1 | tail -1) || true', install)
+        self.assertNotIn('node_modules/.bin/tsc', deploy)
+        self.assertIn(
+            'bash "$SCRIPT_DIR/install-dashboard-dependencies.sh" "$dashboard_dir"', deploy
+        )
+        self.assertIn(
+            'bash "$SCRIPT_DIR/install-dashboard-dependencies.sh" "$DASHBOARD_DIR"', verify
+        )
+        dependency_install = DASHBOARD_DEPENDENCY_INSTALL_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('npm ci --include=dev --no-audit --no-fund', dependency_install)
+        self.assertIn('node "$SCRIPT_DIR/check-dashboard-install-state.mjs" "$dashboard_dir"', deploy)
+        self.assertIn('Existing node_modules was preserved', deploy)
+
+    def test_dashboard_filter_owns_all_toolchain_guard_inputs(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-pr.yml").read_text(encoding="utf-8")
+        dashboard_filter = workflow.split("            dashboard:\n", 1)[1].split(
+            "            high_risk_recovery:\n", 1
+        )[0]
+
+        for path in (
+            ".nvmrc",
+            "dashboard/**",
+            "scripts/check-dashboard-install-state.mjs",
+            "scripts/check-dashboard-toolchain.sh",
+            "scripts/install-dashboard-dependencies.sh",
+            "scripts/verify-dashboard.sh",
+        ):
+            self.assertIn(f"- '{path}'", dashboard_filter)
+
+    @unittest.skipIf(os.name == "nt", "behavioral dashboard installer uses POSIX paths")
+    def test_dashboard_dependency_installer_includes_dev_under_production_env(self):
+        if shutil.which("bash") is None:
+            self.skipTest("bash is not available")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp = Path(tmp)
+            dashboard = temp / "dashboard"
+            fakebin = temp / "fakebin"
+            dashboard.mkdir()
+            fakebin.mkdir()
+            (dashboard / "package.json").write_text("{}\n", encoding="utf-8")
+            (dashboard / "package-lock.json").write_text("{}\n", encoding="utf-8")
+            self.write_executable(
+                fakebin / "npm",
+                """
+                if [[ " $* " != *" ci "* || " $* " != *" --include=dev "* ]]; then
+                  printf 'missing deterministic dev dependency flags: %s\n' "$*" >&2
+                  exit 9
+                fi
+                """,
+            )
+
+            env = os.environ.copy()
+            env.update(
+                {
+                    "PATH": f"{fakebin}:{env['PATH']}",
+                    "NODE_ENV": "production",
+                    "NPM_CONFIG_OMIT": "dev",
+                }
+            )
+            result = subprocess.run(
+                ["bash", str(DASHBOARD_DEPENDENCY_INSTALL_SCRIPT), str(dashboard)],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipIf(shutil.which("node") is None, "dashboard cache validation requires Node")
+    def test_dashboard_install_state_requires_exact_lock_versions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dashboard = Path(tmp) / "dashboard"
+            package_dir = dashboard / "node_modules" / "example-package"
+            package_dir.mkdir(parents=True)
+            (dashboard / "package.json").write_text(
+                '{"devDependencies":{"example-package":"1.0.0"}}\n', encoding="utf-8"
+            )
+            lock = {
+                "lockfileVersion": 3,
+                "packages": {
+                    "": {"devDependencies": {"example-package": "1.0.0"}},
+                    "node_modules/example-package": {
+                        "version": "1.0.0",
+                        "resolved": "https://registry.example/example-package.tgz",
+                        "integrity": "sha512-test",
+                    },
+                },
+            }
+            (dashboard / "package-lock.json").write_text(json.dumps(lock), encoding="utf-8")
+            installed_lock = {"lockfileVersion": 3, "packages": dict(lock["packages"])}
+            installed_lock["packages"].pop("")
+            (dashboard / "node_modules" / ".package-lock.json").write_text(
+                json.dumps(installed_lock), encoding="utf-8"
+            )
+            (package_dir / "package.json").write_text(
+                '{"name":"example-package","version":"1.0.0"}\n', encoding="utf-8"
+            )
+
+            exact = subprocess.run(
+                ["node", str(DASHBOARD_INSTALL_STATE_SCRIPT), str(dashboard)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(exact.returncode, 0, exact.stdout + exact.stderr)
+
+            installed_lock["packages"]["node_modules/example-package"]["version"] = "0.9.0"
+            (dashboard / "node_modules" / ".package-lock.json").write_text(
+                json.dumps(installed_lock), encoding="utf-8"
+            )
+            stale = subprocess.run(
+                ["node", str(DASHBOARD_INSTALL_STATE_SCRIPT), str(dashboard)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertNotEqual(stale.returncode, 0)
+            self.assertIn("version does not match package-lock.json", stale.stderr)
+
+    def test_dashboard_pnpm_importer_matches_manifest_specs(self):
+        manifest = json.loads((ROOT / "dashboard" / "package.json").read_text(encoding="utf-8"))
+        lines = (ROOT / "dashboard" / "pnpm-lock.yaml").read_text(encoding="utf-8").splitlines()
+        importer = {}
+        current_group = None
+        current_package = None
+        in_root_importer = False
+
+        for line in lines:
+            if line == "  .:":
+                in_root_importer = True
+                continue
+            if in_root_importer and line == "packages:":
+                break
+            if not in_root_importer:
+                continue
+            if line in ("    dependencies:", "    devDependencies:"):
+                current_group = line.strip().removesuffix(":")
+                importer[current_group] = {}
+                current_package = None
+                continue
+            if line.startswith("    ") and not line.startswith("      "):
+                current_group = None
+                current_package = None
+                continue
+            if current_group and line.startswith("      ") and not line.startswith("        "):
+                current_package = line.strip().removesuffix(":").strip("'\"")
+                continue
+            if current_group and current_package and line.startswith("        specifier: "):
+                importer[current_group][current_package] = line.split("specifier: ", 1)[1].strip("'\"")
+
+        for group in ("dependencies", "devDependencies"):
+            self.assertEqual(importer.get(group), manifest.get(group), f"pnpm importer drift: {group}")
+
+    @unittest.skipIf(os.name == "nt", "behavioral dashboard toolchain guard uses POSIX paths")
+    def test_dashboard_toolchain_guard_rejects_an_old_node(self):
+        if shutil.which("bash") is None:
+            self.skipTest("bash is not available")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp = Path(tmp)
+            repo = temp / "repo"
+            fakebin = temp / "fakebin"
+            (repo / "dashboard").mkdir(parents=True)
+            fakebin.mkdir()
+            (repo / ".nvmrc").write_text("22.22.0\n", encoding="utf-8")
+            (repo / "dashboard" / "package.json").write_text("{}\n", encoding="utf-8")
+            (repo / "dashboard" / "package-lock.json").write_text("{}\n", encoding="utf-8")
+            self.write_executable(
+                fakebin / "node",
+                """
+                if [[ "${1:-}" == "-e" ]]; then
+                  exit 1
+                fi
+                echo v22.21.0
+                """,
+            )
+            self.write_executable(fakebin / "npm", "exit 0\n")
+
+            env = os.environ.copy()
+            env["PATH"] = f"{fakebin}:{env['PATH']}"
+            result = subprocess.run(
+                ["bash", str(DASHBOARD_TOOLCHAIN_SCRIPT), str(repo)],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("requires Node >=22.22.0", result.stderr)
+            self.assertIn("found v22.21.0", result.stderr)
 
     @unittest.skipIf(os.name == "nt", "behavioral bash installer smoke uses POSIX paths")
     def test_source_build_fallback_installs_into_fresh_sandbox(self):

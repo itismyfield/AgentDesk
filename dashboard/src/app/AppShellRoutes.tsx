@@ -1,5 +1,5 @@
 import { lazy } from "react";
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router";
 
 import * as api from "../api/client";
 import { DEFAULT_ROUTE_PATH, PRIMARY_ROUTES } from "./routes";

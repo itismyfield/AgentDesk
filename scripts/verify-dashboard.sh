@@ -4,44 +4,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 DASHBOARD_DIR="$REPO/dashboard"
-REQUIRED_NODE_VERSION=22.15.0
 
-if ! command -v node >/dev/null 2>&1; then
-  echo "Error: node is required to verify the dashboard" >&2
-  exit 1
-fi
+bash "$SCRIPT_DIR/check-dashboard-toolchain.sh" "$REPO"
 
-if ! command -v npm >/dev/null 2>&1; then
-  echo "Error: npm is required to verify the dashboard" >&2
-  exit 1
-fi
-
-if ! REQUIRED_NODE_VERSION="$REQUIRED_NODE_VERSION" node -e '
-const min = process.env.REQUIRED_NODE_VERSION.split(".").map(Number);
-const cur = process.versions.node.split(".").map(Number);
-const ok = cur[0] > min[0]
-  || (cur[0] === min[0] && cur[1] > min[1])
-  || (cur[0] === min[0] && cur[1] === min[1] && cur[2] >= min[2]);
-process.exit(ok ? 0 : 1);
-'; then
-  echo "Error: dashboard verification requires Node >=${REQUIRED_NODE_VERSION} (found $(node -v))" >&2
-  exit 1
-fi
-
-if [ ! -f "$DASHBOARD_DIR/package.json" ]; then
-  echo "Error: dashboard/package.json missing" >&2
-  exit 1
-fi
-
-if [ ! -f "$DASHBOARD_DIR/package-lock.json" ]; then
-  echo "Error: dashboard/package-lock.json missing" >&2
-  exit 1
-fi
+bash "$SCRIPT_DIR/install-dashboard-dependencies.sh" "$DASHBOARD_DIR"
 
 cd "$DASHBOARD_DIR"
-
-echo "==> Dashboard dependency install (npm ci)"
-npm ci --no-audit --no-fund
 
 echo "==> Dashboard security audit (high+)"
 # High/critical dashboard advisories fail CI by default. To waive a specific
