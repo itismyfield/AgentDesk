@@ -876,11 +876,11 @@ _rollback_release_binary() {
     echo "↩ Rolling back release binary to previous good version..."
     domain="$(_launchd_domain)" || domain="gui/$(id -u 2>/dev/null)"
     # Stop the crash-looping new process before swapping the binary back.
-    # NOTE: bootout is asynchronous; race with bootstrap below exists, same as #4726/#5151.
-    # Unlike PG tunnel (fail-closed, blocking), release rollback has tmux fallback (line 897)
-    # and health check (line 899). Rollback is best-effort, not fail-closed; if bootstrap
-    # fails, tmux fallback handles service restart. Scope: PG tunnel (#5151) only; release
-    # rollback follow-up deferred (#5151 comment).
+    # NOTE: bootstrap may not spawn process (runs=0) despite rc=0 (#5151 root cause).
+    # Release rollback has tmux fallback (line 897) + health check (line 899); if bootstrap
+    # succeeds but process doesn't spawn, tmux fallback will restart via SSH.
+    # Observed issue (#5151): explicit kickstart required after bootstrap. Scope: PG tunnel
+    # only for now; release rollback suitable for future unification if measured necessary.
     launchctl bootout "$domain/$plist" 2>/dev/null || true
     tmux kill-session -t "${AGENTDESK_RELEASE_TMUX_SESSION:-AgentDesk-dcserver-release-manual}" 2>/dev/null || true
     # The bad binary is never locked (uchg is deferred to the success path), so
@@ -955,20 +955,24 @@ _pg_wait_canonical_listener_absent() {
     return 1
 }
 
-_launchctl_bootout_and_bootstrap_retry() {
-    # Common pattern for safe launchd service restart after bootout.
-    # Bootout is asynchronous; immediately bootstrapping risks race conditions (#4726, #5151).
-    # This helper polls for unload completion, then retries bootstrap.
+_launchctl_bootout_and_spawn() {
+    # Safe launchd service restart: bootout → poll → bootstrap → kickstart → running.
+    # Issue: bootstrap loads plist but may not spawn process (runs=0, state=not running).
+    # Solution: explicit kickstart -k forces immediate spawn after successful bootstrap.
+    # Polling (below) is defensive for edge cases; primary issue on this node was misspawn, not race.
     # ARGS: domain label plist_path service_name
     local domain="$1" label="$2" plist_path="$3" service_name="${4:-service}"
 
     launchctl bootout "$domain/$label" 2>/dev/null || true
 
-    # Poll for launchd unload completion (max 12 × 0.5s = 6s)
+    # Poll for launchd unload completion (max 12 × 0.5s = 6s).
+    # Note: Observed on this node: polling yielded 0 rounds, bootstrap rc=0 but runs=0 (process not spawned).
+    # Root cause was launchd not executing the process despite successful plist bootstrap.
+    # Polling retained as defensive measure for potential race on other nodes/timings.
     local polls=0
     while launchctl print "$domain/$label" >/dev/null 2>&1; do
         if [ "$polls" -ge 12 ]; then
-            echo "⚠ $service_name still unloading ~6s after bootout — bootstrapping anyway" >&2
+            echo "⚠ $service_name still loading ~6s after bootout — proceeding with bootstrap" >&2
             break
         fi
         sleep 0.5
@@ -976,10 +980,10 @@ _launchctl_bootout_and_bootstrap_retry() {
     done
 
     # Bootstrap with retry (max 3 attempts, 2s between retries)
-    local armed=0 attempt
+    local loaded=0 attempt
     for attempt in 1 2 3; do
         if launchctl bootstrap "$domain" "$plist_path" 2>/dev/null; then
-            armed=1
+            loaded=1
             break
         fi
         if [ "$attempt" -lt 3 ]; then
@@ -988,12 +992,19 @@ _launchctl_bootout_and_bootstrap_retry() {
         fi
     done
 
-    if [ "$armed" = "1" ]; then
-        return 0
-    else
+    if [ "$loaded" != "1" ]; then
         echo "✗ $service_name bootstrap failed after 3 attempts" >&2
         return 1
     fi
+
+    # Explicit kickstart: bootstrap loads plist but doesn't guarantee process spawn.
+    # Kickstart forces immediate spawn; required for consistent readiness after restart (#5151).
+    if ! launchctl kickstart -k "$domain/$label" 2>/dev/null; then
+        echo "⚠ $service_name kickstart failed — service may not spawn immediately" >&2
+        return 1
+    fi
+
+    return 0
 }
 
 _pg_report_rollback_recovery() {
@@ -2129,8 +2140,8 @@ _migrate_pg_tunnel_before_release_stop() {
         echo "✗ Canonical PG tunnel listener survived synchronous takeover"
         return 1
     fi
-    # Use common bootout/poll/bootstrap pattern (extracted to _launchctl_bootout_and_bootstrap_retry)
-    if ! _launchctl_bootout_and_bootstrap_retry "$PG_TUNNEL_LAUNCHD_DOMAIN" "$PG_TUNNEL_LABEL" "$PG_TUNNEL_PLIST_PATH" "PG tunnel"; then
+    # Use common bootout/poll/bootstrap pattern (extracted to _launchctl_bootout_and_spawn)
+    if ! _launchctl_bootout_and_spawn "$PG_TUNNEL_LAUNCHD_DOMAIN" "$PG_TUNNEL_LABEL" "$PG_TUNNEL_PLIST_PATH" "PG tunnel"; then
         return 1
     fi
     echo "▸ Proving canonical PostgreSQL tunnel readiness on :15432..."
@@ -3307,33 +3318,9 @@ PLIST_EOF
                     # Restart only when deployment material changed or the job is absent.
                     # The watermark lives in the atomic state file, so replacement loads
                     # the same pre-restart transcript authority before its first tick.
-                    # NOTE: This code block (`:3305-3330`) implements the same bootout/poll/bootstrap
-                    # pattern as `_launchctl_bootout_and_bootstrap_retry` (line ~953). When extracting
-                    # the relay watchdog restart logic to use the common helper, preserve service-specific
-                    # error messages and reconcile any local variable naming (e.g. `_wd_*` → parameters).
-                    # Candidate for integration in next refactor (#5151 follow-up). #4726 #5151
-                    launchctl bootout "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" 2>/dev/null || true
-                    _wd_bootout_polls=0
-                    while launchctl print "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" >/dev/null 2>&1; do
-                        if [ "$_wd_bootout_polls" -ge 12 ]; then
-                            echo "⚠ Relay watchdog still unloading ~6s after bootout — bootstrapping anyway"
-                            break
-                        fi
-                        sleep 0.5
-                        _wd_bootout_polls=$((_wd_bootout_polls + 1))
-                    done
-                    _wd_armed=0
-                    for _wd_attempt in 1 2 3; do
-                        if launchctl bootstrap "$LAUNCHD_DOMAIN" "$WATCHDOG_PLIST_PATH"; then
-                            _wd_armed=1
-                            break
-                        fi
-                        if [ "$_wd_attempt" -lt 3 ]; then
-                            echo "⚠ Relay watchdog bootstrap attempt $_wd_attempt failed — retrying in 2s"
-                            sleep 2
-                        fi
-                    done
-                    if [ "$_wd_armed" = "1" ]; then
+                    # Use common bootout/poll/bootstrap/kickstart pattern (same as PG tunnel #5151).
+                    # Both services require explicit kickstart after bootstrap to ensure process spawn.
+                    if _launchctl_bootout_and_spawn "$LAUNCHD_DOMAIN" "$WATCHDOG_LABEL" "$WATCHDOG_PLIST_PATH" "Relay watchdog"; then
                         echo "✓ Relay watchdog armed ($WATCHDOG_LABEL)"
                     else
                         echo "⚠ Relay watchdog bootstrap FAILED after 3 attempts — relay gaps will go unwatched"
