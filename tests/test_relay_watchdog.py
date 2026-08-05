@@ -7340,9 +7340,29 @@ class DeploymentWiringTests(unittest.TestCase):
         )
         return "\n".join(lines[start : end + 2])
 
-    def _run_block(self, block: str, adk_rel: Path, home: Path):
+    def _run_block(
+        self,
+        block: str,
+        adk_rel: Path,
+        home: Path,
+        *,
+        fake_bin: Path | None = None,
+        spawns: bool = True,
+    ):
         import shlex
 
+        # Default (fake_bin=None) keeps the original contract: no fake on PATH,
+        # so the real launchctl is asked about a nonexistent domain.
+        fake_env = ""
+        if fake_bin is not None:
+            fake_env = (
+                f"PATH={shlex.quote(str(fake_bin))}:$PATH\n"
+                f"EVENT_LOG={shlex.quote(str(home / 'events.log'))}\n"
+                f"WD_LOADED={shlex.quote(str(home / 'wd.loaded'))}\n"
+                f"WD_PID={shlex.quote(str(home / 'wd.pid'))}\n"
+                f"WD_SPAWNS={int(spawns)}\n"
+                "export PATH EVENT_LOG WD_LOADED WD_PID WD_SPAWNS\n"
+            )
         script = (
             "set -euo pipefail\n"
             f"REPO={shlex.quote(str(REPO_ROOT))}\n"
@@ -7350,11 +7370,117 @@ class DeploymentWiringTests(unittest.TestCase):
             f"HOME={shlex.quote(str(home))}\n"
             # Nonexistent domain: bootstrap must fail (fail-open ⚠ path) rather
             # than loading a test plist into the developer's real launchd.
-            "LAUNCHD_DOMAIN=gui/999999\n" + block + "\necho HARNESS-END\n"
+            "LAUNCHD_DOMAIN=gui/999999\n" + fake_env + block + "\necho HARNESS-END\n"
         )
         return subprocess.run(
             ["bash", "-c", script], capture_output=True, text=True, timeout=60
         )
+
+    @staticmethod
+    def _fake_launchctl_bin(root: Path) -> Path:
+        """Fake launchd shaped after the fake-launchctl harness in
+        tests/test_pg_tunnel.py.
+
+        It reproduces the #5153 defect exactly: `bootstrap` returns 0 and
+        `print` reports the job as loaded, yet `launchctl list` shows '-' in the
+        PID column because nothing was spawned. WD_SPAWNS=1 makes `kickstart`
+        the thing that actually produces a PID — which is what the 2026-08-06
+        manual recovery observed on the live node.
+        """
+        fake_bin = root / "fake-bin"
+        fake_bin.mkdir(parents=True, exist_ok=True)
+        (fake_bin / "launchctl").write_text(
+            """#!/bin/sh
+printf 'launchctl %s\\n' "$*" >> "$EVENT_LOG"
+case "$1" in
+  print) [ -f "$WD_LOADED" ] && exit 0; exit 1 ;;
+  bootout) rm -f "$WD_LOADED" "$WD_PID"; exit 0 ;;
+  bootstrap) : > "$WD_LOADED"; exit 0 ;;
+  kickstart)
+    [ "${WD_SPAWNS:-0}" != 1 ] || printf '4242\\n' > "$WD_PID"
+    exit 0 ;;
+  list)
+    if [ -f "$WD_LOADED" ]; then
+      pid='-'
+      [ ! -f "$WD_PID" ] || IFS= read -r pid < "$WD_PID"
+      printf '%s\\t0\\tcom.agentdesk.relay-watchdog\\n' "$pid"
+    fi
+    exit 0 ;;
+esac
+exit 0
+""",
+            encoding="utf-8",
+        )
+        (fake_bin / "sleep").write_text(
+            "#!/bin/sh\nexec /bin/sleep 0.01\n", encoding="utf-8"
+        )
+        for name in ("launchctl", "sleep"):
+            (fake_bin / name).chmod(0o755)
+        return fake_bin
+
+    @staticmethod
+    def _watchdog_fixture(root: Path) -> tuple[Path, Path]:
+        adk = root / "adk"
+        for sub in ("bin", "config", "logs"):
+            (adk / sub).mkdir(parents=True)
+        (adk / "config" / "relay-watchdog.json").write_text("{}", encoding="utf-8")
+        home = root / "home"
+        (home / "Library").mkdir(parents=True)
+        return adk, home
+
+    # #5153: the deploy printed "✓ Relay watchdog armed" off the bootstrap
+    # return code while `launchctl list` showed '-' and relay gap monitoring was
+    # gone for about two minutes. The ✓ must follow the PID, not the rc.
+    def test_bootstrap_without_spawn_never_prints_armed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adk, home = self._watchdog_fixture(Path(tmp))
+            fake_bin = self._fake_launchctl_bin(Path(tmp))
+            p = self._run_block(
+                self._watchdog_block(), adk, home, fake_bin=fake_bin, spawns=False
+            )
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            self.assertIn("HARNESS-END", p.stdout, "fail-open must reach the end")
+            events = (home / "events.log").read_text(encoding="utf-8")
+            self.assertIn(
+                "launchctl kickstart -k gui/999999/com.agentdesk.relay-watchdog",
+                events,
+                "bootstrap must be followed by an explicit kickstart (#5152 shape)",
+            )
+            self.assertNotIn(
+                "✓ Relay watchdog armed",
+                p.stdout,
+                "a loaded-but-unspawned watchdog must never be reported armed",
+            )
+            self.assertIn("NOT spawned", p.stdout)
+
+    def test_spawned_watchdog_is_reported_armed_with_its_pid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            adk, home = self._watchdog_fixture(Path(tmp))
+            fake_bin = self._fake_launchctl_bin(Path(tmp))
+            p = self._run_block(
+                self._watchdog_block(), adk, home, fake_bin=fake_bin, spawns=True
+            )
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            self.assertIn("HARNESS-END", p.stdout, "fail-open must reach the end")
+            self.assertIn("✓ Relay watchdog armed", p.stdout)
+            self.assertIn("pid 4242", p.stdout)
+            self.assertNotIn("NOT spawned", p.stdout)
+
+    def test_retained_fast_path_requires_a_running_pid_not_just_a_loaded_job(self):
+        """`launchctl print` rc proves loaded, not running — same #5153 defect on
+        the sibling branch. An unspawned job must fall through to the restart
+        path instead of being silently retained."""
+        deploy = (REPO_ROOT / "scripts" / "deploy-release.sh").read_text(
+            encoding="utf-8"
+        )
+        block = deploy[deploy.index('WATCHDOG_LABEL="com.agentdesk.relay-watchdog"') :]
+        retained = block.index("durable authority uninterrupted")
+        self.assertNotIn(
+            'if launchctl print "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" >/dev/null 2>&1; then',
+            block[:retained],
+            "the retained fast path must judge on the PID column, not on print rc",
+        )
+        self.assertIn("_wd_spawned_pid", block[:retained])
 
     # r4 review (PR #4399): plist values were raw-interpolated into the XML
     # heredoc, so an operator path containing &, <, or > produced an invalid
