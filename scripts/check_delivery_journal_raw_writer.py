@@ -39,12 +39,18 @@ FAMILY_REGISTRY = (
 #   - that the call sits on a reachable branch, is reached once, or is reached
 #     at all;
 #   - that a finish/settle exists for every begin. Deleting one of the sink's
-#     three `journal::settle(..)` call sites still leaves this gate green and
-#     kills no test; a dropped settle only self-reports later, as an `Unknown`
-#     classification in shadow data.
+#     three `journal::settle(..)` call sites still leaves THIS gate green, and
+#     no RUNTIME test dies either: `begin_fresh` returns None without PG +
+#     Shadow, so there is nothing to observe. CI does still catch that one
+#     edit, but only through a source-contract text count -- see
+#     `test_source_contract_sink_direct_success_arms_settle_each_terminal_arm`
+#     in tests/test_delivery_journal_raw_writer.py, run by
+#     scripts/ci-script-checks.sh. A settle that is genuinely lost (moved out
+#     of the anchor file, or dropped in a way the count still accepts)
+#     self-reports later, as an `Unknown` classification in shadow data.
 # What the gate does buy is monotonicity: a family cannot silently regress to
 # uninstrumented. Whether the instrumentation is CORRECT is proven only by the
-# Rust runtime tests T1-T9 and their mutations M1-M7 (see the SOURCE-CONTRACT
+# Rust runtime tests T1-T8 and their mutations M1-M7 (see the SOURCE-CONTRACT
 # block in tests/test_delivery_journal_raw_writer.py for the index).
 JOURNAL_FACADE_CALL = re.compile(r"\bself\.journal\.(?:begin_fresh|finish_fresh)\s*\(")
 UNINSTRUMENTED_FAMILY_BASELINE = 4

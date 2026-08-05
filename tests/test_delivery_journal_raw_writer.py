@@ -163,7 +163,7 @@ class RawWriterAllowlistTests(unittest.TestCase):
     # so none of it observes what the code MEANS — a mutation that keeps the
     # tokens and inverts the semantics passes every assertion here. Named
     # `source_contract_*` so they are never read as runtime evidence. The
-    # runtime guarantees are the Rust tests T1-T9, each proven by a mutation:
+    # runtime guarantees are the Rust tests T1-T8, each proven by a mutation:
     # T1-T3 route/cutover boundary, T4 anchor receipt, T5 proof-derived commit,
     # T6 single settle (session_relay_sink/journal.rs::sink_direct_semantics_tests);
     # T7 mismatch preservation (formatting/long_send_rollback.rs);
@@ -180,7 +180,12 @@ class RawWriterAllowlistTests(unittest.TestCase):
         self.assertLess(guard, begin)
 
     def test_source_contract_sink_direct_root_has_one_facade_begin(self):
-        """Source text only: call count, not proof that the call is reachable."""
+        """Source text only: pins begin_fresh at exactly 1 occurrence in
+        session_relay_sink.rs, so a second call added to THAT file -- including
+        one that bypasses the journals_sink_direct predicate -- fails here and
+        is blocked in CI. It proves nothing about reachability, and it reads
+        only this one file: a begin_fresh added in a different module (a new
+        helper, say) is outside every check we have."""
         source = (ROOT / "src/services/discord/session_relay_sink.rs").read_text(encoding="utf-8")
         self.assertEqual(source.count("self.journal.begin_fresh("), 1)
         self.assertEqual(source.count("self.journal.finish_fresh("), 0)
@@ -192,7 +197,13 @@ class RawWriterAllowlistTests(unittest.TestCase):
         self.assertIn("send_long_message_raw_with_rollback_returning_receipts(", source)
 
     def test_source_contract_sink_direct_success_arms_settle_each_terminal_arm(self):
-        """Source text only: three settle call sites. Deleting one is NOT caught by CI."""
+        """Source text only: pins the literal `journal::settle(` count in
+        session_relay_sink.rs at 3, so deleting one of the three terminal arms
+        makes it 2 and fails here -- this test, not a runtime test, is what
+        blocks that edit in CI (no runtime test can see it: begin_fresh is None
+        without PG + Shadow). Being a text count is the limit: it cannot tell
+        which branch a surviving call sits on, and a call commented out rather
+        than deleted still counts toward the 3."""
         source = (ROOT / "src/services/discord/session_relay_sink.rs").read_text(encoding="utf-8")
         self.assertEqual(source.count("journal::settle("), 3)
 if __name__ == "__main__":

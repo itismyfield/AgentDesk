@@ -1,15 +1,18 @@
 # Discord Outbound Migration — Coverage Map (#1006 v3 / #1280 / #1436 / #1457)
 
-> Last refreshed: 2026-08-05 (#5071 T1 S2 — the raw `formatting` transports gained
+> Last refreshed: 2026-08-06 (#5071 T1 S2 — the raw `formatting` transports gained
 > receipt-preserving parallel entry points
 > (`send_long_message_raw_with_rollback_returning_receipts`,
-> `send_long_message_raw_with_reference_returning_receipts`,
-> `replace_long_message_raw_{deferred,with_outcome}_returning_receipt`). All four
-> sink-direct receipt kinds — referenced, split, long-chunk, edit — now carry the
-> channel Discord answered with rather than the channel that was requested, so the
-> journal's `channel_mismatch` classification stays reachable; the legacy names and
-> return types are unchanged thin wrappers, and no v3 producer or direct-send
-> callsite is added, so the coverage rows below are unchanged).
+> `replace_long_message_raw_{deferred,with_outcome}_returning_receipt`). Two of the
+> four sink-direct receipt kinds — **long-chunk and edit** — now carry the channel
+> Discord answered with rather than the channel that was requested, so the
+> journal's `channel_mismatch` classification stays reachable on those paths. The
+> other two — **referenced and split** — are unchanged: that work is D1, deferred
+> to S6 with contract C7, so `formatting/delivery.rs` is byte-identical to its
+> pre-slice state and the multi-chunk arm of `task_notification_context.rs` still
+> returns no receipt. The legacy names and return types are unchanged thin
+> wrappers, and no v3 producer or direct-send callsite is added, so the coverage
+> rows below are unchanged).
 
 > Last refreshed: 2026-08-04 (#5071 T1 S1 r2 — `DiscordTransportReceipt` preserves requested/returned channel IDs and message ID for the shadow journal; outbound delivery callsite coverage remains unchanged).
 
