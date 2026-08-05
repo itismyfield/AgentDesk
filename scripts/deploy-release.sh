@@ -955,59 +955,6 @@ _pg_wait_canonical_listener_absent() {
     return 1
 }
 
-_launchctl_bootout_and_spawn() {
-    # Safe launchd service restart: bootout → poll → bootstrap → kickstart → running.
-    # Issue: bootstrap loads plist but may not spawn process (runs=0, state=not running).
-    # Solution: explicit kickstart -k forces immediate spawn after successful bootstrap.
-    # Measured: bootstrap rc=0 → runs=0; kickstart → runs=1 → SQL-ready in 0.25s.
-    # Polling (below) is defensive for edge cases; primary issue was misspawn, not race.
-    # ARGS: domain label plist_path service_name
-    local domain="$1" label="$2" plist_path="$3" service_name="${4:-service}"
-
-    launchctl bootout "$domain/$label" 2>/dev/null || true
-
-    # Poll for launchd unload completion (max 12 × 0.5s = 6s).
-    # Note: Observed on this node: polling yielded 0 rounds, bootstrap rc=0 but runs=0 (process not spawned).
-    # Root cause was launchd not executing the process despite successful plist bootstrap.
-    # Polling retained as defensive measure for potential race on other nodes/timings.
-    local polls=0
-    while launchctl print "$domain/$label" >/dev/null 2>&1; do
-        if [ "$polls" -ge 12 ]; then
-            echo "⚠ $service_name still loading ~6s after bootout — proceeding with bootstrap" >&2
-            break
-        fi
-        sleep 0.5
-        polls=$((polls + 1))
-    done
-
-    # Bootstrap with retry (max 3 attempts, 2s between retries)
-    local loaded=0 attempt
-    for attempt in 1 2 3; do
-        if launchctl bootstrap "$domain" "$plist_path" 2>/dev/null; then
-            loaded=1
-            break
-        fi
-        if [ "$attempt" -lt 3 ]; then
-            echo "⚠ $service_name bootstrap attempt $attempt failed — retrying in 2s" >&2
-            sleep 2
-        fi
-    done
-
-    if [ "$loaded" != "1" ]; then
-        echo "✗ $service_name bootstrap failed after 3 attempts" >&2
-        return 1
-    fi
-
-    # Explicit kickstart: bootstrap loads plist but doesn't guarantee process spawn.
-    # Kickstart forces immediate spawn; required for consistent readiness after restart (#5151).
-    if ! launchctl kickstart -k "$domain/$label" 2>/dev/null; then
-        echo "⚠ $service_name kickstart failed — service may not spawn immediately" >&2
-        return 1
-    fi
-
-    return 0
-}
-
 _pg_report_rollback_recovery() {
     local backup=${1:-unknown}
     echo "⚠ PG tunnel rollback incomplete; recovery material retained at $backup" >&2
@@ -1027,18 +974,7 @@ _rollback_pg_tunnel_migration() {
     fi
 
     echo "↩ Restoring previous PG tunnel state..." >&2
-    # Use common bootout/poll/bootstrap pattern; we'll actually call restore below
-    # after file restoration, but the unload poll is the same.
     launchctl bootout "$domain/${PG_TUNNEL_LABEL:-com.agentdesk.pg-tunnel}" 2>/dev/null || true
-    local rollback_polls=0
-    while launchctl print "$domain/${PG_TUNNEL_LABEL:-com.agentdesk.pg-tunnel}" >/dev/null 2>&1; do
-        if [ "$rollback_polls" -ge 12 ]; then
-            echo "⚠ PG tunnel still unloading ~6s after rollback bootout — retrying restore anyway" >&2
-            break
-        fi
-        sleep 0.5
-        rollback_polls=$((rollback_polls + 1))
-    done
     if ! _pg_wait_canonical_listener_absent; then
         echo "✗ New PG tunnel listener survived rollback bootout; refusing restore bind race" >&2
         _pg_report_rollback_recovery "$backup"
@@ -1066,15 +1002,15 @@ _rollback_pg_tunnel_migration() {
 
     if [ "$restore_ok" = 1 ]; then
         if [ "${PG_TUNNEL_ROLLBACK_JOB_LOADED:-0}" = 1 ]; then
-            if [ ! -f "$plist" ]; then
-                echo "✗ Failed to restore PG tunnel launchd plist during rollback" >&2
+            # #5151: bootstrap only loads the plist; it does not guarantee that launchd
+            # spawns the process (observed rc=0 with runs=0 despite RunAtLoad/KeepAlive).
+            # The explicit kickstart is what actually brings the tunnel back, so rollback
+            # must treat a kickstart failure as a restore failure too.
+            if [ ! -f "$plist" ] \
+              || ! launchctl bootstrap "$domain" "$plist" 2>/dev/null \
+              || ! launchctl kickstart -k "$domain/${PG_TUNNEL_LABEL:-com.agentdesk.pg-tunnel}" 2>/dev/null; then
+                echo "✗ Failed to restart previous PG tunnel launchd job" >&2
                 restore_ok=0
-            else
-                # Use common bootout/poll/bootstrap/kickstart helper (same as migration).
-                # Rollback context: prior state was captured; bootout in helper re-clears state before restore.
-                if ! _launchctl_bootout_and_spawn "$domain" "${PG_TUNNEL_LABEL:-com.agentdesk.pg-tunnel}" "$plist" "PG tunnel rollback"; then
-                    restore_ok=0
-                fi
             fi
         elif [ "${PG_TUNNEL_ROLLBACK_MANUAL_KIND:-none}" != none ]; then
             if [ ! -x "${PG_TUNNEL_ROLLBACK_WRAPPER_SOURCE:-}" ] \
@@ -2121,8 +2057,6 @@ _migrate_pg_tunnel_before_release_stop() {
     install -m 0755 "$wrapper_source" "$PG_TUNNEL_BIN" || return 1
     _install_pg_tunnel_plist || return 1
     xattr -d com.apple.quarantine "$PG_TUNNEL_PLIST_PATH" 2>/dev/null || true
-    # Bootout before take-over-canonical: we must stop the running process before wrapper claims canonical
-    # (subsequent bootout in helper will be no-op; retained for robustness and clarity of intent)
     launchctl bootout "$PG_TUNNEL_LAUNCHD_DOMAIN/$PG_TUNNEL_LABEL" 2>/dev/null || true
     if ! "$wrapper_source" --take-over-canonical; then
         echo "✗ Failed to synchronously take over the canonical PG tunnel"
@@ -2132,9 +2066,17 @@ _migrate_pg_tunnel_before_release_stop() {
         echo "✗ Canonical PG tunnel listener survived synchronous takeover"
         return 1
     fi
-    # Use common bootout/poll/bootstrap/kickstart pattern (via _launchctl_bootout_and_spawn helper).
-    # Bootout above is intentional (prepare for wrapper takeover); helper's bootout will be no-op.
-    if ! _launchctl_bootout_and_spawn "$PG_TUNNEL_LAUNCHD_DOMAIN" "$PG_TUNNEL_LABEL" "$PG_TUNNEL_PLIST_PATH" "PG tunnel"; then
+    if ! launchctl bootstrap "$PG_TUNNEL_LAUNCHD_DOMAIN" "$PG_TUNNEL_PLIST_PATH"; then
+        echo "✗ PG tunnel bootstrap failed"
+        return 1
+    fi
+    # #5151: bootstrap loads the plist but does not guarantee that launchd spawns the
+    # process — measured rc=0 with runs=0 even though RunAtLoad=true and KeepAlive=true.
+    # The explicit kickstart is what actually starts it (runs 0→1, SQL-ready in 0.25s).
+    # Deliberately placed after the single bootout above: adding a second bootout here
+    # would re-stop the job the wrapper just claimed as canonical.
+    if ! launchctl kickstart -k "$PG_TUNNEL_LAUNCHD_DOMAIN/$PG_TUNNEL_LABEL"; then
+        echo "✗ PG tunnel kickstart failed"
         return 1
     fi
     echo "▸ Proving canonical PostgreSQL tunnel readiness on :15432..."
@@ -3311,10 +3253,10 @@ PLIST_EOF
                     # Restart only when deployment material changed or the job is absent.
                     # The watermark lives in the atomic state file, so replacement loads
                     # the same pre-restart transcript authority before its first tick.
-                    # NOTE: This block implements bootout/poll/bootstrap pattern similar to
-                    # _launchctl_bootout_and_spawn. Currently runs=2 (healthy). Measured as
-                    # not requiring kickstart (unlike PG tunnel #5151). Scope: exclude from
-                    # this PR; integration candidate with verification (#5151 follow-up).
+                    # NOTE: This block implements the same bootout/poll/bootstrap pattern as
+                    # the PG tunnel sites. Currently runs=2 (healthy), i.e. measured as not
+                    # requiring an explicit kickstart (unlike PG tunnel #5151). Scope: excluded
+                    # from this PR; unification is a follow-up gated on measurement (#5151).
                     launchctl bootout "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" 2>/dev/null || true
                     _wd_bootout_polls=0
                     while launchctl print "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" >/dev/null 2>&1; do
