@@ -52,9 +52,20 @@ class RawWriterAllowlistTests(unittest.TestCase):
         root = self.fixture()
         path = root / guard.FAMILY_REGISTRY[4][1]
         path.write_text(path.read_text(encoding="utf-8") +
+                        '/* self.journal.begin_fresh(); */\n'
                         'const STRING_MARKER: &str = "self.journal.finish_fresh(";\n#[cfg(all(test, unix))]\nmod tests {\n    fn dishonest() { self.journal.begin_fresh(); }\n    const TEST_MARKER: &str = "self.journal.begin_fresh(";\n}\n',
                         encoding="utf-8")
         self.assertTrue(*guard.check(root))
+
+    def test_raw_string_marker_is_known_lexical_false_positive(self):
+        """Known limit: raw strings are not parsed and may count as calls."""
+        root = self.fixture()
+        path = root / guard.FAMILY_REGISTRY[4][1]
+        path.write_text(path.read_text(encoding="utf-8") +
+                        'const RAW: &str = r#"x" self.journal.begin_fresh("#;\n', encoding="utf-8")
+        status, error = guard.family_status(root)
+        self.assertEqual(error, "")
+        self.assertTrue(status[4][1], "raw-string marker intentionally pierces lexical scan")
 
     def test_family_baseline_is_measured_and_named(self):
         ok, message = guard.check(self.fixture())

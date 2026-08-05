@@ -18,9 +18,14 @@ FAMILY_REGISTRY = (
     ("recovery / fresh-send / orphan family", "src/services/discord/tmux_reaper.rs", "reap_fresh_routine_orphan"),
     ("pipe stream epoch", "src/services/discord/tmux_watcher/turn_stream_collector.rs", "collect_turn_stream_until_terminal"),
 )
-# A family is instrumented when its anchor file's non-test area calls self.journal's
-# typed begin/finish facade; this is file-level, not limited to the anchor function body.
+# This is a cheap lexical scan, not a Rust parser: a text match in the anchor
+# file's non-test area is only a baseline signal, not proof of instrumentation.
+# It excludes the top-level #[cfg(test)] tail, // line comments, and matches
+# preceded by an odd quote count (a string guess); block comments get only a
+# cheap non-nested /* */ strip. Doc comments, raw strings (r"…"/r#"…"#), escaped quotes, macros,
+# and separate-file test modules (mod tests;) are not reliably excluded.
 JOURNAL_FACADE_CALL = re.compile(r"\bself\.journal\.(?:begin_fresh|finish_fresh)\s*\(")
+BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 TOP_LEVEL_TEST_CFG = re.compile(r"^#\[cfg\((?:test|all\(\s*test\b[^\]]*\))\)\]\s*$")
 TOP_LEVEL_MODULE = re.compile(r"(?:pub(?:\([^)]*\))?\s+)?mod\b")
 UNINSTRUMENTED_FAMILY_BASELINE = 5
@@ -34,7 +39,7 @@ def call_sites(root: Path) -> tuple[Counter[str], int]:
     listed = [rel for rel in listed if rel.endswith(".rs")]
     found: Counter[str] = Counter()
     for rel in listed:
-        for line in (root / rel).read_text(encoding="utf-8").splitlines():
+        for line in BLOCK_COMMENT.sub("", (root / rel).read_text(encoding="utf-8")).splitlines():
             code = line.split("//", 1)[0]
             if "fn append_delivery_journal_batch" not in code and CALL.search(code):
                 found[rel] += 1
@@ -47,7 +52,7 @@ def family_status(root: Path) -> tuple[list[tuple[str, bool]] | None, str]:
         path = root / rel
         if not path.is_file():
             return None, f"family anchor missing: {name} ({rel}:{symbol})"
-        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        lines = BLOCK_COMMENT.sub("", path.read_text(encoding="utf-8")).splitlines(keepends=True)
         for index, line in enumerate(lines):
             candidate = line.split("//", 1)[0].rstrip()
             if not line.startswith("#[") or not TOP_LEVEL_TEST_CFG.fullmatch(candidate):
@@ -60,7 +65,7 @@ def family_status(root: Path) -> tuple[list[tuple[str, bool]] | None, str]:
         text = "\n".join(line.split("//", 1)[0] for line in lines)
         if not re.search(rf"\b(?:async\s+)?fn\s+{re.escape(symbol)}\b", text):
             return None, f"family anchor symbol missing: {name} ({rel}:{symbol})"
-        # Cheap quote parity is intentional; raw strings and escaped quotes are not handled.
+        # Odd-quote parity is only a string guess; raw/escaped quotes are limits.
         instrumented = any(text[:match.start()].count('"') % 2 == 0 for match in JOURNAL_FACADE_CALL.finditer(text))
         status.append((name, instrumented))
     return status, ""
@@ -77,7 +82,7 @@ def check(root: Path) -> tuple[bool, str]:
     if found != ALLOWLIST:
         return False, f"raw writer allowlist mismatch: expected={dict(ALLOWLIST)} actual={dict(found)} (scanned Rust files: {scanned_files})"
     uninstrumented = [name for name, instrumented in families if not instrumented]
-    summary = f"uninstrumented families: {len(uninstrumented)}/{len(families)} (anchor-file non-test area; {', '.join(uninstrumented) or 'none'})"
+    summary = f"uninstrumented families: {len(uninstrumented)}/{len(families)} (lexical text match baseline; anchor-file non-test area; {', '.join(uninstrumented) or 'none'})"
     if len(uninstrumented) > UNINSTRUMENTED_FAMILY_BASELINE:
         return False, f"{summary}; exceeds baseline {UNINSTRUMENTED_FAMILY_BASELINE}: {', '.join(uninstrumented)}"
     if len(uninstrumented) < UNINSTRUMENTED_FAMILY_BASELINE:
