@@ -2025,6 +2025,23 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
     );
 }
 
+/// The caller-PINNED half of the ledger-id safety rule: an id the caller bound to
+/// THIS delivery — either the watcher's delivery-lease authority or the explicit
+/// `ledger_user_msg_id` argument that every production terminal-delivery call site
+/// passes from its own turn/inflight snapshot. Unlike the receipt-qualified
+/// fresh-row fallback it needs neither an inflight re-read nor an authoritative
+/// JSONL generation, so it is the only ledger-id source usable on the
+/// unknown-generation path where no durable frontier is written (#5154).
+fn pinned_ledger_user_msg_id(
+    watcher_authority: Option<WatcherDeliveryRecordAuthority>,
+    ledger_user_msg_id: Option<u64>,
+) -> Option<u64> {
+    watcher_authority
+        .and_then(|authority| authority.ledger_user_msg_id)
+        .or(ledger_user_msg_id)
+        .filter(|user_msg_id| *user_msg_id != 0)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn shadow_mirror_delivered_frontier_inner(
     shared: &crate::services::discord::SharedData,
@@ -2052,12 +2069,47 @@ fn shadow_mirror_delivered_frontier_inner(
         return false;
     }
     if generation_mtime_ns == 0 || range.1 <= range.0 {
+        // #5154: the durable frontier is generation-scoped, so without an
+        // authoritative JSONL incarnation/range it MUST stay unwritten — that guard
+        // is unchanged and just as strict. But "this user message was answered" is
+        // NOT a fact about a JSONL incarnation, and the single early return that
+        // used to live here also skipped the completed-turn ledger append below.
+        // `catch_up/settled_ledger_consult.rs` treats that ledger as the ONLY
+        // settled-evidence source, so a confirmed, delivered turn was re-collected
+        // by catch-up and its prompt re-submitted verbatim. Settlement recording is
+        // therefore separated from frontier persistence.
+        //
+        // Only CALLER-PINNED ids are used here. The receipt-qualified fresh-row
+        // fallback further below is deliberately NOT reproduced: it is qualified by
+        // an exact receipt, which cannot be constructed without an authoritative
+        // generation, and an unqualified current row could let a delayed A settle a
+        // newer B.
+        //
+        // The #4081 delivered-content fingerprint is deliberately NOT recorded on
+        // this path. Its match predicate requires exact generation equality
+        // (`recent_content_fingerprint_matches`) against a reader-side FRESH marker
+        // read (`recent_delivered_content_matches` → `current_generation_mtime_ns`),
+        // so a fingerprint stored under the unknown-generation sentinel `0` becomes
+        // permanently unmatchable the moment the generation is re-established, while
+        // still consuming a slot in the bounded `recent_delivered_contents` ring. It
+        // would look like a duplicate defense without being one. Duplicate defense on
+        // this path stays with the ledger; the fingerprint is not restored here.
+        let settled_ledger_user_msg_id =
+            pinned_ledger_user_msg_id(watcher_authority, ledger_user_msg_id);
+        if let Some(user_msg_id) = settled_ledger_user_msg_id {
+            completed_turn_ledger::append_completed_turn(
+                provider,
+                terminal_anchor_channel_id.unwrap_or(channel_id),
+                user_msg_id,
+            );
+        }
         tracing::warn!(
             provider = provider.as_str(),
             channel_id,
             range = ?range,
             generation_mtime_ns,
-            "confirmed delivery lacks an authoritative JSONL incarnation/range; preserving prior durable frontier"
+            ?settled_ledger_user_msg_id,
+            "confirmed delivery lacks an authoritative JSONL incarnation/range; preserving prior durable frontier (completed-turn settlement still recorded when the caller pinned an inbound id)"
         );
         return false;
     }
@@ -2106,10 +2158,7 @@ fn shadow_mirror_delivered_frontier_inner(
     // A ledger id is safe only when the caller pinned it to this delivery or
     // the same fresh row produced the exact receipt above. Never guess from an
     // unqualified current row: a delayed A could otherwise settle newer B.
-    let safe_ledger_user_msg_id = watcher_authority
-        .and_then(|authority| authority.ledger_user_msg_id)
-        .or(ledger_user_msg_id)
-        .filter(|user_msg_id| *user_msg_id != 0)
+    let safe_ledger_user_msg_id = pinned_ledger_user_msg_id(watcher_authority, ledger_user_msg_id)
         .or_else(|| {
             receipt
                 .as_ref()
@@ -4563,6 +4612,166 @@ mod tests {
         assert!(
             x_settled.is_empty(),
             "no ledger entry may be written under the offset-authority channel X"
+        );
+    }
+
+    /// #5154 regression. A confirmed terminal delivery whose JSONL incarnation is
+    /// UNKNOWN (`generation_mtime_ns == 0`) must still leave settled evidence that
+    /// the user message was answered, while the generation-scoped durable frontier
+    /// stays unwritten.
+    ///
+    /// Production shape being reproduced: the turn-bridge funnel
+    /// (`shadow_mirror_delivered_frontier`) passes `watcher_authority = None`, so the
+    /// incarnation is read from `coord.confirmed_end_generation_mtime_ns`. A stale
+    /// tmux-watermark reset leaves that atomic at its initial `0` and the only
+    /// re-establishment site refuses to write a `0`, so confirmed deliveries kept
+    /// arriving with an unknown incarnation. The old single early return dropped the
+    /// completed-turn ledger append along with the frontier, and
+    /// `catch_up/settled_ledger_consult.rs` treats that ledger as the ONLY
+    /// settled-evidence source — so catch-up re-collected already-answered messages
+    /// and re-submitted their prompts verbatim.
+    ///
+    /// The `range`/`user_msg_id`/`channel_id` values below are the ones observed in
+    /// the reported incident (issue #5154 WARN line at 20:53:32.847Z, channel
+    /// 1479671298497183835, `range=(0, 42675) generation_mtime_ns=0`).
+    #[test]
+    fn unknown_generation_confirmed_delivery_settles_ledger_without_frontier_5154() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Claude;
+        let owner = ChannelId::new(1_479_671_298_497_183_835);
+        let delivery = ChannelId::new(1_479_671_298_497_183_835);
+        let tmux = "AgentDesk-claude-5154-unknown-incarnation";
+        let pinned_user_msg_id = 1_534_665_637_186_765_043_u64;
+
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let coord = shared.tmux_relay_coord(owner);
+        // The stale-watermark reset left the incarnation atomic at its initial `0`
+        // and no writer re-established it. Deliberately NOT stored: `0` IS the
+        // initial value, and the test must exercise exactly that state.
+        assert_eq!(
+            coord
+                .confirmed_end_generation_mtime_ns
+                .load(Ordering::Acquire),
+            0,
+            "precondition: the unknown-incarnation state under test"
+        );
+        coord.confirmed_end_offset.store(42_675, Ordering::Release);
+
+        // Confirmed delivery: `is_delivered == true`, range strictly growing
+        // (42675 > 0), incarnation unknown. Only the third condition is degenerate.
+        shadow_mirror_delivered_frontier(
+            &shared,
+            &provider,
+            owner,
+            Some(tmux),
+            (0, 42_675),
+            true,
+            Some(1_534_665_637_186_765_044),
+            Some(delivery.get()),
+            Some("confirmed terminal answer"),
+            Some(pinned_user_msg_id),
+        );
+
+        let record = read_record(&provider, owner.get());
+        // The frontier guard is UNCHANGED and just as strict: a frontier without an
+        // authoritative JSONL incarnation is meaningless and must never be durable.
+        assert!(
+            record
+                .as_ref()
+                .and_then(|record| record.delivered_frontier.as_ref())
+                .is_none(),
+            "#5154: an unknown JSONL incarnation must never produce a durable frontier"
+        );
+        // The #4081 content fingerprint is generation-scoped by its match predicate
+        // and is deliberately NOT recorded under the unknown-incarnation sentinel.
+        assert!(
+            record
+                .as_ref()
+                .map(|record| record.recent_delivered_contents.is_empty())
+                .unwrap_or(true),
+            "#5154: no fingerprint may be stored under the unknown-incarnation sentinel"
+        );
+
+        // MUTATION TARGET: "this user message was answered" is not a fact about a
+        // JSONL incarnation. Collapsing the settlement append back into the frontier
+        // guard's early return fails HERE, on this assertion.
+        assert!(
+            completed_turn_ledger::settled_user_msg_ids(&provider, delivery.get())
+                .contains(&pinned_user_msg_id),
+            "#5154 MUTATION: the answered user message must remain settled evidence \
+             even when the JSONL incarnation is unknown — otherwise catch-up \
+             re-collects it and re-submits the same turn_id verbatim"
+        );
+    }
+
+    /// #5154 companion: the settlement carve-out must NOT weaken the ledger-id
+    /// safety rule. With no caller-pinned inbound id there is nothing safe to
+    /// settle — the receipt-qualified fresh-row fallback cannot run without an
+    /// authoritative incarnation, and guessing from an unqualified current row
+    /// would let a delayed A settle a newer B. Nothing is written at all.
+    #[test]
+    fn unknown_generation_without_pinned_inbound_id_settles_nothing_5154() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Claude;
+        let owner = ChannelId::new(5_154_201);
+        let delivery = ChannelId::new(5_154_202);
+        let tmux = "AgentDesk-claude-5154-unpinned";
+
+        let shared = crate::services::discord::make_shared_data_for_tests();
+
+        shadow_mirror_delivered_frontier(
+            &shared,
+            &provider,
+            owner,
+            Some(tmux),
+            (0, 42_675),
+            true,
+            Some(5_154_203),
+            Some(delivery.get()),
+            Some("confirmed terminal answer"),
+            None, // caller pinned nothing
+        );
+
+        assert!(
+            completed_turn_ledger::settled_user_msg_ids(&provider, delivery.get()).is_empty(),
+            "#5154: an unpinned delivery must never invent a settled user_msg_id"
+        );
+        assert!(
+            read_record(&provider, owner.get())
+                .and_then(|record| record.delivered_frontier)
+                .is_none(),
+            "#5154: the frontier guard still holds"
+        );
+    }
+
+    /// #5154: `is_delivered == false` is still an absolute bar. The settlement
+    /// carve-out sits BELOW the `!is_delivered` return, so a non-delivered outcome
+    /// records nothing even with a pinned inbound id.
+    #[test]
+    fn not_delivered_never_settles_the_ledger_5154() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(5_154_301);
+        let pinned_user_msg_id = 5_154_300_u64;
+
+        let shared = crate::services::discord::make_shared_data_for_tests();
+
+        shadow_mirror_delivered_frontier(
+            &shared,
+            &provider,
+            channel,
+            Some("AgentDesk-claude-5154-not-delivered"),
+            (0, 42_675),
+            false, // NOT delivered
+            Some(5_154_302),
+            Some(channel.get()),
+            Some("undelivered body"),
+            Some(pinned_user_msg_id),
+        );
+
+        assert!(
+            completed_turn_ledger::settled_user_msg_ids(&provider, channel.get()).is_empty(),
+            "#5154: a non-delivered outcome must never produce settled evidence"
         );
     }
 
