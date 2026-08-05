@@ -281,6 +281,12 @@ db::auto_queue::tests::dispatch_terminal_sync_pg_tests::phase_gate_state_concurr
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::phase_gate_state_save_is_idempotent_for_dispatch_rows_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::phase_gate_state_save_is_idempotent_for_empty_dispatch_set_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::phase_gate_state_save_rolls_back_stale_cleanup_when_write_fails_pg
+db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_auto_queue_pause_run_releases_slots_pg
+db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_auto_queue_policy_complete_preserves_card_and_cleans_resources_pg
+db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_auto_queue_resume_run_changes_paused_status_pg
+db::auto_queue::tests::dispatch_terminal_sync_pg_tests::review_4883_end_cleans_resources_without_touching_card_pg
+db::auto_queue::tests::dispatch_terminal_sync_pg_tests::review_4883_restoring_run_keeps_allocating_its_live_slot_pg
+db::auto_queue::tests::dispatch_terminal_sync_pg_tests::review_4883_stale_allocator_reclaims_slot_after_end_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::slot_has_recent_terminal_auto_queue_dispatch_pg_respects_cooldown
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::user_cancelled_entry_does_not_finalize_review_disabled_run_pg
 db::auto_queue::tests::grouped_card_count_pg_tests::grouped_counts_use_one_status_array_and_preserve_filters_pg
@@ -781,6 +787,9 @@ server::routes::auth::tests::is_internal_loopback_path_rejects_unrelated_paths
 server::routes::auth::tests::is_websocket_upgrade_detects_handshake_header
 server::routes::auth::tests::loopback_peer_detection
 server::routes::auth::tests::peer_addr_from_request_reads_connect_info
+server::routes::auto_queue_lifecycle_pg_tests::tests::patch_completed_no_longer_skips_lifecycle_side_effects_pg
+server::routes::auto_queue_lifecycle_pg_tests::tests::patch_pending_start_and_metadata_updates_remain_supported_pg
+server::routes::auto_queue_lifecycle_pg_tests::tests::postgres_auto_queue_lifecycle_http_routes_use_canonical_writers_pg
 server::routes::auto_queue_preflight_harness_tests::auto_queue_preflight_detects_split_brain_completion
 server::routes::auto_queue_preflight_harness_tests::auto_queue_preflight_fixture_sandbox_roundtrip
 server::routes::bind_security_tests::all_interfaces_hosts_still_force_loopback
