@@ -2525,6 +2525,91 @@ class TickChannelTests(unittest.TestCase):
             )
         )
 
+    def test_unchanged_transcript_above_replay_floor_is_not_growth(self):
+        # Live #5072 recurrence: a dead transcript whose replay floor sits below
+        # its own semantic end re-reported "growth" on every tick, pinning the
+        # selector to a worktree that had not been written to in days and
+        # holding the I1 selector-sync alert open against a healthy relay.
+        dead = self.proj_dir / "dead.jsonl"
+        live_dir = self.projects / (
+            "-Users-alice--adk-release-worktrees-claude-adk-cc-20260710-140500"
+        )
+        live_dir.mkdir()
+        live = live_dir / "live.jsonl"
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        # The trailing block is undelivered, so the gap-recovery re-arm at the
+        # end of the tick is refused (fresh_undelivered > 0) — the production
+        # shape in which the floor never advances on its own.
+        dead.write_text(
+            "".join(
+                record(self.now - 5000 - index, f"dead block {index}") + "\n"
+                for index in range(7)
+            )
+            + record(self.now - 200, "dead block 7") + "\n",
+            encoding="utf-8",
+        )
+        live.write_text(record(self.now - 30, "live block landed") + "\n", "utf-8")
+        os.utime(dead, (self.now - 4000, self.now - 4000))
+        os.utime(live, (self.now, self.now))
+
+        dead_size = dead.stat().st_size
+        rt = self.make_rt()
+        rt.haystack = norm(
+            " ".join(f"dead block {index}" for index in range(7))
+            + " live block landed"
+        )
+        # Guard armed at a recovery point below the transcript's semantic end:
+        # exactly the production shape (floor 4025250 vs file 4070983).
+        state: dict = {
+            "999": {
+                SELECTED_TRANSCRIPT_KEY: str(dead),
+                relay_watchdog.TRANSCRIPT_SIZES_KEY: {str(dead): dead_size},
+                relay_watchdog.RECOVERED_GAP_GUARDS_KEY: {
+                    str(dead): {
+                        "size": dead_size - 100,
+                        "confirmed_at": self.now - 4500,
+                        "last_seen_at": self.now - 10,
+                        "absent_since": None,
+                    }
+                },
+            }
+        }
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertFalse(
+            any(
+                f"transcript-select reason=growth path={dead}" in line
+                for line in rt.log_lines
+            ),
+            "an unchanged transcript must not report growth off its replay floor",
+        )
+
+        rt.log_lines.clear()
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        self.assertFalse(
+            any(
+                f"transcript-select reason=growth path={dead}" in line
+                for line in rt.log_lines
+            ),
+            "the false growth signal must not return on later ticks either",
+        )
+        self.assertEqual(
+            state["999"][relay_watchdog.RECOVERED_GAP_GUARDS_KEY][str(dead)]["size"],
+            dead_size - 100,
+            "the replay floor must stay below the undelivered block (#4435)",
+        )
+
     def test_timestamped_assistant_growth_can_switch_selection(self):
         prior = self.proj_dir / "prior.jsonl"
         current_dir = self.projects / (

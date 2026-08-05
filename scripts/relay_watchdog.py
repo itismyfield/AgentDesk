@@ -3775,6 +3775,16 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         prior_size = guard[0] if guard is not None else previous_sizes.get(path)
         if prior_size is None or candidate.size <= prior_size:
             continue
+        observed_before = previous_sizes.get(path)
+        if observed_before is not None and candidate.size <= observed_before:
+            # Selection asks "which transcript is being written to *now*". A
+            # guard floor is a delivery watermark, not a growth observation:
+            # undelivered content parked above the floor must never make a
+            # transcript that has not changed since the last tick look like it
+            # is growing. Leaving this ungated pinned the selector to a
+            # worktree dead for days and held the I1 alert open against a
+            # healthy relay (#5072).
+            continue
         read_result = read_candidate(candidate)
         if (
             read_result.error is None
