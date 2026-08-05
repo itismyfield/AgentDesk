@@ -7852,6 +7852,246 @@ class DeadWorktreeRetirementTests(unittest.TestCase):
             any("릴레이 갭 감지" in body for body, _ in rt.alerts), rt.alerts
         )
 
+    def test_a_transient_listing_failure_never_retires_a_fresh_transcript(self):
+        """P1-A: a missing candidate must fail CLOSED, like the sibling guard.
+
+        `channel_project_dirs` returns [] on ANY OSError from `root.iterdir()`,
+        and `_regular_file_stat_without_symlink` returns None on a single failed
+        stat. One transient listing failure therefore empties
+        `candidate_by_path` — and a guard written as `candidate is not None and
+        ...` would skip entirely and retire a transcript written seconds ago.
+        """
+        self.write_stale_transcript(4.9 * 86400)
+        rt = self.make_rt()
+        state = {"999": self.open_incident_state()}
+        chs = state["999"]
+        self.tick(rt, state, self.now)
+        retire_at = self.now + relay_watchdog.DEAD_WORKTREE_CONFIRM_SECS + 1
+        # The session is writing again as of this very tick (idle 0s)...
+        os.utime(self.transcript, (retire_at, retire_at))
+        # ...but this tick's directory listing failed, so nothing is observed.
+        with mock.patch.object(
+            relay_watchdog, "transcript_candidates", return_value=[]
+        ):
+            self.tick(rt, state, retire_at)
+
+        self.assertNotIn(
+            str(self.transcript),
+            chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {}),
+        )
+        self.assertTrue(chs.get("alerting"), (chs, rt.log_lines))
+        self.assertIn(
+            str(self.transcript),
+            chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY],
+        )
+        self.assertTrue(
+            any(
+                "dead-worktree-retirement-declined reason=transcript_unobserved"
+                in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+
+    def test_termination_defers_while_the_notice_is_swallowed_by_cooldown(self):
+        """P1-B: loss-state never terminates in silence.
+
+        `_alert_pending_retirement` shares ONE cooldown key across every reason,
+        so an idle/read-failure retirement seconds earlier would otherwise
+        swallow the dead-session notice while the incident closed anyway.
+        """
+        self.write_stale_transcript(4.9 * 86400)
+        rt = self.make_rt()
+        state = {"999": self.open_incident_state()}
+        chs = state["999"]
+        self.tick(rt, state, self.now)
+        retire_at = self.now + relay_watchdog.DEAD_WORKTREE_CONFIRM_SECS + 1
+        # An unrelated retirement 10s ago burned the shared cooldown.
+        chs[relay_watchdog.LAST_PENDING_TRANSCRIPT_RETIREMENT_ALERT_KEY] = (
+            retire_at - 10
+        )
+        self.tick(rt, state, retire_at)
+
+        self.assertTrue(chs.get("alerting"), (chs, rt.log_lines))
+        self.assertIn(
+            str(self.transcript),
+            chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY],
+        )
+        self.assertNotIn(
+            str(self.transcript),
+            chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {}),
+        )
+        self.assertFalse(
+            any("죽은 세션" in body for body, _ in rt.alerts), rt.alerts
+        )
+        self.assertTrue(
+            any(
+                "dead-worktree-retirement-deferred" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+
+        # Only once the notice actually goes out does the incident close.
+        self.tick(rt, state, retire_at + rt.cfg.realert_secs + 1)
+        self.assertTrue(
+            any("죽은 세션" in body for body, _ in rt.alerts), rt.alerts
+        )
+        self.assertFalse(chs.get("alerting"), (chs, rt.log_lines))
+
+    def test_termination_defers_when_the_notice_cannot_be_delivered(self):
+        """P1-B: a failed post is 'not told', so the authority stays open."""
+        self.write_stale_transcript(4.9 * 86400)
+        rt = self.make_rt()
+        state = {"999": self.open_incident_state()}
+        chs = state["999"]
+        self.tick(rt, state, self.now)
+        rt.alert_succeeds = False
+        retire_at = self.now + relay_watchdog.DEAD_WORKTREE_CONFIRM_SECS + 1
+        self.tick(rt, state, retire_at)
+
+        self.assertTrue(chs.get("alerting"), (chs, rt.log_lines))
+        self.assertNotIn(
+            str(self.transcript),
+            chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {}),
+        )
+        self.assertTrue(
+            any(
+                "transcript-retirement-alert undelivered" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+        # The failed attempt must not have burned the cooldown: the very next
+        # tick after transport recovery closes it.
+        rt.alert_succeeds = True
+        self.tick(rt, state, retire_at + 1)
+        self.assertFalse(chs.get("alerting"), (chs, rt.log_lines))
+
+    def live_successor(self) -> Path:
+        """A second, still-existing session family for this same channel."""
+        name = "claude-adk-cc-20260805-200329"
+        (self.worktrees / name).mkdir()
+        live_dir = self.projects / (
+            project_slug(str(self.worktrees)) + "-" + name
+        )
+        live_dir.mkdir(parents=True)
+        return live_dir / "7e3abf13.jsonl"
+
+    def desynced_probe(self, at: float) -> WatcherStateProbe:
+        stale_ms = int((at - COVERAGE_ACTIVITY_FRESH_SECS * 3) * 1000)
+        return WatcherStateProbe(
+            status=200,
+            attached=True,
+            desynced=True,
+            relay_activity=CoverageActivityProbe(
+                relay_stall_state="active_foreground_stream",
+                active_turn="foreground",
+                queue_depth=1,
+                tmux_alive=True,
+                watcher_attached=True,
+                watcher_attached_stale=False,
+                watcher_owns_live_relay=True,
+                last_outbound_activity_ms=stale_ms,
+                last_relay_ts_ms=stale_ms,
+                desynced=True,
+            ),
+            inflight_updated_at=None,
+        )
+
+    def test_retirement_hands_the_desync_alarm_to_the_live_successor(self):
+        """P1-C: proven from the ACTUAL observed shape, not a convenient one.
+
+        Live log, one tick, 2026-08-05T22:03:50-51Z::
+
+            transcript-select reason=growth path=.../20260731-220205/8cf48ae8...
+            COVERAGE ALERT reason=attached_but_desynced ticks=18
+            gap persists path=.../20260731-220205/8cf48ae8... lost=1
+
+        The selected transcript is the DEAD path carrying `lost=1`, so
+        `zero_loss_observed` is False, `growing_relay_stall` is False, and that
+        COVERAGE ALERT was corroborated by `alerting`/`gap_since` ALONE — the two
+        keys this change pops. Starting from exactly that shape, this walks
+        retirement -> reselection -> alarm and pins that the alarm survives on
+        the independent corroborator once the selector reaches the live session.
+        """
+        self.write_stale_transcript(4.9 * 86400)
+        successor = self.live_successor()
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "uuid": f"00000000-0000-4000-8000-{abs(hash(text)) % 10**12:012d}",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        successor.write_text(
+            record(self.now - 30, "live block one delivered") + "\n",
+            encoding="utf-8",
+        )
+        os.utime(successor, (self.now - 30, self.now - 30))
+
+        rt = self.make_rt()
+        rt.haystack = norm("live block one delivered")
+        rt.live_sessions = {expected_tmux_session_name(self.channel)}
+        rt.watcher_probe = self.desynced_probe(self.now)
+        state = {"999": self.open_incident_state()}
+        chs = state["999"]
+        # The successor is already tracked (as in production), so it debuts as
+        # a known path and the selector stays stuck on the dead one — which is
+        # precisely the logged shape being reproduced.
+        chs[relay_watchdog.TRANSCRIPT_SIZES_KEY][str(successor)] = (
+            successor.stat().st_size
+        )
+
+        # Tick 1 reproduces the logged shape: dead path selected, lost=1, the
+        # gap incident open, the desync accumulating toward confirmation.
+        self.tick(rt, state, self.now)
+        self.assertEqual(chs[SELECTED_TRANSCRIPT_KEY], str(self.transcript))
+        self.assertTrue(chs.get("alerting"))
+        self.assertTrue(
+            any("**1건**" in body for body, _ in rt.alerts), rt.alerts
+        )
+
+        # Tick 2: the live session writes and is relayed; the dead session is
+        # retired and the selector moves to the successor.
+        at = self.now + rt.cfg.realert_secs + 1
+        with successor.open("a", encoding="utf-8") as f:
+            f.write(record(at - 5, "live block two delivered") + "\n")
+        os.utime(successor, (at - 5, at - 5))
+        rt.haystack = (
+            norm("live block one delivered")
+            + " "
+            + norm("live block two delivered")
+        )
+        rt.watcher_probe = self.desynced_probe(at)
+        rt.alerts.clear()
+        rt.log_lines.clear()
+        self.tick(rt, state, at)
+
+        # The gap corroborators are gone...
+        self.assertFalse(chs.get("alerting"), (chs, rt.log_lines))
+        self.assertNotIn("gap_since", chs)
+        self.assertEqual(chs[SELECTED_TRANSCRIPT_KEY], str(successor))
+        # ...and the desync still alarms, on `growing_relay_stall` alone.
+        self.assertTrue(
+            any("attached_but_desynced" in body for body, _ in rt.alerts),
+            (rt.alerts, rt.log_lines),
+        )
+        self.assertTrue(chs.get("coverage_alerting"))
+        self.assertFalse(
+            any(
+                "coverage desync uncorroborated" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+
     def test_unreadable_worktree_root_never_retires_anything(self):
         self.write_stale_transcript(4.9 * 86400)
         rt = self.make_rt()

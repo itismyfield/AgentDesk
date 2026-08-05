@@ -3526,11 +3526,20 @@ def _alert_pending_retirement(
     sample = "\n".join(f"- `{path}`" for path in paths[:3])
     if len(paths) > 3:
         sample += f"\n- 외 {len(paths) - 3}개"
-    rt.alert(
+    delivered_notice = rt.alert(
         ch,
         f"🚨 **{title}**\n\n{detail}\n\n{sample}\n\n"
         f"런타임: {rt.dcserver_snapshot()}",
     )
+    if not delivered_notice:
+        # Do not burn the cooldown on a notice that never left the box: the
+        # next tick must be free to retry. Callers that gate termination on this
+        # return value therefore keep the authority open until someone is told.
+        rt.log(
+            f"[{ch.channel_id}] transcript-retirement-alert undelivered "
+            f"reason={reason} count={len(paths)}"
+        )
+        return False
     channel_state[LAST_PENDING_TRANSCRIPT_RETIREMENT_ALERT_KEY] = now
     return True
 
@@ -3718,16 +3727,40 @@ def _retire_dead_worktree_authorities(
             )
             continue
         candidate = candidate_by_path.get(path)
-        if candidate is not None and now - candidate.mtime < rt.cfg.idle_quiet_secs:
+        # Fail CLOSED on a missing candidate, exactly like the supersession
+        # guard below. `channel_project_dirs` returns [] on ANY OSError from
+        # `root.iterdir()` and `_regular_file_stat_without_symlink` returns None
+        # on a single failed stat, so one transient listing failure empties
+        # `candidate_by_path` — treating that as "no live transcript" would
+        # retire a file written seconds ago.
+        if candidate is None or now - candidate.mtime < rt.cfg.idle_quiet_secs:
             rt.log(
-                f"[{cid}] dead-worktree-retirement-declined "
-                f"reason=transcript_still_active path={path}"
+                f"[{cid}] dead-worktree-retirement-declined reason="
+                f"{'transcript_unobserved' if candidate is None else 'transcript_still_active'}"
+                f" path={path}"
             )
             continue
         dead.append(path)
 
     if not dead:
         _store_worktree_absences(chs, next_absences)
+        return []
+
+    # Terminating a dead session's loss-state is the LAST point at which anyone
+    # can learn those blocks are gone, so termination is gated on the notice
+    # actually going out. The retirement notice shares ONE cooldown key across
+    # every reason, so an idle/read-failure retirement a few seconds earlier
+    # would otherwise swallow this one and close the incident in total silence.
+    # Nothing below has mutated state yet, so deferring simply retries next tick
+    # with the absence window intact.
+    if not _alert_pending_retirement(
+        rt, ch, chs, dead, now, reason=DEAD_WORKTREE_RETIREMENT_REASON
+    ):
+        _store_worktree_absences(chs, next_absences)
+        rt.log(
+            f"[{cid}] dead-worktree-retirement-deferred "
+            f"reason=notice_undelivered count={len(dead)}"
+        )
         return []
 
     dead_set = set(dead)
@@ -3777,9 +3810,6 @@ def _retire_dead_worktree_authorities(
     rt.log(
         f"[{cid}] dead-worktree-loss-state-retired count={len(dead)} "
         f"paths={dead[:3]}"
-    )
-    _alert_pending_retirement(
-        rt, ch, chs, dead, now, reason=DEAD_WORKTREE_RETIREMENT_REASON
     )
     _clear_gap_alert_without_recovery(rt, chs, cid, dead)
     return dead
