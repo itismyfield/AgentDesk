@@ -970,6 +970,16 @@ _rollback_pg_tunnel_migration() {
 
     echo "↩ Restoring previous PG tunnel state..." >&2
     launchctl bootout "$domain/${PG_TUNNEL_LABEL:-com.agentdesk.pg-tunnel}" 2>/dev/null || true
+    # Poll for launchd unload completion before re-binding; bootout is asynchronous.
+    _pg_rollback_polls=0
+    while launchctl print "$domain/${PG_TUNNEL_LABEL:-com.agentdesk.pg-tunnel}" >/dev/null 2>&1; do
+        if [ "$_pg_rollback_polls" -ge 12 ]; then
+            echo "⚠ PG tunnel still unloading ~6s after rollback bootout — retrying restore anyway" >&2
+            break
+        fi
+        sleep 0.5
+        _pg_rollback_polls=$((_pg_rollback_polls + 1))
+    done
     if ! _pg_wait_canonical_listener_absent; then
         echo "✗ New PG tunnel listener survived rollback bootout; refusing restore bind race" >&2
         _pg_report_rollback_recovery "$backup"
@@ -997,9 +1007,26 @@ _rollback_pg_tunnel_migration() {
 
     if [ "$restore_ok" = 1 ]; then
         if [ "${PG_TUNNEL_ROLLBACK_JOB_LOADED:-0}" = 1 ]; then
-            if [ ! -f "$plist" ] || ! launchctl bootstrap "$domain" "$plist" 2>/dev/null; then
-                echo "✗ Failed to restart previous PG tunnel launchd job" >&2
+            if [ ! -f "$plist" ]; then
+                echo "✗ Failed to restore PG tunnel launchd plist during rollback" >&2
                 restore_ok=0
+            else
+                # Retry bootstrap with same pattern as migration
+                _pg_rollback_armed=0
+                for _pg_retry in 1 2 3; do
+                    if launchctl bootstrap "$domain" "$plist" 2>/dev/null; then
+                        _pg_rollback_armed=1
+                        break
+                    fi
+                    if [ "$_pg_retry" -lt 3 ]; then
+                        echo "⚠ PG tunnel rollback bootstrap attempt $_pg_retry failed — retrying in 2s" >&2
+                        sleep 2
+                    fi
+                done
+                if [ "$_pg_rollback_armed" != "1" ]; then
+                    echo "✗ Failed to restart previous PG tunnel launchd job after 3 attempts" >&2
+                    restore_ok=0
+                fi
             fi
         elif [ "${PG_TUNNEL_ROLLBACK_MANUAL_KIND:-none}" != none ]; then
             if [ ! -x "${PG_TUNNEL_ROLLBACK_WRAPPER_SOURCE:-}" ] \
@@ -2055,12 +2082,34 @@ _migrate_pg_tunnel_before_release_stop() {
         echo "✗ Canonical PG tunnel listener survived synchronous takeover"
         return 1
     fi
-    if ! launchctl bootstrap "$PG_TUNNEL_LAUNCHD_DOMAIN" "$PG_TUNNEL_PLIST_PATH"; then
-        echo "✗ PG tunnel bootstrap failed"
+    # Poll for launchd unload completion; bootout is asynchronous and race with
+    # bootstrap would fail. Same pattern as relay watchdog (#4726 fix).
+    _pg_bootout_polls=0
+    while launchctl print "$PG_TUNNEL_LAUNCHD_DOMAIN/$PG_TUNNEL_LABEL" >/dev/null 2>&1; do
+        if [ "$_pg_bootout_polls" -ge 12 ]; then
+            echo "⚠ PG tunnel still unloading ~6s after bootout — bootstrapping anyway"
+            break
+        fi
+        sleep 0.5
+        _pg_bootout_polls=$((_pg_bootout_polls + 1))
+    done
+    _pg_armed=0
+    for _pg_attempt in 1 2 3; do
+        if launchctl bootstrap "$PG_TUNNEL_LAUNCHD_DOMAIN" "$PG_TUNNEL_PLIST_PATH"; then
+            _pg_armed=1
+            break
+        fi
+        if [ "$_pg_attempt" -lt 3 ]; then
+            echo "⚠ PG tunnel bootstrap attempt $_pg_attempt failed — retrying in 2s"
+            sleep 2
+        fi
+    done
+    if [ "$_pg_armed" != "1" ]; then
+        echo "✗ PG tunnel bootstrap failed after 3 attempts"
         return 1
     fi
     echo "▸ Proving canonical PostgreSQL tunnel readiness on :15432..."
-    if ! _pg_sql_probe 15432; then
+    if ! _pg_sql_probe 15432 12; then
         echo "✗ Canonical PostgreSQL tunnel SQL readiness failed"
         return 1
     fi
