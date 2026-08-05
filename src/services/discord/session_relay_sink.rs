@@ -971,23 +971,22 @@ impl SessionBoundDiscordRelaySink {
                 )
                 .await;
             }
-            if session_bound_should_send_new_chunks_for_placeholder(&relay_text) {
-                let message_ids = if let Some(gateway) = gateway {
-                    gateway
-                        .send_long_message_with_rollback(channel, msg_id, &relay_text)
-                        .await
-                        .map_err(RelaySinkError::Transient)?
+            let mut direct_journal_attempt =
+                if journal::journals_sink_direct(&route, cutover_short_replace) {
+                    self.journal.begin_fresh(&shared, &delivery)
                 } else {
-                    formatting::send_long_message_raw_with_rollback(
-                        &http,
-                        channel,
-                        msg_id,
-                        &relay_text,
-                        &shared,
-                    )
-                    .await
-                    .map_err(|error| RelaySinkError::Transient(error.to_string()))?
+                    None
                 };
+            if session_bound_should_send_new_chunks_for_placeholder(&relay_text) {
+                let (message_ids, journal_receipts) = journal::send_long_chunks_with_receipts(
+                    gateway,
+                    &http,
+                    channel,
+                    msg_id,
+                    &relay_text,
+                    &shared,
+                )
+                .await?;
                 if let Some(gateway) = gateway {
                     let _ = gateway.delete_message(channel, msg_id).await;
                 } else {
@@ -1027,6 +1026,12 @@ impl SessionBoundDiscordRelaySink {
                     &raw_response_text,
                     sink_lease_guard.as_ref(),
                     "src/services/discord/session_relay_sink.rs:sink_long_chunks_advance",
+                );
+                journal::settle(
+                    &self.journal,
+                    direct_journal_attempt.take(),
+                    journal::anchor_receipt(&journal_receipts),
+                    proof == delivery_frontier::SinkDeliveryProofResult::Persisted,
                 );
                 return Ok(SessionRelayDeliveryOutcome::from_proof(proof));
             }
@@ -1093,6 +1098,12 @@ impl SessionBoundDiscordRelaySink {
                         sink_lease_guard.as_ref(),
                         "src/services/discord/session_relay_sink.rs:sink_legacy_short_edit_advance",
                     );
+                    journal::settle(
+                        &self.journal,
+                        direct_journal_attempt.take(),
+                        Some(journal::receipt_for_message(channel_id, anchor.get())),
+                        proof == delivery_frontier::SinkDeliveryProofResult::Persisted,
+                    );
                     Ok(SessionRelayDeliveryOutcome::from_proof(proof))
                 }
                 Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
@@ -1139,6 +1150,13 @@ impl SessionBoundDiscordRelaySink {
                         &raw_response_text,
                         sink_lease_guard.as_ref(),
                         "src/services/discord/session_relay_sink.rs:sink_legacy_short_fallback_advance",
+                    );
+                    journal::settle(
+                        &self.journal,
+                        direct_journal_attempt.take(),
+                        replacement_anchor
+                            .map(|anchor| journal::receipt_for_message(channel_id, anchor.get())),
+                        proof == delivery_frontier::SinkDeliveryProofResult::Persisted,
                     );
                     Ok(SessionRelayDeliveryOutcome::from_proof(proof))
                 }

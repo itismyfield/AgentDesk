@@ -48,6 +48,21 @@ fn is_unknown_required_reference(error: &(dyn std::error::Error + 'static)) -> b
     false
 }
 
+type TransportReceipt = super::super::outbound::DiscordTransportReceipt;
+
+fn message_ids_from_receipts(receipts: Vec<TransportReceipt>) -> Result<Vec<MessageId>, Error> {
+    receipts
+        .into_iter()
+        .map(|receipt| {
+            receipt
+                .message_id
+                .parse::<u64>()
+                .map(MessageId::new)
+                .map_err(|error| -> Error { Box::new(error) })
+        })
+        .collect()
+}
+
 pub(in crate::services::discord) async fn send_long_message_raw_with_rollback(
     http: &serenity::Http,
     channel_id: ChannelId,
@@ -55,7 +70,29 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_rollback(
     text: &str,
     shared: &Arc<SharedData>,
 ) -> Result<Vec<MessageId>, Error> {
-    send_long_message_raw_with_reference_rollback(
+    let receipts = send_long_message_raw_with_rollback_returning_receipts(
+        http,
+        channel_id,
+        rollback_anchor_msg_id,
+        text,
+        shared,
+    )
+    .await?;
+    message_ids_from_receipts(receipts)
+}
+
+/// Receipt-preserving sibling of [`send_long_message_raw_with_rollback`].
+/// The legacy function above keeps its name and return type for source-order
+/// contracts while direct sink instrumentation consumes the actual POST
+/// receipts here.
+pub(in crate::services::discord) async fn send_long_message_raw_with_rollback_returning_receipts(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    rollback_anchor_msg_id: MessageId,
+    text: &str,
+    shared: &Arc<SharedData>,
+) -> Result<Vec<TransportReceipt>, Error> {
+    send_long_message_raw_with_reference_rollback_returning_receipts(
         http,
         channel_id,
         rollback_anchor_msg_id,
@@ -90,7 +127,9 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_required_re
     )
     .await;
     match result {
-        Ok(message_ids) => Ok(message_ids),
+        Ok(receipts) => {
+            message_ids_from_receipts(receipts).map_err(RequiredReferenceRollbackError::Other)
+        }
         Err(error) if is_unknown_required_reference(error.as_ref()) => {
             Err(RequiredReferenceRollbackError::UnknownReference {
                 detail: error.to_string(),
@@ -108,6 +147,26 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
     shared: &Arc<SharedData>,
     reference: Option<(ChannelId, MessageId)>,
 ) -> Result<Vec<MessageId>, Error> {
+    let receipts = send_long_message_raw_with_reference_rollback_returning_receipts(
+        http,
+        channel_id,
+        rollback_anchor_msg_id,
+        text,
+        shared,
+        reference,
+    )
+    .await?;
+    message_ids_from_receipts(receipts)
+}
+
+pub(in crate::services::discord) async fn send_long_message_raw_with_reference_rollback_returning_receipts(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    rollback_anchor_msg_id: MessageId,
+    text: &str,
+    shared: &Arc<SharedData>,
+    reference: Option<(ChannelId, MessageId)>,
+) -> Result<Vec<TransportReceipt>, Error> {
     send_long_message_raw_with_reference_rollback_policy(
         http,
         channel_id,
@@ -131,7 +190,7 @@ async fn send_long_message_raw_with_reference_rollback_policy(
     reference: Option<(ChannelId, MessageId)>,
     require_reference: bool,
     response_turn_key: Option<&str>,
-) -> Result<Vec<MessageId>, Error> {
+) -> Result<Vec<TransportReceipt>, Error> {
     let payload_byte_len = text.len();
     let chunks = split_message(text);
     let total = chunks.len();
@@ -214,6 +273,7 @@ async fn send_long_message_raw_with_reference_rollback_policy(
     );
 
     let mut sent_message_ids = Vec::new();
+    let mut sent_receipts = Vec::new();
     for (i, chunk) in chunks.iter().enumerate() {
         let is_last = i + 1 == total;
         tracing::debug!(
@@ -242,7 +302,7 @@ async fn send_long_message_raw_with_reference_rollback_policy(
         )
         .await
         {
-            Ok(message_id) => {
+            Ok(receipt) => {
                 // #3082 P1-2: chunk landed — refresh the answer-flush barrier's
                 // inactivity window so a long rollback-tracked answer never
                 // trips the queued-card wait while still progressing.
@@ -250,7 +310,14 @@ async fn send_long_message_raw_with_reference_rollback_policy(
                 shared
                     .tmux_relay_coord(channel_id)
                     .note_relay_progress_heartbeat(chrono::Utc::now().timestamp_millis());
+                let message_id = MessageId::new(
+                    receipt
+                        .message_id
+                        .parse::<u64>()
+                        .map_err(|error| -> Error { Box::new(error) })?,
+                );
                 sent_message_ids.push(message_id.get());
+                sent_receipts.push(receipt);
                 if let Err(error) =
                     record_replace_continuation_rollback(&rollback_key, sent_message_ids.clone())
                 {
@@ -381,7 +448,7 @@ async fn send_long_message_raw_with_reference_rollback_policy(
         )
     }
 
-    Ok(sent_message_ids.into_iter().map(MessageId::new).collect())
+    Ok(sent_receipts)
 }
 
 async fn send_rollback_channel_message(
@@ -391,7 +458,7 @@ async fn send_rollback_channel_message(
     reference: Option<(ChannelId, MessageId)>,
     require_reference: bool,
     nonce: Option<&str>,
-) -> Result<MessageId, Error> {
+) -> Result<TransportReceipt, Error> {
     #[cfg(test)]
     if let Some(result) = super::rollback_transport_test_hook::send(
         channel_id,
@@ -400,7 +467,11 @@ async fn send_rollback_channel_message(
         nonce,
         nonce.is_some(),
     ) {
-        return result;
+        return result.map(|message_id| TransportReceipt {
+            requested_channel_id: channel_id.get().to_string(),
+            returned_channel_id: channel_id.get().to_string(),
+            message_id: message_id.get().to_string(),
+        });
     }
 
     match (reference, require_reference, nonce) {
@@ -414,7 +485,7 @@ async fn send_rollback_channel_message(
                 nonce,
             )
             .await
-            .map(|message| message.id)
+            .map(|message| TransportReceipt::from_message(channel_id, &message))
             .map_err(Into::into)
         }
         (Some((reference_channel_id, reference_message_id)), true, None) => {
@@ -426,7 +497,7 @@ async fn send_rollback_channel_message(
                 reference_message_id,
             )
             .await
-            .map(|message| message.id)
+            .map(|message| TransportReceipt::from_message(channel_id, &message))
             .map_err(Into::into)
         }
         (Some((reference_channel_id, reference_message_id)), false, Some(nonce)) => {
@@ -439,7 +510,7 @@ async fn send_rollback_channel_message(
                 nonce,
             )
             .await
-            .map(|message| message.id)
+            .map(|message| TransportReceipt::from_message(channel_id, &message))
             .map_err(Into::into)
         }
         (Some((reference_channel_id, reference_message_id)), false, None) => {
@@ -450,18 +521,18 @@ async fn send_rollback_channel_message(
                 Some((reference_channel_id, reference_message_id)),
             )
             .await
-            .map(|message| message.id)
+            .map(|message| TransportReceipt::from_message(channel_id, &message))
             .map_err(Into::into)
         }
         (None, _, Some(nonce)) => {
             super::super::http::send_channel_message_with_nonce(http, channel_id, content, nonce)
                 .await
-                .map(|message| message.id)
+                .map(|message| TransportReceipt::from_message(channel_id, &message))
                 .map_err(Into::into)
         }
         (None, _, None) => super::super::http::send_channel_message(http, channel_id, content)
             .await
-            .map(|message| message.id)
+            .map(|message| TransportReceipt::from_message(channel_id, &message))
             .map_err(Into::into),
     }
 }

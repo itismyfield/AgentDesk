@@ -333,12 +333,16 @@ impl super::SessionBoundDiscordRelaySink {
             })?);
             Ok((vec![message_id], Some(receipt)))
         } else {
-            super::super::formatting::send_long_message_raw_with_reference_returning_message_ids(
-                &http, channel, relay_text, shared, reference,
-            )
-            .await
-            .map(|ids| (ids, None))
-            .map_err(|error| RelaySinkError::Transient(error.to_string()))
+            let receipts =
+                super::super::formatting::send_long_message_raw_with_reference_returning_receipts(
+                    &http, channel, relay_text, shared, reference,
+                )
+                .await
+                .map_err(|error| RelaySinkError::Transient(error.to_string()))?;
+            let message_ids = super::journal::message_ids_from_receipts(&receipts)
+                .map_err(RelaySinkError::Transient)?;
+            let anchor = super::journal::anchor_receipt(&receipts);
+            Ok((message_ids, anchor))
         }
     }
 
@@ -465,9 +469,7 @@ impl super::SessionBoundDiscordRelaySink {
             .map_err(RelaySinkError::Transient)?;
             response_heartbeat = Some(heartbeat);
         } else {
-            if super::super::formatting::split_message(relay_text).len() == 1 {
-                plain_journal_attempt = self.journal.begin_fresh(shared, delivery);
-            }
+            plain_journal_attempt = self.journal.begin_fresh(shared, delivery);
             #[cfg(test)]
             let message_ids = if let Some(gateway) = _gateway {
                 gateway
@@ -507,6 +509,12 @@ impl super::SessionBoundDiscordRelaySink {
                 plain_transport_receipt = receipt;
                 message_ids
             };
+            #[cfg(test)]
+            if plain_transport_receipt.is_none() {
+                plain_transport_receipt = message_ids.last().map(|message_id| {
+                    super::journal::receipt_for_message(channel_id, message_id.get())
+                });
+            }
             plain_body_anchor_msg_id = message_ids.last().map(|message_id| message_id.get());
             plain_body_posted = true;
         }

@@ -122,6 +122,32 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
     shared: &Arc<SharedData>,
     reference: Option<(ChannelId, MessageId)>,
 ) -> Result<Vec<MessageId>, Error> {
+    send_long_message_raw_with_reference_returning_receipts(
+        http, channel_id, text, shared, reference,
+    )
+    .await?
+    .into_iter()
+    .map(|receipt| {
+        receipt
+            .message_id
+            .parse::<u64>()
+            .map(MessageId::new)
+            .map_err(|error| -> Error { Box::new(error) })
+    })
+    .collect()
+}
+
+/// Send a long message using raw HTTP and preserve the transport receipt for
+/// every successful POST. The existing message-id entry point above remains
+/// the compatibility surface for callers that do not need returned channel
+/// identity.
+pub(in crate::services::discord) async fn send_long_message_raw_with_reference_returning_receipts(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    text: &str,
+    shared: &Arc<SharedData>,
+    reference: Option<(ChannelId, MessageId)>,
+) -> Result<Vec<super::super::outbound::DiscordTransportReceipt>, Error> {
     let payload_byte_len = text.len();
     if char_count(text) <= DISCORD_MSG_LIMIT {
         tracing::debug!(
@@ -147,7 +173,11 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
                     outcome = "ok",
                     "discord send single done"
                 );
-                return Ok(vec![message.id]);
+                return Ok(vec![
+                    super::super::outbound::DiscordTransportReceipt::from_message(
+                        channel_id, &message,
+                    ),
+                ]);
             }
             Err(err) => {
                 tracing::warn!(
@@ -180,7 +210,7 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
         total_chunks = total,
         "discord send begin"
     );
-    let mut sent_message_ids = Vec::new();
+    let mut sent_receipts = Vec::new();
     for (i, chunk) in chunks.iter().enumerate() {
         let is_last = i + 1 == total;
         tracing::debug!(
@@ -207,7 +237,11 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
                 shared
                     .tmux_relay_coord(channel_id)
                     .note_relay_progress_heartbeat(chrono::Utc::now().timestamp_millis());
-                sent_message_ids.push(message.id);
+                sent_receipts.push(
+                    super::super::outbound::DiscordTransportReceipt::from_message(
+                        channel_id, &message,
+                    ),
+                );
                 if is_last {
                     tracing::debug!(
                         target: "discord::chunker",
@@ -238,7 +272,7 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
         }
     }
 
-    Ok(sent_message_ids)
+    Ok(sent_receipts)
 }
 
 /// Fresh single-message sink path with an unreconstructed Discord receipt.

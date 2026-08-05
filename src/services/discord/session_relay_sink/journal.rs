@@ -2,7 +2,9 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use poise::serenity_prelude::{ChannelId, MessageId};
 use serde_json::{Value, json};
+use serenity::http::Http;
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -10,6 +12,8 @@ use uuid::Uuid;
 use crate::config::DeliveryJournalMode;
 use crate::services::discord::SharedData;
 use crate::services::discord::outbound::DiscordTransportReceipt;
+
+use super::RelaySinkError;
 
 mod pg_store;
 
@@ -188,6 +192,93 @@ impl JournalObserver {
             });
             sender
         }).clone()
+    }
+}
+
+/// The sink-direct shadow window starts only after the cutover short-replace
+/// return. This pure predicate keeps the route boundary visible to both the
+/// caller and its source-order tests; it does not classify new-message or
+/// task-card delivery as a sink-direct observation.
+pub(super) fn journals_sink_direct(
+    route: &super::SessionBoundTerminalDeliveryRoute,
+    cutover_short_replace: bool,
+) -> bool {
+    !cutover_short_replace
+        && matches!(
+            route,
+            super::SessionBoundTerminalDeliveryRoute::PlaceholderEdit(_)
+        )
+}
+
+pub(super) fn receipt_for_message(channel_id: u64, message_id: u64) -> DiscordTransportReceipt {
+    DiscordTransportReceipt {
+        requested_channel_id: channel_id.to_string(),
+        returned_channel_id: channel_id.to_string(),
+        message_id: message_id.to_string(),
+    }
+}
+
+pub(super) fn anchor_receipt(
+    receipts: &[DiscordTransportReceipt],
+) -> Option<DiscordTransportReceipt> {
+    receipts.last().cloned()
+}
+
+pub(super) fn message_ids_from_receipts(
+    receipts: &[DiscordTransportReceipt],
+) -> Result<Vec<MessageId>, String> {
+    receipts
+        .iter()
+        .map(|receipt| {
+            receipt
+                .message_id
+                .parse::<u64>()
+                .map(MessageId::new)
+                .map_err(|error| format!("invalid Discord receipt message id: {error}"))
+        })
+        .collect()
+}
+
+pub(super) async fn send_long_chunks_with_receipts(
+    gateway: Option<&dyn super::super::gateway::TurnGateway>,
+    http: &Http,
+    channel: ChannelId,
+    anchor: MessageId,
+    text: &str,
+    shared: &Arc<SharedData>,
+) -> Result<(Vec<MessageId>, Vec<DiscordTransportReceipt>), RelaySinkError> {
+    if let Some(gateway) = gateway {
+        let message_ids = gateway
+            .send_long_message_with_rollback(channel, anchor, text)
+            .await
+            .map_err(RelaySinkError::Transient)?;
+        let receipts: Vec<DiscordTransportReceipt> = message_ids
+            .iter()
+            .map(|message_id| receipt_for_message(channel.get(), message_id.get()))
+            .collect();
+        return Ok((message_ids, receipts));
+    }
+    let receipts =
+        super::super::formatting::send_long_message_raw_with_rollback_returning_receipts(
+            http, channel, anchor, text, shared,
+        )
+        .await
+        .map_err(|error| RelaySinkError::Transient(error.to_string()))?;
+    let message_ids = message_ids_from_receipts(&receipts).map_err(RelaySinkError::Transient)?;
+    Ok((message_ids, receipts))
+}
+
+/// Settle only when both the observation and a transport receipt exist. A
+/// missing receipt leaves the already-appended O/A observation dangling for
+/// shadow reconciliation; it is not converted into a fabricated confirmation.
+pub(super) fn settle(
+    observer: &JournalObserver,
+    attempt: Option<AttemptObservation>,
+    receipt: Option<DiscordTransportReceipt>,
+    committed: bool,
+) {
+    if let (Some(attempt), Some(receipt)) = (attempt, receipt) {
+        observer.finish_fresh(attempt, receipt, committed);
     }
 }
 

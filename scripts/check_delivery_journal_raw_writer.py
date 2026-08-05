@@ -31,7 +31,7 @@ FAMILY_REGISTRY = (
 # text count; line comments (including /// and //! doc comments) do not. The
 # result is a monotonic baseline signal, not proof of instrumentation.
 JOURNAL_FACADE_CALL = re.compile(r"\bself\.journal\.(?:begin_fresh|finish_fresh)\s*\(")
-UNINSTRUMENTED_FAMILY_BASELINE = 5
+UNINSTRUMENTED_FAMILY_BASELINE = 4
 
 
 def call_sites(root: Path) -> tuple[Counter[str], int]:

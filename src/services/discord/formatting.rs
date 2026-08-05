@@ -43,6 +43,7 @@ mod rollback_journal;
 use self::long_send_rollback::delete_rollback_channel_message;
 pub(in crate::services::discord) use self::long_send_rollback::send_long_message_raw_with_reference_rollback;
 pub(in crate::services::discord) use self::long_send_rollback::send_long_message_raw_with_rollback;
+pub(in crate::services::discord) use self::long_send_rollback::send_long_message_raw_with_rollback_returning_receipts;
 #[cfg(test)]
 use self::rollback_journal::{
     REPLACE_CONTINUATION_ROLLBACKS, force_next_replace_continuation_rollback_remove_failure,
@@ -166,7 +167,8 @@ pub(super) use self::delivery::{
 #[allow(unused_imports)]
 pub(in crate::services::discord) use self::delivery::{
     long_message_reply_builders, send_long_message_raw_with_reference,
-    send_long_message_raw_with_reference_returning_message_ids, send_long_message_reply_ctx,
+    send_long_message_raw_with_reference_returning_message_ids,
+    send_long_message_raw_with_reference_returning_receipts, send_long_message_reply_ctx,
     send_single_message_returning_receipt,
 };
 
