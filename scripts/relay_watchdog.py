@@ -133,6 +133,17 @@ LAST_PENDING_TRANSCRIPT_RETIREMENT_ALERT_KEY = (
 )
 GAP_TRANSCRIPT_KEY = "gap_transcript"
 GAP_OWNER_TRANSCRIPTS_KEY = "gap_owner_transcripts"
+# Per-path timestamp of the FIRST tick on which the owning worktree directory
+# was proven absent. A dead-session retirement is admitted only after the
+# absence has held continuously for DEAD_WORKTREE_CONFIRM_SECS.
+DEAD_WORKTREE_ABSENT_SINCE_KEY = "dead_worktree_absent_since"
+MAX_DEAD_WORKTREE_ABSENCES = 64
+# 600s is five consecutive polls at the shipped Config.poll_secs default of 120
+# (this file, `poll_secs: int = 120`). `git worktree remove`/`add` completes in
+# seconds, so no legitimate worktree churn can stay invisible across five polls;
+# a transient stat failure resets the window instead of accumulating.
+DEAD_WORKTREE_CONFIRM_SECS = 600
+DEAD_WORKTREE_RETIREMENT_REASON = "dead_worktree"
 RECOVERED_GAP_GUARDS_KEY = "recovered_gap_replay_guards"
 ISSUE_FILING_SUPPRESSION_REASON_KEY = "issue_filing_suppression_reason"
 ISSUE_FILING_SUPPRESSION_SINCE_KEY = "issue_filing_suppression_since"
@@ -410,6 +421,53 @@ def main_channel_project_re(worktree_root: str, worktree_prefix: str) -> re.Patt
     """
     prefix = project_slug(worktree_root.rstrip("/")) + "-" + worktree_prefix + "-"
     return re.compile("^" + re.escape(prefix) + r"\d{8}-\d{6}$")
+
+
+def worktree_dir_for_transcript(
+    transcript_path: str, worktree_root: str, pattern: re.Pattern[str]
+) -> Path | None:
+    """Reverse a transcript's project-dir slug back to its owning worktree dir.
+
+    Session transcripts live at ``<projects_root>/<slug>/<uuid>.jsonl`` where
+    ``slug == project_slug(worktree_dir)``.  ``project_slug`` is lossy in
+    general — both ``/`` and ``.`` collapse to ``-`` — so an arbitrary slug
+    cannot be inverted.  This channel's dirs are not arbitrary:
+    ``main_channel_project_re`` admits only
+    ``<slug(root)>-<prefix>-<YYYYMMDD>-<HHMMSS>``, and the tail after
+    ``slug(root)`` contains neither ``/`` nor ``.`` by construction.  For a
+    pattern-matching dir the inverse is therefore exact, and the result is
+    always a direct child of ``worktree_root``.
+
+    Returns None when the slug does not belong to this channel, so a caller can
+    never draw a liveness conclusion from a path it cannot resolve.
+    """
+    parent = Path(transcript_path).parent.name
+    if pattern.fullmatch(parent) is None:
+        return None
+    root = worktree_root.rstrip("/")
+    slug_prefix = project_slug(root) + "-"
+    if not parent.startswith(slug_prefix):
+        return None
+    basename = parent[len(slug_prefix):]
+    if not basename or "/" in basename:
+        return None
+    return Path(root) / basename
+
+
+def directory_presence(path: Path) -> bool | None:
+    """True = directory exists, False = proven absent, None = no verdict.
+
+    Only ENOENT/ENOTDIR count as proof of absence.  Every other error
+    (permissions, I/O, a dismounted volume) is deliberately inconclusive: a
+    liveness predicate that reads "unreadable" as "dead" would retire a live
+    session's loss-state, which is the exact failure this file must not have.
+    """
+    try:
+        return stat_mode.S_ISDIR(os.stat(path).st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except (OSError, ValueError):
+        return None
 
 
 def channel_project_dirs(root: Path, pattern: re.Pattern[str]) -> list[Path]:
@@ -1097,6 +1155,42 @@ def _store_retired_transcripts(
         }
     else:
         channel_state.pop(RETIRED_TRANSCRIPTS_KEY, None)
+
+
+def _validated_worktree_absences(
+    channel_state: Mapping[str, Any],
+) -> dict[str, float]:
+    """Return the persisted first-absence timestamps, malformed rows dropped.
+
+    A malformed row must never read as "absent since the epoch": that would
+    grant an instant retirement. Dropping it restarts the dwell instead.
+    """
+    raw = channel_state.get(DEAD_WORKTREE_ABSENT_SINCE_KEY, {})
+    if not isinstance(raw, dict):
+        return {}
+    valid: dict[str, float] = {}
+    for path, since in raw.items():
+        if not isinstance(path, str) or not path:
+            continue
+        if _is_finite_nonnegative_number(since):
+            valid[path] = float(since)
+    return dict(sorted(valid.items(), key=lambda item: (item[1], item[0]))[
+        :MAX_DEAD_WORKTREE_ABSENCES
+    ])
+
+
+def _store_worktree_absences(
+    channel_state: dict[str, Any], absences: Mapping[str, float]
+) -> None:
+    bounded = dict(
+        sorted(absences.items(), key=lambda item: (item[1], item[0]))[
+            :MAX_DEAD_WORKTREE_ABSENCES
+        ]
+    )
+    if bounded:
+        channel_state[DEAD_WORKTREE_ABSENT_SINCE_KEY] = bounded
+    else:
+        channel_state.pop(DEAD_WORKTREE_ABSENT_SINCE_KEY, None)
 
 
 def _bounded_transcript_history(
@@ -2442,6 +2536,7 @@ def _forget_reclaimed_recovered_gap_lifecycles(
         PENDING_TRANSCRIPT_FAILURES_KEY,
         PENDING_TRANSCRIPT_SINCE_KEY,
         RETIRED_TRANSCRIPTS_KEY,
+        DEAD_WORKTREE_ABSENT_SINCE_KEY,
     ):
         raw = channel_state.get(key)
         if not isinstance(raw, dict):
@@ -2864,6 +2959,15 @@ class Runtime:
                 )
             except (OSError, subprocess.SubprocessError) as e:
                 self.log(f"announce bot error: {e}; falling back")
+        elif trigger_turn:
+            # #5155 correction: with `announce_to` empty the primary is never
+            # ATTEMPTED, so the log shows only discord-sendmessage successes and
+            # an operator counting them reads a healthy config as a 100% primary
+            # failure rate. Say which of the two it is, on every alert.
+            self.log(
+                "announce bot skipped — announce_to empty for channel "
+                f"{ch.channel_id}; posting via discord-sendmessage (bot token)"
+            )
         try:
             p = subprocess.run(
                 [
@@ -3405,6 +3509,14 @@ def _alert_pending_retirement(
             "세션 활동이 idle 한계를 넘겨 더 이상 live GAP으로 반복 평가하지 "
             "않습니다. 미도달 여부가 해결됐다고 주장하는 복구 알림은 보내지 않습니다."
         )
+    elif reason == DEAD_WORKTREE_RETIREMENT_REASON:
+        title = "죽은 세션의 릴레이 loss-state 종결"
+        detail = (
+            "해당 트랜스크립트를 소유한 워크트리 디렉터리가 사라졌습니다 — 그 "
+            "세션은 다시 배달할 수 없으므로 미도달 블록을 재평가 대상에서 "
+            "내립니다. 이는 배달이 확인됐다는 뜻이 아니며(복구 알림은 보내지 "
+            "않습니다), 이 경보가 해당 경로에 대한 마지막 통지입니다."
+        )
     else:
         title = "릴레이 트랜스크립트 평가 불능 에스컬레이션"
         detail = (
@@ -3529,6 +3641,150 @@ def _clear_gap_alert_without_recovery(
     return True
 
 
+def _retire_dead_worktree_authorities(
+    rt: Runtime,
+    ch: ChannelConfig,
+    chs: dict[str, Any],
+    candidates: list[TranscriptCandidate],
+    pattern: re.Pattern[str],
+    now: float,
+) -> list[str]:
+    """Terminate loss-state whose owning session provably cannot come back.
+
+    Pending and unresolved-GAP-owner paths are the two authorities exempt from
+    the normal idle skip, so once one is bound to a session that no longer
+    exists nothing retires it: the incident stays `alerting` and re-fires on its
+    cooldown forever (#5155 — 2,835 `gap persists` ticks against a transcript
+    whose last write was five days earlier).  Growth gating (#5158) stopped the
+    selector from *chasing* that file; it cannot close the incident, because
+    supersession still needs the channel to produce a live, bound, fully
+    delivered successor, and an idle channel never does.
+
+    The liveness predicate is the existence of the owning worktree DIRECTORY,
+    recovered from the transcript's project-dir slug.  It is chosen precisely
+    because it cannot confuse idle with dead: a session that is merely quiet
+    still owns its checkout, and only an operator or `git worktree remove`
+    takes the directory away.  Three further conditions keep an unreadable
+    filesystem from ever reading as a dead session:
+
+    1. The worktree ROOT must itself stat as a directory. A dismounted or
+       renamed root would otherwise retire every authority at once.
+    2. Absence must be proven by ENOENT/ENOTDIR (`directory_presence`), and
+       must hold continuously for DEAD_WORKTREE_CONFIRM_SECS.
+    3. The transcript must also be idle past `idle_quiet_secs`. Redundant with
+       a deleted worktree, and deliberately so: a file still being written is
+       never retired no matter what its directory stat says.
+
+    Retirement is not a recovery claim. No RECOVERED notice is sent, the
+    permanent-loss ledger is untouched, and `transcript-retired-reactivated`
+    still readmits the path if it ever grows semantically again.
+    """
+    cid = ch.channel_id
+    absences = _validated_worktree_absences(chs)
+    if directory_presence(Path(ch.worktree_root)) is not True:
+        if absences:
+            chs.pop(DEAD_WORKTREE_ABSENT_SINCE_KEY, None)
+            rt.log(
+                f"[{cid}] dead-worktree-probe-reset reason=worktree_root_unreadable"
+            )
+        return []
+
+    authorities: list[str] = []
+    for path in (
+        *_validated_gap_owner_transcripts(chs),
+        *_validated_pending_transcripts(chs),
+    ):
+        if path not in authorities:
+            authorities.append(path)
+    candidate_by_path = {str(candidate.path): candidate for candidate in candidates}
+    persisted_sizes = _validated_transcript_sizes(chs)
+
+    next_absences: dict[str, float] = {}
+    dead: list[str] = []
+    for path in authorities:
+        worktree = worktree_dir_for_transcript(path, ch.worktree_root, pattern)
+        if worktree is None:
+            continue
+        if directory_presence(worktree) is not False:
+            continue
+        since = absences.get(path, now)
+        next_absences[path] = since
+        absent_secs = max(0.0, now - since)
+        if absent_secs < DEAD_WORKTREE_CONFIRM_SECS:
+            rt.log(
+                f"[{cid}] dead-worktree-absence-pending worktree={worktree} "
+                f"absent_secs={int(absent_secs)} "
+                f"(< {DEAD_WORKTREE_CONFIRM_SECS}s confirm) path={path}"
+            )
+            continue
+        candidate = candidate_by_path.get(path)
+        if candidate is not None and now - candidate.mtime < rt.cfg.idle_quiet_secs:
+            rt.log(
+                f"[{cid}] dead-worktree-retirement-declined "
+                f"reason=transcript_still_active path={path}"
+            )
+            continue
+        dead.append(path)
+
+    if not dead:
+        _store_worktree_absences(chs, next_absences)
+        return []
+
+    dead_set = set(dead)
+    retired_transcripts = _validated_retired_transcripts(chs)
+    for path in dead:
+        candidate = candidate_by_path.get(path)
+        size = candidate.size if candidate is not None else persisted_sizes.get(path)
+        if not (isinstance(size, int) and not isinstance(size, bool) and size >= 0):
+            size = 0
+        retired_transcripts[path] = (size, now)
+    _store_retired_transcripts(chs, retired_transcripts)
+
+    remaining_pending = [
+        path
+        for path in _validated_pending_transcripts(chs)
+        if path not in dead_set
+    ]
+    chs[PENDING_TRANSCRIPTS_KEY] = remaining_pending
+    for key in (PENDING_TRANSCRIPT_FAILURES_KEY, PENDING_TRANSCRIPT_SINCE_KEY):
+        raw = chs.get(key)
+        if not isinstance(raw, dict):
+            continue
+        pruned = {
+            entry: value for entry, value in raw.items() if entry not in dead_set
+        }
+        if pruned:
+            chs[key] = pruned
+        else:
+            chs.pop(key, None)
+    if chs.get(SELECTED_TRANSCRIPT_KEY) in dead_set:
+        chs.pop(SELECTED_TRANSCRIPT_KEY, None)
+    if chs.get(SELECTOR_DIVERGED_TRANSCRIPT_KEY) in dead_set:
+        # The I1 window was measured against a transcript that no longer has a
+        # session behind it, so the window is void — not repaired. Dropping it
+        # releases the stuck `selector_alerting` flag without asserting that
+        # dcserver's bind is now correct; the next growing selection re-decides.
+        chs.pop("selector_diverged_since", None)
+        chs.pop(SELECTOR_DIVERGED_TRANSCRIPT_KEY, None)
+        was_alerting = bool(chs.pop("selector_alerting", None))
+        rt.log(
+            f"[{cid}] selector-divergence-window-voided reason=dead_worktree "
+            f"was_alerting={was_alerting}"
+        )
+    _store_worktree_absences(
+        chs, {path: since for path, since in next_absences.items() if path not in dead_set}
+    )
+    rt.log(
+        f"[{cid}] dead-worktree-loss-state-retired count={len(dead)} "
+        f"paths={dead[:3]}"
+    )
+    _alert_pending_retirement(
+        rt, ch, chs, dead, now, reason=DEAD_WORKTREE_RETIREMENT_REASON
+    )
+    _clear_gap_alert_without_recovery(rt, chs, cid, dead)
+    return dead
+
+
 def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: float) -> None:
     cfg = rt.cfg
     cid = ch.channel_id
@@ -3578,6 +3834,10 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
                 f"[{cid}] permanent-loss-state-corrupt during lifecycle reclaim; "
                 "preserving raw state"
             )
+    # Runs before any authority is read into locals below, so a dead session's
+    # pending/GAP-owner rows are gone from `chs` by the time selection, growth,
+    # and the gap verdict look at them.
+    _retire_dead_worktree_authorities(rt, ch, chs, candidates, pattern, now)
     previous_sizes = _validated_transcript_sizes(chs)
     previous_seen_at = _validated_transcript_seen_at(chs, previous_sizes, now)
     known_state_persisted = isinstance(chs.get(TRANSCRIPT_KNOWN_AT_KEY), dict)
