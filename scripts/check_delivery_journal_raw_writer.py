@@ -26,7 +26,9 @@ FAMILY_REGISTRY = (
     ("pipe stream epoch", "src/services/discord/tmux_watcher/turn_stream_collector.rs", "collect_turn_stream_until_terminal"),
 )
 # Cheap lexical text match, not Rust parsing: each complete anchor file, including
-# tests, is scanned with only the suffix after // on that line removed.
+# tests, is scanned with only the suffix after // on that line removed. The scan
+# deliberately stays file-wide: lexical brace balancing cannot honestly bound a
+# Rust fn body when strings and macros may contain braces.
 # Strings, block comments (/* */ and /** */), raw strings, macros, and test-area
 # text count; line comments (including /// and //! doc comments) do not. The
 # result is a monotonic baseline signal, not proof of instrumentation.
@@ -96,7 +98,7 @@ def check(root: Path) -> tuple[bool, str]:
     if found != ALLOWLIST:
         return False, f"raw writer allowlist mismatch: expected={dict(ALLOWLIST)} actual={dict(found)} (scanned Rust files: {scanned_files})"
     uninstrumented = [name for name, instrumented in families if not instrumented]
-    summary = f"uninstrumented families: {len(uninstrumented)}/{len(families)} (lexical baseline signal; whole anchor file; only // suffix excluded; not proof; {', '.join(uninstrumented) or 'none'})"
+    summary = f"uninstrumented families: {len(uninstrumented)}/{len(families)} (lexical baseline signal; whole anchor file including tests; only // suffix excluded; not proof; {', '.join(uninstrumented) or 'none'})"
     if len(uninstrumented) > UNINSTRUMENTED_FAMILY_BASELINE:
         return False, f"{summary}; exceeds baseline {UNINSTRUMENTED_FAMILY_BASELINE}: {', '.join(uninstrumented)}"
     if len(uninstrumented) < UNINSTRUMENTED_FAMILY_BASELINE:
