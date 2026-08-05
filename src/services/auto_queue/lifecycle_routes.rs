@@ -55,7 +55,14 @@ async fn run_lifecycle_command(
     let changed = match action {
         LifecycleAction::Pause => crate::db::auto_queue::pause_run_on_pg(pool, &run_id).await,
         LifecycleAction::Resume => crate::db::auto_queue::resume_run_on_pg(pool, &run_id).await,
-        LifecycleAction::End => crate::db::auto_queue::complete_run_on_pg(pool, &run_id).await,
+        LifecycleAction::End => {
+            crate::services::auto_queue::cancel_run::end_run_with_pg(
+                state.health_registry.clone(),
+                pool,
+                &run_id,
+            )
+            .await
+        }
     }
     .map_err(|error| {
         auto_queue_json_error(

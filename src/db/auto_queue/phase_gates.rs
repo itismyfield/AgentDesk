@@ -668,13 +668,11 @@ async fn reconcile_phase_gate_for_terminal_dispatch_on_pg_tx_inner(
     // it was paused on this gate, and mirror the JS hook's pass side effects
     // for bypass callers:
     //
-    //   - For `final_phase` gates the JS hook calls `completeRunAndNotify`,
-    //     which marks the run completed and queues the Discord completion
-    //     ping. The Rust equivalent is `maybe_finalize_run_if_ready_pg` —
-    //     it is idempotent, in-transaction, and a no-op when the run still
-    //     has pending entries or another blocking gate. We always call it
-    //     here so a CRUD/recovery completion of a final-phase gate cannot
-    //     leave the run sitting in `active` with no pending work.
+    //   - For `final_phase` gates the JS hook calls `completeRunAndNotify`
+    //     after clearing the gate. This Rust bypass path instead resumes a
+    //     paused run and then calls `maybe_finalize_run_if_ready_pg` for every
+    //     cleared gate. That helper completes and queues the notification only
+    //     when no pending/dispatched entries or other blocking gates remain.
     //
     //   - Non-final gate activation (kicking off the next phase's first
     //     dispatch) is owned by the JS hook's `activateRun` host call and

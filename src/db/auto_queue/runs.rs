@@ -261,19 +261,48 @@ pub async fn resume_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, Strin
 }
 
 pub async fn complete_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, String> {
-    // End reuses the canonical cancel transaction for dispatch, entry, gate,
-    // and slot cleanup. The cancel writer recognizes this internal reason and
-    // terminalizes the run as completed while retaining End's existing API
-    // semantics and completion notification.
-    let response = crate::services::auto_queue::cancel_run::cancel_selected_runs_with_pg(
-        None,
-        pool,
-        &[run_id.to_string()],
-        "auto_queue_end",
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin postgres complete auto-queue run {run_id}: {error}"))?;
+    // #2048 F17: even an explicit "manual complete" call must drop any
+    // pending/failed phase-gate rows AND release the run's slot bindings.
+    // Otherwise a completed run leaves stale phase_gate rows that next
+    // restore/audit treats as still-pending, plus zombie slot assignments
+    // that block other runs from picking up the slot. We perform the
+    // delete + release inside the same transaction so the operation is
+    // atomic with the status flip.
+    sqlx::query("DELETE FROM auto_queue_phase_gates WHERE run_id = $1")
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("delete phase gates for completed run {run_id}: {error}"))?;
+    let updated = sqlx::query(
+        "UPDATE auto_queue_runs
+         SET status = 'completed',
+             completed_at = NOW()
+         WHERE id = $1
+           AND status IN ('active', 'paused', 'generated', 'pending')",
     )
-    .await?;
-    Ok(response
-        .get("cancelled_runs")
-        .and_then(serde_json::Value::as_u64)
-        .is_some_and(|count| count > 0))
+    .bind(run_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("complete postgres auto-queue run {run_id}: {error}"))?
+    .rows_affected();
+    if updated == 0 {
+        tx.rollback().await.map_err(|error| {
+            format!("rollback stale postgres complete auto-queue run {run_id}: {error}")
+        })?;
+        return Ok(false);
+    }
+
+    release_run_slots_on_pg_tx(&mut tx, run_id)
+        .await
+        .map_err(|error| format!("release slots for completed run {run_id}: {error}"))?;
+
+    queue_run_completion_notify_on_pg(&mut tx, run_id).await?;
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit postgres complete auto-queue run {run_id}: {error}"))?;
+    Ok(true)
 }

@@ -385,7 +385,7 @@ mod dispatch_terminal_sync_pg_tests {
     }
 
     #[tokio::test]
-    async fn postgres_auto_queue_complete_run_releases_slots_gates_and_notifies_pg() {
+    async fn postgres_auto_queue_policy_complete_preserves_card_and_cleans_resources_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = setup_pool(&pg_db).await;
         sqlx::query(
@@ -395,6 +395,24 @@ mod dispatch_terminal_sync_pg_tests {
         .execute(&pool)
         .await
         .expect("seed phase gate");
+        sqlx::query(
+            "INSERT INTO kanban_cards
+                (id, title, status, assigned_agent_id, review_round, review_notes)
+             VALUES ('card-policy-complete', 'Policy Complete Card', 'in_progress',
+                     'agent-1', 3, 'retain this review note')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed policy completion card");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status)
+             VALUES ('entry-policy-complete', 'run-1', 'card-policy-complete',
+                     'agent-1', 'dispatched')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed policy completion entry");
 
         assert!(
             complete_run_on_pg(&pool, "run-1")
@@ -411,6 +429,22 @@ mod dispatch_terminal_sync_pg_tests {
         .expect("count phase gates");
         assert_eq!(gate_count, 0);
         assert_eq!(count_message_outbox(&pool).await, 1);
+        let card = sqlx::query_as::<_, (String, Option<String>, i64)>(
+            "SELECT status, review_notes, review_round::BIGINT
+             FROM kanban_cards
+             WHERE id = 'card-policy-complete'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load policy completion card");
+        assert_eq!(
+            card,
+            (
+                "in_progress".to_string(),
+                Some("retain this review note".to_string()),
+                3,
+            )
+        );
 
         pool.close().await;
         pg_db.drop().await;
@@ -473,12 +507,23 @@ mod dispatch_terminal_sync_pg_tests {
     }
 
     #[tokio::test]
-    async fn review_4883_end_cleans_live_dispatch_before_competing_slot_pg() {
+    async fn review_4883_end_cleans_resources_without_touching_card_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = setup_pool(&pg_db).await;
         sqlx::query(
-            "INSERT INTO task_dispatches (id, to_agent_id, status, context)
-             VALUES ('dispatch-live-after-end', 'agent-1', 'dispatched', $1)",
+            "INSERT INTO kanban_cards
+                (id, title, status, assigned_agent_id, review_round, review_notes)
+             VALUES ('card-live-after-end', 'End Card', 'in_progress',
+                     'agent-1', 4, 'retain end review note')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed end card");
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, to_agent_id, status, context)
+             VALUES ('dispatch-live-after-end', 'card-live-after-end',
+                     'agent-1', 'dispatched', $1)",
         )
         .bind(serde_json::json!({"slot_index": 0}).to_string())
         .execute(&pool)
@@ -486,9 +531,9 @@ mod dispatch_terminal_sync_pg_tests {
         .expect("seed live dispatch");
         sqlx::query(
             "INSERT INTO auto_queue_entries
-                (id, run_id, agent_id, status, dispatch_id, slot_index)
-             VALUES ('entry-live-after-end', 'run-1', 'agent-1', 'dispatched',
-                     'dispatch-live-after-end', 0)",
+                (id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index)
+             VALUES ('entry-live-after-end', 'run-1', 'card-live-after-end',
+                     'agent-1', 'dispatched', 'dispatch-live-after-end', 0)",
         )
         .execute(&pool)
         .await
@@ -500,11 +545,18 @@ mod dispatch_terminal_sync_pg_tests {
         .execute(&pool)
         .await
         .expect("seed competing run");
+        sqlx::query(
+            "INSERT INTO auto_queue_phase_gates (run_id, phase, status)
+             VALUES ('run-1', 0, 'pending')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed end phase gate");
 
         assert!(
-            complete_run_on_pg(&pool, "run-1")
+            crate::services::auto_queue::cancel_run::end_run_with_pg(None, &pool, "run-1")
                 .await
-                .expect("complete original run")
+                .expect("end original run")
         );
         let dispatch_status: String = sqlx::query_scalar(
             "SELECT status FROM task_dispatches WHERE id = 'dispatch-live-after-end'",
@@ -520,6 +572,24 @@ mod dispatch_terminal_sync_pg_tests {
         .await
         .expect("load ended entry status");
         assert_eq!(entry_status, "skipped");
+        let end_state = sqlx::query_as::<_, (i64, String, Option<String>, i64)>(
+            "SELECT
+                (SELECT COUNT(*)::BIGINT FROM auto_queue_phase_gates WHERE run_id = 'run-1'),
+                status, review_notes, review_round::BIGINT
+             FROM kanban_cards WHERE id = 'card-live-after-end'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load end gate and card state");
+        assert_eq!(
+            end_state,
+            (
+                0,
+                "in_progress".to_string(),
+                Some("retain end review note".to_string()),
+                4,
+            )
+        );
         let allocation = allocate_slot_for_group_agent_pg(&pool, "run-2", 0, "agent-1")
             .await
             .expect("competing allocation after end cleanup");
