@@ -158,7 +158,20 @@ class RawWriterAllowlistTests(unittest.TestCase):
         self.assertRegex(result.stdout, r"scanned Rust files: [1-9][0-9]*")
         self.assertIn("uninstrumented families: 4/6", result.stdout)
 
-    def test_sink_direct_begin_is_guarded_after_cutover(self):
+    # SOURCE-CONTRACT block (#5071 T1 S2). Everything below matches TEXT in .rs
+    # files: call ORDER, call COUNT, symbol PRESENCE. None of it executes Rust,
+    # so none of it observes what the code MEANS — a mutation that keeps the
+    # tokens and inverts the semantics passes every assertion here. Named
+    # `source_contract_*` so they are never read as runtime evidence. The
+    # runtime guarantees are the Rust tests T1-T9, each proven by a mutation:
+    # T1-T3 route/cutover boundary, T4 anchor receipt, T5 proof-derived commit,
+    # T6 single settle (session_relay_sink/journal.rs::sink_direct_semantics_tests);
+    # T7 mismatch preservation (formatting/long_send_rollback.rs);
+    # T8 edit/fallback receipt (formatting/replace_long_message_tests.rs);
+    # T9 chunk receipt count/order (formatting/delivery.rs).
+
+    def test_source_contract_sink_direct_begin_is_guarded_after_cutover(self):
+        """Source text only: begin appears after the cutover return, behind the predicate."""
         source = (ROOT / "src/services/discord/session_relay_sink.rs").read_text(encoding="utf-8")
         cutover = source.index("return short_controller::deliver_short_replace_via_controller")
         guard = source.index("journal::journals_sink_direct(&route, cutover_short_replace)")
@@ -166,24 +179,28 @@ class RawWriterAllowlistTests(unittest.TestCase):
         self.assertGreater(begin, cutover)
         self.assertLess(guard, begin)
 
-    def test_sink_direct_root_has_one_facade_begin(self):
+    def test_source_contract_sink_direct_root_has_one_facade_begin(self):
+        """Source text only: call count, not proof that the call is reachable."""
         source = (ROOT / "src/services/discord/session_relay_sink.rs").read_text(encoding="utf-8")
         self.assertEqual(source.count("self.journal.begin_fresh("), 1)
         self.assertEqual(source.count("self.journal.finish_fresh("), 0)
 
-    def test_referenced_split_path_keeps_receipts_and_anchor(self):
+    def test_source_contract_referenced_split_path_keeps_receipts_and_anchor(self):
+        """Source text only: symbol presence. T9 proves the receipts are right."""
         delivery = (ROOT / "src/services/discord/formatting/delivery.rs").read_text(encoding="utf-8")
         task_context = (ROOT / "src/services/discord/session_relay_sink/task_notification_context.rs").read_text(encoding="utf-8")
         self.assertIn("send_long_message_raw_with_reference_returning_receipts", delivery)
         self.assertIn("send_long_message_raw_with_reference_returning_receipts", task_context)
         self.assertIn("super::journal::anchor_receipt", task_context)
 
-    def test_rollback_legacy_entrypoint_keeps_parallel_receipt_entrypoint(self):
+    def test_source_contract_rollback_legacy_entrypoint_keeps_parallel_receipt_entrypoint(self):
+        """Source text only: the frozen name survives beside the receipt entry point."""
         source = (ROOT / "src/services/discord/formatting/long_send_rollback.rs").read_text(encoding="utf-8")
         self.assertIn("send_long_message_raw_with_rollback(", source)
         self.assertIn("send_long_message_raw_with_rollback_returning_receipts(", source)
 
-    def test_sink_direct_success_arms_settle_each_terminal_arm(self):
+    def test_source_contract_sink_direct_success_arms_settle_each_terminal_arm(self):
+        """Source text only: three settle call sites. Deleting one is NOT caught by CI."""
         source = (ROOT / "src/services/discord/session_relay_sink.rs").read_text(encoding="utf-8")
         self.assertEqual(source.count("journal::settle("), 3)
 if __name__ == "__main__":

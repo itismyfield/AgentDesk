@@ -1029,9 +1029,9 @@ impl SessionBoundDiscordRelaySink {
                 );
                 journal::settle(
                     &self.journal,
-                    direct_journal_attempt.take(),
+                    &mut direct_journal_attempt,
                     journal::anchor_receipt(&journal_receipts),
-                    proof == delivery_frontier::SinkDeliveryProofResult::Persisted,
+                    proof,
                 );
                 return Ok(SessionRelayDeliveryOutcome::from_proof(proof));
             }
@@ -1039,18 +1039,20 @@ impl SessionBoundDiscordRelaySink {
             let mut last_chunk_anchor = self.test_replace_anchor.clone();
             #[cfg(not(test))]
             let mut last_chunk_anchor = None;
+            let mut edit_anchor_receipt = None;
             let replace_outcome = if let Some(gateway) = gateway {
                 gateway
                     .replace_message_with_outcome(channel, msg_id, &relay_text)
                     .await
             } else {
-                formatting::replace_long_message_raw_with_outcome(
+                formatting::replace_long_message_raw_with_outcome_returning_receipt(
                     &http,
                     channel,
                     msg_id,
                     &relay_text,
                     &shared,
                     &mut last_chunk_anchor,
+                    &mut edit_anchor_receipt,
                 )
                 .await
                 .map_err(|error| error.to_string())
@@ -1100,9 +1102,9 @@ impl SessionBoundDiscordRelaySink {
                     );
                     journal::settle(
                         &self.journal,
-                        direct_journal_attempt.take(),
-                        Some(journal::receipt_for_message(channel_id, anchor.get())),
-                        proof == delivery_frontier::SinkDeliveryProofResult::Persisted,
+                        &mut direct_journal_attempt,
+                        edit_anchor_receipt.take(),
+                        proof,
                     );
                     Ok(SessionRelayDeliveryOutcome::from_proof(proof))
                 }
@@ -1153,10 +1155,9 @@ impl SessionBoundDiscordRelaySink {
                     );
                     journal::settle(
                         &self.journal,
-                        direct_journal_attempt.take(),
-                        replacement_anchor
-                            .map(|anchor| journal::receipt_for_message(channel_id, anchor.get())),
-                        proof == delivery_frontier::SinkDeliveryProofResult::Persisted,
+                        &mut direct_journal_attempt,
+                        edit_anchor_receipt.take(),
+                        proof,
                     );
                     Ok(SessionRelayDeliveryOutcome::from_proof(proof))
                 }

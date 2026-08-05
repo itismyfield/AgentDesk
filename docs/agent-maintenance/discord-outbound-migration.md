@@ -1,5 +1,16 @@
 # Discord Outbound Migration — Coverage Map (#1006 v3 / #1280 / #1436 / #1457)
 
+> Last refreshed: 2026-08-05 (#5071 T1 S2 — the raw `formatting` transports gained
+> receipt-preserving parallel entry points
+> (`send_long_message_raw_with_rollback_returning_receipts`,
+> `send_long_message_raw_with_reference_returning_receipts`,
+> `replace_long_message_raw_{deferred,with_outcome}_returning_receipt`). All four
+> sink-direct receipt kinds — referenced, split, long-chunk, edit — now carry the
+> channel Discord answered with rather than the channel that was requested, so the
+> journal's `channel_mismatch` classification stays reachable; the legacy names and
+> return types are unchanged thin wrappers, and no v3 producer or direct-send
+> callsite is added, so the coverage rows below are unchanged).
+
 > Last refreshed: 2026-08-04 (#5071 T1 S1 r2 — `DiscordTransportReceipt` preserves requested/returned channel IDs and message ID for the shadow journal; outbound delivery callsite coverage remains unchanged).
 
 > Last refreshed: 2026-07-24 (#4508 review follow-up — watcher anchored short-replace now uses an edit-only deferred transport boundary in both controller and retained legacy paths. On edit failure, the range owner keeps the same delivery lease and suppresses fallback POST only after a locked, stable pre-edit-path/generation + EOF-bounded durable-frontier recheck; any rotate, marker, metadata, or frontier uncertainty remains fail-open. Already-committed reconciliation reuses delivered-anchor-aware guarded placeholder cleanup and drops local/orphan tracking only after cleanup commits. This changes A4 replacement authority and lifecycle parity, but adds no v3 producer or direct-send callsite; the coverage rows below are unchanged).

@@ -50,6 +50,23 @@ fn is_unknown_required_reference(error: &(dyn std::error::Error + 'static)) -> b
 
 type TransportReceipt = super::super::outbound::DiscordTransportReceipt;
 
+/// Single construction point for every chunk receipt produced by the
+/// `formatting` transports. `requested` is the channel this process asked to
+/// post into; `returned` is the channel Discord answered with. The journal
+/// decides `channel_mismatch` by comparing them, so collapsing the two would
+/// make that branch unreachable (T7/M7).
+pub(super) fn transport_receipt(
+    requested: ChannelId,
+    returned: ChannelId,
+    message_id: MessageId,
+) -> TransportReceipt {
+    TransportReceipt {
+        requested_channel_id: requested.get().to_string(),
+        returned_channel_id: returned.get().to_string(),
+        message_id: message_id.get().to_string(),
+    }
+}
+
 fn message_ids_from_receipts(receipts: Vec<TransportReceipt>) -> Result<Vec<MessageId>, Error> {
     receipts
         .into_iter()
@@ -467,11 +484,8 @@ async fn send_rollback_channel_message(
         nonce,
         nonce.is_some(),
     ) {
-        return result.map(|message_id| TransportReceipt {
-            requested_channel_id: channel_id.get().to_string(),
-            returned_channel_id: channel_id.get().to_string(),
-            message_id: message_id.get().to_string(),
-        });
+        return result
+            .map(|(returned, message_id)| transport_receipt(channel_id, returned, message_id));
     }
 
     match (reference, require_reference, nonce) {
@@ -485,7 +499,7 @@ async fn send_rollback_channel_message(
                 nonce,
             )
             .await
-            .map(|message| TransportReceipt::from_message(channel_id, &message))
+            .map(|message| transport_receipt(channel_id, message.channel_id, message.id))
             .map_err(Into::into)
         }
         (Some((reference_channel_id, reference_message_id)), true, None) => {
@@ -497,7 +511,7 @@ async fn send_rollback_channel_message(
                 reference_message_id,
             )
             .await
-            .map(|message| TransportReceipt::from_message(channel_id, &message))
+            .map(|message| transport_receipt(channel_id, message.channel_id, message.id))
             .map_err(Into::into)
         }
         (Some((reference_channel_id, reference_message_id)), false, Some(nonce)) => {
@@ -510,7 +524,7 @@ async fn send_rollback_channel_message(
                 nonce,
             )
             .await
-            .map(|message| TransportReceipt::from_message(channel_id, &message))
+            .map(|message| transport_receipt(channel_id, message.channel_id, message.id))
             .map_err(Into::into)
         }
         (Some((reference_channel_id, reference_message_id)), false, None) => {
@@ -521,18 +535,18 @@ async fn send_rollback_channel_message(
                 Some((reference_channel_id, reference_message_id)),
             )
             .await
-            .map(|message| TransportReceipt::from_message(channel_id, &message))
+            .map(|message| transport_receipt(channel_id, message.channel_id, message.id))
             .map_err(Into::into)
         }
         (None, _, Some(nonce)) => {
             super::super::http::send_channel_message_with_nonce(http, channel_id, content, nonce)
                 .await
-                .map(|message| TransportReceipt::from_message(channel_id, &message))
+                .map(|message| transport_receipt(channel_id, message.channel_id, message.id))
                 .map_err(Into::into)
         }
         (None, _, None) => super::super::http::send_channel_message(http, channel_id, content)
             .await
-            .map(|message| TransportReceipt::from_message(channel_id, &message))
+            .map(|message| transport_receipt(channel_id, message.channel_id, message.id))
             .map_err(Into::into),
     }
 }
@@ -550,4 +564,70 @@ pub(super) async fn delete_rollback_channel_message(
     super::super::http::delete_channel_message(http, channel_id, message_id)
         .await
         .map_err(Into::into)
+}
+
+#[cfg(test)]
+mod sink_direct_receipt_tests {
+    //! #5071 T1 S2 §7 T7. Runtime semantic assertions on the receipt-returning
+    //! rollback variant: the values the transport actually produces are read
+    //! back, not the source text that produces them.
+
+    use super::*;
+
+    /// T7 (kills M7). `finish_fresh` classifies a delivery as `channel_mismatch`
+    /// by comparing the receipt's requested and returned channels. If this
+    /// transport collapsed them into the requested channel that branch would be
+    /// unreachable and a misrouted delivery would journal as delivered.
+    #[test]
+    fn t7_rollback_receipts_preserve_a_returned_channel_mismatch() {
+        let tempdir = tempfile::tempdir().expect("temp runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(tempdir.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let requested = ChannelId::new(5_071_001);
+            let returned = ChannelId::new(5_071_002);
+            let anchor = MessageId::new(5_071_003);
+            let landed = MessageId::new(5_071_004);
+            let _hook = super::super::rollback_transport_test_hook::install(
+                Box::new(
+                    move |seen_channel, _content, _reference, _nonce, _enforce| {
+                        (seen_channel == requested).then_some(Ok((returned, landed)))
+                    },
+                ),
+                Box::new(|_, _| Some(Ok(()))),
+            );
+            let http = serenity::Http::new("test-token");
+            let shared = crate::services::discord::make_shared_data_for_tests();
+
+            let receipts = send_long_message_raw_with_rollback_returning_receipts(
+                &http,
+                requested,
+                anchor,
+                "sink direct body",
+                &shared,
+            )
+            .await
+            .expect("rollback send succeeds");
+
+            assert_eq!(receipts.len(), 1, "one chunk, one receipt");
+            assert_eq!(
+                receipts[0].requested_channel_id,
+                requested.get().to_string(),
+                "the receipt must record the channel this process asked for"
+            );
+            assert_eq!(
+                receipts[0].returned_channel_id,
+                returned.get().to_string(),
+                "the receipt must record the channel Discord answered with, not the requested one"
+            );
+            assert_ne!(
+                receipts[0].requested_channel_id, receipts[0].returned_channel_id,
+                "a channel mismatch must survive transport so the journal can still detect it"
+            );
+            assert_eq!(receipts[0].message_id, landed.get().to_string());
+        });
+    }
 }
