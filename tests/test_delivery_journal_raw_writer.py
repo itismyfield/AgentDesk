@@ -104,10 +104,22 @@ class RawWriterAllowlistTests(unittest.TestCase):
         self.assertEqual(error, "")
         self.assertTrue(status[4][1], "raw-string marker intentionally pierces lexical scan")
 
+    def test_macro_facade_marker_is_known_lexical_match(self):
+        """Pin the declared behavior: facade-call text in a macro counts."""
+        root = self.fixture()
+        path = root / guard.FAMILY_REGISTRY[4][1]
+        path.write_text(path.read_text(encoding="utf-8") +
+                        "macro_rules! journal_probe { () => { self.journal.begin_fresh(); } }\n",
+                        encoding="utf-8")
+        status, error = guard.family_status(root)
+        self.assertEqual(error, "")
+        self.assertTrue(status[4][1], "macro facade-call text is a declared lexical match")
+
     def test_family_baseline_is_measured_and_named(self):
         ok, message = guard.check(self.fixture())
         self.assertTrue(ok, message)
         self.assertIn("uninstrumented families: 4/6", message)
+        self.assertIn("whole anchor file including tests", message)
         self.assertIn("watcher terminal family", message)
 
     def test_instrumentation_rule_is_mechanical(self):
