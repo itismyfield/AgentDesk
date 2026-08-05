@@ -493,14 +493,19 @@ fn log_discord_inflight_atomic_replace(path: &Path) {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("unknown");
+    // NOT a removal: `atomic_write` only ever replaces the row's CONTENT (it
+    // takes a serialized body and renames a temp file over the path). Logging
+    // this under `agentdesk::inflight_remove` / "row removal" made routine
+    // per-tick saves read as row deletions and sent operators down a false
+    // trail, so the target and the message name the real operation.
     tracing::info!(
-        target: "agentdesk::inflight_remove",
+        target: "agentdesk::inflight_write",
         provider = %provider,
         channel_id = discord_inflight_atomic_replace_channel_id(path),
         user_msg_id = discord_inflight_atomic_replace_user_msg_id(path),
         reason = "runtime_store_atomic_write_replace",
         path = %path.display(),
-        "discord inflight state row removal"
+        "discord inflight state row content replaced in place (not removed)"
     );
 }
 

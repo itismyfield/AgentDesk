@@ -204,9 +204,7 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
     if mode == StreamTickSaveMode::StrictBridgeMutation {
         let authority_changed =
             local_authority != baseline_authority || durable_authority != baseline_authority;
-        let bridge_message_epoch_changed = baseline_authority.bridge_owns_relay()
-            && durable_current_message != baseline_current_message;
-        if authority_changed || bridge_message_epoch_changed {
+        if authority_changed {
             tracing::warn!(
                 provider = %provider.as_str(),
                 channel_id = state.channel_id,
@@ -225,6 +223,43 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
             return GuardedSaveOutcome::IdentityMismatch;
         }
 
+        // A durable current-message epoch change is NOT rejected on its own.
+        // What `authority_changed` above rules out is a changed relay-owner
+        // triple. What rules out a DURABLE row belonging to another turn is the
+        // lock-held reload plus `:194-197` (`restart_mode` / `rebind_origin` /
+        // `expected.matches_state(&on_disk)`); `:169` is a separate check on the
+        // two IN-MEMORY snapshots (`state` / `persisted_baseline`) and says
+        // nothing about the row on disk. What is left is an epoch advance by a
+        // writer that left both our identity fields and the relay-owner triple
+        // alone.
+        // In practice that is this turn's own watcher, but the code does NOT
+        // guarantee it: `persist_watcher_stream_progress_locked` takes its
+        // identity guard as an `Option` (`inflight/watcher_state.rs:114-118`)
+        // and falls back to the tmux-session name alone when the caller passes
+        // `None` (`:106`), which the production caller does before the inflight
+        // row exists and can hold stale across turns. So a residual
+        // false-negative remains: another turn's watcher on the same tmux
+        // session can move the epoch through this path without tripping any
+        // gate here.
+        //
+        // That residual is accepted deliberately. Rejecting the whole class
+        // instead produced a *fatal* false-positive: the caller collapses
+        // `IdentityMismatch` into `AuthorityLost` and returns before
+        // `post_loop_finalize`, orphaning the row with the finished answer
+        // inside it. This does extend that residual to the
+        // `StrictBridgeMutation` callers — that is the shipped behaviour change
+        // — but it is the same KIND of residual that `MergeConcurrentOwner`
+        // already carries unguarded, since that mode skips this whole
+        // `:204-265` block and goes straight to the same merge.
+        //
+        // The epoch change deliberately gets no adopt-and-return branch of its
+        // own: it falls through to the three-way merge below, so the BODY that
+        // rides along with it stays subject to `merge_stream_response_progress`
+        // — the only prefix-compatibility / forward-progress check in this
+        // file, and a body-only one. The epoch itself gets no monotonicity
+        // check anywhere here; `:267` takes `on_disk`'s epoch as given. A
+        // branch that adopted `on_disk` wholesale would additionally bypass the
+        // body check and report `Saved` without writing anything.
         if !baseline_authority.bridge_owns_relay() {
             // Exact watcher/standby self-handoff: adopt any same-authority
             // progress (including its current-message epoch) but never merge
@@ -824,8 +859,18 @@ mod tests {
         );
     }
 
+    /// Scenario preserved verbatim from the original
+    /// `strict_visible_fence_rejects_changed_current_message_epoch`. The epoch
+    /// change alone no longer rejects (see
+    /// `strict_visible_fence_merges_same_authority_current_message_epoch`), but
+    /// THIS scenario's two bodies are prefix-INCOMPATIBLE ("base plus stale
+    /// rollover" vs "base plus durable competitor"), so it now falls through to
+    /// `merge_stream_response_progress` and fails closed there instead. The
+    /// outcome and every assert below are unchanged from the original; only the
+    /// reason changed, from "the epoch moved" to "the bodies diverged". Keeping
+    /// it proves the epoch fix did not weaken body divergence handling.
     #[test]
-    fn strict_visible_fence_rejects_changed_current_message_epoch() {
+    fn strict_visible_fence_fails_closed_when_epoch_change_carries_divergent_body() {
         let root = tempfile::tempdir().expect("runtime root");
         let channel_id = 42_593_115;
         let mut baseline = owner_state(channel_id, 77_010);
@@ -863,6 +908,140 @@ mod tests {
         );
         let persisted_json = serde_json::to_value(&persisted).unwrap();
         assert_eq!(serde_json::to_value(&local).unwrap(), persisted_json);
+        assert_eq!(
+            serde_json::to_value(&baseline).unwrap(),
+            serde_json::to_value(&persisted).unwrap()
+        );
+    }
+
+    /// Coverage for the current-message override at
+    /// `save_stream_tick_state_preserving_current_message_races_in_root_with_mode`
+    /// (`local != baseline && (durable == baseline || durable == local)`).
+    ///
+    /// These lines are unchanged by the epoch fix, but the fix changed their
+    /// load: a same-authority epoch change used to be rejected above and never
+    /// reached here, and now every one of them passes through this condition.
+    /// Each row isolates one conjunct so a mutation of that conjunct breaks a
+    /// named assert.
+    ///
+    /// `durable == local` (row "durable_matches_local") is an EQUIVALENT-mutant
+    /// site: `updated` starts as `on_disk.clone()`, so when the durable epoch
+    /// already equals the local one the assignment writes the value that is
+    /// there anyway. Disabling that disjunct alone cannot change any observable
+    /// field, so the row pins the outcome rather than claiming to kill it.
+    #[test]
+    fn stream_tick_current_message_override_isolates_each_conjunct() {
+        // (case, local epoch, durable epoch, expected persisted epoch)
+        for (case, local_message, durable_message, expected_message) in [
+            // local moved, durable stood still -> the local rollover wins.
+            ("durable_matches_baseline", (902, 13), (901, 12), (902, 13)),
+            // local moved and durable already agrees -> same value either way.
+            ("durable_matches_local", (902, 13), (902, 13), (902, 13)),
+            // three-way split -> the override must NOT fire; durable wins.
+            ("three_way_split", (902, 13), (903, 14), (903, 14)),
+            // the P0 shape: only durable moved -> the override must NOT fire.
+            ("only_durable_moved", (901, 12), (903, 14), (903, 14)),
+        ] {
+            let root = tempfile::tempdir().expect("runtime root");
+            let channel_id = 42_593_130;
+            let mut baseline = owner_state(channel_id, 77_010);
+            baseline.full_response = "shared body".to_string();
+            (baseline.current_msg_id, baseline.current_msg_len) = (901, 12);
+            save_inflight_state_in_root(root.path(), &baseline).expect("seed bridge row");
+            let expected = InflightTurnIdentity::from_state(&baseline);
+
+            let mut local = baseline.clone();
+            (local.current_msg_id, local.current_msg_len) = local_message;
+
+            let mut durable = baseline.clone();
+            (durable.current_msg_id, durable.current_msg_len) = durable_message;
+            save_inflight_state_in_root(root.path(), &durable).expect("advance durable row");
+
+            assert_eq!(
+                save_stream_tick_state_if_bridge_authority_in_root(
+                    root.path(),
+                    &mut baseline,
+                    &mut local,
+                    &expected,
+                    901,
+                    12,
+                    "test::current_message_override_conjuncts",
+                ),
+                GuardedSaveOutcome::Saved,
+                "{case}: same-authority epoch resolution must not end the turn",
+            );
+            let persisted = load(root.path(), &ProviderKind::Codex, channel_id);
+            assert_eq!(
+                (persisted.current_msg_id, persisted.current_msg_len),
+                expected_message,
+                "{case}: wrong current-message winner",
+            );
+        }
+    }
+
+    /// The production shape of the wedge: same relay-authority triple on all
+    /// three snapshots (bridge-owned `none`), this turn's own watcher advanced
+    /// the durable `current_msg_id`, and the two bodies ARE prefix-compatible
+    /// because both are parsed from the same stream. The fence must keep
+    /// lifecycle authority, keep the durable epoch, and merge rather than adopt
+    /// blindly.
+    #[test]
+    fn strict_visible_fence_merges_same_authority_current_message_epoch() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let channel_id = 42_593_119;
+        let mut baseline = owner_state(channel_id, 77_010);
+        baseline.full_response = "base".to_string();
+        (baseline.current_msg_id, baseline.current_msg_len) = (931, 12);
+        save_inflight_state_in_root(root.path(), &baseline).expect("seed bridge row");
+        let expected = InflightTurnIdentity::from_state(&baseline);
+
+        // Bridge holds an unflushed chunk; the watcher's durable body is a
+        // forward extension of it, exactly as two readers of one stream produce.
+        let mut local = baseline.clone();
+        local.full_response = "base plus shared".to_string();
+
+        let mut watcher = baseline.clone();
+        watcher.full_response = "base plus shared plus watcher tail".to_string();
+        watcher.response_sent_offset = watcher.full_response.len();
+        (watcher.current_msg_id, watcher.current_msg_len) = (932, 21);
+        save_inflight_state_in_root(root.path(), &watcher).expect("advance durable epoch");
+        assert_eq!(
+            StreamRelayAuthority::from_state(&watcher),
+            StreamRelayAuthority::from_state(&baseline),
+            "the watcher must not have touched relay authority",
+        );
+
+        assert_eq!(
+            save_stream_tick_state_if_bridge_authority_in_root(
+                root.path(),
+                &mut baseline,
+                &mut local,
+                &expected,
+                931,
+                12,
+                "test::strict_current_message_epoch_merge",
+            ),
+            GuardedSaveOutcome::Saved,
+            "a same-authority epoch advance by our own watcher must not end the turn",
+        );
+        let persisted = load(root.path(), &ProviderKind::Codex, channel_id);
+        assert_eq!(
+            (persisted.current_msg_id, persisted.current_msg_len),
+            (932, 21),
+            "the durable epoch wins; the bridge must not rewind it",
+        );
+        assert_eq!(
+            persisted.full_response, "base plus shared plus watcher tail",
+            "the body must go through the forward merge, not a blind adopt",
+        );
+        assert!(
+            StreamRelayAuthority::from_state(&persisted).bridge_owns_relay(),
+            "relay authority is unchanged, so the bridge still owns the relay",
+        );
+        assert_eq!(
+            serde_json::to_value(&local).unwrap(),
+            serde_json::to_value(&persisted).unwrap()
+        );
         assert_eq!(
             serde_json::to_value(&baseline).unwrap(),
             serde_json::to_value(&persisted).unwrap()

@@ -38,7 +38,7 @@ pub(super) async fn handle_stream_tool_message(
     let voice_progress_playback_channel_id = ctx.voice_progress_playback_channel_id;
     let single_message_panel_footer_mode = ctx.single_message_panel_footer_mode;
     let footer_owner = ctx.footer_owner;
-    let current_msg_id = ctx.current_msg_id;
+    let current_msg_id = &mut *ctx.current_msg_id;
 
     let mut state_dirty = *state.state_dirty;
     let inflight_state = &mut *state.inflight_state;
@@ -67,6 +67,8 @@ pub(super) async fn handle_stream_tool_message(
     let mut restart_followup_pending = *state.restart_followup_pending;
     let mut last_edit_text = std::mem::take(state.last_edit_text);
     let mut full_response = std::mem::take(state.full_response);
+    let response_sent_offset = &mut *state.response_sent_offset;
+    let confirmed_offset = &mut *state.confirmed_offset;
     let mut status_panel_dirty = *state.status_panel_dirty;
     let mut restart_visible_authority = None;
     let mut tool_outcome = StreamToolArmOutcome::Continue;
@@ -245,7 +247,7 @@ pub(super) async fn handle_stream_tool_message(
                         super::super::super::placeholder_controller::PlaceholderKey {
                             provider: provider.clone(),
                             channel_id,
-                            message_id: current_msg_id,
+                            message_id: *current_msg_id,
                         };
                     let input_payload =
                         super::super::super::placeholder_controller::PlaceholderActiveInput {
@@ -289,6 +291,10 @@ pub(super) async fn handle_stream_tool_message(
                     inflight_state,
                     stream_tick_expected_identity,
                     expected_current_message,
+                    current_msg_id,
+                    full_response: &mut full_response,
+                    response_sent_offset,
+                    confirmed_offset,
                 });
                 restart_visible_authority = Some(authority);
                 authority == VisibleMutationAuthority::Authorized
@@ -306,7 +312,7 @@ pub(super) async fn handle_stream_tool_message(
                     ),
                 );
                 report.current_msg_id =
-                    optional_durable_current_msg_id_from_detached(current_msg_id);
+                    optional_durable_current_msg_id_from_detached(*current_msg_id);
                 report.channel_name = adk_session_name.clone();
                 if save_restart_report(&report).is_ok() {
                     restart_followup_pending = true;
@@ -315,7 +321,7 @@ pub(super) async fn handle_stream_tool_message(
                     );
                     let handoff_text = "♻️ dcserver 재시작 중...\n\n재시작 후 현재 turn은 자동 새 턴으로 이어가지 않고, 상태만 다시 확인합니다.";
                     if edit_bound_current_message(
-                        gateway.as_ref(), channel_id, current_msg_id, inflight_state, handoff_text,
+                        gateway.as_ref(), channel_id, *current_msg_id, inflight_state, handoff_text,
                     ).await {
                         last_edit_text = handoff_text.to_string();
                     }
@@ -351,6 +357,10 @@ pub(super) async fn handle_stream_tool_message(
                     inflight_state,
                     stream_tick_expected_identity,
                     expected_current_message,
+                    current_msg_id,
+                    full_response: &mut full_response,
+                    response_sent_offset,
+                    confirmed_offset,
                 },
                 &long_running_placeholder_active,
                 &pending_long_running_retarget_after_state_save,

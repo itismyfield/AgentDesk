@@ -455,6 +455,182 @@ mod tests {
         }
     }
 
+    /// Production reproduction of the warm-follow-up wedge: this turn's own
+    /// watcher advances the durable `current_msg_id` through the real
+    /// `persist_watcher_stream_progress_locked` writer while the relay-authority
+    /// triple stays bridge-owned (`none`). Before the fix the strict fence
+    /// returned `IdentityMismatch`, which this mapping collapsed into
+    /// `AuthorityLost`; `mutation_permission() == None` is exactly the condition
+    /// `stream_tick.rs`'s `authorize_visible_mutation!` turns into
+    /// `return_authority_lost!()` → `StreamLoopOutcome::AuthorityLost` →
+    /// `turn_bridge/mod.rs`'s `inflight_guard.defuse(); return;`, i.e. the branch
+    /// that SKIPS `post_loop_finalize` and orphans the row with the finished
+    /// answer inside it. Asserting a non-`None` permission here is the assertion
+    /// that `post_loop_finalize` is still reachable.
+    #[test]
+    fn same_authority_watcher_epoch_advance_keeps_bridge_lifecycle_authority() {
+        with_runtime_root(|| {
+            let channel = ChannelId::new(4_259_120);
+            let bridge_placeholder_msg_id = 1_534_511_598_012_600_371_u64;
+            let watcher_rollover_msg_id = 1_534_511_625_615_311_000_u64;
+
+            let mut state = owner_state(channel.get(), 77_010);
+            state.current_msg_id = bridge_placeholder_msg_id;
+            state.current_msg_len = 21;
+            state.full_response = "헤드번팅".to_string();
+            save_inflight_state(&state).expect("seed bridge-owned row");
+            let expected =
+                crate::services::discord::inflight::InflightTurnIdentity::from_state(&state);
+            let mut persisted_baseline = state.clone();
+            let mut expected_current_message = (state.current_msg_id, state.current_msg_len);
+            let mut detached_current_msg_id =
+                detached_current_msg_id_from_durable(state.current_msg_id);
+
+            // This turn's own watcher rolls the visible message forward. It
+            // deliberately does NOT touch any relay-owner field, so the
+            // authority triple stays byte-identical.
+            let answer = "헤드번팅 그거 고양이가 하는 거 아님?".to_string();
+            assert!(answer.starts_with(&state.full_response));
+            assert_eq!(
+                crate::services::discord::inflight::persist_watcher_stream_progress_locked(
+                    &ProviderKind::Codex,
+                    channel.get(),
+                    Some(&expected),
+                    "AgentDesk-codex-stream-tick",
+                    crate::services::discord::inflight::WatcherStreamProgressPatch {
+                        current_msg_id: Some(watcher_rollover_msg_id),
+                        full_response: answer.clone(),
+                        response_sent_offset: 0,
+                        current_tool_line: None,
+                        prev_tool_status: None,
+                        task_notification_kind: None,
+                        any_tool_used: false,
+                        has_post_tool_text: true,
+                        streaming_rollover_frozen_msg_ids: Vec::new(),
+                    },
+                ),
+                crate::services::discord::inflight::WatcherProgressOutcome::Saved,
+            );
+
+            // The bridge carries an unsaved local chunk into the preflight fence.
+            // It is a forward-compatible prefix of the durable body, as two
+            // readers of one stream produce, so the merge can accept it.
+            state.full_response = "헤드번팅 그거".to_string();
+            let intended_authority =
+                crate::services::discord::inflight::StreamRelayAuthority::from_state(&state);
+            assert!(
+                intended_authority.bridge_owns_relay(),
+                "relay_owner_kind=none is BRIDGE authority, not an absent owner",
+            );
+
+            let outcome = persist_stream_tick_visible_mutation_fence(
+                &mut persisted_baseline,
+                &mut state,
+                &expected,
+                &mut expected_current_message,
+                &mut detached_current_msg_id,
+                channel,
+                "turn_bridge::stream_tick::authority_preflight",
+            );
+
+            assert_eq!(
+                outcome,
+                GuardedSaveOutcome::Saved,
+                "a same-authority epoch advance by our own watcher is not a hostile takeover",
+            );
+            assert_eq!(
+                (state.current_msg_id, state.current_msg_len),
+                (watcher_rollover_msg_id, 21),
+                "the fence must adopt the durable epoch",
+            );
+            assert_eq!(
+                expected_current_message,
+                (watcher_rollover_msg_id, 21),
+                "the tick baseline must resync so the next tick does not re-trip",
+            );
+            assert_eq!(
+                state.full_response, answer,
+                "the adopted row must carry the answer forward into the delivery path",
+            );
+
+            let authority =
+                visible_mutation_authority_after_guarded_save(outcome, &state, intended_authority);
+            assert_eq!(authority, VisibleMutationAuthority::Authorized);
+            assert_eq!(
+                authority.mutation_permission(),
+                Some(true),
+                "None here is `return_authority_lost!()`, which skips post_loop_finalize",
+            );
+        });
+    }
+
+    /// Regression guard for the half of the fence that must NOT weaken: a real
+    /// relay handoff (durable `relay_owner_kind` moved to a watcher) still ends
+    /// bridge authority even though the current-message epoch never moved.
+    #[test]
+    fn changed_durable_relay_authority_still_ends_bridge_authority() {
+        with_runtime_root(|| {
+            let channel = ChannelId::new(4_259_121);
+            let mut state = owner_state(channel.get(), 77_010);
+            state.current_msg_id = 900_501;
+            state.current_msg_len = 21;
+            state.full_response = "base".to_string();
+            save_inflight_state(&state).expect("seed bridge-owned row");
+            let expected =
+                crate::services::discord::inflight::InflightTurnIdentity::from_state(&state);
+            let mut persisted_baseline = state.clone();
+            let mut expected_current_message = (state.current_msg_id, state.current_msg_len);
+            let mut detached_current_msg_id =
+                detached_current_msg_id_from_durable(state.current_msg_id);
+
+            // Genuine handoff: same turn, same epoch, but the relay owner moved.
+            // The bodies are deliberately PREFIX-COMPATIBLE so that if the
+            // authority rejection is removed the three-way merge succeeds and
+            // writes the bridge delta — otherwise the merge would fail closed on
+            // its own and this guard would pass for the wrong reason.
+            let watcher_body = "base plus watcher progress";
+            let mut handed_off = state.clone();
+            handed_off.full_response = watcher_body.to_string();
+            handed_off.response_sent_offset = watcher_body.len();
+            handed_off.set_watcher_owner_channel_id(channel.get() + 1);
+            handed_off
+                .set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+            save_inflight_state(&handed_off).expect("watcher takes relay authority");
+
+            state.full_response = format!("{watcher_body} plus forbidden bridge delta");
+            let intended_authority =
+                crate::services::discord::inflight::StreamRelayAuthority::from_state(&state);
+
+            let outcome = persist_stream_tick_visible_mutation_fence(
+                &mut persisted_baseline,
+                &mut state,
+                &expected,
+                &mut expected_current_message,
+                &mut detached_current_msg_id,
+                channel,
+                "turn_bridge::stream_tick::authority_preflight",
+            );
+
+            assert_eq!(
+                outcome,
+                GuardedSaveOutcome::IdentityMismatch,
+                "a changed durable relay owner must still be rejected by the fence",
+            );
+            let persisted =
+                load_inflight_state(&ProviderKind::Codex, channel.get()).expect("persisted row");
+            assert_eq!(
+                persisted.full_response, watcher_body,
+                "the bridge must not write its local delta after a real handoff",
+            );
+            assert_eq!(
+                visible_mutation_authority_after_guarded_save(outcome, &state, intended_authority)
+                    .mutation_permission(),
+                None,
+                "a real relay handoff must still terminate bridge lifecycle authority",
+            );
+        });
+    }
+
     #[test]
     fn same_owner_flush_persists_and_clears_dirty() {
         with_runtime_root(|| {
