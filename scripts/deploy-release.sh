@@ -1070,28 +1070,9 @@ _rollback_pg_tunnel_migration() {
                 echo "✗ Failed to restore PG tunnel launchd plist during rollback" >&2
                 restore_ok=0
             else
-                # Retry bootstrap and explicit kickstart (required for process spawn after restore)
-                _pg_rollback_armed=0
-                for _pg_retry in 1 2 3; do
-                    if launchctl bootstrap "$domain" "$plist" 2>/dev/null; then
-                        # Kickstart: bootstrap loads plist but doesn't guarantee spawn
-                        if launchctl kickstart -k "$domain/${PG_TUNNEL_LABEL:-com.agentdesk.pg-tunnel}" 2>/dev/null; then
-                            _pg_rollback_armed=1
-                            break
-                        else
-                            echo "⚠ PG tunnel rollback kickstart failed on attempt $_pg_retry — retrying" >&2
-                            if [ "$_pg_retry" -lt 3 ]; then
-                                sleep 2
-                            fi
-                        fi
-                    fi
-                    if [ "$_pg_retry" -lt 3 ] && [ "$_pg_rollback_armed" != "1" ]; then
-                        echo "⚠ PG tunnel rollback bootstrap attempt $_pg_retry failed — retrying in 2s" >&2
-                        sleep 2
-                    fi
-                done
-                if [ "$_pg_rollback_armed" != "1" ]; then
-                    echo "✗ Failed to restart previous PG tunnel launchd job (bootstrap or kickstart) after 3 attempts" >&2
+                # Use common bootout/poll/bootstrap/kickstart helper (same as migration).
+                # Rollback context: prior state was captured; bootout in helper re-clears state before restore.
+                if ! _launchctl_bootout_and_spawn "$domain" "${PG_TUNNEL_LABEL:-com.agentdesk.pg-tunnel}" "$plist" "PG tunnel rollback"; then
                     restore_ok=0
                 fi
             fi
