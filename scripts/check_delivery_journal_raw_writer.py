@@ -18,10 +18,11 @@ FAMILY_REGISTRY = (
     ("recovery / fresh-send / orphan family", "src/services/discord/tmux_reaper.rs", "reap_fresh_routine_orphan"),
     ("pipe stream epoch", "src/services/discord/tmux_watcher/turn_stream_collector.rs", "collect_turn_stream_until_terminal"),
 )
-# Cheap lexical text match, not Rust parsing: each complete anchor file,
-# including tests, is scanned with only the suffix after // on that line removed.
-# Strings, block/doc comments, raw strings, and macros count; the result is a
-# monotonic baseline signal, not proof of instrumentation.
+# Cheap lexical text match, not Rust parsing: each complete anchor file, including
+# tests, is scanned with only the suffix after // on that line removed.
+# Strings, block comments (/* */ and /** */), raw strings, macros, and test-area
+# text count; line comments (including /// and //! doc comments) do not. The
+# result is a monotonic baseline signal, not proof of instrumentation.
 JOURNAL_FACADE_CALL = re.compile(r"\bself\.journal\.(?:begin_fresh|finish_fresh)\s*\(")
 UNINSTRUMENTED_FAMILY_BASELINE = 5
 

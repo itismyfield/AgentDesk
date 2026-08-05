@@ -65,6 +65,20 @@ class RawWriterAllowlistTests(unittest.TestCase):
         self.assertTrue(guard.family_status(root)[0][4][1], "cfg(test) fn marker is a declared lexical match")
         ok, message = guard.check(root); self.assertFalse(ok); self.assertIn("uninstrumented families: 4/6", message)
 
+    def test_line_doc_comment_markers_are_known_limit_and_not_counted(self):
+        """Known limitation and declared behavior: line doc comments are stripped after // on each line."""
+        root = self.fixture()
+        path = root / guard.FAMILY_REGISTRY[4][1]
+        path.write_text(path.read_text(encoding="utf-8") +
+                        "//! self.journal.begin_fresh();\n/// self.journal.begin_fresh();\n",
+                        encoding="utf-8")
+        status, error = guard.family_status(root)
+        self.assertEqual(error, "")
+        self.assertFalse(status[4][1], "line doc comment markers are excluded by the declared lexical cut")
+        ok, message = guard.check(root)
+        self.assertTrue(ok, message)
+        self.assertIn("uninstrumented families: 5/6", message)
+
     def test_block_marker_strings_do_not_hide_real_facade_calls(self):
         """Evidence: block-marker strings no longer delete calls across lines."""
         root = self.fixture()
