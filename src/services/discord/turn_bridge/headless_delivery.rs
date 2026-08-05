@@ -203,6 +203,61 @@ pub(super) async fn cleanup_headless_streaming_placeholder_after_delivery(
     }
 }
 
+/// The caller-supplied delivery identity, once trimmed and emptiness-filtered.
+///
+/// In production this is `InflightTurnState::delivery_bot`, written only by
+/// `router::message_handler::headless_turn` from turn metadata that the routine
+/// runtime (`routines::agent_executor`) puts there. Ordinary user turns and
+/// restart-recovery turns carry no such metadata, so this is `None` for them.
+fn caller_supplied_delivery_bot(delivery_bot: Option<&str>) -> Option<&str> {
+    delivery_bot.map(str::trim).filter(|value| !value.is_empty())
+}
+
+/// #5159: which bot identity a headless terminal delivery posts under.
+///
+/// `enqueue_headless_delivery` has exactly one production caller — the
+/// `can_chain_locally == false` arm of `terminal_outcome_delivery` — and the
+/// payload it carries there is the turn's own (non-empty) answer body. A false
+/// `can_chain_locally` only says "this turn has no live Discord context to edit
+/// its placeholder through"; it says nothing about the content being an
+/// operational notice. Delivery-path selection and identity selection are
+/// therefore decided separately here.
+///
+/// Precedence:
+/// 1. a caller-supplied identity — the routine runtime targets an explicit bot;
+/// 2. otherwise the turn's own provider alias, which is exactly the identity the
+///    `can_chain_locally == true` arm posts under (`DiscordGateway` edits the
+///    placeholder with that provider's `serenity::Http`, registered under
+///    `ProviderKind::as_str` by `runtime_bootstrap::framework_setup`), and the
+///    same alias `message_outbox::delivery_bot_for_target_session` already
+///    rewrites DM-session rows to;
+/// 3. the notify utility bot, only for a provider outside the provider registry,
+///    which has no provider-bot alias to post under.
+fn headless_delivery_bot_alias<'a>(
+    delivery_bot: Option<&'a str>,
+    provider: &'a ProviderKind,
+) -> &'a str {
+    if let Some(explicit) = caller_supplied_delivery_bot(delivery_bot) {
+        return explicit;
+    }
+    if provider.is_supported() {
+        return provider.as_str();
+    }
+    super::super::bot_role::UtilityBotRole::Notify.alias()
+}
+
+/// Whether the direct (non-outbox) fallback at the end of
+/// `enqueue_headless_delivery` keeps its legacy notify-utility http preference.
+///
+/// It does so only for a caller-supplied identity, leaving the routine runtime's
+/// fallback behaviour exactly as it was. When the identity came from the turn's
+/// own provider (#5159's user-turn default) that preference is dropped, because
+/// the `shared` http this function falls through to already *is* that provider's
+/// bot — the identity the placeholder-edit arm would have posted under.
+fn headless_direct_fallback_prefers_notify_http(delivery_bot: Option<&str>) -> bool {
+    caller_supplied_delivery_bot(delivery_bot).is_some()
+}
+
 pub(super) async fn enqueue_headless_delivery(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
@@ -210,14 +265,12 @@ pub(super) async fn enqueue_headless_delivery(
     owning_user_msg_id: Option<MessageId>,
     session_key: Option<&str>,
     delivery_bot: Option<&str>,
+    provider: &ProviderKind,
     content: &str,
     cancel_token: Option<&CancelToken>,
 ) -> Result<(), String> {
     let target = format!("channel:{}", channel_id.get());
-    let bot = delivery_bot
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(super::super::bot_role::UtilityBotRole::Notify.alias());
+    let bot = headless_delivery_bot_alias(delivery_bot, provider);
 
     let outbox_message = crate::services::message_outbox::OutboxMessage {
         target: &target,
@@ -355,8 +408,11 @@ pub(super) async fn enqueue_headless_delivery(
         return Ok(());
     }
 
-    let notify_http = if let Some(registry) = shared.health_registry() {
-        match super::health::resolve_utility_bot_http(
+    let notify_http = match shared
+        .health_registry()
+        .filter(|_| headless_direct_fallback_prefers_notify_http(delivery_bot))
+    {
+        Some(registry) => match super::health::resolve_utility_bot_http(
             registry.as_ref(),
             super::bot_role::UtilityBotRole::Notify,
         )
@@ -373,9 +429,8 @@ pub(super) async fn enqueue_headless_delivery(
                 );
                 None
             }
-        }
-    } else {
-        None
+        },
+        None => None,
     };
 
     // Phase 5.2 of intake-node-routing (issue #2009): use gateway-or-token
@@ -448,6 +503,99 @@ async fn wait_for_headless_delivery_outbox_visible(
 #[cfg(test)]
 mod headless_delivery_tests {
     use super::*;
+
+    /// #5159 regression guard. A user turn (and a restart-recovery turn) reaches
+    /// the headless outbox arm with `delivery_bot == None`, because only routine
+    /// metadata ever writes `InflightTurnState::delivery_bot`. Before this fix
+    /// the decision was `delivery_bot.unwrap_or(Notify.alias())`, so the turn's
+    /// own answer body was posted by the 🔔 notify utility bot. It must post as
+    /// the agent bot instead — the identity the placeholder-edit arm uses.
+    #[test]
+    fn user_turn_answer_posts_as_the_agent_bot_not_notify() {
+        for provider in [
+            ProviderKind::Claude,
+            ProviderKind::Codex,
+            ProviderKind::Gemini,
+            ProviderKind::OpenCode,
+            ProviderKind::Qwen,
+        ] {
+            let bot = headless_delivery_bot_alias(None, &provider);
+            assert_eq!(
+                bot,
+                provider.as_str(),
+                "user turn answer must carry the agent identity for {provider:?}"
+            );
+            assert_ne!(
+                bot,
+                super::super::super::bot_role::UtilityBotRole::Notify.alias(),
+                "user turn answer must not be posted by the notify utility bot"
+            );
+        }
+
+        // Blank/whitespace metadata is not an identity either — it must not
+        // reopen the notify default.
+        for blank in ["", "   ", "\t"] {
+            assert_eq!(
+                headless_delivery_bot_alias(Some(blank), &ProviderKind::Claude),
+                "claude"
+            );
+        }
+    }
+
+    /// #5159 non-regression guard: a routine-originated headless turn carries an
+    /// explicit `delivery_bot` (`routines::agent_executor` → turn metadata →
+    /// `router::message_handler::headless_turn`). That identity always wins,
+    /// including when it is the notify bot itself.
+    #[test]
+    fn routine_supplied_delivery_bot_is_never_overridden() {
+        for (supplied, expected) in [
+            ("notify", "notify"),
+            ("announce", "announce"),
+            ("dm", "dm"),
+            ("routine-thread-bot", "routine-thread-bot"),
+            ("  notify  ", "notify"),
+        ] {
+            assert_eq!(
+                headless_delivery_bot_alias(Some(supplied), &ProviderKind::Claude),
+                expected,
+                "routine identity {supplied:?} must survive the provider default"
+            );
+        }
+        // Also for a provider the registry does not know.
+        assert_eq!(
+            headless_delivery_bot_alias(
+                Some("notify"),
+                &ProviderKind::Unsupported("weirdcli".to_string())
+            ),
+            "notify"
+        );
+    }
+
+    /// A provider outside the provider registry has no provider-bot alias, so
+    /// the notify utility bot stays the last resort there.
+    #[test]
+    fn unregistered_provider_still_falls_back_to_the_notify_bot() {
+        let provider = ProviderKind::Unsupported("weirdcli".to_string());
+        assert!(!provider.is_supported());
+        assert_eq!(
+            headless_delivery_bot_alias(None, &provider),
+            super::super::super::bot_role::UtilityBotRole::Notify.alias()
+        );
+    }
+
+    /// The direct (non-outbox) fallback keeps its notify-http preference only
+    /// for a caller-supplied identity, so routine fallback behaviour is
+    /// unchanged while a user turn answer falls through to this runtime's own
+    /// provider http.
+    #[test]
+    fn direct_fallback_notify_http_preference_is_caller_supplied_only() {
+        assert!(headless_direct_fallback_prefers_notify_http(Some(
+            "notify"
+        )));
+        assert!(headless_direct_fallback_prefers_notify_http(Some("dm")));
+        assert!(!headless_direct_fallback_prefers_notify_http(None));
+        assert!(!headless_direct_fallback_prefers_notify_http(Some("   ")));
+    }
 
     #[test]
     fn headless_cleanup_deletes_status_only_codex_placeholder() {
