@@ -23,7 +23,7 @@ class RawWriterAllowlistTests(unittest.TestCase):
         write(root, "src/services/discord/session_relay_sink/journal/pg_store.rs", "fn append_delivery_journal_batch() {}\n")
         write(root, "src/services/discord/session_relay_sink/journal.rs", "fn actor() { append_delivery_journal_batch(); }\n")
         for index, (_, rel, symbol) in enumerate(guard.FAMILY_REGISTRY):
-            call = " self.journal.begin_fresh();" if index == 0 else ""
+            call = " self.journal.begin_fresh();" if index <= 1 else ""
             write(root, rel, f"fn {symbol}() {{{call}}}\n")
         if extra:
             write(root, "src/services/discord/rogue.rs", extra)
@@ -71,7 +71,7 @@ class RawWriterAllowlistTests(unittest.TestCase):
         path = root / guard.FAMILY_REGISTRY[4][1]
         path.write_text(path.read_text(encoding="utf-8") + '#[cfg(test)] fn journal_probe() { self.journal.begin_fresh(); }\n', encoding="utf-8")
         self.assertTrue(guard.family_status(root)[0][4][1], "cfg(test) fn marker is a declared lexical match")
-        ok, message = guard.check(root); self.assertFalse(ok); self.assertIn("uninstrumented families: 4/6", message)
+        ok, message = guard.check(root); self.assertFalse(ok); self.assertIn("uninstrumented families: 3/6", message)
 
     def test_line_doc_comment_markers_are_known_limit_and_not_counted(self):
         """Known limitation and declared behavior: line doc comments are stripped after // on each line."""
@@ -85,14 +85,14 @@ class RawWriterAllowlistTests(unittest.TestCase):
         self.assertFalse(status[4][1], "line doc comment markers are excluded by the declared lexical cut")
         ok, message = guard.check(root)
         self.assertTrue(ok, message)
-        self.assertIn("uninstrumented families: 5/6", message)
+        self.assertIn("uninstrumented families: 4/6", message)
 
     def test_block_marker_strings_do_not_hide_real_facade_calls(self):
         """Evidence: block-marker strings no longer delete calls across lines."""
         root = self.fixture()
         path = root / guard.FAMILY_REGISTRY[0][1]
         path.write_text(path.read_text(encoding="utf-8") + 'const BLOCK_OPEN: &str = "/*";\nself.journal.begin_fresh();\nconst BLOCK_CLOSE: &str = "*/";\n', encoding="utf-8")
-        ok, message = guard.check(root); self.assertTrue(ok, message); self.assertIn("uninstrumented families: 5/6", message)
+        ok, message = guard.check(root); self.assertTrue(ok, message); self.assertIn("uninstrumented families: 4/6", message)
 
     def test_raw_string_marker_is_known_lexical_false_positive(self):
         """Known limit: raw strings are not parsed and may count as calls."""
@@ -107,8 +107,8 @@ class RawWriterAllowlistTests(unittest.TestCase):
     def test_family_baseline_is_measured_and_named(self):
         ok, message = guard.check(self.fixture())
         self.assertTrue(ok, message)
-        self.assertIn("uninstrumented families: 5/6", message)
-        self.assertIn("sink direct family", message)
+        self.assertIn("uninstrumented families: 4/6", message)
+        self.assertIn("watcher terminal family", message)
 
     def test_instrumentation_rule_is_mechanical(self):
         root = self.fixture()
@@ -138,11 +138,11 @@ class RawWriterAllowlistTests(unittest.TestCase):
     def test_baseline_increase_names_families(self):
         root = self.fixture()
         old = guard.UNINSTRUMENTED_FAMILY_BASELINE
-        guard.UNINSTRUMENTED_FAMILY_BASELINE = 4
+        guard.UNINSTRUMENTED_FAMILY_BASELINE = 3
         self.addCleanup(setattr, guard, "UNINSTRUMENTED_FAMILY_BASELINE", old)
         ok, message = guard.check(root)
         self.assertFalse(ok)
-        self.assertIn("sink direct family", message)
+        self.assertIn("watcher terminal family", message)
 
     def test_baseline_decrease_requires_repin_command(self):
         root = self.fixture()
@@ -156,6 +156,55 @@ class RawWriterAllowlistTests(unittest.TestCase):
         result = subprocess.run(["python3", str(SCRIPT)], cwd=ROOT, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertRegex(result.stdout, r"scanned Rust files: [1-9][0-9]*")
-        self.assertIn("uninstrumented families: 5/6", result.stdout)
+        self.assertIn("uninstrumented families: 4/6", result.stdout)
+
+    # SOURCE-CONTRACT block (#5071 T1 S2). Everything below matches TEXT in .rs
+    # files: call ORDER, call COUNT, symbol PRESENCE. None of it executes Rust,
+    # so none of it observes what the code MEANS — a mutation that keeps the
+    # tokens and inverts the semantics passes every assertion here. Named
+    # `source_contract_*` so they are never read as runtime evidence. The
+    # runtime guarantees are the Rust tests T1-T8, each proven by a mutation:
+    # T1-T3 route/cutover boundary, T4 anchor receipt, T5 proof-derived commit,
+    # T6 single settle (session_relay_sink/journal.rs::sink_direct_semantics_tests);
+    # T7 mismatch preservation (formatting/long_send_rollback.rs);
+    # T8 edit/fallback receipt (formatting/replace_long_message_tests.rs).
+    # T9 (referenced/split receipts) is deferred to S6 with D1 — design 9.2 C7.
+
+    def test_source_contract_sink_direct_begin_is_guarded_after_cutover(self):
+        """Source text only: begin appears after the cutover return, behind the predicate."""
+        source = (ROOT / "src/services/discord/session_relay_sink.rs").read_text(encoding="utf-8")
+        cutover = source.index("return short_controller::deliver_short_replace_via_controller")
+        guard = source.index("journal::journals_sink_direct(&route, cutover_short_replace)")
+        begin = source.index("self.journal.begin_fresh(")
+        self.assertGreater(begin, cutover)
+        self.assertLess(guard, begin)
+
+    def test_source_contract_sink_direct_root_has_one_facade_begin(self):
+        """Source text only: pins begin_fresh at exactly 1 occurrence in
+        session_relay_sink.rs, so a second call added to THAT file -- including
+        one that bypasses the journals_sink_direct predicate -- fails here and
+        is blocked in CI. It proves nothing about reachability, and it reads
+        only this one file: a begin_fresh added in a different module (a new
+        helper, say) is outside every check we have."""
+        source = (ROOT / "src/services/discord/session_relay_sink.rs").read_text(encoding="utf-8")
+        self.assertEqual(source.count("self.journal.begin_fresh("), 1)
+        self.assertEqual(source.count("self.journal.finish_fresh("), 0)
+
+    def test_source_contract_rollback_legacy_entrypoint_keeps_parallel_receipt_entrypoint(self):
+        """Source text only: the frozen name survives beside the receipt entry point."""
+        source = (ROOT / "src/services/discord/formatting/long_send_rollback.rs").read_text(encoding="utf-8")
+        self.assertIn("send_long_message_raw_with_rollback(", source)
+        self.assertIn("send_long_message_raw_with_rollback_returning_receipts(", source)
+
+    def test_source_contract_sink_direct_success_arms_settle_each_terminal_arm(self):
+        """Source text only: pins the literal `journal::settle(` count in
+        session_relay_sink.rs at 3, so deleting one of the three terminal arms
+        makes it 2 and fails here -- this test, not a runtime test, is what
+        blocks that edit in CI (no runtime test can see it: begin_fresh is None
+        without PG + Shadow). Being a text count is the limit: it cannot tell
+        which branch a surviving call sits on, and a call commented out rather
+        than deleted still counts toward the 3."""
+        source = (ROOT / "src/services/discord/session_relay_sink.rs").read_text(encoding="utf-8")
+        self.assertEqual(source.count("journal::settle("), 3)
 if __name__ == "__main__":
     unittest.main()

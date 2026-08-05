@@ -971,23 +971,23 @@ impl SessionBoundDiscordRelaySink {
                 )
                 .await;
             }
-            if session_bound_should_send_new_chunks_for_placeholder(&relay_text) {
-                let message_ids = if let Some(gateway) = gateway {
-                    gateway
-                        .send_long_message_with_rollback(channel, msg_id, &relay_text)
-                        .await
-                        .map_err(RelaySinkError::Transient)?
+            let mut direct_journal_attempt =
+                if journal::journals_sink_direct(&route, cutover_short_replace) {
+                    self.journal.begin_fresh(&shared, &delivery)
                 } else {
-                    formatting::send_long_message_raw_with_rollback(
+                    None
+                };
+            if session_bound_should_send_new_chunks_for_placeholder(&relay_text) {
+                let (message_ids, chunk_anchor_receipt) =
+                    journal::send_long_chunks_with_anchor_receipt(
+                        gateway,
                         &http,
                         channel,
                         msg_id,
                         &relay_text,
                         &shared,
                     )
-                    .await
-                    .map_err(|error| RelaySinkError::Transient(error.to_string()))?
-                };
+                    .await?;
                 if let Some(gateway) = gateway {
                     let _ = gateway.delete_message(channel, msg_id).await;
                 } else {
@@ -1028,24 +1028,32 @@ impl SessionBoundDiscordRelaySink {
                     sink_lease_guard.as_ref(),
                     "src/services/discord/session_relay_sink.rs:sink_long_chunks_advance",
                 );
+                journal::settle(
+                    &self.journal,
+                    &mut direct_journal_attempt,
+                    chunk_anchor_receipt,
+                    proof,
+                );
                 return Ok(SessionRelayDeliveryOutcome::from_proof(proof));
             }
             #[cfg(test)]
             let mut last_chunk_anchor = self.test_replace_anchor.clone();
             #[cfg(not(test))]
             let mut last_chunk_anchor = None;
+            let mut edit_anchor_receipt = None;
             let replace_outcome = if let Some(gateway) = gateway {
                 gateway
                     .replace_message_with_outcome(channel, msg_id, &relay_text)
                     .await
             } else {
-                formatting::replace_long_message_raw_with_outcome(
+                formatting::replace_long_message_raw_with_outcome_returning_receipt(
                     &http,
                     channel,
                     msg_id,
                     &relay_text,
                     &shared,
                     &mut last_chunk_anchor,
+                    &mut edit_anchor_receipt,
                 )
                 .await
                 .map_err(|error| error.to_string())
@@ -1093,6 +1101,12 @@ impl SessionBoundDiscordRelaySink {
                         sink_lease_guard.as_ref(),
                         "src/services/discord/session_relay_sink.rs:sink_legacy_short_edit_advance",
                     );
+                    journal::settle(
+                        &self.journal,
+                        &mut direct_journal_attempt,
+                        edit_anchor_receipt.take(),
+                        proof,
+                    );
                     Ok(SessionRelayDeliveryOutcome::from_proof(proof))
                 }
                 Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
@@ -1139,6 +1153,12 @@ impl SessionBoundDiscordRelaySink {
                         &raw_response_text,
                         sink_lease_guard.as_ref(),
                         "src/services/discord/session_relay_sink.rs:sink_legacy_short_fallback_advance",
+                    );
+                    journal::settle(
+                        &self.journal,
+                        &mut direct_journal_attempt,
+                        edit_anchor_receipt.take(),
+                        proof,
                     );
                     Ok(SessionRelayDeliveryOutcome::from_proof(proof))
                 }

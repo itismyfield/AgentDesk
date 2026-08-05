@@ -2,7 +2,9 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use poise::serenity_prelude::{ChannelId, MessageId};
 use serde_json::{Value, json};
+use serenity::http::Http;
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -10,6 +12,9 @@ use uuid::Uuid;
 use crate::config::DeliveryJournalMode;
 use crate::services::discord::SharedData;
 use crate::services::discord::outbound::DiscordTransportReceipt;
+
+use super::RelaySinkError;
+use super::delivery_frontier::SinkDeliveryProofResult;
 
 mod pg_store;
 
@@ -189,6 +194,85 @@ impl JournalObserver {
             sender
         }).clone()
     }
+}
+
+/// A pure predicate, so the route boundary is enforced by behaviour rather than
+/// by where the call sits: `NewMessage` (index-0 delegation) and cutover
+/// short-replace (S4) stay out of this family even if the call site moves.
+/// Pinned by T1-T3.
+pub(super) fn journals_sink_direct(
+    route: &super::SessionBoundTerminalDeliveryRoute,
+    cutover_short_replace: bool,
+) -> bool {
+    !cutover_short_replace
+        && matches!(
+            route,
+            super::SessionBoundTerminalDeliveryRoute::PlaceholderEdit(_)
+        )
+}
+
+/// D4.3: of a multi-chunk send, the message the legacy frontier commits is the
+/// last one, so that is the receipt the `T` event carries. Pinned by T4.
+pub(super) fn anchor_receipt(
+    receipts: &[DiscordTransportReceipt],
+) -> Option<DiscordTransportReceipt> {
+    receipts.last().cloned()
+}
+
+/// Long-chunk send that also yields the anchor receipt. It lives here rather
+/// than inline in `deliver_response` only because the anchor file is frozen at
+/// the giant-file ratchet. The in-process `TurnGateway` (test-only) has no
+/// Discord response to read a returned channel from, so it yields no receipt:
+/// a synthesised one could never trip the `channel_mismatch` branch.
+pub(super) async fn send_long_chunks_with_anchor_receipt(
+    gateway: Option<&dyn super::super::gateway::TurnGateway>,
+    http: &Http,
+    channel: ChannelId,
+    anchor: MessageId,
+    text: &str,
+    shared: &Arc<SharedData>,
+) -> Result<(Vec<MessageId>, Option<DiscordTransportReceipt>), RelaySinkError> {
+    if let Some(gateway) = gateway {
+        return gateway
+            .send_long_message_with_rollback(channel, anchor, text)
+            .await
+            .map(|message_ids| (message_ids, None))
+            .map_err(RelaySinkError::Transient);
+    }
+    let receipts =
+        super::super::formatting::send_long_message_raw_with_rollback_returning_receipts(
+            http, channel, anchor, text, shared,
+        )
+        .await
+        .map_err(|error| RelaySinkError::Transient(error.to_string()))?;
+    let message_ids = super::super::formatting::message_ids_from_receipts(receipts.clone())
+        .map_err(|error| RelaySinkError::Transient(error.to_string()))?;
+    Ok((message_ids, anchor_receipt(&receipts)))
+}
+
+/// Settle only when both the observation and a receipt exist; a missing receipt
+/// leaves the O/A observation dangling for shadow reconciliation rather than
+/// fabricating a confirmation. Two invariants live here rather than at the three
+/// sink call sites: the observation is consumed so a second settle emits nothing
+/// (T6), and `committed` is derived from the frontier proof so only `Persisted`
+/// yields `T`+`C` (T5).
+pub(super) fn settle(
+    observer: &JournalObserver,
+    attempt: &mut Option<AttemptObservation>,
+    receipt: Option<DiscordTransportReceipt>,
+    proof: SinkDeliveryProofResult,
+) -> Vec<JournalEvent> {
+    let Some(receipt) = receipt else {
+        return Vec::new();
+    };
+    let Some(attempt) = attempt.take() else {
+        return Vec::new();
+    };
+    observer.finish_fresh(
+        attempt,
+        receipt,
+        proof == SinkDeliveryProofResult::Persisted,
+    )
 }
 
 struct TuiObligationKey {
@@ -371,6 +455,235 @@ fn transport_event(
     let mut event = event(obligation_id, Some(attempt_id), "T", 2, payload);
     event.receipt = Some(receipt);
     event
+}
+
+#[cfg(test)]
+mod sink_direct_semantics_tests {
+    //! #5071 T1 S2 §7 T1-T6. These are RUNTIME semantic assertions: every test
+    //! here calls the production function and inspects its value. None of them
+    //! inspects source text, so a mutation that keeps the file compiling but
+    //! changes what the code means still fails.
+
+    use super::super::SessionBoundTerminalDeliveryRoute as Route;
+    use super::*;
+
+    fn lazy_test_pool() -> sqlx::PgPool {
+        sqlx::Pool::<sqlx::Postgres>::connect_lazy("postgres://localhost/agentdesk_test")
+            .expect("lazy test pool URL is valid")
+    }
+
+    fn fixture_attempt() -> AttemptObservation {
+        AttemptObservation {
+            obligation_id: Uuid::from_u128(7),
+            attempt_id: Uuid::from_u128(8),
+            frontier: (10, 20),
+            pool: lazy_test_pool(),
+        }
+    }
+
+    fn receipt(requested: u64, returned: u64, message_id: u64) -> DiscordTransportReceipt {
+        DiscordTransportReceipt {
+            requested_channel_id: requested.to_string(),
+            returned_channel_id: returned.to_string(),
+            message_id: message_id.to_string(),
+        }
+    }
+
+    /// T1 (kills M1). The `else` arm of `deliver_response` delegates to
+    /// `deliver_new_message_with_task_authority`, which owns the index-0
+    /// obligation. If the sink-direct family also began one there the same
+    /// delivery would be journalled twice.
+    #[test]
+    fn t1_new_message_delegation_is_not_a_sink_direct_obligation() {
+        assert!(
+            !journals_sink_direct(&Route::NewMessage, false),
+            "NewMessage delegation belongs to the index-0 family; sink direct must not begin an obligation there"
+        );
+        assert!(
+            !journals_sink_direct(&Route::NewMessage, true),
+            "a NewMessage route stays out of the sink-direct family regardless of the cutover flag"
+        );
+    }
+
+    /// T2 (kills M2). D2: the cutover short-replace branch returns before the
+    /// sink-direct window opens and is instrumented by the controller family
+    /// (S4), so observing it here would double-count that delivery.
+    #[test]
+    fn t2_cutover_short_replace_is_not_a_sink_direct_obligation() {
+        assert!(
+            !journals_sink_direct(&Route::PlaceholderEdit(MessageId::new(4_242)), true),
+            "cutover short-replace is the controller family's obligation (S4), not sink direct"
+        );
+    }
+
+    /// T3 (kills M3). Positive control: without it the predicate could decay to
+    /// a constant `false` — i.e. the facade would never be called at all — and
+    /// T1/T2 would still pass.
+    #[test]
+    fn t3_placeholder_edit_without_cutover_is_a_sink_direct_obligation() {
+        assert!(
+            journals_sink_direct(&Route::PlaceholderEdit(MessageId::new(4_242)), false),
+            "the long-chunk and legacy-edit branches are exactly the sink direct family"
+        );
+    }
+
+    /// T4 (kills M4). D4.3 anchor receipt rule: the journal's `T` must name the
+    /// same message the legacy frontier committed, which is
+    /// `message_ids.last()` on every multi-chunk sink path.
+    #[test]
+    fn t4_anchor_receipt_is_the_last_chunk_the_frontier_commits() {
+        let receipts = vec![
+            receipt(10, 10, 901),
+            receipt(10, 10, 902),
+            receipt(10, 10, 903),
+        ];
+        let anchor = anchor_receipt(&receipts).expect("a multi-chunk send has an anchor receipt");
+        assert_eq!(
+            anchor.message_id, "903",
+            "T must point at the tail chunk (message_ids.last()), not the head"
+        );
+        assert_ne!(
+            anchor.message_id, receipts[0].message_id,
+            "anchoring on the head chunk would make T name a message the frontier did not commit"
+        );
+        assert_eq!(
+            anchor_receipt(&receipts[..1])
+                .expect("single chunk")
+                .message_id,
+            "901",
+            "a single-chunk send anchors on its only message"
+        );
+        assert!(anchor_receipt(&[]).is_none(), "no send, no anchor receipt");
+        assert_eq!(
+            receipts
+                .iter()
+                .map(|r| r.message_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["901", "902", "903"],
+            "receipt order is chunk delivery order"
+        );
+    }
+
+    /// T5 (kills M5). The worst available forgery is journalling an uncommitted
+    /// delivery as delivered. Only `Persisted` means the legacy frontier
+    /// recorded the advance; the other two proofs must produce `U`.
+    #[tokio::test]
+    async fn t5_settle_derives_committed_from_the_frontier_proof() {
+        let observer = JournalObserver::default();
+
+        for stale in [
+            SinkDeliveryProofResult::LandedStale,
+            SinkDeliveryProofResult::LandedUnrecorded,
+        ] {
+            let mut attempt = Some(fixture_attempt());
+            let events = settle(&observer, &mut attempt, Some(receipt(10, 10, 30)), stale);
+            assert_eq!(
+                events.len(),
+                1,
+                "{stale:?} is not a delivery: exactly one terminal event"
+            );
+            assert_eq!(
+                events[0].kind, "U",
+                "{stale:?} must be journalled as Unknown, never as T+C"
+            );
+            assert_eq!(
+                events[0].canonical_payload["reason"],
+                "commit_not_persisted"
+            );
+        }
+
+        let mut attempt = Some(fixture_attempt());
+        let events = settle(
+            &observer,
+            &mut attempt,
+            Some(receipt(10, 10, 30)),
+            SinkDeliveryProofResult::Persisted,
+        );
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec!["T", "C"],
+            "a persisted commit emits the transport and commit pair"
+        );
+        assert!(
+            events[0].receipt.is_some(),
+            "T carries the transport receipt"
+        );
+
+        // The mismatch detector must stay reachable: a receipt whose returned
+        // channel differs from the requested one is Unknown even when the
+        // legacy frontier persisted the advance.
+        let mut attempt = Some(fixture_attempt());
+        let events = settle(
+            &observer,
+            &mut attempt,
+            Some(receipt(10, 20, 30)),
+            SinkDeliveryProofResult::Persisted,
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "U");
+        assert_eq!(events[0].canonical_payload["reason"], "channel_mismatch");
+    }
+
+    /// T6 (kills M6). The observation is single-use. A second settle on the same
+    /// delivery — a retry, or a future branch that settles twice — must not
+    /// append a second terminal event, which the 0103 schema would reject.
+    #[tokio::test]
+    async fn t6_settle_consumes_the_attempt_and_never_settles_twice() {
+        let observer = JournalObserver::default();
+        let mut attempt = Some(fixture_attempt());
+
+        assert_eq!(
+            settle(
+                &observer,
+                &mut attempt,
+                Some(receipt(10, 10, 30)),
+                SinkDeliveryProofResult::Persisted
+            )
+            .len(),
+            2,
+            "the first settle emits T and C"
+        );
+        assert!(attempt.is_none(), "a settled observation must be consumed");
+        assert!(
+            settle(
+                &observer,
+                &mut attempt,
+                Some(receipt(10, 10, 30)),
+                SinkDeliveryProofResult::Persisted
+            )
+            .is_empty(),
+            "a second settle on the same observation must emit nothing"
+        );
+
+        // A missing receipt is not a settlement: nothing is emitted and the
+        // observation is left for shadow reconciliation to classify.
+        let mut pending = Some(fixture_attempt());
+        assert!(
+            settle(
+                &observer,
+                &mut pending,
+                None,
+                SinkDeliveryProofResult::Persisted
+            )
+            .is_empty(),
+            "no receipt, no terminal event"
+        );
+        assert!(
+            pending.is_some(),
+            "a missing receipt must not consume the observation"
+        );
+
+        assert!(
+            settle(
+                &observer,
+                &mut None,
+                Some(receipt(10, 10, 30)),
+                SinkDeliveryProofResult::Persisted
+            )
+            .is_empty(),
+            "an unobserved delivery settles into nothing"
+        );
+    }
 }
 
 #[rustfmt::skip]

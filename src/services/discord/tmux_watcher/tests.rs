@@ -2939,7 +2939,7 @@ fn placeholderless_rollback_sender_cleans_prefix_before_rewind_4154() {
                         .lock()
                         .unwrap_or_else(|poison| poison.into_inner())
                         .push((id, content.to_string()));
-                    Some(Ok(id))
+                    Some(Ok((seen_channel, id)))
                 },
             ),
             Box::new(move |seen_channel, message_id| {

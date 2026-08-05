@@ -6,6 +6,8 @@ use serenity::{ChannelId, MessageId};
 use super::*;
 use crate::services::discord::SharedData;
 
+type TransportReceipt = super::super::outbound::DiscordTransportReceipt;
+
 /// Replace an existing Discord message with the first chunk, then send the remaining chunks.
 pub(in crate::services::discord) async fn replace_long_message_raw(
     http: &serenity::Http,
@@ -108,24 +110,56 @@ pub(in crate::services::discord) async fn replace_long_message_raw_with_outcome(
     shared: &Arc<SharedData>,
     last_chunk_anchor: &mut Option<ReplaceLastChunkAnchor>,
 ) -> Result<ReplaceLongMessageOutcome, Error> {
-    match replace_long_message_raw_deferred(
+    replace_long_message_raw_with_outcome_returning_receipt(
         http,
         channel_id,
         message_id,
         text,
         shared,
         last_chunk_anchor,
+        &mut None,
+    )
+    .await
+}
+
+/// Receipt-preserving sibling of [`replace_long_message_raw_with_outcome`]
+/// (D4.3). `anchor_receipt` gets Discord's own receipt for the message the
+/// legacy frontier commits — the same message `watcher_completion_footer_anchor`
+/// / `replacement_anchor` names. A parallel entry point rather than a seventh
+/// parameter on the frozen name, so no existing caller is opened.
+pub(in crate::services::discord) async fn replace_long_message_raw_with_outcome_returning_receipt(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    text: &str,
+    shared: &Arc<SharedData>,
+    last_chunk_anchor: &mut Option<ReplaceLastChunkAnchor>,
+    anchor_receipt: &mut Option<TransportReceipt>,
+) -> Result<ReplaceLongMessageOutcome, Error> {
+    match replace_long_message_raw_deferred_returning_receipt(
+        http,
+        channel_id,
+        message_id,
+        text,
+        shared,
+        last_chunk_anchor,
+        anchor_receipt,
     )
     .await?
     {
         DeferredReplaceLongMessageOutcome::Edited(outcome) => Ok(outcome),
         DeferredReplaceLongMessageOutcome::EditFailed { edit_error } => {
-            let replacement_message_ids =
-                send_long_message_raw_with_rollback(http, channel_id, message_id, text, shared)
-                    .await?;
+            let replacement_receipts = send_long_message_raw_with_rollback_returning_receipts(
+                http, channel_id, message_id, text, shared,
+            )
+            .await?;
+            *anchor_receipt = replacement_receipts.first().cloned();
+            let replacement_anchor = message_ids_from_receipts(replacement_receipts)?
+                .first()
+                .copied();
             Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
                 edit_error,
-                replacement_anchor: replacement_message_ids.first().copied(),
+                replacement_anchor,
             })
         }
     }
@@ -137,11 +171,59 @@ pub(in crate::services::discord) async fn replace_long_message_raw_deferred(
     message_id: MessageId,
     text: &str,
     shared: &Arc<SharedData>,
+    last_chunk_anchor: &mut Option<ReplaceLastChunkAnchor>,
+) -> Result<DeferredReplaceLongMessageOutcome, Error> {
+    replace_long_message_raw_deferred_returning_receipt(
+        http,
+        channel_id,
+        message_id,
+        text,
+        shared,
+        last_chunk_anchor,
+        &mut None,
+    )
+    .await
+}
+
+/// Chunk-0 PATCH preserving Discord's returned channel identity, so the edit
+/// branch yields a real receipt rather than a synthesised one. Tests intercept
+/// the PATCH here.
+async fn edit_chunk0_returning_receipt(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    content: &str,
+) -> Result<TransportReceipt, String> {
+    #[cfg(test)]
+    if let Some(result) = super::chunk_transport_test_hook::edit(channel_id, message_id, content) {
+        return result
+            .map(|(returned, edited)| {
+                super::long_send_rollback::transport_receipt(channel_id, returned, edited)
+            })
+            .map_err(|error| error.to_string());
+    }
+    crate::services::discord::http::edit_channel_message(http, channel_id, message_id, content)
+        .await
+        .map(|message| {
+            super::long_send_rollback::transport_receipt(channel_id, message.channel_id, message.id)
+        })
+        .map_err(|error| error.to_string())
+}
+
+pub(in crate::services::discord) async fn replace_long_message_raw_deferred_returning_receipt(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    text: &str,
+    shared: &Arc<SharedData>,
     // #3805 P1: on the fully-successful multi-chunk edit path this is set to the
     // tail continuation chunk (id + text) so a footer-appending caller can
     // re-anchor onto it; left untouched (caller-initialised `None`) on every
     // other path (single-chunk, edit-failure fallback, partial failure).
     last_chunk_anchor: &mut Option<ReplaceLastChunkAnchor>,
+    // #5071 T1 S2: set only on the fully-successful edit path; left untouched on
+    // `EditFailed` and on partial failure (rollback deletes what landed).
+    anchor_receipt: &mut Option<TransportReceipt>,
 ) -> Result<DeferredReplaceLongMessageOutcome, Error> {
     let payload_byte_len = text.len();
     let chunks = split_message(text);
@@ -255,37 +337,33 @@ pub(in crate::services::discord) async fn replace_long_message_raw_deferred(
         "discord edit first chunk"
     );
     rate_limit_wait(shared, channel_id).await;
-    let edit_result = crate::services::discord::http::edit_channel_message(
-        http,
-        channel_id,
-        message_id,
-        first_chunk,
-    )
-    .await;
+    let edit_result =
+        edit_chunk0_returning_receipt(http, channel_id, message_id, first_chunk).await;
 
-    if let Err(e) = edit_result {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] ⚠ replace_long_message_raw edit failed for channel {} msg {}: {e}",
-            channel_id.get(),
-            message_id.get()
-        );
-        tracing::warn!(
-            target: "discord::chunker",
-            path = "replace_long_message_raw",
-            channel_id = channel_id.get(),
-            message_id = message_id.get(),
-            payload_byte_len,
-            chunk_index = 0usize,
-            total_chunks = total,
-            outcome = "edit_failed_falling_back_to_send",
-            error = %e,
-            "discord first-chunk edit failed; deferring fallback-send authority to caller"
-        );
-        return Ok(DeferredReplaceLongMessageOutcome::EditFailed {
-            edit_error: e.to_string(),
-        });
-    }
+    let chunk0_receipt = match edit_result {
+        Ok(receipt) => receipt,
+        Err(e) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ⚠ replace_long_message_raw edit failed for channel {} msg {}: {e}",
+                channel_id.get(),
+                message_id.get()
+            );
+            tracing::warn!(
+                target: "discord::chunker",
+                path = "replace_long_message_raw",
+                channel_id = channel_id.get(),
+                message_id = message_id.get(),
+                payload_byte_len,
+                chunk_index = 0usize,
+                total_chunks = total,
+                outcome = "edit_failed_falling_back_to_send",
+                error = %e,
+                "discord first-chunk edit failed; deferring fallback-send authority to caller"
+            );
+            return Ok(DeferredReplaceLongMessageOutcome::EditFailed { edit_error: e });
+        }
+    };
 
     // #3082 P1-2 residual: the FIRST edited chunk also delivers answer payload
     // while the multi-chunk barrier guard is held. Mirror the continuation loop
@@ -314,6 +392,7 @@ pub(in crate::services::discord) async fn replace_long_message_raw_deferred(
     }
 
     let mut sent_continuation_message_ids = Vec::new();
+    let mut tail_continuation_receipt = None;
     for (offset, chunk) in chunks.iter().skip(1).enumerate() {
         let i = offset + 1;
         let is_last = i + 1 == total;
@@ -335,6 +414,11 @@ pub(in crate::services::discord) async fn replace_long_message_raw_deferred(
                 // that keeps making progress never trips the queued-card wait.
                 shared.answer_flush_barrier.note_progress(channel_id);
                 sent_continuation_message_ids.push(message.id.get());
+                tail_continuation_receipt = Some(super::long_send_rollback::transport_receipt(
+                    channel_id,
+                    message.channel_id,
+                    message.id,
+                ));
                 if let Err(error) = record_replace_continuation_rollback(
                     &rollback_key,
                     sent_continuation_message_ids.clone(),
@@ -507,6 +591,9 @@ pub(in crate::services::discord) async fn replace_long_message_raw_deferred(
                 msg_id,
                 text: chunks.last().cloned().unwrap_or_default(),
             });
+    // D4.3: same message the frontier commits — tail continuation when the
+    // answer split, chunk 0 otherwise. Mirrors `last_chunk_anchor` above.
+    *anchor_receipt = tail_continuation_receipt.or(Some(chunk0_receipt));
     Ok(DeferredReplaceLongMessageOutcome::Edited(
         ReplaceLongMessageOutcome::EditedOriginal,
     ))

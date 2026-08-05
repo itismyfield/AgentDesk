@@ -22,6 +22,180 @@ impl Drop for RuntimeRootEnvGuard {
     }
 }
 
+// #5071 T1 S2 §7 T8. Runtime semantic assertions on the edit branch's transport
+// receipt recovery: the out-param is read back after driving the real async
+// function, so a mutation that keeps compiling but stops recovering (or starts
+// fabricating) the receipt fails here.
+mod sink_direct_edit_receipt_tests {
+    use super::*;
+
+    const REQUESTED: u64 = 5_071_101;
+    const RETURNED: u64 = 5_071_102;
+    const PLACEHOLDER: u64 = 5_071_103;
+    const EDITED: u64 = 5_071_104;
+    const FALLBACK: u64 = 5_071_105;
+
+    fn test_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+    }
+
+    /// T8a: a successful chunk-0 PATCH hands back Discord's own identity for the
+    /// message the completion-footer anchor names (D4.3, `EditedOriginal` row).
+    #[test]
+    fn t8_edited_original_recovers_the_real_edit_receipt() {
+        let tempdir = tempfile::tempdir().expect("temp runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(tempdir.path());
+        test_runtime().block_on(async {
+            let channel = ChannelId::new(REQUESTED);
+            let _hook = crate::services::discord::formatting::chunk_transport_test_hook::install(
+                Box::new(move |seen_channel, _message_id, _content| {
+                    (seen_channel == channel)
+                        .then_some(Ok((ChannelId::new(RETURNED), MessageId::new(EDITED))))
+                }),
+            );
+            let http = poise::serenity_prelude::Http::new("test-token");
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let mut anchor_receipt = None;
+
+            let outcome = super::super::replace_long_message_raw_deferred_returning_receipt(
+                &http,
+                channel,
+                MessageId::new(PLACEHOLDER),
+                "short single-chunk answer",
+                &shared,
+                &mut None,
+                &mut anchor_receipt,
+            )
+            .await
+            .expect("edit path succeeds");
+
+            assert_eq!(
+                outcome,
+                super::super::DeferredReplaceLongMessageOutcome::Edited(
+                    super::super::ReplaceLongMessageOutcome::EditedOriginal
+                )
+            );
+            let receipt = anchor_receipt.expect("EditedOriginal must recover its transport receipt");
+            assert_eq!(
+                receipt.message_id,
+                EDITED.to_string(),
+                "the receipt must name the edited message, not the placeholder id"
+            );
+            assert_eq!(receipt.requested_channel_id, REQUESTED.to_string());
+            assert_eq!(
+                receipt.returned_channel_id,
+                RETURNED.to_string(),
+                "the returned channel must come from Discord's answer, not be synthesised from the request"
+            );
+            assert_ne!(
+                receipt.requested_channel_id, receipt.returned_channel_id,
+                "synthesising both fields would make the journal's channel_mismatch branch unreachable"
+            );
+        });
+    }
+
+    /// T8b: a failed PATCH created no message, so the deferred call must leave
+    /// the out-param empty rather than invent an anchor for the caller.
+    #[test]
+    fn t8_edit_failure_leaves_the_receipt_unset() {
+        let tempdir = tempfile::tempdir().expect("temp runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(tempdir.path());
+        test_runtime().block_on(async {
+            let channel = ChannelId::new(REQUESTED);
+            let _hook = crate::services::discord::formatting::chunk_transport_test_hook::install(
+                Box::new(move |seen_channel, _message_id, _content| {
+                    (seen_channel == channel).then_some(Err("edit rejected".to_string()))
+                }),
+            );
+            let http = poise::serenity_prelude::Http::new("test-token");
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let mut anchor_receipt = None;
+
+            let outcome = super::super::replace_long_message_raw_deferred_returning_receipt(
+                &http,
+                channel,
+                MessageId::new(PLACEHOLDER),
+                "short single-chunk answer",
+                &shared,
+                &mut None,
+                &mut anchor_receipt,
+            )
+            .await
+            .expect("a rejected edit defers rather than erroring");
+
+            assert!(matches!(
+                outcome,
+                super::super::DeferredReplaceLongMessageOutcome::EditFailed { .. }
+            ));
+            assert!(
+                anchor_receipt.is_none(),
+                "no message was created by a failed edit, so there is no receipt to journal"
+            );
+        });
+    }
+
+    /// T8c: the fallback send after an edit failure is a real POST, and its
+    /// receipt must be the one journalled (D4.3,
+    /// `SentFallbackAfterEditFailure` row) — the same message
+    /// `replacement_anchor` names.
+    #[test]
+    fn t8_fallback_after_edit_failure_recovers_the_send_receipt() {
+        let tempdir = tempfile::tempdir().expect("temp runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(tempdir.path());
+        test_runtime().block_on(async {
+            let channel = ChannelId::new(REQUESTED);
+            let _edit_hook =
+                crate::services::discord::formatting::chunk_transport_test_hook::install(Box::new(
+                    move |seen_channel, _message_id, _content| {
+                        (seen_channel == channel).then_some(Err("edit rejected".to_string()))
+                    },
+                ));
+            let _send_hook =
+                crate::services::discord::formatting::rollback_transport_test_hook::install(
+                Box::new(move |seen_channel, _content, _reference, _nonce, _enforce| {
+                    (seen_channel == channel)
+                        .then_some(Ok((ChannelId::new(RETURNED), MessageId::new(FALLBACK))))
+                }),
+                Box::new(|_, _| Some(Ok(()))),
+            );
+            let http = poise::serenity_prelude::Http::new("test-token");
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let mut anchor_receipt = None;
+
+            let outcome = super::super::replace_long_message_raw_with_outcome_returning_receipt(
+                &http,
+                channel,
+                MessageId::new(PLACEHOLDER),
+                "short single-chunk answer",
+                &shared,
+                &mut None,
+                &mut anchor_receipt,
+            )
+            .await
+            .expect("fallback send succeeds");
+
+            let super::super::ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
+                replacement_anchor,
+                ..
+            } = outcome
+            else {
+                panic!("a rejected edit with a successful fallback send is SentFallbackAfterEditFailure");
+            };
+            assert_eq!(replacement_anchor, Some(MessageId::new(FALLBACK)));
+            let receipt = anchor_receipt.expect("the fallback POST must produce a receipt");
+            assert_eq!(
+                receipt.message_id,
+                FALLBACK.to_string(),
+                "the journalled receipt must name the same message as replacement_anchor"
+            );
+            assert_eq!(receipt.returned_channel_id, RETURNED.to_string());
+        });
+    }
+}
+
 #[test]
 fn required_reference_failure_never_retries_as_plain_message() {
     let _lock = crate::config::shared_test_env_lock()
