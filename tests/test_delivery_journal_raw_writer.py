@@ -167,8 +167,8 @@ class RawWriterAllowlistTests(unittest.TestCase):
     # T1-T3 route/cutover boundary, T4 anchor receipt, T5 proof-derived commit,
     # T6 single settle (session_relay_sink/journal.rs::sink_direct_semantics_tests);
     # T7 mismatch preservation (formatting/long_send_rollback.rs);
-    # T8 edit/fallback receipt (formatting/replace_long_message_tests.rs);
-    # T9 chunk receipt count/order (formatting/delivery.rs).
+    # T8 edit/fallback receipt (formatting/replace_long_message_tests.rs).
+    # T9 (referenced/split receipts) is deferred to S6 with D1 — design 9.2 C7.
 
     def test_source_contract_sink_direct_begin_is_guarded_after_cutover(self):
         """Source text only: begin appears after the cutover return, behind the predicate."""
@@ -184,14 +184,6 @@ class RawWriterAllowlistTests(unittest.TestCase):
         source = (ROOT / "src/services/discord/session_relay_sink.rs").read_text(encoding="utf-8")
         self.assertEqual(source.count("self.journal.begin_fresh("), 1)
         self.assertEqual(source.count("self.journal.finish_fresh("), 0)
-
-    def test_source_contract_referenced_split_path_keeps_receipts_and_anchor(self):
-        """Source text only: symbol presence. T9 proves the receipts are right."""
-        delivery = (ROOT / "src/services/discord/formatting/delivery.rs").read_text(encoding="utf-8")
-        task_context = (ROOT / "src/services/discord/session_relay_sink/task_notification_context.rs").read_text(encoding="utf-8")
-        self.assertIn("send_long_message_raw_with_reference_returning_receipts", delivery)
-        self.assertIn("send_long_message_raw_with_reference_returning_receipts", task_context)
-        self.assertIn("super::journal::anchor_receipt", task_context)
 
     def test_source_contract_rollback_legacy_entrypoint_keeps_parallel_receipt_entrypoint(self):
         """Source text only: the frozen name survives beside the receipt entry point."""

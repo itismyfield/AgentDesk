@@ -50,11 +50,9 @@ fn is_unknown_required_reference(error: &(dyn std::error::Error + 'static)) -> b
 
 type TransportReceipt = super::super::outbound::DiscordTransportReceipt;
 
-/// Single construction point for every chunk receipt produced by the
-/// `formatting` transports. `requested` is the channel this process asked to
-/// post into; `returned` is the channel Discord answered with. The journal
-/// decides `channel_mismatch` by comparing them, so collapsing the two would
-/// make that branch unreachable (T7/M7).
+/// Single construction point for every `formatting` chunk receipt. The journal
+/// decides `channel_mismatch` by comparing requested against returned, so
+/// collapsing the two would make that branch unreachable (T7/M7).
 pub(super) fn transport_receipt(
     requested: ChannelId,
     returned: ChannelId,
@@ -67,7 +65,11 @@ pub(super) fn transport_receipt(
     }
 }
 
-fn message_ids_from_receipts(receipts: Vec<TransportReceipt>) -> Result<Vec<MessageId>, Error> {
+/// Receipt list -> message ids, shared by every legacy entry point that keeps
+/// its `Vec<MessageId>` return type over a receipt-returning body.
+pub(in crate::services::discord) fn message_ids_from_receipts(
+    receipts: Vec<TransportReceipt>,
+) -> Result<Vec<MessageId>, Error> {
     receipts
         .into_iter()
         .map(|receipt| {
@@ -87,21 +89,21 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_rollback(
     text: &str,
     shared: &Arc<SharedData>,
 ) -> Result<Vec<MessageId>, Error> {
-    let receipts = send_long_message_raw_with_rollback_returning_receipts(
-        http,
-        channel_id,
-        rollback_anchor_msg_id,
-        text,
-        shared,
+    message_ids_from_receipts(
+        send_long_message_raw_with_rollback_returning_receipts(
+            http,
+            channel_id,
+            rollback_anchor_msg_id,
+            text,
+            shared,
+        )
+        .await?,
     )
-    .await?;
-    message_ids_from_receipts(receipts)
 }
 
-/// Receipt-preserving sibling of [`send_long_message_raw_with_rollback`].
-/// The legacy function above keeps its name and return type for source-order
-/// contracts while direct sink instrumentation consumes the actual POST
-/// receipts here.
+/// Receipt-preserving sibling of [`send_long_message_raw_with_rollback`]. The
+/// legacy name above keeps its return type for the frozen source-order
+/// contract; sink instrumentation consumes the actual POST receipts here.
 pub(in crate::services::discord) async fn send_long_message_raw_with_rollback_returning_receipts(
     http: &serenity::Http,
     channel_id: ChannelId,
@@ -109,12 +111,14 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_rollback_re
     text: &str,
     shared: &Arc<SharedData>,
 ) -> Result<Vec<TransportReceipt>, Error> {
-    send_long_message_raw_with_reference_rollback_returning_receipts(
+    send_long_message_raw_with_reference_rollback_policy(
         http,
         channel_id,
         rollback_anchor_msg_id,
         text,
         shared,
+        None,
+        false,
         None,
     )
     .await
@@ -164,37 +168,19 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
     shared: &Arc<SharedData>,
     reference: Option<(ChannelId, MessageId)>,
 ) -> Result<Vec<MessageId>, Error> {
-    let receipts = send_long_message_raw_with_reference_rollback_returning_receipts(
-        http,
-        channel_id,
-        rollback_anchor_msg_id,
-        text,
-        shared,
-        reference,
+    message_ids_from_receipts(
+        send_long_message_raw_with_reference_rollback_policy(
+            http,
+            channel_id,
+            rollback_anchor_msg_id,
+            text,
+            shared,
+            reference,
+            false,
+            None,
+        )
+        .await?,
     )
-    .await?;
-    message_ids_from_receipts(receipts)
-}
-
-pub(in crate::services::discord) async fn send_long_message_raw_with_reference_rollback_returning_receipts(
-    http: &serenity::Http,
-    channel_id: ChannelId,
-    rollback_anchor_msg_id: MessageId,
-    text: &str,
-    shared: &Arc<SharedData>,
-    reference: Option<(ChannelId, MessageId)>,
-) -> Result<Vec<TransportReceipt>, Error> {
-    send_long_message_raw_with_reference_rollback_policy(
-        http,
-        channel_id,
-        rollback_anchor_msg_id,
-        text,
-        shared,
-        reference,
-        false,
-        None,
-    )
-    .await
 }
 
 #[allow(clippy::too_many_arguments)]

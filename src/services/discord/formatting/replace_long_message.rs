@@ -123,14 +123,10 @@ pub(in crate::services::discord) async fn replace_long_message_raw_with_outcome(
 }
 
 /// Receipt-preserving sibling of [`replace_long_message_raw_with_outcome`]
-/// (#5071 T1 S2, design D4.3). `anchor_receipt` receives Discord's own receipt
-/// for the message the legacy delivery frontier commits: for `EditedOriginal`
-/// the chunk-0 PATCH, or the tail continuation POST when the answer split
-/// (mirroring `watcher_completion_footer_anchor`); for
-/// `SentFallbackAfterEditFailure` the first fallback POST, the same message
-/// `replacement_anchor` names. Never synthesised, so a `requested != returned`
-/// mismatch stays observable. A parallel entry point (not a seventh parameter
-/// on the legacy name) leaves the five existing callers untouched.
+/// (D4.3). `anchor_receipt` gets Discord's own receipt for the message the
+/// legacy frontier commits — the same message `watcher_completion_footer_anchor`
+/// / `replacement_anchor` names. A parallel entry point rather than a seventh
+/// parameter on the frozen name, so no existing caller is opened.
 pub(in crate::services::discord) async fn replace_long_message_raw_with_outcome_returning_receipt(
     http: &serenity::Http,
     channel_id: ChannelId,
@@ -157,17 +153,10 @@ pub(in crate::services::discord) async fn replace_long_message_raw_with_outcome_
                 http, channel_id, message_id, text, shared,
             )
             .await?;
-            let replacement_anchor = replacement_receipts
+            *anchor_receipt = replacement_receipts.first().cloned();
+            let replacement_anchor = message_ids_from_receipts(replacement_receipts)?
                 .first()
-                .map(|receipt| {
-                    receipt
-                        .message_id
-                        .parse::<u64>()
-                        .map(MessageId::new)
-                        .map_err(|error| -> Error { Box::new(error) })
-                })
-                .transpose()?;
-            *anchor_receipt = replacement_receipts.into_iter().next();
+                .copied();
             Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
                 edit_error,
                 replacement_anchor,
@@ -196,9 +185,9 @@ pub(in crate::services::discord) async fn replace_long_message_raw_deferred(
     .await
 }
 
-/// Chunk-0 PATCH that preserves Discord's returned channel identity, so the
-/// edit branch produces a real transport receipt instead of one synthesised
-/// from the requested channel. Tests intercept the PATCH here.
+/// Chunk-0 PATCH preserving Discord's returned channel identity, so the edit
+/// branch yields a real receipt rather than a synthesised one. Tests intercept
+/// the PATCH here.
 async fn edit_chunk0_returning_receipt(
     http: &serenity::Http,
     channel_id: ChannelId,
@@ -232,10 +221,8 @@ pub(in crate::services::discord) async fn replace_long_message_raw_deferred_retu
     // re-anchor onto it; left untouched (caller-initialised `None`) on every
     // other path (single-chunk, edit-failure fallback, partial failure).
     last_chunk_anchor: &mut Option<ReplaceLastChunkAnchor>,
-    // #5071 T1 S2: set only on the fully-successful edit path, to the receipt of
-    // the same message `watcher_completion_footer_anchor` names. Left untouched
-    // on `EditFailed` (no message was created here) and on partial failure
-    // (rollback deletes the chunks that did land).
+    // #5071 T1 S2: set only on the fully-successful edit path; left untouched on
+    // `EditFailed` and on partial failure (rollback deletes what landed).
     anchor_receipt: &mut Option<TransportReceipt>,
 ) -> Result<DeferredReplaceLongMessageOutcome, Error> {
     let payload_byte_len = text.len();
@@ -604,9 +591,8 @@ pub(in crate::services::discord) async fn replace_long_message_raw_deferred_retu
                 msg_id,
                 text: chunks.last().cloned().unwrap_or_default(),
             });
-    // #5071 T1 S2 (D4.3): keep the journal's `T` on the same message the legacy
-    // frontier commits — the tail continuation when the answer split, chunk 0
-    // otherwise. This mirrors the `last_chunk_anchor` selection one line above.
+    // D4.3: same message the frontier commits — tail continuation when the
+    // answer split, chunk 0 otherwise. Mirrors `last_chunk_anchor` above.
     *anchor_receipt = tail_continuation_receipt.or(Some(chunk0_receipt));
     Ok(DeferredReplaceLongMessageOutcome::Edited(
         ReplaceLongMessageOutcome::EditedOriginal,

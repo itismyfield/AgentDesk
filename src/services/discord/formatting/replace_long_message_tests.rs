@@ -51,7 +51,6 @@ mod sink_direct_edit_receipt_tests {
         test_runtime().block_on(async {
             let channel = ChannelId::new(REQUESTED);
             let _hook = crate::services::discord::formatting::chunk_transport_test_hook::install(
-                Box::new(|_, _, _| None),
                 Box::new(move |seen_channel, _message_id, _content| {
                     (seen_channel == channel)
                         .then_some(Ok((ChannelId::new(RETURNED), MessageId::new(EDITED))))
@@ -107,7 +106,6 @@ mod sink_direct_edit_receipt_tests {
         test_runtime().block_on(async {
             let channel = ChannelId::new(REQUESTED);
             let _hook = crate::services::discord::formatting::chunk_transport_test_hook::install(
-                Box::new(|_, _, _| None),
                 Box::new(move |seen_channel, _message_id, _content| {
                     (seen_channel == channel).then_some(Err("edit rejected".to_string()))
                 }),
@@ -150,12 +148,11 @@ mod sink_direct_edit_receipt_tests {
         test_runtime().block_on(async {
             let channel = ChannelId::new(REQUESTED);
             let _edit_hook =
-                crate::services::discord::formatting::chunk_transport_test_hook::install(
-                    Box::new(|_, _, _| None),
-                    Box::new(move |seen_channel, _message_id, _content| {
+                crate::services::discord::formatting::chunk_transport_test_hook::install(Box::new(
+                    move |seen_channel, _message_id, _content| {
                         (seen_channel == channel).then_some(Err("edit rejected".to_string()))
-                    }),
-                );
+                    },
+                ));
             let _send_hook =
                 crate::services::discord::formatting::rollback_transport_test_hook::install(
                 Box::new(move |seen_channel, _content, _reference, _nonce, _enforce| {

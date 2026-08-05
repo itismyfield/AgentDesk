@@ -978,15 +978,16 @@ impl SessionBoundDiscordRelaySink {
                     None
                 };
             if session_bound_should_send_new_chunks_for_placeholder(&relay_text) {
-                let (message_ids, journal_receipts) = journal::send_long_chunks_with_receipts(
-                    gateway,
-                    &http,
-                    channel,
-                    msg_id,
-                    &relay_text,
-                    &shared,
-                )
-                .await?;
+                let (message_ids, chunk_anchor_receipt) =
+                    journal::send_long_chunks_with_anchor_receipt(
+                        gateway,
+                        &http,
+                        channel,
+                        msg_id,
+                        &relay_text,
+                        &shared,
+                    )
+                    .await?;
                 if let Some(gateway) = gateway {
                     let _ = gateway.delete_message(channel, msg_id).await;
                 } else {
@@ -1030,7 +1031,7 @@ impl SessionBoundDiscordRelaySink {
                 journal::settle(
                     &self.journal,
                     &mut direct_journal_attempt,
-                    journal::anchor_receipt(&journal_receipts),
+                    chunk_anchor_receipt,
                     proof,
                 );
                 return Ok(SessionRelayDeliveryOutcome::from_proof(proof));

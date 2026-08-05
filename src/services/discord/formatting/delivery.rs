@@ -122,56 +122,6 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
     shared: &Arc<SharedData>,
     reference: Option<(ChannelId, MessageId)>,
 ) -> Result<Vec<MessageId>, Error> {
-    send_long_message_raw_with_reference_returning_receipts(
-        http, channel_id, text, shared, reference,
-    )
-    .await?
-    .into_iter()
-    .map(|receipt| {
-        receipt
-            .message_id
-            .parse::<u64>()
-            .map(MessageId::new)
-            .map_err(|error| -> Error { Box::new(error) })
-    })
-    .collect()
-}
-
-/// One chunk POST that preserves Discord's returned channel identity.
-/// Production always reaches `send_channel_message_with_optional_reference`;
-/// tests intercept here so a returned-channel mismatch and multi-chunk receipt
-/// ordering are observable without a live Discord.
-async fn send_chunk_returning_receipt(
-    http: &serenity::Http,
-    channel_id: ChannelId,
-    content: &str,
-    reference: Option<(ChannelId, MessageId)>,
-) -> Result<super::super::outbound::DiscordTransportReceipt, Error> {
-    #[cfg(test)]
-    if let Some(result) = super::chunk_transport_test_hook::send(channel_id, content, reference) {
-        return result.map(|(returned, message_id)| {
-            super::long_send_rollback::transport_receipt(channel_id, returned, message_id)
-        });
-    }
-    send_channel_message_with_optional_reference(http, channel_id, content, reference)
-        .await
-        .map(|message| {
-            super::long_send_rollback::transport_receipt(channel_id, message.channel_id, message.id)
-        })
-        .map_err(Into::into)
-}
-
-/// Send a long message using raw HTTP and preserve the transport receipt for
-/// every successful POST. The existing message-id entry point above remains
-/// the compatibility surface for callers that do not need returned channel
-/// identity.
-pub(in crate::services::discord) async fn send_long_message_raw_with_reference_returning_receipts(
-    http: &serenity::Http,
-    channel_id: ChannelId,
-    text: &str,
-    shared: &Arc<SharedData>,
-    reference: Option<(ChannelId, MessageId)>,
-) -> Result<Vec<super::super::outbound::DiscordTransportReceipt>, Error> {
     let payload_byte_len = text.len();
     if char_count(text) <= DISCORD_MSG_LIMIT {
         tracing::debug!(
@@ -185,8 +135,9 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
             "discord send single"
         );
         rate_limit_wait(shared, channel_id).await;
-        match send_chunk_returning_receipt(http, channel_id, text, reference).await {
-            Ok(receipt) => {
+        match send_channel_message_with_optional_reference(http, channel_id, text, reference).await
+        {
+            Ok(message) => {
                 tracing::debug!(
                     target: "discord::chunker",
                     path = "send_long_message_raw",
@@ -196,7 +147,7 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
                     outcome = "ok",
                     "discord send single done"
                 );
-                return Ok(vec![receipt]);
+                return Ok(vec![message.id]);
             }
             Err(err) => {
                 tracing::warn!(
@@ -209,7 +160,7 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
                     error = %err,
                     "discord send single failed (issue #1043)"
                 );
-                return Err(err);
+                return Err(err.into());
             }
         }
     }
@@ -229,7 +180,7 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
         total_chunks = total,
         "discord send begin"
     );
-    let mut sent_receipts = Vec::new();
+    let mut sent_message_ids = Vec::new();
     for (i, chunk) in chunks.iter().enumerate() {
         let is_last = i + 1 == total;
         tracing::debug!(
@@ -245,9 +196,10 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
         rate_limit_wait(shared, channel_id).await;
         let chunk_reference = if i == 0 { reference.clone() } else { None };
         let send_result =
-            send_chunk_returning_receipt(http, channel_id, chunk, chunk_reference).await;
+            send_channel_message_with_optional_reference(http, channel_id, chunk, chunk_reference)
+                .await;
         match send_result {
-            Ok(receipt) => {
+            Ok(message) => {
                 // #3082 P1-2: chunk landed — keep the answer-flush barrier's
                 // inactivity window fresh so a long answer never trips the
                 // queued-card wait while it is still making progress.
@@ -255,10 +207,7 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
                 shared
                     .tmux_relay_coord(channel_id)
                     .note_relay_progress_heartbeat(chrono::Utc::now().timestamp_millis());
-                // Chunk order is the delivery order: `anchor_receipt` (D4.3)
-                // takes the LAST element as the message the legacy frontier
-                // commits, so pushing out of order would mis-anchor the T event.
-                sent_receipts.push(receipt);
+                sent_message_ids.push(message.id);
                 if is_last {
                     tracing::debug!(
                         target: "discord::chunker",
@@ -284,12 +233,12 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
                     error = %err,
                     "discord send chunk failed (issue #1043 — tail may be missing)"
                 );
-                return Err(err);
+                return Err(err.into());
             }
         }
     }
 
-    Ok(sent_receipts)
+    Ok(sent_message_ids)
 }
 
 /// Fresh single-message sink path with an unreconstructed Discord receipt.
@@ -602,109 +551,5 @@ mod attachment_delivery_tests {
             &inline,
         ));
         assert!(inline.chars().count() <= DISCORD_MSG_LIMIT);
-    }
-}
-
-#[cfg(test)]
-mod sink_direct_chunk_receipt_tests {
-    //! #5071 T1 S2 §7 T9. Runtime semantic assertions on the referenced/split
-    //! receipt variant: the returned receipts are compared against the chunks
-    //! the splitter produced, so losing, duplicating, or reordering a receipt
-    //! fails here even though the code still compiles.
-
-    use super::*;
-
-    /// T9. `referenced` and `split` are the same function under
-    /// `reference: Some(..)` / `None`. Both must return one receipt per chunk,
-    /// in delivery order, because `anchor_receipt` (D4.3) takes the last one as
-    /// the message the legacy frontier commits.
-    #[test]
-    fn t9_multi_chunk_send_returns_one_ordered_receipt_per_chunk() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .start_paused(true)
-            .build()
-            .expect("test runtime");
-        runtime.block_on(async {
-            let requested = ChannelId::new(5_071_201);
-            let returned = ChannelId::new(5_071_202);
-            let card = MessageId::new(5_071_203);
-            let body = (0..400)
-                .map(|line| format!("relay line {line} body text"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let expected_chunks = split_message(&body).len();
-            assert!(
-                expected_chunks > 1,
-                "the fixture must exercise the multi-chunk arm"
-            );
-
-            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-            let recorder = seen.clone();
-            let next_id = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(9_000));
-            let _hook = super::chunk_transport_test_hook::install(
-                Box::new(move |seen_channel, _content, reference| {
-                    if seen_channel != requested {
-                        return None;
-                    }
-                    let id = next_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    recorder
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .push(reference);
-                    Some(Ok((returned, MessageId::new(id))))
-                }),
-                Box::new(|_, _, _| None),
-            );
-            let http = serenity::Http::new("test-token");
-            let shared = crate::services::discord::make_shared_data_for_tests();
-
-            let receipts = send_long_message_raw_with_reference_returning_receipts(
-                &http,
-                requested,
-                &body,
-                &shared,
-                Some((requested, card)),
-            )
-            .await
-            .expect("multi-chunk referenced send succeeds");
-
-            assert_eq!(
-                receipts.len(),
-                expected_chunks,
-                "every chunk that landed must contribute exactly one receipt"
-            );
-            assert_eq!(
-                receipts
-                    .iter()
-                    .map(|receipt| receipt.message_id.clone())
-                    .collect::<Vec<_>>(),
-                (0..expected_chunks as u64)
-                    .map(|offset| (9_000 + offset).to_string())
-                    .collect::<Vec<_>>(),
-                "receipts must stay in chunk delivery order so the last one is the frontier anchor"
-            );
-            assert!(
-                receipts.iter().all(|receipt| receipt.returned_channel_id
-                    == returned.get().to_string()
-                    && receipt.requested_channel_id == requested.get().to_string()),
-                "every chunk receipt keeps the requested and returned channels apart"
-            );
-
-            let references = seen
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .clone();
-            assert_eq!(references.len(), expected_chunks);
-            assert_eq!(
-                references[0],
-                Some((requested, card)),
-                "referenced mode attaches the reply reference to chunk 0"
-            );
-            assert!(
-                references[1..].iter().all(Option::is_none),
-                "continuation chunks are unreferenced (this is the split arm)"
-            );
-        });
     }
 }

@@ -41,6 +41,7 @@ pub(in crate::services::discord) mod long_send_rollback;
 mod rollback_journal;
 
 use self::long_send_rollback::delete_rollback_channel_message;
+pub(in crate::services::discord) use self::long_send_rollback::message_ids_from_receipts;
 pub(in crate::services::discord) use self::long_send_rollback::send_long_message_raw_with_reference_rollback;
 pub(in crate::services::discord) use self::long_send_rollback::send_long_message_raw_with_rollback;
 pub(in crate::services::discord) use self::long_send_rollback::send_long_message_raw_with_rollback_returning_receipts;
@@ -129,61 +130,33 @@ pub(in crate::services::discord) mod rollback_transport_test_hook {
     }
 }
 
-/// #5071 T1 S2: transport interception for the receipt-returning chunk
-/// variants (`delivery::send_long_message_raw_with_reference_returning_receipts`
-/// and `replace_long_message`'s chunk-0 PATCH). Kept separate from
-/// [`rollback_transport_test_hook`] so installing one never silently changes
-/// which POSTs the other intercepts. Both hooks yield `(returned channel,
+/// #5071 T1 S2: PATCH interception for `replace_long_message`'s chunk-0 edit.
+/// Separate from [`rollback_transport_test_hook`] so installing one never
+/// changes which requests the other intercepts. Yields `(returned channel,
 /// message id)` so a channel mismatch is expressible.
 #[cfg(test)]
 pub(in crate::services::discord) mod chunk_transport_test_hook {
     use super::*;
 
-    type ChunkSendHook = Box<
-        dyn Fn(
-                ChannelId,
-                &str,
-                Option<(ChannelId, MessageId)>,
-            ) -> Option<Result<(ChannelId, MessageId), String>>
-            + Send
-            + Sync,
-    >;
     type ChunkEditHook = Box<
         dyn Fn(ChannelId, MessageId, &str) -> Option<Result<(ChannelId, MessageId), String>>
             + Send
             + Sync,
     >;
 
-    static SEND_HOOK: LazyLock<Mutex<Option<ChunkSendHook>>> = LazyLock::new(|| Mutex::new(None));
     static EDIT_HOOK: LazyLock<Mutex<Option<ChunkEditHook>>> = LazyLock::new(|| Mutex::new(None));
 
     pub(in crate::services::discord) struct Guard;
 
     impl Drop for Guard {
         fn drop(&mut self) {
-            *SEND_HOOK.lock().unwrap_or_else(|error| error.into_inner()) = None;
             *EDIT_HOOK.lock().unwrap_or_else(|error| error.into_inner()) = None;
         }
     }
 
-    pub(in crate::services::discord) fn install(send: ChunkSendHook, edit: ChunkEditHook) -> Guard {
-        *SEND_HOOK.lock().unwrap_or_else(|error| error.into_inner()) = Some(send);
+    pub(in crate::services::discord) fn install(edit: ChunkEditHook) -> Guard {
         *EDIT_HOOK.lock().unwrap_or_else(|error| error.into_inner()) = Some(edit);
         Guard
-    }
-
-    pub(super) fn send(
-        channel_id: ChannelId,
-        content: &str,
-        reference: Option<(ChannelId, MessageId)>,
-    ) -> Option<Result<(ChannelId, MessageId), Error>> {
-        SEND_HOOK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .as_ref()
-            .and_then(|hook| {
-                hook(channel_id, content, reference).map(|result| result.map_err(Into::into))
-            })
     }
 
     pub(super) fn edit(
@@ -243,8 +216,7 @@ pub(super) use self::delivery::{
 #[allow(unused_imports)]
 pub(in crate::services::discord) use self::delivery::{
     long_message_reply_builders, send_long_message_raw_with_reference,
-    send_long_message_raw_with_reference_returning_message_ids,
-    send_long_message_raw_with_reference_returning_receipts, send_long_message_reply_ctx,
+    send_long_message_raw_with_reference_returning_message_ids, send_long_message_reply_ctx,
     send_single_message_returning_receipt,
 };
 

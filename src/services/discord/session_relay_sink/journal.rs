@@ -196,12 +196,10 @@ impl JournalObserver {
     }
 }
 
-/// The sink-direct shadow window starts only after the cutover short-replace
-/// return. Extracting the decision into a pure predicate means the route
-/// boundary is enforced by behaviour rather than by where the call happens to
-/// sit: `NewMessage` (index-0 delegation) and cutover short-replace (S4) stay
-/// out of this family even if the call site is moved. Pinned by T1-T3 in
-/// `sink_direct_semantics_tests`.
+/// A pure predicate, so the route boundary is enforced by behaviour rather than
+/// by where the call sits: `NewMessage` (index-0 delegation) and cutover
+/// short-replace (S4) stay out of this family even if the call site moves.
+/// Pinned by T1-T3.
 pub(super) fn journals_sink_direct(
     route: &super::SessionBoundTerminalDeliveryRoute,
     cutover_short_replace: bool,
@@ -213,59 +211,33 @@ pub(super) fn journals_sink_direct(
         )
 }
 
-/// Synthesise a receipt whose requested and returned channels are equal. Only
-/// correct where no Discord response exists to read a returned channel from —
-/// the in-process `TurnGateway` test double, which hands back bare message ids.
-/// Live transport must use `formatting::long_send_rollback::transport_receipt`
-/// instead: a synthesised receipt can never trip `finish_fresh`'s
-/// `channel_mismatch` branch, so it would silently retire that detector.
-pub(super) fn receipt_for_message(channel_id: u64, message_id: u64) -> DiscordTransportReceipt {
-    DiscordTransportReceipt {
-        requested_channel_id: channel_id.to_string(),
-        returned_channel_id: channel_id.to_string(),
-        message_id: message_id.to_string(),
-    }
-}
-
+/// D4.3: of a multi-chunk send, the message the legacy frontier commits is the
+/// last one, so that is the receipt the `T` event carries. Pinned by T4.
 pub(super) fn anchor_receipt(
     receipts: &[DiscordTransportReceipt],
 ) -> Option<DiscordTransportReceipt> {
     receipts.last().cloned()
 }
 
-pub(super) fn message_ids_from_receipts(
-    receipts: &[DiscordTransportReceipt],
-) -> Result<Vec<MessageId>, String> {
-    receipts
-        .iter()
-        .map(|receipt| {
-            receipt
-                .message_id
-                .parse::<u64>()
-                .map(MessageId::new)
-                .map_err(|error| format!("invalid Discord receipt message id: {error}"))
-        })
-        .collect()
-}
-
-pub(super) async fn send_long_chunks_with_receipts(
+/// Long-chunk send that also yields the anchor receipt. It lives here rather
+/// than inline in `deliver_response` only because the anchor file is frozen at
+/// the giant-file ratchet. The in-process `TurnGateway` (test-only) has no
+/// Discord response to read a returned channel from, so it yields no receipt:
+/// a synthesised one could never trip the `channel_mismatch` branch.
+pub(super) async fn send_long_chunks_with_anchor_receipt(
     gateway: Option<&dyn super::super::gateway::TurnGateway>,
     http: &Http,
     channel: ChannelId,
     anchor: MessageId,
     text: &str,
     shared: &Arc<SharedData>,
-) -> Result<(Vec<MessageId>, Vec<DiscordTransportReceipt>), RelaySinkError> {
+) -> Result<(Vec<MessageId>, Option<DiscordTransportReceipt>), RelaySinkError> {
     if let Some(gateway) = gateway {
-        let message_ids = gateway
+        return gateway
             .send_long_message_with_rollback(channel, anchor, text)
             .await
-            .map_err(RelaySinkError::Transient)?;
-        let receipts: Vec<DiscordTransportReceipt> = message_ids
-            .iter()
-            .map(|message_id| receipt_for_message(channel.get(), message_id.get()))
-            .collect();
-        return Ok((message_ids, receipts));
+            .map(|message_ids| (message_ids, None))
+            .map_err(RelaySinkError::Transient);
     }
     let receipts =
         super::super::formatting::send_long_message_raw_with_rollback_returning_receipts(
@@ -273,19 +245,17 @@ pub(super) async fn send_long_chunks_with_receipts(
         )
         .await
         .map_err(|error| RelaySinkError::Transient(error.to_string()))?;
-    let message_ids = message_ids_from_receipts(&receipts).map_err(RelaySinkError::Transient)?;
-    Ok((message_ids, receipts))
+    let message_ids = super::super::formatting::message_ids_from_receipts(receipts.clone())
+        .map_err(|error| RelaySinkError::Transient(error.to_string()))?;
+    Ok((message_ids, anchor_receipt(&receipts)))
 }
 
-/// Settle only when both the observation and a transport receipt exist. A
-/// missing receipt leaves the already-appended O/A observation dangling for
-/// shadow reconciliation; it is not converted into a fabricated confirmation.
-///
-/// Two invariants live here rather than at the three sink call sites: the
-/// observation is consumed (`take`), so a second settle cannot append a
-/// duplicate terminal event (T6); and `committed` is derived from the legacy
-/// frontier proof, so only `Persisted` yields `T`+`C` while `LandedStale` /
-/// `LandedUnrecorded` are journalled as `U` (T5).
+/// Settle only when both the observation and a receipt exist; a missing receipt
+/// leaves the O/A observation dangling for shadow reconciliation rather than
+/// fabricating a confirmation. Two invariants live here rather than at the three
+/// sink call sites: the observation is consumed so a second settle emits nothing
+/// (T6), and `committed` is derived from the frontier proof so only `Persisted`
+/// yields `T`+`C` (T5).
 pub(super) fn settle(
     observer: &JournalObserver,
     attempt: &mut Option<AttemptObservation>,
@@ -585,12 +555,11 @@ mod sink_direct_semantics_tests {
         );
         assert!(anchor_receipt(&[]).is_none(), "no send, no anchor receipt");
         assert_eq!(
-            message_ids_from_receipts(&receipts).expect("numeric ids"),
-            vec![
-                MessageId::new(901),
-                MessageId::new(902),
-                MessageId::new(903)
-            ],
+            receipts
+                .iter()
+                .map(|r| r.message_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["901", "902", "903"],
             "receipt order is chunk delivery order"
         );
     }
