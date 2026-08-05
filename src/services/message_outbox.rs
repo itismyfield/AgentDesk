@@ -10,10 +10,9 @@ use crate::services::{
 pub(crate) const LIFECYCLE_NOTIFY_DEDUPE_TTL_SECS: i64 = 5 * 60;
 pub(crate) const LIFECYCLE_NOTIFIER_SOURCE: &str = "lifecycle_notifier";
 /// Actionable operational alerts are delivered by the announce bot first so
-/// the channel's resident AgentDesk role receives a real intake turn.  The
-/// outbox worker falls back to the notify bot only when that primary delivery
-/// fails, preserving human visibility without turning informational notices
-/// into agent work (#4449).
+/// the channel's resident AgentDesk role receives a human-visible notice. The
+/// delivery path stamps non-turn provenance; the outbox worker falls back to
+/// the notify bot only when that primary delivery fails (#4449).
 pub(crate) const ACTIONABLE_OPS_ALERT_BOT: &str = UtilityBotRole::Announce.alias();
 
 pub(crate) fn is_actionable_ops_alert(source: &str, reason_code: Option<&str>) -> bool {
@@ -30,6 +29,20 @@ pub(crate) fn is_actionable_ops_alert(source: &str, reason_code: Option<&str>) -
             | ("auto-queue-monitor", Some("auto_queue.monitor_stuck"))
             | ("auto-queue-monitor", Some("auto_queue.monitor_anomaly"))
     )
+}
+
+/// Operational outbox alerts are human-visible notifications, not turn input.
+/// Keep this classification separate from `is_actionable_ops_alert`: some
+/// notify-only alerts still need the same intake provenance if their bot is
+/// later configured as an allowed sender.
+pub(crate) fn is_non_turn_operational_alert(source: &str, reason_code: Option<&str>) -> bool {
+    is_actionable_ops_alert(source, reason_code)
+        || matches!(
+            source,
+            "stall_watchdog" | "quality_regression_alerter" | "queue_overflow_notice"
+        )
+        || (source == "auto-queue-monitor"
+            && reason_code.is_some_and(|reason| reason.starts_with("auto_queue.monitor_")))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -189,7 +202,10 @@ pub(crate) fn dedupe_key_for_message_for_test(
 
 #[cfg(test)]
 mod dedupe_key_tests {
-    use super::{dedupe_key_for_message, delivery_bot_for_target_session, is_actionable_ops_alert};
+    use super::{
+        dedupe_key_for_message, delivery_bot_for_target_session, is_actionable_ops_alert,
+        is_non_turn_operational_alert,
+    };
 
     #[test]
     fn actionable_ops_alert_registry_is_exact_and_excludes_recovery_noise() {
@@ -227,6 +243,30 @@ mod dedupe_key_tests {
         assert!(!is_actionable_ops_alert(
             "wrong-source",
             Some("dispatch_stuck")
+        ));
+    }
+
+    #[test]
+    fn operational_alert_registry_includes_notify_only_alerts() {
+        for (source, reason) in [
+            ("auto-queue-monitor", "auto_queue.monitor_review_long"),
+            ("stall_watchdog", "stall_watchdog_suspected_stall"),
+            ("quality_regression_alerter", "agent_quality.regression"),
+            ("queue_overflow_notice", "queue_overflow.evict"),
+            (
+                "stall_watchdog",
+                "relay_reattach_circuit_open:discord:channel-42",
+            ),
+            ("auto-queue-monitor", "auto_queue.monitor_recovery"),
+        ] {
+            assert!(
+                is_non_turn_operational_alert(source, Some(reason)),
+                "missing non-turn provenance registration for {source}/{reason}"
+            );
+        }
+        assert!(!is_non_turn_operational_alert(
+            "lifecycle_notifier",
+            Some("runtime_started")
         ));
     }
 

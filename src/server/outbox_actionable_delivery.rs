@@ -1,11 +1,12 @@
 //! Delivery policy for actionable operational outbox alerts (#4449).
 //!
 //! The durable row keeps its existing channel target and dedupe identity.  An
-//! announce-bot post is the primary delivery because messages in the configured
-//! operations channel are ingested by its resident AgentDesk role.  If that bot
-//! cannot deliver, retry once with the notify bot so the human-visible alert
-//! survives an announce credential/runtime failure.  Informational rows never
-//! enter this fallback path.
+//! announce-bot post is the primary delivery so the configured operations
+//! channel receives the notice through its resident role. Non-turn provenance
+//! keeps the notice out of intervention intake. If that bot cannot deliver,
+//! retry once with the notify bot so the human-visible alert survives an
+//! announce credential/runtime failure. Informational rows never enter this
+//! fallback path.
 
 use sqlx::PgPool;
 
@@ -23,6 +24,14 @@ fn should_fallback_to_notify(
         && crate::services::message_outbox::is_actionable_ops_alert(source, reason_code)
 }
 
+fn delivery_content(content: &str, source: &str, reason_code: Option<&str>) -> String {
+    if crate::services::message_outbox::is_non_turn_operational_alert(source, reason_code) {
+        crate::services::discord::dispatch_policy::prepend_operational_alert_origin(content)
+    } else {
+        content.to_string()
+    }
+}
+
 async fn deliver_with_bot(
     registry: &HealthRegistry,
     pg_pool: &PgPool,
@@ -30,11 +39,12 @@ async fn deliver_with_bot(
     bot: &str,
 ) -> (&'static str, String) {
     let (correlation_id, semantic_event_id) = row.delivery_ids();
+    let content = delivery_content(&row.content, &row.source, row.reason_code.as_deref());
     crate::services::discord::health::send_message_with_backends_and_delivery_options(
         registry,
         Some(pg_pool),
         &row.target,
-        &row.content,
+        &content,
         &row.source,
         bot,
         None,
@@ -90,7 +100,7 @@ pub(super) async fn deliver(
 
 #[cfg(test)]
 mod tests {
-    use super::should_fallback_to_notify;
+    use super::{delivery_content, should_fallback_to_notify};
 
     #[test]
     fn notify_fallback_requires_a_failed_actionable_announce_delivery() {
@@ -118,5 +128,19 @@ mod tests {
             "auto-queue-monitor",
             Some("auto_queue.monitor_recovery"),
         ));
+    }
+
+    #[test]
+    fn operational_alert_delivery_adds_non_turn_provenance() {
+        let marked = delivery_content(
+            "watchdog alert",
+            "dispatch_watchdog",
+            Some("dispatch_stuck"),
+        );
+        assert!(crate::services::discord::dispatch_policy::has_non_turn_provenance(&marked));
+        assert_eq!(
+            delivery_content("handoff", "lifecycle_notifier", Some("runtime_started")),
+            "handoff"
+        );
     }
 }

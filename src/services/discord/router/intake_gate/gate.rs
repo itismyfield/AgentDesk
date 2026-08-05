@@ -55,6 +55,27 @@ pub(in crate::services::discord) fn bot_author_allowed_for_live_intake(
     allowed_bot_ids.contains(&author_id) || announce_bot_id.is_some_and(|id| id == author_id)
 }
 
+/// Apply the sender policy at the live-intake queue boundary and reject
+/// non-turn provenance before any queue branch. `is_allowed_turn_sender`
+/// already rejects operational-alert provenance; the additional effective
+/// suppression here is monitor-origin text, while the combined check keeps the
+/// alert rejection explicit at this outer boundary.
+pub(super) fn should_admit_turn_message(
+    allowed_bot_ids: &[u64],
+    announce_bot_id: Option<u64>,
+    author_id: u64,
+    author_is_bot: bool,
+    text: &str,
+) -> bool {
+    crate::services::discord::dispatch_policy::is_allowed_turn_sender(
+        allowed_bot_ids,
+        announce_bot_id,
+        author_id,
+        author_is_bot,
+        text,
+    ) && !crate::services::discord::dispatch_policy::has_non_turn_provenance(text)
+}
+
 pub(super) fn live_sender_excluded_from_human_preservation(
     allowed_bot_ids: &[u64],
     author_id: u64,
@@ -150,6 +171,27 @@ mod tests {
             automation_id,
             UtilityBotUserIdResolution::Unconfigured,
             UtilityBotUserIdResolution::Unconfigured,
+        ));
+    }
+
+    #[test]
+    fn operational_alert_is_not_admitted_but_announce_handoff_is() {
+        let marked = crate::services::discord::dispatch_policy::prepend_operational_alert_origin(
+            "DISPATCH:watchdog alert",
+        );
+        assert!(!should_admit_turn_message(
+            &[1001],
+            Some(1001),
+            1001,
+            true,
+            &marked,
+        ));
+        assert!(should_admit_turn_message(
+            &[1001],
+            Some(1001),
+            1001,
+            true,
+            "DISPATCH:real handoff",
         ));
     }
 }

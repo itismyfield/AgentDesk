@@ -468,19 +468,74 @@ pub(in crate::services::discord) fn build_long_message_attachment(
 
 fn build_attachment_inline(text: &str, summary: Option<&str>) -> String {
     let footer = format!("\n\n{ATTACHMENT_FOOTER_PREFIX} ({} bytes)", text.len());
+    let has_operational_alert_origin =
+        crate::services::discord::dispatch_policy::strip_operational_alert_origin(text).1;
     let trimmed_summary = summary.and_then(|s| {
         let t = s.trim();
         (!t.is_empty()).then_some(t)
     });
 
+    // Re-apply provenance before checking the limit. The hidden marker uses one
+    // Unicode scalar per bit: `[origin=operational_alert]` is 26 UTF-8 bytes,
+    // so the current marker contributes 208 characters. A summary that fits
+    // without the marker must therefore be allowed to fall back to the short
+    // generic notice instead of producing an over-limit inline message.
+    let with_provenance = |inline: String| {
+        if has_operational_alert_origin {
+            crate::services::discord::dispatch_policy::prepend_operational_alert_origin(&inline)
+        } else {
+            inline
+        }
+    };
+
     if let Some(summary) = trimmed_summary {
-        if char_count(summary) + char_count(&footer) <= DISCORD_MSG_LIMIT {
-            return format!("{summary}{footer}");
+        let candidate = with_provenance(format!("{summary}{footer}"));
+        if char_count(&candidate) <= DISCORD_MSG_LIMIT {
+            return candidate;
         }
     }
 
-    format!(
+    let fallback = with_provenance(format!(
         "📎 내용이 길어 전문을 파일로 첨부했습니다. ({} bytes)",
         text.len()
-    )
+    ));
+    // The fixed fallback is currently well below the remaining budget after
+    // the 208-character marker. If either wording or marker grows past the
+    // Discord limit, this attachment path has no second inline fallback and
+    // the send will surface Discord's length rejection; keep this assertion so
+    // that such a change is caught in debug/test builds rather than hidden.
+    debug_assert!(char_count(&fallback) <= DISCORD_MSG_LIMIT);
+    fallback
+}
+
+#[cfg(test)]
+mod attachment_delivery_tests {
+    use super::build_long_message_attachment;
+    use crate::services::discord::DISCORD_MSG_LIMIT;
+    use crate::services::discord::dispatch_policy::{
+        has_non_turn_provenance, is_allowed_turn_sender, prepend_operational_alert_origin,
+    };
+
+    const ANNOUNCE_ID: u64 = 1_001;
+
+    #[test]
+    fn oversize_operational_alert_attachment_inline_remains_non_turn() {
+        let operational_alert = prepend_operational_alert_origin(&format!(
+            "DISPATCH:operational alert\n{}",
+            "x".repeat(DISCORD_MSG_LIMIT)
+        ));
+        assert!(operational_alert.chars().count() > DISCORD_MSG_LIMIT);
+
+        let (inline, _attachment) = build_long_message_attachment(&operational_alert, None);
+
+        assert!(has_non_turn_provenance(&inline));
+        assert!(!is_allowed_turn_sender(
+            &[ANNOUNCE_ID],
+            Some(ANNOUNCE_ID),
+            ANNOUNCE_ID,
+            true,
+            &inline,
+        ));
+        assert!(inline.chars().count() <= DISCORD_MSG_LIMIT);
+    }
 }

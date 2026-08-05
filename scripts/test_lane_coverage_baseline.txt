@@ -86,7 +86,6 @@ server::maintenance::registry_membership_tests
 server::maintenance::storage_jobs::tests
 server::message_outbox_retry_tests
 server::multinode_regression::tests
-server::outbox_actionable_delivery::tests
 server::policy_tick_schedule_tests
 server::rate_limit_header_tests
 server::routes::agents::tmux_relay_adoption_state_tests
@@ -218,7 +217,6 @@ services::discord::commands::tui_passthrough::tests
 services::discord::commands::voice::auto_join_tests
 services::discord::compact_turn_authority::tests
 services::discord::completion_footer_metadata::tests
-services::discord::dispatch_policy::allowed_turn_sender_tests
 services::discord::dispatch_policy::dispatch_turn_gate_tests
 services::discord::followup_retry_requeue_tests
 services::discord::footer_view_reconciler::tests
@@ -330,7 +328,6 @@ services::discord::router::dispatch_trigger::tests
 services::discord::router::intake_dispatch::notice::tests
 services::discord::router::intake_dispatch::tests
 services::discord::router::intake_gate::busy_duplicate_notice::tests
-services::discord::router::intake_gate::gate::tests
 services::discord::router::intake_gate::live_intake_preserve_wiring_tests
 services::discord::router::intake_gate::queue_effects::channel_queued_placeholder_pure_tests
 services::discord::router::intake_gate::queue_effects::duplicate_repair_interleaving_tests
@@ -357,7 +354,6 @@ services::discord::router::message_handler::voice_announcement_route::voice_rout
 services::discord::router::message_handler::voice_announcement_scope::tests
 services::discord::router::message_handler::watchdog::cold_start_retry_tests
 services::discord::router::message_handler::watchdog::relay_state_contract_refs
-services::discord::router::message_handler::watchdog::timeout_notice_tests
 services::discord::router::response_format::tests
 services::discord::runtime_bootstrap::bootstrap_tests
 services::discord::runtime_bootstrap::framework_setup::slash_command_registration_tests
@@ -555,7 +551,6 @@ services::memory::memento::tool_feedback_trigger_type_tests
 services::memory::memento::workspace_scope_tests
 services::memory::memento_instructions_cache::tests
 services::memory::memento_throttle::forget_ratio_tests
-services::message_outbox::dedupe_key_tests
 services::message_outbox::stop_turn_notify_removal_tests
 services::message_outbox_circuit_authority_tests
 services::message_outbox_recovery_tests
