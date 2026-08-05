@@ -44,9 +44,17 @@ class RawWriterAllowlistTests(unittest.TestCase):
         ok, message = guard.check(root)
         self.assertFalse(ok)
         self.assertIn("src/config.rs", message)
-    def test_comments_do_not_create_call_sites(self):
-        ok, message = guard.check(self.fixture("// append_delivery_journal_batch()\n"))
+    def test_line_comments_are_excluded_but_block_comments_and_strings_count(self):
+        """Declare the exact lexical boundary: // is excluded; /* */ and strings count."""
+        ok, message = guard.check(self.fixture("// append_delivery_journal_batch(x);\n"))
         self.assertTrue(ok, message)
+        for marker in (
+            "/* append_delivery_journal_batch(x); */\n",
+            'const S: &str = "append_delivery_journal_batch(x);";\n',
+        ):
+            ok, message = guard.check(self.fixture(marker))
+            self.assertFalse(ok, marker)
+            self.assertIn("raw writer call count 2 exceeds monotonic baseline 1", message)
 
     def test_test_area_and_string_facade_markers_count_as_declared(self):
         """Evidence: whole-file lexical scanning counts test and string text."""

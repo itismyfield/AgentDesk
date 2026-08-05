@@ -7,6 +7,13 @@ import sys
 from collections import Counter
 from pathlib import Path
 SYMBOL = "append_delivery_journal_batch"
+# `CALL`/`call_sites()` use a cheap lexical text match, not Rust parsing: each
+# line has only the suffix after `//` removed. Therefore symbols in block
+# comments (`/* */`, `/** */`) and string literals are counted as calls and can
+# make harmless text produce a false-red; line comments are excluded. A failure
+# is intentionally loud and self-explanatory (it prints the filename and count)
+# so the cause is immediately visible. This is a monotonic guard against new
+# raw writers outside `journal.rs`, not exact call analysis.
 CALL = re.compile(rf"\b{SYMBOL}\s*\(")
 ALLOWLIST = Counter({"src/services/discord/session_relay_sink/journal.rs": 1})
 BASELINE = 1
