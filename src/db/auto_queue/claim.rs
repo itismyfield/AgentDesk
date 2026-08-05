@@ -1,6 +1,7 @@
 use sqlx::{PgPool, Row as SqlxRow};
 
 use super::phase_gates::batch_phase_is_eligible;
+use super::run_status::live_run_statuses_sql;
 use super::slot_predicate::{DispatchSlotPolarity, active_dispatch_on_slot_predicate};
 use super::slots::{
     ensure_agent_slot_pool_rows_pg, run_slot_pool_size_pg, slot_has_active_dispatch_pg,
@@ -295,6 +296,18 @@ fn active_dispatch_slot_exists_sql(agent_expr: &str, slot_expr: &str) -> String 
     active_dispatch_on_slot_predicate(agent_expr, slot_expr, DispatchSlotPolarity::Exists, None)
 }
 
+fn live_run_allocation_guard_sql(run_expr: &str) -> String {
+    let live_statuses = live_run_statuses_sql();
+    format!(
+        "EXISTS (
+             SELECT 1
+             FROM auto_queue_runs allocation_run
+             WHERE allocation_run.id = {run_expr}
+               AND allocation_run.status IN ({live_statuses})
+         )"
+    )
+}
+
 async fn first_free_slot_blocked_by_active_dispatch_pg(
     pool: &PgPool,
     agent_id: &str,
@@ -375,14 +388,17 @@ async fn allocate_slot_for_group_agent_pg_inner(
     agent_id: &str,
 ) -> Result<Option<SlotAllocation>, String> {
     for attempt in 1..=SLOT_ALLOCATION_MAX_RETRIES {
-        let existing = sqlx::query_scalar::<_, i64>(
+        let existing_run_guard = live_run_allocation_guard_sql("$2");
+        let existing_query = format!(
             "SELECT slot_index::BIGINT
              FROM auto_queue_slots
              WHERE agent_id = $1
                AND assigned_run_id = $2
                AND COALESCE(assigned_thread_group, 0) = $3
+               AND {existing_run_guard}
              LIMIT 1",
-        )
+        );
+        let existing = sqlx::query_scalar::<_, i64>(&existing_query)
         .bind(agent_id)
         .bind(run_id)
         .bind(thread_group)
@@ -420,6 +436,7 @@ async fn allocate_slot_for_group_agent_pg_inner(
         }
 
         let reusable_slot_guard = active_dispatch_slot_guard_sql("s.agent_id", "s.slot_index");
+        let reusable_run_guard = live_run_allocation_guard_sql("$2");
         let reusable_slot_query = format!(
             "SELECT s.slot_index::BIGINT,
                     s.assigned_thread_group::BIGINT
@@ -427,6 +444,7 @@ async fn allocate_slot_for_group_agent_pg_inner(
              WHERE s.agent_id = $1
                AND s.assigned_run_id = $2
                AND COALESCE(s.assigned_thread_group, -1) != $3
+               AND {reusable_run_guard}
                AND NOT EXISTS (
                    SELECT 1
                    FROM auto_queue_entries e
@@ -467,6 +485,7 @@ async fn allocate_slot_for_group_agent_pg_inner(
                 "auto_queue_slots.agent_id",
                 "auto_queue_slots.slot_index",
             );
+            let rebound_run_guard = live_run_allocation_guard_sql("$4");
             let rebound_query = format!(
                 "UPDATE auto_queue_slots
                  SET assigned_thread_group = $1,
@@ -475,6 +494,7 @@ async fn allocate_slot_for_group_agent_pg_inner(
                    AND slot_index = $3
                    AND assigned_run_id = $4
                    AND COALESCE(assigned_thread_group, -1) != $1
+                   AND {rebound_run_guard}
                    AND NOT EXISTS (
                        SELECT 1
                        FROM auto_queue_entries e
@@ -574,17 +594,20 @@ async fn allocate_slot_for_group_agent_pg_inner(
             "auto_queue_slots.agent_id",
             "auto_queue_slots.slot_index",
         );
+        let free_run_guard = live_run_allocation_guard_sql("$2");
         let free_slot_query = format!(
             "SELECT slot_index::BIGINT
              FROM auto_queue_slots
              WHERE agent_id = $1
                AND assigned_run_id IS NULL
+               AND {free_run_guard}
                AND {free_slot_guard}
              ORDER BY slot_index ASC
              LIMIT 1"
         );
         let free_slot = sqlx::query_scalar::<_, i64>(&free_slot_query)
         .bind(agent_id)
+        .bind(run_id)
         .fetch_optional(pool)
         .await
         .map_err(|error| {
@@ -617,6 +640,7 @@ async fn allocate_slot_for_group_agent_pg_inner(
             "auto_queue_slots.agent_id",
             "auto_queue_slots.slot_index",
         );
+        let claim_run_guard = live_run_allocation_guard_sql("$1");
         let claim_query = format!(
             "UPDATE auto_queue_slots
              SET assigned_run_id = $1,
@@ -625,6 +649,7 @@ async fn allocate_slot_for_group_agent_pg_inner(
              WHERE agent_id = $3
                AND slot_index = $4
                AND assigned_run_id IS NULL
+               AND {claim_run_guard}
                AND {claim_slot_guard}"
         );
         let claimed = sqlx::query(&claim_query)

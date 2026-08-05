@@ -3,7 +3,7 @@ use sqlx::{PgPool, Row as SqlxRow};
 use super::entries::{ENTRY_STATUS_DONE, ENTRY_STATUS_USER_CANCELLED};
 use super::slots::release_run_slots_on_pg_tx;
 
-async fn queue_run_completion_notify_on_pg(
+pub(crate) async fn queue_run_completion_notify_on_pg(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
 ) -> Result<(), String> {
@@ -236,6 +236,15 @@ pub async fn pause_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, String
 }
 
 pub async fn resume_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, String> {
+    // Keep scoped Resume on the same canonical gate predicate as the global
+    // Resume route. A pending/failed gate must leave the paused run untouched.
+    if super::phase_gates::run_has_blocking_phase_gate_pg(pool, run_id)
+        .await
+        .map_err(|error| format!("check blocking phase gates for run {run_id}: {error}"))?
+    {
+        return Ok(false);
+    }
+
     let updated = sqlx::query(
         "UPDATE auto_queue_runs
          SET status = 'active',

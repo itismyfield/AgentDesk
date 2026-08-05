@@ -270,6 +270,7 @@ src/
 │   │   ├── analytics.rs
 │   │   ├── auth.rs
 │   │   ├── auto_queue.rs
+│   │   ├── auto_queue_lifecycle_pg_tests.rs
 │   │   ├── automation_candidates.rs
 │   │   ├── claude_accounts_api.rs
 │   │   ├── cluster.rs
@@ -370,6 +371,7 @@ src/
 │   │   ├── dispatch_command.rs
 │   │   ├── dispatch_query.rs
 │   │   ├── fsm.rs
+│   │   ├── lifecycle_routes.rs
 │   │   ├── order_routes.rs
 │   │   ├── phase_gate.rs
 │   │   ├── phase_gate_catalog.rs

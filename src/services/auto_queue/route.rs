@@ -45,6 +45,8 @@ mod dispatch_command;
 mod dispatch_query;
 #[path = "fsm.rs"]
 mod fsm;
+#[path = "lifecycle_routes.rs"]
+mod lifecycle_routes;
 #[path = "order_routes.rs"]
 mod order_routes;
 #[path = "phase_gate.rs"]
@@ -75,6 +77,7 @@ pub use control_routes::{
     cancel, pause, reorder, repair_phase_gates, reset, reset_global, reset_slot_thread, resume_run,
     update_run,
 };
+pub use lifecycle_routes::{end_run, pause_run, resume_run_scoped};
 pub use order_routes::{OrderBody, submit_order};
 pub use phase_gate_catalog::{DEFAULT_PHASE_GATE_KIND, catalog as phase_gate_catalog};
 pub use phase_gate_violations::violations_route;

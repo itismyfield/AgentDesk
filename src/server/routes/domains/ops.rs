@@ -312,6 +312,12 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route("/queue/runs/{id}/entries", post(auto_queue::add_run_entry))
             .route("/queue/entries/{id}/skip", patch(auto_queue::skip_entry))
             .route("/queue/runs/{id}", patch(auto_queue::update_run))
+            .route("/queue/runs/{id}/pause", post(auto_queue::pause_run))
+            .route(
+                "/queue/runs/{id}/resume",
+                post(auto_queue::resume_run_scoped),
+            )
+            .route("/queue/runs/{id}/end", post(auto_queue::end_run))
             .route("/queue/reorder", patch(auto_queue::reorder))
             .route(
                 "/queue/slots/{agent_id}/{slot_index}/rebind",

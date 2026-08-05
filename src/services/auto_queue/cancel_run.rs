@@ -862,24 +862,38 @@ pub(crate) async fn clear_and_release_slots_for_runs_pg(
     }
 }
 
-pub(crate) async fn cancel_selected_runs_with_pg(
+async fn terminalize_selected_runs_with_pg(
     health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
     pool: &PgPool,
     target_run_ids: &[String],
     reason: &str,
-) -> Result<Value, String> {
+) -> Result<(Value, Vec<String>), String> {
+    let completes_run = reason == "auto_queue_end";
+    let run_status_filter = if completes_run {
+        "status IN ('active', 'paused', 'generated', 'pending')"
+    } else {
+        "status IN ('active', 'paused', 'restoring')"
+    };
+    let terminal_status = if completes_run {
+        "completed"
+    } else {
+        "cancelled"
+    };
     if target_run_ids.is_empty() {
-        return Ok(json!({
-            "ok": true,
-            "cancelled_entries": 0usize,
-            "cancelled_runs": 0usize,
-            "cancelled_dispatches": 0usize,
-            "deleted_phase_gates": 0usize,
-            "rolled_back_cards": 0usize,
-            "remaining_live_dispatches": 0usize,
-            "released_slots": 0usize,
-            "cleared_slot_sessions": 0usize,
-        }));
+        return Ok((
+            json!({
+                "ok": true,
+                "cancelled_entries": 0usize,
+                "cancelled_runs": 0usize,
+                "cancelled_dispatches": 0usize,
+                "deleted_phase_gates": 0usize,
+                "rolled_back_cards": 0usize,
+                "remaining_live_dispatches": 0usize,
+                "released_slots": 0usize,
+                "cleared_slot_sessions": 0usize,
+            }),
+            Vec::new(),
+        ));
     }
 
     let mut tx = pool
@@ -887,11 +901,17 @@ pub(crate) async fn cancel_selected_runs_with_pg(
         .await
         .map_err(|error| format!("begin postgres run cancel transaction: {error}"))?;
 
-    let locked_run_ids = sqlx::query_scalar::<_, String>(
+    let lock_status_filter = if completes_run {
+        run_status_filter
+    } else {
+        "TRUE"
+    };
+    let lock_runs_sql = format!(
         "WITH target_runs AS (
              SELECT id
              FROM auto_queue_runs
              WHERE id = ANY($1)
+               AND {lock_status_filter}
              ORDER BY id ASC
          ),
          locked AS (
@@ -899,12 +919,13 @@ pub(crate) async fn cancel_selected_runs_with_pg(
                     pg_advisory_xact_lock(hashtext('aq_run:' || id)) AS _lock
              FROM target_runs
          )
-         SELECT id FROM locked ORDER BY id ASC",
-    )
-    .bind(target_run_ids)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(|error| format!("lock postgres auto_queue_runs for cancel: {error}"))?;
+         SELECT id FROM locked ORDER BY id ASC"
+    );
+    let locked_run_ids = sqlx::query_scalar::<_, String>(&lock_runs_sql)
+        .bind(target_run_ids)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|error| format!("lock postgres auto_queue_runs for cancel: {error}"))?;
 
     let rollback_candidate_card_ids = sqlx::query_scalar::<_, String>(
         "SELECT DISTINCT kanban_card_id
@@ -952,20 +973,22 @@ pub(crate) async fn cancel_selected_runs_with_pg(
             .map_err(|error| format!("delete postgres auto_queue_phase_gates: {error}"))?
             .rows_affected() as usize;
 
-    let cancelled_runs = sqlx::query(
+    let update_runs_sql = format!(
         "UPDATE auto_queue_runs
-         SET status = 'cancelled',
+         SET status = $2,
              completed_at = NOW()
          WHERE id = ANY($1)
-           AND status IN ('active', 'paused', 'restoring')",
-    )
-    .bind(&locked_run_ids)
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| format!("cancel postgres auto_queue_runs: {error}"))?
-    .rows_affected() as usize;
+           AND {run_status_filter}"
+    );
+    let terminalized_runs = sqlx::query(&update_runs_sql)
+        .bind(&locked_run_ids)
+        .bind(terminal_status)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("cancel postgres auto_queue_runs: {error}"))?
+        .rows_affected() as usize;
 
-    let mut cancelled_entries = 0usize;
+    let mut terminalized_entries = 0usize;
     for (entry_id, _entry_status, _dispatch_id) in entry_rows {
         let current_status =
             sqlx::query_scalar::<_, String>("SELECT status FROM auto_queue_entries WHERE id = $1")
@@ -986,7 +1009,7 @@ pub(crate) async fn cancel_selected_runs_with_pg(
             )
             .await?;
         }
-        cancelled_entries += 1;
+        terminalized_entries += 1;
     }
 
     let released_slot_rows = sqlx::query(
@@ -1014,6 +1037,12 @@ pub(crate) async fn cancel_selected_runs_with_pg(
             Ok((agent_id, slot_index))
         })
         .collect::<Result<Vec<_>, String>>()?;
+
+    if completes_run && terminalized_runs > 0 {
+        for run_id in &locked_run_ids {
+            crate::db::auto_queue::queue_run_completion_notify_on_pg(&mut tx, run_id).await?;
+        }
+    }
 
     tx.commit()
         .await
@@ -1051,8 +1080,6 @@ pub(crate) async fn cancel_selected_runs_with_pg(
             )),
         }
     }
-    let rolled_back_cards =
-        rollback_cancelled_run_cards_pg(pool, &rollback_candidate_card_ids, reason).await;
     let remaining_live_dispatches = count_live_dispatches_for_runs_pg(pool, target_run_ids).await?;
     let cleanup = LiveRunCleanupResult {
         cancelled_dispatches: cancel_metas.len(),
@@ -1079,11 +1106,11 @@ pub(crate) async fn cancel_selected_runs_with_pg(
 
     let mut response = json!({
         "ok": true,
-        "cancelled_entries": cancelled_entries,
-        "cancelled_runs": cancelled_runs,
+        "cancelled_entries": terminalized_entries,
+        "cancelled_runs": terminalized_runs,
         "cancelled_dispatches": cleanup.cancelled_dispatches,
         "deleted_phase_gates": deleted_phase_gates,
-        "rolled_back_cards": rolled_back_cards,
+        "rolled_back_cards": 0usize,
         "remaining_live_dispatches": remaining_live_dispatches,
         "released_slots": cleanup.slot_cleanup.released_slots,
         "cleared_slot_sessions": cleanup.slot_cleanup.cleared_slot_sessions,
@@ -1091,7 +1118,39 @@ pub(crate) async fn cancel_selected_runs_with_pg(
     if let Some(warning) = slot_cleanup_warning(&cleanup.slot_cleanup.warnings) {
         response["warning"] = json!(warning);
     }
+    Ok((response, rollback_candidate_card_ids))
+}
+
+pub(crate) async fn cancel_selected_runs_with_pg(
+    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    pool: &PgPool,
+    target_run_ids: &[String],
+    reason: &str,
+) -> Result<Value, String> {
+    let (mut response, rollback_candidate_card_ids) =
+        terminalize_selected_runs_with_pg(health_registry, pool, target_run_ids, reason).await?;
+    let rolled_back_cards =
+        rollback_cancelled_run_cards_pg(pool, &rollback_candidate_card_ids, reason).await;
+    response["rolled_back_cards"] = json!(rolled_back_cards);
     Ok(response)
+}
+
+pub(crate) async fn end_run_with_pg(
+    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    pool: &PgPool,
+    run_id: &str,
+) -> Result<bool, String> {
+    let (response, _) = terminalize_selected_runs_with_pg(
+        health_registry,
+        pool,
+        &[run_id.to_string()],
+        "auto_queue_end",
+    )
+    .await?;
+    Ok(response
+        .get("cancelled_runs")
+        .and_then(Value::as_u64)
+        .is_some_and(|count| count > 0))
 }
 
 pub(crate) async fn skip_dispatched_entries_for_runs_pg(

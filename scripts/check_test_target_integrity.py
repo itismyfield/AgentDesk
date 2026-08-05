@@ -91,9 +91,9 @@ LIB_INVENTORY_KNOWN_CARGO_ONLY = frozenset({
 # Keep the count beside the digest so a failed check reports a signed count
 # delta even though the compact pin deliberately does not embed every identity.
 LIB_INVENTORY_STATIC_IDS_SHA256 = (
-    "87b82e474b61bcfc15f4538d23e9b76ff1c484658276eb16bf677b8a6d89ccd6"
+    "ba2889681f59618f2af135d354a1e5958bbb491a9e3d82ec362d50a4551600a0"
 )
-LIB_INVENTORY_STATIC_IDS_COUNT = 7465
+LIB_INVENTORY_STATIC_IDS_COUNT = 7474
 
 
 @dataclass(frozen=True)

@@ -147,7 +147,7 @@ export default function AutoQueuePanelHeader({ ctx }: { ctx: any }) {
           )}
           {run?.status === "active" && (
             <button
-              onClick={() => void handleRunAction(run, "paused")}
+              onClick={() => void handleRunAction(run, "pause")}
               className="text-xs px-2 py-1 rounded-lg border"
               style={{
                 borderColor: "rgba(148,163,184,0.22)",
@@ -159,7 +159,7 @@ export default function AutoQueuePanelHeader({ ctx }: { ctx: any }) {
           )}
           {run?.status === "paused" && (
             <button
-              onClick={() => void handleRunAction(run, "active")}
+              onClick={() => void handleRunAction(run, "resume")}
               className="text-xs px-2 py-1 rounded-lg border"
               style={{ borderColor: "rgba(16,185,129,0.3)", color: "#10b981" }}
             >

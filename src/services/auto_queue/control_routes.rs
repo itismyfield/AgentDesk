@@ -11,6 +11,7 @@ pub async fn update_run(
     Path(id): Path<String>,
     Json(body): Json<UpdateRunBody>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    super::lifecycle_routes::validate_patch_status(&body)?;
     if body
         .deploy_phases
         .as_ref()
@@ -19,24 +20,18 @@ pub async fn update_run(
     {
         return Err(auto_queue_json_error(
             StatusCode::FORBIDDEN,
-            Json(json!({
-                "error": "deploy_phases requires server.auth_token to be configured"
-            })),
+            Json(json!({"error": "deploy_phases requires server.auth_token to be configured"})),
         ));
     }
-
     let Some(pool) = state.pg_pool_ref() else {
         return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
-    if let Some(max_concurrent_threads) = body.max_concurrent_threads {
-        if max_concurrent_threads <= 0 {
-            return Err(auto_queue_json_error(
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "max_concurrent_threads must be > 0"})),
-            ));
-        }
+    if body.max_concurrent_threads.is_some_and(|value| value <= 0) {
+        return Err(auto_queue_json_error(
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "max_concurrent_threads must be > 0"})),
+        ));
     }
-
     let ignored_unified_thread = body.unified_thread.is_some();
     if body.status.is_none()
         && body.deploy_phases.is_none()
@@ -48,8 +43,21 @@ pub async fn update_run(
             Json(json!({"error": "no fields to update"})),
         ));
     }
-
     match update_run_with_pg(&id, &body, pool).await {
+        Ok((_, Some(false))) => Err(auto_queue_json_error(
+            StatusCode::CONFLICT,
+            Json(json!({"error": format!("auto-queue run '{id}' is not pending")})),
+        )),
+        Ok((0, None))
+            if body.status.is_some()
+                || body.deploy_phases.is_some()
+                || body.max_concurrent_threads.is_some() =>
+        {
+            Err(auto_queue_json_error(
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("auto-queue run '{id}' not found")})),
+            ))
+        }
         Ok(_) => Ok((
             StatusCode::OK,
             Json(json!({
