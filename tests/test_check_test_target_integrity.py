@@ -250,7 +250,7 @@ class RunListCheckContract(unittest.TestCase):
         self.assertIn("rc=101", detail)
 
 
-class LibInventoryIdentityContract(unittest.TestCase):
+class LibInventoryManifestContract(unittest.TestCase):
     def _fixture(self, root: Path) -> None:
         (root / "src" / "nested").mkdir(parents=True)
         (root / "Cargo.toml").write_text(
@@ -305,92 +305,132 @@ mod after_string_brace {
             frozenset(),
         )
 
-    def _inventory_cli(self, comparison, pinned_ids: set[str]) -> int:
+    def _write_manifest(self, root: Path, test_ids: set[str], raw: str | None = None) -> Path:
+        path = root / integrity.LIB_INVENTORY_MANIFEST_REL
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(
+            (raw if raw is not None else
+             integrity.render_lib_inventory_manifest(test_ids)).encode("utf-8")
+        )
+        return path
+
+    def _inventory_cli(self, root: Path, comparison) -> tuple[int, str]:
+        output = io.StringIO()
         with mock.patch.object(
             integrity, "compare_lib_inventory", return_value=comparison,
-        ), mock.patch.object(
-            integrity, "LIB_INVENTORY_STATIC_IDS_SHA256",
-            integrity._identity_digest(pinned_ids),
-        ), mock.patch.object(
-            integrity, "LIB_INVENTORY_STATIC_IDS_COUNT", len(pinned_ids),
-        ), contextlib.redirect_stdout(io.StringIO()):
-            return integrity.main([
-                "--repo-root", str(REPO_ROOT), "--verify-lib-inventory",
+        ), contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            rc = integrity.main([
+                "--repo-root", str(root), "--verify-lib-inventory",
             ])
+        return rc, output.getvalue()
 
-    def test_cli_accepts_exact_pinned_static_identity(self) -> None:
+    def test_manifest_matches_actual_set(self) -> None:
         baseline = {"module::tests::kept", "module::tests::guard"}
-        self.assertEqual(self._inventory_cli(
-            self._comparison(baseline), baseline,
-        ), 0)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_manifest(root, baseline)
+            rc, rendered = self._inventory_cli(root, self._comparison(baseline))
+        self.assertEqual(rc, 0, rendered)
+        self.assertIn("manifest=match", rendered)
 
-    def test_cli_rejects_identity_deleted_from_static_and_cargo(self) -> None:
+    def test_added_id_fails_and_names_the_id(self) -> None:
         baseline = {"module::tests::kept", "module::tests::guard"}
-        deleted = {"module::tests::kept"}
-        self.assertEqual(self._inventory_cli(
-            self._comparison(deleted), baseline,
-        ), 1, "identity deletion must fail even when static/cargo drift sets match")
+        added = baseline | {"module::tests::new_case"}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_manifest(root, baseline)
+            rc, rendered = self._inventory_cli(root, self._comparison(added))
+        self.assertNotEqual(rc, 0)
+        self.assertIn(
+            "lib inventory actual-only (added in source): module::tests::new_case",
+            rendered,
+        )
+        self.assertIn("--write-lib-inventory-manifest", rendered)
 
-    def test_cli_rejects_same_count_identity_rename(self) -> None:
-        baseline = {"module::tests::kept", "module::tests::guard"}
-        renamed = {"module::tests::kept", "module::tests::renamed_guard"}
-        self.assertEqual(self._inventory_cli(
-            self._comparison(renamed), baseline,
-        ), 1, "same-count identity replacement must fail")
+    def test_deleted_id_fails_and_names_the_id(self) -> None:
+        baseline = {"module::tests::kept", "module::tests::deleted"}
+        actual = {"module::tests::kept"}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_manifest(root, baseline)
+            rc, rendered = self._inventory_cli(root, self._comparison(actual))
+        self.assertNotEqual(rc, 0)
+        self.assertIn(
+            "lib inventory manifest-only (deleted from source): module::tests::deleted",
+            rendered,
+        )
 
-    def test_print_flag_reports_digest_and_signed_count_delta(self) -> None:
+    def test_unsorted_manifest_fails_closed(self) -> None:
+        raw = "\n".join([
+            integrity.LIB_INVENTORY_MANIFEST_HEADER,
+            *integrity.LIB_INVENTORY_MANIFEST_RULES,
+            "[tests]",
+            "module::tests::z_case",
+            "module::tests::a_case",
+            "",
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_manifest(root, set(), raw=raw)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                rc = integrity.main([
+                    "--repo-root", str(root), "--verify-lib-inventory",
+                ])
+        self.assertNotEqual(rc, 0)
+        self.assertIn("must be sorted by bytewise UTF-8 order", output.getvalue())
+
+    def test_missing_manifest_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                rc = integrity.main([
+                    "--repo-root", str(root), "--verify-lib-inventory",
+                ])
+        self.assertNotEqual(rc, 0)
+        rendered = output.getvalue()
+        self.assertIn("cannot read", rendered)
+        self.assertIn("--write-lib-inventory-manifest", rendered)
+
+    def test_manifest_parser_rejects_duplicates_and_noncanonical_newlines(self) -> None:
+        duplicate = "\n".join([
+            integrity.LIB_INVENTORY_MANIFEST_HEADER,
+            *integrity.LIB_INVENTORY_MANIFEST_RULES,
+            "[tests]", "module::tests::same", "module::tests::same", "",
+        ])
+        with self.assertRaisesRegex(ValueError, "duplicate test IDs"):
+            integrity.parse_lib_inventory_manifest(duplicate)
+        with self.assertRaisesRegex(ValueError, "final LF"):
+            integrity.parse_lib_inventory_manifest(duplicate[:-1])
+        with self.assertRaisesRegex(ValueError, "LF line endings"):
+            integrity.parse_lib_inventory_manifest(duplicate.replace("\n", "\r\n"))
+
+    def test_write_flag_generates_canonical_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._fixture(root)
             output = io.StringIO()
-            with mock.patch.object(
-                integrity, "LIB_INVENTORY_STATIC_IDS_COUNT", 3,
-            ), contextlib.redirect_stdout(output):
+            with contextlib.redirect_stdout(output):
                 rc = integrity.main([
                     "--repo-root", str(root),
-                    "--print-lib-inventory-digest",
+                    "--write-lib-inventory-manifest",
                 ])
+            path = root / integrity.LIB_INVENTORY_MANIFEST_REL
+            rendered = path.read_bytes()
+            manifest_ids = integrity.load_lib_inventory_manifest(path)
         self.assertEqual(rc, 0)
-        rendered = output.getvalue()
-        expected_ids = {
-            "nested::tests::plain_case",
-            "nested::tests::async_case",
-            "nested::after_string_brace::keeps_root_scope",
-        }
-        self.assertIn(
-            f"lib inventory static digest: {integrity._identity_digest(expected_ids)}",
-            rendered,
+        self.assertEqual(
+            manifest_ids,
+            frozenset({
+                "nested::tests::plain_case",
+                "nested::tests::async_case",
+                "nested::after_string_brace::keeps_root_scope",
+            }),
         )
-        self.assertIn("lib inventory static count: current=3 pinned=3 delta=+0", rendered)
-        self.assertIn("LIB_INVENTORY_STATIC_IDS_SHA256", rendered)
-
-    def test_changed_pin_stays_red_and_reports_repin_command(self) -> None:
-        baseline = {"module::tests::kept", "module::tests::guard"}
-        added = baseline | {"module::tests::new_case"}
-        output = io.StringIO()
-        with mock.patch.object(
-            integrity, "compare_lib_inventory", return_value=self._comparison(added),
-        ), mock.patch.object(
-            integrity, "LIB_INVENTORY_STATIC_IDS_SHA256",
-            integrity._identity_digest(baseline),
-        ), mock.patch.object(
-            integrity, "LIB_INVENTORY_STATIC_IDS_COUNT", len(baseline),
-        ), contextlib.redirect_stdout(output):
-            rc = integrity.main([
-                "--repo-root", str(REPO_ROOT), "--verify-lib-inventory",
-            ])
-        self.assertEqual(rc, 1)
-        rendered = output.getvalue()
-        self.assertIn("static=changed", rendered)
-        self.assertIn(
-            f"digest={integrity._identity_digest(added)}", rendered,
-        )
-        self.assertIn("delta=+1", rendered)
-        self.assertIn(
-            "python3 scripts/check_test_target_integrity.py "
-            "--print-lib-inventory-digest",
-            rendered,
-        )
+        self.assertTrue(rendered.endswith(b"\n"))
+        self.assertNotIn(b"\r", rendered)
+        self.assertIn("entries=3", output.getvalue())
 
     def test_ci_script_runs_inventory_verifier_as_a_standalone_command(self) -> None:
         lines = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(

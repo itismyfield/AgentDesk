@@ -62,23 +62,29 @@
 
 ### CI lib-test identity inventory pin
 
-The source-of-truth for the static lib-test identity pin is
+The source-of-truth for the static lib-test identity pin is the sorted manifest
+`scripts/lib_test_inventory_manifest.txt`, generated and checked by
 `scripts/check_test_target_integrity.py`. Adding, deleting, or renaming a Rust
 lib test requires a reviewable companion update:
 
 1. Run `python3 scripts/check_test_target_integrity.py
-   --print-lib-inventory-digest` (this is read-only and does not compile).
-2. Review the source diff and the command's digest/count output. Update
-   `LIB_INVENTORY_STATIC_IDS_SHA256` and, when the signed count delta is not
-   zero, `LIB_INVENTORY_STATIC_IDS_COUNT` in the same diff.
-3. Re-run `--verify-lib-inventory`; its failure output repeats the digest,
-   count delta, and the exact re-pin command.
+   --write-lib-inventory-manifest` (this is an explicit, non-compiling rewrite).
+2. Review the source diff and the manifest diff. The manifest has one `[tests]`
+   section; every full test ID appears exactly once, sorted by locale-independent
+   bytewise UTF-8 order. It is UTF-8 with LF endings and a final LF.
+3. Re-run `--verify-lib-inventory`. It compares the manifest and current static
+   source set in both directions and prints each `actual-only (added in source)`
+   or `manifest-only (deleted from source)` ID by name. A missing, malformed, or
+   unsorted manifest fails closed and repeats the exact regeneration command.
 
-The pin is a source constant, not an external immutable manifest. A deletion
-or rename can therefore pass if the same unreviewed diff re-pins it; the gate's
-guarantee is review visibility of the 64-hex digest/count change, not an
-unforgeable deletion block. Keep the named platform/include exceptions in the
-same file synchronized when a test moves across those compilation boundaries.
+The Rust source scanner can encounter the same full ID in cfg-disjoint
+declarations (the current Unix/non-Unix voice harness does this); it records
+those sites and canonicalizes the ID to one manifest row. Duplicate rows in the
+manifest itself are forbidden. If two same-ID declarations compile together,
+Cargo remains the independent compiler-level failure. Keep the named
+platform/include exceptions in the same file synchronized when a test moves
+across those compilation boundaries. Count and digest are derived at check
+time for diagnostics; neither is a stored approval value.
 
 ## Surface Map (by feature)
 

@@ -45,23 +45,24 @@ invocation 하한은 이 게이트가 보장하지 않는다.
 
 `scripts/ci-script-checks.sh`가 독립 실행하는
 `check_test_target_integrity.py --verify-lib-inventory` 검사는 Rust 소스에서
-정적으로 수집한 lib 테스트의 전체 이름 집합을 고정된 identity digest와 비교하고,
-같은 트리에서 `cargo test --lib -- --list`가 연 집합과의 차이가 명시된
-platform/include 차이인지 비교한다. 새 테스트를 추가하거나 기존 테스트를 삭제·이름
-변경하면 static identity digest가 달라지거나 저장된 개수 delta가 생겨 red가 된다.
-실패 출력에는 계산된 digest와 signed count delta가 함께 나오며, 다음 명령으로
-현재 값을 다시 계산할 수 있다:
+정적으로 수집한 lib 테스트의 전체 이름 집합을 정렬된
+`scripts/lib_test_inventory_manifest.txt`와 양방향 비교하고, 같은 트리에서
+`cargo test --lib -- --list`가 연 집합과의 차이가 명시된 platform/include 차이인지
+비교한다. 새 테스트를 추가하거나 기존 테스트를 삭제·이름 변경하면 manifest와
+static 집합의 차집합에 실제 test ID가 이름 그대로 출력되어 red가 된다. 실패
+출력에는 검사 시점에 파생한 count/digest와 함께 다음 재생성 명령이 그대로 나온다:
 
 ```sh
-python3 scripts/check_test_target_integrity.py --print-lib-inventory-digest
+python3 scripts/check_test_target_integrity.py --write-lib-inventory-manifest
 ```
 
-출력을 검토한 뒤 `scripts/check_test_target_integrity.py`의
-`LIB_INVENTORY_STATIC_IDS_SHA256`와 `LIB_INVENTORY_STATIC_IDS_COUNT`를 같은 diff에서
-수동으로 갱신한다. 이 pin은 리포 소스 안의 값이므로, 같은 PR에서 삭제·이름 변경을
-검토하지 않고 digest/count를 함께 재핀하면 통과할 수 있다. 즉 이 게이트가 제공하는
-것은 삭제·이름 변경 PR이 64-hex 상수와 count pin을 함께 건드려야 한다는 **리뷰
-가시성**이지, 외부 불변 원장에 의한 삭제 방지는 아니다.
+명령은 사람이 의도적으로 실행해 매니페스트를 다시 쓰는 절차다. 생성된
+`[tests]` 행을 소스 diff와 함께 검토한 뒤 `--verify-lib-inventory`를 다시 실행한다.
+검사는 자동으로 매니페스트를 고치지 않는다. 행은 중복 없이 locale-independent
+bytewise UTF-8 오름차순이어야 하고, 파일은 UTF-8/LF/최종 LF 형식이어야 한다.
+따라서 64-hex/count 한 줄보다 추가·삭제된 test ID 자체가 리뷰 diff에 노출된다.
+소스에서 cfg-분기 때문에 같은 full ID가 반복되면 스캐너가 위치를 진단하고
+집합에는 한 번만 canonicalize한다. 매니페스트의 중복 행은 거부한다.
 
 이 inventory 검사는 테스트 identity만 확인하며 다음을 보장하지 않는다.
 
@@ -75,9 +76,9 @@ python3 scripts/check_test_target_integrity.py --print-lib-inventory-digest
 - path filter에 `!src/...` 부정 패턴을 넣어 변경을 lane 선택에서 제외해도 Rust test
   identity는 바뀌지 않는다. 이 inventory 검사는 path-filter의 lane 선택 의미론을
   검증하지 않는다.
-- static identity digest/count pin 자체는 같은 PR에서 갱신할 수 있으므로, 그 갱신을
-  동반한 삭제·이름 변경을 이 검사만으로 막는 것은 보장하지 않는다. 반드시 소스 diff와
-  새 digest/count를 함께 리뷰해야 한다.
+- 매니페스트 자체는 같은 PR에서 갱신할 수 있으므로, 그 갱신을 동반한 삭제·이름
+  변경을 이 검사만으로 막는 것은 보장하지 않는다. 반드시 소스 diff와 이름 diff를
+  함께 리뷰해야 한다.
 
 `--verify-lib-inventory`는 `cargo test --manifest-path Cargo.toml --lib -- --list`를
 실행하므로 전체 lib 크레이트 컴파일이 필요하다. 이를 호출하는 PR `Script checks`와
