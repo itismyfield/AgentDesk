@@ -1903,12 +1903,10 @@ fn execute_streaming_local_tui_tmux(
 
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
-    // #3087: stamp a per-spawn nonce on the Codex-TUI DIRECT spawn path too.
-    // Without it this path produces no `.spawn_nonce`, so the status-panel
-    // instance key is `None` and the new-session boundary cannot be detected.
-    if let Err(e) = crate::services::discord::write_spawn_nonce(tmux_session_name) {
-        tracing::warn!("failed to write spawn nonce for {tmux_session_name} (codex-tui): {e}");
-    }
+    // Stamp `.generation` + `.spawn_nonce` on the Codex-TUI DIRECT spawn path
+    // too. #3087 originally added only the nonce here, leaving this path with no
+    // `.generation` — see `write_session_spawn_markers` for the frontier impact.
+    crate::services::discord::write_session_spawn_markers("codex-tui", tmux_session_name);
 
     wire_cancel_token_to_tmux_session(cancel_token.as_ref(), tmux_session_name);
 
@@ -2418,18 +2416,10 @@ fn execute_streaming_local_tmux(
     // Keep tmux session alive after process exits for post-mortem analysis
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
-    // Stamp generation marker so post-restart watcher restore can detect old sessions
-    let gen_marker_path =
-        crate::services::tmux_common::session_temp_path(tmux_session_name, "generation");
-    let current_gen = crate::services::discord::runtime_store::process_generation();
-    let _ = std::fs::write(&gen_marker_path, current_gen.to_string());
-
-    // #3087: stamp a per-spawn nonce in a SEPARATE marker (see claude.rs). The
-    // status-panel session-instance key reads this unique nonce instead of the
-    // `.generation` mtime, eliminating mtime missing/duplicate collisions.
-    if let Err(e) = crate::services::discord::write_spawn_nonce(tmux_session_name) {
-        tracing::warn!("failed to write spawn nonce for {tmux_session_name}: {e}");
-    }
+    // Stamp `.generation` (post-restart watcher restore detects old sessions by
+    // its content, wrapper identity by its mtime) + `.spawn_nonce` (status-panel
+    // instance key).
+    crate::services::discord::write_session_spawn_markers("codex-streaming", tmux_session_name);
 
     if let Some(ref token) = cancel_token {
         token.bind_unmanaged_session_name(tmux_session_name);

@@ -1428,15 +1428,16 @@ fn status_panel_resets_on_two_distinct_nonces_without_provider_id() {
     }
 }
 
-/// #3087 P2-2 — a TUI-direct spawn path (Claude-TUI / Codex-TUI) now stamps a
-/// `.spawn_nonce` via `write_spawn_nonce`, exactly like the main provider spawn
-/// sites. This drives the panel through the REAL filesystem chain those paths
-/// use at runtime: each TUI-direct spawn writes a fresh nonce, the panel derives
-/// its instance key from `session_panel_instance_key` (which reads that nonce),
-/// and a second TUI-direct spawn mints a DISTINCT nonce → distinct instance key
-/// → reset — even with no provider-session signal at all.
-// Exercises `write_spawn_nonce` / `session_panel_instance_key`, which live in
-// the unix-only `tmux` module (tmux/TUI-direct paths are unix-only).
+/// #3087 P2-2 — a TUI-direct spawn path (Claude-TUI / Codex-TUI) stamps its
+/// per-spawn markers through `write_session_spawn_markers`, the same funnel the
+/// main provider spawn sites use. This drives the panel through the REAL
+/// filesystem chain those paths use at runtime: each TUI-direct spawn writes a
+/// fresh nonce, the panel derives its instance key from
+/// `session_panel_instance_key` (which reads that nonce), and a second
+/// TUI-direct spawn mints a DISTINCT nonce → distinct instance key → reset —
+/// even with no provider-session signal at all.
+// Exercises `write_session_spawn_markers` / `session_panel_instance_key`, which
+// live in the unix-only `tmux` module (tmux/TUI-direct paths are unix-only).
 #[cfg(unix)]
 #[test]
 fn status_panel_resets_across_two_tui_direct_spawns_via_stamped_nonce() {
@@ -1466,9 +1467,9 @@ fn status_panel_resets_across_two_tui_direct_spawns_via_stamped_nonce() {
         std::fs::create_dir_all(parent).expect("runtime dir");
     }
 
-    // TUI-direct spawn #1 stamps a nonce (the exact call the Claude/Codex
+    // TUI-direct spawn #1 stamps its markers (the exact call the Claude/Codex
     // TUI-direct paths now make right after `create_session`).
-    crate::services::discord::write_spawn_nonce(&tmux_name).expect("tui spawn 1 nonce");
+    crate::services::discord::write_session_spawn_markers("claude-tui", &tmux_name);
     let key1 = crate::services::discord::tmux::session_panel_instance_key(&tmux_name)
         .expect("tui spawn 1 must produce an instance key");
     assert!(events.set_session_panel_lifecycle_event(
@@ -1486,7 +1487,7 @@ fn status_panel_resets_across_two_tui_direct_spawns_via_stamped_nonce() {
     );
 
     // TUI-direct spawn #2 (same tmux name) mints a DISTINCT nonce → distinct key.
-    crate::services::discord::write_spawn_nonce(&tmux_name).expect("tui spawn 2 nonce");
+    crate::services::discord::write_session_spawn_markers("claude-tui", &tmux_name);
     let key2 = crate::services::discord::tmux::session_panel_instance_key(&tmux_name)
         .expect("tui spawn 2 must produce an instance key");
     assert_ne!(

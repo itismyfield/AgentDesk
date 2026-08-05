@@ -9,17 +9,19 @@ use super::SharedData;
 /// migration window). All of those conditions are treated by callers as
 /// "fresh wrapper".
 ///
-/// `.generation` is written exactly once per spawn by `claude.rs` after
-/// `tmux::create_session` and never touched by the live wrapper, so its
+/// `.generation` is written exactly once per spawn by
+/// `write_session_spawn_markers` after `tmux::create_session` and never touched
+/// by the live wrapper, so its
 /// mtime uniquely identifies the wrapper instance even when jsonl
 /// rotation changes the jsonl inode (#1270). NOTE: this mtime signal is the
 /// #1270 wrapper-identity consumer ONLY. The status-panel session-instance
 /// key (#3087) no longer reads this mtime — it reads the dedicated
 /// `.spawn_nonce` marker content instead (see `session_panel_instance_key`).
 pub(in crate::services::discord) fn read_generation_file_mtime_ns(tmux_session_name: &str) -> i64 {
-    let Some(path) =
-        crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "generation")
-    else {
+    let Some(path) = crate::services::tmux_common::resolve_session_temp_path(
+        tmux_session_name,
+        GENERATION_SUFFIX,
+    ) else {
         return 0;
     };
     let Ok(meta) = std::fs::metadata(&path) else {
@@ -42,10 +44,15 @@ pub(in crate::services::discord) fn read_generation_file_mtime_ns(tmux_session_n
 /// own file so neither of those `.generation` consumers is perturbed.
 const SPAWN_NONCE_SUFFIX: &str = "spawn_nonce";
 
+/// The per-spawn marker-file suffix whose mtime is the #1270 wrapper-identity
+/// signal and whose CONTENT is the runtime generation number read by the
+/// adoption path (`watchers::lifecycle`).
+const GENERATION_SUFFIX: &str = "generation";
+
 /// Write a fresh, globally-unique per-spawn nonce to the `.spawn_nonce` marker.
 ///
-/// Called once at each provider spawn site (claude/codex/qwen) right after
-/// `tmux::create_session` stamps `.generation`. The nonce is the stability key
+/// Called once per spawn by `write_session_spawn_markers`, right after it
+/// stamps `.generation`. The nonce is the stability key
 /// the status panel uses to detect a genuine new-session boundary (#3087): it
 /// is guaranteed unique per spawn (a v4 UUID — no reliance on filesystem mtime
 /// resolution or `fsync` ordering), invariant across every status tick and
@@ -66,7 +73,7 @@ const SPAWN_NONCE_SUFFIX: &str = "spawn_nonce";
 /// than reading the PRIOR spawn's stale nonce (which would wrongly SUPPRESS the
 /// reset on a genuinely new session). "Absent → None key" is always preferred
 /// over "stale → colliding key".
-pub(crate) fn write_spawn_nonce(tmux_session_name: &str) -> std::io::Result<String> {
+fn write_spawn_nonce(tmux_session_name: &str) -> std::io::Result<String> {
     let nonce = uuid::Uuid::new_v4().simple().to_string();
     let path =
         crate::services::tmux_common::session_temp_path(tmux_session_name, SPAWN_NONCE_SUFFIX);
@@ -88,6 +95,50 @@ pub(crate) fn write_spawn_nonce(tmux_session_name: &str) -> std::io::Result<Stri
         return Err(e);
     }
     Ok(nonce)
+}
+
+/// Stamp BOTH per-spawn markers every provider spawn site owes the relay:
+/// `.generation` (runtime generation content + wrapper-identity mtime) and
+/// `.spawn_nonce` (status-panel instance key). Call this once per spawn right
+/// after `tmux::create_session`, on EVERY path — headless/streaming and
+/// TUI-direct alike.
+///
+/// This exists as one funnel because the pair used to be copy-pasted across
+/// five spawn sites, and #3087 only added `.spawn_nonce` to the two TUI-direct
+/// copies. Those two paths then produced NO `.generation` at all, which made
+/// `read_generation_file_mtime_ns` return 0 for the whole session and silently
+/// disabled the durable relay frontier: `advance_tmux_relay_confirmed_end`
+/// never paired an mtime with the offset, so
+/// `shadow_mirror_delivered_frontier_inner` refused every confirmed delivery
+/// ("lacks an authoritative JSONL incarnation/range") and the frontier never
+/// advanced — turns were delivered but never committed, and recovery redrive
+/// saw zero progress. One funnel means the next marker added here reaches all
+/// providers and both spawn shapes at once.
+///
+/// Both writes are best-effort but LOUD: a missing marker degrades relay
+/// durability rather than failing the spawn, so failures are logged with the
+/// spawn label instead of being swallowed by `let _ =`.
+pub(crate) fn write_session_spawn_markers(spawn_label: &str, tmux_session_name: &str) {
+    let generation_path =
+        crate::services::tmux_common::session_temp_path(tmux_session_name, GENERATION_SUFFIX);
+    let current_gen = crate::services::discord::runtime_store::process_generation();
+    if let Err(e) = std::fs::write(&generation_path, current_gen.to_string()) {
+        tracing::warn!(
+            spawn_label,
+            tmux_session_name,
+            path = %generation_path,
+            error = %e,
+            "failed to stamp .generation marker; durable relay frontier will not advance for this session"
+        );
+    }
+    if let Err(e) = write_spawn_nonce(tmux_session_name) {
+        tracing::warn!(
+            spawn_label,
+            tmux_session_name,
+            error = %e,
+            "failed to stamp .spawn_nonce marker; status-panel instance key degrades to None"
+        );
+    }
 }
 
 /// Read the per-spawn nonce from the `.spawn_nonce` marker CONTENT. Returns
@@ -575,5 +626,46 @@ mod tests {
         );
         // No committed delivery yet (offset 0) → None even if generations match.
         assert_eq!(committed_frontier_for_same_generation(0, 42, 42), None);
+    }
+
+    /// Every spawn path must leave `read_generation_file_mtime_ns` non-zero.
+    ///
+    /// Regression guard for the TUI-direct frontier freeze: those spawn sites
+    /// stamped only `.spawn_nonce`, so `read_generation_file_mtime_ns` returned
+    /// 0 for the session's whole lifetime. A 0 mtime makes
+    /// `advance_tmux_relay_confirmed_end` skip pairing the mtime with the
+    /// offset, which makes `shadow_mirror_delivered_frontier_inner` reject every
+    /// confirmed delivery — turns are delivered but the durable frontier never
+    /// advances. Asserting the funnel's post-condition catches a regression at
+    /// the marker layer instead of at a lost user response.
+    #[cfg(unix)]
+    #[test]
+    fn spawn_markers_make_generation_mtime_readable() {
+        let _lock = match crate::config::shared_test_env_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let tmux_name = format!("AgentDesk-claude-tui-spawn-markers-{}", std::process::id());
+        assert_eq!(
+            read_generation_file_mtime_ns(&tmux_name),
+            0,
+            "no marker stamped yet → the wrapper-identity mtime must be unknown"
+        );
+
+        write_session_spawn_markers("test-tui", &tmux_name);
+
+        assert_ne!(
+            read_generation_file_mtime_ns(&tmux_name),
+            0,
+            "a stamped spawn must expose a non-zero .generation mtime, or the \
+             durable relay frontier can never advance for the session"
+        );
+        assert!(
+            read_spawn_nonce(&tmux_name).is_some(),
+            "the same funnel must also stamp the status-panel instance nonce"
+        );
     }
 }
