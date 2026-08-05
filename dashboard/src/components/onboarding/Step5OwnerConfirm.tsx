@@ -111,6 +111,7 @@ export function Step5OwnerConfirm({
 
         <input
           type="text"
+          aria-label={tr("소유자 Discord ID", "Owner Discord ID")}
           placeholder="123456789012345678"
           value={ownerId}
           onChange={(event) => setOwnerId(event.target.value)}
