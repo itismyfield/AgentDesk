@@ -1,6 +1,14 @@
 # Multinode Transition
 
 ### Audited touches
+- 2026-08-05 (#5035): `runtime_bootstrap.rs` changes only the signature of the
+  bootstrap stale-queued-placeholder delete helper (it now receives `SharedData`
+  so each card is re-decided by `placeholder_controller::queued_card_gate`). The
+  decision reads this node's in-process mailbox snapshot and the per-channel
+  `queued_placeholders_persist_lock`, both already worker-local. No lease,
+  leader check, durable intent, cross-node fencing, or ownership assumption is
+  added or changed; a second node bootstrapping the same channel would reach its
+  own verdict exactly as it reached its own delete decision before.
 - 2026-08-03 (#5057): failed pre-accept retry selection now matches the Rust intake capability contract and rotates no-capable sources without changing terminal status or error.
 > Source: [`docs/agent-maintenance/index.md`](index.md). Use this page before
 > moving any AgentDesk runtime, worker, dispatch, provider, MCP, merge, or test

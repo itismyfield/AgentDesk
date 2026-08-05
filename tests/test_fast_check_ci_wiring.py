@@ -54,6 +54,8 @@ EXPECTED_TEST_NON_PG_COMMANDS = (
     "cargo test --lib attachment -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib mailbox_reaction_tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib queue_marker::tests -- --skip _pg --skip pg_ --skip postgres",
+    "cargo test --lib services::discord::placeholder_controller::queued_card_gate::tests"
+    " -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib queue_status_presentation::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib status_panel_singleton_store -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib busy_followup_retry_store -- --skip _pg --skip pg_ --skip postgres",

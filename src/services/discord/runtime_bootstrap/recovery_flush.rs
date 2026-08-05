@@ -354,7 +354,13 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
             // Without this loop the cards stay forever (the
             // owning mapping was just removed, so no future
             // dispatch / queue-exit event can reach them).
-            delete_stale_queued_placeholder_cards(&http_for_tmux, &stale_cards_to_delete).await;
+            // #5035 (A8): the helper re-decides each card through the gate.
+            delete_stale_queued_placeholder_cards(
+                &http_for_tmux,
+                &shared_for_tmux2,
+                &stale_cards_to_delete,
+            )
+            .await;
 
             // #122: Reconcile phase complete — open intake
             mark_reconcile_complete(&shared_for_restart_reports);
