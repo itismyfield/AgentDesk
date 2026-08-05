@@ -13,8 +13,8 @@
         "--lib",
         "services::discord::session_relay_sink"
       ],
-      "minimum": 94,
-      "derivation": "Measured on origin/main 0ae1c5b77 with the declared command plus -- --list. This is the current sink handoff and delivery-authority test surface; the future DeliveryJournal single-writer mutation contract is not present yet."
+      "minimum": 100,
+      "derivation": "Measured on t1-s1-shadow-journal commit c94ebc3715f7a898e61d8bdea6ed7cfef665e581 with cargo test --lib services::discord::session_relay_sink -- --list; 105 named tests were selected. This branch contains the DeliveryJournal single-writer contract: pg_store.rs exposes the raw append entry point only within the journal module, check_delivery_journal_raw_writer.py enforces its exact allowlist, and ci-script-checks.sh runs that gate."
     },
     {
       "name": "t2-intake-dispatched-terminal-receipt",

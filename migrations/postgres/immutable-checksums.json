@@ -525,6 +525,11 @@
       "path": "migrations/postgres/0102_dispatch_failed_quality_event.sql",
       "sha256": "abe09efd9228df56e2c0221c302c13ff4ee460e795da71dae173233247ad6edb",
       "version": 102
+    },
+    {
+      "path": "migrations/postgres/0103_delivery_journal.sql",
+      "sha256": "a8b316673f275edc3636bc2cd1b94ca4ba6ef28e870e229c674022d7a4623b7c",
+      "version": 103
     }
   ],
   "version": 1

@@ -85,6 +85,10 @@ echo "=== await_holding_lock ratchet guard ==="
 "$PYTHON" scripts/check_await_holding_lock_ratchet.py
 "$PYTHON" -m unittest tests.test_await_holding_lock_ratchet
 
+echo "=== DeliveryJournal raw-writer allowlist ==="
+"$PYTHON" scripts/check_delivery_journal_raw_writer.py
+"$PYTHON" -m unittest tests.test_delivery_journal_raw_writer
+
 echo "=== Hotfile LOC ratchet guard (#3565) ==="
 "$PYTHON" scripts/check_hotfile_ratchet.py
 "$PYTHON" -m unittest scripts.test_ratchet_admission

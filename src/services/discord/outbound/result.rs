@@ -26,6 +26,26 @@ use serde::{Deserialize, Serialize};
 
 use super::message::OutboundDedupKey;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DiscordTransportReceipt {
+    pub(crate) requested_channel_id: String,
+    pub(crate) returned_channel_id: String,
+    pub(crate) message_id: String,
+}
+
+impl DiscordTransportReceipt {
+    pub(crate) fn from_message(
+        requested: ChannelId,
+        message: &poise::serenity_prelude::Message,
+    ) -> Self {
+        Self {
+            requested_channel_id: requested.get().to_string(),
+            returned_channel_id: message.channel_id.get().to_string(),
+            message_id: message.id.get().to_string(),
+        }
+    }
+}
+
 /// Tag describing which fallback path a [`DeliveryResult::Fallback`]
 /// outcome took.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

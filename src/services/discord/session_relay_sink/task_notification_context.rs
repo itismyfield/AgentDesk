@@ -309,18 +309,37 @@ impl super::SessionBoundDiscordRelaySink {
         channel: ChannelId,
         relay_text: &str,
         reference: Option<(ChannelId, MessageId)>,
-    ) -> Result<Vec<MessageId>, RelaySinkError> {
+    ) -> Result<
+        (
+            Vec<MessageId>,
+            Option<super::super::outbound::DiscordTransportReceipt>,
+        ),
+        RelaySinkError,
+    > {
         let http = shared.serenity_http_or_token_fallback().ok_or_else(|| {
             RelaySinkError::Transient(format!(
                 "discord http unavailable for provider {}",
                 provider.as_str()
             ))
         })?;
-        super::super::formatting::send_long_message_raw_with_reference_returning_message_ids(
-            &http, channel, relay_text, shared, reference,
-        )
-        .await
-        .map_err(|error| RelaySinkError::Transient(error.to_string()))
+        if super::super::formatting::split_message(relay_text).len() == 1 {
+            let receipt = super::super::formatting::send_single_message_returning_receipt(
+                &http, channel, relay_text, shared, reference,
+            )
+            .await
+            .map_err(|error| RelaySinkError::Transient(error.to_string()))?;
+            let message_id = MessageId::new(receipt.message_id.parse().map_err(|error| {
+                RelaySinkError::Transient(format!("invalid Discord receipt message id: {error}"))
+            })?);
+            Ok((vec![message_id], Some(receipt)))
+        } else {
+            super::super::formatting::send_long_message_raw_with_reference_returning_message_ids(
+                &http, channel, relay_text, shared, reference,
+            )
+            .await
+            .map(|ids| (ids, None))
+            .map_err(|error| RelaySinkError::Transient(error.to_string()))
+        }
     }
 
     pub(super) async fn deliver_new_message_with_task_authority(
@@ -346,6 +365,8 @@ impl super::SessionBoundDiscordRelaySink {
         // arm switches to the funnel; the task-card arm keeps its own fence.
         let mut plain_body_anchor_msg_id = None;
         let mut plain_body_posted = false;
+        let mut plain_journal_attempt = None;
+        let mut plain_transport_receipt = None;
         let prompt_anchor = super::relay_format::ssh_direct_prompt_anchor_for_response(
             provider,
             &delivery.session_name,
@@ -444,6 +465,9 @@ impl super::SessionBoundDiscordRelaySink {
             .map_err(RelaySinkError::Transient)?;
             response_heartbeat = Some(heartbeat);
         } else {
+            if super::super::formatting::split_message(relay_text).len() == 1 {
+                plain_journal_attempt = self.journal.begin_fresh(shared, delivery);
+            }
             #[cfg(test)]
             let message_ids = if let Some(gateway) = _gateway {
                 gateway
@@ -457,25 +481,32 @@ impl super::SessionBoundDiscordRelaySink {
                     .await
                     .map_err(RelaySinkError::Transient)?
             } else {
-                self.send_plain_response_chunks(
-                    shared,
-                    provider,
-                    channel,
-                    relay_text,
-                    prompt_anchor_reference,
-                )
-                .await?
+                let (message_ids, receipt) = self
+                    .send_plain_response_chunks(
+                        shared,
+                        provider,
+                        channel,
+                        relay_text,
+                        prompt_anchor_reference,
+                    )
+                    .await?;
+                plain_transport_receipt = receipt;
+                message_ids
             };
             #[cfg(not(test))]
-            let message_ids = self
-                .send_plain_response_chunks(
-                    shared,
-                    provider,
-                    channel,
-                    relay_text,
-                    prompt_anchor_reference,
-                )
-                .await?;
+            let message_ids = {
+                let (message_ids, receipt) = self
+                    .send_plain_response_chunks(
+                        shared,
+                        provider,
+                        channel,
+                        relay_text,
+                        prompt_anchor_reference,
+                    )
+                    .await?;
+                plain_transport_receipt = receipt;
+                message_ids
+            };
             plain_body_anchor_msg_id = message_ids.last().map(|message_id| message_id.get());
             plain_body_posted = true;
         }
@@ -542,6 +573,14 @@ impl super::SessionBoundDiscordRelaySink {
             None
         };
         if let Some(proof) = plain_body_proof {
+            if let (Some(attempt), Some(receipt)) = (plain_journal_attempt, plain_transport_receipt)
+            {
+                self.journal.finish_fresh(
+                    attempt,
+                    receipt,
+                    proof == super::delivery_frontier::SinkDeliveryProofResult::Persisted,
+                );
+            }
             // The plain-body arm and the task-card arm are mutually exclusive, so
             // no task-response heartbeat can be running here; the bounded final
             // delivery CAS below belongs to the card path only.

@@ -1570,9 +1570,27 @@ fn default_prompt_max_bytes_user_derived() -> u64 {
     16 * 1024
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryJournalMode {
+    #[default]
+    Legacy,
+    Shadow,
+}
+
+fn is_legacy_delivery_journal_mode(mode: &DeliveryJournalMode) -> bool {
+    *mode == DeliveryJournalMode::Legacy
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct RuntimeSettingsConfig {
+    #[serde(default, skip_serializing_if = "is_legacy_delivery_journal_mode")]
+    pub delivery_journal_mode: DeliveryJournalMode,
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub delivery_journal_cohort_percent: u8,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivery_journal_internal_channel_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_timeout_min: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1746,7 +1764,10 @@ pub struct RuntimeSettingsConfig {
 
 impl RuntimeSettingsConfig {
     pub fn is_empty(&self) -> bool {
-        self.requested_timeout_min.is_none()
+        self.delivery_journal_mode == DeliveryJournalMode::Legacy
+            && self.delivery_journal_cohort_percent == 0
+            && self.delivery_journal_internal_channel_ids.is_empty()
+            && self.requested_timeout_min.is_none()
             && self.in_progress_stale_min.is_none()
             && self.long_turn_alert_interval_min.is_none()
             && self.context_compact_percent.is_none()
@@ -1796,6 +1817,10 @@ fn default_claude_gateway_proxy_url() -> String {
 
 fn is_default_claude_gateway_proxy_url(value: &str) -> bool {
     value.is_empty() || value == DEFAULT_CLAUDE_GATEWAY_PROXY_URL
+}
+
+fn is_zero_u8(value: &u8) -> bool {
+    *value == 0
 }
 
 impl RuntimeSettingsConfig {
