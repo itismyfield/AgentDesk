@@ -77,19 +77,30 @@ pub(super) async fn reuse_bound_busy_notice(
 
     // The dispatch hand-off already consumed this message's queued-placeholder
     // mapping, so a distinct queued card would otherwise remain ownerless.
+    // #5035 (A7): "ownerless" holds only for the consumed id — the same card can
+    // still represent other waiting entries, so the gate decides. `user_msg_id`
+    // is the busy-retry input id, NOT the dispatch head, so the departing hint is
+    // left empty (harmless: the hint never changes a verdict).
     if let Some(stale_queued) = queued_placeholder_handoff.filter(|queued| *queued != existing) {
-        let deleted = channel_id.delete_message(http, stale_queued).await;
-        shared
-            .ui
-            .placeholder_controller
-            .detach_by_message(channel_id, stale_queued);
+        let stale_disposition =
+            match queued_card_gate::release_or_rekey(shared, channel_id, stale_queued, &[]).await {
+                QueuedCardDisposition::Released(teardown) => {
+                    match queued_card_gate::teardown_delete(http, shared, teardown).await {
+                        Ok(()) => "deleted".to_string(),
+                        Err(_) => "delete_failed".to_string(),
+                    }
+                }
+                QueuedCardDisposition::Preserved { owner } => {
+                    format!("preserved_for_{}", owner.get())
+                }
+            };
         tracing::info!(
             channel_id = channel_id.get(),
             user_msg_id = user_msg_id.get(),
             notice_message_id = existing.get(),
             stale_queued = stale_queued.get(),
-            stale_deleted = deleted.is_ok(),
-            "busy follow-up retry reused its bound notice card; dropped the orphaned queued card"
+            stale_disposition = stale_disposition,
+            "busy follow-up retry reused its bound notice card; routed the queued card through the #5035 gate"
         );
     }
     Some(existing)

@@ -253,6 +253,7 @@ use formatting::{format_for_discord, format_tool_input, send_long_message_raw, t
 use inflight::save_inflight_state;
 use inflight::{InflightTurnState, load_inflight_states};
 pub(crate) use inflight::{clear_inflight_state, lock_inflight_state_path};
+use placeholder_controller::queued_card_gate::{self, QueuedCardDisposition, QueuedCardTeardown};
 pub(in crate::services::discord) use prompt_builder::load_channel_recent_context;
 use prompt_builder::{RecoveryContextManifestInput, build_system_prompt_with_manifest};
 pub(in crate::services::discord) use queue_dispatch::MailboxEnqueueOutcome;
@@ -2067,11 +2068,16 @@ struct QueueExitVisibleCard {
 /// visible Discord card ids the caller should edit/delete. Split out from
 /// `apply_queue_exit_feedback` so the bookkeeping is testable without a
 /// serenity HTTP client.
+///
+/// #5035 (A1/A2): removing the mapping only proves *this* id stopped owning the
+/// card, so every drained card goes through `queued_card_gate` and only
+/// `Released` ones are returned — which is what keeps the exit-body EDIT /
+/// DELETE off a card another queue entry still needs.
 async fn queue_exit_drain_queued_placeholders(
     shared: &SharedData,
     channel_id: ChannelId,
     queue_exit_events: &[&QueueExitEvent],
-) -> Vec<QueueExitVisibleCard> {
+) -> Vec<(QueueExitVisibleCard, QueuedCardTeardown)> {
     // codex review round-4 P2 + round-5 P2: hold the channel's persistence
     // mutex (async since round-5 so `.await`-spanning callers serialize too)
     // across the whole batch drain + snapshot write, or a concurrent
@@ -2079,8 +2085,17 @@ async fn queue_exit_drain_queued_placeholders(
     // snapshot that resurrects already-exited entries on restart.
     let persist_lock = shared.queued_placeholders_persist_lock(channel_id);
     let _persist_guard = persist_lock.lock().await;
-    let mut visible_cards_to_clear: Vec<QueueExitVisibleCard> = Vec::new();
+    let mut released_cards: Vec<(QueueExitVisibleCard, QueuedCardTeardown)> = Vec::new();
     let mut mutated = false;
+    // #5035: complete departing hint (every exiting intervention is in hand).
+    // Ordering preference for re-keying only; the verdict ignores it.
+    let departing: Vec<MessageId> = queue_exit_events
+        .iter()
+        .flat_map(|event| {
+            std::iter::once(event.intervention.message_id)
+                .chain(event.intervention.source_message_ids.iter().copied())
+        })
+        .collect();
     for event in queue_exit_events {
         for message_id in &event.intervention.source_message_ids {
             if let Some((_, placeholder_msg_id)) = shared
@@ -2088,16 +2103,26 @@ async fn queue_exit_drain_queued_placeholders(
                 .queued_placeholders
                 .remove(&(channel_id, *message_id))
             {
-                shared
-                    .ui
-                    .placeholder_controller
-                    .detach_by_message(channel_id, placeholder_msg_id);
-                visible_cards_to_clear.push(QueueExitVisibleCard {
-                    user_msg_id: *message_id,
-                    placeholder_msg_id,
-                    kind: event.kind,
-                });
                 mutated = true;
+                if let QueuedCardDisposition::Released(teardown) =
+                    queued_card_gate::release_or_rekey_locked(
+                        shared,
+                        channel_id,
+                        placeholder_msg_id,
+                        &departing,
+                        &_persist_guard,
+                    )
+                    .await
+                {
+                    released_cards.push((
+                        QueueExitVisibleCard {
+                            user_msg_id: *message_id,
+                            placeholder_msg_id,
+                            kind: event.kind,
+                        },
+                        teardown,
+                    ));
+                }
             }
         }
     }
@@ -2113,7 +2138,7 @@ async fn queue_exit_drain_queued_placeholders(
             channel_id,
         );
     }
-    visible_cards_to_clear
+    released_cards
 }
 
 async fn apply_queue_exit_feedback(
@@ -2137,8 +2162,10 @@ async fn apply_queue_exit_feedback(
     // review P2 (#1332 follow-up): also collect the visible card ids to
     // rewrite/delete once a ctx exists (best-effort; drain rationale on the
     // `queue_exit_drain_queued_placeholders` doc).
-    let visible_cards_to_clear =
+    let released_cards =
         queue_exit_drain_queued_placeholders(shared, channel_id, &queue_exit_events).await;
+    let visible_cards_to_clear: Vec<QueueExitVisibleCard> =
+        released_cards.iter().map(|(card, _)| *card).collect();
 
     // #4260 dual r1: dead-letter + notice for capacity-`Overflow` evicts only
     // (benign Superseded producers pass through untouched). Fire-and-forget —
@@ -2158,6 +2185,11 @@ async fn apply_queue_exit_feedback(
     // placeholder cards via REST. Falling back to the deferred-cleanup
     // path is still correct for genuinely-no-token startup races.
     let Some(http) = shared.serenity_http_or_token_fallback() else {
+        // #5035: consume the tokens on the deferred path; the parked card is
+        // re-gated by the ready-time drain because this verdict goes stale.
+        for (_, teardown) in released_cards {
+            queued_card_gate::teardown_defer(shared, teardown);
+        }
         shared
             .add_pending_queue_exit_placeholder_clears(channel_id, &visible_cards_to_clear)
             .await;
@@ -2178,15 +2210,10 @@ async fn apply_queue_exit_feedback(
     // the shared Discord HTTP boundary instead of the placeholder controller
     // because the controller entry was just detached (and the public
     // `transition` API only renders terminal monitor-handoff cards).
-    for card in &visible_cards_to_clear {
-        let body = queue_exit_card_body(card.kind);
-        let edit_result =
-            http::edit_channel_message(&http, channel_id, card.placeholder_msg_id, &body).await;
-        if edit_result.is_err() {
-            let _ = channel_id
-                .delete_message(&http, card.placeholder_msg_id)
-                .await;
-        }
+    // #5035: the edit-or-delete pair is now `teardown_exit_body`, reachable
+    // only with a gate-issued token.
+    for (card, teardown) in released_cards {
+        queued_card_gate::teardown_exit_body(&http, shared, teardown, card.kind).await;
     }
 
     queue_marker::drain_queue_exit_markers(shared, &http, channel_id, &queue_exit_events).await;
@@ -2239,14 +2266,43 @@ pub(in crate::services::discord) async fn drain_pending_queue_exit_placeholder_c
         return (0, 0);
     }
 
-    let mut deleted_by_channel: HashMap<ChannelId, Vec<(MessageId, MessageId)>> = HashMap::new();
+    let mut cleared_by_channel: HashMap<ChannelId, Vec<(MessageId, MessageId)>> = HashMap::new();
     let mut deleted = 0usize;
     let mut failed = 0usize;
+    let mut preserved = 0usize;
     for (channel_id, user_msg_id, placeholder_msg_id) in pending {
-        match deleter.delete(channel_id, placeholder_msg_id).await {
+        // #5035 (A3): re-gate — the verdict taken when the card was parked is
+        // stale by the time this ctx-ready drain runs. The sidecar carries only
+        // the parked owner, so the hint is partial; that cannot flip a verdict.
+        let teardown = match queued_card_gate::release_or_rekey(
+            shared,
+            channel_id,
+            placeholder_msg_id,
+            &[user_msg_id],
+        )
+        .await
+        {
+            QueuedCardDisposition::Preserved { owner } => {
+                preserved += 1;
+                tracing::debug!(
+                    channel_id = channel_id.get(),
+                    user_msg_id = user_msg_id.get(),
+                    placeholder_msg_id = placeholder_msg_id.get(),
+                    owner = owner.get(),
+                    "queue_exit_pending_clear: card belongs to a live queue entry; dropping the pending row without deleting",
+                );
+                cleared_by_channel
+                    .entry(channel_id)
+                    .or_default()
+                    .push((user_msg_id, placeholder_msg_id));
+                continue;
+            }
+            QueuedCardDisposition::Released(teardown) => teardown,
+        };
+        match queued_card_gate::teardown_via_deleter(shared, deleter, teardown).await {
             Ok(_) => {
                 deleted += 1;
-                deleted_by_channel
+                cleared_by_channel
                     .entry(channel_id)
                     .or_default()
                     .push((user_msg_id, placeholder_msg_id));
@@ -2269,7 +2325,7 @@ pub(in crate::services::discord) async fn drain_pending_queue_exit_placeholder_c
         }
     }
 
-    for (channel_id, cards) in deleted_by_channel {
+    for (channel_id, cards) in cleared_by_channel {
         shared
             .remove_pending_queue_exit_placeholder_clears(channel_id, &cards)
             .await;
@@ -2277,7 +2333,7 @@ pub(in crate::services::discord) async fn drain_pending_queue_exit_placeholder_c
 
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
-        "  [{ts}] 🧹 QUEUE-EXIT: deleted {deleted} pending queued placeholder card(s) after ctx ready (failed {failed})",
+        "  [{ts}] 🧹 QUEUE-EXIT: deleted {deleted} pending queued placeholder card(s) after ctx ready (failed {failed}, preserved {preserved})",
     );
     (deleted, failed)
 }
@@ -3050,10 +3106,9 @@ async fn kickoff_idle_queue_channel(
         &intervention.source_message_ids,
     )
     .await;
-    for placeholder_msg_id in drained_cards {
-        let _ = channel_id
-            .delete_message(&ctx.http, placeholder_msg_id)
-            .await;
+    // #5035 (A5): the drain now yields tokens only for gate-released cards.
+    for teardown in drained_cards {
+        let _ = queued_card_gate::teardown_delete(&ctx.http, shared, teardown).await;
     }
 
     let dispatch_result =

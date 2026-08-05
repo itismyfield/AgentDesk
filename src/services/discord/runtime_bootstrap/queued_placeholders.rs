@@ -96,12 +96,17 @@ pub(in crate::services::discord) fn filter_restored_queued_placeholders(
 /// The deletion is dispatched through the small
 /// `StalePlaceholderDeleter` indirection so unit tests can substitute a
 /// recorder without spinning up a real serenity HTTP client.
+/// #5035 (A8): a stale *owner* does not imply the *card* is unowned — the same
+/// card can be the only card of a live, cardless entry on that channel. Each
+/// card is therefore re-decided by `queued_card_gate` here, at delete time, so
+/// the snapshot it reads is the freshest one available.
 pub(in crate::services::discord) async fn delete_stale_queued_placeholder_cards(
     http: &Arc<serenity::Http>,
+    shared: &SharedData,
     stale_cards: &[(ChannelId, MessageId, MessageId)],
 ) {
     let deleter = SerenityStalePlaceholderDeleter { http: http.clone() };
-    delete_stale_queued_placeholder_cards_with(&deleter, stale_cards).await;
+    delete_stale_queued_placeholder_cards_with(&deleter, shared, stale_cards).await;
 }
 
 pub(in crate::services::discord) trait StalePlaceholderDeleter:
@@ -136,6 +141,7 @@ impl StalePlaceholderDeleter for SerenityStalePlaceholderDeleter {
 
 pub(in crate::services::discord) async fn delete_stale_queued_placeholder_cards_with(
     deleter: &dyn StalePlaceholderDeleter,
+    shared: &SharedData,
     stale_cards: &[(ChannelId, MessageId, MessageId)],
 ) {
     if stale_cards.is_empty() {
@@ -143,13 +149,30 @@ pub(in crate::services::discord) async fn delete_stale_queued_placeholder_cards_
     }
     let mut deleted = 0usize;
     let mut failed = 0usize;
+    let mut preserved = 0usize;
     for (channel_id, user_msg_id, placeholder_msg_id) in stale_cards {
-        match deleter.delete(*channel_id, *placeholder_msg_id).await {
+        let (channel_id, placeholder_msg_id) = (*channel_id, *placeholder_msg_id);
+        // The stale owner is by definition absent from `live_queue_ids`, so the
+        // partial departing hint cannot even reach the candidate list.
+        let teardown = match queued_card_gate::release_or_rekey(
+            shared,
+            channel_id,
+            placeholder_msg_id,
+            &[*user_msg_id],
+        )
+        .await
+        {
+            QueuedCardDisposition::Preserved { .. } => {
+                preserved += 1;
+                continue;
+            }
+            QueuedCardDisposition::Released(teardown) => teardown,
+        };
+        match queued_card_gate::teardown_via_deleter(shared, deleter, teardown).await {
             Ok(_) => {
                 deleted += 1;
                 tracing::debug!(
                     channel_id = channel_id.get(),
-                    user_msg_id = user_msg_id.get(),
                     placeholder_msg_id = placeholder_msg_id.get(),
                     "queued_placeholder restore: deleted stale 📬 card",
                 );
@@ -158,7 +181,6 @@ pub(in crate::services::discord) async fn delete_stale_queued_placeholder_cards_
                 failed += 1;
                 tracing::warn!(
                     channel_id = channel_id.get(),
-                    user_msg_id = user_msg_id.get(),
                     placeholder_msg_id = placeholder_msg_id.get(),
                     "queued_placeholder restore: failed to delete stale 📬 card ({error}); leaving in place",
                 );
@@ -167,7 +189,7 @@ pub(in crate::services::discord) async fn delete_stale_queued_placeholder_cards_
     }
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
-        "  [{ts}] 🧹 STALE-PLACEHOLDER: deleted {deleted}/{} stale 📬 card(s) on bootstrap (failed {failed})",
+        "  [{ts}] 🧹 STALE-PLACEHOLDER: deleted {deleted}/{} stale 📬 card(s) on bootstrap (failed {failed}, preserved {preserved})",
         stale_cards.len(),
     );
 }

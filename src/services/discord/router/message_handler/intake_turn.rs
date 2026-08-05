@@ -1366,19 +1366,40 @@ pub(super) async fn handle_text_message(
             Ok(fresh_msg_id) => {
                 // Fresh anchor is live; tear down the buried queued card. Delete
                 // failure is NON-fatal — never abort the turn over a lingering card.
-                let deleted = channel_id.delete_message(http, existing).await;
-                // Drop the stale card's controller row (else it leaks; see above).
-                shared
-                    .ui
-                    .placeholder_controller
-                    .detach_by_message(channel_id, existing);
+                // #5035 (A6): the buried card may still stand for OTHER waiting
+                // entries, so the teardown (and the detach it carries) runs only
+                // on a gate release. The hint is just the dequeued head.
+                let stale_disposition = match queued_card_gate::release_or_rekey(
+                    shared,
+                    channel_id,
+                    existing,
+                    &[user_msg_id],
+                )
+                .await
+                {
+                    QueuedCardDisposition::Released(teardown) => {
+                        match queued_card_gate::teardown_delete(http, shared, teardown).await {
+                            Ok(()) => "deleted",
+                            Err(_) => "delete_failed",
+                        }
+                    }
+                    QueuedCardDisposition::Preserved { owner } => {
+                        tracing::info!(
+                            channel_id = channel_id.get(),
+                            stale = existing.get(),
+                            owner = owner.get(),
+                            "#5035: kept the queued card for a live queue entry instead of deleting it"
+                        );
+                        "preserved"
+                    }
+                };
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
-                    "  [{ts}] 📬➡️🔄 DISPATCH: queued dequeued; posted fresh anchor (channel {}, fresh_msg {}, stale {}, stale_deleted={})",
+                    "  [{ts}] 📬➡️🔄 DISPATCH: queued dequeued; posted fresh anchor (channel {}, fresh_msg {}, stale {}, stale_disposition={})",
                     channel_id,
                     fresh_msg_id,
                     existing,
-                    deleted.is_ok()
+                    stale_disposition
                 );
                 fresh_msg_id
             }

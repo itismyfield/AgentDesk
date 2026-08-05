@@ -19,8 +19,8 @@ use super::outbound::{
 use super::router;
 use super::turn_bridge::{auto_retry_with_history, release_retry_pending};
 use super::{
-    Intervention, SharedData, formatting, queue_marker, rate_limit_wait,
-    resolve_discord_bot_provider, validate_live_channel_routing,
+    Intervention, QueuedCardDisposition, QueuedCardTeardown, SharedData, formatting, queue_marker,
+    queued_card_gate, rate_limit_wait, resolve_discord_bot_provider, validate_live_channel_routing,
 };
 use crate::services::provider::ProviderKind;
 use formatting::ReplaceLongMessageOutcome;
@@ -517,12 +517,16 @@ fn dispatch_post_error(
 /// Discord message ids whose visible cards the caller should delete (kept as
 /// a return value to keep the helper independent of `serenity::Http` so the
 /// test harness can invoke it without a real Discord client).
+///
+/// #5035 (A4/A5): a non-head source id losing its mapping does not make the card
+/// unowned — a rollback can leave a *surviving* entry owning it, so each drained
+/// card is gated and only released ones come back, as teardown tokens.
 pub(super) async fn drain_merged_queued_placeholders(
     shared: &SharedData,
     channel_id: ChannelId,
     head_message_id: MessageId,
     source_message_ids: &[MessageId],
-) -> Vec<MessageId> {
+) -> Vec<QueuedCardTeardown> {
     // codex review round-4 P2 + round-5 P2: serialize the merged-source
     // drain with every other `queued_placeholders` mutation on the same
     // channel via the per-channel async persistence mutex. Otherwise an
@@ -536,6 +540,10 @@ pub(super) async fn drain_merged_queued_placeholders(
     let _persist_guard = persist_lock.lock().await;
     let mut to_delete = Vec::new();
     let mut mutated = false;
+    // #5035: complete departing hint (head ∪ sources) — re-key ordering only.
+    let departing: Vec<MessageId> = std::iter::once(head_message_id)
+        .chain(source_message_ids.iter().copied())
+        .collect();
     for message_id in source_message_ids {
         if *message_id == head_message_id {
             continue;
@@ -545,12 +553,19 @@ pub(super) async fn drain_merged_queued_placeholders(
             .queued_placeholders
             .remove(&(channel_id, *message_id))
         {
-            shared
-                .ui
-                .placeholder_controller
-                .detach_by_message(channel_id, placeholder_msg_id);
-            to_delete.push(placeholder_msg_id);
             mutated = true;
+            if let QueuedCardDisposition::Released(teardown) =
+                queued_card_gate::release_or_rekey_locked(
+                    shared,
+                    channel_id,
+                    placeholder_msg_id,
+                    &departing,
+                    &_persist_guard,
+                )
+                .await
+            {
+                to_delete.push(teardown);
+            }
         }
     }
     // codex review round-3 P2: persist the write-through after the batch
@@ -819,10 +834,10 @@ impl TurnGateway for DiscordGateway {
                 &intervention.source_message_ids,
             )
             .await;
-            for placeholder_msg_id in drained {
-                let result = channel_id
-                    .delete_message(&self.http, placeholder_msg_id)
-                    .await;
+            for teardown in drained {
+                let placeholder_msg_id = teardown.card();
+                let result =
+                    queued_card_gate::teardown_delete(&self.http, &self.shared, teardown).await;
                 // #3607: observe the merged-queued-placeholder drain delete.
                 crate::services::observability::emit_relay_delete_result(
                     self.provider.as_str(),

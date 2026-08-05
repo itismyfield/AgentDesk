@@ -587,6 +587,10 @@ mod bootstrap_tests {
 
     #[tokio::test]
     async fn delete_stale_queued_placeholder_cards_with_deletes_only_supplied_stale_cards() {
+        // #5035: the helper re-gates each card. Neither channel has a mailbox,
+        // so both queues are empty and every card is released — the original
+        // per-card assertions are unchanged.
+        let shared = make_shared_data_for_tests();
         let deleter = RecordingStalePlaceholderDeleter::new([Ok(()), Err("gone".to_string())]);
         let stale_cards = vec![
             (
@@ -601,12 +605,12 @@ mod bootstrap_tests {
             ),
         ];
 
-        delete_stale_queued_placeholder_cards_with(&deleter, &stale_cards).await;
+        delete_stale_queued_placeholder_cards_with(&deleter, &shared, &stale_cards).await;
 
         assert_eq!(deleter.calls(), vec![(10, 1_000), (20, 2_000)]);
 
         let empty_deleter = RecordingStalePlaceholderDeleter::new([]);
-        delete_stale_queued_placeholder_cards_with(&empty_deleter, &[]).await;
+        delete_stale_queued_placeholder_cards_with(&empty_deleter, &shared, &[]).await;
         assert!(
             empty_deleter.calls().is_empty(),
             "empty stale-card input must preserve all visible cards"

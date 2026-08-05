@@ -664,7 +664,15 @@ impl PlaceholderController {
     /// intervention would leave a stale `Queued` row in the cap-bounded
     /// `entries` map (`Queued` is excluded from the regular eviction sweep
     /// because in-flight queued placeholders must survive until dispatch).
-    pub(super) fn detach_by_message(&self, channel_id: ChannelId, message_id: MessageId) {
+    /// #5035: narrowed from `pub(super)` (all of `crate::services::discord`) to
+    /// this subtree so the queue-exit / dispatch sites must reach it through
+    /// `queued_card_gate`'s teardown helpers. This narrows the callable set; it
+    /// does not make the gate the only caller (see the gate's module docs).
+    pub(in crate::services::discord::placeholder_controller) fn detach_by_message(
+        &self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+    ) {
         self.entries
             .retain(|key, _| !(key.channel_id == channel_id && key.message_id == message_id));
     }
@@ -1266,3 +1274,8 @@ mod live_events_tests {
         assert_eq!(gateway.edits.load(Ordering::SeqCst), 2);
     }
 }
+
+/// #5035: the single enforcement point for destroying a queued placeholder
+/// card. Lives under `placeholder_controller` so `detach_by_message` can be
+/// narrowed to this subtree.
+pub(in crate::services::discord) mod queued_card_gate;
