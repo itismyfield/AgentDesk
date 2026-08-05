@@ -48,14 +48,29 @@ class RawWriterAllowlistTests(unittest.TestCase):
         ok, message = guard.check(self.fixture("// append_delivery_journal_batch()\n"))
         self.assertTrue(ok, message)
 
-    def test_test_area_and_string_facade_markers_do_not_count(self):
+    def test_test_area_and_string_facade_markers_count_as_declared(self):
+        """Evidence: whole-file lexical scanning counts test and string text."""
         root = self.fixture()
         path = root / guard.FAMILY_REGISTRY[4][1]
         path.write_text(path.read_text(encoding="utf-8") +
-                        '/* self.journal.begin_fresh(); */\n'
                         'const STRING_MARKER: &str = "self.journal.finish_fresh(";\n#[cfg(all(test, unix))]\nmod tests {\n    fn dishonest() { self.journal.begin_fresh(); }\n    const TEST_MARKER: &str = "self.journal.begin_fresh(";\n}\n',
                         encoding="utf-8")
-        self.assertTrue(*guard.check(root))
+        self.assertTrue(guard.family_status(root)[0][4][1], "test/string markers are declared lexical matches")
+
+    def test_cfg_test_fn_facade_marker_counts_as_known_limit(self):
+        """Evidence: a top-level cfg(test) function is counted, not parsed away."""
+        root = self.fixture()
+        path = root / guard.FAMILY_REGISTRY[4][1]
+        path.write_text(path.read_text(encoding="utf-8") + '#[cfg(test)] fn journal_probe() { self.journal.begin_fresh(); }\n', encoding="utf-8")
+        self.assertTrue(guard.family_status(root)[0][4][1], "cfg(test) fn marker is a declared lexical match")
+        ok, message = guard.check(root); self.assertFalse(ok); self.assertIn("uninstrumented families: 4/6", message)
+
+    def test_block_marker_strings_do_not_hide_real_facade_calls(self):
+        """Evidence: block-marker strings no longer delete calls across lines."""
+        root = self.fixture()
+        path = root / guard.FAMILY_REGISTRY[0][1]
+        path.write_text(path.read_text(encoding="utf-8") + 'const BLOCK_OPEN: &str = "/*";\nself.journal.begin_fresh();\nconst BLOCK_CLOSE: &str = "*/";\n', encoding="utf-8")
+        ok, message = guard.check(root); self.assertTrue(ok, message); self.assertIn("uninstrumented families: 5/6", message)
 
     def test_raw_string_marker_is_known_lexical_false_positive(self):
         """Known limit: raw strings are not parsed and may count as calls."""

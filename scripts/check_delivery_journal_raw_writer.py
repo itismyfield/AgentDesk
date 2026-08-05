@@ -18,16 +18,11 @@ FAMILY_REGISTRY = (
     ("recovery / fresh-send / orphan family", "src/services/discord/tmux_reaper.rs", "reap_fresh_routine_orphan"),
     ("pipe stream epoch", "src/services/discord/tmux_watcher/turn_stream_collector.rs", "collect_turn_stream_until_terminal"),
 )
-# This is a cheap lexical scan, not a Rust parser: a text match in the anchor
-# file's non-test area is only a baseline signal, not proof of instrumentation.
-# It excludes the top-level #[cfg(test)] tail, // line comments, and matches
-# preceded by an odd quote count (a string guess); block comments get only a
-# cheap non-nested /* */ strip. Doc comments, raw strings (r"…"/r#"…"#), escaped quotes, macros,
-# and separate-file test modules (mod tests;) are not reliably excluded.
+# Cheap lexical text match, not Rust parsing: each complete anchor file,
+# including tests, is scanned with only the suffix after // on that line removed.
+# Strings, block/doc comments, raw strings, and macros count; the result is a
+# monotonic baseline signal, not proof of instrumentation.
 JOURNAL_FACADE_CALL = re.compile(r"\bself\.journal\.(?:begin_fresh|finish_fresh)\s*\(")
-BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
-TOP_LEVEL_TEST_CFG = re.compile(r"^#\[cfg\((?:test|all\(\s*test\b[^\]]*\))\)\]\s*$")
-TOP_LEVEL_MODULE = re.compile(r"(?:pub(?:\([^)]*\))?\s+)?mod\b")
 UNINSTRUMENTED_FAMILY_BASELINE = 5
 
 
@@ -39,7 +34,7 @@ def call_sites(root: Path) -> tuple[Counter[str], int]:
     listed = [rel for rel in listed if rel.endswith(".rs")]
     found: Counter[str] = Counter()
     for rel in listed:
-        for line in BLOCK_COMMENT.sub("", (root / rel).read_text(encoding="utf-8")).splitlines():
+        for line in (root / rel).read_text(encoding="utf-8").splitlines():
             code = line.split("//", 1)[0]
             if "fn append_delivery_journal_batch" not in code and CALL.search(code):
                 found[rel] += 1
@@ -52,21 +47,10 @@ def family_status(root: Path) -> tuple[list[tuple[str, bool]] | None, str]:
         path = root / rel
         if not path.is_file():
             return None, f"family anchor missing: {name} ({rel}:{symbol})"
-        lines = BLOCK_COMMENT.sub("", path.read_text(encoding="utf-8")).splitlines(keepends=True)
-        for index, line in enumerate(lines):
-            candidate = line.split("//", 1)[0].rstrip()
-            if not line.startswith("#[") or not TOP_LEVEL_TEST_CFG.fullmatch(candidate):
-                continue
-            following = next((item.strip() for item in lines[index + 1:]
-                              if item.strip() and not item.strip().startswith(("//", "#["))), "")
-            if TOP_LEVEL_MODULE.match(following) and not following.endswith(";"):
-                lines = lines[:index]
-                break
-        text = "\n".join(line.split("//", 1)[0] for line in lines)
+        text = "\n".join(line.split("//", 1)[0] for line in path.read_text(encoding="utf-8").splitlines())
         if not re.search(rf"\b(?:async\s+)?fn\s+{re.escape(symbol)}\b", text):
             return None, f"family anchor symbol missing: {name} ({rel}:{symbol})"
-        # Odd-quote parity is only a string guess; raw/escaped quotes are limits.
-        instrumented = any(text[:match.start()].count('"') % 2 == 0 for match in JOURNAL_FACADE_CALL.finditer(text))
+        instrumented = any(JOURNAL_FACADE_CALL.search(line) for line in text.splitlines())
         status.append((name, instrumented))
     return status, ""
 
@@ -82,7 +66,7 @@ def check(root: Path) -> tuple[bool, str]:
     if found != ALLOWLIST:
         return False, f"raw writer allowlist mismatch: expected={dict(ALLOWLIST)} actual={dict(found)} (scanned Rust files: {scanned_files})"
     uninstrumented = [name for name, instrumented in families if not instrumented]
-    summary = f"uninstrumented families: {len(uninstrumented)}/{len(families)} (lexical text match baseline; anchor-file non-test area; {', '.join(uninstrumented) or 'none'})"
+    summary = f"uninstrumented families: {len(uninstrumented)}/{len(families)} (lexical baseline signal; whole anchor file; only // suffix excluded; not proof; {', '.join(uninstrumented) or 'none'})"
     if len(uninstrumented) > UNINSTRUMENTED_FAMILY_BASELINE:
         return False, f"{summary}; exceeds baseline {UNINSTRUMENTED_FAMILY_BASELINE}: {', '.join(uninstrumented)}"
     if len(uninstrumented) < UNINSTRUMENTED_FAMILY_BASELINE:
