@@ -876,6 +876,11 @@ _rollback_release_binary() {
     echo "↩ Rolling back release binary to previous good version..."
     domain="$(_launchd_domain)" || domain="gui/$(id -u 2>/dev/null)"
     # Stop the crash-looping new process before swapping the binary back.
+    # NOTE: bootout is asynchronous; race with bootstrap below exists, same as #4726/#5151.
+    # Unlike PG tunnel (fail-closed, blocking), release rollback has tmux fallback (line 897)
+    # and health check (line 899). Rollback is best-effort, not fail-closed; if bootstrap
+    # fails, tmux fallback handles service restart. Scope: PG tunnel (#5151) only; release
+    # rollback follow-up deferred (#5151 comment).
     launchctl bootout "$domain/$plist" 2>/dev/null || true
     tmux kill-session -t "${AGENTDESK_RELEASE_TMUX_SESSION:-AgentDesk-dcserver-release-manual}" 2>/dev/null || true
     # The bad binary is never locked (uchg is deferred to the success path), so
@@ -950,6 +955,47 @@ _pg_wait_canonical_listener_absent() {
     return 1
 }
 
+_launchctl_bootout_and_bootstrap_retry() {
+    # Common pattern for safe launchd service restart after bootout.
+    # Bootout is asynchronous; immediately bootstrapping risks race conditions (#4726, #5151).
+    # This helper polls for unload completion, then retries bootstrap.
+    # ARGS: domain label plist_path service_name
+    local domain="$1" label="$2" plist_path="$3" service_name="${4:-service}"
+
+    launchctl bootout "$domain/$label" 2>/dev/null || true
+
+    # Poll for launchd unload completion (max 12 × 0.5s = 6s)
+    local polls=0
+    while launchctl print "$domain/$label" >/dev/null 2>&1; do
+        if [ "$polls" -ge 12 ]; then
+            echo "⚠ $service_name still unloading ~6s after bootout — bootstrapping anyway" >&2
+            break
+        fi
+        sleep 0.5
+        polls=$((polls + 1))
+    done
+
+    # Bootstrap with retry (max 3 attempts, 2s between retries)
+    local armed=0 attempt
+    for attempt in 1 2 3; do
+        if launchctl bootstrap "$domain" "$plist_path" 2>/dev/null; then
+            armed=1
+            break
+        fi
+        if [ "$attempt" -lt 3 ]; then
+            echo "⚠ $service_name bootstrap attempt $attempt failed — retrying in 2s" >&2
+            sleep 2
+        fi
+    done
+
+    if [ "$armed" = "1" ]; then
+        return 0
+    else
+        echo "✗ $service_name bootstrap failed after 3 attempts" >&2
+        return 1
+    fi
+}
+
 _pg_report_rollback_recovery() {
     local backup=${1:-unknown}
     echo "⚠ PG tunnel rollback incomplete; recovery material retained at $backup" >&2
@@ -969,16 +1015,17 @@ _rollback_pg_tunnel_migration() {
     fi
 
     echo "↩ Restoring previous PG tunnel state..." >&2
+    # Use common bootout/poll/bootstrap pattern; we'll actually call restore below
+    # after file restoration, but the unload poll is the same.
     launchctl bootout "$domain/${PG_TUNNEL_LABEL:-com.agentdesk.pg-tunnel}" 2>/dev/null || true
-    # Poll for launchd unload completion before re-binding; bootout is asynchronous.
-    _pg_rollback_polls=0
+    local rollback_polls=0
     while launchctl print "$domain/${PG_TUNNEL_LABEL:-com.agentdesk.pg-tunnel}" >/dev/null 2>&1; do
-        if [ "$_pg_rollback_polls" -ge 12 ]; then
+        if [ "$rollback_polls" -ge 12 ]; then
             echo "⚠ PG tunnel still unloading ~6s after rollback bootout — retrying restore anyway" >&2
             break
         fi
         sleep 0.5
-        _pg_rollback_polls=$((_pg_rollback_polls + 1))
+        rollback_polls=$((rollback_polls + 1))
     done
     if ! _pg_wait_canonical_listener_absent; then
         echo "✗ New PG tunnel listener survived rollback bootout; refusing restore bind race" >&2
@@ -2082,30 +2129,8 @@ _migrate_pg_tunnel_before_release_stop() {
         echo "✗ Canonical PG tunnel listener survived synchronous takeover"
         return 1
     fi
-    # Poll for launchd unload completion; bootout is asynchronous and race with
-    # bootstrap would fail. Same pattern as relay watchdog (#4726 fix).
-    _pg_bootout_polls=0
-    while launchctl print "$PG_TUNNEL_LAUNCHD_DOMAIN/$PG_TUNNEL_LABEL" >/dev/null 2>&1; do
-        if [ "$_pg_bootout_polls" -ge 12 ]; then
-            echo "⚠ PG tunnel still unloading ~6s after bootout — bootstrapping anyway"
-            break
-        fi
-        sleep 0.5
-        _pg_bootout_polls=$((_pg_bootout_polls + 1))
-    done
-    _pg_armed=0
-    for _pg_attempt in 1 2 3; do
-        if launchctl bootstrap "$PG_TUNNEL_LAUNCHD_DOMAIN" "$PG_TUNNEL_PLIST_PATH"; then
-            _pg_armed=1
-            break
-        fi
-        if [ "$_pg_attempt" -lt 3 ]; then
-            echo "⚠ PG tunnel bootstrap attempt $_pg_attempt failed — retrying in 2s"
-            sleep 2
-        fi
-    done
-    if [ "$_pg_armed" != "1" ]; then
-        echo "✗ PG tunnel bootstrap failed after 3 attempts"
+    # Use common bootout/poll/bootstrap pattern (extracted to _launchctl_bootout_and_bootstrap_retry)
+    if ! _launchctl_bootout_and_bootstrap_retry "$PG_TUNNEL_LAUNCHD_DOMAIN" "$PG_TUNNEL_LABEL" "$PG_TUNNEL_PLIST_PATH" "PG tunnel"; then
         return 1
     fi
     echo "▸ Proving canonical PostgreSQL tunnel readiness on :15432..."
@@ -3282,6 +3307,11 @@ PLIST_EOF
                     # Restart only when deployment material changed or the job is absent.
                     # The watermark lives in the atomic state file, so replacement loads
                     # the same pre-restart transcript authority before its first tick.
+                    # NOTE: This code block (`:3305-3330`) implements the same bootout/poll/bootstrap
+                    # pattern as `_launchctl_bootout_and_bootstrap_retry` (line ~953). When extracting
+                    # the relay watchdog restart logic to use the common helper, preserve service-specific
+                    # error messages and reconcile any local variable naming (e.g. `_wd_*` → parameters).
+                    # Candidate for integration in next refactor (#5151 follow-up). #4726 #5151
                     launchctl bootout "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" 2>/dev/null || true
                     _wd_bootout_polls=0
                     while launchctl print "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" >/dev/null 2>&1; do
