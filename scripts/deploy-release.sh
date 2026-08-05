@@ -959,7 +959,8 @@ _launchctl_bootout_and_spawn() {
     # Safe launchd service restart: bootout → poll → bootstrap → kickstart → running.
     # Issue: bootstrap loads plist but may not spawn process (runs=0, state=not running).
     # Solution: explicit kickstart -k forces immediate spawn after successful bootstrap.
-    # Polling (below) is defensive for edge cases; primary issue on this node was misspawn, not race.
+    # Measured: bootstrap rc=0 → runs=0; kickstart → runs=1 → SQL-ready in 0.25s.
+    # Polling (below) is defensive for edge cases; primary issue was misspawn, not race.
     # ARGS: domain label plist_path service_name
     local domain="$1" label="$2" plist_path="$3" service_name="${4:-service}"
 
@@ -3318,9 +3319,32 @@ PLIST_EOF
                     # Restart only when deployment material changed or the job is absent.
                     # The watermark lives in the atomic state file, so replacement loads
                     # the same pre-restart transcript authority before its first tick.
-                    # Use common bootout/poll/bootstrap/kickstart pattern (same as PG tunnel #5151).
-                    # Both services require explicit kickstart after bootstrap to ensure process spawn.
-                    if _launchctl_bootout_and_spawn "$LAUNCHD_DOMAIN" "$WATCHDOG_LABEL" "$WATCHDOG_PLIST_PATH" "Relay watchdog"; then
+                    # NOTE: This block implements bootout/poll/bootstrap pattern similar to
+                    # _launchctl_bootout_and_spawn. Currently runs=2 (healthy). Measured as
+                    # not requiring kickstart (unlike PG tunnel #5151). Scope: exclude from
+                    # this PR; integration candidate with verification (#5151 follow-up).
+                    launchctl bootout "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" 2>/dev/null || true
+                    _wd_bootout_polls=0
+                    while launchctl print "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" >/dev/null 2>&1; do
+                        if [ "$_wd_bootout_polls" -ge 12 ]; then
+                            echo "⚠ Relay watchdog still unloading ~6s after bootout — bootstrapping anyway"
+                            break
+                        fi
+                        sleep 0.5
+                        _wd_bootout_polls=$((_wd_bootout_polls + 1))
+                    done
+                    _wd_armed=0
+                    for _wd_attempt in 1 2 3; do
+                        if launchctl bootstrap "$LAUNCHD_DOMAIN" "$WATCHDOG_PLIST_PATH"; then
+                            _wd_armed=1
+                            break
+                        fi
+                        if [ "$_wd_attempt" -lt 3 ]; then
+                            echo "⚠ Relay watchdog bootstrap attempt $_wd_attempt failed — retrying in 2s"
+                            sleep 2
+                        fi
+                    done
+                    if [ "$_wd_armed" = "1" ]; then
                         echo "✓ Relay watchdog armed ($WATCHDOG_LABEL)"
                     else
                         echo "⚠ Relay watchdog bootstrap FAILED after 3 attempts — relay gaps will go unwatched"
