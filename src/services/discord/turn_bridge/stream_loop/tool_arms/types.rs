@@ -44,7 +44,7 @@ pub(in crate::services::discord::turn_bridge::stream_loop) struct StreamToolArmC
         bool,
     pub(in crate::services::discord::turn_bridge::stream_loop) footer_owner:
         crate::services::discord::footer_view_reconciler::CompletionFooterOwner,
-    pub(in crate::services::discord::turn_bridge::stream_loop) current_msg_id: MessageId,
+    pub(in crate::services::discord::turn_bridge::stream_loop) current_msg_id: &'a mut MessageId,
 }
 
 pub(in crate::services::discord::turn_bridge::stream_loop) struct StreamToolArmState<'a> {
@@ -88,5 +88,9 @@ pub(in crate::services::discord::turn_bridge::stream_loop) struct StreamToolArmS
         &'a mut bool,
     pub(in crate::services::discord::turn_bridge::stream_loop) last_edit_text: &'a mut String,
     pub(in crate::services::discord::turn_bridge::stream_loop) full_response: &'a mut String,
+    pub(in crate::services::discord::turn_bridge::stream_loop) response_sent_offset: &'a mut usize,
+    /// The stream loop's `bridge_confirmed_response_sent_offset`; abbreviated
+    /// here only to keep the three call sites on one line each.
+    pub(in crate::services::discord::turn_bridge::stream_loop) confirmed_offset: &'a mut usize,
     pub(in crate::services::discord::turn_bridge::stream_loop) status_panel_dirty: &'a mut bool,
 }

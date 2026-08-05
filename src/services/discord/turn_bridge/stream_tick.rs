@@ -393,11 +393,21 @@ pub(super) async fn run_bridge_stream_tick(
             {
                 Some(allowed) => allowed,
                 None => {
+                    // `durable_relay_owner_kind="none"` means "the BRIDGE owns
+                    // the relay" (`StreamRelayAuthority::bridge_owns_relay`), NOT
+                    // "nobody owns it" — read `bridge_owns_relay` for the
+                    // disposition and never treat `none` as a missing owner.
                     tracing::warn!(
                         channel_id = channel_id.get(),
                         caller = $caller,
                         ?guarded_outcome,
-                        relay_owner = inflight_state.effective_relay_owner_kind().as_str(),
+                        durable_relay_owner_kind =
+                            inflight_state.effective_relay_owner_kind().as_str(),
+                        bridge_owns_relay =
+                            crate::services::discord::inflight::StreamRelayAuthority::from_state(
+                                inflight_state,
+                            )
+                            .bridge_owns_relay(),
                         "stream tick lost durable Discord mutation authority"
                     );
                     return_authority_lost!();

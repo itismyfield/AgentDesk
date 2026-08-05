@@ -423,7 +423,7 @@ pub(super) async fn run_stream_loop(
                                     voice_progress_playback_channel_id,
                                     single_message_panel_footer_mode,
                                     footer_owner,
-                                    current_msg_id,
+                                    current_msg_id: &mut current_msg_id,
                                 },
                                 StreamToolArmState {
                                     state_dirty: &mut state_dirty,
@@ -454,6 +454,8 @@ pub(super) async fn run_stream_loop(
                                     restart_followup_pending: &mut restart_followup_pending,
                                     last_edit_text: &mut last_edit_text,
                                     full_response: &mut full_response,
+                                    response_sent_offset: &mut response_sent_offset,
+                                    confirmed_offset: &mut bridge_confirmed_response_sent_offset,
                                     status_panel_dirty: &mut status_panel_dirty,
                                 },
                             )
@@ -489,7 +491,7 @@ pub(super) async fn run_stream_loop(
                                     voice_progress_playback_channel_id,
                                     single_message_panel_footer_mode,
                                     footer_owner,
-                                    current_msg_id,
+                                    current_msg_id: &mut current_msg_id,
                                 },
                                 StreamToolArmState {
                                     state_dirty: &mut state_dirty,
@@ -520,6 +522,8 @@ pub(super) async fn run_stream_loop(
                                     restart_followup_pending: &mut restart_followup_pending,
                                     last_edit_text: &mut last_edit_text,
                                     full_response: &mut full_response,
+                                    response_sent_offset: &mut response_sent_offset,
+                                    confirmed_offset: &mut bridge_confirmed_response_sent_offset,
                                     status_panel_dirty: &mut status_panel_dirty,
                                 },
                             )
@@ -562,7 +566,7 @@ pub(super) async fn run_stream_loop(
                                     voice_progress_playback_channel_id,
                                     single_message_panel_footer_mode,
                                     footer_owner,
-                                    current_msg_id,
+                                    current_msg_id: &mut current_msg_id,
                                 },
                                 StreamToolArmState {
                                     state_dirty: &mut state_dirty,
@@ -593,6 +597,8 @@ pub(super) async fn run_stream_loop(
                                     restart_followup_pending: &mut restart_followup_pending,
                                     last_edit_text: &mut last_edit_text,
                                     full_response: &mut full_response,
+                                    response_sent_offset: &mut response_sent_offset,
+                                    confirmed_offset: &mut bridge_confirmed_response_sent_offset,
                                     status_panel_dirty: &mut status_panel_dirty,
                                 },
                             )
