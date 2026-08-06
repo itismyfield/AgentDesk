@@ -997,7 +997,7 @@ mod target_safety_tests {
     #[test]
     fn blank_session_name_is_not_a_valid_target() {
         assert!(!has_session(""));
-        assert_eq!(get_option("", "@agentdesk_claude_compact_provenance"), None);
+        assert_eq!(get_option("", "@agentdesk-probe-option"), None);
         assert!(
             kill_session_output_internal_with_timeout(
                 "",

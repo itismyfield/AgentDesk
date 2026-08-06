@@ -102,12 +102,7 @@ pub fn execute_streaming(
     // guard (#4559).
     let launch_env = ClaudeLaunchEnv::resolve(ClaudeLaunchIntent::Turn);
     let auto_compact_window = compact_percent.and_then(|percent| {
-        launch_auto_compact_window(
-            model_override,
-            percent,
-            compact_lower_bound_tokens,
-            launch_env.gateway_proxy_env(),
-        )
+        launch_auto_compact_window(model_override, percent, compact_lower_bound_tokens)
     });
     let mut builder = ClaudeCommandBuilder::for_wrapper_with_env(&claude_e_bin, launch_env);
     {
