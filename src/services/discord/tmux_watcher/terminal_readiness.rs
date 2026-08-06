@@ -627,3 +627,58 @@ pub(super) fn discard_watcher_pending_buffer_after_suppressed_turn(
 #[cfg(test)]
 #[path = "terminal_readiness_tests.rs"]
 mod tests;
+
+/// #5071 T1 S3-0: PURE MOVE from `tmux_watcher.rs`, zero logic change. The root
+/// file sits exactly on its hot-file ratchet ceiling, so the S3 delivery-journal
+/// wiring that must live there needs headroom first. This helper belongs here: it
+/// is synchronous, side-effect-free, touches neither `shared` nor `http`, and its
+/// `restored_seed_from_rewind` input already lives in this module. Items are
+/// `pub(super)` so the root's glob re-export keeps every existing caller
+/// (`turn_stream_collector`, `tests`) naming them unchanged.
+#[derive(Debug)]
+pub(super) struct RestoredSeedDisposition {
+    pub(super) stream_seed: WatcherStreamSeed,
+    pub(super) discard_restored_seed: bool,
+    pub(super) seed_reassigned_to_different_turn: bool,
+    pub(super) restored_seed_undelivered_body_len: usize,
+    pub(super) prompt_anchor_present: bool,
+}
+
+pub(super) fn watcher_stream_seed_after_restored_seed_discard(
+    restored_turn_seed: Option<RestoredWatcherTurn>,
+    current_turn_identity: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
+    prompt_anchor_message_id: Option<u64>,
+) -> RestoredSeedDisposition {
+    let seed_from_rewind = restored_seed_from_rewind(restored_turn_seed.as_ref());
+    let restored_seed_undelivered_body_len = restored_turn_seed
+        .as_ref()
+        .and_then(|seed| seed.full_response.get(seed.response_sent_offset..))
+        .map(|body| body.trim().chars().count())
+        .unwrap_or(0);
+    let restored_seed_has_body = restored_seed_undelivered_body_len > 0;
+    let prompt_anchor_present = prompt_anchor_message_id.is_some();
+    let seed_reassigned_to_different_turn = restored_seed_reassigned_to_different_turn(
+        restored_turn_seed.as_ref(),
+        current_turn_identity,
+        prompt_anchor_message_id,
+    );
+    let discard_restored_seed = should_discard_restored_seed_for_idle_direct_prompt(
+        restored_turn_seed.is_some(),
+        prompt_anchor_present,
+        restored_seed_has_body,
+        seed_from_rewind,
+        seed_reassigned_to_different_turn,
+    );
+    let stream_seed = watcher_stream_seed(if discard_restored_seed {
+        None
+    } else {
+        restored_turn_seed
+    });
+    RestoredSeedDisposition {
+        stream_seed,
+        discard_restored_seed,
+        seed_reassigned_to_different_turn,
+        restored_seed_undelivered_body_len,
+        prompt_anchor_present,
+    }
+}
