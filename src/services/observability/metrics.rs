@@ -85,6 +85,14 @@ pub struct AtomicCounters {
     /// cleanly assigned across the three relay-launch paths, root cause #3). A
     /// phantom/unknown owner can make the bridge skip its own delivery.
     pub relay_owner_unknown: AtomicU64,
+    /// #5175: a terminal frame ended with NO delivery owner — the session-bound
+    /// sink did not acknowledge delivery AND the soft terminal failed the
+    /// watcher's turn-authority contract, so neither actor posted the body. Any
+    /// non-zero value is a silently dropped answer plus a frozen delivery
+    /// frontier (redrive then re-publishes the previous answer). The failing
+    /// conjunct is emitted alongside as a `relay_terminal_authority_denied_*`
+    /// root-cause counter.
+    pub relay_terminal_authority_denied: AtomicU64,
     /// #4794: observed prompt-notification emissions that hit an authoritative
     /// tmux-owner registry miss and were still pending when bounded three-state
     /// probing definitively reported `DeadOrAbsent`. Poll misses are excluded;
@@ -126,6 +134,9 @@ impl AtomicCounters {
                 .relay_uncommitted_inflight_cleared
                 .load(Ordering::Relaxed),
             relay_owner_unknown: self.relay_owner_unknown.load(Ordering::Relaxed),
+            relay_terminal_authority_denied: self
+                .relay_terminal_authority_denied
+                .load(Ordering::Relaxed),
             relay_permanent_loss: self.relay_permanent_loss.load(Ordering::Relaxed),
             relay_permanent_loss_drift_state_ttl_expired: self
                 .relay_permanent_loss_drift_state_ttl_expired
@@ -173,6 +184,8 @@ pub struct AtomicCountersSnapshot {
     pub relay_uncommitted_inflight_cleared: u64,
     /// #2838: see [`AtomicCounters::relay_owner_unknown`].
     pub relay_owner_unknown: u64,
+    /// #5175: see [`AtomicCounters::relay_terminal_authority_denied`].
+    pub relay_terminal_authority_denied: u64,
     /// #4794: confirmed lost observed-prompt emissions; see
     /// [`AtomicCounters::relay_permanent_loss`] for exact inclusion rules.
     pub relay_permanent_loss: u64,
@@ -217,6 +230,9 @@ pub struct CounterSnapshotRow {
     /// #2838: turns that began relay with an Unknown owner kind. See
     /// [`AtomicCounters::relay_owner_unknown`].
     pub relay_owner_unknown: u64,
+    /// #5175: terminal frames that ended with no delivery owner at all. See
+    /// [`AtomicCounters::relay_terminal_authority_denied`].
+    pub relay_terminal_authority_denied: u64,
     /// #4794: confirmed lost observed-prompt emissions; see
     /// [`AtomicCounters::relay_permanent_loss`] for exact inclusion rules.
     pub relay_permanent_loss: u64,
@@ -312,6 +328,14 @@ impl ObservabilityCounters {
     pub fn record_relay_uncommitted_inflight_cleared(&self, channel_id: u64, provider: &str) {
         self.slot(channel_id, provider)
             .relay_uncommitted_inflight_cleared
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// #5175: a terminal frame ended with no delivery owner (sink unacknowledged
+    /// AND soft-terminal watcher authority denied).
+    pub fn record_relay_terminal_authority_denied(&self, channel_id: u64, provider: &str) {
+        self.slot(channel_id, provider)
+            .relay_terminal_authority_denied
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -426,6 +450,7 @@ impl ObservabilityCounters {
                     relay_terminal_ack_timeout: snap.relay_terminal_ack_timeout,
                     relay_uncommitted_inflight_cleared: snap.relay_uncommitted_inflight_cleared,
                     relay_owner_unknown: snap.relay_owner_unknown,
+                    relay_terminal_authority_denied: snap.relay_terminal_authority_denied,
                     relay_permanent_loss: snap.relay_permanent_loss,
                     relay_permanent_loss_drift_state_ttl_expired: snap
                         .relay_permanent_loss_drift_state_ttl_expired,
@@ -506,6 +531,27 @@ pub fn record_session_identity_conflict(
 pub fn record_relay_terminal_ack_timeout(channel_id: u64, provider: &str) {
     global().record_relay_terminal_ack_timeout(channel_id, provider);
     super::emit::emit_relay_root_cause_counter(provider, channel_id, "relay_terminal_ack_timeout");
+}
+
+/// #5175: convenience wrapper for
+/// `ObservabilityCounters::record_relay_terminal_authority_denied`.
+///
+/// `denial_counter` names the failing authority conjunct
+/// (`relay_terminal_authority_denied_*`) and is emitted as its own root-cause
+/// counter so an alert can distinguish "the row vanished" from "a forged turn
+/// was correctly refused".
+pub fn record_relay_terminal_authority_denied(
+    channel_id: u64,
+    provider: &str,
+    denial_counter: &str,
+) {
+    global().record_relay_terminal_authority_denied(channel_id, provider);
+    super::emit::emit_relay_root_cause_counter(
+        provider,
+        channel_id,
+        "relay_terminal_authority_denied",
+    );
+    super::emit::emit_relay_root_cause_counter(provider, channel_id, denial_counter);
 }
 
 /// #2838: convenience wrapper for `ObservabilityCounters::record_relay_uncommitted_inflight_cleared`.
