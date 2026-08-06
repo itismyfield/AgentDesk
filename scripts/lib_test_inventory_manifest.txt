@@ -2965,6 +2965,7 @@ services::discord::outbound::delivery_record::tests::long_chunk_full_commit_reco
 services::discord::outbound::delivery_record::tests::long_chunk_partial_or_err_never_records_anchor_3610c
 services::discord::outbound::delivery_record::tests::malformed_record_reads_none_conservative
 services::discord::outbound::delivery_record::tests::missing_record_reads_none_conservative
+services::discord::outbound::delivery_record::tests::not_delivered_never_settles_the_ledger_5154
 services::discord::outbound::delivery_record::tests::only_frontier_writer_advances_frontier
 services::discord::outbound::delivery_record::tests::ordered_jsonl_blocked_writer_revalidates_after_rotation_4911
 services::discord::outbound::delivery_record::tests::ordered_jsonl_commit_is_generation_scoped_and_monotonic
@@ -2993,6 +2994,8 @@ services::discord::outbound::delivery_record::tests::shadow_write_preserves_exis
 services::discord::outbound::delivery_record::tests::shadow_writes_frontier_and_reports_match
 services::discord::outbound::delivery_record::tests::should_shadow_mirror_requires_delivered_and_enabled
 services::discord::outbound::delivery_record::tests::sidecar_path_is_outside_inflight_scan_set
+services::discord::outbound::delivery_record::tests::unknown_generation_confirmed_delivery_settles_ledger_without_frontier_5154
+services::discord::outbound::delivery_record::tests::unknown_generation_without_pinned_inbound_id_settles_nothing_5154
 services::discord::outbound::delivery_record::tests::watcher_long_chunk_partial_or_unadvanced_never_records_3610d
 services::discord::outbound::delivery_record::tests::watcher_long_chunk_same_channel_anchor_pair_3610d
 services::discord::outbound::delivery_record::tests::watcher_owner_context_preserves_frontier_and_resolves_current_generation_3751
