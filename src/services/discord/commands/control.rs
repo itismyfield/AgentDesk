@@ -575,11 +575,30 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
                 "/stop",
             )
             .await;
+            // #5176 — "the interrupt was sent (or deliberately skipped)" is not
+            // cancel success. When the runtime this turn belonged to is already
+            // gone, the stop delivery layer decides `skip_pre_generation` and
+            // there is nobody left to run the turn-bridge exit that would
+            // normally release the mailbox. Without this the channel keeps a
+            // foreground anchor forever and every queued user message stays
+            // locked behind it. The guard inside
+            // `release_zombie_foreground_turn` is what keeps a live turn safe.
+            let release = super::super::zombie_foreground_release::release_zombie_foreground_turn(
+                &ctx.data().shared,
+                &ctx.data().provider,
+                channel_id,
+                "/stop",
+            )
+            .await;
             log_info_event!(
                 "discord_cancel_signal_sent",
                 channel_id = channel_id.get(),
                 provider = ctx.data().provider.as_str(),
-                status = "sent",
+                status = if release.released { "released" } else { "sent" },
+                mailbox_foreground_released = release.released,
+                zombie_verdict = release.verdict_str(),
+                queue_depth_after = release.queue_depth_after,
+                queue_kickoff_scheduled = release.queue_kickoff_scheduled,
             );
         }
         None => {

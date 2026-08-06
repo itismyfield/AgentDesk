@@ -155,22 +155,51 @@ pub async fn reconcile_stale_turn(
             })?;
 
     match outcome {
-        crate::services::stale_turn_reconciler::SessionReconcileOutcome::Reconciled => Ok((
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "ok": true,
-                "session_key": session_key,
-                "reconciled": true,
-                "status": "idle",
-            })),
-        )),
+        crate::services::stale_turn_reconciler::SessionReconcileOutcome::Reconciled(
+            qualification,
+        ) => {
+            // #5176: the Postgres row was never what blocked the channel — the
+            // in-memory mailbox foreground anchor was. Reporting `reconciled`
+            // while the mailbox still owns the slot would be the same false
+            // success this endpoint was supposed to cure, so release it here
+            // too. The release runs through the guarded authority and cannot
+            // take a live turn's anchor.
+            let release = match crate::services::discord::session_identity::tmux_name_from_session_key(&session_key) {
+                Some(tmux_name) => {
+                    crate::services::discord::health::release_zombie_foreground_turn_by_tmux_name(
+                        state.health_registry.as_deref(),
+                        &tmux_name,
+                        "reconcile_stale_turn",
+                    )
+                    .await
+                }
+                None => crate::services::discord::zombie_foreground_release::ZombieForegroundReleaseOutcome::default(),
+            };
+            Ok((
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "ok": true,
+                    "session_key": session_key,
+                    "reconciled": true,
+                    "status": "idle",
+                    "mailbox_foreground_released": release.released,
+                    "mailbox_release_verdict": release.verdict_str(),
+                    // #5176: which guard fired. `idle_without_inflight` is the
+                    // widened one — no active dispatch, no inflight turn record,
+                    // terminal tmux evidence — added because the heartbeat-only
+                    // guard classified a channel with no turn at all as "live".
+                    "qualification": qualification.as_str(),
+                })),
+            ))
+        }
         crate::services::stale_turn_reconciler::SessionReconcileOutcome::Unchanged => Ok((
             StatusCode::OK,
             Json(serde_json::json!({
                 "ok": true,
                 "session_key": session_key,
                 "reconciled": false,
-                "reason": "session is live or does not meet the stale-turn guard",
+                "reason": "session is live, or has an inflight turn record, \
+                           or its tmux evidence was not terminal",
             })),
         )),
         crate::services::stale_turn_reconciler::SessionReconcileOutcome::NotFound => {

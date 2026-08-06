@@ -75,6 +75,19 @@ pub(crate) struct TurnLifecycleStopResult {
     /// after the cancel ran. A `true → false` transition is the canonical
     /// signature of #1672 — pending_queue silently dropped during cancel.
     pub queue_disk_present_after: bool,
+    /// #5176: whether the channel mailbox actually gave up its foreground
+    /// turn anchor. THIS is what "the turn was cancelled" has to mean — a
+    /// `turn_status: cancelled` stamp on a mailbox that still owns the
+    /// foreground slot leaves the channel permanently unusable, which is the
+    /// exact incident this field exists to make visible in the API response.
+    /// `None` when no runtime could be resolved to probe (direct-fallback).
+    pub mailbox_foreground_free: Option<bool>,
+    /// #5176: the primary Discord message ids that were in the pending queue
+    /// before the cancel and are gone after it. `queue_preserved=false` told an
+    /// operator that something was lost; this tells them WHAT, so a violation of
+    /// the user-message-lossless contract can be traced to a specific
+    /// instruction instead of a decremented counter.
+    pub queue_dropped_message_ids: Vec<u64>,
 }
 
 pub(crate) async fn stop_turn_preserving_queue(
@@ -191,6 +204,7 @@ async fn stop_turn_with_policy(
     let mut queue_depth = None;
     let mut termination_recorded = false;
     let mut runtime_persistent_inflight_cleared = false;
+    let mut mailbox_foreground_free = None;
     let tmux_was_alive = !probe_session_owned.is_empty()
         && crate::services::platform::tmux::has_session(&probe_session_owned);
     let cleanup_tmux = cleanup_policy.should_cleanup_tmux();
@@ -231,6 +245,7 @@ async fn stop_turn_with_policy(
             queue_depth = Some(runtime.queue_depth);
             termination_recorded = runtime.termination_recorded;
             runtime_persistent_inflight_cleared = runtime.persistent_inflight_cleared;
+            mailbox_foreground_free = Some(runtime.mailbox_foreground_free);
         }
     }
 
@@ -334,6 +349,8 @@ async fn stop_turn_with_policy(
         pre_snapshot.as_ref(),
         post_snapshot.as_ref(),
     );
+    let queue_dropped_message_ids =
+        dropped_queue_message_ids(pre_snapshot.as_ref(), post_snapshot.as_ref());
 
     let result = TurnLifecycleStopResult {
         lifecycle_path,
@@ -347,7 +364,47 @@ async fn stop_turn_with_policy(
         queue_depth_after: post_snapshot.as_ref().map(|s| s.queue_depth),
         queue_disk_present_before: pre_snapshot.as_ref().is_some_and(|s| s.disk_present),
         queue_disk_present_after: post_snapshot.as_ref().is_some_and(|s| s.disk_present),
+        mailbox_foreground_free,
+        queue_dropped_message_ids,
     };
+
+    // #5176: a cancel that silently ate a queued user instruction violates the
+    // user-message-lossless contract. Name the casualties at ERROR — a
+    // decremented `queued_remaining` in an INFO line is not a report.
+    if !result.queue_dropped_message_ids.is_empty() {
+        tracing::error!(
+            provider = target
+                .provider
+                .as_ref()
+                .map(ProviderKind::as_str)
+                .unwrap_or("unknown"),
+            channel_id = target.channel_id.map(ChannelId::get).unwrap_or(0),
+            lifecycle_path,
+            reason,
+            dropped_message_ids = ?result.queue_dropped_message_ids,
+            queue_depth_before = ?result.queue_depth_before,
+            queue_depth_after = ?result.queue_depth_after,
+            "cancel dropped queued user messages instead of preserving them (see #5176)"
+        );
+    }
+
+    // #5176: a cancel that stamped the turn `cancelled` while the mailbox kept
+    // its foreground anchor is not a successful cancel — it is the incident.
+    // Say so at ERROR so it can never again be read as success from the logs.
+    if mailbox_foreground_free == Some(false) {
+        tracing::error!(
+            provider = target
+                .provider
+                .as_ref()
+                .map(ProviderKind::as_str)
+                .unwrap_or("unknown"),
+            channel_id = target.channel_id.map(ChannelId::get).unwrap_or(0),
+            lifecycle_path,
+            reason,
+            "cancel stamped the turn cancelled but the mailbox still owns the foreground slot; \
+             the channel remains blocked (see #5176)"
+        );
+    }
 
     if emit_cancel_observability {
         crate::services::turn_cancel_finalizer::finalize_turn_cancel(
@@ -461,11 +518,13 @@ mod policy_observability_tests {
             queue_depth: 1,
             disk_present: true,
             disk_path: None,
+            message_ids: vec![9_001],
         };
         let post_loss = PendingQueueSnapshot {
             queue_depth: 0,
             disk_present: false,
             disk_path: None,
+            message_ids: Vec::new(),
         };
         assert!(
             !super::compute_queue_preserved(
@@ -482,6 +541,7 @@ mod policy_observability_tests {
             queue_depth: 1,
             disk_present: true,
             disk_path: None,
+            message_ids: vec![9_001],
         };
         assert!(super::compute_queue_preserved(
             TmuxCleanupPolicy::PreserveSessionAndInflight {
@@ -507,6 +567,54 @@ mod policy_observability_tests {
             None,
             None,
         ));
+    }
+
+    /// #5176: the cancel response must name the user instructions it destroyed.
+    /// Depth is not enough — a swapped queue keeps the same depth.
+    #[test]
+    fn dropped_queue_message_ids_names_the_lost_user_instructions() {
+        use crate::services::discord::health::PendingQueueSnapshot;
+
+        fn snapshot(message_ids: Vec<u64>) -> PendingQueueSnapshot {
+            PendingQueueSnapshot {
+                queue_depth: message_ids.len(),
+                disk_present: !message_ids.is_empty(),
+                disk_path: None,
+                message_ids,
+            }
+        }
+
+        // The #5176 incident shape: queued_before=1, queued_remaining=0.
+        assert_eq!(
+            super::dropped_queue_message_ids(
+                Some(&snapshot(vec![9_001])),
+                Some(&snapshot(Vec::new())),
+            ),
+            vec![9_001]
+        );
+
+        // Same depth, different message: still a lost user instruction, and the
+        // reason a depth comparison alone cannot audit the lossless contract.
+        assert_eq!(
+            super::dropped_queue_message_ids(
+                Some(&snapshot(vec![9_001])),
+                Some(&snapshot(vec![9_002])),
+            ),
+            vec![9_001]
+        );
+
+        // Preservation, and growth, report nothing.
+        assert!(
+            super::dropped_queue_message_ids(
+                Some(&snapshot(vec![9_001])),
+                Some(&snapshot(vec![9_001, 9_002])),
+            )
+            .is_empty()
+        );
+
+        // An unobservable side is not evidence of a drop.
+        assert!(super::dropped_queue_message_ids(Some(&snapshot(vec![9_001])), None).is_empty());
+        assert!(super::dropped_queue_message_ids(None, None).is_empty());
     }
 }
 
@@ -567,6 +675,33 @@ async fn pending_queue_post_snapshot(
     target: &TurnLifecycleTarget,
 ) -> Option<crate::services::discord::health::PendingQueueSnapshot> {
     pending_queue_pre_snapshot(health_registry, target).await
+}
+
+/// #5176: the queued primary message ids that were present before the cancel
+/// and absent after it.
+///
+/// Deliberately identity-based rather than depth-based. `queue_preserved` is an
+/// OBSERVATION (that is the whole point of the #1672 fix — it used to be
+/// hardcoded `true`), so "flipping the default back to preserve" would only
+/// re-hide the loss it was built to expose. The actionable half of a lossless
+/// contract is naming what went missing, which a depth comparison cannot do: a
+/// queue that lost item A and gained item B has the same depth and is still a
+/// lost user instruction.
+///
+/// Returns empty when either side is unobservable — an unknown queue is not
+/// evidence of a drop.
+fn dropped_queue_message_ids(
+    pre: Option<&crate::services::discord::health::PendingQueueSnapshot>,
+    post: Option<&crate::services::discord::health::PendingQueueSnapshot>,
+) -> Vec<u64> {
+    let (Some(pre), Some(post)) = (pre, post) else {
+        return Vec::new();
+    };
+    pre.message_ids
+        .iter()
+        .copied()
+        .filter(|message_id| !post.message_ids.contains(message_id))
+        .collect()
 }
 
 /// #1672 invariant: `queue_preserved=true` requires that no in-memory

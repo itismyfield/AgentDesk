@@ -43,6 +43,11 @@ pub struct RuntimeTurnStopResult {
     pub queue_depth: usize,
     pub persistent_inflight_cleared: bool,
     pub termination_recorded: bool,
+    /// #5176 — whether this stop actually took the mailbox foreground anchor.
+    /// `true` also covers "the mailbox was already free when we checked": the
+    /// contract this field reports is *ownership released*, and the caller only
+    /// needs to know whether the channel is still locked.
+    pub mailbox_foreground_free: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -412,6 +417,10 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
                             persistent_inflight_was_present,
                         )),
                 termination_recorded,
+                // The turn ended on its own: the mailbox anchor is gone by the
+                // canonical exit, which is the only path that never needed a
+                // zombie release in the first place.
+                mailbox_foreground_free: snapshot.cancel_token.is_none(),
             });
         }
     }
@@ -475,12 +484,38 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
             false
         };
 
+    // #5176 — the runtime fallback is exactly where the zombie survived. It
+    // stamps the turn `cancelled` and returns, and when no turn-bridge loop
+    // exists to run the canonical exit the mailbox keeps its foreground anchor,
+    // so the channel stays permanently locked while the response reports a
+    // successful cancel. Ask the single release authority whether the anchor may
+    // go, and report what actually happened rather than what was attempted.
+    let release = discord::zombie_foreground_release::release_zombie_foreground_turn(
+        &shared,
+        &provider,
+        channel_id,
+        "runtime_stop_fallback",
+    )
+    .await;
+    let mailbox_foreground_free = shared
+        .mailbox(channel_id)
+        .snapshot()
+        .await
+        .cancel_token
+        .is_none();
+    let queue_depth = if release.released {
+        release.queue_depth_after
+    } else {
+        queue_depth
+    };
+
     Some(RuntimeTurnStopResult {
         lifecycle_path: "runtime-fallback",
-        had_active_turn: finish.removed_token.is_some(),
+        had_active_turn: finish.removed_token.is_some() || release.released,
         queue_depth,
         persistent_inflight_cleared,
         termination_recorded,
+        mailbox_foreground_free,
     })
 }
 
@@ -532,6 +567,12 @@ pub struct PendingQueueSnapshot {
     // preservation check (which only compares depth + presence).
     #[allow(dead_code)]
     pub disk_path: Option<std::path::PathBuf>,
+    /// #5176: the primary Discord message id of every queued intervention, in
+    /// queue order. Depth alone told operators that a cancel lost "one item"
+    /// and nothing else — not which user instruction vanished, and not whether
+    /// a same-depth queue had actually been swapped out underneath them. A
+    /// user-message-lossless contract cannot be audited by counting.
+    pub message_ids: Vec<u64>,
 }
 
 async fn snapshot_pending_queue_state_for_shared(
@@ -539,12 +580,16 @@ async fn snapshot_pending_queue_state_for_shared(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> PendingQueueSnapshot {
-    let queue_depth = shared
+    let queued = shared
         .mailbox(channel_id)
         .snapshot()
         .await
-        .intervention_queue
-        .len();
+        .intervention_queue;
+    let queue_depth = queued.len();
+    let message_ids = queued
+        .iter()
+        .map(|intervention| intervention.message_id.get())
+        .collect();
     let disk_path = discord::runtime_store::discord_pending_queue_root().map(|root| {
         root.join(provider.as_str())
             .join(&shared.token_hash)
@@ -558,6 +603,7 @@ async fn snapshot_pending_queue_state_for_shared(
         queue_depth,
         disk_present,
         disk_path,
+        message_ids,
     }
 }
 
@@ -1233,6 +1279,39 @@ pub async fn stop_providerless_runtime_turn_preserving_watcher_strict_ownership(
     stop_source: &'static str,
 ) -> HardStopRuntimeResult {
     runtime_turn_cleanup_by_lookup(registry, None, Some(channel_id), None, stop_source, false).await
+}
+
+/// #5176 — release a zombie foreground anchor identified by tmux session name.
+///
+/// `POST /api/sessions/{session_key}/reconcile-stale-turn` owns the Postgres
+/// session row, but the row was never the thing blocking the channel: the
+/// in-memory mailbox anchor was. Flipping the row to `idle` while the mailbox
+/// still owns the foreground slot would leave the operator with a "reconciled"
+/// response and a channel that is still unusable — the same false success this
+/// issue is about. Session keys carry a tmux name rather than a channel id, so
+/// the runtime is resolved by tmux name here.
+///
+/// The release itself goes through the single guarded authority, so this cannot
+/// take a live turn's anchor even if the caller's own guard was wrong.
+pub(crate) async fn release_zombie_foreground_turn_by_tmux_name(
+    registry: Option<&HealthRegistry>,
+    tmux_name: &str,
+    stop_source: &'static str,
+) -> discord::zombie_foreground_release::ZombieForegroundReleaseOutcome {
+    let Some(registry) = registry else {
+        return discord::zombie_foreground_release::ZombieForegroundReleaseOutcome::default();
+    };
+    let Some(runtime) = find_runtime_channel_match(registry, None, None, Some(tmux_name)).await
+    else {
+        return discord::zombie_foreground_release::ZombieForegroundReleaseOutcome::default();
+    };
+    discord::zombie_foreground_release::release_zombie_foreground_turn(
+        &runtime.shared,
+        &runtime.provider,
+        runtime.channel_id,
+        stop_source,
+    )
+    .await
 }
 
 pub async fn finish_cancelled_provider_channel_mailbox(

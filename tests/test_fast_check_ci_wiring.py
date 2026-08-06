@@ -53,6 +53,7 @@ EXPECTED_TEST_NON_PG_COMMANDS = (
     "cargo test --lib services::discord::router::intake_dispatch::tests::telemetry_only_unopted -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib attachment -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib mailbox_reaction_tests -- --skip _pg --skip pg_ --skip postgres",
+    "cargo test --lib services::discord::zombie_foreground_release::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib queue_marker::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib services::discord::placeholder_controller::queued_card_gate::tests"
     " -- --skip _pg --skip pg_ --skip postgres",

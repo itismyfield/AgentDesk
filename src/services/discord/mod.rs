@@ -165,6 +165,7 @@ mod voice_routing;
 mod voice_sensitivity;
 #[path = "watchers/lifecycle_decision.rs"]
 mod watcher_lifecycle_decision;
+pub(crate) mod zombie_foreground_release; // #5176 cancel/mailbox-release authority
 
 #[allow(unused_imports)]
 pub(in crate::services::discord) use tmux_watcher_registry::{

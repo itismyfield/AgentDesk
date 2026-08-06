@@ -10,9 +10,31 @@ use crate::services::provider::ProviderKind;
 /// bounding how long a stale busy state can block mailbox injection.
 pub(crate) const STALE_TURN_GRACE: Duration = Duration::from_secs(5 * 60);
 
+/// Which guard qualified a session for reconciliation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StaleTurnQualification {
+    /// The historical guard: no active dispatch AND an expired heartbeat.
+    StaleHeartbeat,
+    /// #5176: no active dispatch AND no persistent inflight-turn record for the
+    /// session's channel, with the heartbeat still fresh. A session whose turn
+    /// record is gone has no turn — the heartbeat is being kept alive by
+    /// something that is not the turn, which is exactly why the heartbeat-only
+    /// guard reported the incident channel as "live" and left it locked.
+    IdleWithoutInflight,
+}
+
+impl StaleTurnQualification {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::StaleHeartbeat => "stale_heartbeat",
+            Self::IdleWithoutInflight => "idle_without_inflight",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionReconcileOutcome {
-    Reconciled,
+    Reconciled(StaleTurnQualification),
     Unchanged,
     NotFound,
 }
@@ -48,11 +70,50 @@ pub(crate) async fn reconcile_stale_turn_by_key_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> Result<SessionReconcileOutcome> {
+    reconcile_stale_turn_by_key_with_probes_pg(
+        pool,
+        session_key,
+        independent_tmux_liveness,
+        channel_inflight_state_present,
+    )
+    .await
+}
+
+/// #5176 — the operator endpoint, with both liveness probes injectable so the
+/// widened guard can be pinned in BOTH directions without a tmux pane.
+async fn reconcile_stale_turn_by_key_with_probes_pg<L, I>(
+    pool: &PgPool,
+    session_key: &str,
+    liveness_probe: L,
+    inflight_probe: I,
+) -> Result<SessionReconcileOutcome>
+where
+    L: Fn(&str, &str) -> IndependentLiveness + Copy + Send + 'static,
+    I: Fn(&str, &str) -> InflightPresence + Copy + Send + 'static,
+{
     let reconciled =
-        reconcile_stale_turns_matching_pg(pool, Some(session_key), independent_tmux_liveness)
-            .await?;
+        reconcile_stale_turns_matching_pg(pool, Some(session_key), liveness_probe).await?;
     if reconciled > 0 {
-        return Ok(SessionReconcileOutcome::Reconciled);
+        return Ok(SessionReconcileOutcome::Reconciled(
+            StaleTurnQualification::StaleHeartbeat,
+        ));
+    }
+
+    // #5176 — the heartbeat-only guard reported the incident channel as "live"
+    // even though its turn record was gone and its pane sat at the prompt, so
+    // the endpoint that exists precisely for this case could not touch it.
+    //
+    // The widened qualification is deliberately scoped to THIS keyed operator
+    // call and never to the unattended sweeps above: an operator naming one
+    // session is a bounded, intentional act, while widening the sweep would put
+    // every `turn_active` row one probe away from being idled. The gates that
+    // protect a live turn are unchanged and all three still have to pass — no
+    // active dispatch (SQL), no inflight-turn record, terminal tmux evidence.
+    if reconcile_idle_without_inflight_pg(pool, session_key, liveness_probe, inflight_probe).await?
+    {
+        return Ok(SessionReconcileOutcome::Reconciled(
+            StaleTurnQualification::IdleWithoutInflight,
+        ));
     }
 
     let exists = sqlx::query_scalar::<_, bool>(
@@ -68,6 +129,144 @@ pub(crate) async fn reconcile_stale_turn_by_key_pg(
     } else {
         SessionReconcileOutcome::NotFound
     })
+}
+
+/// Whether a persistent inflight-turn record exists for a session's channel.
+/// `Unknown` is NOT "absent": an unparseable session key or an unreadable
+/// runtime root must fail closed, exactly like an unprobeable tmux pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InflightPresence {
+    Present,
+    Absent,
+    Unknown,
+}
+
+fn channel_inflight_state_present(session_key: &str, provider: &str) -> InflightPresence {
+    let Some(identity) = SessionIdentity::parse(session_key) else {
+        return InflightPresence::Unknown;
+    };
+    let Some(db_provider) = ProviderKind::from_str(provider) else {
+        return InflightPresence::Unknown;
+    };
+    if identity.host != crate::services::platform::hostname_short() {
+        // A remote session's inflight files do not live on this host, so their
+        // absence here proves nothing.
+        return InflightPresence::Unknown;
+    }
+    let Some((tmux_provider, _)) = identity.provider_and_channel() else {
+        return InflightPresence::Unknown;
+    };
+    if tmux_provider != db_provider {
+        return InflightPresence::Unknown;
+    }
+    if crate::services::discord::zombie_foreground_release::inflight_state_present_for_tmux_name(
+        &db_provider,
+        &identity.tmux_name,
+    ) {
+        InflightPresence::Present
+    } else {
+        InflightPresence::Absent
+    }
+}
+
+async fn reconcile_idle_without_inflight_pg<L, I>(
+    pool: &PgPool,
+    session_key: &str,
+    liveness_probe: L,
+    inflight_probe: I,
+) -> Result<bool>
+where
+    L: Fn(&str, &str) -> IndependentLiveness + Copy + Send + 'static,
+    I: Fn(&str, &str) -> InflightPresence + Copy + Send + 'static,
+{
+    let Some(candidate) = load_busy_session_pg(pool, session_key).await? else {
+        return Ok(false);
+    };
+
+    let key = candidate.session_key.clone();
+    let provider = candidate.provider.clone();
+    let inflight = tokio::task::spawn_blocking(move || inflight_probe(&key, &provider))
+        .await
+        .unwrap_or(InflightPresence::Unknown);
+    if inflight != InflightPresence::Absent {
+        tracing::info!(
+            target: "reconcile",
+            session_key = %candidate.session_key,
+            ?inflight,
+            "preserved busy session because an inflight turn record was present or unprobeable"
+        );
+        return Ok(false);
+    }
+
+    let key = candidate.session_key.clone();
+    let provider = candidate.provider.clone();
+    let liveness = tokio::task::spawn_blocking(move || liveness_probe(&key, &provider))
+        .await
+        .unwrap_or(IndependentLiveness::LiveOrAmbiguous);
+    if !matches!(
+        liveness,
+        IndependentLiveness::NoPane | IndependentLiveness::ReadyForInput
+    ) {
+        tracing::info!(
+            target: "reconcile",
+            session_key = %candidate.session_key,
+            ?liveness,
+            "preserved busy session without inflight because independent liveness was not terminal"
+        );
+        return Ok(false);
+    }
+
+    let reconciled =
+        reconcile_idle_without_inflight_candidate_pg(pool, &candidate.session_key).await?;
+    if reconciled > 0 {
+        tracing::warn!(
+            target: "reconcile",
+            session_key = %candidate.session_key,
+            qualification = StaleTurnQualification::IdleWithoutInflight.as_str(),
+            "reconciled a busy session with no inflight turn record and terminal tmux evidence"
+        );
+    }
+    Ok(reconciled > 0)
+}
+
+/// The same busy-session shape as `load_stale_turn_candidates_pg`, minus the
+/// heartbeat predicate. The heartbeat is the ONLY relaxed gate; the no-active-
+/// dispatch requirement is carried unchanged.
+async fn load_busy_session_pg(
+    pool: &PgPool,
+    session_key: &str,
+) -> Result<Option<StaleTurnCandidate>> {
+    sqlx::query_as::<_, StaleTurnCandidate>(
+        "SELECT session_key, COALESCE(provider, 'claude') AS provider
+           FROM sessions
+          WHERE status IN ('turn_active', 'working')
+            AND COALESCE(BTRIM(active_dispatch_id), '') = ''
+            AND session_key = $1",
+    )
+    .bind(session_key)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| anyhow!("load busy session for idle-without-inflight reconcile: {error}"))
+}
+
+async fn reconcile_idle_without_inflight_candidate_pg(
+    pool: &PgPool,
+    session_key: &str,
+) -> Result<usize> {
+    sqlx::query(
+        "UPDATE sessions
+            SET session_info = 'reconciled busy ' || status ||
+                               ' (no dispatch, no inflight turn, terminal tmux)',
+                status = 'idle'
+          WHERE session_key = $1
+            AND status IN ('turn_active', 'working')
+            AND COALESCE(BTRIM(active_dispatch_id), '') = ''",
+    )
+    .bind(session_key)
+    .execute(pool)
+    .await
+    .map(|result| result.rows_affected() as usize)
+    .map_err(|error| anyhow!("reconcile busy session without inflight {session_key}: {error}"))
 }
 
 async fn reconcile_stale_turns_matching_pg<F>(
@@ -397,6 +596,166 @@ mod tests {
             .map(crate::services::pane_readiness::FallbackPaneReadiness::is_ready),
             Some(false)
         );
+    }
+
+    /// #5176 — the reproduction. A busy session with a FRESH heartbeat (so the
+    /// historical guard reports "session is live"), no active dispatch, no
+    /// inflight turn record, and a pane parked at the prompt is a zombie, and
+    /// the operator endpoint must be able to reconcile it.
+    #[tokio::test]
+    async fn keyed_reconcile_pg_releases_busy_session_without_inflight() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        // 30s: far inside STALE_TURN_GRACE, i.e. the heartbeat guard says LIVE.
+        seed_session(
+            &pool,
+            "host:zombie-fresh-heartbeat",
+            "turn_active",
+            None,
+            30,
+        )
+        .await;
+
+        assert_eq!(
+            reconcile_stale_turn_by_key_with_probes_pg(
+                &pool,
+                "host:zombie-fresh-heartbeat",
+                |_, _| IndependentLiveness::ReadyForInput,
+                |_, _| InflightPresence::Absent,
+            )
+            .await
+            .unwrap(),
+            SessionReconcileOutcome::Reconciled(StaleTurnQualification::IdleWithoutInflight)
+        );
+        assert_eq!(
+            load_state(&pool, "host:zombie-fresh-heartbeat").await,
+            (
+                "idle".to_string(),
+                Some(
+                    "reconciled busy turn_active (no dispatch, no inflight turn, terminal tmux)"
+                        .to_string()
+                )
+            )
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// The counter-direction for the widened guard: every gate that can prove a
+    /// turn is alive must independently keep the row `turn_active`. Over-release
+    /// here is worse than the zombie — it abandons work a user is waiting on.
+    #[tokio::test]
+    async fn keyed_reconcile_pg_never_idles_a_live_busy_session() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        seed_session(&pool, "host:live-inflight", "turn_active", None, 30).await;
+        seed_session(&pool, "host:live-pane", "turn_active", None, 30).await;
+        seed_session(&pool, "host:unknown-inflight", "turn_active", None, 30).await;
+        seed_session(
+            &pool,
+            "host:live-dispatch-fresh",
+            "turn_active",
+            Some("dispatch-live"),
+            30,
+        )
+        .await;
+
+        // A turn-bridge loop still owns this turn.
+        assert_eq!(
+            reconcile_stale_turn_by_key_with_probes_pg(
+                &pool,
+                "host:live-inflight",
+                |_, _| IndependentLiveness::ReadyForInput,
+                |_, _| InflightPresence::Present,
+            )
+            .await
+            .unwrap(),
+            SessionReconcileOutcome::Unchanged
+        );
+
+        // No inflight record, but the pane is streaming or unprobeable.
+        assert_eq!(
+            reconcile_stale_turn_by_key_with_probes_pg(
+                &pool,
+                "host:live-pane",
+                |_, _| IndependentLiveness::LiveOrAmbiguous,
+                |_, _| InflightPresence::Absent,
+            )
+            .await
+            .unwrap(),
+            SessionReconcileOutcome::Unchanged
+        );
+
+        // Inflight presence could not be established — absence of proof is not
+        // proof of absence, so it must fail closed like the tmux probe does.
+        assert_eq!(
+            reconcile_stale_turn_by_key_with_probes_pg(
+                &pool,
+                "host:unknown-inflight",
+                |_, _| IndependentLiveness::ReadyForInput,
+                |_, _| InflightPresence::Unknown,
+            )
+            .await
+            .unwrap(),
+            SessionReconcileOutcome::Unchanged
+        );
+
+        // The no-active-dispatch gate is carried over unchanged from the
+        // historical guard: a dispatched turn is never reconciled, no matter
+        // how terminal the local evidence looks.
+        assert_eq!(
+            reconcile_stale_turn_by_key_with_probes_pg(
+                &pool,
+                "host:live-dispatch-fresh",
+                |_, _| IndependentLiveness::NoPane,
+                |_, _| InflightPresence::Absent,
+            )
+            .await
+            .unwrap(),
+            SessionReconcileOutcome::Unchanged
+        );
+
+        for key in [
+            "host:live-inflight",
+            "host:live-pane",
+            "host:unknown-inflight",
+            "host:live-dispatch-fresh",
+        ] {
+            assert_eq!(
+                load_state(&pool, key).await,
+                ("turn_active".to_string(), Some("original".to_string())),
+                "{key} must survive the widened stale-turn guard"
+            );
+        }
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// The unattended sweeps must NOT inherit the widened qualification: they
+    /// still require an expired heartbeat, so a fresh busy row is untouched even
+    /// when every local probe looks terminal.
+    #[tokio::test]
+    async fn periodic_sweep_pg_still_requires_an_expired_heartbeat() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_session(&pool, "host:sweep-fresh", "turn_active", None, 30).await;
+
+        assert_eq!(
+            reconcile_stale_turns_matching_pg(&pool, None, |_, _| IndependentLiveness::NoPane)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            load_state(&pool, "host:sweep-fresh").await,
+            ("turn_active".to_string(), Some("original".to_string()))
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]

@@ -274,7 +274,7 @@
 | `POST` | `/api/sessions/{session_key}/idle-recap` | `idle_recap::post_idle_recap` | `src/server/routes/idle_recap.rs:70` | `src/server/routes/domains/ops.rs:216` |
 | `POST` | `/api/sessions/{session_key}/kill-tmux` | `dispatched_sessions::kill_tmux_session` | `src/server/routes/dispatched_sessions.rs:126` | `src/server/routes/domains/ops.rs:204` |
 | `POST` | `/api/sessions/{session_key}/reconcile-stale-turn` | `dispatched_sessions::reconcile_stale_turn` | `src/server/routes/dispatched_sessions.rs:142` | `src/server/routes/domains/ops.rs:208` |
-| `POST` | `/api/sessions/{session_key}/resume-previous` | `dispatched_sessions::resume_previous_session` | `src/server/routes/dispatched_sessions.rs:183` | `src/server/routes/domains/ops.rs:212` |
+| `POST` | `/api/sessions/{session_key}/resume-previous` | `dispatched_sessions::resume_previous_session` | `src/server/routes/dispatched_sessions.rs:212` | `src/server/routes/domains/ops.rs:212` |
 | `GET` | `/api/settings` | `settings::get_settings` | `src/server/routes/settings.rs:17` | `src/server/routes/domains/admin.rs:48` |
 | `PUT` | `/api/settings` | `settings::put_settings` | `src/server/routes/settings.rs:27` | `src/server/routes/domains/admin.rs:48` |
 | `GET` | `/api/settings/config` | `settings::get_config_entries` | `src/server/routes/settings.rs:40` | `src/server/routes/domains/admin.rs:52` |

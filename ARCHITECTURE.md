@@ -1199,7 +1199,8 @@ src/
 │   │   ├── voice_id_sequences.rs
 │   │   ├── voice_lifecycle.rs
 │   │   ├── voice_routing.rs
-│   │   └── voice_sensitivity.rs
+│   │   ├── voice_sensitivity.rs
+│   │   └── zombie_foreground_release.rs
 │   ├── dispatched_sessions/
 │   │   └── canonical_identity.rs
 │   ├── dispatches/

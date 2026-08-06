@@ -161,22 +161,74 @@ fn tmux_generation_mtime_for_stop(tmux_session_name: Option<&str>) -> Option<i64
         .filter(|mtime| *mtime > 0)
 }
 
+/// #5176 R4, same shape as the #5154 fix: separate the fact that DEPENDS on the
+/// JSONL/wrapper incarnation from the fact that does not, and keep the
+/// incarnation-scoped guard byte-for-byte as strict.
+///
+/// Range suppression (`recent_turn_stop_matches_watcher_range`) legitimately
+/// requires an authoritative `.generation` mtime — an offset means nothing
+/// without knowing which wrapper instance produced it, and that guard already
+/// refuses any tombstone whose `stop_generation_mtime_ns` is absent or `0`. It
+/// is unchanged.
+///
+/// But the stop OFFSET was also being discarded whenever the generation was
+/// unknown, and the offset is consumed by a second, generation-INDEPENDENT
+/// consumer: `recent_turn_stop_matches_watcher_death`, whose generation check is
+/// explicitly skipped when the tombstone carries no generation. There the offset
+/// is used only to REFUSE suppression once the pane has produced output past the
+/// cancel boundary. Dropping it therefore made watcher-death suppression
+/// strictly MORE permissive on exactly the sessions with no `.generation`
+/// marker — a follow-up turn's genuine failure could be swallowed by a stale
+/// cancel tombstone inside the 60s metadata-fallback TTL. The log line called
+/// that "fail closed"; it was failing open.
+///
+/// Recording the offset without a generation can never over-suppress: a rotated
+/// incarnation restarts the offset near zero, which fails the
+/// `current > stop + grace` test and leaves suppression exactly as it was. So
+/// the offset is now captured unconditionally, and only its generation-scoped
+/// USE stays gated.
+fn stop_output_offset_for_tombstone(
+    channel_id: ChannelId,
+    tmux_session_name: Option<&str>,
+) -> Option<u64> {
+    tmux_session_name.and_then(|name| tmux_output_offset_for_stop(channel_id, name))
+}
+
+/// Why a cancel tombstone has no authoritative wrapper incarnation. The two
+/// cases were previously indistinguishable in the logs, and only one of them is
+/// an anomaly worth a WARN.
+fn generation_unavailable_reason(tmux_session_name: &str) -> &'static str {
+    // `resolve_session_temp_path` only yields a path that EXISTS (canonical or
+    // legacy `/tmp` location), so `None` is proof the marker is absent.
+    match crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "generation") {
+        // The marker is written once per spawn; a session that never had one is
+        // a runtime shape, not a fault.
+        None => "marker_absent",
+        // Present, yet the mtime read produced nothing usable: a real anomaly.
+        Some(_) => "marker_unreadable_or_zero",
+    }
+}
+
 pub(in crate::services::discord) async fn record_recent_turn_stop(
     channel_id: ChannelId,
     tmux_session_name: Option<&str>,
     reason: &str,
 ) {
     let stop_generation_mtime_ns = tmux_generation_mtime_for_stop(tmux_session_name);
-    if tmux_session_name.is_some() && stop_generation_mtime_ns.is_none() {
+    let stop_output_offset = stop_output_offset_for_tombstone(channel_id, tmux_session_name);
+    if let Some(session) = tmux_session_name
+        && stop_generation_mtime_ns.is_none()
+    {
         tracing::warn!(
-            "[cancel-tombstone] generation mtime unavailable for channel {} session {:?}; range suppression will fail closed",
-            channel_id.get(),
-            tmux_session_name
+            channel_id = channel_id.get(),
+            tmux_session = session,
+            unavailable_reason = generation_unavailable_reason(session),
+            stop_output_offset = ?stop_output_offset,
+            "[cancel-tombstone] generation mtime unavailable; generation-scoped RANGE suppression \
+             fails closed for this tombstone, while watcher-death classification keeps the \
+             offset boundary it does not need a generation for (#5176)"
         );
     }
-    let stop_output_offset = tmux_session_name
-        .filter(|_| stop_generation_mtime_ns.is_some())
-        .and_then(|name| tmux_output_offset_for_stop(channel_id, name));
     // #2549: the in-memory entry is still published immediately so a live
     // watcher can classify the cancel race, but async consumers wait for the
     // PG insert tied to the same UUID before deleting/consuming the row. That
@@ -580,6 +632,72 @@ mod recent_turn_stop_range_tests {
             511,
             now,
         ));
+    }
+
+    /// #5176 R4, in the #5154 shape. The tombstone's stop offset is NOT a fact
+    /// about the wrapper incarnation, and the watcher-death classifier consumes
+    /// it without ever consulting a generation. Dropping the offset whenever
+    /// the `.generation` marker was missing therefore removed the ONLY boundary
+    /// that consumer had — every watcher death inside the 60s fallback TTL got
+    /// suppressed, including one caused by a follow-up turn's real failure.
+    ///
+    /// The incarnation-scoped guard is unchanged: range suppression still
+    /// refuses a tombstone with no generation (pinned by
+    /// `watcher_range_stop_without_generation_fails_closed` above).
+    #[test]
+    fn death_classification_keeps_the_offset_boundary_without_a_generation() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _root_guard =
+            crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", tmp.path());
+
+        let channel_id = ChannelId::new(5176);
+        let tmux_session_name = "AgentDesk-claude-5176-no-generation";
+        // A live transcript, but NO `.generation` marker: the production shape
+        // that produced the "range suppression will fail closed" WARN.
+        let output_path =
+            crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
+        std::fs::write(&output_path, vec![b'x'; 512]).expect("transcript");
+        assert!(tmux_generation_mtime_for_stop(Some(tmux_session_name)).is_none());
+        assert_eq!(
+            generation_unavailable_reason(tmux_session_name),
+            "marker_absent"
+        );
+
+        // The recording half: the offset must survive the missing incarnation.
+        // This is the mutation point — gating the offset on the generation (the
+        // pre-#5176 behaviour) puts `None` here and disarms the boundary below.
+        assert_eq!(
+            stop_output_offset_for_tombstone(channel_id, Some(tmux_session_name)),
+            Some(512),
+            "the stop offset is not a fact about the wrapper incarnation"
+        );
+
+        let now = std::time::Instant::now();
+        let entry = recent_stop(channel_id, now, Some(tmux_session_name), None);
+
+        // Still at the cancel boundary: the death IS the cancel, so suppress.
+        assert!(recent_turn_stop_matches_watcher_death(
+            &entry,
+            channel_id,
+            tmux_session_name,
+            Some(512),
+            now,
+        ));
+
+        // The pane produced a whole follow-up turn's worth of output past the
+        // cancel boundary. That death belongs to the follow-up turn and must
+        // surface its own lifecycle signal — which is only possible because the
+        // offset survived the missing generation.
+        assert!(
+            !recent_turn_stop_matches_watcher_death(
+                &entry,
+                channel_id,
+                tmux_session_name,
+                Some(512 + CANCEL_TEARDOWN_GRACE_BYTES + 1),
+                now,
+            ),
+            "an offset-less tombstone would swallow an unrelated watcher death"
+        );
     }
 
     #[test]
