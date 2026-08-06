@@ -8,6 +8,15 @@
 > [`docs/generated/giant-file-registry.md`](../generated/giant-file-registry.md);
 > the rows below project the operational meaning of each entry.
 >
+> Last refreshed: 2026-08-06 (#5071 T1 S3b — the dead-tmux tail drain in
+> `tmux.rs` (`drain_missing_inflight_dead_tmux_tail_to_eof`) now records itself in
+> the delivery journal. That arm advances the relay frontier to EOF so it cannot
+> strand behind a dead wrapper, but nothing is posted, so it emits `O`+`S` only —
+> no attempt and no receipt — and is never counted as Delivered. Shadow
+> instrumentation only: the drain's trigger conditions, offset authority and
+> delivery behavior are unchanged, and no new coordinate field or
+> migration-sensitive surface is added).
+>
 > Last refreshed: 2026-07-21 (against #4706 acceptance repair: structural lint allow baseline, giant-registry issue validation, and production-count sync).
 >
 > Last refreshed: 2026-07-30 (#4984 S1 records unintended cross-channel tmux

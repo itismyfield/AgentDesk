@@ -246,6 +246,7 @@ class RawWriterAllowlistTests(unittest.TestCase):
         for exact in (
             " journal_watcher::begin_watcher_terminal(",
             " journal_watcher::settle_watcher_terminal(",
+            " journal_watcher::settle_without_transport(",
             " self.journal.begin_fresh(",
             " self.journal.finish_fresh(",
         ):
@@ -282,5 +283,26 @@ class RawWriterAllowlistTests(unittest.TestCase):
             source.index("journal_watcher::settle_watcher_terminal("),
             "the obligation opens before transport and settles after the commit",
         )
+
+    # #5071 T1 S3b addition.
+
+    def test_source_contract_five_no_transport_sites_each_settle(self):
+        """Source text only: the design names exactly five no-transport frontier
+        advances. This pins one settle_without_transport call per site, so adding
+        a sixth advance without an observation -- or dropping one of the five --
+        fails here. It is a text count: it cannot prove any call is reached."""
+        sites = {
+            "src/services/discord/tmux_watcher/terminal_preflight.rs": 2,
+            "src/services/discord/tmux_watcher/no_result_exits.rs": 1,
+            "src/services/discord/tmux_watcher/loop_poll_prologue.rs": 1,
+            "src/services/discord/tmux.rs": 1,
+        }
+        total = 0
+        for rel, expected in sites.items():
+            source = (ROOT / rel).read_text(encoding="utf-8")
+            found = source.count("settle_without_transport(")
+            self.assertEqual(found, expected, f"{rel}: expected {expected}, found {found}")
+            total += found
+        self.assertEqual(total, 5, "the design names exactly five no-transport settlement sites")
 if __name__ == "__main__":
     unittest.main()

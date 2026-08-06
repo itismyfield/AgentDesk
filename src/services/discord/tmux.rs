@@ -1461,6 +1461,19 @@ async fn drain_missing_inflight_dead_tmux_tail_to_eof(
                 drained_offset,
                 "src/services/discord/tmux.rs:missing_inflight_dead_tmux_tail_drain",
             );
+            // #5071 T1 S3b: O+S only — the tail is drained to EOF so the frontier
+            // does not strand behind a dead wrapper; nothing is posted.
+            crate::services::discord::session_relay_sink::journal::watcher::settle_without_transport(
+                shared,
+                crate::services::discord::session_relay_sink::journal::watcher::WatcherObligationCoordinates {
+                    provider,
+                    channel_id,
+                    tmux_session_name,
+                    generation_mtime_ns: read_generation_file_mtime_ns(tmux_session_name),
+                    range: (current_offset, drained_offset),
+                },
+                crate::services::discord::session_relay_sink::journal::watcher::SettlementReason::MissingInflightDeadTmuxDrain,
+            );
             drained_offset
         }
         Err(error) => {

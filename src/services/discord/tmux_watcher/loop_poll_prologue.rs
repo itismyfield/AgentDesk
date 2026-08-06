@@ -1,5 +1,7 @@
 use super::*;
 use std::io::{Read, Seek, SeekFrom};
+
+use crate::services::discord::session_relay_sink::journal::watcher as journal_watcher;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
@@ -582,7 +584,15 @@ pub(super) async fn poll_watcher_output_or_continue(
     }
     if post_terminal_no_inflight_should_suppress {
         let suppressed_range = (data_start_offset, current_offset);
-        if last_post_terminal_suppressed_range != Some(suppressed_range) {
+        // #5071 T1 S3b: this arm is re-entered on every poll pass while the same
+        // bytes stay suppressed, so the one-shot test that already keeps the
+        // warning from repeating now also gates the shadow observation. Without
+        // it a stuck suppression would submit an O+S batch on every pass.
+        let first_observation_of_range = journal_watcher::first_observation_of_suppressed_range(
+            last_post_terminal_suppressed_range,
+            suppressed_range,
+        );
+        if first_observation_of_range {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 "  [{ts}] 🛑 watcher: suppressed post-terminal output without inflight for channel {} (tmux={}, range {}..{})",
@@ -601,16 +611,34 @@ pub(super) async fn poll_watcher_output_or_continue(
                 "watcher: repeated post-terminal suppress for same range"
             );
         }
+        let confirmed_end = suppressed_terminal_confirmed_end(current_offset, all_data);
+        let generation_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
         last_relayed_offset = Some(current_offset);
-        last_observed_generation_mtime_ns = Some(read_generation_file_mtime_ns(tmux_session_name));
+        last_observed_generation_mtime_ns = Some(generation_mtime_ns);
         advance_watcher_confirmed_end(
             shared,
             watcher_provider,
             channel_id,
             tmux_session_name,
-            suppressed_terminal_confirmed_end(current_offset, all_data),
+            confirmed_end,
             "src/services/discord/tmux.rs:post_terminal_no_inflight_suppressed_output",
         );
+        // #5071 T1 S3b: O+S once per distinct suppressed range. The advance itself
+        // is a monotonic CAS that no-ops on re-entry; the observation is gated so
+        // the journal no-ops the same way.
+        if first_observation_of_range {
+            journal_watcher::settle_without_transport(
+                shared,
+                journal_watcher::WatcherObligationCoordinates {
+                    provider: watcher_provider,
+                    channel_id,
+                    tmux_session_name,
+                    generation_mtime_ns,
+                    range: (data_start_offset, confirmed_end),
+                },
+                journal_watcher::SettlementReason::PostTerminalNoInflightSuppressed,
+            );
+        }
         // #3053: suppressing post-terminal output is NOT idleness — the
         // wrapper is still alive and producing JSONL. The original code
         // `continue`d here before reaching the heartbeat refresh below, so

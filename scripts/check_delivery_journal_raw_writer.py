@@ -66,7 +66,7 @@ FAMILY_REGISTRY = (
 # including a string literal or a test module, flips the family.
 JOURNAL_FACADE_CALL = re.compile(
     r"\bself\.journal\.(?:begin_fresh|finish_fresh)\s*\("
-    r"|\bjournal_watcher::(?:begin_watcher_terminal|settle_watcher_terminal)\s*\("
+    r"|\bjournal_watcher::(?:begin_watcher_terminal|settle_watcher_terminal|settle_without_transport)\s*\("
 )
 UNINSTRUMENTED_FAMILY_BASELINE = 3
 

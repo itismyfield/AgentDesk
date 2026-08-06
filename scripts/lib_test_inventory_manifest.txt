@@ -4134,6 +4134,9 @@ services::discord::session_relay_sink::journal::tests::finish_fresh_emits_transp
 services::discord::session_relay_sink::journal::tests::shadow_candidate_delivered_requires_transport_confirmed
 services::discord::session_relay_sink::journal::tests::shadow_receipt_uses_returned_channel
 services::discord::session_relay_sink::journal::watcher::watcher_terminal_semantics_tests::w10_terminal_obligation_identity_covers_every_coordinate
+services::discord::session_relay_sink::journal::watcher::watcher_terminal_semantics_tests::w1_settlement_is_o_plus_s_only_and_is_not_delivered
+services::discord::session_relay_sink::journal::watcher::watcher_terminal_semantics_tests::w3_settlement_identity_separates_range_reason_and_source
+services::discord::session_relay_sink::journal::watcher::watcher_terminal_semantics_tests::w4_settlement_and_terminal_delivery_are_separate_obligations
 services::discord::session_relay_sink::journal::watcher::watcher_terminal_semantics_tests::w5_only_a_persisted_guarded_advance_is_a_commit
 services::discord::session_relay_sink::journal::watcher::watcher_terminal_semantics_tests::w6_terminal_settle_derives_commit_from_the_proof_and_is_single_use
 services::discord::session_relay_sink::journal::watcher::watcher_terminal_semantics_tests::w8_watcher_terminal_delivery_classifies_as_candidate_delivered
