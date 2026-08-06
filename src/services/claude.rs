@@ -206,11 +206,8 @@ fn build_tmux_launch_env_lines(
             provider.as_str()
         ));
     }
-    // Chokepoint base (#4559): resolved gateway launch env + managed-launch
-    // marker so the `agentdesk tmux-wrapper` reconstructs this decision rather
-    // than re-resolving config-less to a bare Scrub.
+    // Chokepoint base (#4559): resolved gateway launch env.
     launch_env.append_shell_env(&mut env_lines);
-    crate::services::claude_command::append_managed_launch_marker_shell(&mut env_lines);
     // Compact-window overlay (#4591): fence off any inherited absolute window
     // and export the freshly resolved one when present.
     append_auto_compact_window_shell_env(&mut env_lines, auto_compact_window);
@@ -221,16 +218,13 @@ fn build_tmux_launch_env_lines(
 #[cfg(test)]
 mod launch_env_tests {
     use super::build_tmux_launch_env_lines;
-    use crate::services::claude_command::{ClaudeLaunchEnv, TMUX_WRAPPER_GATEWAY_RESOLVED_ENV};
+    use crate::services::claude_command::ClaudeLaunchEnv;
 
     #[test]
     fn launch_env_exports_absolute_compact_window_and_gates_gateway_proxy() {
         let gateway_env = ClaudeLaunchEnv::inject_for_test("http://proxy.example/it's-ready");
         let enabled = build_tmux_launch_env_lines(None, None, None, Some(700_000), &gateway_env);
         assert!(enabled.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW=700000\n"));
-        // Managed launches always mark the wrapper env so it reconstructs this
-        // decision rather than re-resolving to a bare Scrub.
-        assert!(enabled.contains(&format!("export {TMUX_WRAPPER_GATEWAY_RESOLVED_ENV}=1\n")));
         assert!(
             enabled.contains("export ANTHROPIC_BASE_URL='http://proxy.example/it'\\''s-ready'\n")
         );
@@ -3113,9 +3107,8 @@ pub(crate) fn execute_streaming_local_process(
 
     let backend = ProcessBackend::new();
     let handle = backend.create_session_with_command_env(&config, |command| {
-        // Chokepoint base (#4559): resolved gateway env + managed-launch marker
-        // so the spawned `agentdesk tmux-wrapper` reconstructs this decision.
-        launch_env.apply_to_managed_process_command(command);
+        // Chokepoint base (#4559): resolved gateway env.
+        launch_env.apply_to_command(command);
         // Compact-window overlay (#4591).
         apply_auto_compact_window_to_command(command, auto_compact_window);
     })?;
