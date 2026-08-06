@@ -1,0 +1,82 @@
+id: E-36
+title: 2000자를 진짜로 넘는 한글 답변은 정상적으로 분할되어야 한다 (과잉 억제 방지)
+agent_mode: real_live
+coverage_class: live
+cells: [claude-pipe, claude-tui, claude-e, codex-pipe, codex-tui]
+isolation: required
+acceptance_criteria:
+  - Produce a Korean answer whose CHARACTER length is well above the Discord
+    2000-character limit.
+  - That answer must still be split into more than one Discord relay message.
+  - The full span must survive the split in order (no dropped middle/tail).
+notes: |
+  Over-suppression guard, the mirror of E-35. E-35 alone can be satisfied by a
+  "fix" that makes every answer a single message; that regression is fatal
+  because Discord rejects a >2000-character message outright, so the answer
+  would silently never arrive. E-15 already exercises a >2000-character answer,
+  but its body is ASCII — a Korean-specific over-correction (e.g. special-casing
+  multi-byte text into the never-split path) would slip past it. This scenario
+  pins the split direction for a multi-byte body.
+
+  Kept as a separate scenario rather than a second step in E-35 on purpose:
+  `message_count_between_markers` is evaluated over the whole scenario window,
+  so a combined scenario would assert 1 + 2 = 3 messages and lose the ability
+  to say which direction broke.
+
+  Payload sizing, measured directly (python3, CPython UTF-8) on the exact string
+  this prompt asks for (BEGIN marker + N lines of
+  "K36-NNN-가나다라마바사아자차카타파하" + END marker, newline-joined). One such
+  line is 22 characters / 50 bytes:
+    * 120 lines (requested) -> 2789 chars / 6149 bytes
+    *  86 lines             -> 2007 chars (smallest line count above the 1990
+                               chunker limit, i.e. smallest that still splits)
+  Any model output of 86 lines or more still splits, so requesting 120 leaves
+  a ~28% under-production margin.
+
+  Chunker margin (#3089 A0): `effective_limit = DISCORD_MSG_LIMIT - tag_overhead
+  - 10` = exactly 1990 characters outside a code block. 2789 characters is 799
+  characters above that, so this scenario stays clear of the 1991..2000 grey
+  band in the other direction as well. There is no code block in the payload,
+  so tag_overhead is 0.
+
+  Bonus property, observed on the first live run: the split landed between
+  K36-083 and K36-084, i.e. the first chunk ran to roughly 1990 CHARACTERS. A
+  byte-sized chunker would have had to cut near K36-039 (~2000 bytes) instead.
+  So the split POSITION is itself a byte-vs-character witness, and the
+  `ordered_text_present` span above pins that the whole body survives whichever
+  boundary the chunker picks.
+steps:
+  - send_prompt: |
+      E2E E-36 한글 초과 길이 분할 픽스처입니다. 설명·요약·머리말을 절대 붙이지 말고
+      아래 내용만 정확히 그대로 출력해줘.
+      1) 첫 줄: [E2E:E36:BEGIN]
+      2) 그다음 "K36-NNN-가나다라마바사아자차카타파하" 형식으로 한 줄에 하나씩,
+         NNN 은 001 부터 120 까지 0 채움 3자리 (총 120줄).
+         뒤쪽 한글 14자 "가나다라마바사아자차카타파하" 는 매 줄 똑같이 반복한다.
+      3) 마지막 줄: [E2E:E36:END]
+  - wait_for_discord_text: "[E2E:E36:END]"
+    timeout_s: 300
+assertions:
+  # Core judgment: a genuinely over-limit answer must NOT collapse into one
+  # message. The upper bound is loose because the exact chunk count depends on
+  # where the chunker finds newline boundaries.
+  - message_count_between_markers:
+      min: 2
+      max: 8
+  - relay_latency_within:
+      max_seconds: 300
+  # Non-vacuity: K36-120 proves at least 120 lines arrived, i.e. the answer
+  # really did exceed 2000 characters and the split was required rather than
+  # incidental.
+  - text_present: "K36-120-가나다라마바사아자차카타파하"
+  # The split must not cost content: head, an early line, a late line and tail
+  # must resolve in order across the chunk boundary.
+  - ordered_text_present:
+      - "[E2E:E36:BEGIN]"
+      - "K36-001-가나다라마바사아자차카타파하"
+      - "K36-060-가나다라마바사아자차카타파하"
+      - "K36-120-가나다라마바사아자차카타파하"
+      - "[E2E:E36:END]"
+  - no_duplicate_marker: "[E2E:E36:BEGIN]"
+  - no_duplicate_marker: "[E2E:E36:END]"
+  - no_control_chars: true

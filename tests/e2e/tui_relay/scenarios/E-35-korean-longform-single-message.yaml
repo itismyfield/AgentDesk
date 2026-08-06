@@ -1,0 +1,118 @@
+id: E-35
+title: 한글 장문 답변(667자~2000자 구간)은 한 개의 Discord 메시지로 도착해야 한다
+agent_mode: real_live
+coverage_class: live
+cells: [claude-pipe, claude-tui, claude-e, codex-pipe, codex-tui]
+isolation: required
+acceptance_criteria:
+  - Produce a Korean answer whose UTF-8 byte length exceeds 2000 while its
+    character length stays below the Discord 2000-character limit.
+  - The whole answer must arrive as exactly one Discord relay message.
+  - Prove the answer really reached the byte-over/char-under band (non-vacuity).
+notes: |
+  Byte-vs-character regression coverage for the Korean answer-split P0 family
+  (#4214 -> 6cd2df545 -> sibling sites). The defect shape is a size test that
+  compares `text.len()` (Rust = UTF-8 BYTES) against
+  `DISCORD_MSG_LIMIT: usize = 2000` (Discord = CHARACTERS). Every ASCII test
+  passes because the two units coincide there, and every existing e2e scenario
+  answers with short ASCII markers (`[E2E:E5:TURN-A]`), so no e2e lane ever put
+  a multi-byte body across the byte limit. This scenario closes that structural
+  hole: it is the only e2e scenario whose answer is byte-over-limit but
+  character-under-limit.
+
+  Boundary values below were computed directly (python3, CPython UTF-8) against
+  `DISCORD_MSG_LIMIT = 2000` from src/services/discord/mod.rs:328 — not quoted
+  from the issue:
+    * a Hangul syllable is 3 UTF-8 bytes ("가".encode() -> 3 bytes)
+    * "가" * 666 -> 1998 bytes (byte test does NOT trip)
+    * "가" * 667 -> 2001 bytes (byte test trips first here)
+    => 667..2000 characters is the discriminating band: byte-over, char-under.
+
+  Payload sizing, measured on the exact string this prompt asks for
+  (BEGIN marker + N lines of "K35-NNN-가나다라마바사아자차카타파하" + END marker,
+  newline-joined). One such line is 22 characters / 50 bytes:
+    *  60 lines (requested) -> 1409 chars / 3089 bytes
+    *  39 lines             -> 2018 bytes  (smallest line count that still
+                               crosses the 2000-BYTE limit)
+    *  86 lines             -> 2007 chars  (smallest line count that would
+                               legitimately split; see the chunker note below)
+  So any model output between 39 and 85 lines still discriminates. Requesting
+  60 leaves -35% / +42% tolerance, which is why this is not flaky despite being
+  a live scenario. The requested payload is a fixed repeated unit rather than
+  free prose precisely so the length is deterministic.
+
+  Chunker margin (#3089 A0): split_message uses
+  `effective_limit = DISCORD_MSG_LIMIT - tag_overhead - 10`, i.e. exactly 1990
+  characters outside a code block. 1409 characters sits 581 characters below
+  that, so this scenario deliberately does NOT touch the 1991..2000 grey band
+  where a `split_message(text).len() > 1` style probe misclassifies. There is
+  no code block in the payload, so tag_overhead is 0.
+
+  Judgment is message COUNT, not content equality: if the chunker sizes the
+  body in bytes, this payload becomes 2 Discord messages; sized in characters
+  it stays one. `body_complete` is the structural form of the same check — a
+  split puts BEGIN and END in different Discord messages.
+
+  SCOPE — what this scenario does and does not guard (measured, not assumed):
+  It guards the CHUNKER's unit, i.e. `split_message` / the
+  `char_count(text) <= DISCORD_MSG_LIMIT` size tests in
+  src/services/discord/formatting/delivery.rs. Replacing those character counts
+  with `.len()` byte counts turns this payload into 2 messages and both the
+  count and `body_complete` assertions fail (verified by driving this exact
+  1409-char payload through scripts/e2e/tui_relay/assertions.py under a
+  byte-based chunk model).
+
+  It does NOT guard the five byte-vs-character ROUTE predicates
+  (`*_should_send_new_chunks_for_placeholder` in session_relay_sink.rs /
+  standby_relay.rs, `done_result_requires_full_terminal_replay`,
+  `terminal_delivery_should_send_new_chunks`,
+  `watcher_should_send_ordered_new_chunks_for_terminal_fallback`). Those choose
+  "edit the placeholder in place" vs "post new chunks and delete the
+  placeholder"; because the chunker they then call is already character-based,
+  a 1409-char body yields exactly one chunk on either branch, so the observable
+  Discord message count is unchanged. This scenario was run green against a
+  build that still contained all five byte-based predicates, which is the
+  evidence for that statement — it is a necessary payload-shape guard, not a
+  detector for the route-predicate siblings.
+
+  The opposite direction (a genuinely >2000-character Korean answer MUST still
+  split) is covered by E-36, kept separate on purpose: a single scenario with
+  both turns would make `message_count_between_markers` the sum of both turns
+  (1 + 2 = 3), which no longer discriminates in either direction.
+steps:
+  - send_prompt: |
+      E2E E-35 한글 장문 길이 판정 픽스처입니다. 설명·요약·머리말을 절대 붙이지 말고
+      아래 내용만 정확히 그대로 출력해줘.
+      1) 첫 줄: [E2E:E35:BEGIN]
+      2) 그다음 "K35-NNN-가나다라마바사아자차카타파하" 형식으로 한 줄에 하나씩,
+         NNN 은 001 부터 060 까지 0 채움 3자리 (총 60줄).
+         뒤쪽 한글 14자 "가나다라마바사아자차카타파하" 는 매 줄 똑같이 반복한다.
+      3) 마지막 줄: [E2E:E35:END]
+  - wait_for_discord_text: "[E2E:E35:END]"
+    timeout_s: 300
+assertions:
+  # Core judgment: the byte-over / char-under answer is ONE Discord message.
+  # With the byte-based size test this becomes 2 and the scenario fails.
+  - message_count_between_markers:
+      min: 1
+      max: 1
+  - relay_latency_within:
+      max_seconds: 300
+  # Structural restatement of the same property: a split would put BEGIN and
+  # END in different Discord messages, so body_complete fails there too. Kept
+  # alongside the count so the failure mode is unambiguous in the report.
+  - body_complete:
+      head: "[E2E:E35:BEGIN]"
+      tail: "[E2E:E35:END]"
+  # Non-vacuity: K35-060 proves at least 60 lines arrived, i.e. the answer
+  # really was >= 3000 bytes and therefore really was in the band the defect
+  # trips on. Without this a short model answer would pass silently.
+  - text_present: "K35-060-가나다라마바사아자차카타파하"
+  - ordered_text_present:
+      - "[E2E:E35:BEGIN]"
+      - "K35-001-가나다라마바사아자차카타파하"
+      - "K35-060-가나다라마바사아자차카타파하"
+      - "[E2E:E35:END]"
+  - no_duplicate_marker: "[E2E:E35:BEGIN]"
+  - no_duplicate_marker: "[E2E:E35:END]"
+  - no_control_chars: true
