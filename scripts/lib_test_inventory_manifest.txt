@@ -3506,7 +3506,7 @@ services::discord::queue_io::presleep_tests::lagged_completion_receiver_warns_an
 services::discord::queue_io::presleep_tests::marker_only_backlog_counts_as_backstop_work
 services::discord::queue_io::presleep_tests::normal_event_path_drains_before_backstop_records_zero_fires
 services::discord::queue_io::presleep_tests::promote_defer_requeue_converges_no_oscillation_across_cycles_4270
-services::discord::queue_io::presleep_tests::race_loss_recheck_waits_for_transition_before_kickoff_4794
+services::discord::queue_io::presleep_tests::race_loss_recheck_fences_on_transition_without_parking_a_waiter_5170
 services::discord::queue_io::presleep_tests::race_loss_requeue_does_not_rekick_until_holding_turn_completes_4078
 services::discord::queue_io::presleep_tests::race_loss_requeue_idle_recheck_kicks_after_missed_completion_4078
 services::discord::queue_io::presleep_tests::single_backstop_profile_is_the_only_slow_cycle
@@ -3950,7 +3950,9 @@ services::discord::router::message_handler::intake_turn::race_loss::mailbox_reac
 services::discord::router::message_handler::intake_turn::race_loss::mailbox_reaction_tests::standalone_without_start_attempt_adds_mailbox_once
 services::discord::router::message_handler::intake_turn::race_loss::race_loss_requeue_tests::busy_transition_is_durable_before_the_guard_is_released
 services::discord::router::message_handler::intake_turn::race_loss::race_loss_requeue_tests::persistence_failure_rolls_back_queue_and_clears_dispatch_reservation
+services::discord::router::message_handler::intake_turn::race_loss::race_loss_requeue_tests::race_loss_requeue_still_takes_the_immediate_idle_recheck_5170
 services::discord::router::message_handler::intake_turn::race_loss::race_loss_requeue_tests::race_loss_requeue_suppresses_post_enqueue_idle_kick_while_holder_active
+services::discord::router::message_handler::intake_turn::race_loss::race_loss_requeue_tests::transition_busy_requeue_replaces_the_immediate_rekick_with_the_slow_backstop_5170
 services::discord::router::message_handler::intake_turn::recovery_context_take_order_tests::discord_user_turn_keeps_user_and_streaming_placeholder_ids_separate
 services::discord::router::message_handler::intake_turn::recovery_context_take_order_tests::intake_real_turn_consumes_recovery_context_once_after_non_dispatch_guards
 services::discord::router::message_handler::intake_turn::recovery_context_take_order_tests::recovery_context_survives_intake_stale_dispatch_abort

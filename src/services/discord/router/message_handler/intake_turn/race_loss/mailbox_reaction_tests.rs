@@ -277,6 +277,7 @@ async fn stale_start_attempt_repairs_mailbox_from_live_queue_truth() {
         channel_id,
         message_id,
         user_intervention(message_id.get()),
+        QueuedIntakeCause::RaceLoss,
     )
     .await;
     assert!(enqueue.enqueued);
@@ -360,6 +361,7 @@ async fn busy_tui_requeue_preserves_standalone_marker_after_matching_rollback() 
         channel_id,
         message_id,
         user_intervention(message_id.get()),
+        QueuedIntakeCause::RaceLoss,
     )
     .await;
     assert!(enqueue.enqueued, "busy TUI follow-up genuinely requeues M");
@@ -436,6 +438,7 @@ async fn recently_finalized_message_requeued_in_live_mailbox_repairs_mailbox_mar
         channel_id,
         message_id,
         user_intervention(message_id.get()),
+        QueuedIntakeCause::RaceLoss,
     )
     .await;
     assert!(

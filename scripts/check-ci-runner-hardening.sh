@@ -305,7 +305,9 @@ targets = {
     "runs_on" => "ubuntu-latest",
     # #5034 re-pins after adding the attachment-delivery and catch-up
     # operational-alert targets to the path-filtered required high-risk lane.
-    "job_sha256" => "29c7a0c33753933e50c446f073da942bebd0c53881460260562cd9cabaef9c44",
+    # #5170 re-pins after wiring the transition-busy requeue oracles, which the
+    # lib inventory manifest counted while no curated filter executed them.
+    "job_sha256" => "dc85115bd40b9f4ce8b1595d3568ae2a0996c78d7ca1e0fa4f03576ebeb6f1d9",
     "require_debug_env" => false,
     "cargo_steps" => {
       "Observe curated lane selections" => {

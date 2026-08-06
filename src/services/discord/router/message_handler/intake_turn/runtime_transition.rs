@@ -35,6 +35,13 @@ pub(super) async fn acquire_after_redirect_or_requeue(
     // immediately and let the normal queued consumer retry after the transition.
     // This removes the process-crash loss window that existed while intake waited
     // up to three seconds with the event only on this task's stack.
+    //
+    // #5170: the enqueue is unchanged, but it is NOT a race loss. Nothing
+    // claimed the mailbox here — the transition lock was simply held at this
+    // instant — so the requeue is tagged `SessionTransitionBusy` and takes the
+    // deferred wake policy (the fixed 60s fail-open backstop) rather than the race-loss
+    // edge-trigger recheck, whose own transition wait re-entered intake against
+    // a lock it had itself made unacquirable, requeueing on every rotation.
     match try_intake_runtime_transition_after_redirect(shared, channel_id, fallback_state).await {
         Ok(transition) => Ok(Some(transition)),
         Err(_) => {
@@ -62,6 +69,7 @@ pub(super) async fn acquire_after_redirect_or_requeue(
                 dispatch_id_for_thread,
                 turn_start_attempt,
                 preserve_on_cancel,
+                race_loss::QueuedIntakeCause::SessionTransitionBusy,
             )
             .await?;
             Ok(None)

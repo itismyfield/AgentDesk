@@ -341,7 +341,6 @@ services::discord::router::message_handler::headless_turn::headless_hard_ceiling
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests
 services::discord::router::message_handler::intake_turn::feedback_reminder_take_order_tests
 services::discord::router::message_handler::intake_turn::queue_pending_reaction_clear_tests
-services::discord::router::message_handler::intake_turn::race_loss::race_loss_requeue_tests
 services::discord::router::message_handler::intake_turn::recovery_context_take_order_tests
 services::discord::router::message_handler::intake_turn::tui_busy_pre_submit_queue_reaction_tests
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests
