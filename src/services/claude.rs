@@ -942,7 +942,6 @@ IMPORTANT: Format your responses using Markdown for better readability:
         model_override,
         compact_percent,
         compact_lower_bound_tokens,
-        launch_env.gateway_proxy_env(),
     );
     let mut builder =
         ClaudeCommandBuilder::for_binary_with_env(&claude_bin, &resolution, launch_env);
@@ -2080,10 +2079,6 @@ fn prepare_and_create_claude_tui_session(
         let _ = std::fs::remove_file(&owner_path);
         return Err(format!("tmux error: {}", stderr));
     }
-    crate::services::claude_compact_context::persist_launch_provenance_to_tmux(
-        tmux_session_name,
-        launch_env.gateway_proxy_env(),
-    );
     Ok(owner_path)
 }
 
@@ -2821,7 +2816,6 @@ fn execute_streaming_local_tmux(
         claude_model_from_args(args),
         compact_percent,
         compact_lower_bound_tokens,
-        launch_env.gateway_proxy_env(),
     );
     let env_lines = build_tmux_launch_env_lines(
         resolution.exec_path.as_deref(),
@@ -2877,11 +2871,6 @@ fn execute_streaming_local_tmux(
         let _ = std::fs::remove_file(&script_path);
         return Err(format!("tmux error: {}", stderr));
     }
-
-    crate::services::claude_compact_context::persist_launch_provenance_to_tmux(
-        tmux_session_name,
-        launch_env.gateway_proxy_env(),
-    );
 
     // Keep tmux session alive after process exits for post-mortem analysis
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
@@ -3113,7 +3102,6 @@ pub(crate) fn execute_streaming_local_process(
         claude_model_from_args(args),
         compact_percent,
         compact_lower_bound_tokens,
-        launch_env.gateway_proxy_env(),
     );
     let config = SessionConfig {
         session_name: session_name.to_string(),

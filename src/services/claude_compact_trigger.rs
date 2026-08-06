@@ -620,15 +620,8 @@ mod tests {
     fn launch_bound_bare_model_fires_at_max_window_threshold_only() {
         let _context_guard = crate::services::claude_compact_context::state_test_guard();
         let _trigger_guard = state_test_guard();
-        let gateway = crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv::Scrub;
-        crate::services::claude_compact_context::register_launch_provenance(
-            "tmux-4678-high",
-            &gateway,
-        );
-        crate::services::claude_compact_context::register_launch_provenance(
-            "tmux-4678-low",
-            &gateway,
-        );
+        crate::services::claude_compact_context::register_launch_provenance("tmux-4678-high");
+        crate::services::claude_compact_context::register_launch_provenance("tmux-4678-low");
 
         let high_resolution = crate::services::claude_compact_context::context_window_for_turn(
             "tmux-4678-high",

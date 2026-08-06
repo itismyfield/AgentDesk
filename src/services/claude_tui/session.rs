@@ -365,13 +365,10 @@ fn write_launch_script(
     config: &ClaudeTuiLaunchConfig,
     hook_settings_path: &Path,
 ) -> Result<(), String> {
-    // This is the final pre-exec launch artifact. Registering here makes the
-    // exact effective proxy decision available before the pane can receive its
-    // first prompt, and keeps direct script-generation tests on the same path.
-    crate::services::claude_compact_context::register_launch_provenance(
-        &config.tmux_session_name,
-        config.launch_env.gateway_proxy_env(),
-    );
+    // This is the final pre-exec launch artifact. Registering here marks the
+    // pane as AgentDesk-launched before it can receive its first prompt, and
+    // keeps direct script-generation tests on the same path.
+    crate::services::claude_compact_context::register_launch_provenance(&config.tmux_session_name);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             format!("create TUI launch script dir {}: {error}", parent.display())
