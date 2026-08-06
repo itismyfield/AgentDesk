@@ -75,6 +75,13 @@ pub(crate) struct TurnLifecycleStopResult {
     /// after the cancel ran. A `true → false` transition is the canonical
     /// signature of #1672 — pending_queue silently dropped during cancel.
     pub queue_disk_present_after: bool,
+    /// #5176: whether the channel mailbox actually gave up its foreground
+    /// turn anchor. THIS is what "the turn was cancelled" has to mean — a
+    /// `turn_status: cancelled` stamp on a mailbox that still owns the
+    /// foreground slot leaves the channel permanently unusable, which is the
+    /// exact incident this field exists to make visible in the API response.
+    /// `None` when no runtime could be resolved to probe (direct-fallback).
+    pub mailbox_foreground_free: Option<bool>,
 }
 
 pub(crate) async fn stop_turn_preserving_queue(
@@ -191,6 +198,7 @@ async fn stop_turn_with_policy(
     let mut queue_depth = None;
     let mut termination_recorded = false;
     let mut runtime_persistent_inflight_cleared = false;
+    let mut mailbox_foreground_free = None;
     let tmux_was_alive = !probe_session_owned.is_empty()
         && crate::services::platform::tmux::has_session(&probe_session_owned);
     let cleanup_tmux = cleanup_policy.should_cleanup_tmux();
@@ -231,6 +239,7 @@ async fn stop_turn_with_policy(
             queue_depth = Some(runtime.queue_depth);
             termination_recorded = runtime.termination_recorded;
             runtime_persistent_inflight_cleared = runtime.persistent_inflight_cleared;
+            mailbox_foreground_free = Some(runtime.mailbox_foreground_free);
         }
     }
 
@@ -347,7 +356,26 @@ async fn stop_turn_with_policy(
         queue_depth_after: post_snapshot.as_ref().map(|s| s.queue_depth),
         queue_disk_present_before: pre_snapshot.as_ref().is_some_and(|s| s.disk_present),
         queue_disk_present_after: post_snapshot.as_ref().is_some_and(|s| s.disk_present),
+        mailbox_foreground_free,
     };
+
+    // #5176: a cancel that stamped the turn `cancelled` while the mailbox kept
+    // its foreground anchor is not a successful cancel — it is the incident.
+    // Say so at ERROR so it can never again be read as success from the logs.
+    if mailbox_foreground_free == Some(false) {
+        tracing::error!(
+            provider = target
+                .provider
+                .as_ref()
+                .map(ProviderKind::as_str)
+                .unwrap_or("unknown"),
+            channel_id = target.channel_id.map(ChannelId::get).unwrap_or(0),
+            lifecycle_path,
+            reason,
+            "cancel stamped the turn cancelled but the mailbox still owns the foreground slot; \
+             the channel remains blocked (see #5176)"
+        );
+    }
 
     if emit_cancel_observability {
         crate::services::turn_cancel_finalizer::finalize_turn_cancel(

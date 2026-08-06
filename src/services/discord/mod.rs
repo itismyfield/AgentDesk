@@ -165,6 +165,9 @@ mod voice_routing;
 mod voice_sensitivity;
 #[path = "watchers/lifecycle_decision.rs"]
 mod watcher_lifecycle_decision;
+// #5176 — the single authority that decides whether a cancel is allowed to take
+// the mailbox foreground anchor away, and the only place that does so.
+mod zombie_foreground_release;
 
 #[allow(unused_imports)]
 pub(in crate::services::discord) use tmux_watcher_registry::{
@@ -195,6 +198,9 @@ pub(in crate::services::discord) use mailbox_finish::{
     mailbox_finish_turn_if_matches, mailbox_finish_turn_if_matches_episode_started_before,
 };
 pub(in crate::services::discord) use recovery_engine as recovery;
+pub(crate) use zombie_foreground_release::{
+    ZombieForegroundReleaseOutcome, release_zombie_foreground_turn,
+};
 // #3038 S1: re-export the extracted cluster type so the `SharedData` field
 // declaration and constructor literals reference it without a module-qualified
 // path (surface freeze, #3294/#3295 pattern).
@@ -662,6 +668,20 @@ pub(crate) fn clear_inflight_by_tmux_name(provider: &ProviderKind, tmux_name: &s
 
 pub(crate) fn clear_inflight_state_for_channel(provider: &ProviderKind, channel_id: u64) {
     inflight::clear_inflight_state(provider, channel_id);
+}
+
+/// #5176 — is a persistent inflight-turn record still claiming this tmux
+/// session? Session keys carry the tmux name, not the Discord channel id, so
+/// the stale-turn reconciler resolves inflight presence by tmux name rather
+/// than by channel. `rebind_origin` rows are synthetic reattach markers, not a
+/// running turn, so they do not count as liveness evidence.
+pub(crate) fn inflight_state_present_for_tmux_name(
+    provider: &ProviderKind,
+    tmux_name: &str,
+) -> bool {
+    inflight::load_inflight_states(provider)
+        .into_iter()
+        .any(|state| !state.rebind_origin && state.tmux_session_name.as_deref() == Some(tmux_name))
 }
 
 pub(crate) fn inflight_state_allows_idle_tmux_repair_for_channel(

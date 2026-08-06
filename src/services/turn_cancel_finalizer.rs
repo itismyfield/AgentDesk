@@ -172,6 +172,7 @@ mod tests {
             queue_depth_after: Some(3),
             queue_disk_present_before: false,
             queue_disk_present_after: false,
+            mailbox_foreground_free: Some(true),
         };
         let completed_at = Utc.with_ymd_and_hms(2026, 5, 3, 9, 30, 0).unwrap();
         let result = finalize_turn_cancel(
@@ -272,6 +273,7 @@ mod tests {
             queue_depth_after: None,
             queue_disk_present_before: false,
             queue_disk_present_after: false,
+            mailbox_foreground_free: Some(true),
         };
 
         let finalized = finalize_turn_cancel(FinalizeTurnCancelRequest::from_lifecycle_result(
@@ -324,6 +326,7 @@ mod tests {
             queue_depth_after: Some(1),
             queue_disk_present_before: false,
             queue_disk_present_after: false,
+            mailbox_foreground_free: Some(true),
         };
         let channel_id = ChannelId::new(1479671301387059200);
         let cases = vec![
