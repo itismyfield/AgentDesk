@@ -3157,6 +3157,24 @@ pub fn load_graceful() -> Config {
 /// and it is why the rule stops at `Mutex<()>` and does not extend to the
 /// state mutexes (`Mutex<HashMap<..>>` and friends) that tests also touch.
 ///
+/// **The rule is machine-checked, not merely written here.**
+/// `scripts/check_test_mutex_poison_recovery.py` derives the inventory of
+/// process-global `Mutex<()>` singletons from the tree and fails on any
+/// acquisition spelled `.unwrap()`, `.expect(..)`, `?`, or an
+/// `unwrap_or_else` whose handler never reaches `into_inner`.
+/// `scripts/ci-script-checks.sh` runs it. It had to become a script because
+/// this class recurred *after* being fixed once and *after* being documented
+/// here; `grep` over the tree found nothing else asserting it.
+///
+/// The inventory it covers is **26 distinct names across 42 declaration
+/// sites** at the time of writing, and the count is printed on every run
+/// rather than pinned here, because a stale figure in prose is the failure
+/// mode this paragraph is trying to avoid. Names are reused across modules --
+/// `LOCK` is declared in nine files, `ENV_LOCK` and `STORE_WRITE_LOCK` in
+/// four each, `TEST_LOCK` and `STATE_TEST_LOCK` in two each -- so counting
+/// names and counting mutexes give different answers, and only the second is
+/// the number of independent cascades that are possible.
+///
 /// The convention here is that every acquisition site recovers the guard
 /// rather than propagating the `PoisonError`. Of the 290 direct
 /// `shared_test_env_lock().lock()` sites, 288 spell it
@@ -3182,10 +3200,14 @@ pub fn load_graceful() -> Config {
 /// invariant over data, so a panic mid-critical-section leaves no torn value
 /// for poison to warn about. It can leave an env var unrestored: restoration
 /// is RAII-driven at the `TestEnvVarGuard`/`RuntimeRootGuard` sites but *not*
-/// everywhere -- `services::tmux_common`'s
-/// `dead_marker_path_is_cleaned_with_session_temp_files` is one of the sites
-/// that saves and restores by hand around an intervening `assert!` (#5185
-/// tracks converting the remaining hand-rolled sites).
+/// everywhere. #5185 converted the two hand-rolled sites it found --
+/// `services::tmux_common`'s `dead_marker_path_is_cleaned_with_session_temp_files`
+/// (env vars) and `session_resume`'s
+/// `resume_production_path_clears_stale_binding_and_rebinds_runtime`
+/// (a pane-liveness override) -- to guards that restore on unwind. Nothing
+/// mechanically forbids the next one: the poison gate above checks lock
+/// acquisition, not restoration shape, so "no hand-rolled sites remain" is a
+/// statement about a review, not about a check.
 #[cfg(test)]
 pub(crate) fn shared_test_env_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();

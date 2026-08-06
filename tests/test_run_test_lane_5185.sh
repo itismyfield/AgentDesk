@@ -645,6 +645,63 @@ cat >"$LEDGER" <<'EOF'
 # no entries
 EOF
 
+# ATTACK 2b -- the `failures:` block parsed as a SET, not as its first element.
+# Every other assertion in this file names exactly ONE id in the block, so a
+# parser that read only the first entry and discarded the rest satisfied all of
+# them: measured, that mutation SURVIVED the whole suite. The block is the only
+# evidence the gate has for WHICH ids failed, so a truncating read silently
+# turns every failure after the first into `failure-misattributed` -- or, with
+# the counts still matching, into no finding at all.
+cat >"$LEDGER" <<'EOF'
+always | alpha::beta | lane=demo | #5185 | isolated while the owning slice lands its fix
+always | alpha::gamma | lane=demo | #5185 | isolated while the owning slice lands its fix
+EOF
+TWO_FAILURES_RUN="test alpha::beta ... FAILED
+test alpha::gamma ... FAILED
+
+$(failures_block alpha::beta alpha::gamma)
+
+$(summary_line 0 2 0)"
+run_gate "$TWO_FAILURES_RUN" 101 --lane demo
+if [ "$rc" -ne 0 ]; then
+    fail_test "two ledgered failures named in one failures: block must leave the lane green (rc=$rc): $(grep -E '^(failure-|ERROR)' "$OUT" | head -3)"
+else pass_test
+fi
+if ! grep -q 'declared-failed[^0-9]*2' "$OUT"; then
+    fail_test "both ids in the block must be declared, not just the first: $(grep -i 'declared-failed' "$OUT" | head -2)"
+else pass_test
+fi
+# The same block with a THIRD id libtest named but the transcript never
+# reported: the missing side of the set difference must be caught too, which a
+# first-element read cannot see once the first element matches.
+write_manifest alpha::beta alpha::gamma alpha::delta >/dev/null
+EXTRA=$(grep -c '' "$PRELUDE")
+cat >"$LEDGER" <<'EOF'
+always | alpha::beta | lane=demo | #5185 | isolated while the owning slice lands its fix
+always | alpha::gamma | lane=demo | #5185 | isolated while the owning slice lands its fix
+EOF
+LOST_VERDICT_RUN="test alpha::beta ... FAILED
+test alpha::gamma ... FAILED
+test alpha::delta ... ok
+
+$(failures_block alpha::beta alpha::gamma alpha::delta)
+
+$(summary_line 0 3 0)"
+run_gate "$LOST_VERDICT_RUN" 101 --lane demo
+if [ "$rc" -eq 0 ]; then
+    fail_test "an id libtest named as failing but the transcript parsed as passing must fail the lane"
+else pass_test
+fi
+if ! grep -q '^failure-unattributed .*: alpha::delta' "$OUT"; then
+    fail_test "the third id in the block must be adjudicated, not dropped after the first: $(grep -E '^(failure-|ERROR)' "$OUT" | head -3)"
+else pass_test
+fi
+write_manifest alpha::beta alpha::gamma >/dev/null
+EXTRA=$(grep -c '' "$PRELUDE")
+cat >"$LEDGER" <<'EOF'
+# no entries
+EOF
+
 # --------------------------------------------------------------------------
 # 5. A failure that is not in the ledger must fail the lane.
 # --------------------------------------------------------------------------

@@ -48,6 +48,14 @@ def _seed_pattern(seed: str) -> re.Pattern[str]:
 SEED_PATTERNS = tuple(_seed_pattern(seed) for seed in SEEDS)
 CONNECT_SEED_PATTERNS = tuple(_seed_pattern(seed) for seed in CONNECT_SEEDS)
 SECTIONS = ("rule1", "rule2", "rule3", "rule4")
+# rule5 is deliberately NOT a baseline section. Every section in SECTIONS is
+# ratcheted: existing entries are tolerated and only growth is refused, which
+# makes a rule warn-only for a tree that already carries the debt. rule5 admits
+# no debt at all, so it has nothing to ratchet and is enforced directly in
+# `check_analysis`. Adding it to SECTIONS would also make the checked-in
+# baseline unparseable against `origin/main`, which has no `[rule5]` section.
+UNBASELINED_SECTIONS = ("rule5",)
+PR_WORKFLOW_REL = ".github/workflows/ci-pr.yml"
 CONFIGURATION_ERROR_FINDINGS = frozenset({"jobs-empty"})
 
 
@@ -789,6 +797,34 @@ def pgless_lane_filters(jobs: Iterable[Job], coverage) -> tuple:
     return tuple(dict.fromkeys(lanes))
 
 
+def pr_pgless_lane_filters(jobs: Iterable[Job], coverage) -> tuple:
+    """Every ``ci-pr.yml`` cargo-test lane that runs without the PG service.
+
+    Deliberately WIDER than :func:`pgless_lane_filters`, which only looks at
+    ``--all-targets`` commands and therefore cannot see a ``--lib`` lane at all.
+    That blind spot is what let #5185's own library sweep ship selecting 61
+    PG-dependent tests into a job with no database: rule2 recorded those 61 as
+    debt against the *nightly* macOS/Windows lanes, so adding a required PR
+    context that selected the very same ids moved no number anywhere.
+
+    Scope is the PR workflow because that is where the consequence is
+    categorical rather than budgeted: a PR job that cannot reach a database it
+    needs is red on every pull request that trips its filter, and its
+    required-context mirror is fail-closed.
+    """
+    lanes = []
+    for job in jobs:
+        if job.workflow != PR_WORKFLOW_REL:
+            continue
+        if "postgres-service.sh start" in job.text:
+            continue
+        for command in _cargo_commands(job.text):
+            lane = coverage.cargo_test_filter(command)
+            if lane is not None:
+                lanes.append(lane)
+    return tuple(dict.fromkeys(lanes))
+
+
 def parse_pg_db_patterns(path: Path) -> tuple[str, ...]:
     """Parse the block-style dorny ``pg_db`` filter by relative indentation."""
     lines = path.read_text("utf-8").splitlines()
@@ -863,12 +899,14 @@ def analyze(repo_root: Path, allowlist_path: Path | None = None) -> Analysis:
     active_tests = {name: path for name, path in inventory.tests.items() if name not in allowed_tests and path not in allowed_files}
     pg_lanes = pg_lane_filters(repo_root, jobs, coverage)
     pgless_lanes = pgless_lane_filters(jobs, coverage)
-    patterns = parse_pg_db_patterns(repo_root / ".github/workflows/ci-pr.yml")
+    pr_pgless_lanes = pr_pgless_lane_filters(jobs, coverage)
+    patterns = parse_pg_db_patterns(repo_root / PR_WORKFLOW_REL)
     debts = {
         "rule1": {name for name in active_tests if not any(lane.selects_test(name) for lane in pg_lanes)},
         "rule2": {name for name in active_tests if any(lane.selects_test(name) for lane in pgless_lanes)},
         "rule3": {path for path in set(active_tests.values()) if not path_selected(path, patterns)},
         "rule4": {job.key for job in jobs if "postgres-service.sh start" in job.text and not re.search(r"^\s+AGENTDESK_REQUIRE_PG:\s*['\"]?1['\"]?\s*$", job.text, re.MULTILINE)},
+        "rule5": {name for name in active_tests if any(lane.selects_test(name) for lane in pr_pgless_lanes)},
     }
     return Analysis(
         PgInventory(active_tests),
@@ -1014,7 +1052,29 @@ def check_analysis(
             if stale:
                 failed = True
     counts = analysis.debts
-    print(f"pg-lane debt: rule1={len(counts['rule1'])} rule2={len(counts['rule2'])} rule3={len(counts['rule3'])} (allowlist={analysis.allowlist_count})")
+    # rule5: no ratchet, no allowance. A PR-workflow job that runs cargo test
+    # without starting the PostgreSQL service must select no PG-dependent test.
+    # Unlike rule1-rule4 this is not a budget: the failure mode it names is not
+    # "debt that should shrink" but "this required context can never be green",
+    # and it lands on every PR at once rather than on the author of the change.
+    if counts["rule5"]:
+        print(
+            f"FAIL: [rule5] {len(counts['rule5'])} PostgreSQL-dependent test(s) are "
+            f"selected by a {PR_WORKFLOW_REL} job that never starts the service:",
+            file=sys.stderr,
+        )
+        for entry in sorted(counts["rule5"]):
+            print(f"  ! {entry}", file=sys.stderr)
+        print(
+            "Give that job `./scripts/ci/postgres-service.sh start` plus the "
+            "`AGENTDESK_REQUIRE_PG: \"1\"` env rule4 requires, or narrow its "
+            "selection so it stops choosing these ids. There is no baseline "
+            "for this rule and the allowlist only exempts classifier false "
+            "positives.",
+            file=sys.stderr,
+        )
+        failed = True
+    print(f"pg-lane debt: rule1={len(counts['rule1'])} rule2={len(counts['rule2'])} rule3={len(counts['rule3'])} rule5={len(counts['rule5'])} (allowlist={analysis.allowlist_count})")
     if failed:
         return 1
     print(f"PG test-lane membership check passed: {len(analysis.inventory.tests)} tests, {len(analysis.inventory.files)} files; rule4={len(counts['rule4'])}")

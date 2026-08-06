@@ -147,13 +147,50 @@ from check_test_target_integrity import (  # noqa: E402
 #   * an id invented by a test's own stdout fails as `lane-extra`; an id that
 #     never reports a verdict fails as `lane-missing`.
 #
-# Still NOT closed: a mis-read that swaps two PASSING verdicts (harmless -- both
-# ids stay executed and passing, and neither the ledger nor the selection set
-# can tell the difference), and a `failures:` block corrupted by an interleaved
-# write, which yields a named set difference, i.e. a false RED rather than a
-# false green. Replaying all 76 archived transcripts of this lane -- including
-# one 73-failure poison cascade -- the block set and the parsed set agree
-# exactly, so the measured false-red cost of this check is 0.
+# Still NOT closed. The list below is the whole of it; an earlier revision of
+# this comment named the first two entries and stopped, which understated it.
+#
+#   1. A mis-read that swaps two PASSING verdicts. Harmless: both ids stay
+#      executed and passing, and neither the ledger nor the selection set can
+#      tell the difference.
+#   2. A `failures:` block corrupted by an interleaved write. Yields a named
+#      set difference, i.e. a false RED, not a false green.
+#   3. Any test that writes a bare line `failures:` to the inherited stdout
+#      puts `TranscriptScanner.feed` into block mode, and the four-space-
+#      indented `a::b` lines that follow become `declared_failures`. A wholly
+#      green run then fails on `declared-not-parsed`. Fail-closed, and no test
+#      in this lane does it today -- but nothing forbids it.
+#   4. A nested child libtest prints its own `failures:` block to the same
+#      inherited stdout, and those ids are UNIONed into `declared_failures`
+#      with the parent's. If a child fails on an id the parent never selected,
+#      the lane fails naming an id absent from the manifest. This is the same
+#      re-execution path that forces `--max-summaries 2`, so it is reachable by
+#      construction rather than hypothetically. Fail-closed.
+#   5. `VERDICT_AT_START` carries no word boundary, so the residual is NOT only
+#      foreign text that *ends* in a verdict word: foreign text that *begins*
+#      with one steals a verdict too (`okhttp: connect` at the start of a
+#      segment reads as `ok`). The boundary CANNOT simply be added. `\b` after
+#      `ok` requires a non-word character next, and the merged-write case this
+#      parser exists to handle -- `okok`, two verdicts written back to back with
+#      the newline lost -- has a word character next, so the second verdict
+#      would be dropped and its id would fail the lane as `lane-missing`. That
+#      is a false RED on a required context, which is strictly worse than the
+#      false green it would prevent, and the false-green direction is already
+#      narrowed by the `failures:` set comparison. Reviewed and rejected, not
+#      overlooked. The same reasoning applies in reverse to `VERDICT_AT_END`:
+#      a boundary there would drop the measured `/var/….plist: OKok` shape.
+#
+# The closure argument in (2) rests on a premise worth stating, because it is
+# not self-evident: block corruption is assumed to be INSERTION-only. An
+# experiment that *substitutes* the block's contents so they match the parsed
+# set does produce rc=0 -- but interleaving is a write landing between other
+# writes, and it can only add bytes, never replace libtest's own. If some
+# future mechanism could rewrite that block in place, the set comparison would
+# stop being a closure and this comment would be wrong.
+#
+# Replaying all 76 archived transcripts of this lane -- including one
+# 73-failure poison cascade -- the block set and the parsed set agree exactly,
+# so the measured false-red cost of this check is 0.
 NAME_FRAGMENT = re.compile(r"test (?P<id>[^\s:]+::\S*) \.\.\. ?")
 VERDICT_AT_START = re.compile(r"^(?P<outcome>ok|FAILED|ignored)")
 VERDICT_AT_END = re.compile(r"(?P<outcome>ok|FAILED|ignored)$")

@@ -281,9 +281,15 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.rust_or_policy == 'true'",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "41d8f5d779fa8029618033e45ddc4e068c207ca748a2efa6f79491ad3c8e9785",
+    # #5185 re-pins after giving this lane the PostgreSQL service its own
+    # selection requires: the `--skip _pg --skip pg_ --skip postgres` filters
+    # are substring matches over ids, and 61 PG-dependent tests carry none of
+    # those substrings, so the job selected a database it never provisioned.
+    # The re-pin is a review trigger only; the property is enforced without a
+    # hash by `[rule5]` in scripts/check_pg_test_lane_membership.py.
+    "job_sha256" => "965109bf40156315b9b5a029052aa3a01cc3516b19d4a4915f41250deed6610d",
     "cargo_steps" => {
-      "Non-PostgreSQL library sweep (selection-set gated)" => {
+      "Library sweep (selection-set gated)" => {
         "commands" => [
           "python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 2 --skip _pg --skip pg_ --skip postgres -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- --skip _pg --skip pg_ --skip postgres",
         ],

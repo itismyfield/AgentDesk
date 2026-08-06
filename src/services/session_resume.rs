@@ -952,10 +952,16 @@ mod tests {
         // times out, maps to `ProbeError`, and the assertion below sees
         // `RetainedLive`. Measured exactly that way in a full sweep, passing
         // when run alone. State the pane's liveness instead of racing for it.
-        crate::services::tmux_diagnostics::set_pane_liveness_override_for_tests(
-            tmux,
-            Some(crate::services::platform::tmux::PaneLiveness::DeadOrAbsent),
-        );
+        //
+        // Held as a guard, not cleared after the assertions: a failing assert
+        // unwinds, and a hand-rolled cleanup at the bottom of the test would
+        // then leak the forced answer into the process-global override map --
+        // the same shape this branch removed from `tmux_common.rs`.
+        let _liveness_override =
+            crate::services::tmux_diagnostics::PaneLivenessOverrideGuard::set(
+                tmux,
+                crate::services::platform::tmux::PaneLiveness::DeadOrAbsent,
+            );
 
         sqlx::query(
             "INSERT INTO sessions
@@ -1048,7 +1054,6 @@ mod tests {
         assert_eq!(durable.1.as_deref(), Some(target_session_id));
         assert_eq!(durable.2.as_deref(), Some(target_session_id));
 
-        crate::services::tmux_diagnostics::set_pane_liveness_override_for_tests(tmux, None);
         pool.close().await;
         pg_db.drop().await;
     }

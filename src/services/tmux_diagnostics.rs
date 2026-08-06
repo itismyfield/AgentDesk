@@ -83,6 +83,43 @@ pub(crate) fn set_pane_liveness_override_for_tests(
     }
 }
 
+/// RAII form of [`set_pane_liveness_override_for_tests`].
+///
+/// #5185: the first revision of this helper was called by hand at the top of a
+/// test and cleared by hand at the bottom, *after* the assertions. That is the
+/// same hand-rolled shape this branch removed from
+/// `tmux_common::sentinel_tests::dead_marker_path_is_cleaned_with_session_temp_files`:
+/// a failing assertion unwinds past the cleanup, so the forced answer for that
+/// session name outlives the test in a process-global map. Nothing in this
+/// sweep re-uses those session names today, which is why the leak was
+/// invisible -- but "no current collision" is a property of the other tests,
+/// not of this helper. The guard clears on unwind.
+#[cfg(test)]
+#[must_use = "the override is cleared when this guard is dropped"]
+pub(crate) struct PaneLivenessOverrideGuard {
+    tmux_session_name: String,
+}
+
+#[cfg(test)]
+impl PaneLivenessOverrideGuard {
+    pub(crate) fn set(
+        tmux_session_name: &str,
+        liveness: crate::services::platform::tmux::PaneLiveness,
+    ) -> Self {
+        set_pane_liveness_override_for_tests(tmux_session_name, Some(liveness));
+        Self {
+            tmux_session_name: tmux_session_name.to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for PaneLivenessOverrideGuard {
+    fn drop(&mut self) {
+        set_pane_liveness_override_for_tests(&self.tmux_session_name, None);
+    }
+}
+
 #[cfg(test)]
 fn pane_liveness_override_for_tests(
     tmux_session_name: &str,

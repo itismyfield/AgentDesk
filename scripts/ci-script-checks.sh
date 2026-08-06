@@ -156,6 +156,14 @@ echo "=== PostgreSQL test-lane membership gate (#4979, enforced) ==="
 "$PYTHON" scripts/check_pg_test_lane_membership.py --baseline-ref "$TEST_LANE_BASELINE_REF"
 "$PYTHON" -m unittest tests.test_check_pg_test_lane_membership
 
+echo "=== Process-global Mutex<()> poison-recovery gate (#5185) ==="
+# The rule this enforces was documented in src/config.rs and recurred anyway:
+# one real failure reported itself as 11, was repaired at one mutex, and then a
+# different process-global Mutex<()> turned one real failure into 68 (67 of 73
+# panics were PoisonError). A rule that only exists as prose is #5003.
+"$PYTHON" scripts/check_test_mutex_poison_recovery.py
+"$PYTHON" -m unittest tests.test_check_test_mutex_poison_recovery
+
 echo "=== Scheduled-message PG path-filter wiring contract ==="
 "$PYTHON" -m unittest tests.test_scheduled_messages_ci_wiring
 

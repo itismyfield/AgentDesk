@@ -10,7 +10,7 @@
 
 | Gate | ci-main.yml job | ci-pr.yml job | ci-nightly.yml 대응 | 실행 조건 |
 | --- | --- | --- | --- | --- |
-| **Full tests** | `full_non_pg` | `library_sweep` (+ `check_fast` compile/policy) | `full_macos` + `full_windows` | main/nightly always run non-PG tests. PR side: `library_sweep` runs the whole non-PG library harness on the broad `rust_or_policy` filter (#5185); `check_fast` stays compile/policy only. |
+| **Full tests** | `full_non_pg` | `library_sweep` (+ `check_fast` compile/policy) | `full_macos` + `full_windows` | main/nightly always run non-PG tests. PR side: `library_sweep` runs the whole `--lib` harness minus the `_pg`/`pg_`/`postgres` id filters on the broad `rust_or_policy` filter (#5185), **with its own PostgreSQL service** — those filters are substring matches over ids and 61 PG-dependent tests carry none of them; `check_fast` stays compile/policy only. |
 | **PostgreSQL tests** | `postgres` | `test_fast`의 PG 서비스 | `postgres_full` | main/nightly는 항상 실행. PR의 `test_fast`와 selection observer는 `pg_db` path filter가 true일 때만 실행하며, false이면 required mirror가 명시적으로 green을 반환. |
 | **High-risk recovery** | `high-risk-recovery` | `high-risk-recovery` | `high_risk_recovery_full` | path filter hit 시에만 실행. nightly full job은 무조건. |
 
@@ -25,8 +25,30 @@ Selection observer required gate가 red로 만드는 observer 사망은 **프로
 
 ### PR 측 library sweep (#5185)
 
-`library_sweep` job은 non-PG 라이브러리 하네스 전체를
-`scripts/run_test_lane.py`를 통해 실행한다. 이 wrapper는 **실행 건수 임계를 쓰지
+`library_sweep` job은 `--lib` 하네스 전체에서 `--skip _pg --skip pg_ --skip
+postgres`가 제거하는 것만 뺀 나머지를 `scripts/run_test_lane.py`를 통해 실행한다.
+
+> ⚠️ **이 잡은 PostgreSQL을 필요로 한다.** 이름의 skip 패턴은 **test id에 대한
+> 부분문자열 필터**이고 PG 의존성은 **테스트 본문의 성질**이라 둘이 일치하지
+> 않는다. `scripts/pg_test_lane_manifest.txt`가 PG 의존으로 분류한 460건 중
+> **정확히 61건**이 그 세 부분문자열을 id에 갖지 않아 이 레인에 선택된다.
+> 실측: fixture base를 닫힌 포트로 향하게 하면 **61건 중 57건 FAILED**이고
+> 소요 **915.7초**(연결 재시도로 각 테스트가 60초 이상 매달린다), 살아 있는
+> 서버에 대해서는 `AGENTDESK_REQUIRE_PG=1`·병렬로 **61 passed / 0 failed,
+> 24.8초**다. 따라서 서비스가 없으면 이 required context는 **구조적으로 초록이
+> 될 수 없다**. 서비스를 붙임으로써 어떤 PR 레인도 실행하지 않던 56건
+> (`scripts/pg_test_lane_baseline.txt`의 `[rule1]`, 이제 비어 있다)이 모든 Rust
+> PR에서 실제 DB를 상대로 돌기 시작한다.
+>
+> 이 성질은 `scripts/check_pg_test_lane_membership.py`의 **`[rule5]`**가
+> 기계적으로 지킨다: `ci-pr.yml`의 어떤 잡이 서비스를 시작하지 않은 채
+> `cargo test`로 PG 의존 테스트를 선택하면 **id를 전수로 지목하며 rc=1**이다.
+> baseline 관용이 없는 규칙이라 재생성으로 흡수되지 않는다. `rule2`는 이것을
+> 잡지 못한다 — `--all-targets` 커맨드만 읽어서 `--lib` 레인을 보지 못하고,
+> 같은 61건이 이미 nightly macOS/Windows 레인 몫의 debt로 등재돼 있어 **PR 레인을
+> 추가해도 숫자가 움직이지 않는다.**
+
+이 wrapper는 **실행 건수 임계를 쓰지
 않는다.** 임계는 집합의 스칼라 요약이고, 실측된 두 회피가 모두 임계를 통과했다:
 한 모듈을 402건 축소하면 `executed=6539`, 213건 모듈을 비활성화하면
 `executed=6708`로 둘 다 floor 6500 위에 남아 **GATE_RC=0**을 반환했다.
@@ -74,21 +96,61 @@ green으로 바뀌지 않는다"고 적었고, 그 전칭은 **실측으로 반�
 * 테스트 자신의 stdout이 만들어낸 id는 `lane-extra`, 판정을 보고하지 않은 id는
   `lane-missing`으로 실패한다.
 
-**아직 닫히지 않은 것**: 통과한 두 판정끼리의 뒤바뀜(양쪽 모두 executed·pass로
-남으므로 무해하다)과, `failures:` 블록 자체가 오염되는 경우 — 후자는 이름이 붙은
-집합 차분, 즉 **false green이 아니라 false red**로 나타난다. 이 레인의 아카이브
-전사 76개(73건 실패의 poison cascade 1개 포함)를 재생했을 때 블록 집합과 파싱
-집합은 전부 일치했으므로, 이 검사의 실측 false-red 비용은 0이다.
+**아직 닫히지 않은 것 — 전수 5건.** 이전 판본은 아래 1·2만 적었고, 그것은 코드보다
+좁은 서술이었다.
+
+1. 통과한 두 판정끼리의 뒤바뀜. 양쪽 모두 executed·pass로 남으므로 무해하다.
+2. `failures:` 블록 자체가 인터리빙으로 오염되는 경우. 이름이 붙은 집합 차분,
+   즉 **false green이 아니라 false red**로 나타난다.
+3. **어떤 테스트든 상속 stdout에 `failures:` 한 줄만 써도** 스캐너가 블록 모드에
+   들어가고, 뒤따르는 4-스페이스 들여쓴 `a::b` 줄들이 `declared_failures`가 된다.
+   전부 초록인 런이 `declared-not-parsed`로 red가 된다. fail-closed이고 현재 이
+   레인에 그런 테스트는 없지만, 금지하는 장치도 없다.
+4. **중첩 자식 libtest**가 같은 상속 stdout에 자기 `failures:` 블록을 쓰면 그 id가
+   부모 것과 **union**된다. 자식이 부모가 선택하지도 않은 id로 실패하면 레인은
+   매니페스트에 없는 id를 지목하며 red가 된다. `--max-summaries 2`를 선언하게 만든
+   바로 그 재실행 경로이므로 가정이 아니라 **구성상 도달 가능**하다. fail-closed.
+5. 잔여는 `ok|FAILED|ignored`로 **끝나는** 외래 텍스트에 한정되지 않는다.
+   `VERDICT_AT_START`에 워드 경계가 없어 **그것으로 시작하는** 외래 텍스트
+   (`okhttp: connect`)도 판정을 훔친다. **워드 경계는 넣을 수 없다**: `ok` 뒤의
+   `\b`는 다음 문자가 non-word이기를 요구하는데, 이 파서가 존재하는 이유인
+   병합 write `okok`(개행이 유실된 연속 두 판정)은 다음 문자가 word라서 두 번째
+   판정이 유실되고 그 id가 `lane-missing`으로 레인을 red로 만든다. required
+   context에서 false red는 그것이 막는 false green보다 나쁘고, false green 방향은
+   이미 `failures:` 집합 대조로 좁혀져 있다. **검토 후 기각**이며 누락이 아니다.
+   `VERDICT_AT_END`도 같은 이유로 실측된 `/var/….plist: OKok` 형상을 잃는다.
+
+2의 폐쇄 논증에는 명시되지 않은 전제가 있다: **블록 오염은 삽입 전용**이라는 것.
+블록 내용을 파싱 집합과 일치하도록 **치환**하면 rc=0이 나오지만, 인터리빙은 다른
+write 사이에 끼어드는 것이라 바이트를 **추가**할 수 있을 뿐 libtest 자신의 write를
+**대체할 수 없다**. 그 블록을 제자리에서 다시 쓸 수 있는 메커니즘이 생기면 이
+집합 대조는 더 이상 폐쇄가 아니다.
+
+이 레인의 아카이브 전사 76개(73건 실패의 poison cascade 1개 포함)를 재생했을 때
+블록 집합과 파싱 집합은 전부 일치했으므로, 이 검사의 실측 false-red 비용은 0이다.
 
 #### required context 등록 절차 (#5185)
 
 `library_sweep`을 branch protection의 required check으로 등록할 때:
 
 1. 먼저 이 PR을 머지한다. 등록은 머지 **후**다.
-2. main에서 `Library test sweep`이 **N회 연속 green**인지 확인하고 **false-red
+2. **잡이 필요로 하는 서비스를 실제로 갖고 있는지 확인한다.** 등록 여부와
+   무관하게 잡은 실행되므로, 등록은 red를 만드는 것이 아니라 **red가 머지를
+   막게 만들 뿐**이다. 즉 이 단계를 건너뛰면 등록 전에 이미 모든 PR이 red다.
+   확인 방법은 두 가지이며 **둘 다** 한다:
+   - `python3 scripts/check_pg_test_lane_membership.py`가 `rule5=0`인지 본다.
+     0이 아니면 `ci-pr.yml`의 어떤 잡이 PG를 시작하지 않은 채 PG 의존 테스트를
+     선택하고 있다는 뜻이고, 출력이 그 id를 전수로 지목한다.
+   - main의 실제 런에서 그 잡의 `Start PostgreSQL service` step이 존재하고
+     성공했는지 본다. rule5는 **선택 집합**을 검사할 뿐 서비스가 실제로 떴는지는
+     모른다.
+   ⚠️ 이 단계는 #5185가 **거의 놓친 것**이다. 잡 이름과 `--skip` 패턴이 모두
+   "non-PostgreSQL"이라 아무도 PG를 의심하지 않았지만, 그 패턴은 id 부분문자열
+   필터였고 61건이 통과했다.
+3. main에서 `Library test sweep`이 **N회 연속 green**인지 확인하고 **false-red
    비율을 실측**한다. 1회 green은 근거가 아니다: 이 레인이 관측하는 stdout
    오염은 확률적이고, 실제로 5회 스윕 중 1회 오탐이 관측된 적이 있다.
-3. 등록할 컨텍스트 이름은 **`Library test sweep (ubuntu-latest)`**
+4. 등록할 컨텍스트 이름은 **`Library test sweep (ubuntu-latest)`**
    (= `library_sweep_required_context` job)이다. sweep 잡 본체인
    `Library test sweep`을 등록하면 `rust_or_policy` path filter가 false인 PR에서
    잡이 skip되어 **pending으로 영구 블록**된다. mirror job은 `if: always()`로
@@ -163,7 +225,7 @@ cache를 먼저 설치한다. 이 wiring을 바꾸면 해당 workflow setup과 �
 | Gate | main 커맨드 | 재현 커맨드 (로컬) |
 | --- | --- | --- |
 | Full tests | `full_non_pg`의 `just check` step: `just check` | `just check` |
-| Full tests (PR) | `library_sweep`의 `Non-PostgreSQL library sweep (selection-set gated)` step | `python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 2 --skip _pg --skip pg_ --skip postgres -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- --skip _pg --skip pg_ --skip postgres` |
+| Full tests (PR) | `library_sweep`의 `Library sweep (selection-set gated)` step | 도달 가능한 PostgreSQL과 `AGENTDESK_REQUIRE_PG=1` 아래에서 `python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 2 --skip _pg --skip pg_ --skip postgres -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- --skip _pg --skip pg_ --skip postgres` (⚠️ 레인 이름과 달리 PG가 필요하다 — 위 §PR 측 library sweep 참조) |
 | PostgreSQL tests | `postgres`의 `just test-postgres` step: `just test-postgres` | workflow와 같은 PostgreSQL 환경에서 `just test-postgres` |
 | High-risk recovery | `high-risk-recovery`의 `High-risk recovery lane` step: `cargo test --lib high_risk_recovery:: -- --test-threads=1` | 동일 |
 

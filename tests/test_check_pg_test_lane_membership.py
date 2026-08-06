@@ -61,12 +61,25 @@ class Fixture:
         start_step = "      - run: ./scripts/ci/postgres-service.sh start\n" if (start or require) else ""
         return "on:\n  push:\njobs:\n  lane:\n" + env + "    steps:\n" + start_step + f"      - run: {command}\n"
 
-    def write_pr(self, patterns: tuple[str, ...], indent: int = 12) -> None:
+    def write_pr(
+        self,
+        patterns: tuple[str, ...],
+        indent: int = 12,
+        *,
+        sweep: str | None = None,
+        sweep_starts_service: bool = False,
+    ) -> None:
         prefix = " " * indent
         rendered = "\n".join(f"{prefix}  - '{pattern}'" for pattern in patterns)
+        extra = ""
+        if sweep is not None:
+            start = "      - run: ./scripts/ci/postgres-service.sh start\n" if sweep_starts_service else ""
+            env = "    env:\n      AGENTDESK_REQUIRE_PG: \"1\"\n" if sweep_starts_service else ""
+            extra = f"  sweep:\n{env}    steps:\n{start}      - run: {sweep}\n"
         (self.root / ".github/workflows/ci-pr.yml").write_text(
             "jobs:\n  changes:\n    steps:\n      - with:\n          filters: |\n"
-            f"{prefix}pg_db:\n{rendered}\n{prefix}rust:\n{prefix}  - 'src/**'\n",
+            f"{prefix}pg_db:\n{rendered}\n{prefix}rust:\n{prefix}  - 'src/**'\n"
+            + extra,
             "utf-8",
         )
 
@@ -384,6 +397,88 @@ class RuleMutations(FixtureCase):
                 fx.write_source(path, "#[cfg(test)] mod postgres_tests { #[test] fn case() { create_test_database(); } }\n", "#[path = \"%s\"] mod service;\n" % path.removeprefix("src/"))
                 self.assertEqual(bool(fx.analysis().debts["rule3"]), bad)
 
+    # ------------------------------------------------------------------
+    # rule5 (#5185): a ci-pr.yml job that runs cargo test without starting the
+    # PostgreSQL service must select no PG-dependent test. The tests below pin
+    # the three properties that make it discriminating rather than decorative:
+    # it sees `--lib` lanes (rule2 cannot), it is scoped to the PR workflow,
+    # and it fails with no baseline to ratchet against.
+    # ------------------------------------------------------------------
+    SWEEP = "cargo test --lib -- --skip _pg --skip pg_ --skip postgres"
+
+    def write_pg_test(self, module: str = "tests") -> None:
+        """A PG-dependent test whose id carries none of the skip substrings."""
+        self.fx.write_source(
+            "src/db/service.rs",
+            f"#[cfg(test)] mod {module} {{ #[test] fn case() {{ create_test_database(); }} }}\n",
+            "mod db { pub mod service; }\n",
+        )
+
+    def test_rule5_pr_lib_lane_without_service_is_debt_and_service_clears_it(self) -> None:
+        self.write_pg_test()
+        self.fx.write_pr(("src/db/**",), sweep=self.SWEEP)
+        self.assertEqual(self.fx.analysis().debts["rule5"], {"db::service::tests::case"})
+        self.fx.write_pr(("src/db/**",), sweep=self.SWEEP, sweep_starts_service=True)
+        analysis = self.fx.analysis()
+        self.assertEqual(analysis.debts["rule5"], set())
+        # Starting the service also makes the sweep a PG lane, so the same test
+        # stops being rule1 debt -- the coverage half of the same fix.
+        self.assertEqual(analysis.debts["rule1"], set())
+        self.assertEqual(analysis.debts["rule4"], set())
+
+    def test_rule5_sees_lib_lanes_that_pgless_lane_filters_cannot(self) -> None:
+        """The blind spot that let the defect ship: rule2 only reads --all-targets."""
+        self.write_pg_test()
+        self.fx.write_pr(("src/db/**",), sweep=self.SWEEP)
+        jobs = [
+            job
+            for path in sorted((self.root / ".github/workflows").glob("*.yml"))
+            for job in membership.parse_jobs(path, self.root, [])
+        ]
+        coverage = membership._load_coverage_module(self.root)
+        sweep_lane = coverage.cargo_test_filter(self.SWEEP)
+        self.assertNotIn(sweep_lane, membership.pgless_lane_filters(jobs, coverage))
+        self.assertEqual(membership.pr_pgless_lane_filters(jobs, coverage), (sweep_lane,))
+        # And this is why rule2 could not have caught it even by counting: the
+        # nightly `--all-targets` lane already carries the same id, so ADDING
+        # the PR sweep moves rule2 by nothing at all while rule5 goes 0 -> 1.
+        with_sweep = self.fx.analysis()
+        self.fx.write_pr(("src/db/**",))
+        without_sweep = self.fx.analysis()
+        self.assertEqual(with_sweep.debts["rule2"], without_sweep.debts["rule2"])
+        self.assertEqual(without_sweep.debts["rule5"], set())
+        self.assertEqual(with_sweep.debts["rule5"], {"db::service::tests::case"})
+
+    def test_rule5_is_scoped_to_the_pr_workflow(self) -> None:
+        self.write_pg_test()
+        self.fx.write_pr(("src/db/**",))
+        (self.root / ".github/workflows/ci-nightly.yml").write_text(
+            self.fx.workflow(self.SWEEP), "utf-8"
+        )
+        self.assertEqual(self.fx.analysis().debts["rule5"], set())
+
+    def test_rule5_fails_without_any_baseline_to_ratchet(self) -> None:
+        inventory = membership.PgInventory({"db::service::tests::case": "src/db/service.rs"})
+        debts = empty_debts()
+        debts["rule5"] = {"db::service::tests::case"}
+        empty = empty_debts()
+        stderr, stdout = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(stdout):
+            rc = membership.check_analysis(
+                membership.Analysis(inventory, debts, 0),
+                {section: set() for section in membership.SECTIONS},
+                {section: set() for section in membership.SECTIONS},
+                membership.render_manifest(inventory),
+                reference_label="fixture base",
+                allowlist_label="scripts/pg_test_lane_allowlist.txt",
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("FAIL: [rule5]", stderr.getvalue())
+        self.assertIn("db::service::tests::case", stderr.getvalue())
+        # rule5 is not a baseline section, so a regenerated snapshot cannot
+        # absorb it the way rule1-rule4 debt can.
+        self.assertNotIn("rule5", membership.render_baseline(debts))
+
     def test_rule4_bad_and_pgless_counterexample(self) -> None:
         workflow = self.root / ".github/workflows/ci-main.yml"
         workflow.write_text(self.fx.workflow("cargo test postgres_", start=True), "utf-8")
@@ -507,7 +602,7 @@ class ParserMutations(FixtureCase):
             "tab": "jobs:\n\t# tab-indented comment, but no job key\n",
         }
         workflow = self.root / ".github/workflows/empty.yml"
-        empty = {section: set() for section in membership.SECTIONS}
+        empty = empty_debts()
         for shape, text in cases.items():
             with self.subTest(shape=shape):
                 workflow.write_text(text, "utf-8")
@@ -546,7 +641,7 @@ class ParserMutations(FixtureCase):
             "space-before-colon": "jobs :\n  bypass:\n" + payload,
         }
         workflow = self.root / ".github/workflows/unsupported.yml"
-        empty = {section: set() for section in membership.SECTIONS}
+        empty = empty_debts()
         for shape, text in cases.items():
             with self.subTest(shape=shape):
                 workflow.write_text(text, "utf-8")
@@ -588,7 +683,7 @@ class ParserMutations(FixtureCase):
             ),
         }
         workflow = self.root / ".github/workflows/extended-job-headers.yml"
-        empty = {section: set() for section in membership.SECTIONS}
+        empty = empty_debts()
         for shape, (text, expected_jobs) in cases.items():
             with self.subTest(shape=shape):
                 loaded = yaml.safe_load(text)
@@ -642,7 +737,7 @@ class ParserMutations(FixtureCase):
             finding.source == ".github/workflows/anchored-jobs-map.yml"
             for finding in analysis.findings
         ))
-        empty = {section: set() for section in membership.SECTIONS}
+        empty = empty_debts()
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             rc = membership.check_analysis(
@@ -661,7 +756,7 @@ class ParserMutations(FixtureCase):
         workflow.write_text("on:\n  push:\n", "utf-8")
         analysis = self.fx.analysis()
         self.assertFalse(any(finding.kind == "jobs-empty" for finding in analysis.findings))
-        empty = {section: set() for section in membership.SECTIONS}
+        empty = empty_debts()
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             rc = membership.check_analysis(
@@ -695,7 +790,7 @@ class ParserMutations(FixtureCase):
             ),
         }
         workflow = self.root / ".github/workflows/non-top-level.yml"
-        empty = {section: set() for section in membership.SECTIONS}
+        empty = empty_debts()
         for shape, (text, expected_jobs) in cases.items():
             with self.subTest(shape=shape):
                 workflow.write_text(text, "utf-8")
@@ -730,7 +825,7 @@ class ParserMutations(FixtureCase):
             analysis.debts["rule4"],
             {".github/workflows/ci-main.yml:comment_job"},
         )
-        empty = {section: set() for section in membership.SECTIONS}
+        empty = empty_debts()
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             rc = membership.check_analysis(
@@ -759,7 +854,7 @@ class ParserMutations(FixtureCase):
             {section: len(analysis.debts[section]) for section in ("rule1", "rule2", "rule3")},
             {"rule1": 1, "rule2": 1, "rule3": 1},
         )
-        empty = {section: set() for section in membership.SECTIONS}
+        empty = empty_debts()
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             rc = membership.check_analysis(
@@ -788,7 +883,7 @@ class ParserMutations(FixtureCase):
         counters = [finding for finding in analysis.findings if finding.kind == "operation-counter"]
         self.assertEqual(len(counters), 1)
         self.assertRegex(counters[0].detail, r"_matching_brace calls=\d+ cache_hits=\d+ cache_misses=\d+")
-        empty = {section: set() for section in membership.SECTIONS}
+        empty = empty_debts()
         synthetic = membership.Analysis(
             membership.PgInventory({}), empty, 0, tuple(counters)
         )
@@ -840,11 +935,19 @@ class ParserMutations(FixtureCase):
         self.assertIsNone(membership._load_coverage_module(self.root).cargo_test_filter(command))
 
 
+def empty_debts() -> dict[str, set[str]]:
+    """Every debt key `check_analysis` reads, baselined or not."""
+    return {
+        section: set()
+        for section in membership.SECTIONS + membership.UNBASELINED_SECTIONS
+    }
+
+
 class BaselineAndEnforcement(FixtureCase):
     def analysis(self, debts: dict[str, set[str]] | None = None):
         return membership.Analysis(
             membership.PgInventory({"service::postgres_tests::case": "src/db/service.rs"}),
-            debts or {section: set() for section in membership.SECTIONS},
+            debts or empty_debts(),
             0,
         )
 
@@ -863,17 +966,17 @@ class BaselineAndEnforcement(FixtureCase):
         return rc, stdout.getvalue(), stderr.getvalue()
 
     def test_repair_passes_and_stale_baseline_fails(self) -> None:
-        old = {section: set() for section in membership.SECTIONS}
+        old = empty_debts()
         old["rule3"] = {"src/db/service.rs"}
-        rc, _, _ = self.run_check(self.analysis(), {section: set() for section in membership.SECTIONS}, old)
+        rc, _, _ = self.run_check(self.analysis(), empty_debts(), old)
         self.assertEqual(rc, 0)
         rc, _, error = self.run_check(self.analysis(), old, old)
         self.assertEqual(rc, 1)
         self.assertIn("Remove '-' entries", error)
 
     def test_new_violation_warns_and_baseline_coverup_fails(self) -> None:
-        empty = {section: set() for section in membership.SECTIONS}
-        current = {section: set() for section in membership.SECTIONS}
+        empty = empty_debts()
+        current = empty_debts()
         current["rule1"] = {"service::tests::case"}
         rc, _, error = self.run_check(self.analysis(current), empty, empty)
         self.assertEqual(rc, 0)
@@ -884,7 +987,7 @@ class BaselineAndEnforcement(FixtureCase):
         self.assertIn("baseline growth forbidden", error)
 
     def test_manifest_drift_fails_with_complete_recovery_command(self) -> None:
-        empty = {section: set() for section in membership.SECTIONS}
+        empty = empty_debts()
         rc, _, error = self.run_check(self.analysis(), empty, empty, "")
         self.assertEqual(rc, 1)
         self.assertIn("python3 scripts/check_pg_test_lane_membership.py --write-snapshots", error)
@@ -892,7 +995,7 @@ class BaselineAndEnforcement(FixtureCase):
         self.assertIn("will not excuse", error)
 
     def test_inventory_change_passes_when_manifest_matches(self) -> None:
-        empty = {section: set() for section in membership.SECTIONS}
+        empty = empty_debts()
         analysis = membership.Analysis(
             membership.PgInventory({
                 "service::postgres_tests::case": "src/db/service.rs",
