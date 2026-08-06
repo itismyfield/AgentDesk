@@ -343,6 +343,55 @@ mod watcher_terminal_semantics_tests {
             "the delivery and suppression dispositions are distinct obligations");
     }
 
+    /// W2 (kills M-W2). Repeated-settlement idempotency, the core S3c claim.
+    /// `loop_poll_prologue` re-enters with the same range, so the second
+    /// observation must land on the SAME logical slots — identical event ids,
+    /// idempotency keys and canonical payloads — for the 0103 `ON CONFLICT DO
+    /// NOTHING` insert to report `DuplicateNoOp` instead of appending a row.
+    #[test]
+    fn w2_repeated_settlement_is_an_exact_no_op() {
+        let (first, second) = (settlement_events(coordinates((10, 20)), POST_TERMINAL),
+                               settlement_events(coordinates((10, 20)), POST_TERMINAL));
+        assert_eq!(first.len(), second.len(), "a repeat emits the same number of events");
+        for (left, right) in first.iter().zip(second.iter()) {
+            assert_eq!(left.obligation_id, right.obligation_id, "same obligation");
+            assert_eq!(left.event_id, right.event_id, "same event id");
+            assert_eq!(left.seq, right.seq, "same logical slot");
+            assert_eq!(left.idempotency_key, right.idempotency_key, "same idempotency key");
+            assert_eq!(left.canonical_payload, right.canonical_payload, "same canonical payload");
+        }
+    }
+
+    /// W2b. The repeat is stable across MANY re-entries, not just two — a stuck
+    /// suppression re-enters for as long as the bytes stay suppressed, and every
+    /// pass must reuse the same two slots.
+    #[test]
+    fn w2b_many_re_entries_reuse_exactly_two_logical_slots() {
+        let slots: std::collections::HashSet<_> = (0..32)
+            .flat_map(|_| settlement_events(coordinates((10, 20)), POST_TERMINAL))
+            .map(|event| (event.obligation_id, event.seq))
+            .collect();
+        assert_eq!(slots.len(), 2, "32 re-entries must occupy exactly the O and S slots");
+        let keys: std::collections::HashSet<_> = (0..32)
+            .flat_map(|_| settlement_events(coordinates((10, 20)), POST_TERMINAL))
+            .map(|event| event.idempotency_key)
+            .collect();
+        assert_eq!(keys.len(), 2, "32 re-entries must produce exactly two idempotency keys");
+    }
+
+    /// W7 (kills M-W7). The re-entry guard that keeps those repeats off the
+    /// mailbox entirely: only the first pass over a suppressed range observes.
+    #[test]
+    fn w7_only_the_first_pass_over_a_suppressed_range_observes() {
+        assert!(first_observation_of_suppressed_range(None, (10, 20)), "the first pass observes");
+        assert!(!first_observation_of_suppressed_range(Some((10, 20)), (10, 20)),
+            "re-entering with the SAME range must not observe again");
+        assert!(first_observation_of_suppressed_range(Some((10, 20)), (10, 21)),
+            "the suppressed range growing is a new observation");
+        assert!(first_observation_of_suppressed_range(Some((10, 20)), (20, 30)),
+            "a disjoint suppressed range is a new observation");
+    }
+
     /// W5 (kills M-W5). Journalling `AdvancedWithoutProof` as delivered is the
     /// worst forgery available here: the frontier moved, but no receipt or ledger
     /// entry exists behind it.
