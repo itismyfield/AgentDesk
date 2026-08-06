@@ -5333,6 +5333,178 @@ class TickChannelTests(unittest.TestCase):
         self.assertIn(live.name, gap_alerts[0])
         self.assertTrue(chs.get("alerting"))
 
+    def test_5190_r1_undelivered_retirement_notice_keeps_the_authority_open(self):
+        """The notice IS the retirement (#5190 R1).
+
+        `_alert_pending_retirement` returns False when nothing left the box.
+        Retiring anyway deletes the loss record with nobody ever told — the
+        observation failure collapsed into a success this campaign keeps finding.
+        """
+        rt, state, live, orphan = self._5190_live_channel()
+        chs = state["999"]
+        discovered_at = self.now + rt.cfg.orphan_abandon_secs + 600
+        self._5190_strand_orphan(orphan, self.now)
+        self._5190_live_delivery(rt, live, discovered_at, "live block two")
+        tick_channel(rt, TICK_CHANNEL, state, discovered_at)
+        self.assertIn(str(orphan), chs[self.ORPHAN_STRANDED_KEY])
+
+        retire_at = discovered_at + relay_watchdog.ORPHAN_STRANDED_CONFIRM_SECS
+        self._5190_live_delivery(rt, live, retire_at, "live block three")
+        rt.alert_succeeds = False
+        tick_channel(rt, TICK_CHANNEL, state, retire_at)
+
+        self.assertIn(
+            str(orphan), chs.get(relay_watchdog.PENDING_TRANSCRIPTS_KEY, [])
+        )
+        self.assertNotIn(
+            str(orphan), chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {})
+        )
+        self.assertIn(str(orphan), chs.get(self.ORPHAN_STRANDED_KEY, {}))
+        self.assertTrue(
+            any(
+                "orphan-stranded-retirement-deferred" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+        self.assertFalse(
+            any(
+                "orphan-stranded-authority-retired" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+
+        # A deferral, not a dead end: the first tick that reaches a human
+        # completes exactly the same retirement.
+        rt.alert_succeeds = True
+        retry_at = retire_at + 1
+        self._5190_live_delivery(rt, live, retry_at, "live block four")
+        tick_channel(rt, TICK_CHANNEL, state, retry_at)
+        self.assertNotIn(
+            str(orphan), chs.get(relay_watchdog.PENDING_TRANSCRIPTS_KEY, [])
+        )
+        self.assertIn(
+            str(orphan), chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {})
+        )
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "회수 불가" in body]),
+            2,
+            rt.alerts,
+        )
+
+    def _5190_observed_orphan(
+        self, rt: FakeRuntime, orphan: Path, frozen_at: float
+    ) -> None:
+        """An orphan that DID deliver once and then stranded the rest (R2).
+
+        Its `gap_secs` is a real measurement, not the unobserved sentinel, which
+        is exactly why silencing it needs a stronger bar than the never-seen case.
+        """
+        orphan.write_text(
+            self._5190_record(frozen_at - 900, "orphan block that did arrive")
+            + "\n"
+            + self._5190_record(frozen_at - 700, "orphan block stranded one")
+            + "\n"
+            + self._5190_record(frozen_at - 600, "orphan block stranded two")
+            + "\n",
+            encoding="utf-8",
+        )
+        os.utime(orphan, (frozen_at, frozen_at))
+        rt.haystack = norm(f"{rt.haystack} orphan block that did arrive")
+
+    def _5190_observed_orphan_tick(
+        self, *, bind_successor: bool, elapsed: float
+    ) -> tuple[FakeRuntime, dict, dict, Path, Path]:
+        for stale in self.proj_dir.glob("*.jsonl"):
+            stale.unlink()
+        rt, state, live, orphan = self._5190_live_channel()
+        self._5190_observed_orphan(rt, orphan, self.now)
+        at = self.now + elapsed
+        self._5190_live_delivery(rt, live, at, "live block two")
+        if bind_successor:
+            rt.watcher_probe = WatcherStateProbe(
+                200, attached=True, desynced=False, bound_output_path=str(live)
+            )
+        tick_channel(rt, TICK_CHANNEL, state, at)
+        return rt, state, state["999"], live, orphan
+
+    def test_5190_r2_observed_history_orphan_retires_on_stronger_evidence(self):
+        """R2: delivery history does not make the same defect out of scope.
+
+        A `/clear`ed session that delivered before stranding its tail is pinned
+        by the identical loop — every exit blocked, re-alerting every 15 minutes
+        until an unrelated idle timer expires. It is admitted, but only on
+        evidence strictly stronger than the never-observed case.
+        """
+        doubled = (
+            relay_watchdog.Config().orphan_abandon_secs
+            * relay_watchdog.ORPHAN_OBSERVED_FREEZE_MULTIPLIER
+        )
+        rt, state, chs, live, orphan = self._5190_observed_orphan_tick(
+            bind_successor=True, elapsed=doubled + 60
+        )
+        self.assertIn(str(orphan), chs[self.ORPHAN_STRANDED_KEY])
+        self.assertTrue(
+            any(
+                "orphan-stranded-marker-opened" in line
+                and "observed_history=True" in line
+                and f"freeze_floor={doubled}s" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+
+        discovered_at = self.now + doubled + 60
+        retire_at = discovered_at + relay_watchdog.ORPHAN_STRANDED_CONFIRM_SECS
+        self._5190_live_delivery(rt, live, retire_at, "live block three")
+        tick_channel(rt, TICK_CHANNEL, state, retire_at)
+
+        self.assertIn(
+            str(orphan), chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {})
+        )
+        self.assertNotIn(
+            str(orphan), chs.get(relay_watchdog.PENDING_TRANSCRIPTS_KEY, [])
+        )
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "회수 불가" in body]), 1
+        )
+        self.assertFalse(any("릴레이 갭 해소" in body for body, _ in rt.alerts))
+
+    def test_5190_r2_reverse_a_measured_gap_survives_a_weaker_evidence_bar(self):
+        """THE reverse direction for R2 — the bar is what keeps it loud.
+
+        Drop either half of the extra evidence and the measured gap must keep
+        alerting, still naming its elapsed time as a measurement. This is the
+        pin against R2's fix quietly widening into "orphans are never reported".
+        """
+        cfg = relay_watchdog.Config()
+        doubled = cfg.orphan_abandon_secs * (
+            relay_watchdog.ORPHAN_OBSERVED_FREEZE_MULTIPLIER
+        )
+        cases = (
+            ("dcserver never confirmed the channel moved on", False, doubled + 60),
+            ("frozen past the unobserved floor only", True, cfg.orphan_abandon_secs + 60),
+        )
+        for label, bind_successor, elapsed in cases:
+            with self.subTest(label):
+                rt, _state, chs, _live, orphan = self._5190_observed_orphan_tick(
+                    bind_successor=bind_successor, elapsed=elapsed
+                )
+                gap_alerts = [
+                    body for body, _ in rt.alerts if "릴레이 갭 감지" in body
+                ]
+                self.assertEqual(len(gap_alerts), 1, (rt.alerts, rt.log_lines))
+                self.assertIn(orphan.name, gap_alerts[0])
+                # The measurement is reported AS a measurement.
+                self.assertIn("마지막 정상 도달 이후", gap_alerts[0])
+                self.assertNotIn("배달이 확인된 이력이 없습니다", gap_alerts[0])
+                self.assertNotIn(str(orphan), chs.get(self.ORPHAN_STRANDED_KEY, {}))
+                self.assertNotIn(
+                    str(orphan),
+                    chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {}),
+                )
+
     def test_5190_young_orphan_gap_names_the_session_and_narrows_the_claim(self):
         """Below the freeze floor nothing is reclassified — #4435 lives here.
 

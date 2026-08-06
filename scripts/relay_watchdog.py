@@ -156,6 +156,13 @@ ORPHAN_STRANDED_RETIREMENT_REASON = "orphan_stranded"
 # consecutive polls at the shipped poll_secs default, so one anomalous tick can
 # never retire anything.
 ORPHAN_STRANDED_CONFIRM_SECS = 600
+# An orphan WITH delivery history carries a real, measured gap, so silencing it
+# on the never-observed evidence bar would risk burying an outage this watchdog
+# exists to report (#5190 R2). It is admitted only on a strictly stronger bar:
+# this multiple of the freeze floor, plus a delivery frontier that has itself
+# been stale for a full freeze floor, plus dcserver independently confirming the
+# channel is now bound to a DIFFERENT session.
+ORPHAN_OBSERVED_FREEZE_MULTIPLIER = 2
 # `Verdict.gap_secs` when NO delivery was ever matched for a path. It is not a
 # duration and must never be rendered as one (#5190/#5052): "never observed"
 # and "infinitely stale" are different claims, and `float("inf")` collapsed
@@ -910,13 +917,52 @@ def _store_orphan_stranded_since(
         channel_state.pop(ORPHAN_STRANDED_SINCE_KEY, None)
 
 
+def _release_pending_authority(
+    channel_state: dict[str, Any],
+    remaining_pending: list[str],
+    pending_failures: dict[str, int],
+    pending_since: dict[str, float],
+    released: set[str],
+) -> tuple[list[str], dict[str, int], dict[str, float]]:
+    """Drop paths from every pending-authority map in one step (#5190).
+
+    The three maps are one fact recorded three ways, so releasing a path from
+    only some of them leaves a half-retired authority behind. Callers that must
+    release atomically with an external side effect (a retirement notice that
+    actually left the box) need a single call they can place after it.
+    """
+    remaining_pending = [
+        path for path in remaining_pending if path not in released
+    ]
+    pending_failures = {
+        path: failures
+        for path, failures in pending_failures.items()
+        if path not in released
+    }
+    pending_since = {
+        path: since
+        for path, since in pending_since.items()
+        if path not in released
+    }
+    channel_state[PENDING_TRANSCRIPTS_KEY] = remaining_pending
+    if pending_failures:
+        channel_state[PENDING_TRANSCRIPT_FAILURES_KEY] = pending_failures
+    else:
+        channel_state.pop(PENDING_TRANSCRIPT_FAILURES_KEY, None)
+    if pending_since:
+        channel_state[PENDING_TRANSCRIPT_SINCE_KEY] = pending_since
+    else:
+        channel_state.pop(PENDING_TRANSCRIPT_SINCE_KEY, None)
+    return remaining_pending, pending_failures, pending_since
+
+
 def _orphan_authority_matured(
     channel_state: Mapping[str, Any], path: str, now: float
 ) -> bool:
     """True once a stranded-orphan marker has held long enough to close out.
 
     The marker itself carries the evidence — it is only written on a tick where
-    the path was already frozen past `orphan_abandon_secs` AND the channel was
+    the path was already frozen past its freeze floor AND the channel was
     provably delivering on another transcript — so this only asks whether that
     finding has survived the confirmation window. Reading the persisted marker
     means the answer is available before any of this tick's verdicts exist,
@@ -4770,12 +4816,14 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             # an orphan holding permanently undelivered blocks — STATE_OK can
             # never arrive on a session that will never write again — which is
             # what pinned #5190's pending authority open forever. A matured
-            # stranded-orphan marker is the second, evidence-backed exit.
+            # stranded-orphan marker is the second, evidence-backed exit, but it
+            # is NOT applied here: that release now happens below, atomically
+            # with the retirement notice actually reaching a human (#5190 R1).
             if (
                 verdict.state == STATE_OK
                 and fresh_undelivered == 0
                 and read_result.blocks
-            ) or orphan_matured:
+            ):
                 remaining_pending = [
                     pending for pending in remaining_pending if pending != path
                 ]
@@ -4890,28 +4938,15 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             superseded = set(superseded_gap_owners)
             _store_retired_transcripts(chs, retired_transcripts)
             retired_pending_paths.extend(superseded_gap_owners)
-            remaining_pending = [
-                path for path in remaining_pending if path not in superseded
-            ]
-            pending_failures = {
-                path: failures
-                for path, failures in pending_failures.items()
-                if path not in superseded
-            }
-            pending_since = {
-                path: since
-                for path, since in pending_since.items()
-                if path not in superseded
-            }
-            chs[PENDING_TRANSCRIPTS_KEY] = remaining_pending
-            if pending_failures:
-                chs[PENDING_TRANSCRIPT_FAILURES_KEY] = pending_failures
-            else:
-                chs.pop(PENDING_TRANSCRIPT_FAILURES_KEY, None)
-            if pending_since:
-                chs[PENDING_TRANSCRIPT_SINCE_KEY] = pending_since
-            else:
-                chs.pop(PENDING_TRANSCRIPT_SINCE_KEY, None)
+            remaining_pending, pending_failures, pending_since = (
+                _release_pending_authority(
+                    chs,
+                    remaining_pending,
+                    pending_failures,
+                    pending_since,
+                    superseded,
+                )
+            )
             evaluated = [
                 (candidate, verdict)
                 for candidate, verdict in evaluated
@@ -4933,10 +4968,10 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     # frozen for hours.
     #
     # The exit here rests on positive evidence rather than on silence: the path
-    # is NOT the active session, has never been seen delivering, is not growing,
-    # and — decisively — another transcript on the same channel is delivering
-    # right now. A relay that is actually down produces none of that last part,
-    # so nothing below can silence a real outage.
+    # is NOT the active session, is not growing, has been frozen past its freeze
+    # floor, and — decisively — another transcript on the same channel is
+    # delivering right now. A relay that is actually down produces none of that
+    # last part, so nothing below can silence a real outage.
     stranded_since = _validated_orphan_stranded_since(chs)
     orphan_unattributable_paths: set[str] = set()
     for candidate, verdict in evaluated:
@@ -4945,12 +4980,30 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         # shape swallows #4435: a session that has just been swapped in, is not
         # yet selected, and whose blocks are being lost RIGHT NOW looks
         # identical to an abandoned one except for how long it has been silent.
+        # #5190 R2: an orphan that once delivered is the SAME defect — it re-
+        # alerts every `realert_secs` until an unrelated idle timer expires —
+        # but its gap is a measurement, not an unknown, so excluding it was
+        # wrong and admitting it on the same terms would be reckless. It gets a
+        # strictly stronger bar: twice the freeze floor, a delivery frontier
+        # that has itself gone a full freeze floor without advancing (it is not
+        # simply lagging), and dcserver proving the channel has moved to another
+        # session. Every one of those is falsified by a live relay outage.
+        observed_history = not gap_is_unobserved(verdict)
+        freeze_floor = cfg.orphan_abandon_secs * (
+            ORPHAN_OBSERVED_FREEZE_MULTIPLIER if observed_history else 1
+        )
         eligible = (
             path != selected_path
             and verdict.state == STATE_GAP
-            and gap_is_unobserved(verdict)
             and path not in semantic_growth_paths
-            and now - candidate.mtime >= cfg.orphan_abandon_secs
+            and now - candidate.mtime >= freeze_floor
+            and (
+                not observed_history
+                or (
+                    successor_binding_proven
+                    and now - verdict.delivered_ts >= cfg.orphan_abandon_secs
+                )
+            )
         )
         if not eligible:
             # Resurrection, recovery, or promotion to the active session voids
@@ -4972,9 +5025,29 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             stranded_since[path] = now
             rt.log(
                 f"[{cid}] orphan-stranded-marker-opened path={path} "
-                f"lost={verdict.lost} selected={selected_path}"
+                f"lost={verdict.lost} selected={selected_path} "
+                f"observed_history={observed_history} "
+                f"freeze_floor={int(freeze_floor)}s"
             )
         orphan_unattributable_paths.add(path)
+    if orphan_retired_paths and not _alert_pending_retirement(
+        rt,
+        ch,
+        chs,
+        orphan_retired_paths,
+        now,
+        reason=ORPHAN_STRANDED_RETIREMENT_REASON,
+    ):
+        # #5190 R1: the notice IS the retirement. Retiring anyway would drop the
+        # pending authority, clear the gap, and delete the only surviving record
+        # of these blocks with nobody ever told — an observation failure
+        # collapsed into a success. The marker survives untouched, so the next
+        # tick resumes from exactly here and the alert keeps firing meanwhile.
+        rt.log(
+            f"[{cid}] orphan-stranded-retirement-deferred "
+            f"count={len(orphan_retired_paths)} notice=undelivered"
+        )
+        orphan_retired_paths = []
     if orphan_retired_paths:
         retired_orphans = set(orphan_retired_paths)
         for path in orphan_retired_paths:
@@ -4983,9 +5056,16 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
                 retired_transcripts[path] = (candidate.size, now)
             stranded_since.pop(path, None)
         _store_retired_transcripts(chs, retired_transcripts)
-        # The pending authority itself was already released in the evaluation
-        # loop above, on the same `orphan_matured` predicate; what remains is to
-        # drop the path from this tick's judgment and close the incident.
+        # Released only now, downstream of a notice that provably left the box.
+        remaining_pending, pending_failures, pending_since = (
+            _release_pending_authority(
+                chs,
+                remaining_pending,
+                pending_failures,
+                pending_since,
+                retired_orphans,
+            )
+        )
         evaluated = [
             (candidate, verdict)
             for candidate, verdict in evaluated
@@ -4997,14 +5077,6 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             f"count={len(orphan_retired_paths)} "
             f"frozen_floor={int(cfg.orphan_abandon_secs)}s "
             f"confirm={ORPHAN_STRANDED_CONFIRM_SECS}s"
-        )
-        _alert_pending_retirement(
-            rt,
-            ch,
-            chs,
-            orphan_retired_paths,
-            now,
-            reason=ORPHAN_STRANDED_RETIREMENT_REASON,
         )
         _clear_gap_alert_without_recovery(rt, chs, cid, orphan_retired_paths)
         retired_pending_paths.extend(orphan_retired_paths)
