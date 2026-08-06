@@ -1622,9 +1622,25 @@ fn assert_suppression_arm_uses_confirmed_end_helper(reason: &str) {
     // The arm may pass the batch data by reference or by value (`&all_data` when
     // the module owns a `String`, `all_data` when it already borrows a slice);
     // both are the same consumed-terminal-end wiring.
+    const INLINE_FORMS: &[&str] = &[
+        "suppressed_terminal_confirmed_end(current_offset, &all_data)",
+        "suppressed_terminal_confirmed_end(current_offset, all_data)",
+    ];
+    if INLINE_FORMS.iter().any(|form| call_src.contains(form)) {
+        return;
+    }
+    // #5071 T1 S3b: the post-terminal arm needs the same end offset a second time
+    // for its shadow-journal range, so it hoists the helper into a `confirmed_end`
+    // binding instead of calling it inline in the argument list. Accept that only
+    // when the binding is initialised from the helper itself, so the arm is still
+    // pinned to the consumed terminal end rather than to the raw poll offset.
+    let args_src = &call_src["advance_watcher_confirmed_end(".len()..];
+    let advances_binding = args_src.contains("confirmed_end,");
+    let binding_is_helper = INLINE_FORMS
+        .iter()
+        .any(|form| module_src[..call_start].contains(&format!("let confirmed_end = {form}")));
     assert!(
-        call_src.contains("suppressed_terminal_confirmed_end(current_offset, &all_data)")
-            || call_src.contains("suppressed_terminal_confirmed_end(current_offset, all_data)"),
+        advances_binding && binding_is_helper,
         "suppression arm {reason} must advance only to the consumed terminal end"
     );
 }
