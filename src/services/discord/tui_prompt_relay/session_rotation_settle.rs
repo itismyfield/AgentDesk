@@ -89,6 +89,113 @@ pub(in crate::services::discord) fn plan_claude_session_rotation(
     ClaudeRotationPlan::SettleStaleInflight
 }
 
+/// #5188 (R1): does `existing` carry a session id ADOPTED from a live Claude
+/// hook payload, making it authoritative over the on-disk launch script?
+///
+/// [`claude_continuation_binding_supersedes_launch`] is the pre-existing,
+/// filesystem-only cutover test. It is conservative by design and can decline a
+/// REAL rotation — it demands that the new transcript's FIRST timestamp be
+/// strictly later than the frozen transcript's LAST one, which a trailing
+/// rotation-boundary record appended to the old file (or a leading untimestamped
+/// record in the new one) defeats. When it declines, the rehydration pass falls
+/// through and re-registers the LAUNCH-script binding, silently reverting
+/// delivery to the transcript Claude has stopped writing to. That is the observed
+/// #5188 signature: `adopted Claude continuation session …` immediately followed
+/// by `rehydrated Claude TUI direct relay binding from launch script …
+/// transcript_path=<frozen>.jsonl`, after which nothing is ever delivered again.
+///
+/// A hook payload is different evidence in kind: it was emitted by the running
+/// Claude process and names the session it is writing RIGHT NOW, whereas the
+/// launch script is a start-time artifact that a `/clear` makes stale forever. So
+/// once a payload-adopted id is on record for the pane, a binding carrying that
+/// id outranks the launch script.
+///
+/// Deliberately narrow: it only holds for a ClaudeTui pair where `existing`
+/// carries exactly the adopted id, the LAUNCH binding does NOT (so a launch
+/// script that has caught up still wins the ordinary `matches_launch` path), and
+/// `existing`'s transcript is a real file on disk (a vanished transcript must
+/// still fall through to re-derivation).
+#[cfg(unix)]
+pub(in crate::services::discord) fn hook_adopted_binding_supersedes_launch(
+    existing: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+    launch: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+    hook_adopted_session_id: Option<&str>,
+) -> bool {
+    let Some(adopted) = hook_adopted_session_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return false;
+    };
+    existing.runtime_kind == RuntimeHandoffKind::ClaudeTui
+        && launch.runtime_kind == RuntimeHandoffKind::ClaudeTui
+        && existing.session_id.as_deref() == Some(adopted)
+        && launch.session_id.as_deref() != Some(adopted)
+        && Path::new(&existing.output_path).is_file()
+}
+
+/// #5188 (R1): the launch-script rehydration pass's FIRST gate — may the binding
+/// already registered for this pane be kept as-is?
+///
+/// Extracted from the pass so the adopted-session override is exercised through
+/// the SAME code production runs, ledger lookup included. Inline in the loop it
+/// was unreachable from any test, and deleting the override there changed no
+/// test outcome at all.
+#[cfg(unix)]
+pub(in crate::services::discord) fn existing_claude_binding_outranks_launch_script(
+    tmux_session_name: &str,
+    existing: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+    fresh: Option<&crate::services::tui_prompt_dedupe::TuiRuntimeBinding>,
+) -> bool {
+    if existing.runtime_kind != RuntimeHandoffKind::ClaudeTui
+        || !Path::new(&existing.output_path).exists()
+    {
+        return false;
+    }
+    // No launch script to compare against: there is nothing that could replace
+    // this binding, so it stands.
+    let Some(fresh) = fresh else {
+        return true;
+    };
+    claude_tui_runtime_binding_matches_launch(existing, fresh)
+        || claude_continuation_binding_supersedes_launch(existing, fresh)
+        || hook_adopted_binding_supersedes_launch(
+            existing,
+            fresh,
+            crate::services::tui_prompt_dedupe::hook_adopted_claude_session_id(tmux_session_name)
+                .as_deref(),
+        )
+}
+
+/// #5188 (R1): the rehydration pass's SECOND gate — may the launch script's
+/// re-derived binding overwrite the one already registered?
+///
+/// A separate gate on purpose: the first one only runs for a pane whose dedupe
+/// mirror already resolves to a channel, and a pane that has not got one yet
+/// would otherwise still be reverted here.
+///
+/// Returning `true` for a payload-adopted binding is the #5188 production
+/// failure itself — `rehydrated Claude TUI direct relay binding from launch
+/// script … transcript_path=<frozen>.jsonl`, after which delivery reads a file
+/// that never grows again.
+#[cfg(unix)]
+pub(in crate::services::discord) fn launch_script_may_replace_binding(
+    tmux_session_name: &str,
+    existing: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+    fresh: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+) -> bool {
+    if hook_adopted_binding_supersedes_launch(
+        existing,
+        fresh,
+        crate::services::tui_prompt_dedupe::hook_adopted_claude_session_id(tmux_session_name)
+            .as_deref(),
+    ) {
+        return false;
+    }
+    !claude_tui_runtime_binding_matches_launch(existing, fresh)
+        || !Path::new(&existing.output_path).exists()
+}
+
 /// Finalize context for the rotation settle: clear the unfinalizable row and let
 /// the queue kick, but do not run completion cleanup (there is no completion to
 /// clean up — the transcript that would have carried it is frozen) and do not
@@ -391,6 +498,174 @@ mod tests {
             last_offset: 0,
             relay_last_offset: None,
         }
+    }
+
+    // Direction (a), the R1 half: after `/clear` the launch script still names the
+    // LAUNCH-time UUID forever. The rehydration pass must not use it to drag the
+    // binding back onto the frozen transcript, or delivery reads a dead file for
+    // the rest of the pane's life — the exact #5188 production signature.
+    #[cfg(unix)]
+    #[test]
+    fn a_hook_adopted_binding_outranks_the_stale_launch_script() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let frozen = dir.path().join("4648aa76.jsonl");
+        let rotated = dir.path().join("67f48e65.jsonl");
+        std::fs::write(&frozen, b"{}\n").expect("write frozen transcript");
+        std::fs::write(&rotated, b"{}\n").expect("write rotated transcript");
+
+        let adopted = binding(&rotated, "67f48e65");
+        let launch = binding(&frozen, "4648aa76");
+
+        assert!(
+            hook_adopted_binding_supersedes_launch(&adopted, &launch, Some("67f48e65")),
+            "the running Claude process reported this session id; the launch script \
+             is a start-time artifact that `/clear` made stale forever"
+        );
+        assert!(
+            !hook_adopted_binding_supersedes_launch(&adopted, &launch, None),
+            "with no adoption on record the launch script keeps its authority"
+        );
+        assert!(
+            !hook_adopted_binding_supersedes_launch(&adopted, &launch, Some("4648aa76")),
+            "an id that is the LAUNCH binding's own must never promote the existing one"
+        );
+    }
+
+    /// P1-A regression, and the one that matters most in this change.
+    ///
+    /// Sequence is the production one, in production order:
+    ///   1. a `/clear` hook adopts the new session (rotation recorded),
+    ///   2. the ~500ms settle tick finds nothing pinned to the frozen
+    ///      transcript, plans `RebindOnly`, and retires the rotation record,
+    ///   3. the 5s rehydration tick then re-derives the LAUNCH-script binding
+    ///      and asks whether it may overwrite the adopted one.
+    ///
+    /// Step 3 must answer NO. It previously answered YES for every run in which
+    /// step 2 got there first — which is nearly all of them — and that answer is
+    /// the whole #5188 incident: delivery went back to a transcript Claude had
+    /// abandoned and stayed there for 31 minutes with every failure counter at
+    /// zero.
+    #[cfg(unix)]
+    #[test]
+    fn rehydration_does_not_revert_an_adopted_binding_after_the_settle_pass_runs() {
+        let _serial = crate::services::tui_prompt_dedupe::lock_claude_session_rotations_for_tests();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let frozen = dir.path().join("4648aa76.jsonl");
+        let rotated = dir.path().join("67f48e65.jsonl");
+        std::fs::write(&frozen, b"{}\n").expect("write frozen transcript");
+        std::fs::write(&rotated, b"{}\n").expect("write rotated transcript");
+
+        let adopted = binding(&rotated, "67f48e65");
+        let launch = binding(&frozen, "4648aa76");
+
+        crate::services::tui_prompt_dedupe::record_claude_session_rotation(
+            crate::services::tui_prompt_dedupe::ClaudeSessionRotation {
+                tmux_session_name: "pane-5188".to_string(),
+                old_session_id: Some("4648aa76".to_string()),
+                old_output_path: frozen.display().to_string(),
+                old_last_offset: 0,
+                new_session_id: "67f48e65".to_string(),
+                new_output_path: rotated.display().to_string(),
+                observed_drain_frontier: 0,
+                polls_without_drain_progress: 0,
+            },
+        );
+
+        // Step 2: exactly what `RebindOnly` does on the first ~500ms tick.
+        assert!(
+            crate::services::tui_prompt_dedupe::clear_claude_session_rotation("pane-5188"),
+            "the settle pass retires the record it just finished with"
+        );
+
+        // Step 3, both gates, ~4.5s later.
+        assert!(
+            !launch_script_may_replace_binding("pane-5188", &adopted, &launch),
+            "the launch script must NOT overwrite a payload-adopted binding — \
+             surviving the settle pass is the entire point of keeping the \
+             adopted-session authority in its own store"
+        );
+        assert!(
+            existing_claude_binding_outranks_launch_script("pane-5188", &adopted, Some(&launch)),
+            "and the keep-as-is gate must agree, or the pane is reverted through \
+             the other branch instead"
+        );
+    }
+
+    /// The override is scoped to the pane that actually rotated. A different
+    /// pane's binding gets no free pass.
+    #[cfg(unix)]
+    #[test]
+    fn a_pane_with_no_adoption_on_record_still_yields_to_the_launch_script() {
+        let _serial = crate::services::tui_prompt_dedupe::lock_claude_session_rotations_for_tests();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let frozen = dir.path().join("4648aa76.jsonl");
+        let rotated = dir.path().join("67f48e65.jsonl");
+        std::fs::write(&frozen, b"{}\n").expect("write frozen transcript");
+        std::fs::write(&rotated, b"{}\n").expect("write rotated transcript");
+
+        crate::services::tui_prompt_dedupe::record_hook_adopted_claude_session_id(
+            "some-other-pane",
+            "67f48e65",
+        );
+
+        assert!(
+            launch_script_may_replace_binding(
+                "pane-with-no-adoption",
+                &binding(&rotated, "67f48e65"),
+                &binding(&frozen, "4648aa76"),
+            ),
+            "an adoption recorded for a DIFFERENT pane must not keep this pane's \
+             binding alive; the ledger lookup has to be keyed by tmux session"
+        );
+    }
+
+    /// Once `persist_claude_continuation_session` has rewritten the launch
+    /// script, the adopted id is no longer evidence of a conflict and the
+    /// ordinary match-launch path takes over. This is why the authority needs no
+    /// timed expiry: it stops applying by itself.
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_script_that_caught_up_takes_authority_back() {
+        let _serial = crate::services::tui_prompt_dedupe::lock_claude_session_rotations_for_tests();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rotated = dir.path().join("67f48e65.jsonl");
+        std::fs::write(&rotated, b"{}\n").expect("write rotated transcript");
+
+        crate::services::tui_prompt_dedupe::record_hook_adopted_claude_session_id(
+            "pane-5188",
+            "67f48e65",
+        );
+        let caught_up = binding(&rotated, "67f48e65");
+
+        assert!(
+            !hook_adopted_binding_supersedes_launch(&caught_up, &caught_up, Some("67f48e65")),
+            "a launch script naming the adopted id is not stale evidence"
+        );
+        assert!(
+            !launch_script_may_replace_binding("pane-5188", &caught_up, &caught_up),
+            "and an identical launch binding needs no overwrite anyway"
+        );
+    }
+
+    // The override must not resurrect a transcript that no longer exists: a
+    // vanished file has to fall through to ordinary re-derivation, otherwise a
+    // deleted transcript would pin delivery to nothing at all.
+    #[cfg(unix)]
+    #[test]
+    fn a_hook_adopted_binding_with_no_transcript_on_disk_does_not_win() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let frozen = dir.path().join("4648aa76.jsonl");
+        std::fs::write(&frozen, b"{}\n").expect("write frozen transcript");
+        let missing = dir.path().join("gone.jsonl");
+
+        assert!(
+            !hook_adopted_binding_supersedes_launch(
+                &binding(&missing, "67f48e65"),
+                &binding(&frozen, "4648aa76"),
+                Some("67f48e65"),
+            ),
+            "an adopted id cannot pin delivery to a transcript that is not on disk"
+        );
     }
 
     // The drain wait must be BOUNDED: a tail that died mid-drain must not hold the

@@ -565,6 +565,15 @@ pub(crate) fn adopt_claude_continuation_session(
     {
         // Subsequent hooks still carry the launch-time query UUID. Do not reset
         // the already-adopted continuation cursor to zero on every event.
+        //
+        // #5188 (P1-A): but DO refresh the adopted-session authority. This is
+        // the branch every hook after the first one takes, so leaving it out
+        // made the authority a write-once fact tied to a single instant instead
+        // of a standing statement about what this pane is running now.
+        super::session_rotation::record_hook_adopted_claude_session_id(
+            &tmux_session_name,
+            payload_session_id,
+        );
         state.tmux_by_provider_session.insert(
             PromptKey::new("claude", payload_session_id),
             TimedValue {

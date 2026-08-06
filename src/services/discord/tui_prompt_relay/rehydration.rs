@@ -113,6 +113,13 @@ pub(super) fn evict_dead_orphaned_claude_tui_mirrors(shared: &Arc<SharedData>) {
         shared
             .tmux_watchers
             .clear_restored_owner_for_tmux_session(&tmux_session_name);
+        // #5188 (P1-A): the adopted-session authority is scoped to the PANE, so
+        // confirmed pane death is the one event that retires it. This is the
+        // only caller — the settle pass must never reach it, or the authority
+        // goes back to expiring on a ~500ms timer.
+        crate::services::tui_prompt_dedupe::forget_hook_adopted_claude_session_id(
+            &tmux_session_name,
+        );
         let mirror_channel =
             crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(&tmux_session_name)
                 .unwrap_or(0);
@@ -274,25 +281,33 @@ pub(super) fn rehydrate_existing_claude_tui_bindings(shared: &Arc<SharedData>) {
                 );
             }
         }
-        if let (Some(existing), Some(_)) = (&existing_binding, existing_channel) {
-            if existing.runtime_kind == RuntimeHandoffKind::ClaudeTui
-                && Path::new(&existing.output_path).exists()
-                && match fresh_binding.as_ref() {
-                    Some(fresh) => {
-                        claude_tui_runtime_binding_matches_launch(existing, fresh)
-                            || claude_continuation_binding_supersedes_launch(existing, fresh)
-                    }
-                    None => true,
-                }
-            {
-                continue;
-            }
+        // #5188 (R1): both gates below consult the session id a live hook payload
+        // most recently reported for this pane. A `/clear` rotates Claude onto a
+        // new transcript while the launch script keeps naming the launch-time
+        // UUID forever, so that payload is the only evidence which outranks the
+        // stale artifact. Both decisions live in `session_rotation_settle` — they
+        // were unreachable from any test while inlined here, and production takes
+        // no other path to them.
+        if let (Some(existing), Some(_)) = (&existing_binding, existing_channel)
+            && super::session_rotation_settle::existing_claude_binding_outranks_launch_script(
+                &tmux_session_name,
+                existing,
+                fresh_binding.as_ref(),
+            )
+        {
+            continue;
         }
         if let Some(fresh) = fresh_binding {
             let should_refresh = match existing_binding.as_ref() {
+                // Second gate on purpose: the first one requires a resolved
+                // `existing_channel`, and a pane whose dedupe mirror has no
+                // channel yet would otherwise still be reverted here.
                 Some(existing) => {
-                    !claude_tui_runtime_binding_matches_launch(existing, &fresh)
-                        || !Path::new(&existing.output_path).exists()
+                    super::session_rotation_settle::launch_script_may_replace_binding(
+                        &tmux_session_name,
+                        existing,
+                        &fresh,
+                    )
                 }
                 None => true,
             };

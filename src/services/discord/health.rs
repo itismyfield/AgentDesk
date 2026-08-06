@@ -36,6 +36,8 @@ mod session_enrichment;
 mod snapshot;
 mod stall_liveness;
 mod stall_verdict;
+// #5188 (R5/R6): a delivery binding pointed at a transcript Claude abandoned.
+mod transcript_binding_stall;
 mod watcher_respawn;
 
 // `HeadlessAgentTurnReservation` has no external referent today (callers
