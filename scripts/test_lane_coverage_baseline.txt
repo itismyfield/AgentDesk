@@ -284,7 +284,6 @@ services::discord::prompt_builder::layer_rendering::workspace_aware_shared_rules
 services::discord::prompt_builder::memory_guidance::tests
 services::discord::prompt_builder::section_dedupe::tests
 services::discord::queue_exit_feedback_reconciler_tests
-services::discord::queue_io::presleep_tests
 services::discord::queue_overflow_dlq::tests
 services::discord::queue_reactions::tests
 services::discord::queued_dequeue_dispatch_guard_wiring_tests
