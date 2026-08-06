@@ -983,8 +983,13 @@ mod tests {
     /// three snapshots (bridge-owned `none`), this turn's own watcher advanced
     /// the durable `current_msg_id`, and the two bodies ARE prefix-compatible
     /// because both are parsed from the same stream. The fence must keep
-    /// lifecycle authority, keep the durable epoch, and merge rather than adopt
-    /// blindly.
+    /// lifecycle authority and keep the durable epoch.
+    ///
+    /// This fixture is oriented `durable ⊃ local`, which is the orientation
+    /// where merge and blind adopt AGREE on the body. It therefore pins the
+    /// outcome but cannot discriminate the two by itself;
+    /// `strict_visible_fence_keeps_the_local_tail_when_only_the_durable_epoch_moved`
+    /// carries the `local ⊃ durable` orientation that does.
     #[test]
     fn strict_visible_fence_merges_same_authority_current_message_epoch() {
         let root = tempfile::tempdir().expect("runtime root");
@@ -1033,6 +1038,101 @@ mod tests {
         assert_eq!(
             persisted.full_response, "base plus shared plus watcher tail",
             "the body must go through the forward merge, not a blind adopt",
+        );
+        assert!(
+            StreamRelayAuthority::from_state(&persisted).bridge_owns_relay(),
+            "relay authority is unchanged, so the bridge still owns the relay",
+        );
+        assert_eq!(
+            serde_json::to_value(&local).unwrap(),
+            serde_json::to_value(&persisted).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&baseline).unwrap(),
+            serde_json::to_value(&persisted).unwrap()
+        );
+    }
+
+    /// The `local ⊃ durable` orientation of the same wedge — the one where a
+    /// blind adopt of `on_disk` and the three-way merge produce DIFFERENT
+    /// bodies, so the "merge, not adopt" claim becomes load-bearing.
+    ///
+    /// Same-authority triple everywhere; the watcher advanced ONLY the durable
+    /// `current_msg_id` (its body stopped short of what the bridge already
+    /// parsed), while the bridge holds a longer unflushed tail on the same
+    /// prefix. A blind adopt would report `Saved` while silently dropping that
+    /// tail: the bridge would then keep streaming from a body the durable row
+    /// no longer contains. The merge must instead keep the DURABLE epoch and
+    /// the LOCAL (longer) body.
+    ///
+    /// It is not the ONLY test that discriminates. Measured by replacing the
+    /// fall-through with a blind adopt on any durable epoch change: this test
+    /// FAILS and so does the pre-existing
+    /// `strict_visible_fence_fails_closed_when_epoch_change_carries_divergent_body`
+    /// (its two bodies are prefix-incompatible, so a blind adopt turns its
+    /// expected `IdentityMismatch` into `Saved`). The test that stays green under
+    /// that mutant is `strict_visible_fence_merges_same_authority_current_message_
+    /// epoch` — the one #5150 named — because its `durable ⊃ local` orientation
+    /// makes adopt and merge agree.
+    #[test]
+    fn strict_visible_fence_keeps_the_local_tail_when_only_the_durable_epoch_moved() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let channel_id = 42_593_123;
+        let mut baseline = owner_state(channel_id, 77_010);
+        baseline.full_response = "base".to_string();
+        (baseline.current_msg_id, baseline.current_msg_len) = (941, 12);
+        save_inflight_state_in_root(root.path(), &baseline).expect("seed bridge row");
+        let expected = InflightTurnIdentity::from_state(&baseline);
+
+        // The watcher moved the epoch and a little body; it did NOT move the
+        // epoch the bridge holds, and it did not touch relay authority.
+        let mut watcher = baseline.clone();
+        watcher.full_response = "base plus shared".to_string();
+        watcher.response_sent_offset = watcher.full_response.len();
+        (watcher.current_msg_id, watcher.current_msg_len) = (942, 21);
+        save_inflight_state_in_root(root.path(), &watcher).expect("advance durable epoch");
+        assert_eq!(
+            StreamRelayAuthority::from_state(&watcher),
+            StreamRelayAuthority::from_state(&baseline),
+            "the watcher must not have touched relay authority",
+        );
+
+        // The bridge parsed further on the same stream and has not flushed it.
+        // Its own epoch never moved, so nothing here competes for the anchor.
+        let mut local = baseline.clone();
+        local.full_response = "base plus shared plus bridge tail".to_string();
+        assert!(
+            local.full_response.starts_with(&watcher.full_response),
+            "the fixture must be local ⊃ durable, or adopt and merge cannot diverge",
+        );
+
+        assert_eq!(
+            save_stream_tick_state_if_bridge_authority_in_root(
+                root.path(),
+                &mut baseline,
+                &mut local,
+                &expected,
+                941,
+                12,
+                "test::strict_current_message_epoch_local_superset",
+            ),
+            GuardedSaveOutcome::Saved,
+            "a same-authority epoch advance by our own watcher must not end the turn",
+        );
+        let persisted = load(root.path(), &ProviderKind::Codex, channel_id);
+        assert_eq!(
+            (persisted.current_msg_id, persisted.current_msg_len),
+            (942, 21),
+            "the durable epoch still wins; the bridge must not rewind it",
+        );
+        assert_eq!(
+            persisted.full_response, "base plus shared plus bridge tail",
+            "a blind adopt of the durable row would drop the bridge's unflushed tail",
+        );
+        assert_eq!(
+            persisted.response_sent_offset,
+            "base plus shared".len(),
+            "the delivery watermark must stay at the durable maximum, not jump to the merged tail",
         );
         assert!(
             StreamRelayAuthority::from_state(&persisted).bridge_owns_relay(),
