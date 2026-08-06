@@ -5513,6 +5513,11 @@ class TickChannelTests(unittest.TestCase):
         sibling. Only elapsed silence separates it from #5190's corpse, so the
         alert still fires; what changes is that it now says WHICH session it is
         talking about and stops claiming a live relay failure.
+
+        #5190 R5: r1's version of this test pinned the WRONG rendering — it
+        asserted that this very target was announced as a "고아 세션 / 과거
+        세션". Non-selection is not pastness; only the freeze floor this target
+        has not yet crossed could carry that claim.
         """
         rt, state, live, orphan = self._5190_live_channel()
         young_at = self.now + rt.cfg.orphan_abandon_secs - 600
@@ -5525,8 +5530,14 @@ class TickChannelTests(unittest.TestCase):
         body = gap_alerts[0]
         self.assertIn(orphan.name, body)
         self.assertIn(live.name, body)
-        self.assertIn("고아 세션(현재 활성 세션 아님)", body)
-        self.assertIn("과거 세션에 미도달 블록이", body)
+        # Not proved, therefore not claimed.
+        self.assertNotIn("고아 세션", body)
+        self.assertNotIn("과거 세션에 미도달 블록이", body)
+        self.assertIn("아직 과거 세션이라고 단정할 수 없습니다", body)
+        # Proved this tick, therefore stated: it is not the active session, and
+        # a sibling really did deliver.
+        self.assertIn("현재 활성 세션(`%s`)이 아닙니다" % live.name, body)
+        self.assertIn("실제로 배달이 확인됐습니다", body)
         # R2: an unknown elapsed time is stated as unknown, not as 999 minutes.
         self.assertIn("배달이 확인된 이력이 없습니다", body)
         self.assertNotIn("999분", body)
@@ -5534,6 +5545,89 @@ class TickChannelTests(unittest.TestCase):
         self.assertNotIn(
             str(orphan), state["999"].get(self.ORPHAN_STRANDED_KEY, {})
         )
+
+    def test_5190_r3_a_block_that_arrives_during_the_window_is_not_retired(self):
+        """Maturity is a timer, not a finding (#5190 R3).
+
+        The confirmation window exists so the finding can be falsified. If a
+        stranded block finally reaches Discord inside it, "회수 불가" becomes a
+        false statement about blocks that had already arrived — so the claim is
+        re-checked against the current verdict before it is made.
+        """
+        rt, state, live, orphan = self._5190_live_channel()
+        chs = state["999"]
+        discovered_at = self.now + rt.cfg.orphan_abandon_secs + 600
+        self._5190_strand_orphan(orphan, self.now)
+        self._5190_live_delivery(rt, live, discovered_at, "live block two")
+        tick_channel(rt, TICK_CHANNEL, state, discovered_at)
+        self.assertIn(str(orphan), chs[self.ORPHAN_STRANDED_KEY])
+
+        # The relay was slow, not dead: both stranded blocks land during the
+        # confirmation window.
+        recovered_at = (
+            discovered_at + relay_watchdog.ORPHAN_STRANDED_CONFIRM_SECS
+        )
+        rt.haystack = norm(
+            f"{rt.haystack} stranded orphan block one stranded orphan block two"
+        )
+        tick_channel(rt, TICK_CHANNEL, state, recovered_at)
+
+        self.assertEqual([b for b, _ in rt.alerts if "회수 불가" in b], [])
+        self.assertNotIn(
+            str(orphan), chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {})
+        )
+        self.assertNotIn(str(orphan), chs.get(self.ORPHAN_STRANDED_KEY, {}))
+        self.assertTrue(
+            any(
+                "orphan-stranded-maturity-voided" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+
+    def test_5190_r4_a_stale_watermark_is_not_proof_of_live_delivery(self):
+        """R4: the safety hinge must prove a match NOW, not a match once.
+
+        `Verdict.delivered_ts` is `max(persisted watermark, current match)`, so
+        an idle sibling that delivered minutes ago voted "the channel is fine"
+        for a full `gap_alert_secs` on an empty haystack — and that vote is the
+        only thing standing between a real gap and being marked stranded.
+
+        R5 rides along: this orphan HAS crossed the freeze floor, so the "고아
+        세션" wording is earned here, while the relay-health clause must stay
+        honest because nothing was seen delivering.
+        """
+        rt, state, live, orphan = self._5190_live_channel()
+        chs = state["999"]
+        # A delivery recent enough that its watermark is younger than
+        # `gap_alert_secs` at probe time.
+        mid_at = self.now + rt.cfg.orphan_abandon_secs + 50
+        self._5190_live_delivery(rt, live, mid_at, "live block two")
+        tick_channel(rt, TICK_CHANNEL, state, mid_at)
+
+        probe_at = mid_at + 100
+        self._5190_strand_orphan(orphan, self.now)
+        # The bounded Discord read window rolled over: nothing matches now.
+        rt.haystack = ""
+        tick_channel(rt, TICK_CHANNEL, state, probe_at)
+
+        self.assertLessEqual(
+            probe_at - relay_watchdog.delivered_watermark_for_path(chs, live),
+            rt.cfg.gap_alert_secs,
+            "watermark must still be fresh, or the test proves nothing",
+        )
+        self.assertNotIn(str(orphan), chs.get(self.ORPHAN_STRANDED_KEY, {}))
+        self.assertNotIn(
+            str(orphan), chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {})
+        )
+        gap_alerts = [body for body, _ in rt.alerts if "릴레이 갭 감지" in body]
+        self.assertEqual(len(gap_alerts), 1, (rt.alerts, rt.log_lines))
+        body = gap_alerts[0]
+        self.assertIn(orphan.name, body)
+        self.assertIn("고아 세션", body)
+        self.assertIn("분째 새 기록이 없습니다", body)
+        self.assertIn("릴레이 장애 가능성이 남아 있습니다", body)
+        self.assertNotIn("실제로 배달이 확인됐습니다", body)
 
     def test_5190_unobserved_elapsed_time_never_renders_as_a_measurement(self):
         rt = self.gap_rt(github_repo="owner/repo")

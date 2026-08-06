@@ -978,6 +978,7 @@ def _orphan_authority_matured(
 def _channel_has_live_delivery(
     evaluated: list[tuple[TranscriptCandidate, Verdict]],
     fresh_undelivered_by_path: Mapping[str, int],
+    current_delivered_by_path: Mapping[str, float],
     exclude_path: str,
     now: float,
     gap_alert_secs: int,
@@ -986,10 +987,17 @@ def _channel_has_live_delivery(
 
     This is the whole safety hinge of the #5190 orphan handling, so it demands
     positive proof rather than the absence of a complaint: a sibling path with a
-    clean verdict, nothing fresh outstanding, and a delivery actually matched
-    inside the same window that would have declared a gap. When the relay is
-    genuinely down every transcript fails at least one of those, this returns
-    False, and the gap alert proceeds untouched.
+    clean verdict, nothing fresh outstanding, and a recent block of its own
+    matched in THIS tick's haystack.
+
+    That last clause is why `Verdict.delivered_ts` cannot be the evidence
+    (#5190 R4): it is `max(persisted watermark, current match)`, so an idle
+    transcript that delivered ten minutes ago and matches nothing now still
+    carried a fresh-looking timestamp — a stale watermark voting as if it were a
+    live delivery, for up to `gap_alert_secs`. `current_delivered_by_path`
+    carries only what this tick actually matched. When the relay is genuinely
+    down nothing matches, this returns False, and the gap alert proceeds
+    untouched.
     """
     for candidate, verdict in evaluated:
         path = str(candidate.path)
@@ -999,9 +1007,10 @@ def _channel_has_live_delivery(
             continue
         if fresh_undelivered_by_path.get(path, 0) > 0:
             continue
-        if gap_is_unobserved(verdict) or not verdict.delivered_ts:
+        matched_ts = current_delivered_by_path.get(path, 0.0)
+        if matched_ts <= 0.0:
             continue
-        if now - verdict.delivered_ts > gap_alert_secs:
+        if now - matched_ts > gap_alert_secs:
             continue
         return True
     return False
@@ -4587,6 +4596,10 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
 
     evaluated: list[tuple[TranscriptCandidate, Verdict]] = []
     fresh_undelivered_by_path: dict[str, int] = {}
+    # #5190 R4: the newest block epoch this tick actually matched in the
+    # haystack, per path. Distinct from `Verdict.delivered_ts`, which folds in
+    # the persisted watermark and so cannot answer "is it delivering NOW?".
+    current_delivered_by_path: dict[str, float] = {}
     suspected_permanent_losses = 0
     new_permanent_losses = 0
     raw_delivery_by_path = chs.get(LAST_ACTUAL_DELIVERY_BY_PATH_KEY, {})
@@ -4784,14 +4797,37 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             and not matched
         )
         fresh_undelivered_by_path[path] = fresh_undelivered
+        current_delivered_by_path[path] = max(
+            (
+                epoch
+                for (epoch, _), matched in zip(
+                    tombstone_update.active_blocks, active_matches
+                )
+                if matched
+            ),
+            default=0.0,
+        )
         # #5190: a stranded-orphan marker written on an earlier tick matures
         # into an abandonment once the window has elapsed and the file is still
         # frozen. Resurrection (semantic growth) voids it below, so a session
         # that starts writing again is never closed out behind its own back.
+        marker_matured = _orphan_authority_matured(chs, path, now)
+        # #5190 R3: elapsed time is not the finding — the finding is "these
+        # blocks cannot be recovered", and the confirmation window exists to let
+        # that be falsified. A stranded block that finally reached Discord
+        # during the window recovers the verdict, so retiring on the timer alone
+        # would announce "회수 불가" about blocks that had already arrived. The
+        # claim is re-checked against THIS tick's verdict before it is made.
         orphan_matured = (
-            path not in semantic_growth_paths
-            and _orphan_authority_matured(chs, path, now)
+            marker_matured
+            and path not in semantic_growth_paths
+            and verdict.state == STATE_GAP
         )
+        if marker_matured and not orphan_matured:
+            rt.log(
+                f"[{cid}] orphan-stranded-maturity-voided path={path} "
+                f"state={verdict.state} lost={verdict.lost}"
+            )
         if orphan_matured:
             orphan_retired_paths.append(path)
         if tombstone_update.newly_tombstoned:
@@ -5014,6 +5050,7 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         if path not in stranded_since and not _channel_has_live_delivery(
             evaluated,
             fresh_undelivered_by_path,
+            current_delivered_by_path,
             path,
             now,
             cfg.gap_alert_secs,
@@ -5306,26 +5343,60 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
                 else "이 세션에서 배달이 확인된 이력이 없습니다 "
                 "(경과 시간을 측정할 기준점 없음).\n"
             )
-            # #5190 R4/R5: the alerting transcript is not always the channel's
-            # active session, and the two cases call for different responses.
-            # Naming the file and narrowing the claim is the difference between
-            # "the relay is down right now" and "a past session left blocks
-            # behind".
-            orphan_gap = bool(selected_path) and verdict_path != selected_path
+            # #5190 R5: say only what this tick proved, one clause per piece of
+            # evidence. Non-selection alone does NOT make a transcript a past
+            # session — a concurrent one swapped in moments ago is also
+            # non-selected, and calling it "과거 세션" while its blocks are being
+            # lost right now is exactly backwards. It also proves nothing about
+            # the relay's health; that claim belongs to the delivering sibling,
+            # which is a separate check. A true enumeration beats a false
+            # universal.
+            not_selected = bool(selected_path) and verdict_path != selected_path
+            frozen_secs = max(0.0, now - verdict_candidate.mtime)
+            frozen_min = int(frozen_secs) // 60
+            orphan_gap = (
+                not_selected
+                and verdict_path not in semantic_growth_paths
+                and frozen_secs >= cfg.orphan_abandon_secs
+            )
+            delivering_elsewhere = _channel_has_live_delivery(
+                evaluated,
+                fresh_undelivered_by_path,
+                current_delivered_by_path,
+                verdict_path,
+                now,
+                cfg.gap_alert_secs,
+            )
             headline = (
                 "🚨 **릴레이 갭 감지 (out-of-band 워치독) — 고아 세션**"
                 if orphan_gap
                 else "🚨 **릴레이 갭 감지 (out-of-band 워치독)**"
             )
-            scope_line = (
-                f"대상 세션: `{Path(verdict_path).name}` — "
-                "**고아 세션(현재 활성 세션 아님)**. 현재 활성 세션은 "
-                f"`{Path(str(selected_path)).name}` 입니다. 즉 이 경보는 "
-                "\"지금 릴레이가 죽었다\"가 아니라 \"과거 세션에 미도달 블록이 "
-                "남아 있다\"는 뜻입니다.\n"
-                if orphan_gap
-                else f"대상 세션: `{Path(verdict_path).name}` (현재 활성 세션).\n"
-            )
+            if not not_selected:
+                scope_line = (
+                    f"대상 세션: `{Path(verdict_path).name}` (현재 활성 세션).\n"
+                )
+            else:
+                scope_line = (
+                    f"대상 세션: `{Path(verdict_path).name}` — 이 채널의 현재 "
+                    f"활성 세션(`{Path(str(selected_path)).name}`)이 아닙니다. "
+                    + (
+                        f"이 트랜스크립트는 **{frozen_min}분째 새 기록이 "
+                        "없습니다** (고아 세션으로 판정).\n"
+                        if orphan_gap
+                        else f"마지막 기록으로부터 {frozen_min}분 경과 — 아직 "
+                        "과거 세션이라고 단정할 수 없습니다 (판정 기준 "
+                        f"{cfg.orphan_abandon_secs // 60}분).\n"
+                    )
+                    + (
+                        "이 채널의 다른 세션은 이번 점검에서 실제로 배달이 "
+                        "확인됐습니다 — 릴레이 전체 장애가 아니라 이 "
+                        "트랜스크립트의 미도달 블록 문제입니다.\n"
+                        if delivering_elsewhere
+                        else "이 채널에서 지금 배달 중인 다른 세션은 확인되지 "
+                        "않았습니다 — 릴레이 장애 가능성이 남아 있습니다.\n"
+                    )
+                )
             rt.alert(
                 ch,
                 f"{headline}\n\n"
