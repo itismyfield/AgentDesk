@@ -3,15 +3,18 @@ use super::*;
 #[test]
 fn legacy_edit_failure_revalidation_precedes_fallback_post_4508() {
     let source = include_str!("terminal_direct_fallback.rs");
+    // #5071 T1 S3a: both transports moved to their receipt-returning parallel
+    // entry points so the delivery journal can name the channel Discord answered
+    // with. Same deferred-edit/fallback authority, so only the names change here.
     let deferred = source
-        .find("replace_long_message_raw_deferred(")
+        .find("replace_long_message_raw_deferred_returning_receipt(")
         .expect("legacy short replace must defer fallback authority");
     let recheck = source[deferred..]
         .find("range_committed_after_edit_failure(")
         .map(|offset| deferred + offset)
         .expect("legacy edit failure must re-read the durable frontier");
     let fallback = source[recheck..]
-        .find("send_long_message_raw_with_rollback(")
+        .find("send_long_message_raw_with_rollback_returning_receipts(")
         .map(|offset| recheck + offset)
         .expect("uncommitted legacy range must retain fallback delivery");
     assert!(deferred < recheck && recheck < fallback);
@@ -21,7 +24,8 @@ fn legacy_edit_failure_revalidation_precedes_fallback_post_4508() {
         "committed proof must branch away before the fallback POST"
     );
     assert!(
-        !source.contains("replace_long_message_raw_with_outcome("),
+        !source.contains("replace_long_message_raw_with_outcome(")
+            && !source.contains("replace_long_message_raw_with_outcome_returning_receipt("),
         "legacy owner must not call the generic auto-fallback replace API"
     );
     let capture = source
