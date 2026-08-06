@@ -9,7 +9,7 @@ pub(in crate::services::discord) async fn send_long_message_ctx(
     ctx: Context<'_>,
     text: &str,
 ) -> Result<(), Error> {
-    if char_count(text) <= DISCORD_MSG_LIMIT {
+    if !needs_multiple_messages(text) {
         tracing::debug!(
             target: "discord::chunker",
             path = "send_long_message_ctx",
@@ -47,7 +47,7 @@ pub(in crate::services::discord) async fn send_long_message_ctx(
 pub(in crate::services::discord) fn long_message_reply_builders(
     text: &str,
 ) -> Vec<poise::CreateReply> {
-    if char_count(text) <= DISCORD_MSG_LIMIT {
+    if !needs_multiple_messages(text) {
         return vec![poise::CreateReply::default().content(text.to_string())];
     }
 
@@ -123,7 +123,7 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
     reference: Option<(ChannelId, MessageId)>,
 ) -> Result<Vec<MessageId>, Error> {
     let payload_byte_len = text.len();
-    if char_count(text) <= DISCORD_MSG_LIMIT {
+    if !needs_multiple_messages(text) {
         tracing::debug!(
             target: "discord::chunker",
             path = "send_long_message_raw",
@@ -460,6 +460,24 @@ pub(in crate::services::discord) fn split_message(text: &str) -> Vec<String> {
     );
 
     chunks
+}
+
+/// Whether `text` exceeds what one Discord message can carry.
+///
+/// Discord's 2000 limit counts **characters**, so this must too. Callers used
+/// to compare `text.len()` — a **byte** count — against `DISCORD_MSG_LIMIT`.
+/// For ASCII the two agree, which is why the ASCII-only tests passed; for
+/// Korean (3 bytes per character in UTF-8) the byte comparison trips at roughly
+/// 667 characters, so a comfortably single-message answer was routed down the
+/// multi-chunk path and reached the channel split in two.
+///
+/// Deliberately not `split_message(text).len() > 1`: that chunker reserves a
+/// ~10-character margin for code-fence repair, so texts in the 1991..=2000
+/// range would be declared multi-message even though they fit one send. This
+/// predicate answers "does it fit at all"; [`split_message`] owns "how do I cut
+/// it once it doesn't".
+pub(in crate::services::discord) fn needs_multiple_messages(text: &str) -> bool {
+    char_count(text) > DISCORD_MSG_LIMIT
 }
 
 /// Build an `(inline_message, attachment)` pair for content that exceeds
