@@ -819,11 +819,10 @@ async fn build_health_snapshot_with_options(
                     recovery_started: snapshot.recovery_started_at.is_some(),
                     active_request_owner: snapshot.active_request_owner.map(|id| id.get()),
                     active_user_message_id: mailbox_active_user_msg_id,
-                    agent_turn_status: if mailbox_has_cancel_token {
-                        "active"
-                    } else {
-                        "idle"
-                    },
+                    agent_turn_status: super::mailbox::mailbox_agent_turn_status(
+                        mailbox_has_cancel_token,
+                        super::mailbox::residual_occupancy(&entry.shared, channel, &snapshot),
+                    ),
                     watcher_attached: session.watcher_attached,
                     inflight_state_present: session.inflight_state_present,
                     tmux_present,
@@ -1275,5 +1274,63 @@ mod tests {
             crate::services::discord::ChannelMailboxRegistry::global_handle(channel).is_none(),
             "health snapshot construction must remain peek-only for absent channels"
         );
+    }
+
+    #[test]
+    fn health_detail_marks_same_episode_guarded_finish_occupancy_residual() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("health detail test runtime")
+            .block_on(async {
+                let registry = HealthRegistry::new();
+                let shared = crate::services::discord::make_shared_data_for_tests();
+                registry
+                    .register(ProviderKind::Claude.as_str().to_string(), shared.clone())
+                    .await;
+                let channel =
+                    ChannelId::new(NEXT_ABSENT_MAILBOX_CHANNEL.fetch_add(1, Ordering::Relaxed));
+                let active_user_msg_id = 5_068_301;
+                let token = Arc::new(CancelToken::new());
+                let nonce = token.turn_nonce().expect("fresh token nonce").to_string();
+                assert!(
+                    crate::services::discord::mailbox_try_start_turn(
+                        &shared,
+                        channel,
+                        token,
+                        UserId::new(7),
+                        MessageId::new(active_user_msg_id),
+                    )
+                    .await
+                );
+                shared.turn_finalizer.guarded_finish_residues().insert(
+                    channel,
+                    crate::services::discord::turn_finalizer::GuardedFinishResidue {
+                        expected_user_msg_id: 5_068_300,
+                        active_user_msg_id,
+                        generation: 0,
+                        provider: ProviderKind::Claude,
+                        terminal_turn_nonce: Some(nonce.clone()),
+                        active_turn_nonce: Some(nonce),
+                        observed_before: std::time::Instant::now(),
+                        allow_completion_cleanup: true,
+                        drain_voice: true,
+                        terminal_was_cancel: false,
+                    },
+                );
+
+                let json = serde_json::to_value(build_health_snapshot(&registry).await)
+                    .expect("serialize residual mailbox health");
+                assert_eq!(json["mailboxes"][0]["agent_turn_status"], "residual");
+                assert_eq!(
+                    json["mailboxes"][0]["active_user_message_id"],
+                    active_user_msg_id
+                );
+            });
     }
 }

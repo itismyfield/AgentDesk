@@ -22,7 +22,7 @@ use crate::services::provider::ProviderKind;
 //     send-to-agent/outbound dispatch, re-exported here for compatibility
 mod headless_turn;
 pub(in crate::services::discord) mod liveness_authority;
-mod mailbox;
+pub(in crate::services::discord) mod mailbox;
 mod provider_probe;
 #[path = "health/rebind_request.rs"]
 mod rebind_request;

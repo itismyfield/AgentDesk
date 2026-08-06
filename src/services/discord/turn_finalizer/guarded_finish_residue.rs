@@ -16,6 +16,61 @@ impl super::TurnFinalizer {
     }
 }
 
+/// #5068 §2: the kickoff guard that parks a queued turn. The issue's retracted
+/// proposal 2 wanted this path to requeue; it must NOT — the item is preserved
+/// right where it is, and requeuing preserved work is the #5191 double-execution
+/// hazard. What is true is that every caller of this path is a race or a
+/// deferred kick, so `INFO: skipped` understated a park that only a residue
+/// owner or an active-turn completion will ever undo. Say so, name the owner,
+/// and make sure a retry is actually armed.
+pub(in crate::services::discord) async fn handle_idle_queue_guard_skip(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    snapshot: &ChannelMailboxSnapshot,
+) {
+    if !super::super::idle_queue_snapshot_has_pending_or_marker_backlog(
+        shared, provider, channel_id, snapshot,
+    ) {
+        tracing::debug!(
+            channel_id = channel_id.get(),
+            provider = provider.as_str(),
+            "KICKOFF: stale channel selection had no queued backlog after fresh mailbox/TUI guard"
+        );
+        return;
+    }
+
+    let slow_backstop_armed =
+        super::super::queue_io::arm_slow_idle_queue_backstop_if_queue_nonempty(
+            shared,
+            provider,
+            channel_id,
+            "fresh_mailbox_tui_guard_skip",
+        )
+        .await;
+    let residue_recorded = shared
+        .turn_finalizer
+        .guarded_finish_residues()
+        .contains_key(&channel_id);
+    tracing::warn!(
+        channel_id = channel_id.get(),
+        provider = provider.as_str(),
+        active_user_message_id = snapshot
+            .active_user_message_id
+            .map(|id| id.get())
+            .unwrap_or(0),
+        queue_depth = snapshot.intervention_queue.len(),
+        residue_recorded,
+        slow_backstop_armed,
+        recovery_owner = if residue_recorded {
+            "turn_finalizer_reconcile"
+        } else {
+            "active_turn_completion"
+        },
+        "KICKOFF: queued turn preserved after fresh mailbox/TUI guard; recovery remains armed"
+    );
+}
+
 /// A guarded finalize that could not release the mailbox owner it observed.
 ///
 /// This is deliberately richer than a log line: the actor reconciler keeps

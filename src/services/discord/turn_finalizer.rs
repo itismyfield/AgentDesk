@@ -61,6 +61,7 @@ pub(in crate::services::discord) use self::completion_signal::{
     CompletionSignal, completion_signal_from_transcript,
 };
 pub(in crate::services::discord) use self::guarded_finish_residue::GuardedFinishResidue;
+pub(in crate::services::discord) use self::guarded_finish_residue::handle_idle_queue_guard_skip;
 // #3479 r9: dormant delivery-lease handlers extracted to the child module; the
 // actor-loop call sites below reference them unqualified, byte-identical.
 #[allow(unused_imports)] // handlers are `#[cfg(unix)]`-conditional + dormant.

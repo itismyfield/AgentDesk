@@ -2324,6 +2324,7 @@ services::discord::health::liveness_authority::tests::single_observe_per_tick
 services::discord::health::liveness_authority::tests::transient_unknown_expires_after_monotonic_budget
 services::discord::health::liveness_authority::tests::verdict_overwrite_child
 services::discord::health::liveness_authority::tests::vouch_enforces_ttl_identity_and_absolute_ceiling
+services::discord::health::mailbox::tests::agent_turn_status_separates_releasable_and_permanently_held_residue
 services::discord::health::provider_probe::tests::classifier_preserves_healthy_provider
 services::discord::health::provider_probe::tests::classifier_reports_probe_degradation_reasons
 services::discord::health::provider_probe::tests::mixed_gateway_and_standby_is_not_classified_as_cluster_standby
@@ -2419,6 +2420,7 @@ services::discord::health::snapshot::tests::bound_selector_absent_when_no_source
 services::discord::health::snapshot::tests::bound_selector_falls_back_to_runtime_binding
 services::discord::health::snapshot::tests::bound_selector_prefers_inflight_over_binding
 services::discord::health::snapshot::tests::enriched_tmux_identity_precedes_mailbox_fallback
+services::discord::health::snapshot::tests::health_detail_marks_same_episode_guarded_finish_occupancy_residual
 services::discord::health::snapshot::tests::mailbox_snapshot_absent_channel_is_peek_only_for_health
 services::discord::health::snapshot::tests::provider_scoped_snapshot_timeout_does_not_fallback_to_provider_scan
 services::discord::health::snapshot::tests::rebind_origin_idle_only_without_cancel_token
@@ -5818,7 +5820,10 @@ services::discord::turn_finalizer::finalize::tests::non_thread_finalize_schedule
 services::discord::turn_finalizer::finalize::tests::residue_tests::guarded_miss_residue_reconcile_preserves_live_newer_episode
 services::discord::turn_finalizer::finalize::tests::residue_tests::guarded_miss_residue_reconcile_releases_same_terminal_episode_and_rearms_queue
 services::discord::turn_finalizer::finalize::tests::residue_tests::guarded_miss_residue_without_terminal_nonce_is_held
+services::discord::turn_finalizer::finalize::tests::residue_tests::health_names_the_permanently_held_residue_instead_of_calling_it_active
+services::discord::turn_finalizer::finalize::tests::residue_tests::health_still_shows_residual_while_an_inflight_owner_holds_the_release
 services::discord::turn_finalizer::finalize::tests::residue_tests::issue_shape_surviving_inflight_row_holds_recovery_on_every_tick
+services::discord::turn_finalizer::finalize::tests::residue_tests::kickoff_guard_skip_preserves_queue_and_arms_recovery
 services::discord::turn_finalizer::finalize::tests::thread_finalize_removes_parent_mapping_and_schedules_parent_kickoff
 services::discord::turn_finalizer::finalize_context::tests::watcher_after_pre_panel_release_only_flips_expected_guard_miss
 services::discord::turn_finalizer::tests::already_finalized_loser_cleans_same_turn_mailbox_and_inflight
