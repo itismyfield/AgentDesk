@@ -26,6 +26,17 @@ pub(super) async fn do_finalize(
     shared: &Arc<SharedData>,
 ) -> FinalizeOutcome {
     let channel_id = key.channel_id;
+    // Capture the terminal episode before any caller-owned/in-function inflight
+    // clear can erase it. Watcher submitters provide the pre-clear snapshot;
+    // other paths may still have the matching row on disk here.
+    let terminal_turn_nonce = submit_snapshot
+        .filter(|snapshot| snapshot.user_msg_id == key.user_msg_id)
+        .and_then(|snapshot| snapshot.turn_nonce.clone())
+        .or_else(|| {
+            crate::services::discord::inflight::load_inflight_state(&provider, channel_id.get())
+                .filter(|state| state.effective_finalizer_turn_id() == key.user_msg_id)
+                .and_then(|state| state.turn_nonce)
+        });
 
     // #3866: test-only injection point — fire a panic INSIDE the finalize
     // side-effect surface, AFTER the caller (`handle_terminal` /
@@ -155,10 +166,30 @@ pub(super) async fn do_finalize(
     // release and counter decrement. (An id-0 orphan keeps today's behaviour.)
     let guarded_finish_missed = key.user_msg_id != 0 && finish.removed_token.is_none();
     if guarded_finish_missed {
-        let active_user_message_id = crate::services::discord::mailbox_snapshot(shared, channel_id)
-            .await
-            .active_user_message_id
-            .map(|id| id.get());
+        let active_snapshot = crate::services::discord::mailbox_snapshot(shared, channel_id).await;
+        let active_user_message_id = active_snapshot.active_user_message_id.map(|id| id.get());
+        let residue_recorded = if let Some(active_user_msg_id) = active_user_message_id
+            && active_snapshot.cancel_token.is_some()
+        {
+            shared.turn_finalizer.guarded_finish_residues().insert(
+                channel_id,
+                GuardedFinishResidue {
+                    expected_user_msg_id: key.user_msg_id,
+                    active_user_msg_id,
+                    generation: key.generation,
+                    provider: provider.clone(),
+                    terminal_turn_nonce: terminal_turn_nonce.clone(),
+                    active_turn_nonce: active_snapshot.active_turn_nonce.clone(),
+                    observed_before: std::time::Instant::now(),
+                    allow_completion_cleanup: ctx.allow_completion_cleanup,
+                    drain_voice: ctx.drain_voice,
+                    terminal_was_cancel: matches!(event, TerminalEvent::Cancel),
+                },
+            );
+            true
+        } else {
+            false
+        };
         if ctx.is_backstop_reconcile_path() {
             tracing::debug!(
                 provider = %provider.as_str(),
@@ -166,6 +197,7 @@ pub(super) async fn do_finalize(
                 expected_user_msg_id = key.user_msg_id,
                 active_user_message_id = active_user_message_id.unwrap_or(0),
                 generation = key.generation,
+                residue_recorded,
                 expected_idempotent = true,
                 "TurnFinalizer identity-guarded mailbox release skipped; active mailbox owner did not match finalizer turn identity"
             );
@@ -176,6 +208,7 @@ pub(super) async fn do_finalize(
                 expected_user_msg_id = key.user_msg_id,
                 active_user_message_id = active_user_message_id.unwrap_or(0),
                 generation = key.generation,
+                residue_recorded,
                 expected_idempotent = false,
                 "TurnFinalizer identity-guarded mailbox release skipped; active mailbox owner did not match finalizer turn identity"
             );
@@ -591,4 +624,6 @@ mod tests {
             "no removed thread-parent mapping means no parent kick"
         );
     }
+
+    mod residue_tests;
 }
