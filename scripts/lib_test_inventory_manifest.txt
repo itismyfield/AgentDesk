@@ -1319,8 +1319,6 @@ services::claude_tui::hook_relay::tests::scan_search_event_id_handles_escaped_an
 services::claude_tui::hook_relay::tests::scan_search_event_id_rejects_false_positives
 services::claude_tui::hook_server::relay_receipts::tests::ledger_retention_covers_every_deliverable_request
 services::claude_tui::hook_server::relay_receipts::tests::request_id_pin_mismatch_is_conflict_and_accepted_body_is_fixed
-services::claude_tui::hook_server::tests::classify_memento_ignores_unrelated_tools
-services::claude_tui::hook_server::tests::classify_memento_recognizes_claude_and_codex_prefixes
 services::claude_tui::hook_server::tests::codex_stop_event_wakes_prompt_ready_waiter
 services::claude_tui::hook_server::tests::empty_body_stop_is_still_buffered
 services::claude_tui::hook_server::tests::empty_payload_filter_drops_identifier_echo_only_objects
@@ -6266,12 +6264,7 @@ services::memory::memento::static_slice_cache_tests::static_slice_split_separate
 services::memory::memento::tool_feedback_trigger_type_tests::normalizes_automatic_tool_feedback_trigger_to_sampled
 services::memory::memento::workspace_scope_tests::memento_workspace_from_channel_workspace_uses_path_basename
 services::memory::memento::workspace_scope_tests::unbound_memento_workspace_falls_back_to_channel_scope
-services::memory::memento_throttle::forget_ratio_tests::alarm_fires_once_then_cools_down
-services::memory::memento_throttle::forget_ratio_tests::empty_scope_falls_back_to_default_bucket
 services::memory::memento_throttle::forget_ratio_tests::identity_only_empty_recall_is_exposed_in_stats
-services::memory::memento_throttle::forget_ratio_tests::no_alarm_below_min_evidence
-services::memory::memento_throttle::forget_ratio_tests::recalls_reduce_ratio_below_threshold
-services::memory::memento_throttle::forget_ratio_tests::scope_isolation_does_not_silence_other_agents
 services::memory::memento_throttle::forget_ratio_tests::unsubmitted_stop_flush_is_exposed_in_the_seven_day_process_snapshot
 services::message_outbox::dedupe_key_tests::actionable_ops_alert_registry_is_exact_and_excludes_recovery_noise
 services::message_outbox::dedupe_key_tests::content_dedupe_key_keeps_content_identity_without_reason_code

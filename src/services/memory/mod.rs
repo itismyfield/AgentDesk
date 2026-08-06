@@ -20,13 +20,9 @@ pub(crate) use memento::{
     resolve_memento_workspace, sanitize_memento_workspace_segment,
 };
 pub(crate) use memento_throttle::{
-    ForgetRatioAlarmDecision, RecallSizeBucket, memento_call_metrics_snapshot,
-    note_memento_forget_call, note_memento_recall_call, note_memento_tool_feedback_trigger,
+    RecallSizeBucket, memento_call_metrics_snapshot, note_memento_tool_feedback_trigger,
     note_recall_context_size,
 };
-#[cfg(test)]
-#[allow(unused_imports)]
-pub(crate) use memento_throttle::{ForgetRatioSnapshot, observe_memento_forget_recall};
 pub(crate) use runtime_state::{backend_is_active, backend_state, refresh_backend_health};
 
 pub(crate) const UNBOUND_MEMORY_ROLE_ID: &str = "__unbound_role__";
