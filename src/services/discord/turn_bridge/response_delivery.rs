@@ -85,7 +85,7 @@ pub(super) fn done_result_requires_full_terminal_replay(
 ) -> bool {
     response_sent_offset > 0
         && streamed_assistant_text_this_turn
-        && result.len() > super::super::DISCORD_MSG_LIMIT
+        && super::super::formatting::needs_multiple_messages(result)
         && !result.trim().is_empty()
         && full_response.trim() == result.trim()
 }
@@ -155,15 +155,47 @@ mod tests {
 
     #[test]
     fn long_authoritative_done_after_rollover_replays_full_body() {
-        let frozen_prefix = "probe 품질 ".repeat(220);
+        // The fixture is Korean, so it must clear the limit in CHARACTERS, not
+        // only in UTF-8 bytes: the old `repeat(220)` body was 2891 bytes but
+        // only 1991 characters — it fit one Discord message and passed this
+        // test purely on the byte comparison the predicate no longer makes.
+        let frozen_prefix = "probe 품질 ".repeat(240);
         let terminal_tail = "기준으로는 실패입니다";
         let terminal_body = format!("{frozen_prefix}{terminal_tail}");
         assert!(terminal_body.len() > DISCORD_MSG_LIMIT);
+        assert!(terminal_body.chars().count() > DISCORD_MSG_LIMIT);
 
         assert!(done_result_requires_full_terminal_replay(
             &terminal_body,
             &terminal_body,
             frozen_prefix.len(),
+            true,
+        ));
+    }
+
+    /// A Korean answer is ~3 UTF-8 bytes per character, so the old
+    /// `result.len() > DISCORD_MSG_LIMIT` byte check declared a comfortably
+    /// single-message body "long" at ~667 characters and reset the delivery
+    /// offset to replay the whole answer down the terminal-chunk path. (It did
+    /// not split the body: `split_message` already counts characters and
+    /// returns one chunk here.) The gate must count characters, like
+    /// `split_message` does.
+    #[test]
+    fn korean_answer_under_the_character_limit_stays_one_message() {
+        let body = "한".repeat(900);
+        assert!(
+            body.len() > DISCORD_MSG_LIMIT,
+            "2700 bytes, over the byte limit"
+        );
+        assert!(!done_result_requires_full_terminal_replay(
+            &body, &body, 900, true
+        ));
+
+        let overflowing = "한".repeat(2100);
+        assert!(done_result_requires_full_terminal_replay(
+            &overflowing,
+            &overflowing,
+            900,
             true,
         ));
     }

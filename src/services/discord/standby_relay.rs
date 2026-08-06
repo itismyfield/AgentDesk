@@ -1392,9 +1392,11 @@ mod tests {
     }
 
     /// Korean answers are ~3 bytes per character, so the old `text.len() >
-    /// DISCORD_MSG_LIMIT` byte check fired at ~667 characters and split a
-    /// single-message answer in two. The predicate must track `split_message`,
-    /// which counts characters.
+    /// DISCORD_MSG_LIMIT` byte check fired at ~667 characters and routed a
+    /// single-message answer down the delete-placeholder-and-POST-new-messages
+    /// path instead of the in-place edit. (It did not split the body:
+    /// `split_message` already counts characters and returns one chunk here.)
+    /// The predicate must track `split_message`, which counts characters.
     #[test]
     fn korean_answer_under_the_character_limit_stays_one_message() {
         let body = "한".repeat(900);
