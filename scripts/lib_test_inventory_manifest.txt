@@ -3444,9 +3444,6 @@ services::discord::prompt_builder::dispatch_contract_tests::full_prompt_manifest
 services::discord::prompt_builder::dispatch_contract_tests::issue_4310_role_and_sak_layers_survive_memento_health_changes
 services::discord::prompt_builder::dispatch_contract_tests::issue_4313_agentdesk_prompt_has_single_policy_owner
 services::discord::prompt_builder::dispatch_contract_tests::issue_4313_prompt_policy_contract
-services::discord::prompt_builder::dispatch_contract_tests::memory_recall_layer_disabled_when_memento_backend_disabled
-services::discord::prompt_builder::dispatch_contract_tests::memory_recall_layer_disabled_when_recall_skipped
-services::discord::prompt_builder::dispatch_contract_tests::memory_recall_layer_records_memento_preview_only
 services::discord::prompt_builder::dispatch_contract_tests::parent_plan_context_is_rendered_into_the_current_task_section
 services::discord::prompt_builder::dispatch_contract_tests::parent_plan_is_truncated_when_oversized
 services::discord::prompt_builder::dispatch_contract_tests::phase_gate_contract_requires_verdict_and_checks
@@ -4045,7 +4042,7 @@ services::discord::router::message_handler::watchdog::timeout_notice_tests::watc
 services::discord::router::queue_status_presentation::tests::queued_user_messages_never_render_status_cards
 services::discord::router::response_format::tests::absent_voluntary_feedback_reminder_leaves_reply_context_unchanged
 services::discord::router::response_format::tests::absent_wip_warning_leaves_reply_context_unchanged_when_worktree_clean
-services::discord::router::response_format::tests::issue_4310_sak_layer_is_independent_of_memento_recall_state
+services::discord::router::response_format::tests::issue_4310_sak_layer_is_independent_of_memory_backend_state
 services::discord::router::response_format::tests::race_requeue_carries_the_intake_cancel_preservation_decision
 services::discord::router::response_format::tests::voluntary_feedback_reminder_is_injected_into_reply_context
 services::discord::router::response_format::tests::wip_warning_is_injected_into_reply_context_when_uncommitted_changes_exist

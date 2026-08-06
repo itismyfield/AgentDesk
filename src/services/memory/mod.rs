@@ -159,14 +159,6 @@ pub(crate) trait MemoryBackend: Send + Sync {
     }
 }
 
-pub(crate) fn build_memory_backend(
-    role_binding: Option<&RoleBinding>,
-) -> (ResolvedMemorySettings, Box<dyn MemoryBackend + Send + Sync>) {
-    let settings = crate::services::discord::settings::memory_settings_for_binding(role_binding);
-    let backend = build_resolved_memory_backend(&settings);
-    (settings, backend)
-}
-
 pub(crate) fn build_resolved_memory_backend(
     settings: &ResolvedMemorySettings,
 ) -> Box<dyn MemoryBackend + Send + Sync> {

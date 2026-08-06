@@ -1,6 +1,6 @@
-//! Memory guidance — proactive memento prompt blocks and the
-//! `MemoryRecallManifestInput` carrier consumed by the memory recall manifest
-//! layer.
+//! Memory guidance — the proactive memory prompt block, including the memento
+//! scope hint (channel -> workspace/agentId) the model needs to scope its own
+//! `context`/`recall`/`remember` calls.
 
 use poise::serenity_prelude::ChannelId;
 
@@ -10,13 +10,6 @@ use crate::services::memory::{
     UNBOUND_MEMORY_ROLE_ID, resolve_memento_agent_id, resolve_memento_workspace,
     sanitize_memento_workspace_segment,
 };
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct MemoryRecallManifestInput<'a> {
-    pub(crate) should_recall: bool,
-    pub(crate) gate_reason: &'a str,
-    pub(crate) external_recall: Option<&'a str>,
-}
 
 pub(super) fn proactive_memory_guidance(
     memory_settings: Option<&ResolvedMemorySettings>,

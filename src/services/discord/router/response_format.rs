@@ -1,43 +1,28 @@
 use super::super::*;
-use crate::services::memory::{RecallMode, RecallResponse};
 
+/// Shared Agent Knowledge placement for a turn.
+///
+/// #5168: this used to also carry the memento `external_recall` / file-backend
+/// `longterm_catalog` payloads fetched by the server on the turn's behalf
+/// (path A). Server-side recall is gone — the model calls `context`/`recall`
+/// through the Memento MCP itself — so only the SAK routing decision remains.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct MemoryInjectionPlan<'a> {
+pub(super) struct MemoryInjectionPlan {
     pub(super) shared_knowledge_for_context: Option<String>,
     pub(super) shared_knowledge_for_system_prompt: Option<String>,
-    pub(super) external_recall_for_context: Option<&'a str>,
-    pub(super) longterm_catalog_for_system_prompt: Option<&'a str>,
 }
 
-impl MemoryInjectionPlan<'_> {
+impl MemoryInjectionPlan {
     pub(super) fn sak_for_system_prompt(&self) -> Option<&str> {
         self.shared_knowledge_for_system_prompt.as_deref()
     }
 }
 
-/// #1083: Memento recall gate decision.
-///
-/// Trigger conditions for full memento context injection:
-/// 1. The user prompt contains a "previous-context" keyword.
-/// 2. The user prompt contains an "error/failure" keyword.
-/// 3. The user prompt contains a "settings change" keyword.
-/// 4. The user prompt is an explicit recall command.
-///
-/// Non-memento backends always recall in `Full` mode for backwards
-/// compatibility.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct MementoRecallGateDecision {
-    pub(super) should_recall: bool,
-    pub(super) mode: RecallMode,
-    pub(super) reason: &'static str,
-}
-
-pub(super) fn build_memory_injection_plan<'a>(
+pub(super) fn build_memory_injection_plan(
     provider: &ProviderKind,
     has_session_id: bool,
     dispatch_profile: DispatchProfile,
-    memory_recall: &'a RecallResponse,
-) -> MemoryInjectionPlan<'a> {
+) -> MemoryInjectionPlan {
     let shared_knowledge = crate::services::discord::shared_memory::load_shared_knowledge();
     let should_inject_shared_knowledge =
         dispatch_profile == DispatchProfile::Full && !has_session_id;
@@ -53,127 +38,10 @@ pub(super) fn build_memory_injection_plan<'a>(
         } else {
             None
         };
-    let external_recall_for_context = if dispatch_profile != DispatchProfile::ReviewLite {
-        memory_recall.external_recall.as_deref()
-    } else {
-        None
-    };
-    let longterm_catalog_for_system_prompt = if dispatch_profile == DispatchProfile::Full {
-        memory_recall.longterm_catalog.as_deref()
-    } else {
-        None
-    };
 
     MemoryInjectionPlan {
         shared_knowledge_for_context,
         shared_knowledge_for_system_prompt,
-        external_recall_for_context,
-        longterm_catalog_for_system_prompt,
-    }
-}
-
-pub(super) fn memento_recall_gate_decision(
-    memory_settings: &settings::ResolvedMemorySettings,
-    memento_context_loaded: bool,
-    user_text: &str,
-    dispatch_profile: DispatchProfile,
-) -> MementoRecallGateDecision {
-    if memory_settings.backend != settings::MemoryBackendKind::Memento {
-        return MementoRecallGateDecision {
-            should_recall: true,
-            mode: RecallMode::Full,
-            reason: "non_memento_backend",
-        };
-    }
-
-    if dispatch_profile == DispatchProfile::ReviewLite {
-        return MementoRecallGateDecision {
-            should_recall: false,
-            mode: RecallMode::Full,
-            reason: "review_lite_profile",
-        };
-    }
-
-    let normalized = user_text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let lower = normalized.to_lowercase();
-    let text = lower.as_str();
-
-    if ["이전에", "저번에", "전에"]
-        .iter()
-        .any(|keyword| text.contains(keyword))
-    {
-        return MementoRecallGateDecision {
-            should_recall: true,
-            mode: RecallMode::Full,
-            reason: "previous_context_signal",
-        };
-    }
-
-    if ["에러", "실패", "오류", "안 됨", "안됨"]
-        .iter()
-        .any(|keyword| text.contains(keyword))
-    {
-        return MementoRecallGateDecision {
-            should_recall: true,
-            mode: RecallMode::Full,
-            reason: "error_context_signal",
-        };
-    }
-
-    if [
-        "설정 변경",
-        "설정 바",
-        "설정 업데이트",
-        "config change",
-        "configuration change",
-        "settings change",
-    ]
-    .iter()
-    .any(|keyword| text.contains(keyword))
-    {
-        return MementoRecallGateDecision {
-            should_recall: true,
-            mode: RecallMode::Full,
-            reason: "setting_change_signal",
-        };
-    }
-
-    let trimmed = text.trim_start();
-    if trimmed.starts_with("/recall")
-        || trimmed.starts_with("/memento")
-        || trimmed.starts_with("/memory-read")
-        || text.contains("[memento:recall]")
-        || text.contains("<memento:recall>")
-        || text.contains("memento_recall")
-        || text.contains("@memento recall")
-    {
-        return MementoRecallGateDecision {
-            should_recall: true,
-            mode: RecallMode::Full,
-            reason: "explicit_recall_signal",
-        };
-    }
-
-    if !memento_context_loaded {
-        return MementoRecallGateDecision {
-            should_recall: true,
-            mode: RecallMode::IdentityOnly,
-            reason: if dispatch_profile == DispatchProfile::Lite {
-                "lite_identity_only"
-            } else {
-                "identity_only_session_start"
-            },
-        };
-    }
-
-    MementoRecallGateDecision {
-        should_recall: false,
-        mode: RecallMode::Full,
-        reason: if dispatch_profile == DispatchProfile::Lite {
-            "lite_no_turn_signal"
-        } else {
-            "no_turn_signal"
-        },
     }
 }
 
@@ -183,16 +51,6 @@ pub(super) fn dispatch_profile_label(dispatch_profile: DispatchProfile) -> &'sta
         DispatchProfile::Lite => "lite",
         DispatchProfile::ReviewLite => "review_lite",
     }
-}
-
-pub(super) fn should_note_memento_context_loaded(
-    memory_settings: &settings::ResolvedMemorySettings,
-    memento_context_loaded: bool,
-    memory_recall: &RecallResponse,
-) -> bool {
-    memory_settings.backend == settings::MemoryBackendKind::Memento
-        && !memento_context_loaded
-        && memory_recall.memento_context_loaded
 }
 
 pub(super) fn format_session_retry_context(raw_context: &str) -> Option<String> {
@@ -563,8 +421,13 @@ mod tests {
         );
     }
 
+    /// #4310: the SAK layer must not depend on memory-backend state. #5168
+    /// removed the recall payload the plan used to carry, so the surviving
+    /// guard is that SAK still lands in the Claude system prompt across every
+    /// dispatch profile that is supposed to receive it, and stays out of the
+    /// ones that are not.
     #[test]
-    fn issue_4310_sak_layer_is_independent_of_memento_recall_state() {
+    fn issue_4310_sak_layer_is_independent_of_memory_backend_state() {
         let runtime_root = tempfile::tempdir().expect("runtime root");
         let _root_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
         let sak_path = crate::runtime_layout::shared_agent_knowledge_path(runtime_root.path());
@@ -572,27 +435,34 @@ mod tests {
         std::fs::write(&sak_path, "state-independent rules").expect("write SAK");
         crate::services::discord::shared_memory::invalidate_shared_knowledge_cache_for_tests();
         let expected = "[Shared Agent Knowledge]\nstate-independent rules";
-        let healthy_recall = RecallResponse {
-            external_recall: Some("memento context".to_string()),
-            memento_context_loaded: true,
-            ..RecallResponse::default()
-        };
-        let degraded_recall = RecallResponse {
-            warnings: vec!["memento unavailable; local fallback used".to_string()],
-            ..RecallResponse::default()
-        };
 
-        for recall in [&healthy_recall, &degraded_recall] {
+        for has_session_id in [false, true] {
             let plan = build_memory_injection_plan(
                 &ProviderKind::Claude,
-                false,
+                has_session_id,
                 DispatchProfile::Full,
-                recall,
             );
             assert_eq!(
-                plan.shared_knowledge_for_system_prompt.as_deref(),
-                Some(expected)
+                plan.sak_for_system_prompt(),
+                Some(expected),
+                "Claude Full turns keep SAK in the system prompt (has_session_id={has_session_id})"
+            );
+            assert_eq!(
+                plan.shared_knowledge_for_context, None,
+                "Claude never receives SAK through the user context"
             );
         }
+
+        // Non-Claude providers get SAK through the user context instead, and
+        // only on a fresh session.
+        let fresh = build_memory_injection_plan(&ProviderKind::Codex, false, DispatchProfile::Full);
+        assert_eq!(
+            fresh.shared_knowledge_for_context.as_deref(),
+            Some(expected)
+        );
+        assert_eq!(fresh.sak_for_system_prompt(), None);
+        let resumed =
+            build_memory_injection_plan(&ProviderKind::Codex, true, DispatchProfile::Full);
+        assert_eq!(resumed.shared_knowledge_for_context, None);
     }
 }
