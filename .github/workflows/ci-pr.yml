@@ -786,6 +786,17 @@ jobs:
       - name: Local model durable queue wake regression
         run: env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1
 
+      # #5170: the transition-busy requeue oracles live in two modules that no
+      # curated PR filter selected, so they would have been counted by the lib
+      # inventory manifest and executed nowhere -- the #5046/#5041 defect. The
+      # queue_io oracle is named exactly on purpose: the surrounding
+      # `queue_io` module carries pre-existing #4270 failures that predate this
+      # lane, and a module-wide filter would import them.
+      - name: Transition-busy requeue spin regressions
+        run: |
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::intake_turn::race_loss:: -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::queue_io::presleep_tests::race_loss_recheck_fences_on_transition_without_parking_a_waiter_5170 -- --exact --test-threads=1
+
       - name: Stop PostgreSQL service
         if: always()
         run: ./scripts/ci/postgres-service.sh stop
