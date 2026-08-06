@@ -3476,9 +3476,10 @@ services::discord::prompt_builder::layer_rendering::workspace_aware_shared_rules
 services::discord::prompt_builder::memory_guidance::tests::agentdesk_workspace_memento_keeps_memory_scope_reference
 services::discord::prompt_builder::memory_guidance::tests::configured_file_backend_yields_unchanged_file_guidance
 services::discord::prompt_builder::memory_guidance::tests::foreign_workspace_memento_omits_memory_scope_but_keeps_feedback_contract
+services::discord::prompt_builder::memory_guidance::tests::full_memento_guidance_carries_scope_hint_without_recall_ownership
 services::discord::prompt_builder::memory_guidance::tests::memento_fallback_yields_hold_permanent_writes_guidance
 services::discord::prompt_builder::memory_guidance::tests::non_full_file_profile_suppresses_guidance
-services::discord::prompt_builder::memory_guidance::tests::non_full_memento_profiles_keep_recall_ownership_only
+services::discord::prompt_builder::memory_guidance::tests::non_full_memento_profiles_suppress_guidance
 services::discord::prompt_builder::section_dedupe::tests::distinct_content_each_records
 services::discord::prompt_builder::section_dedupe::tests::empty_or_whitespace_never_records
 services::discord::prompt_builder::section_dedupe::tests::first_append_returns_true_duplicate_returns_false

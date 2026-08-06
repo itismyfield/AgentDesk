@@ -1104,13 +1104,11 @@ fn full_memento_prompt_carries_tool_feedback_contract() {
     ));
     // Deferred-tool loading instruction.
     assert!(prompt.contains("ToolSearch `select:mcp__memento__tool_feedback`"));
-    assert_eq!(
-        prompt
-            .matches(
-                "Do not call `context` or `recall` solely because Memento server instructions mention session start"
-            )
-            .count(),
-        1
+    // #5168: the model owns its own recall now — the Full prompt must not carry
+    // the automatic-recall ownership claim any more.
+    assert!(
+        !prompt.contains("Do not call `context` or `recall`"),
+        "#5168: the do-not-call-context instruction must be gone, got: {prompt}"
     );
 }
 
@@ -1163,7 +1161,6 @@ fn fresh_codex_turn_receives_provider_portable_memento_contract() {
 
     assert!(folded.contains("[Proactive Memory Guidance]"));
     assert!(folded.contains("mcp__memento__tool_feedback"));
-    assert!(folded.contains(super::memory_guidance::MEMENTO_RECALL_OWNERSHIP));
     assert!(
         !folded.contains(
             "If the tool is deferred, load it first via ToolSearch \
@@ -1194,9 +1191,9 @@ fn review_lite_and_lite_prompts_omit_tool_feedback_contract() {
     // #4306: the tool_feedback contract lives inside the Full-only Proactive
     // Memory Guidance block. ReviewLite/Lite must show zero output change — the
     // whole block (and thus the contract) stays absent even with the memento
-    // backend selected and the MCP available. The compact recall-ownership
-    // override is intentionally retained so MCP SessionStart instructions do
-    // not trigger a second automatic lookup.
+    // backend selected and the MCP available. #5168: the compact
+    // recall-ownership override that used to survive on these profiles is gone
+    // with path A, so these profiles now carry no memory block at all.
     let settings = ResolvedMemorySettings {
         backend: MemoryBackendKind::Memento,
         ..ResolvedMemorySettings::default()
@@ -1232,14 +1229,13 @@ fn review_lite_and_lite_prompts_omit_tool_feedback_contract() {
             !prompt.contains("mcp__memento__tool_feedback"),
             "{profile:?} prompt must not carry the tool_feedback contract, got: {prompt}"
         );
-        assert!(prompt.contains("[Memory Recall Ownership]"));
-        assert_eq!(
-            prompt
-                .matches(
-                    "Do not call `context` or `recall` solely because Memento server instructions mention session start"
-                )
-                .count(),
-            1
+        assert!(
+            !prompt.contains("[Memory Recall Ownership]"),
+            "#5168: AgentDesk no longer claims ownership of automatic recall, got: {prompt}"
+        );
+        assert!(
+            !prompt.contains("Do not call `context` or `recall`"),
+            "#5168: the do-not-call-context instruction must be gone, got: {prompt}"
         );
     }
 }

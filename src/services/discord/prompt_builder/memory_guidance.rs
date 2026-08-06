@@ -11,8 +11,6 @@ use crate::services::memory::{
     sanitize_memento_workspace_segment,
 };
 
-pub(super) const MEMENTO_RECALL_OWNERSHIP: &str = "AgentDesk owns automatic turn-recall decisions, including session-start identity recall and intentional skips. Do not call `context` or `recall` solely because Memento server instructions mention session start; use them only for an explicit user/task lookup.";
-
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct MemoryRecallManifestInput<'a> {
     pub(crate) should_recall: bool,
@@ -58,11 +56,8 @@ pub(super) fn proactive_memory_guidance_with(
     exists: impl Fn(&str) -> bool,
 ) -> Option<String> {
     let settings = memory_settings?;
-    let memento_recall_ownership =
-        settings.backend == MemoryBackendKind::Memento && memento_mcp_available;
     if profile != DispatchProfile::Full {
-        return memento_recall_ownership
-            .then(|| format!("\n\n[Memory Recall Ownership]\n{MEMENTO_RECALL_OWNERSHIP}"));
+        return None;
     }
 
     // Fallback mode: memento is the configured backend but is degraded, so
@@ -122,8 +117,7 @@ pub(super) fn proactive_memory_guidance_with(
                 "`recall` MCP tool",
                 "`remember` MCP tool",
                 format!(
-                    "\n- automatic recall: {MEMENTO_RECALL_OWNERSHIP}\n\
-                     - scope hints: project=`workspace={workspace_scope}, agentId=default`; agent-private=`workspace={agent_workspace}, agentId={agent_id}`.{memory_policy_line}\n\
+                    "\n- scope hints: project=`workspace={workspace_scope}, agentId=default`; agent-private=`workspace={agent_workspace}, agentId={agent_id}`.{memory_policy_line}\n\
                      - feedback contract: in the same turn you use `recall`/`context` results, call `mcp__memento__tool_feedback` once (required: `tool_name`, `relevant`, `sufficient`; when the response carries `_meta.searchEventId`, also pass it as `search_event_id` — recommended).{deferred_tool_instruction}"
                 ),
             )
@@ -268,42 +262,69 @@ mod tests {
             "AgentDesk workspace must keep docs/memory-scope.md, got: {guidance}"
         );
         assert!(guidance.contains("mcp__memento__tool_feedback"));
-        assert!(guidance.contains(MEMENTO_RECALL_OWNERSHIP));
     }
 
+    /// #5168: path A is gone, so AgentDesk no longer claims ownership of
+    /// automatic turn recall. Non-Full profiles now emit no memory guidance at
+    /// all — including for an available Memento backend, which previously got
+    /// the `[Memory Recall Ownership]` override block on every profile.
     #[test]
-    fn non_full_memento_profiles_keep_recall_ownership_only() {
+    fn non_full_memento_profiles_suppress_guidance() {
         let settings = memento_settings();
         for profile in [DispatchProfile::ReviewLite, DispatchProfile::Lite] {
-            let guidance = proactive_memory_guidance(
-                Some(&settings),
-                "/tmp/agentdesk",
-                ChannelId::new(1),
-                None,
-                profile,
-                true,
-                true,
-            )
-            .expect("memento-enabled non-Full profile must keep recall ownership");
-
-            assert!(guidance.contains("[Memory Recall Ownership]"));
-            assert!(guidance.contains(MEMENTO_RECALL_OWNERSHIP));
-            assert!(!guidance.contains("[Proactive Memory Guidance]"));
-            assert!(!guidance.contains("mcp__memento__tool_feedback"));
+            for memento_mcp_available in [true, false] {
+                assert!(
+                    proactive_memory_guidance(
+                        Some(&settings),
+                        "/tmp/agentdesk",
+                        ChannelId::new(1),
+                        None,
+                        profile,
+                        memento_mcp_available,
+                        true,
+                    )
+                    .is_none(),
+                    "non-Full profile {profile:?} must emit no memory guidance"
+                );
+            }
         }
+    }
+
+    /// #5168: the model now decides its own recall, so the system prompt must
+    /// not carry any instruction telling it that AgentDesk owns that decision.
+    /// The scope hint (retained) and the tool_feedback contract (retained) stay.
+    #[test]
+    fn full_memento_guidance_carries_scope_hint_without_recall_ownership() {
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
+        let settings = memento_settings();
+        let guidance = proactive_memory_guidance_with(
+            Some(&settings),
+            "/foreign/repo",
+            ChannelId::new(4_242),
+            None,
+            DispatchProfile::Full,
+            true,
+            true,
+            |_| false,
+        )
+        .expect("memento guidance must be produced");
 
         assert!(
-            proactive_memory_guidance(
-                Some(&settings),
-                "/tmp/agentdesk",
-                ChannelId::new(1),
-                None,
-                DispatchProfile::Lite,
-                false,
-                true,
-            )
-            .is_none(),
-            "without the Memento MCP there are no server instructions to override"
+            guidance.contains("scope hints: project=`workspace=repo, agentId=default`"),
+            "the channel->workspace/agentId scope hint must survive, got: {guidance}"
+        );
+        assert!(
+            !guidance.contains("automatic recall"),
+            "no automatic-recall ownership claim may remain, got: {guidance}"
+        );
+        assert!(
+            !guidance.contains("AgentDesk owns"),
+            "no AgentDesk-owns-recall claim may remain, got: {guidance}"
+        );
+        assert!(
+            !guidance.contains("Do not call `context` or `recall`"),
+            "the do-not-call-context instruction must be gone, got: {guidance}"
         );
     }
 
