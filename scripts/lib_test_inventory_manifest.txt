@@ -787,9 +787,12 @@ server::routes::auth::tests::is_internal_loopback_path_rejects_unrelated_paths
 server::routes::auth::tests::is_websocket_upgrade_detects_handshake_header
 server::routes::auth::tests::loopback_peer_detection
 server::routes::auth::tests::peer_addr_from_request_reads_connect_info
+server::routes::auto_queue_lifecycle_pg_tests::tests::manual_rebind_accepts_every_canonical_live_status_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::patch_completed_no_longer_skips_lifecycle_side_effects_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::patch_pending_start_and_metadata_updates_remain_supported_pg
+server::routes::auto_queue_lifecycle_pg_tests::tests::patch_retired_deploy_phases_returns_client_error_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::postgres_auto_queue_lifecycle_http_routes_use_canonical_writers_pg
+server::routes::auto_queue_lifecycle_pg_tests::tests::stale_manual_rebind_cannot_reclaim_slot_after_canonical_completion_pg
 server::routes::auto_queue_preflight_harness_tests::auto_queue_preflight_detects_split_brain_completion
 server::routes::auto_queue_preflight_harness_tests::auto_queue_preflight_fixture_sandbox_roundtrip
 server::routes::bind_security_tests::all_interfaces_hosts_still_force_loopback

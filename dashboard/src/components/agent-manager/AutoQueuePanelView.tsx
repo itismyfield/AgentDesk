@@ -4,17 +4,12 @@ import type { DispatchQueueEntry as DispatchQueueEntryType } from "../../api";
 import AutoQueuePanelHeader from "./AutoQueuePanelHeader";
 import { AgentSubQueue, SortableEntryRow } from "./AutoQueueSortableRows";
 import { createAutoQueuePhaseRenderers } from "./AutoQueuePhaseRenderers";
+import type { AutoQueueAgentStats, AutoQueuePanelCtx } from "./auto-queue-panel-ctx";
 import { batchPhaseLabel, formatTs, sortEntriesForDisplay } from "./auto-queue-panel-utils";
 
-type AgentQueueStats = {
-  dispatched: number;
-  done: number;
-  failed: number;
-  pending: number;
-  skipped: number;
-};
+type AgentQueueStats = AutoQueueAgentStats;
 
-export default function AutoQueuePanelView({ ctx }: { ctx: any }) {
+export default function AutoQueuePanelView({ ctx }: { ctx: AutoQueuePanelCtx }) {
   const {
     agentStats,
     allDrag,

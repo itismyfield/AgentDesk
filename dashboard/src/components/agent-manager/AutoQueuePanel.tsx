@@ -18,6 +18,7 @@ import {
   shouldClearSuppressedAutoQueueRun,
 } from "./auto-queue-panel-state";
 import { buildRequestGenerateGroups } from "./auto-queue-actions";
+import type { AutoQueueRequestProgress } from "./auto-queue-panel-ctx";
 import AutoQueuePanelView from "./AutoQueuePanelView";
 import { useSortableReorder } from "./AutoQueueSortableRows";
 import { formatRequestGroupKey, isCompletedEntry, requestGroupKey, sortEntriesForDisplay, type ViewMode } from "./auto-queue-panel-utils";
@@ -36,13 +37,7 @@ interface Props {
   readyEntries?: ReadyAutoQueueEntry[];
 }
 
-interface RequestProgress {
-  startedAt: number;
-  baselineEntryIds: Set<string>;
-  pendingGroups: Set<string>;
-  satisfiedGroups: Set<string>;
-  errors: { groupKey: string; message: string }[];
-}
+type RequestProgress = AutoQueueRequestProgress;
 
 const REQUEST_GENERATE_TIMEOUT_MS = 5 * 60 * 1000;
 const REQUEST_GENERATE_POLL_MS = 30 * 1000;
@@ -362,7 +357,6 @@ export default function AutoQueuePanel({
   const run = status?.run ?? null;
   const entries = status?.entries ?? [];
   const phaseGates = status?.phase_gates ?? [];
-  const deployPhases = new Set(run?.deploy_phases ?? []);
   const resetAgentId = selectedAgentId ?? run?.agent_id ?? null;
   const resolveResetAgentTargets = (): string[] => {
     if (resetAgentId) return [resetAgentId];
@@ -457,7 +451,6 @@ export default function AutoQueuePanel({
         allEntriesSorted,
         completedCount,
         currentBatchPhase,
-        deployPhases,
         dispatchedCount,
         doneCount,
         entries,

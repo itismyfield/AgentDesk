@@ -124,6 +124,33 @@ mod tests {
             .expect("load scalar")
     }
 
+    async fn wait_for_rebind_advisory_lock_waiter(pool: &sqlx::PgPool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let blocked = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                     SELECT 1
+                     FROM pg_stat_activity
+                     WHERE datname = current_database()
+                       AND state = 'active'
+                       AND wait_event_type = 'Lock'
+                       AND query LIKE '%SELECT pg_advisory_lock(hashtext($1), hashtext($2))%'
+                 )",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("inspect blocked slot rebind advisory lock");
+            if blocked {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "slot rebind did not reach its advisory lock after reading run status"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
     #[tokio::test]
     async fn postgres_auto_queue_lifecycle_http_routes_use_canonical_writers_pg() {
         let pg_db = TestPostgresDb::create().await;
@@ -290,6 +317,151 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(run_status(&pool, "run-start").await, "paused");
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn patch_retired_deploy_phases_returns_client_error_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+        seed_agent(&pool).await;
+        seed_run(&pool, "run-retired-deploy-phases", "active").await;
+        let app = test_router(pool.clone());
+
+        let (status, response) = request_json_response(
+            &app,
+            Method::PATCH,
+            "/queue/runs/run-retired-deploy-phases",
+            Some(json!({"deploy_phases": [1, 3]})),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(response["error"], "no fields to update");
+        assert_eq!(
+            run_status(&pool, "run-retired-deploy-phases").await,
+            "active"
+        );
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn stale_manual_rebind_cannot_reclaim_slot_after_canonical_completion_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate_with_max_connections(6).await;
+        seed_agent(&pool).await;
+        seed_run(&pool, "run-stale-rebind", "active").await;
+        sqlx::query(
+            "INSERT INTO auto_queue_slots
+                (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map)
+             VALUES ('agent-1', 0, 'run-stale-rebind', 0, '{}'::jsonb)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed stale rebind slot");
+
+        let mut blocker = pool.acquire().await.expect("acquire rebind blocker");
+        sqlx::query("SELECT pg_advisory_lock(hashtext($1), hashtext($2))")
+            .bind("aq_slot_rebind:agent-1")
+            .bind("0")
+            .execute(&mut *blocker)
+            .await
+            .expect("hold route rebind advisory lock");
+
+        let app = test_router(pool.clone());
+        let rebind_task = tokio::spawn(async move {
+            request_json_response(
+                &app,
+                Method::POST,
+                "/queue/slots/agent-1/0/rebind",
+                Some(json!({"run_id": "run-stale-rebind", "thread_group": 0})),
+            )
+            .await
+        });
+        wait_for_rebind_advisory_lock_waiter(&pool).await;
+
+        assert!(
+            crate::db::auto_queue::complete_run_on_pg(&pool, "run-stale-rebind")
+                .await
+                .expect("canonically complete run after route status read")
+        );
+        assert_eq!(run_status(&pool, "run-stale-rebind").await, "completed");
+        assert_eq!(slot_run(&pool).await, None);
+
+        sqlx::query("SELECT pg_advisory_unlock(hashtext($1), hashtext($2))")
+            .bind("aq_slot_rebind:agent-1")
+            .bind("0")
+            .execute(&mut *blocker)
+            .await
+            .expect("release route rebind advisory lock");
+        let (status, _response) = rebind_task.await.expect("join stale route continuation");
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(run_status(&pool, "run-stale-rebind").await, "completed");
+        assert_eq!(
+            slot_run(&pool).await,
+            None,
+            "terminal run must not regain slot authority from the stale route continuation"
+        );
+        drop(blocker);
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn manual_rebind_accepts_every_canonical_live_status_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+        seed_agent(&pool).await;
+        seed_run(&pool, "run-live-rebind", "active").await;
+        sqlx::query(
+            "INSERT INTO auto_queue_slots
+                (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map)
+             VALUES ('agent-1', 0, NULL, NULL, '{}'::jsonb)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed live rebind slot");
+        let app = test_router(pool.clone());
+
+        for status in crate::db::auto_queue::run_status::LIVE_RUN_STATUSES {
+            sqlx::query("UPDATE auto_queue_runs SET status = $1 WHERE id = 'run-live-rebind'")
+                .bind(status)
+                .execute(&pool)
+                .await
+                .expect("set canonical live status");
+            sqlx::query(
+                "UPDATE auto_queue_slots
+                 SET assigned_run_id = NULL, assigned_thread_group = NULL
+                 WHERE agent_id = 'agent-1' AND slot_index = 0",
+            )
+            .execute(&pool)
+            .await
+            .expect("clear slot before live rebind");
+
+            let (response_status, response) = request_json_response(
+                &app,
+                Method::POST,
+                "/queue/slots/agent-1/0/rebind",
+                Some(json!({"run_id": "run-live-rebind", "thread_group": 0})),
+            )
+            .await;
+
+            assert_eq!(
+                response_status,
+                StatusCode::OK,
+                "canonical live status {status} must remain eligible: {response}"
+            );
+            assert_eq!(run_status(&pool, "run-live-rebind").await, *status);
+            assert_eq!(
+                slot_run(&pool).await.as_deref(),
+                Some("run-live-rebind"),
+                "canonical live status {status} must retain rebind authority"
+            );
+        }
+
         pool.close().await;
         pg_db.drop().await;
     }

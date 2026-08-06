@@ -1,15 +1,5 @@
 use super::*;
 
-pub(super) fn deploy_phase_api_enabled(state: &AppState) -> bool {
-    state
-        .config
-        .server
-        .auth_token
-        .as_deref()
-        .map(|token| !token.trim().is_empty())
-        .unwrap_or(false)
-}
-
 pub(super) fn pg_unavailable_response() -> (StatusCode, Json<serde_json::Value>) {
     (
         StatusCode::SERVICE_UNAVAILABLE,

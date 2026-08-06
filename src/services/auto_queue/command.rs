@@ -194,24 +194,6 @@ pub(super) async fn update_run_with_pg(
         }
     }
 
-    if let Some(ref deploy_phases) = body.deploy_phases {
-        let json_str = serde_json::to_string(deploy_phases)
-            .map_err(|error| format!("serialize deploy_phases for run {run_id}: {error}"))?;
-        let result = sqlx::query(
-            "UPDATE auto_queue_runs
-             SET deploy_phases = $1::jsonb
-             WHERE id = $2",
-        )
-        .bind(json_str)
-        .bind(run_id)
-        .execute(pool)
-        .await
-        .map_err(|error| {
-            format!("update postgres auto_queue_runs deploy_phases for {run_id}: {error}")
-        })?;
-        changed += result.rows_affected() as usize;
-    }
-
     if let Some(max_concurrent_threads) = body.max_concurrent_threads {
         let result = sqlx::query(
             "UPDATE auto_queue_runs

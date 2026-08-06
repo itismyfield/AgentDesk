@@ -2,12 +2,12 @@ import type { ReactNode } from "react";
 import type { DispatchQueueEntry as DispatchQueueEntryType } from "../../api";
 import { getBatchPhaseColor } from "../../theme/statusTokens";
 import { EntryRow } from "./AutoQueueEntryRow";
+import type { AutoQueuePhaseRendererCtx } from "./auto-queue-panel-ctx";
 import { batchPhaseLabel, isCompletedEntry, threadGroupColor } from "./auto-queue-panel-utils";
 
-export function createAutoQueuePhaseRenderers(ctx: any) {
+export function createAutoQueuePhaseRenderers(ctx: AutoQueuePhaseRendererCtx) {
   const {
     currentBatchPhase,
-    deployPhases,
     gatesByPhase,
     hasBatchPhases,
     handleEntryStatusUpdate,
@@ -78,9 +78,28 @@ export function createAutoQueuePhaseRenderers(ctx: any) {
     );
   };
 
+  // #5131: the deploy-flavoured variant of this indicator (blue / 🚀 / "배포
+  // 게이트") was keyed off the retired `auto_queue_runs.deploy_phases` column,
+  // dropped by migration 0006. The server does still ship a per-entry
+  // `phase_gate_kind` on `AutoQueueStatusEntryView` (src/services/auto_queue.rs),
+  // defined by migration 0057 as the gate kind that follows that `batch_phase`;
+  // what is missing is on this side — the dashboard's `DispatchQueueEntry` type
+  // does not expose that field, so no deploy signal reaches this renderer.
+  // Rendering the single generic flavour is nonetheless accurate today:
+  // `deploy-gate` is unavailable in the catalog and migration 0100 rejects
+  // persisting it, so no deploy-flavoured row can exist. Re-typing
+  // `phase_gate_kind` on the dashboard is the prerequisite for reviving the
+  // variant.
+  //
+  // Whether this indicator renders at all is decided by `hasBatchPhases` and
+  // `phaseSections` at the `AutoQueuePanelView` call sites, not by
+  // `gatesByPhase`: when a phase has no gate row the generic "게이트" label
+  // still renders under the `"pending"` default. What `gatesByPhase` does feed
+  // is the gate row's `status` (driving `baseColor`, `statusIcon` and the
+  // `animate-pulse` active state) plus the two parts guarded on the row
+  // existing at all — the status badge and the failure reason.
   const renderPhaseGateIndicator = (phase: number) => {
     const gates = gatesByPhase.get(phase) ?? [];
-    const isDeploy = deployPhases.has(phase);
 
     const gate = gates[0];
     const gateStatus = gate?.status ?? "pending";
@@ -94,9 +113,9 @@ export function createAutoQueuePhaseRenderers(ctx: any) {
       : isFailed
         ? "#ef4444"
         : isActive
-          ? isDeploy ? "#60a5fa" : "#f59e0b"
+          ? "#f59e0b"
           : "#6b7280";
-    const statusIcon = isPassed ? "✓" : isFailed ? "✗" : isActive ? (isDeploy ? "🚀" : "⏳") : "○";
+    const statusIcon = isPassed ? "✓" : isFailed ? "✗" : isActive ? "⏳" : "○";
     const statusLabel = isPassed
       ? tr("통과", "Passed")
       : isFailed
@@ -104,7 +123,7 @@ export function createAutoQueuePhaseRenderers(ctx: any) {
         : isActive
           ? tr("진행중", "In Progress")
           : tr("대기", "Pending");
-    const gateLabel = isDeploy ? tr("배포 게이트", "Deploy Gate") : tr("게이트", "Gate");
+    const gateLabel = tr("게이트", "Gate");
 
     return (
       <div

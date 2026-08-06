@@ -168,15 +168,18 @@ pub async fn rebind_slot_for_group_agent_pg(
             format!("prepare postgres slot rows for run {run_id} agent {agent_id}: {error}")
         })?;
 
-    let slot_updated = sqlx::query(
+    let live_run_guard = live_run_allocation_guard_sql("$1");
+    let rebind_query = format!(
         "UPDATE auto_queue_slots
          SET assigned_run_id = $1,
              assigned_thread_group = $2,
              updated_at = NOW()
          WHERE agent_id = $3
            AND slot_index = $4
-           AND (assigned_run_id IS NULL OR assigned_run_id = $1)",
-    )
+           AND (assigned_run_id IS NULL OR assigned_run_id = $1)
+           AND {live_run_guard}"
+    );
+    let slot_updated = sqlx::query(&rebind_query)
     .bind(run_id)
     .bind(thread_group)
     .bind(agent_id)

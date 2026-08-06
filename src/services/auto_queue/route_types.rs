@@ -72,7 +72,6 @@ pub struct ReorderBody {
 pub struct UpdateRunBody {
     pub status: Option<String>,
     pub unified_thread: Option<bool>,
-    pub deploy_phases: Option<Vec<i64>>,
     pub max_concurrent_threads: Option<i64>,
 }
 
