@@ -284,6 +284,16 @@ async fn persist_stream_tick_state_with_candidate_cleanup_mode<G: TurnGateway + 
     if outcome == GuardedSaveOutcome::IoError {
         return outcome;
     }
+    // Orphan-delete seam for an ABANDONED LOCAL ROLLOVER. The candidate is a
+    // Discord message the bridge already CREATED but has not yet bound to the
+    // durable row. A `Saved` whose durable epoch is this candidate is the bind
+    // completing, and only that clears the candidate without a delete. Every
+    // other disposition — including a `Saved` whose merge kept a DIFFERENT
+    // epoch, which is what a same-authority durable epoch advance produces —
+    // leaves the created message bound to nothing, so it is deleted here.
+    // Nothing downstream carries the id, so skipping the delete strands it.
+    // Asserted by
+    // `abandoned_local_rollover_is_deleted_when_the_fence_adopts_a_durable_epoch`.
     let Some(candidate) = *context.pending_current_message_candidate else {
         return outcome;
     };
@@ -1126,6 +1136,128 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&persisted_baseline).unwrap(),
             serde_json::to_value(&durable).unwrap()
+        );
+    }
+
+    /// The orphan-delete half of the #5149 wedge, asserted at the seam that
+    /// owns it (`persist_stream_tick_state_with_candidate_cleanup_mode`'s
+    /// `Saved`-but-a-different-epoch branch) rather than at the fence test.
+    ///
+    /// #5149 made a same-authority durable epoch advance return `Saved` instead
+    /// of ending the turn, which made this shape reachable: the bridge has
+    /// already CREATED its own rollover message on Discord and is holding it as
+    /// `pending_current_message_candidate`, and then the merge keeps this turn's
+    /// own watcher's durable epoch instead of the bridge's. The bridge's message
+    /// is now bound to nothing. `expected_current_message` and `current_msg_id`
+    /// are both resynced to the durable epoch, so no other caller ever sees the
+    /// abandoned id again — if it is not deleted right here it is a stray.
+    ///
+    /// Not a virgin seam: the "competing" leg of
+    /// `candidate_cleanup_covers_saved_competing_reowned_and_missing_rows`
+    /// already reaches the same delete line, via `settle_pending_current_message_
+    /// candidate_on_loop_exit` (loop exit, `MergeConcurrentOwner` mode) with a
+    /// durable epoch that beat the local one. What this test adds on top of that
+    /// leg is the `StrictBridgeMutation` mode, the specific #5149 shape (this
+    /// turn's own watcher advancing the epoch with the relay-authority triple
+    /// untouched), an explicit assert on the gateway's delete list rather than a
+    /// pooled one, and the durable-row-not-rewound assert.
+    #[tokio::test(flavor = "current_thread")]
+    async fn abandoned_local_rollover_is_deleted_when_the_fence_adopts_a_durable_epoch() {
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let _env_reset =
+            crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let channel = ChannelId::new(4_259_122);
+        let bridge_bound_msg_id = 1_534_511_598_012_600_371_u64;
+        let watcher_rollover_msg_id = 1_534_511_625_615_311_000_u64;
+        let abandoned_bridge_rollover_msg_id = 1_534_511_701_002_003_004_u64;
+
+        let mut state = owner_state(channel.get(), 77_010);
+        state.current_msg_id = bridge_bound_msg_id;
+        state.current_msg_len = 4;
+        state.full_response = "base".to_string();
+        save_inflight_state(&state).expect("seed bridge-owned row");
+        let expected = crate::services::discord::inflight::InflightTurnIdentity::from_state(&state);
+        let mut persisted_baseline = state.clone();
+        let mut expected_current_message = (bridge_bound_msg_id, 4_usize);
+
+        // This turn's own watcher rolls the durable epoch forward and leaves
+        // every relay-owner field alone, so the strict fence stays on its merge
+        // path instead of ending bridge authority.
+        let mut watcher = persisted_baseline.clone();
+        watcher.full_response = "base plus shared plus watcher tail".to_string();
+        watcher.response_sent_offset = watcher.full_response.len();
+        watcher.current_msg_id = watcher_rollover_msg_id;
+        watcher.current_msg_len = 21;
+        save_inflight_state(&watcher).expect("watcher advances the durable epoch");
+        assert_eq!(
+            crate::services::discord::inflight::StreamRelayAuthority::from_state(&watcher),
+            crate::services::discord::inflight::StreamRelayAuthority::from_state(
+                &persisted_baseline
+            ),
+            "the watcher must not have touched relay authority",
+        );
+
+        // Meanwhile the bridge created its OWN rollover message on Discord and
+        // still holds it unbound. Its body is a prefix of the watcher's, as two
+        // readers of one stream produce, so the merge accepts and the epoch —
+        // not the body — is what gets abandoned.
+        state.full_response = "base plus shared".to_string();
+        state.current_msg_id = abandoned_bridge_rollover_msg_id;
+        state.current_msg_len = 16;
+        let mut current_msg_id = MessageId::new(abandoned_bridge_rollover_msg_id);
+        let mut pending_candidate = Some(current_msg_id);
+        let mut bridge_created_candidate = Some(current_msg_id);
+
+        let gateway = super::super::provider_output_guard_tests::CapturingGateway::default();
+        let outcome = fence_stream_tick_visible_mutation_with_candidate_cleanup(
+            StreamTickCandidateSaveContext {
+                gateway: &gateway,
+                provider: &ProviderKind::Codex,
+                token_hash: "abandoned-local-rollover-test",
+                channel_id: channel,
+                persisted_baseline: &mut persisted_baseline,
+                inflight_state: &mut state,
+                expected_identity: &expected,
+                expected_current_message: &mut expected_current_message,
+                current_msg_id: &mut current_msg_id,
+                pending_current_message_candidate: &mut pending_candidate,
+                bridge_created_response_placeholder_msg_id: &mut bridge_created_candidate,
+            },
+            "turn_bridge::stream_tick::abandoned_local_rollover_test",
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            GuardedSaveOutcome::Saved,
+            "a same-authority epoch advance must not end the turn",
+        );
+        assert_eq!(
+            (state.current_msg_id, state.current_msg_len),
+            (watcher_rollover_msg_id, 21),
+            "the durable epoch wins, so the bridge's own rollover is the abandoned one",
+        );
+        assert_eq!(
+            gateway.deletes.lock().expect("deletes lock").as_slice(),
+            &[abandoned_bridge_rollover_msg_id],
+            "the abandoned local rollover must be deleted, not left as a Discord orphan",
+        );
+        assert_eq!(
+            pending_candidate, None,
+            "a deleted candidate must not be retried",
+        );
+        assert_eq!(
+            bridge_created_candidate, None,
+            "the bridge-created placeholder id must be released with the delete",
+        );
+        assert_eq!(expected_current_message, (watcher_rollover_msg_id, 21));
+        assert_eq!(current_msg_id, MessageId::new(watcher_rollover_msg_id));
+        assert_eq!(
+            load_inflight_state(&ProviderKind::Codex, channel.get())
+                .expect("durable row survives")
+                .current_msg_id,
+            watcher_rollover_msg_id,
+            "the delete must not have rewound the durable epoch",
         );
     }
 

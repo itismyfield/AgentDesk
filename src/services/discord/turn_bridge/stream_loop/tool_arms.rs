@@ -295,6 +295,8 @@ pub(super) async fn handle_stream_tool_message(
                     full_response: &mut full_response,
                     response_sent_offset,
                     confirmed_offset,
+                    any_tool_used: &mut any_tool_used,
+                    has_post_tool_text: &mut has_post_tool_text,
                 });
                 restart_visible_authority = Some(authority);
                 authority == VisibleMutationAuthority::Authorized
@@ -361,6 +363,8 @@ pub(super) async fn handle_stream_tool_message(
                     full_response: &mut full_response,
                     response_sent_offset,
                     confirmed_offset,
+                    any_tool_used: &mut any_tool_used,
+                    has_post_tool_text: &mut has_post_tool_text,
                 },
                 &long_running_placeholder_active,
                 &pending_long_running_retarget_after_state_save,

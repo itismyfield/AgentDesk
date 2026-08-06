@@ -2714,6 +2714,7 @@ services::discord::inflight::save_store::identity_gate::stream_loop_patch::tests
 services::discord::inflight::save_store::identity_gate::stream_loop_patch::tests::stream_tick_merge_retry_is_idempotent
 services::discord::inflight::save_store::identity_gate::stream_loop_patch::tests::strict_visible_fence_accepts_exact_self_delegation_and_adopts_relay_epoch
 services::discord::inflight::save_store::identity_gate::stream_loop_patch::tests::strict_visible_fence_fails_closed_when_epoch_change_carries_divergent_body
+services::discord::inflight::save_store::identity_gate::stream_loop_patch::tests::strict_visible_fence_keeps_the_local_tail_when_only_the_durable_epoch_moved
 services::discord::inflight::save_store::identity_gate::stream_loop_patch::tests::strict_visible_fence_merges_same_authority_current_message_epoch
 services::discord::inflight::save_store::identity_gate::stream_loop_patch::tests::strict_visible_fence_rejects_foreign_delegated_owner_projection
 services::discord::inflight::save_store::identity_gate::stream_loop_patch::tests::strict_visible_fence_rejects_watcher_before_local_delta_and_adopts_durable
@@ -5521,9 +5522,12 @@ services::discord::turn_bridge::stream_loop::expected_identity_tests::saved_tmux
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::queued_restart_foreign_authority_propagates_loss_while_self_delegation_continues
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::terminal_tool_result_fence_maps_handoff_loss_and_io_retry_fail_closed
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::tool_arm_locals_follow_the_durable_row_after_a_guarded_save
+services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::tool_arms_derive_the_four_excluded_tool_line_locals_around_their_fences
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::transient_terminal_tool_result_fence_requeues_the_exact_frame_at_front
+services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_tick
 services::discord::turn_bridge::stream_receiver::ready_drain_unit_tests::done_wait_uses_remaining_drain_window_as_safety_wake
 services::discord::turn_bridge::stream_receiver::ready_drain_unit_tests::stream_receiver_adapter_wakes_on_ready_frame
+services::discord::turn_bridge::stream_tick::guarded_persist::tests::abandoned_local_rollover_is_deleted_when_the_fence_adopts_a_durable_epoch
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::candidate_cleanup_covers_saved_competing_reowned_and_missing_rows
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::changed_durable_relay_authority_still_ends_bridge_authority
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::dirty_and_side_effect_transitions_follow_guarded_outcome

@@ -59,6 +59,34 @@
 - `active_callsite_coverage` only applies to surfaces with a parallel canonical
   path already implemented (e.g. Discord outbound v3). For pre-migration giant
   files (no canonical replacement yet), the column is `n/a`.
+- **At-cap surfaces (#5150).** Two files sit on a hard size gate with no usable
+  headroom. The two gates measure DIFFERENT things, so check which one applies
+  before adding a line. This was previously recorded only in a comment inside
+  `scripts/audit_maintainability_config.toml`, i.e. nowhere a reader of this
+  registry would see it.
+  - `src/services/discord/turn_bridge/stream_loop.rs` — **979 raw file lines**
+    against its `979` `[namespace_size_caps]` entry. That gate counts every
+    line in the file (inline `#[cfg(test)]` blocks included — unlike the
+    giant-file rule above), so the headroom is **zero**: one added line of any
+    kind fails `scripts/audit_maintainability.py --check`. The pressure is
+    already distorting the code — #5149 named a tool-arm authority context
+    field `confirmed_offset` rather than `bridge_confirmed_response_sent_offset`
+    purely so its three call sites fit on one line each. Extract before adding.
+  - `src/services/discord/gateway.rs` — **999 production lines** (1568 raw,
+    569 test) against the `>= 1000` giant threshold. One added PRODUCTION line
+    makes it a giant; test-only lines are free. It is registered in neither
+    `scripts/giant_file_registry.toml` nor
+    `scripts/audit_maintainability_giant_baseline.toml`, and the registry's
+    `grandfathered_baseline_paths` array is a closed baseline, so crossing the
+    threshold forces a new `[[entry]]` carrying an owner, a deadline, and a
+    decompose issue before CI goes green again.
+  - Both figures measured 2026-08-06 on `main` @ `9721fc70a` with the gates'
+    own code: `audit_maintainability/checks/namespace_size_caps.count_lines`
+    for the raw figure and `generate_inventory_docs.split_prod_test_lines` (the
+    `Prod` column of the generated `module-inventory.md`) for the production
+    figure. `wc -l` reproduces the raw figure only — it has no test-block rule,
+    so it reports 1568, not 999, for `gateway.rs`. Re-measure before relying on
+    these numbers; both drift with every landing.
 
 ### CI lib-test identity inventory pin
 
@@ -1530,8 +1558,10 @@ time for diagnostics; neither is a stored approval value.
     the content/status/terminal arms to `stream_loop/content_arms.rs`. The root
     now retains the cancel gates, ready-frame drain, runtime-handoff delegation,
     stream/status ticks, and long-running placeholder state wiring. Its #4230
-    giant registry entry was retired after S8; the measured 979-line cap remains
-    below the 1000-prod-LoC threshold).
+    giant registry entry was retired after S8, so the giant-file rule is not what
+    binds here — the `[namespace_size_caps]` entry is, and the file is AT that
+    cap with zero headroom. See "At-cap surfaces" under Read This First for the
+    measurement and for why the next change of any size has to extract first).
   - `src/services/discord/outbound/turn_output_controller.rs` (frozen giant surface;
     #4046 S1r-1 keeps the anchor-less `SendFresh` implementation in the 228-line
     `turn_output_controller/fresh_send.rs` child while the root owns only the

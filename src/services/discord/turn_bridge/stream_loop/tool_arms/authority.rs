@@ -33,6 +33,8 @@ pub(super) struct StreamToolAuthorityContext<'a> {
     /// keep the call sites within the `stream_loop.rs` namespace size cap. NOT
     /// the unrelated `confirmed_end_offset` used by the relay sink.
     pub(super) confirmed_offset: &'a mut usize,
+    pub(super) any_tool_used: &'a mut bool,
+    pub(super) has_post_tool_text: &'a mut bool,
 }
 
 /// Mirror of `stream_tick`'s post-save reconcile for the tool arms: after a
@@ -48,6 +50,8 @@ pub(super) fn reconcile_tool_arm_locals_after_guarded_save(
     full_response: &mut String,
     response_sent_offset: &mut usize,
     bridge_confirmed_response_sent_offset: &mut usize,
+    any_tool_used: &mut bool,
+    has_post_tool_text: &mut bool,
 ) {
     *expected_current_message = (
         inflight_state.current_msg_id,
@@ -59,27 +63,52 @@ pub(super) fn reconcile_tool_arm_locals_after_guarded_save(
     full_response.clone_from(&inflight_state.full_response);
     // A SUBSET of what `bridge_entry_persist::reconcile_runtime_locals_from_inflight_state`
     // (the `stream_tick` side) re-seeds — not an isomorphism. That function also
-    // re-seeds `current_tool_line`, `prev_tool_status`, `last_tool_name`,
-    // `last_tool_summary`, `any_tool_used` and `has_post_tool_text`
-    // (`bridge_entry_persist.rs:96-109`), and this one deliberately does not.
-    // Those six are staged back the same way and `any_tool_used` /
-    // `has_post_tool_text` are not display-only (they feed `resolve_done_response`
-    // via `content_arms.rs:341-346`), but their merge goes through
-    // `apply_local_change_if_durable_unchanged`, where durable wins, and no
-    // damage path through it has been demonstrated. They are left out until one
-    // is, rather than widened pre-emptively.
+    // re-seeds `current_tool_line`, `prev_tool_status`, `last_tool_name` and
+    // `last_tool_summary` (`bridge_entry_persist.rs:96-109`). Exactly those FOUR
+    // display fields are excluded here, and the exclusion claim below is about
+    // those four ONLY — it does not extend to the two behaviour flags, which
+    // this function DOES re-seed (see the `stage_tick_state_for_guard!` note).
     //
-    // `response_sent_offset` IS demonstrated: it is one stream-loop local shared
-    // with `stream_tick`, whose `stage_tick_state_for_guard!` stages it back on
-    // the NEXT tick; leaving it behind lets the
-    // `durable == before => return local` arm of `merge_stream_response_progress`
-    // rewind the durable offset and resend already-delivered text.
+    // The two callers below are the ONLY two tool-arm fence sites
+    // (`tool_arms.rs:287` restart, `tool_arms.rs:352` terminal ToolResult), and
+    // at both of them the loop's copies of those four were derived from the
+    // STREAM FRAME the arm is handling, not read from a durable row:
+    // `tool_arms.rs:174-181` assigns all four on every ToolUse and runs BEFORE
+    // the restart fence in that same arm, and the ToolResult arm re-derives
+    // `prev_tool_status` + `current_tool_line` from them again at
+    // `tool_arms.rs:551-556`, AFTER its fence. Re-seeding them from `on_disk`
+    // would replace the bridge's own frame projection with the watcher's older
+    // one and, in the ToolUse arm, erase the tool line for the tool that is
+    // starting right now.
+    // `tool_arms_derive_the_four_excluded_tool_line_locals_around_their_fences`
+    // pins that ordering, so the exclusion cannot rot silently.
+    //
+    // Everything below IS re-seeded, and for one shared reason: each is a
+    // stream-loop local that `stage_tick_state_for_guard!`
+    // (`stream_tick.rs:291-304`) pushes back into the row on the NEXT tick.
+    // Leaving one behind after a `Saved` leaves the loop holding the pre-save
+    // value while `persisted_baseline` holds the merged one, and the next tick's
+    // `local != before && durable == before => durable = local` branch
+    // (`stream_loop_patch.rs:9` for the flags, `:24` inside
+    // `merge_stream_response_progress` for the offset) then REWINDS the durable
+    // row to the pre-save value.
+    // * `response_sent_offset` — rewinding it resends already-delivered text.
+    // * `any_tool_used` / `has_post_tool_text` — the writer that puts a value the
+    //   loop never saw onto the row is `persist_watcher_stream_progress_locked`
+    //   (`inflight/watcher_state.rs:131-132`), which writes both flags
+    //   unconditionally and touches no relay-authority field, so the strict
+    //   fence's `authority_changed` never trips and the save returns `Saved`.
+    //   `watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_tick`
+    //   drives that exact chain through the real watcher writer, the real
+    //   restart fence and the real `run_bridge_stream_tick`.
     *response_sent_offset = inflight_state.response_sent_offset;
     *bridge_confirmed_response_sent_offset =
         crate::services::discord::turn_bridge::retry_state::bridge_confirmed_response_sent_offset_seed(
             inflight_state.effective_relay_owner_kind(),
             *response_sent_offset,
         );
+    *any_tool_used = inflight_state.any_tool_used;
+    *has_post_tool_text = inflight_state.has_post_tool_text;
 }
 
 pub(super) enum TerminalToolResultFence {
@@ -150,6 +179,8 @@ pub(super) fn fence_restart_visible_mutation(
             context.full_response,
             context.response_sent_offset,
             context.confirmed_offset,
+            context.any_tool_used,
+            context.has_post_tool_text,
         );
     }
     visible_mutation_authority_after_guarded_save(
@@ -224,6 +255,8 @@ pub(super) async fn fence_terminal_tool_result_transition(
             context.full_response,
             context.response_sent_offset,
             context.confirmed_offset,
+            context.any_tool_used,
+            context.has_post_tool_text,
         );
     }
     let authority = visible_mutation_authority_after_guarded_save(
