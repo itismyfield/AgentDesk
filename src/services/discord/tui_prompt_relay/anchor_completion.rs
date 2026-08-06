@@ -245,7 +245,7 @@ mod tests {
         };
         let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
-            .unwrap();
+            .unwrap_or_else(|poison| poison.into_inner());
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
 
         let tmux = "AgentDesk-claude-anchor-race";
@@ -354,7 +354,7 @@ mod tests {
     fn relay_drain_decision_completes_and_consumes_matching_turn_marker() {
         let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
-            .unwrap();
+            .unwrap_or_else(|poison| poison.into_inner());
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
 
         let provider = "claude";
@@ -389,7 +389,7 @@ mod tests {
     fn relay_drain_decision_fails_open_when_http_unavailable() {
         let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
-            .unwrap();
+            .unwrap_or_else(|poison| poison.into_inner());
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
 
         let provider = "claude";
@@ -423,7 +423,7 @@ mod tests {
     fn relay_drain_decision_does_not_cross_consume_other_turn_marker() {
         let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
-            .unwrap();
+            .unwrap_or_else(|poison| poison.into_inner());
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
 
         let provider = "claude";

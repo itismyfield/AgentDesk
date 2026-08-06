@@ -1138,7 +1138,7 @@ mod cold_start_retry_tests {
         fn new() -> Self {
             let lock = RETRY_TEST_MUTEX
                 .lock()
-                .expect("paused watcher retry test lock poisoned");
+                .unwrap_or_else(|poison| poison.into_inner());
             clear_pending_paused_watcher_attaches_for_tests();
             set_test_paused_watcher_tmux_live_override(Some(&[]));
             set_test_suppress_paused_watcher_task_spawn(true);

@@ -1891,7 +1891,7 @@ mod tests {
     fn session_relay_trace_context_uses_external_input_lease_without_inflight() {
         let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
-            .unwrap();
+            .unwrap_or_else(|poison| poison.into_inner());
         let tmux = "AgentDesk-codex-external-trace";
         crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
             ProviderKind::Codex.as_str(),
@@ -1931,7 +1931,7 @@ mod tests {
     fn terminal_delivery_route_skips_bridge_owned_external_lease_without_inflight() {
         let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
-            .unwrap();
+            .unwrap_or_else(|poison| poison.into_inner());
         let tmux = "AgentDesk-codex-bridge-owned-direct";
         let lease = crate::services::tui_prompt_dedupe::ExternalInputRelayLease {
             channel_id: Some(4243),
@@ -4970,7 +4970,7 @@ mod tests {
     fn lease_guard_drop_preserves_newer_turn_lease_no_clobber() {
         let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
-            .unwrap();
+            .unwrap_or_else(|poison| poison.into_inner());
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
 
         let channel_id = 8_042_u64;
@@ -5026,7 +5026,7 @@ mod tests {
     fn lease_guard_drop_preserves_newer_unassigned_lease_by_generation() {
         let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
-            .unwrap();
+            .unwrap_or_else(|poison| poison.into_inner());
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
 
         let channel_id = 8_044_u64;
@@ -5092,7 +5092,7 @@ mod tests {
     fn lease_guard_drop_clears_own_lease_and_is_inert_for_foreign_owner() {
         let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
-            .unwrap();
+            .unwrap_or_else(|poison| poison.into_inner());
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
 
         let channel_id = 8_043_u64;

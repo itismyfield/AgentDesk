@@ -974,7 +974,7 @@ mod tests {
     async fn stale_busy_finalize_uses_identity_gate_and_returns_global_slot() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
-            .expect("shared env lock poisoned");
+            .unwrap_or_else(|poison| poison.into_inner());
         let root = tempfile::tempdir().expect("runtime root");
         let _root = RuntimeRootGuard::set(root.path());
         let shared = crate::services::discord::make_shared_data_for_tests();
@@ -1019,7 +1019,7 @@ mod tests {
     async fn stale_busy_finalize_cannot_release_newer_mailbox_identity() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
-            .expect("shared env lock poisoned");
+            .unwrap_or_else(|poison| poison.into_inner());
         let root = tempfile::tempdir().expect("runtime root");
         let _root = RuntimeRootGuard::set(root.path());
         let shared = crate::services::discord::make_shared_data_for_tests();
@@ -1065,7 +1065,7 @@ mod tests {
     async fn periodic_reaper_preserves_live_turn_for_role_override_provider() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
-            .expect("shared env lock poisoned");
+            .unwrap_or_else(|poison| poison.into_inner());
         let root = tempfile::tempdir().expect("runtime root");
         let _root = RuntimeRootGuard::set(root.path());
         let config_dir = root.path().join("config");
@@ -1207,7 +1207,7 @@ agents:
     async fn periodic_reaper_probes_recorded_routine_session_not_reconstructed_name() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
-            .expect("shared env lock poisoned");
+            .unwrap_or_else(|poison| poison.into_inner());
         let root = tempfile::tempdir().expect("runtime root");
         let _root = RuntimeRootGuard::set(root.path());
 
@@ -1315,7 +1315,7 @@ agents:
     async fn periodic_reaper_skips_when_recorded_session_name_is_absent() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
-            .expect("shared env lock poisoned");
+            .unwrap_or_else(|poison| poison.into_inner());
         let root = tempfile::tempdir().expect("runtime root");
         let _root = RuntimeRootGuard::set(root.path());
 

@@ -376,15 +376,21 @@ class RatchetTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertEqual(stderr, "")
 
-    def test_repository_baseline_contains_logical_footer_path(self) -> None:
-        baseline = coverage.load_baseline(REPO_ROOT / coverage.BASELINE_REL)
+    def test_repository_inventory_uses_logical_footer_path(self) -> None:
+        # This asserted the same property against the debt baseline until
+        # #5185's library sweep covered the footer module and removed its
+        # entry. Anchoring on the inventory instead states the real contract --
+        # `#[path]` aliases resolve to logical module paths -- and keeps
+        # holding as the baseline shrinks toward empty, which is the direction
+        # the ratchet exists to force.
+        inventory = coverage.discover_test_inventory(REPO_ROOT)
         self.assertIn(
             "services::discord::tmux::tmux_watcher::single_message_footer::tests",
-            baseline,
+            inventory,
         )
         self.assertNotIn(
             "services::discord::tmux_watcher::single_message_footer::tests",
-            baseline,
+            inventory,
         )
 
     def test_candidate_merge_first_parent_composes_parallel_removals(self) -> None:

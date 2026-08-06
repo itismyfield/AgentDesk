@@ -469,7 +469,9 @@ mod review_slim_tests {
     where
         F: FnOnce(),
     {
-        let _guard = REVIEW_ALLOWLIST_ENV_LOCK.lock().unwrap();
+        let _guard = REVIEW_ALLOWLIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let previous_review_mcp_allowlist = std::env::var_os(REVIEW_MCP_ALLOWLIST_ENV);
         unsafe { std::env::remove_var(REVIEW_MCP_ALLOWLIST_ENV) };
         f();

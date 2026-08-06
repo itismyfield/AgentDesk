@@ -459,7 +459,7 @@ mod tests {
     }
 
     fn env_guard() -> MutexGuard<'static, ()> {
-        ENV_LOCK.lock().unwrap()
+        ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
     }
 
     #[test]

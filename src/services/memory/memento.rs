@@ -1833,6 +1833,23 @@ mod static_slice_cache_tests {
     use super::*;
     use serde_json::json;
 
+    /// #5185: `clear_static_slice_cache()` wipes one process-global map, and
+    /// every test below calls it and then depends on the entry it just wrote
+    /// still being there on the following call. Run in parallel, one test's
+    /// clear lands between another's first and second `elide_..._if_recent`,
+    /// the second call finds no cached digest, re-emits the full banner, and
+    /// the pointer assertion fails for a reason unrelated to the cache logic.
+    ///
+    /// Serialise these tests against each other -- distinct cache keys are not
+    /// enough when the reset is global. Poison is recovered with `into_inner`
+    /// rather than cleared, which is this repository's convention (268 of the
+    /// 290 shared-test-lock sites) and keeps a panicking holder from turning
+    /// one failure into a cascade of unrelated ones.
+    fn cache_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
     // #2660 — static-slice cache behaviour
     #[test]
     fn static_slice_split_separates_ranked_and_core_from_dynamic() {
@@ -1877,6 +1894,7 @@ mod static_slice_cache_tests {
 
     #[test]
     fn elide_static_slice_first_call_keeps_full_text() {
+        let _cache_guard = cache_guard();
         crate::services::memory::memento_throttle::clear_static_slice_cache();
         let payload = json!({
             "rankedInjection": {
@@ -1894,6 +1912,7 @@ mod static_slice_cache_tests {
 
     #[test]
     fn elide_static_slice_second_call_replaces_with_pointer_when_unchanged() {
+        let _cache_guard = cache_guard();
         crate::services::memory::memento_throttle::clear_static_slice_cache();
         let payload = json!({
             "rankedInjection": {
@@ -1936,6 +1955,7 @@ mod static_slice_cache_tests {
 
     #[test]
     fn elide_static_slice_re_emits_when_content_drifts() {
+        let _cache_guard = cache_guard();
         crate::services::memory::memento_throttle::clear_static_slice_cache();
         let key = "test-key-drift";
         let payload_v1 = json!({
@@ -1994,6 +2014,7 @@ mod static_slice_cache_tests {
 
     #[test]
     fn elide_static_slice_keeps_banner_when_only_static_sections_present() {
+        let _cache_guard = cache_guard();
         crate::services::memory::memento_throttle::clear_static_slice_cache();
         let payload = json!({
             "rankedInjection": {

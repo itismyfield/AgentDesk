@@ -3133,6 +3133,59 @@ pub fn load_graceful() -> Config {
     config
 }
 
+/// The process-global mutex serialising tests that mutate process environment
+/// variables.
+///
+/// # Poison
+///
+/// A panicking holder poisons this mutex, and a site that propagates the
+/// `PoisonError` dies with it instead of reaching its own assertion. In the
+/// widened #5185 sweep one real failure (`voice_pcm_harness_unattended_e2e`)
+/// reported itself as eleven, burying the primary under ten cascade victims.
+///
+/// The convention below is **not specific to this mutex**, and treating it as
+/// specific to this mutex is what left the amplification in place after the
+/// first attempt: a later sweep turned one real failure
+/// (`session_resume::tests::resume_production_path_clears_stale_binding_and_rebinds_runtime`)
+/// into 68, because that test and 66 `tui_prompt_dedupe` tests serialise on
+/// `tui_prompt_dedupe::TEST_LOCK` -- a *different* process-global `Mutex<()>`
+/// -- and every one of them still spelled the acquisition `.lock().unwrap()`.
+/// Of 73 panics in that run, 67 were `PoisonError`. So the rule is: any
+/// process-global `Mutex<()>` used to serialise tests recovers the guard at
+/// every acquisition site. The unit payload is what makes that unconditionally
+/// safe -- there is no data invariant a panicking holder could have torn --
+/// and it is why the rule stops at `Mutex<()>` and does not extend to the
+/// state mutexes (`Mutex<HashMap<..>>` and friends) that tests also touch.
+///
+/// The convention here is that every acquisition site recovers the guard
+/// rather than propagating the `PoisonError`. Of the 290 direct
+/// `shared_test_env_lock().lock()` sites, 288 spell it
+/// `unwrap_or_else(|poison| poison.into_inner())` literally; the remaining two
+/// recover identically in a different syntax -- `placeholder_live_events`
+/// matches on `Err(poisoned) => poisoned.into_inner()`, and
+/// `turn_orchestrator::SharedEnvLock::lock` is a forwarding shim whose single
+/// caller `lock_test_env()` applies the `unwrap_or_else`. The canonical
+/// `test_env_lock::acquire_shared_test_env_lock` path recovers too.
+/// `into_inner` is deliberate and is **not** interchangeable with
+/// `Mutex::clear_poison`: `into_inner` recovers this one acquisition and leaves
+/// the poison flag set as a durable record that some test panicked while
+/// holding the environment, whereas `clear_poison` destroys that record for
+/// every subsequent observer in the process.
+///
+/// Clearing is also the wrong shape for the race. Any accessor-side clear
+/// happens *before* `lock()`, so it cannot help a thread already blocked in
+/// `lock()` when the holder panics -- that waiter still receives
+/// `Err(PoisonError)`. Recovery has to be at the acquisition site, which is
+/// where `into_inner` puts it.
+///
+/// What this mutex guards is mutual exclusion over process env vars, not an
+/// invariant over data, so a panic mid-critical-section leaves no torn value
+/// for poison to warn about. It can leave an env var unrestored: restoration
+/// is RAII-driven at the `TestEnvVarGuard`/`RuntimeRootGuard` sites but *not*
+/// everywhere -- `services::tmux_common`'s
+/// `dead_marker_path_is_cleaned_with_session_temp_files` is one of the sites
+/// that saves and restores by hand around an intervening `assert!` (#5185
+/// tracks converting the remaining hand-rolled sites).
 #[cfg(test)]
 pub(crate) fn shared_test_env_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -3197,6 +3250,18 @@ impl TestEnvVarGuard {
     pub(crate) fn set_path_after_shared_test_env_lock(
         key: &'static str,
         value: &std::path::Path,
+    ) -> Self {
+        Self::set_value_after_shared_test_env_lock(key, value.as_os_str())
+    }
+
+    /// Same contract as `set_path_after_shared_test_env_lock` for env vars whose
+    /// value is not a path (`HOSTNAME`, feature flags). #5185 added it because
+    /// the hand-rolled save/`set_var`/restore shape it replaces leaks the
+    /// override to every later test in the process when an `assert!` between
+    /// the two halves unwinds past the restore.
+    pub(crate) fn set_value_after_shared_test_env_lock(
+        key: &'static str,
+        value: &std::ffi::OsStr,
     ) -> Self {
         let previous = std::env::var_os(key);
         unsafe { std::env::set_var(key, value) };

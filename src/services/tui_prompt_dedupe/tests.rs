@@ -11,7 +11,9 @@ fn reset_state() {
 // stay provider-isolated even when two providers share a tmux name.
 #[test]
 fn provider_session_for_tmux_resolves_reverse_mapping() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     register_provider_session("claude", "uuid-claude-1", "tmux-shared");
@@ -36,7 +38,9 @@ fn provider_session_for_tmux_resolves_reverse_mapping() {
 
 #[test]
 fn provider_session_for_tmux_prefers_most_recent_mapping() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     // A relaunch of the same tmux session under a new provider UUID must
@@ -51,7 +55,9 @@ fn provider_session_for_tmux_prefers_most_recent_mapping() {
 
 #[test]
 fn claude_hook_payload_adopts_sibling_continuation_once_without_cursor_reset() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     let tmp = tempfile::tempdir().unwrap();
     let old_session = uuid::Uuid::new_v4().to_string();
@@ -103,7 +109,9 @@ fn claude_hook_payload_adopts_sibling_continuation_once_without_cursor_reset() {
 
 #[test]
 fn claude_hook_payload_can_advance_multiple_continuation_hops_but_not_rewind() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     let tmp = tempfile::tempdir().unwrap();
     let command_session = uuid::Uuid::new_v4().to_string();
@@ -159,7 +167,9 @@ fn claude_hook_payload_can_advance_multiple_continuation_hops_but_not_rewind() {
 
 #[test]
 fn provider_session_mapping_survives_prompt_purge_ttl() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     register_provider_session("claude", "uuid-long-lived", "tmux-long-lived");
@@ -185,7 +195,9 @@ fn provider_session_mapping_survives_prompt_purge_ttl() {
 
 #[test]
 fn provider_session_mapping_is_removed_with_runtime_binding_clear() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     register_provider_session("claude", "uuid-stale", "tmux-stale");
@@ -204,7 +216,9 @@ fn provider_session_mapping_is_removed_with_runtime_binding_clear() {
 
 #[test]
 fn provider_session_mapping_is_removed_with_dead_tmux_mirror() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     register_provider_session("claude", "uuid-dead", "tmux-dead");
@@ -223,7 +237,9 @@ fn provider_session_mapping_is_removed_with_dead_tmux_mirror() {
 // channels.
 #[test]
 fn provider_session_mapping_isolates_claude_and_codex_for_same_session_id() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     register_provider_session("claude", "session-shared", "tmux-claude");
@@ -314,7 +330,9 @@ fn relay_last_offset_falls_back_to_last_offset_when_unset() {
 // could fast-forward our offset past unread frames.
 #[test]
 fn advance_offset_rejects_mismatched_path_when_relay_override_differs() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     register_tmux_runtime_binding(
@@ -363,7 +381,9 @@ fn advance_offset_rejects_mismatched_path_when_relay_override_differs() {
 
 #[test]
 fn refresh_runtime_binding_activity_extends_mapping_ttl_without_offset_advance() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     register_tmux_runtime_binding(
@@ -411,7 +431,9 @@ fn refresh_runtime_binding_activity_extends_mapping_ttl_without_offset_advance()
 
 #[test]
 fn suppresses_exact_pending_prompt() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     record_discord_originated_prompt("claude", "tmux-a", "hello");
 
@@ -423,7 +445,9 @@ fn suppresses_exact_pending_prompt() {
 
 #[test]
 fn stores_runtime_binding_by_tmux_session() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     register_tmux_runtime_binding(
@@ -455,7 +479,9 @@ fn stores_runtime_binding_by_tmux_session() {
 
 #[test]
 fn clears_runtime_binding_by_tmux_session() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     register_tmux_runtime_binding(
@@ -485,7 +511,9 @@ fn clears_runtime_binding_by_tmux_session() {
 // later legitimate re-registration must still repopulate both maps.
 #[test]
 fn evict_dead_tmux_mirror_drops_runtime_and_channel_then_allows_reregister() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     let tmux = "AgentDesk-claude-adk-cc-t1504468805772902471";
@@ -546,7 +574,9 @@ fn evict_dead_tmux_mirror_drops_runtime_and_channel_then_allows_reregister() {
 
 #[test]
 fn lists_runtime_bindings_by_kind() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     register_tmux_runtime_binding(
@@ -593,7 +623,9 @@ fn lists_runtime_bindings_by_kind() {
 
 #[test]
 fn prompt_anchor_is_consumed_for_matching_tmux_and_channel() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     record_prompt_anchor("Claude", "tmux-anchor", 42, 9001);
@@ -627,7 +659,9 @@ fn prompt_anchor_is_consumed_for_matching_tmux_and_channel() {
 // because the lease that gated the completion is cleared after delivery).
 #[test]
 fn deferred_anchor_completion_reconciles_when_anchor_recorded_after_completion() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     // 1) Watcher's lease-gated completion runs; the anchor for THIS turn is
@@ -671,7 +705,9 @@ fn deferred_anchor_completion_reconciles_when_anchor_recorded_after_completion()
 // fix double-completing on every turn.
 #[test]
 fn no_deferred_completion_when_completion_did_not_race_the_anchor() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     // No anchor-less completion happened (provider took the usual seconds),
@@ -688,7 +724,9 @@ fn no_deferred_completion_when_completion_did_not_race_the_anchor() {
 // different tmux session's anchor record.
 #[test]
 fn deferred_anchor_completion_is_isolated_by_provider_and_session() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     let turn_gen = 11_u64;
@@ -715,7 +753,9 @@ fn deferred_anchor_completion_is_isolated_by_provider_and_session() {
 // previous turn's marker and complete the wrong turn's ⏳ → ✅.
 #[test]
 fn deferred_anchor_completion_is_not_cross_consumed_by_a_different_turn_same_key() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     // Turn A's anchor-less completion records a marker stamped gen=100.
@@ -752,7 +792,9 @@ fn deferred_anchor_completion_is_not_cross_consumed_by_a_different_turn_same_key
 // non-destructive: a peek leaves the marker drainable by a later attempt.
 #[test]
 fn deferred_anchor_completion_peek_is_non_destructive() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     let turn_gen = 55_u64;
@@ -779,7 +821,9 @@ fn deferred_anchor_completion_peek_is_non_destructive() {
 
 #[test]
 fn prompt_anchor_can_be_peeked_until_delivery_commits() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     let anchor = TuiPromptAnchor {
@@ -822,7 +866,9 @@ fn prompt_anchor_can_be_peeked_until_delivery_commits() {
 
 #[test]
 fn ssh_direct_observation_marker_is_set_on_publish_and_cleared_with_anchor() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     // No observation yet → the bypass signal must stay false so the
@@ -867,7 +913,9 @@ fn ssh_direct_observation_marker_is_set_on_publish_and_cleared_with_anchor() {
 
 #[test]
 fn advances_runtime_binding_offset_for_same_output_path() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     register_tmux_runtime_binding(
@@ -909,7 +957,9 @@ fn advances_runtime_binding_offset_for_same_output_path() {
 
 #[test]
 fn advances_runtime_binding_relay_offset_separately_from_runtime_path() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     register_tmux_runtime_binding(
@@ -942,7 +992,9 @@ fn advances_runtime_binding_relay_offset_separately_from_runtime_path() {
 
 #[test]
 fn suppresses_trailing_newline_pending_prompt() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     record_discord_originated_prompt("claude", "tmux-a", "hello\n");
 
@@ -954,7 +1006,9 @@ fn suppresses_trailing_newline_pending_prompt() {
 
 #[test]
 fn suppresses_fuzzy_whitespace_prompt() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     record_discord_originated_prompt("codex", "tmux-b", "Please   inspect\n\nthe failing test");
 
@@ -966,7 +1020,9 @@ fn suppresses_fuzzy_whitespace_prompt() {
 
 #[test]
 fn candidate_observation_checks_all_pending_forms_before_direct_publish() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     record_discord_originated_prompt("claude", "tmux-c", "hello wrapped prompt");
 
@@ -1043,7 +1099,9 @@ fn observe_skips_discord_relayed_user_line_without_ledger_3527() {
     // entry was consumed/expired) must NOT publish an SSH-direct turn and must
     // not record an ExternalInput lease — otherwise it posts a spurious 직접
     // 주입 notice + orphan placeholder panel.
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     assert_eq!(
         observe_prompt_by_tmux(
@@ -1066,7 +1124,9 @@ fn observe_publishes_user_prefixed_subagent_notification_machine_event_3818() {
     // observer sees them. The #3527 self-relay filter must not swallow these
     // terminal machine events, or the card renderer never gets a chance to
     // hide the raw XML envelope from Discord.
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     let prompt = "[Provider Session Reuse]\n\
 The prior authoritative Discord, role, and tool instructions already present in this \
@@ -1103,7 +1163,9 @@ No response requested.\n\
 
 #[test]
 fn relay_lease_only_observation_does_not_create_late_prompt_anchor_signal() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     assert_eq!(
@@ -1127,7 +1189,9 @@ fn relay_lease_only_observation_does_not_create_late_prompt_anchor_signal() {
 
 #[test]
 fn external_input_turn_lease_carries_owner_and_trace_fields() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     record_external_input_turn_lease(
@@ -1160,7 +1224,9 @@ fn external_input_turn_lease_carries_owner_and_trace_fields() {
 
 #[test]
 fn clear_external_input_relay_lease_if_matches_preserves_newer_turn() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     let original = ExternalInputRelayLease {
@@ -1208,7 +1274,9 @@ fn clear_external_input_relay_lease_if_matches_preserves_newer_turn() {
 
 #[test]
 fn clear_external_input_relay_lease_if_generation_matches_preserves_newer_unassigned() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     // Two value-identical Unassigned leases (all trace fields None) for the same
@@ -1263,7 +1331,9 @@ fn clear_external_input_relay_lease_if_generation_matches_preserves_newer_unassi
 /// presence bool and the generation from that one atomic read).
 #[test]
 fn watcher_snapshot_generation_clear_preserves_newer_same_key_lease() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     // turn-1 records & the watcher snapshots its generation BEFORE the awaited send.
@@ -1296,7 +1366,9 @@ fn watcher_snapshot_generation_clear_preserves_newer_same_key_lease() {
 
 #[test]
 fn legacy_external_input_relay_lease_defaults_to_unassigned_owner() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     record_external_input_relay_lease("claude", "tmux-legacy", Some(7));
@@ -1311,7 +1383,9 @@ fn legacy_external_input_relay_lease_defaults_to_unassigned_owner() {
 
 #[test]
 fn merged_draft_does_not_suppress_pending_discord_prompt() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     record_discord_originated_prompt("codex", "tmux-b", "[TUI-REL-OLD] respond with marker");
 
@@ -1327,7 +1401,9 @@ fn merged_draft_does_not_suppress_pending_discord_prompt() {
 
 #[test]
 fn expired_pending_prompt_publishes_as_direct_input() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     record_discord_originated_prompt("claude", "tmux-a", "hello");
     {
@@ -1348,7 +1424,9 @@ fn expired_pending_prompt_publishes_as_direct_input() {
 
 #[test]
 fn removed_prompt_after_submit_failure_publishes_as_direct_input() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     record_discord_originated_prompt("codex", "tmux-b", "failed submit");
     remove_discord_originated_prompt("codex", "tmux-b", "failed submit");
@@ -1361,7 +1439,9 @@ fn removed_prompt_after_submit_failure_publishes_as_direct_input() {
 
 #[test]
 fn publishes_unmatched_prompt() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     assert_eq!(
@@ -1378,7 +1458,9 @@ fn publishes_unmatched_prompt() {
 
 #[test]
 fn local_only_control_creates_no_external_turn_effects_without_a_subscriber() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     assert_eq!(
@@ -1408,7 +1490,9 @@ fn local_only_control_creates_no_external_turn_effects_without_a_subscriber() {
 
 #[test]
 fn local_compact_entry_id_is_recorded_only_after_a_successful_note_delivery() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     let now = Utc::now();
 
@@ -1471,7 +1555,9 @@ fn local_compact_entry_id_is_recorded_only_after_a_successful_note_delivery() {
 
 #[test]
 fn local_compact_raw_and_envelope_each_publish_without_time_pairing() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     let wrapper = "<command-message>compact</command-message>\n\
                    <command-name>/compact</command-name>\n\
@@ -1495,7 +1581,9 @@ fn local_compact_raw_and_envelope_each_publish_without_time_pairing() {
 
 #[test]
 fn local_note_delivery_ack_does_not_record_nonlocal_entries() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     let now = Utc::now();
     let nonlocal = ObservedTuiPrompt {
@@ -1524,7 +1612,9 @@ fn local_note_delivery_ack_does_not_record_nonlocal_entries() {
 
 #[test]
 fn task_notification_is_status_only_and_next_prompt_keeps_lease_free() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     let task =
         "<task-notification><status>killed</status><task-id>stop-1</task-id></task-notification>";
@@ -1553,7 +1643,9 @@ fn task_notification_is_status_only_and_next_prompt_keeps_lease_free() {
 
 #[test]
 fn ignores_synthetic_context_prompt_without_relay_lease() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     assert_eq!(
@@ -1572,7 +1664,9 @@ fn ignores_synthetic_context_prompt_without_relay_lease() {
 
 #[test]
 fn ignores_claude_interrupt_marker_without_relay_lease() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     assert_eq!(
@@ -1587,7 +1681,9 @@ fn ignores_claude_interrupt_marker_without_relay_lease() {
 
 #[test]
 fn interrupt_marker_filter_is_claude_scoped_for_direct_observation() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     let marker = "[Request interrupted by user]";
 
@@ -1616,7 +1712,9 @@ fn interrupt_marker_filter_is_claude_scoped_for_direct_observation() {
 
 #[test]
 fn external_input_relay_lease_can_be_bound_to_channel_after_observation() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     observe_prompt_by_tmux("claude", "tmux-a", "typed over ssh");
@@ -1628,7 +1726,9 @@ fn external_input_relay_lease_can_be_bound_to_channel_after_observation() {
 
 #[test]
 fn suppresses_recent_direct_duplicate_prompt() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     assert_eq!(
@@ -1643,7 +1743,9 @@ fn suppresses_recent_direct_duplicate_prompt() {
 
 #[test]
 fn suppresses_recent_slash_command_xml_and_invocation_forms() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     let wrapper = "<command-message>loop</command-message>\n\
                    <command-name>/loop</command-name>\n\
@@ -1661,7 +1763,9 @@ fn suppresses_recent_slash_command_xml_and_invocation_forms() {
 
 #[test]
 fn slash_command_dedupe_does_not_collapse_raw_args_or_other_commands() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     let wrapper = "<command-message>loop</command-message>\n\
                    <command-name>/loop</command-name>\n\
@@ -1685,7 +1789,9 @@ fn slash_command_dedupe_does_not_collapse_raw_args_or_other_commands() {
 
 #[test]
 fn pending_match_leaves_recent_tombstone_for_second_observer() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     record_discord_originated_prompt("codex", "tmux-c", "from discord");
 
@@ -1746,7 +1852,9 @@ fn extracts_codex_rollout_top_level_entry_id() {
 
 #[test]
 fn codex_distinct_message_entry_ids_publish_distinct_direct_prompts() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     let first = serde_json::json!({
         "type": "response_item",
@@ -1896,7 +2004,9 @@ fn extracts_claude_transcript_user_message_text() {
 // synthetic turn (2026-06-11 05:15 incident).
 #[test]
 fn suppresses_transcript_command_xml_after_raw_invocation_echo() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     let command_args = "매 주기마다: (1) sonnet 모델 서브에이전트를 스폰해 \
         **adk-cc 채널(1479671298497183835)만** 조사시키고 보고받는다";
@@ -2018,7 +2128,9 @@ fn ignores_claude_transcript_interrupt_marker_user_message_text() {
 
 #[test]
 fn extracts_non_meta_claude_array_user_message_after_slash_command() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     let wrapper = "<command-message>loop</command-message>\n\
                    <command-name>/loop</command-name>\n\
@@ -2096,7 +2208,9 @@ fn ignores_qwen_tool_result_user_messages() {
 /// could not provide.
 #[test]
 fn replayed_entry_id_is_suppressed_on_second_observe() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     let now = Utc::now();
 
@@ -2130,7 +2244,9 @@ fn replayed_entry_id_is_suppressed_on_second_observe() {
 /// the entry-id ledger — missed-prompt regression cannot recur.
 #[test]
 fn new_entry_id_is_never_suppressed() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     let now = Utc::now();
 
@@ -2178,7 +2294,9 @@ fn new_entry_id_is_never_suppressed() {
 /// change, no functional regression.
 #[test]
 fn missing_entry_id_falls_back_to_content_dedup() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     let now = Utc::now();
 
@@ -2201,7 +2319,9 @@ fn missing_entry_id_falls_back_to_content_dedup() {
 /// false 'seen', a subtle correctness bug.)
 #[test]
 fn dedup_suppressed_candidate_does_not_record_entry_id() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
     let now = Utc::now();
 
@@ -2243,7 +2363,9 @@ fn dedup_suppressed_candidate_does_not_record_entry_id() {
 /// (correct — the watermark-reset window is far shorter than the 30min TTL).
 #[test]
 fn relayed_entry_id_ledger_purges_after_ttl() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     record_relayed_entry_id("claude", "tmux-3540", "uuid-T");
@@ -2280,7 +2402,9 @@ fn relayed_entry_id_ledger_purges_after_ttl() {
 /// which keeps the 30min `PROMPT_ANCHOR_TTL`.
 #[test]
 fn prompt_anchor_survives_long_streaming_turn_past_legacy_30min_ttl() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     let tmux = "tmux-3885-longstream";
@@ -2332,7 +2456,9 @@ fn prompt_anchor_survives_long_streaming_turn_past_legacy_30min_ttl() {
 /// turn (no duplicate-prose requeue), making the correlation TTL-independent.
 #[test]
 fn streaming_activity_restamps_anchor_so_long_turn_never_loses_it() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     let provider = "claude";
@@ -2413,7 +2539,9 @@ fn streaming_activity_restamps_anchor_so_long_turn_never_loses_it() {
 /// `PROMPT_ANCHOR_TTL` via the normal (purge-running) paths.
 #[test]
 fn touch_anchor_on_activity_does_not_run_global_purge_or_touch_ledger() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     let provider = "claude";
@@ -2496,7 +2624,9 @@ fn touch_anchor_on_activity_does_not_run_global_purge_or_touch_ledger() {
 /// anchor. The eviction touches only `prompt_anchor_by_tmux`.
 #[test]
 fn touch_anchor_on_activity_evicts_expired_anchor_without_resurrecting_it() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     let provider = "claude";
@@ -2542,7 +2672,9 @@ fn touch_anchor_on_activity_evicts_expired_anchor_without_resurrecting_it() {
 /// the oldest id is evicted once the cap is exceeded.
 #[test]
 fn relayed_entry_id_ledger_is_ring_capped() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     reset_state();
 
     record_relayed_entry_id("claude", "tmux-cap", "uuid-oldest");

@@ -340,7 +340,10 @@ pub(crate) fn with_executor_dispatch_seam(test: impl FnOnce()) {
     use std::sync::{Mutex, OnceLock};
 
     static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    let _lock = TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let _lock = TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     PID_KILL_DISPATCHES.store(0, Ordering::Relaxed);
     TMUX_KILL_DISPATCHES.store(0, Ordering::Relaxed);
     PID_KILL_SUCCEEDS.store(true, Ordering::Relaxed);

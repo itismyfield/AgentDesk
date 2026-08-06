@@ -537,7 +537,9 @@ mod tests {
 
     #[test]
     fn requested_tui_selects_claude_driver_when_available() {
-        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let _guard = TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         install_provider_hosting_config(&Config::default());
 
         let selection = resolve_provider_session_selection(&ProviderKind::Claude);
@@ -549,7 +551,9 @@ mod tests {
 
     #[test]
     fn requested_tui_selects_codex_driver_when_available() {
-        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let _guard = TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let mut config = Config::default();
         config.providers.insert(
             "codex".to_string(),
@@ -569,7 +573,9 @@ mod tests {
 
     #[test]
     fn codex_defaults_to_legacy_prompt_driver() {
-        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let _guard = TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         install_provider_hosting_config(&Config::default());
 
         let selection = resolve_provider_session_selection(&ProviderKind::Codex);
@@ -581,7 +587,9 @@ mod tests {
 
     #[test]
     fn channel_override_can_enable_tui_when_provider_default_is_disabled() {
-        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let _guard = TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let mut config = Config::default();
         config.providers.insert(
             "claude".to_string(),
@@ -617,7 +625,9 @@ mod tests {
 
     #[test]
     fn channel_override_can_disable_tui_when_provider_default_is_enabled() {
-        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let _guard = TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let mut config = Config::default();
         config.agents.push(test_agent_with_claude_channel(
             "1506295332949196840",
@@ -641,7 +651,9 @@ mod tests {
 
     #[test]
     fn unsupported_entrypoint_falls_back_even_when_claude_driver_exists() {
-        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let _guard = TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         install_provider_hosting_config(&Config::default());
 
         let selection =
@@ -661,7 +673,9 @@ mod tests {
 
     #[test]
     fn requested_non_claude_tui_still_falls_back_until_driver_exists() {
-        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let _guard = TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let mut config = Config::default();
         config.providers.insert(
             "claude".to_string(),
@@ -693,7 +707,9 @@ mod tests {
     // the operator explicitly sets the flag in `providers.codex`.
     #[test]
     fn codex_remote_ssh_gate_defaults_off() {
-        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let _guard = TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         install_provider_hosting_config(&Config::default());
 
         assert!(!codex_remote_ssh_enabled());
@@ -701,7 +717,9 @@ mod tests {
 
     #[test]
     fn codex_remote_ssh_gate_mirrors_explicit_true() {
-        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let _guard = TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let mut config = Config::default();
         config.providers.insert(
             "codex".to_string(),
@@ -741,7 +759,9 @@ mod tests {
 
     #[test]
     fn provider_runtime_pipe_overrides_tui_hosting_true() {
-        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let _guard = TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let mut config = Config::default();
         config.providers.insert(
             "claude".to_string(),
@@ -764,7 +784,9 @@ mod tests {
 
     #[test]
     fn provider_runtime_tui_overrides_tui_hosting_false() {
-        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let _guard = TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let mut config = Config::default();
         config.providers.insert(
             "claude".to_string(),
@@ -793,7 +815,9 @@ mod tests {
         // `claude_e_binary_missing` so a misconfiguration cannot break
         // dispatch. The assertion adapts to whichever environment the
         // test runs in (developer host vs. clean CI).
-        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let _guard = TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let mut config = Config::default();
         config.providers.insert(
             "claude".to_string(),
@@ -820,7 +844,9 @@ mod tests {
 
     #[test]
     fn provider_runtime_claude_e_on_codex_falls_back_with_unsupported_reason() {
-        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let _guard = TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let mut config = Config::default();
         config.providers.insert(
             "codex".to_string(),
@@ -845,7 +871,9 @@ mod tests {
 
     #[test]
     fn channel_runtime_overrides_provider_runtime() {
-        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let _guard = TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let mut config = Config::default();
         config.providers.insert(
             "claude".to_string(),
@@ -884,7 +912,9 @@ mod tests {
         // Phase 0 counter-review MAJOR-2: an operator who only sets
         // `runtime: tui` (without the legacy `tui_hosting` boolean) must
         // still cause the hook endpoint to be published at boot.
-        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let _guard = TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let mut config = Config::default();
         // Wipe the Claude default so we are not relying on the per-provider
         // default returning `true` for Claude.
@@ -911,7 +941,9 @@ mod tests {
         // channel has the legacy `tui_hosting: true` boolean set, because
         // the resolver would route that channel through LegacyPrompt.
         // Without this fix the hook predicate and the resolver disagree.
-        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let _guard = TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let mut config = Config::default();
         config.providers.insert(
             "claude".to_string(),
@@ -940,7 +972,9 @@ mod tests {
         // a single channel with explicit `runtime: tui` must light up the
         // predicate even when the provider has neither `runtime` nor
         // `tui_hosting` requesting TUI.
-        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let _guard = TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let mut config = Config::default();
         config.providers.insert(
             "claude".to_string(),
@@ -964,7 +998,9 @@ mod tests {
         // Phase 0: `runtime: pipe` and `runtime: claude-e` must NOT light up
         // the hook endpoint even when `tui_hosting: true` is also present
         // (explicit `runtime` wins).
-        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let _guard = TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
 
         let mut pipe_config = Config::default();
         pipe_config.providers.insert(
@@ -996,7 +1032,9 @@ mod tests {
 
     #[test]
     fn unknown_runtime_string_falls_back_to_tui_hosting_derivation() {
-        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let _guard = TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let mut config = Config::default();
         config.providers.insert(
             "claude".to_string(),

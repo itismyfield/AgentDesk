@@ -10,7 +10,7 @@
 
 | Gate | ci-main.yml job | ci-pr.yml job | ci-nightly.yml 대응 | 실행 조건 |
 | --- | --- | --- | --- | --- |
-| **Full tests** | `full_non_pg` | `check_fast` (compile/policy only) | `full_macos` + `full_windows` | main/nightly always run non-PG tests; the path-filtered PR lane is compile/policy only. |
+| **Full tests** | `full_non_pg` | `library_sweep` (+ `check_fast` compile/policy) | `full_macos` + `full_windows` | main/nightly always run non-PG tests. PR side: `library_sweep` runs the whole non-PG library harness on the broad `rust_or_policy` filter (#5185); `check_fast` stays compile/policy only. |
 | **PostgreSQL tests** | `postgres` | `test_fast`의 PG 서비스 | `postgres_full` | main/nightly는 항상 실행. PR의 `test_fast`와 selection observer는 `pg_db` path filter가 true일 때만 실행하며, false이면 required mirror가 명시적으로 green을 반환. |
 | **High-risk recovery** | `high-risk-recovery` | `high-risk-recovery` | `high_risk_recovery_full` | path filter hit 시에만 실행. nightly full job은 무조건. |
 
@@ -23,8 +23,80 @@ Selection observer required gate가 red로 만드는 observer 사망은 **프로
 **참인지**만 검사하며 관측이 충분한지는 검사하지 않는다. invocation 하한을
 제거했으므로 truthful all-zero summary도 통과한다.
 
+### PR 측 library sweep (#5185)
+
+`library_sweep` job은 non-PG 라이브러리 하네스 전체를
+`scripts/run_test_lane.py`를 통해 실행한다. 이 wrapper는 **실행 건수 임계를 쓰지
+않는다.** 임계는 집합의 스칼라 요약이고, 실측된 두 회피가 모두 임계를 통과했다:
+한 모듈을 402건 축소하면 `executed=6539`, 213건 모듈을 비활성화하면
+`executed=6708`로 둘 다 floor 6500 위에 남아 **GATE_RC=0**을 반환했다.
+
+대신 wrapper는 `scripts/lib_test_inventory_manifest.txt`에서 이 레인이 실행해야
+할 **test id 집합**을 유도하고(플랫폼별 static-only / cargo-only 보정은 #5144의
+`--verify-lib-inventory`와 같은 상수를 재사용한다), 선언된 `--skip` 패턴을 뺀 뒤
+실제 보고된 집합과 비교해 **양쪽 차분을 id 이름으로 출력하며** 실패한다.
+`--skip`은 wrapper와 cargo 양쪽에 선언되어야 하고 둘이 다르면 레인 실행 전에
+실패한다. `#[ignore]`는 선택 집합을 유지한 채 실행만 줄이는 우회로이므로
+원장(`ignored` 모드)에 집합으로 핀된다. libtest 요약줄이 `--max-summaries`를
+넘으면 실패하며(테스트 바이너리를 재실행하는 테스트가 자식 요약을 상속 stdout에
+쓴다), 주 요약줄은 유도된 기대 집합과 교차검증된다.
+
+libtest는 병렬 모드에서 `test <id> ... `과 판정을 **동기화되지 않은 두 번의
+write**로 내보내고, 그 stdout은 모든 테스트 스레드와 상속받은 자식 프로세스가
+공유한다. 실제 스윕에서 launchd-plist 헬퍼의 write가 이름 앞·이름과 판정 사이
+양쪽에 끼어드는 것이 관측됐다. 그래서 wrapper는 한 줄을 통째로 매치하지 않고
+`test <id> ... ` 조각을 `finditer`로 훑은 뒤 조각 사이 구간의 **맨 앞 또는 맨
+끝**에서만 판정을 인정한다(경로 중간의 `ok`는 판정이 아니다).
+
+한 줄에 이름이 둘 이상 미결로 남을 때의 LIFO 귀속은 **증명이 아니라 선택**이다.
+rust 1.94 `library/test/src/formatters/pretty.rs`는 병렬 모드에서 콘솔 스레드
+하나가 이름과 판정을 연달아 쓴다는 것만 보장하며, 그래서 **한 libtest
+프로세스는 이름을 둘 미결로 둘 수 없다**. `test A ... test B ... ok`는 부모와
+중첩 자식이 상속 stdout을 공유할 때만 나오고, 그 경우 두 가지 순서가 **바이트
+단위로 동일**하다. LIFO는 그중 하나를 답으로 고정한다.
+
+**이 wrapper가 막는 것과 막지 못하는 것.** 이전 판본은 "파서 오류가 false
+green으로 바뀌지 않는다"고 적었고, 그 전칭은 **실측으로 반증됐다**. `executed`,
+`failed`, `selected`는 모두 **스칼라**이므로 **서로 상쇄되는 두 개의 오독**은 셋을
+동시에 만족시킨다: 실패한 테스트가 외래 텍스트의 끝 `ok`를 가져가고 통과한
+테스트가 다른 외래 텍스트의 끝 `FAILED`를 가져가면 rc=0, unexpected=0, stale=0
+으로 **미등재 실패가 조용히 초록**이 된다.
+
+그래서 판정 귀속은 더 이상 개수로 판단하지 않는다. libtest는 실패한 id를
+`failures:` 블록에 스스로 나열하므로, wrapper는 그 **집합**을 파싱 집합과
+대조하고 양쪽 차분을 id로 출력한다. 집합 차분에는 상쇄가 없다. 정확히:
+
+* FAILED가 유실·날조되거나 **LIFO 선택이 틀려** 다른 id에 귀속되면 레인이 id를
+  지목하며 실패한다,
+* 요약이 실패를 보고하는데 `failures:` 블록을 복구할 수 없으면 실패한다(어느
+  id가 실패했는지 판정 자체가 불가능하므로),
+* `ignored` 오독은 원장 대비 양방향 집합 핀에 걸린다,
+* 테스트 자신의 stdout이 만들어낸 id는 `lane-extra`, 판정을 보고하지 않은 id는
+  `lane-missing`으로 실패한다.
+
+**아직 닫히지 않은 것**: 통과한 두 판정끼리의 뒤바뀜(양쪽 모두 executed·pass로
+남으므로 무해하다)과, `failures:` 블록 자체가 오염되는 경우 — 후자는 이름이 붙은
+집합 차분, 즉 **false green이 아니라 false red**로 나타난다. 이 레인의 아카이브
+전사 76개(73건 실패의 poison cascade 1개 포함)를 재생했을 때 블록 집합과 파싱
+집합은 전부 일치했으므로, 이 검사의 실측 false-red 비용은 0이다.
+
+#### required context 등록 절차 (#5185)
+
+`library_sweep`을 branch protection의 required check으로 등록할 때:
+
+1. 먼저 이 PR을 머지한다. 등록은 머지 **후**다.
+2. main에서 `Library test sweep`이 **N회 연속 green**인지 확인하고 **false-red
+   비율을 실측**한다. 1회 green은 근거가 아니다: 이 레인이 관측하는 stdout
+   오염은 확률적이고, 실제로 5회 스윕 중 1회 오탐이 관측된 적이 있다.
+3. 등록할 컨텍스트 이름은 **`Library test sweep (ubuntu-latest)`**
+   (= `library_sweep_required_context` job)이다. sweep 잡 본체인
+   `Library test sweep`을 등록하면 `rust_or_policy` path filter가 false인 PR에서
+   잡이 skip되어 **pending으로 영구 블록**된다. mirror job은 `if: always()`로
+   돌면서 skip을 명시적 green으로 변환하고 upstream 실패/취소에는 fail-closed다.
+
 `scripts/check-ci-runner-hardening.sh`의 `targets`에 등재된 `test_fast`,
-`high-risk-recovery`, `check_fast_cross_os`에는 **강도가 다른 두 층**이 있다.
+`high-risk-recovery`, `check_fast_cross_os`, `library_sweep`에는 **강도가 다른 두
+층**이 있다.
 섞어 읽으면 안 된다.
 
 1. **whole-job semantic hash — 변경 탐지기이지 보장이 아니다.** 같은 diff 안에서
@@ -91,6 +163,7 @@ cache를 먼저 설치한다. 이 wiring을 바꾸면 해당 workflow setup과 �
 | Gate | main 커맨드 | 재현 커맨드 (로컬) |
 | --- | --- | --- |
 | Full tests | `full_non_pg`의 `just check` step: `just check` | `just check` |
+| Full tests (PR) | `library_sweep`의 `Non-PostgreSQL library sweep (selection-set gated)` step | `python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 2 --skip _pg --skip pg_ --skip postgres -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- --skip _pg --skip pg_ --skip postgres` |
 | PostgreSQL tests | `postgres`의 `just test-postgres` step: `just test-postgres` | workflow와 같은 PostgreSQL 환경에서 `just test-postgres` |
 | High-risk recovery | `high-risk-recovery`의 `High-risk recovery lane` step: `cargo test --lib high_risk_recovery:: -- --test-threads=1` | 동일 |
 

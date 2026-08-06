@@ -834,6 +834,128 @@ jobs:
           UPSTREAM_RESULT: ${{ needs.high-risk-recovery.result }}
         run: ./scripts/required-check-mirror.sh
 
+  # #5185: measured on b6b551627, the curated PR lanes select 971 of 7538
+  # library tests (12.9%), and every curated lane is path-filtered. The one
+  # job that EXECUTES library tests unconditionally is
+  # `relay-authority-contract`: it carries no `if:` and no `needs:`, and this
+  # workflow has no `paths:` trigger filter, so it runs on every PR. (The
+  # `scripts` job is unconditional too, but its Rust step is
+  # `cargo test --lib -- --list`, which compiles and enumerates without
+  # running anything.) That is the real floor a PR missing `pg_db`,
+  # `high_risk_recovery` and the relay-authority path filters used to land on:
+  # 171 library tests -- 123 under `services::discord::session_relay_sink`,
+  # 43 under `services::discord::relay_recovery::tests`, 5 under
+  # `services::discord::tui_prompt_relay::local_model_queue_wake_e2e` -- i.e.
+  # 2.3% of the harness, all of it relay-authority surface.
+  #
+  # This lane raises that floor to the whole non-PostgreSQL library harness,
+  # run in parallel on the broad `rust_or_policy` filter: 6,934 tests selected
+  # on ubuntu-latest, of which 8 are `#[ignore]`d, so 6,926 execute (~1 min of
+  # test time). darwin derives 6,937 / 6,929 from the same manifest because
+  # four macOS-only tests are `#[cfg]`-absent on Linux while one Linux-only
+  # test is present; the wrapper resolves that through `--platform`, which
+  # defaults to the host, so the runner derives the Linux figures and a local
+  # reproduction on a Mac derives the darwin ones.
+  #
+  # Boundaries and why they are here rather than wider:
+  #   * `--lib` only. `full_non_pg` in ci-main.yml documents that an
+  #     `--all-targets` non-PG sweep panics in ~169 SQLite-fixture tests that
+  #     still await the #1238 PostgreSQL migration; pulling them in would force
+  #     either a huge isolation ledger or a re-narrowed filter.
+  #   * PostgreSQL tests keep their existing home in `test_fast` /
+  #     `just test-postgres`, which owns the service container.
+  #   * Parallel, NOT `--test-threads=1`: serialising would hide the shared
+  #     process-global state this sweep exposes instead of recording it.
+  #
+  # `scripts/run_test_lane.py` is what makes the green meaningful. It derives
+  # the exact id set this lane must run and fails -- naming every id on either
+  # side of the difference -- when the run reports a different one, and it
+  # fails on any failure that is not carried in
+  # `scripts/known_test_failures.txt` with a tracking issue and a reason.
+  # There is deliberately no execution-count floor; the step comment below
+  # records the two measured evasions that cleared one.
+  library_sweep:
+    name: Library test sweep
+    needs: changes
+    if: needs.changes.outputs.rust_or_policy == 'true'
+    runs-on: ubuntu-latest
+    env:
+      RUST_BACKTRACE: 1
+      # Match the other test lanes: assertions and panic text are preserved,
+      # only native debug symbols are dropped to cut link memory (#4245).
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      # See `check_fast` for rationale: `target/` excluded to protect the
+      # sccache GHA cache quota.
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # There is no execution-count floor here, deliberately. A floor is a
+      # scalar summary of a set, and both measured evasions cleared one: a
+      # 402-test narrowing of a single module and a 213-test module disable
+      # each stayed above a floor of 6500 and reported a green lane. The
+      # adjudicator instead derives the exact id set this lane must run from
+      # scripts/lib_test_inventory_manifest.txt minus the --skip patterns
+      # declared below, and names every id on either side of the difference --
+      # the same set-comparison convention #5144 moved the inventory pin onto.
+      #
+      # --skip is declared to the adjudicator as well as to libtest, and the
+      # two must match: a lane that told the adjudicator about a narrower
+      # selection than it executed would shrink its own expectation to fit.
+      #
+      # --max-summaries 2 because `non_wait_relay_parent_subprocess_entry`
+      # re-executes the test binary and its child libtest writes a second
+      # "test result:" line to the inherited stdout. Any further nesting is an
+      # error: child output is otherwise counted as if this run had produced it.
+      - name: Non-PostgreSQL library sweep (selection-set gated)
+        timeout-minutes: 45
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: |
+          python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 2 --skip _pg --skip pg_ --skip postgres -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- --skip _pg --skip pg_ --skip postgres
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
+
+  library_sweep_required_context:
+    name: Library test sweep (ubuntu-latest)
+    needs:
+      - changes
+      - library_sweep
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mirror library sweep result across path-filter skips
+        env:
+          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
+          FILTER_NAME: rust_or_policy
+          FILTER_OUTPUT: ${{ needs.changes.outputs.rust_or_policy }}
+          UPSTREAM_JOB_NAME: library_sweep
+          UPSTREAM_RESULT: ${{ needs.library_sweep.result }}
+        run: ./scripts/required-check-mirror.sh
+
   lint:
     name: Lint
     needs: changes

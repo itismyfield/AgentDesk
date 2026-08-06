@@ -269,6 +269,28 @@ targets = {
       },
     },
   },
+  # #5185: the PR-side whole-library sweep. Registering it here pins its step
+  # inventory, so removing the adjudicator and leaving a bare `cargo test --lib`
+  # -- which exits 0 on a zero-match filter -- is a diff that fails this script
+  # rather than one that quietly restores the false green the job exists to
+  # close. Read the two-layer caveat above before treating the hash as a
+  # guarantee: it detects change, it does not prevent it.
+  "library_sweep" => {
+    "label" => "PR library sweep job",
+    "name" => "Library test sweep",
+    "needs" => "changes",
+    "if" => "needs.changes.outputs.rust_or_policy == 'true'",
+    "runs_on" => "ubuntu-latest",
+    "job_sha256" => "41d8f5d779fa8029618033e45ddc4e068c207ca748a2efa6f79491ad3c8e9785",
+    "cargo_steps" => {
+      "Non-PostgreSQL library sweep (selection-set gated)" => {
+        "commands" => [
+          "python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 2 --skip _pg --skip pg_ --skip postgres -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- --skip _pg --skip pg_ --skip postgres",
+        ],
+        "timeout_minutes" => 45,
+      },
+    },
+  },
   "relay-authority-contract" => {
     "label" => "relay-authority contract job",
     "name" => "relay-authority-contract",

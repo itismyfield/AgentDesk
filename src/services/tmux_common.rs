@@ -1646,22 +1646,35 @@ mod sentinel_tests {
         assert!(content.contains("\"provider\":\"codex\""));
     }
 
+    /// #5185: this test used to save `AGENTDESK_ROOT_DIR`/`HOSTNAME` into
+    /// locals, `set_var` them raw, and restore by hand *after* the `assert!`
+    /// below. When that assertion fails the restore never runs, so the process
+    /// keeps a runtime root pointing at a directory this test then deletes, and
+    /// every later test that reads the root sees it. The failure surfaces
+    /// somewhere else, as a missing record rather than as this assertion.
+    ///
+    /// The guards restore on unwind, which is the property the hand-rolled
+    /// shape lacked. `set_value_after_shared_test_env_lock` is the
+    /// already-holding-the-lock variant, so it does not re-enter the mutex this
+    /// test holds directly (`acquire_shared_test_env_lock` panics on re-entry).
     #[test]
     fn dead_marker_path_is_cleaned_with_session_temp_files() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
-        let previous_host = std::env::var_os("HOSTNAME");
 
         let tdir =
             std::env::temp_dir().join(format!("adk-issue-2424-cleanup-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tdir);
 
-        unsafe {
-            std::env::set_var("AGENTDESK_ROOT_DIR", &tdir);
-            std::env::set_var("HOSTNAME", "issue-2424-host");
-        }
+        let _root_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            &tdir,
+        );
+        let _host_guard = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            "HOSTNAME",
+            std::ffi::OsStr::new("issue-2424-host"),
+        );
 
         let session = format!("issue-2424-cleanup-sess-{}", std::process::id());
         let marker_path = session_dead_marker_path(&session);
@@ -1678,14 +1691,6 @@ mod sentinel_tests {
         );
 
         let _ = std::fs::remove_dir_all(&tdir);
-        match previous_root {
-            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-        }
-        match previous_host {
-            Some(value) => unsafe { std::env::set_var("HOSTNAME", value) },
-            None => unsafe { std::env::remove_var("HOSTNAME") },
-        }
     }
 
     #[test]
