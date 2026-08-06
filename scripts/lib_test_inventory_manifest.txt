@@ -2488,6 +2488,14 @@ services::discord::health::stall_verdict::tests::verdict_serializes_for_health_d
 services::discord::health::tests::reload_bot_tokens_keeps_previous_client_when_credential_is_missing
 services::discord::health::tests::reload_bot_tokens_reports_success_and_invalidates_user_id_cache
 services::discord::health::tests::utility_bot_user_id_cache_rejects_stale_http_after_reload
+services::discord::health::transcript_binding_stall::tests::a_binding_left_on_a_superseded_session_alerts_after_the_rotation_record_is_gone
+services::discord::health::transcript_binding_stall::tests::a_dead_pane_or_detached_relay_is_somebody_elses_verdict
+services::discord::health::transcript_binding_stall::tests::a_live_turn_waiting_on_a_frozen_transcript_alerts
+services::discord::health::transcript_binding_stall::tests::a_pending_rotation_makes_a_frozen_binding_a_confirmed_fault
+services::discord::health::transcript_binding_stall::tests::a_superseded_binding_whose_transcript_still_grows_is_not_alerted_on
+services::discord::health::transcript_binding_stall::tests::a_transcript_that_grew_recently_is_healthy_even_mid_rotation
+services::discord::health::transcript_binding_stall::tests::an_idle_channel_is_never_alerted_on
+services::discord::health::transcript_binding_stall::tests::an_unresolvable_bound_transcript_is_not_this_verdict
 services::discord::health::watcher_respawn::tests::deadman_switch_escalates_after_threshold_then_clears_on_watcher_return
 services::discord::health::watcher_respawn::tests::deadman_switch_ignores_idle_channel_without_relay_work
 services::discord::health::watcher_respawn::tests::force_clean_respawn_offset_floor_ignores_stale_prior_generation_frontier
@@ -5154,7 +5162,12 @@ services::discord::tui_prompt_relay::rehydration::tests::markerless_codex_tui_fa
 services::discord::tui_prompt_relay::rehydration::tests::markerless_codex_tui_fallback_rejects_ambiguous_same_cwd_sessions
 services::discord::tui_prompt_relay::session_rotation_settle::tests::a_committed_terminal_settles_even_with_bytes_left_over
 services::discord::tui_prompt_relay::session_rotation_settle::tests::a_fully_drained_frozen_transcript_settles_its_unfinalizable_inflight
+services::discord::tui_prompt_relay::session_rotation_settle::tests::a_hook_adopted_binding_outranks_the_stale_launch_script
+services::discord::tui_prompt_relay::session_rotation_settle::tests::a_hook_adopted_binding_with_no_transcript_on_disk_does_not_win
+services::discord::tui_prompt_relay::session_rotation_settle::tests::a_launch_script_that_caught_up_takes_authority_back
+services::discord::tui_prompt_relay::session_rotation_settle::tests::a_pane_with_no_adoption_on_record_still_yields_to_the_launch_script
 services::discord::tui_prompt_relay::session_rotation_settle::tests::a_stalled_drain_gives_up_and_settles_at_the_bound
+services::discord::tui_prompt_relay::session_rotation_settle::tests::rehydration_does_not_revert_an_adopted_binding_after_the_settle_pass_runs
 services::discord::tui_prompt_relay::session_rotation_settle::tests::rotation_without_a_pinned_inflight_rebinds_immediately
 services::discord::tui_prompt_relay::session_rotation_settle::tests::undelivered_bytes_in_the_frozen_transcript_are_drained_before_the_rotation_settles
 services::discord::tui_prompt_relay::synthetic_orphan_reclaim::tests::orphan_row_is_reclaimable_matches_stale_session_bound_orphan_on_caller_session
@@ -7031,6 +7044,8 @@ services::tui_prompt_control::tests::recognizes_known_local_controls_without_mat
 services::tui_prompt_control::tests::recognizes_raw_and_envelope_without_using_them_as_a_dedup_key
 services::tui_prompt_dedupe::session_rotation::tests::drain_progress_resets_the_stall_counter_and_stall_accumulates
 services::tui_prompt_dedupe::session_rotation::tests::second_hop_preserves_the_original_frozen_transcript
+services::tui_prompt_dedupe::session_rotation::tests::settling_a_rotation_does_not_retire_the_adopted_session_authority
+services::tui_prompt_dedupe::session_rotation::tests::the_adopted_authority_is_writable_without_a_rotation_record
 services::tui_prompt_dedupe::tests::advance_offset_rejects_mismatched_path_when_relay_override_differs
 services::tui_prompt_dedupe::tests::advances_runtime_binding_offset_for_same_output_path
 services::tui_prompt_dedupe::tests::advances_runtime_binding_relay_offset_separately_from_runtime_path

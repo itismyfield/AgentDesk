@@ -538,6 +538,7 @@ src/
 │   │   │   ├── snapshot.rs
 │   │   │   ├── stall_liveness.rs
 │   │   │   ├── stall_verdict.rs
+│   │   │   ├── transcript_binding_stall.rs
 │   │   │   └── watcher_respawn.rs
 │   │   ├── idle_recap/
 │   │   │   ├── card.rs

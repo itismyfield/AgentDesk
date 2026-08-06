@@ -680,6 +680,7 @@ mod tests {
             mailbox_active_turn_nonce: None,
             bound_output_path: None,
             bound_session_id: None,
+            transcript_binding_stall: "none",
             inflight_terminal_delivery_committed: false,
             inflight_identity: None,
             inflight_finalizer_turn_id: None,

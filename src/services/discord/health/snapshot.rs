@@ -7,6 +7,7 @@ use super::provider_probe::{self, ProviderHealthSnapshot};
 use super::redaction;
 use super::session_enrichment::SessionEnrichment;
 use super::stall_verdict;
+use super::transcript_binding_stall::{self, resolve_bound_selector};
 use super::{BotTokenReloadScopes, HealthRegistry, bot_token_reload_scopes};
 use crate::services::discord;
 use crate::services::discord::SharedData;
@@ -111,6 +112,10 @@ pub struct WatcherStateSnapshot {
     /// advances a watermark) is intentionally never consulted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bound_session_id: Option<String>,
+    /// #5188 (R5/R6): `"none"`, or why a delivery binding is pointed at a
+    /// transcript that stopped growing. See
+    /// [`super::transcript_binding_stall::TranscriptBindingStall`].
+    pub transcript_binding_stall: &'static str,
     /// #3126: `true` when the in-flight row records a turn whose terminal
     /// assistant response has already been committed
     /// (`InflightTurnState::terminal_delivery_committed`). A row with this set
@@ -208,39 +213,6 @@ fn ownerless_external_input_inflight_is_idle(
     inflight: Option<&discord::inflight::InflightTurnState>,
 ) -> bool {
     inflight.is_some_and(discord::inflight::ownerless_external_input_inflight_is_stale)
-}
-
-/// #4408 phase-2 (I1): resolve the transcript path / provider session the relay
-/// tail is bound to, surfaced on `watcher-state` so the out-of-band watchdog can
-/// compare the server's asserted selector (B) against its own growth-aware
-/// transcript pick (F).
-///
-/// Precedence is per field: a live inflight row's persisted `output_path` /
-/// `session_id` win because they are the authoritative binding; when the inflight
-/// row is absent — or leaves a field blank — we fall back to the in-memory tmux
-/// runtime binding's `relay_output_path` / `session_id`. Both inputs come from
-/// sync single-shot lookups that never straddle an await (so no
-/// `await_holding_lock` allow is introduced), and the side-effecting
-/// claude-session-id GET path is intentionally NOT consulted. A field is `None`
-/// when neither source knows it, so serialization omits it and the watchdog fails
-/// closed instead of alarming on an unknown bind.
-fn resolve_bound_selector(
-    inflight_output_path: Option<&str>,
-    inflight_session_id: Option<&str>,
-    binding: Option<&crate::services::tui_prompt_dedupe::TuiRuntimeBinding>,
-) -> (Option<String>, Option<String>) {
-    fn non_blank(value: Option<&str>) -> Option<String> {
-        value
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    }
-
-    let bound_output_path = non_blank(inflight_output_path)
-        .or_else(|| non_blank(binding.map(|binding| binding.relay_output_path())));
-    let bound_session_id = non_blank(inflight_session_id)
-        .or_else(|| non_blank(binding.and_then(|binding| binding.session_id.as_deref())));
-    (bound_output_path, bound_session_id)
 }
 
 fn relay_active_turn_from_inflight(
@@ -640,6 +612,15 @@ async fn watcher_state_snapshot_for_shared(
             .and_then(|state| state.session_id.as_deref()),
         tmux_runtime_binding.as_ref(),
     );
+    let transcript_binding_stall = transcript_binding_stall::resolve_transcript_binding_stall(
+        provider_name,
+        authoritative_tmux_session.as_deref(),
+        bound_output_path.as_deref(),
+        bound_session_id.as_deref(),
+        session.attached,
+        tmux_session_alive,
+        session.inflight_state_present,
+    );
     Some(WatcherStateSnapshot {
         provider: provider_name.to_string(),
         attached: session.attached,
@@ -663,6 +644,7 @@ async fn watcher_state_snapshot_for_shared(
         mailbox_active_turn_nonce: mailbox_snapshot.active_turn_nonce.clone(),
         bound_output_path,
         bound_session_id,
+        transcript_binding_stall: transcript_binding_stall.as_str(),
         inflight_terminal_delivery_committed: session.inflight_terminal_delivery_committed(),
         inflight_identity: session
             .inflight
