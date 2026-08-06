@@ -32,12 +32,12 @@ pub(super) async fn rebind_slot_with_pg(
                 Json(json!({"error": format!("auto-queue run '{run_id}' not found")})),
             ));
         }
-        Some("active") | Some("paused") => {}
+        Some(status) if crate::db::auto_queue::run_status::is_live_run_status(status) => {}
         Some(status) => {
             return Ok((
                 StatusCode::BAD_REQUEST,
                 Json(json!({
-                    "error": format!("slot rebind requires an active or paused run (status={status})"),
+                    "error": format!("slot rebind requires a live run (status={status})"),
                     "run_id": run_id,
                     "status": status,
                 })),

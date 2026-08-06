@@ -1543,7 +1543,6 @@ pub(crate) async fn cmd_auto_queue_config(
             Json(crate::server::routes::auto_queue::UpdateRunBody {
                 status: None,
                 unified_thread: None,
-                deploy_phases: None,
                 max_concurrent_threads: Some(max_concurrent_threads),
             }),
         )

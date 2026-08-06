@@ -14,7 +14,6 @@ export interface AutoQueueRun {
   completed_at: number | null;
   max_concurrent_threads?: number;
   thread_group_count?: number;
-  deploy_phases?: number[];
 }
 
 export interface AutoQueueThreadLink {

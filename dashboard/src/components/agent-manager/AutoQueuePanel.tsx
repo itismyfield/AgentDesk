@@ -362,7 +362,6 @@ export default function AutoQueuePanel({
   const run = status?.run ?? null;
   const entries = status?.entries ?? [];
   const phaseGates = status?.phase_gates ?? [];
-  const deployPhases = new Set(run?.deploy_phases ?? []);
   const resetAgentId = selectedAgentId ?? run?.agent_id ?? null;
   const resolveResetAgentTargets = (): string[] => {
     if (resetAgentId) return [resetAgentId];
@@ -457,7 +456,6 @@ export default function AutoQueuePanel({
         allEntriesSorted,
         completedCount,
         currentBatchPhase,
-        deployPhases,
         dispatchedCount,
         doneCount,
         entries,

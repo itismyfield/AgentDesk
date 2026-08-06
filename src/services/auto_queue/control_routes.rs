@@ -12,17 +12,6 @@ pub async fn update_run(
     Json(body): Json<UpdateRunBody>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     super::lifecycle_routes::validate_patch_status(&body)?;
-    if body
-        .deploy_phases
-        .as_ref()
-        .is_some_and(|phases| !phases.is_empty())
-        && !deploy_phase_api_enabled(&state)
-    {
-        return Err(auto_queue_json_error(
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "deploy_phases requires server.auth_token to be configured"})),
-        ));
-    }
     let Some(pool) = state.pg_pool_ref() else {
         return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
@@ -33,11 +22,7 @@ pub async fn update_run(
         ));
     }
     let ignored_unified_thread = body.unified_thread.is_some();
-    if body.status.is_none()
-        && body.deploy_phases.is_none()
-        && body.max_concurrent_threads.is_none()
-        && !ignored_unified_thread
-    {
+    if body.status.is_none() && body.max_concurrent_threads.is_none() && !ignored_unified_thread {
         return Err(auto_queue_json_error(
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "no fields to update"})),
@@ -48,11 +33,7 @@ pub async fn update_run(
             StatusCode::CONFLICT,
             Json(json!({"error": format!("auto-queue run '{id}' is not pending")})),
         )),
-        Ok((0, None))
-            if body.status.is_some()
-                || body.deploy_phases.is_some()
-                || body.max_concurrent_threads.is_some() =>
-        {
+        Ok((0, None)) if body.status.is_some() || body.max_concurrent_threads.is_some() => {
             Err(auto_queue_json_error(
                 StatusCode::NOT_FOUND,
                 Json(json!({"error": format!("auto-queue run '{id}' not found")})),
