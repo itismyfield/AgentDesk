@@ -1050,9 +1050,15 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
     @staticmethod
     def _production_cleanup_handlers() -> str:
         deploy = DEPLOY.read_text(encoding="utf-8")
+        # _cleanup_on_exit calls _emit_terminal_deploy_marker (#5189: every deploy
+        # exit must leave a greppable terminal marker). Pull in the real definition
+        # instead of stubbing it, so this harness cannot silently drift from the
+        # production exit path it claims to exercise.
+        marker_start = deploy.index("_emit_terminal_deploy_marker() {")
+        marker_end = deploy.index("_finalize_detached_helper() {", marker_start)
         start = deploy.index("_cleanup_owned_pg_tunnel_preflight() {")
         end = deploy.index("_self_hosted_release_session() {", start)
-        return deploy[start:end]
+        return deploy[marker_start:marker_end] + deploy[start:end]
 
     def test_int_cleanup_reaps_probe_once_and_returns_130(self):
         status, events = self._run_signal_cleanup("INT")
