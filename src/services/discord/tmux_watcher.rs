@@ -198,54 +198,6 @@ pub(in crate::services::discord) use self::turn_identity::pinned_delivery_lease_
 use self::turn_stream_collector::*;
 use self::utf8_chunk_decoder::*;
 
-#[derive(Debug)]
-struct RestoredSeedDisposition {
-    stream_seed: WatcherStreamSeed,
-    discard_restored_seed: bool,
-    seed_reassigned_to_different_turn: bool,
-    restored_seed_undelivered_body_len: usize,
-    prompt_anchor_present: bool,
-}
-
-fn watcher_stream_seed_after_restored_seed_discard(
-    restored_turn_seed: Option<RestoredWatcherTurn>,
-    current_turn_identity: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
-    prompt_anchor_message_id: Option<u64>,
-) -> RestoredSeedDisposition {
-    let seed_from_rewind = restored_seed_from_rewind(restored_turn_seed.as_ref());
-    let restored_seed_undelivered_body_len = restored_turn_seed
-        .as_ref()
-        .and_then(|seed| seed.full_response.get(seed.response_sent_offset..))
-        .map(|body| body.trim().chars().count())
-        .unwrap_or(0);
-    let restored_seed_has_body = restored_seed_undelivered_body_len > 0;
-    let prompt_anchor_present = prompt_anchor_message_id.is_some();
-    let seed_reassigned_to_different_turn = restored_seed_reassigned_to_different_turn(
-        restored_turn_seed.as_ref(),
-        current_turn_identity,
-        prompt_anchor_message_id,
-    );
-    let discard_restored_seed = should_discard_restored_seed_for_idle_direct_prompt(
-        restored_turn_seed.is_some(),
-        prompt_anchor_present,
-        restored_seed_has_body,
-        seed_from_rewind,
-        seed_reassigned_to_different_turn,
-    );
-    let stream_seed = watcher_stream_seed(if discard_restored_seed {
-        None
-    } else {
-        restored_turn_seed
-    });
-    RestoredSeedDisposition {
-        stream_seed,
-        discard_restored_seed,
-        seed_reassigned_to_different_turn,
-        restored_seed_undelivered_body_len,
-        prompt_anchor_present,
-    }
-}
-
 /// Background watcher variant used by restart recovery to continue editing an
 /// existing streaming placeholder instead of creating a new one.
 pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
