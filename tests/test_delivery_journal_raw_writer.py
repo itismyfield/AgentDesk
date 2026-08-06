@@ -304,5 +304,24 @@ class RawWriterAllowlistTests(unittest.TestCase):
             self.assertEqual(found, expected, f"{rel}: expected {expected}, found {found}")
             total += found
         self.assertEqual(total, 5, "the design names exactly five no-transport settlement sites")
+
+    # #5071 T1 S3c addition.
+
+    def test_source_contract_repeated_suppression_arm_gates_its_observation(self):
+        """Source text only: the post-terminal suppression arm is the one site
+        that re-enters with the same range, so its settlement must sit behind the
+        one-shot range test. This pins that the guard is computed once and that
+        the settlement call is gated by it. A text check: it cannot prove the
+        gate is evaluated at runtime -- W7 and W2/W2b do that."""
+        source = (
+            ROOT / "src/services/discord/tmux_watcher/loop_poll_prologue.rs"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(source.count("first_observation_of_suppressed_range("), 1)
+        self.assertEqual(source.count("if first_observation_of_range {"), 2)
+        self.assertLess(
+            source.index("first_observation_of_suppressed_range("),
+            source.index("settle_without_transport("),
+            "the guard is computed before the settlement it gates",
+        )
 if __name__ == "__main__":
     unittest.main()
