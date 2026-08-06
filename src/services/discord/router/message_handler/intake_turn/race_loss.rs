@@ -2,6 +2,36 @@ use super::*;
 
 pub(in crate::services::discord::router::message_handler) mod mailbox_reaction;
 
+/// #5170: why this intake is being handed back to the durable queue.
+///
+/// The two causes look identical downstream (same `Intervention`, same durable
+/// enqueue) but they carry opposite information about *who else is running*:
+///
+/// * [`Self::RaceLoss`] — the mailbox start-turn claim was taken by another
+///   turn. There is a live opponent that owns the completion wake edge, and the
+///   post-enqueue recheck exists only to cover the case where that opponent had
+///   already finished before our enqueue became visible.
+/// * [`Self::SessionTransitionBusy`] — nobody claimed the mailbox. The
+///   per-channel session transition lock merely happened to be held at the
+///   instant intake tried to take it. Treating that as a lost race is what
+///   armed an immediate re-kick, whose own transition wait then guaranteed the
+///   next intake would fail the same way (#5170).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord::router::message_handler) enum QueuedIntakeCause {
+    RaceLoss,
+    SessionTransitionBusy,
+}
+
+impl QueuedIntakeCause {
+    /// A real race loss owns an edge-trigger recheck (the opponent may already
+    /// be gone). A transition-busy requeue owns no edge at all — the transition
+    /// holder is still mid-flight — so it hands the channel to the slow
+    /// fail-open backstop instead of re-kicking into the same busy lock.
+    fn wants_immediate_idle_recheck(self) -> bool {
+        matches!(self, Self::RaceLoss)
+    }
+}
+
 fn race_loss_persistence_failure(
     channel_id: ChannelId,
     persistence_error: Option<&str>,
@@ -22,6 +52,7 @@ async fn enqueue_race_loss_requeued_intervention(
     channel_id: ChannelId,
     user_msg_id: MessageId,
     intervention: Intervention,
+    cause: QueuedIntakeCause,
 ) -> crate::services::discord::MailboxEnqueueOutcome {
     let outcome = crate::services::discord::queue_io::with_post_enqueue_idle_queue_kick_suppressed(
         crate::services::discord::mailbox_enqueue_intervention(
@@ -66,11 +97,35 @@ async fn enqueue_race_loss_requeued_intervention(
         }
     }
     if outcome.enqueued && outcome.persistence_error.is_none() {
-        crate::services::discord::queue_io::schedule_race_loss_requeue_post_enqueue_idle_recheck(
-            shared.clone(),
-            provider.clone(),
-            channel_id,
-        );
+        if cause.wants_immediate_idle_recheck() {
+            crate::services::discord::queue_io::schedule_race_loss_requeue_post_enqueue_idle_recheck(
+                shared.clone(),
+                provider.clone(),
+                channel_id,
+            );
+        } else {
+            // #5170 A — the durable enqueue above stays exactly where it is (it
+            // is what closes the process-crash loss window). Only the wake
+            // policy changes: an immediate re-kick here would re-enter intake
+            // while the transition it just failed to take is still held, and
+            // every such failure enqueued again. Arm the slow fail-open
+            // backstop so the channel still drains if no other edge arrives —
+            // the same treatment the finalize epilogue already gives a
+            // transition-owned channel.
+            tracing::debug!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                user_message_id = user_msg_id.get(),
+                "session-transition-busy intake queued durably; deferring the drain to the slow backstop instead of an immediate re-kick"
+            );
+            crate::services::discord::arm_slow_idle_queue_backstop_if_queue_nonempty(
+                shared,
+                provider,
+                channel_id,
+                "intake_session_transition_busy",
+            )
+            .await;
+        }
     }
     outcome
 }
@@ -102,6 +157,7 @@ pub(super) async fn handle_race_loss_enqueue(
     dispatch_id_for_thread: &Option<String>,
     turn_start_attempt: Option<crate::services::discord::turn_view_reconciler::TurnStartAttempt>,
     preserve_on_cancel: bool,
+    cause: QueuedIntakeCause,
 ) -> Result<(), Error> {
     let bot_owner_provider = crate::services::discord::resolve_discord_bot_provider(token);
     let want_queued_card = !turn_kind.is_background_trigger() && channel_id == original_channel_id;
@@ -161,6 +217,7 @@ pub(super) async fn handle_race_loss_enqueue(
             // reply to plain text.
             voice_announcement.clone(),
         ),
+        cause,
     )
     .await;
 
@@ -641,10 +698,19 @@ pub(super) async fn handle_race_loss_enqueue(
         .await;
     }
     let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::info!(
-        "  [{ts}] 🔀 RACE: message queued (another turn won), channel {}",
-        channel_id
-    );
+    // #5170: only the mailbox start-turn claim can be lost to "another turn".
+    // A transition-busy requeue has no winning opponent to name, and saying so
+    // sent operators looking for a competing turn that was never there.
+    match cause {
+        QueuedIntakeCause::RaceLoss => tracing::info!(
+            "  [{ts}] 🔀 RACE: message queued (another turn won), channel {}",
+            channel_id
+        ),
+        QueuedIntakeCause::SessionTransitionBusy => tracing::info!(
+            "  [{ts}] 🔀 QUEUE: message queued (session transition held at intake), channel {}",
+            channel_id
+        ),
+    }
     return Ok(());
 }
 

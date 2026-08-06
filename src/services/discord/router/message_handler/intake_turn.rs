@@ -1319,6 +1319,7 @@ pub(super) async fn handle_text_message(
             &dispatch_id_for_thread,
             turn_start_attempt,
             preserve_on_cancel,
+            race_loss::QueuedIntakeCause::RaceLoss,
         )
         .await;
     }

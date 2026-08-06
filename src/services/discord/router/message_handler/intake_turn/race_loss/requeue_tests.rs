@@ -61,6 +61,7 @@ async fn busy_transition_is_durable_before_the_guard_is_released() {
         channel_id,
         message_id,
         user_intervention(message_id.get(), "resume transition queue"),
+        QueuedIntakeCause::SessionTransitionBusy,
     )
     .await;
     assert!(outcome.enqueued);
@@ -127,6 +128,7 @@ async fn persistence_failure_rolls_back_queue_and_clears_dispatch_reservation() 
         channel_id,
         message_id,
         user_intervention(message_id.get(), "must roll back"),
+        QueuedIntakeCause::RaceLoss,
     )
     .await;
     assert!(outcome.persistence_error.is_some());
@@ -175,6 +177,7 @@ async fn race_loss_requeue_suppresses_post_enqueue_idle_kick_while_holder_active
         channel_id,
         MessageId::new(4_078_101),
         user_intervention(4_078_101, "race loss requeue"),
+        QueuedIntakeCause::RaceLoss,
     )
     .await;
     tokio::task::yield_now().await;
@@ -200,4 +203,132 @@ async fn race_loss_requeue_suppresses_post_enqueue_idle_kick_while_holder_active
     assert!(snapshot.cancel_token.is_some());
     assert_eq!(snapshot.active_user_message_id, Some(holder_msg));
     assert_eq!(snapshot.intervention_queue.len(), 1);
+}
+
+async fn yield_spawned_tasks() {
+    for _ in 0..6 {
+        tokio::task::yield_now().await;
+    }
+}
+
+type RecordedKicks = Arc<std::sync::Mutex<Vec<&'static str>>>;
+
+fn record_idle_queue_kicks(
+    channel_id: ChannelId,
+) -> (
+    RecordedKicks,
+    crate::services::discord::queue_io::IdleQueueKickHookResetForTests,
+) {
+    let kicks: RecordedKicks = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = kicks.clone();
+    let reset = crate::services::discord::queue_io::set_idle_queue_kick_hook_for_tests(Arc::new(
+        move |shared, provider, channel, reason| {
+            let recorded = recorded.clone();
+            Box::pin(async move {
+                if channel != channel_id {
+                    return None;
+                }
+                recorded.lock().expect("recorded kicks").push(reason);
+                let taken = crate::services::discord::mailbox_take_next_automatic_intervention(
+                    &shared, &provider, channel,
+                )
+                .await;
+                Some(crate::services::discord::IdleQueueKickoffChannelOutcome {
+                    started: taken.intervention.is_some(),
+                })
+            })
+        },
+    ));
+    (kicks, reset)
+}
+
+/// #5170 A, under-enforcement direction: a `SessionTransitionBusy` intake is
+/// not a lost race and must not re-arm the immediate edge-trigger recheck.
+/// That recheck was the engine of the observed spin — each rotation re-entered
+/// intake against a transition it could not take, which requeued and spawned
+/// the next rotation. The durable enqueue itself is unchanged (asserted here so
+/// the crash-loss window stays closed).
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn transition_busy_requeue_replaces_the_immediate_rekick_with_the_slow_backstop_5170() {
+    let tmp = tempfile::tempdir().expect("temp runtime root");
+    let _env = crate::config::set_agentdesk_root_for_test(tmp.path());
+
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(5_170_100);
+    let message_id = MessageId::new(5_170_101);
+    let (kicks, _hook) = record_idle_queue_kicks(channel_id);
+
+    let outcome = enqueue_race_loss_requeued_intervention(
+        &shared,
+        &provider,
+        channel_id,
+        message_id,
+        user_intervention(message_id.get(), "transition busy intake"),
+        QueuedIntakeCause::SessionTransitionBusy,
+    )
+    .await;
+    assert!(
+        outcome.enqueued && outcome.persistence_error.is_none(),
+        "the durable enqueue is unchanged by the cause tag"
+    );
+    yield_spawned_tasks().await;
+
+    // The channel is fully idle here: no holder, no transition guard. The
+    // race-loss cause would kick immediately (see the control test below); the
+    // transition-busy cause must not, because the transition it just failed to
+    // take is still in flight.
+    assert!(
+        kicks.lock().expect("recorded kicks").is_empty(),
+        "a transition-busy requeue must not re-kick into the transition it just lost"
+    );
+
+    // Over-suppression direction: the backlog must still have an owner.
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    yield_spawned_tasks().await;
+    assert_eq!(
+        kicks.lock().expect("recorded kicks").as_slice(),
+        ["intake_session_transition_busy"],
+        "the slow fail-open backstop must drain the backlog the requeue declined to kick"
+    );
+    assert!(
+        crate::services::discord::mailbox_snapshot(&shared, channel_id)
+            .await
+            .intervention_queue
+            .is_empty(),
+        "the backstop kick must consume the queued message"
+    );
+}
+
+/// Control for the test above: a genuine mailbox race loss keeps the immediate
+/// recheck, so the #5170 split narrows the edge-trigger to the cause that
+/// actually owns an edge rather than removing it.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn race_loss_requeue_still_takes_the_immediate_idle_recheck_5170() {
+    let tmp = tempfile::tempdir().expect("temp runtime root");
+    let _env = crate::config::set_agentdesk_root_for_test(tmp.path());
+
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(5_170_200);
+    let message_id = MessageId::new(5_170_201);
+    let (kicks, _hook) = record_idle_queue_kicks(channel_id);
+
+    let outcome = enqueue_race_loss_requeued_intervention(
+        &shared,
+        &provider,
+        channel_id,
+        message_id,
+        user_intervention(message_id.get(), "race loss requeue"),
+        QueuedIntakeCause::RaceLoss,
+    )
+    .await;
+    assert!(outcome.enqueued && outcome.persistence_error.is_none());
+    yield_spawned_tasks().await;
+
+    assert_eq!(
+        kicks.lock().expect("recorded kicks").as_slice(),
+        ["race_loss_requeue_idle_recheck"],
+        "a real race loss against an already-finished opponent keeps its immediate recheck"
+    );
 }
