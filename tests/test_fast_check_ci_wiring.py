@@ -36,6 +36,10 @@ EXPECTED_TEST_NON_PG_COMMANDS = (
     "cargo test --lib formatting -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib delivery_record -- --skip _pg --skip pg_ --skip postgres",
     (
+        "cargo test --lib services::discord::recovery_known_ids::recovery_known_message_ids_tests"
+        " -- --skip _pg --skip pg_ --skip postgres"
+    ),
+    (
         "cargo test --lib services::discord::tmux::placeholder_suppression::evidence::tests"
         " -- --skip _pg --skip pg_ --skip postgres"
     ),

@@ -42,6 +42,10 @@ test-non-pg:
     cargo test --lib server::routes::e2e_control::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib formatting -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib delivery_record -- --skip _pg --skip pg_ --skip postgres
+    # #5191: the catch-up recovery dedup must cover the dequeue→claim window,
+    # including a merged head's absorbed source ids, without letting an orphaned
+    # reservation suppress a genuinely unanswered message.
+    cargo test --lib services::discord::recovery_known_ids::recovery_known_message_ids_tests -- --skip _pg --skip pg_ --skip postgres
     # #4911: a winner-bound current-generation frontier must never delete a losing anchor.
     cargo test --lib services::discord::tmux::placeholder_suppression::evidence::tests -- --skip _pg --skip pg_ --skip postgres
     env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::watcher_lifecycle::tests::tests::turn_starts_reuse_healthy_runtime_path_incumbent_after_handoff -- --exact

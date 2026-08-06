@@ -510,6 +510,10 @@ pub(crate) struct ChannelMailboxSnapshot {
     pub(crate) active_turn_kind: ActiveTurnKind,
     pub(crate) intervention_queue: Vec<Intervention>,
     pub(crate) pending_user_dispatch: Option<MessageId>,
+    /// #5191 — the reserved head's absorbed inbound ids (see the same-named
+    /// field on `ChannelMailboxState`). Recovery dedup must union these with
+    /// the primary across the dequeue→claim window.
+    pub(crate) pending_user_dispatch_source_ids: Vec<MessageId>,
     pub(crate) pending_user_dispatch_since: Option<Instant>,
     pub(crate) pending_user_dispatch_lease_held_by_caller: bool,
     pub(crate) recently_valve_cleared_dispatch: Option<(MessageId, Instant)>,
@@ -1944,6 +1948,16 @@ struct ChannelMailboxState {
     /// re-enqueued/requeued (dispatch failed → queue-non-empty then covers it),
     /// or by the bounded safety valve below.
     pending_user_dispatch: Option<MessageId>,
+    /// #5191 — EVERY inbound id the reserved head speaks for, not just the
+    /// primary. A merged intervention keeps the newest message as
+    /// `pending_user_dispatch` but still answers for the ids it absorbed
+    /// (`Intervention::source_message_ids`), and `queued_message_ids()` already
+    /// unions both while the entry sits in the queue. Without this the union
+    /// COLLAPSES to the primary the moment the head is popped, re-exposing the
+    /// absorbed ids to the catch-up recovery scan for the whole dequeue→claim
+    /// window. Set and cleared strictly alongside `pending_user_dispatch` so
+    /// the two can never disagree.
+    pending_user_dispatch_source_ids: Vec<MessageId>,
     pending_user_dispatch_lease: Option<Arc<DispatchLease>>,
     /// #3167 BLOCKER-2 SAFETY VALVE — consecutive `Background` starts refused
     /// SOLELY because of `pending_user_dispatch` (the queue is already empty).
@@ -2227,6 +2241,9 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         active_turn_kind: state.active_turn_kind,
                         intervention_queue: state.intervention_queue.clone(),
                         pending_user_dispatch: state.pending_user_dispatch,
+                        pending_user_dispatch_source_ids: state
+                            .pending_user_dispatch_source_ids
+                            .clone(),
                         pending_user_dispatch_since: state.pending_user_dispatch_since,
                         pending_user_dispatch_lease_held_by_caller: state
                             .pending_user_dispatch_lease
@@ -2657,6 +2674,13 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     // intervention is moved into the reply, so we can reserve the
                     // dequeue→claim window against a racing Background start.
                     let dispatched_head = next_result.intervention.as_ref().map(|i| i.message_id);
+                    // #5191: the merged head answers for every absorbed id too;
+                    // capture them alongside the primary for the same reason.
+                    let dispatched_head_sources = next_result
+                        .intervention
+                        .as_ref()
+                        .map(|i| i.source_message_ids.clone())
+                        .unwrap_or_default();
                     let marker_error = if let Some(intervention) = next_result.intervention.as_ref()
                     {
                         save_channel_pending_dispatch_marker(
@@ -2717,7 +2741,11 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         // the slot is not claimed until `intake_turn` runs. Reserve
                         // the window so a Background start cannot slip in ahead.
                         if let Some(head) = dispatched_head {
-                            let dispatch_lease = set_pending_user_dispatch(&mut state, head);
+                            let dispatch_lease = set_pending_user_dispatch(
+                                &mut state,
+                                head,
+                                &dispatched_head_sources,
+                            );
                             TakeNextSoftResult {
                                 intervention: next_result.intervention,
                                 dispatch_lease: Some(dispatch_lease),
