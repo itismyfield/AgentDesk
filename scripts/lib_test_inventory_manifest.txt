@@ -5815,6 +5815,10 @@ services::discord::turn_finalizer::finalize::tests::finalize_chokepoint_publishe
 services::discord::turn_finalizer::finalize::tests::guarded_miss_preserves_parent_mapping_and_skips_parent_kickoff
 services::discord::turn_finalizer::finalize::tests::identity_guard_mismatch_does_not_release_wrong_owner_and_logs
 services::discord::turn_finalizer::finalize::tests::non_thread_finalize_schedules_no_parent_kickoff
+services::discord::turn_finalizer::finalize::tests::residue_tests::guarded_miss_residue_reconcile_preserves_live_newer_episode
+services::discord::turn_finalizer::finalize::tests::residue_tests::guarded_miss_residue_reconcile_releases_same_terminal_episode_and_rearms_queue
+services::discord::turn_finalizer::finalize::tests::residue_tests::guarded_miss_residue_without_terminal_nonce_is_held
+services::discord::turn_finalizer::finalize::tests::residue_tests::issue_shape_surviving_inflight_row_holds_recovery_on_every_tick
 services::discord::turn_finalizer::finalize::tests::thread_finalize_removes_parent_mapping_and_schedules_parent_kickoff
 services::discord::turn_finalizer::finalize_context::tests::watcher_after_pre_panel_release_only_flips_expected_guard_miss
 services::discord::turn_finalizer::tests::already_finalized_loser_cleans_same_turn_mailbox_and_inflight

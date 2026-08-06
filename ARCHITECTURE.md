@@ -1018,6 +1018,9 @@ src/
 │   │   │   ├── watcher_handoff.rs
 │   │   │   └── watcher_orphan_cleanup.rs
 │   │   ├── turn_finalizer/
+│   │   │   ├── finalize/
+│   │   │   │   └── tests/
+│   │   │   │       └── residue_tests.rs
 │   │   │   ├── actor_state.rs
 │   │   │   ├── cleanup.rs
 │   │   │   ├── completion_admission.rs
@@ -1026,6 +1029,7 @@ src/
 │   │   │   ├── delivery_lease.rs
 │   │   │   ├── finalize.rs
 │   │   │   ├── finalize_context.rs
+│   │   │   ├── guarded_finish_residue.rs
 │   │   │   ├── reconcile.rs
 │   │   │   └── watcher_backstop.rs
 │   │   ├── turn_view_reconciler/

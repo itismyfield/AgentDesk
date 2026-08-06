@@ -186,6 +186,7 @@ pub(super) fn should_ensure_synthetic_claim_marker(
 #[derive(Clone, Debug)]
 pub(in crate::services::discord) struct SyntheticClaimSnapshot {
     pub(in crate::services::discord) user_msg_id: u64,
+    pub(in crate::services::discord) turn_nonce: Option<String>,
     pub(in crate::services::discord) turn_source_external: bool,
     pub(in crate::services::discord) relay_owner_watcher: bool,
     pub(in crate::services::discord) injected_prompt_message_id: Option<u64>,
@@ -207,6 +208,7 @@ impl SyntheticClaimSnapshot {
         use crate::services::discord::inflight::{RelayOwnerKind, TurnSource};
         Self {
             user_msg_id: row.user_msg_id,
+            turn_nonce: row.turn_nonce.clone(),
             turn_source_external: row.turn_source == TurnSource::ExternalInput,
             relay_owner_watcher: row.relay_owner_kind == RelayOwnerKind::Watcher,
             injected_prompt_message_id: row.injected_prompt_message_id,

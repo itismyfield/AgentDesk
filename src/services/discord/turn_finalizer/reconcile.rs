@@ -83,6 +83,125 @@ async fn run_backstop_finalize(
     }
 }
 
+/// Consume identity-guarded finalize misses without ever converting a stale
+/// terminal into channel-scoped release authority.
+///
+/// A different mailbox owner id or episode nonce means a newer turn won and
+/// the residue is resolved without mutation. A matching episode is released
+/// only through the same #5176 terminal-evidence conjunction: explicit release
+/// authority (same terminal episode, or a separately cancelled token), no
+/// inflight owner, and structurally idle TUI. The mailbox actor then repeats an
+/// id + nonce + start-cutoff CAS at the mutation point.
+async fn reconcile_guarded_finish_residues(shared: &Arc<SharedData>) {
+    let residues: Vec<_> = shared
+        .turn_finalizer
+        .guarded_finish_residues()
+        .iter()
+        .map(|entry| (*entry.key(), entry.value().clone()))
+        .collect();
+
+    for (channel_id, residue) in residues {
+        let snapshot = crate::services::discord::mailbox_snapshot(shared, channel_id).await;
+        // The owner we recorded is gone — idle mailbox, different id, or a
+        // successor that reused the id under a new nonce. Nothing of ours is
+        // left to recover, so consume the record without mutating anything.
+        if !residue.matches_observed_owner(&snapshot) {
+            shared
+                .turn_finalizer
+                .guarded_finish_residues()
+                .remove(&channel_id);
+            continue;
+        }
+        let same_terminal_episode = residue.same_terminal_episode(&snapshot);
+        let proven_different_episode = match (
+            residue.terminal_turn_nonce.as_deref(),
+            snapshot.active_turn_nonce.as_deref(),
+        ) {
+            (Some(terminal_nonce), Some(active_nonce)) => {
+                !terminal_nonce.is_empty()
+                    && !active_nonce.is_empty()
+                    && terminal_nonce != active_nonce
+            }
+            _ => false,
+        };
+        if proven_different_episode {
+            // This is the protected counter-direction: a stale terminal saw a
+            // genuinely newer episode. The record has been consumed; no
+            // recovery work belongs to that live owner.
+            shared
+                .turn_finalizer
+                .guarded_finish_residues()
+                .remove(&channel_id);
+            tracing::debug!(
+                provider = residue.provider.as_str(),
+                channel_id = channel_id.get(),
+                expected_user_msg_id = residue.expected_user_msg_id,
+                active_user_msg_id = residue.active_user_msg_id,
+                reason = residue.reason(),
+                "TurnFinalizer guarded miss resolved as a different live episode"
+            );
+            continue;
+        }
+        let token = snapshot
+            .cancel_token
+            .as_ref()
+            .expect("active residual snapshot must carry its token");
+        let separately_cancelled = token.cancelled.load(std::sync::atomic::Ordering::Relaxed);
+        // Single definition, shared with the health reporter (#5068 r2).
+        let release_authorized = residue.release_authorized(&snapshot);
+        let inflight_state_present = crate::services::discord::inflight::inflight_state_file_exists(
+            &residue.provider,
+            channel_id.get(),
+        );
+        let tui_structurally_idle =
+            crate::services::discord::zombie_foreground_release::tui_structurally_idle(
+                &residue.provider,
+                token,
+            );
+        let release = crate::services::discord::zombie_foreground_release::terminal_evidence_allows_mailbox_release(
+            true,
+            release_authorized,
+            inflight_state_present,
+            tui_structurally_idle,
+        );
+        if !release {
+            tracing::debug!(
+                provider = residue.provider.as_str(),
+                channel_id = channel_id.get(),
+                expected_user_msg_id = residue.expected_user_msg_id,
+                active_user_msg_id = residue.active_user_msg_id,
+                generation = residue.generation,
+                reason = residue.reason(),
+                same_terminal_episode,
+                separately_cancelled,
+                inflight_state_present,
+                tui_structurally_idle,
+                "TurnFinalizer residual mailbox ownership held pending terminal evidence"
+            );
+            continue;
+        }
+
+        let released = super::guarded_finish_residue::release(shared, channel_id, &residue).await;
+        if released {
+            shared
+                .turn_finalizer
+                .guarded_finish_residues()
+                .remove(&channel_id);
+            tracing::warn!(
+                provider = residue.provider.as_str(),
+                channel_id = channel_id.get(),
+                expected_user_msg_id = residue.expected_user_msg_id,
+                released_user_msg_id = residue.active_user_msg_id,
+                generation = residue.generation,
+                reason = residue.reason(),
+                same_terminal_episode,
+                separately_cancelled,
+                "TurnFinalizer reconciler released terminal residual mailbox ownership"
+            );
+        }
+    }
+}
+
 /// The one reconciler. Finalizes deadline-armed gate-timeouts whose backstop
 /// elapsed, GUARANTEES the phase-5a watcher far-backstop for watcher-owned
 /// `register_start` Pending entries that never received a terminal (re-checking
@@ -95,6 +214,11 @@ pub(super) async fn reconcile(
     shared: &Arc<SharedData>,
 ) {
     let now = Instant::now();
+
+    // #5068: the finalizer actor owns guarded-miss recovery. Run before other
+    // deadline work so releasing a terminal residue promptly publishes the
+    // mailbox completion edge and re-arms queued delivery.
+    reconcile_guarded_finish_residues(shared).await;
 
     // #3041 P1-1 (B3): reclaim any delivery lease whose acquire deadline has
     // elapsed (a dead/stuck holder), so a legitimate successor can acquire. This

@@ -97,6 +97,14 @@ impl ZombieForegroundVerdict {
 pub(in crate::services::discord) fn classify_zombie_foreground(
     evidence: ZombieForegroundEvidence,
 ) -> ZombieForegroundVerdict {
+    if terminal_evidence_allows_mailbox_release(
+        evidence.mailbox_holds_active_turn,
+        evidence.active_turn_cancelled,
+        evidence.inflight_state_present,
+        evidence.tui_structurally_idle,
+    ) {
+        return ZombieForegroundVerdict::Release;
+    }
     if !evidence.mailbox_holds_active_turn {
         return ZombieForegroundVerdict::HoldNoActiveTurn;
     }
@@ -109,7 +117,37 @@ pub(in crate::services::discord) fn classify_zombie_foreground(
     if !evidence.tui_structurally_idle {
         return ZombieForegroundVerdict::HoldTuiNotIdle;
     }
-    ZombieForegroundVerdict::Release
+    // Dead by construction. Staying total keeps the P0 relay cancel path free of
+    // a panic point, and the fall-through HOLDS rather than releasing: reaching
+    // it can only mean a conjunct was added above without its negation arm, i.e.
+    // evidence this function cannot account for — and unaccounted evidence is
+    // fail-closed everywhere else in #5068. `debug_assert!` makes that loud in
+    // tests; release builds hold and retry on the next tick.
+    debug_assert!(
+        false,
+        "classify_zombie_foreground negation chain is not exhaustive"
+    );
+    ZombieForegroundVerdict::HoldTuiNotIdle
+}
+
+/// Shared #5176 terminal-evidence conjunction.
+///
+/// Cancel surfaces pass `release_authorized = token.cancelled`.  The #5068
+/// finalizer reconciler passes an exact episode-nonce match between the
+/// terminal submission and the residual mailbox token.  Both callers must
+/// independently prove that no inflight bridge owns the turn and that the TUI
+/// is structurally terminal. Keeping the conjunction here prevents the two
+/// recovery surfaces from drifting toward different definitions of a zombie.
+pub(in crate::services::discord) const fn terminal_evidence_allows_mailbox_release(
+    mailbox_holds_active_turn: bool,
+    release_authorized: bool,
+    inflight_state_present: bool,
+    tui_structurally_idle: bool,
+) -> bool {
+    mailbox_holds_active_turn
+        && release_authorized
+        && !inflight_state_present
+        && tui_structurally_idle
 }
 
 /// What a cancel surface actually accomplished at the mailbox.
@@ -147,7 +185,10 @@ fn readiness_is_structurally_idle(readiness: IndependentTmuxReadiness) -> bool {
 /// means. A token with no bound tmux session has no pane to contradict the
 /// other two evidences, so it is treated as structurally idle — the inflight
 /// and cancelled gates still have to pass.
-fn tui_structurally_idle(provider: &ProviderKind, token: &Arc<CancelToken>) -> bool {
+pub(in crate::services::discord) fn tui_structurally_idle(
+    provider: &ProviderKind,
+    token: &Arc<CancelToken>,
+) -> bool {
     let Some(tmux_session) = token
         .tmux_session_name()
         .filter(|session| !session.trim().is_empty())
