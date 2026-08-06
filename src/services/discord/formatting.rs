@@ -43,6 +43,7 @@ mod rollback_journal;
 use self::long_send_rollback::delete_rollback_channel_message;
 pub(in crate::services::discord) use self::long_send_rollback::message_ids_from_receipts;
 pub(in crate::services::discord) use self::long_send_rollback::send_long_message_raw_with_reference_rollback;
+pub(in crate::services::discord) use self::long_send_rollback::send_long_message_raw_with_reference_rollback_returning_receipts;
 pub(in crate::services::discord) use self::long_send_rollback::send_long_message_raw_with_rollback;
 pub(in crate::services::discord) use self::long_send_rollback::send_long_message_raw_with_rollback_returning_receipts;
 #[cfg(test)]
@@ -228,11 +229,11 @@ mod status_panel_v2_formatter_tests;
 #[path = "formatting/replace_long_message.rs"]
 mod replace_long_message;
 
-// The deferred receipt variant has no production consumer: the sink uses the
-// `_with_outcome_` entry point and T8 drives the deferred one directly.
 #[cfg(test)]
 pub(in crate::services::discord) use self::replace_long_message::ReplaceLastChunkAnchor;
-#[cfg(test)]
+// #5071 T1 S3a: the deferred receipt variant gained a production consumer — the
+// watcher's cutover short-replace arm, which needs the tail-continuation receipt
+// its `_with_outcome_` sibling does not surface.
 pub(in crate::services::discord) use self::replace_long_message::replace_long_message_raw_deferred_returning_receipt;
 pub(in crate::services::discord) use self::replace_long_message::{
     DeferredReplaceLongMessageOutcome, ReplaceLongMessageOutcome,

@@ -1,5 +1,19 @@
 # Discord Outbound Migration — Coverage Map (#1006 v3 / #1280 / #1436 / #1457)
 
+> Last refreshed: 2026-08-06 (#5071 T1 S3a — the **watcher terminal family** joined the
+> shadow journal. The watcher's own leased direct send opens an obligation before
+> transport and settles it from the guarded delivery result, so only a `Persisted`
+> durable record yields `T`+`C` while a proof-less advance settles as `Unknown`. The
+> placeholderless fresh-send arm gained
+> `send_long_message_raw_with_reference_rollback_returning_receipts`, and the cutover
+> deferred-replace receipt variant gained its first production consumer, so those arms
+> carry Discord's returned channel. The controller/gateway long-chunk path still reports
+> message ids only, so it yields no receipt and the journal leaves that obligation open
+> rather than synthesising one. `JournalObserver` moved from a sink field to one
+> process-wide instance so both families serialise onto a single actor. No v3 producer or
+> direct-send callsite is added and no delivery behaviour changes, so the coverage rows
+> below are unchanged.)
+
 > Last refreshed: 2026-08-06 (#5071 T1 S2 — the raw `formatting` transports gained
 > receipt-preserving parallel entry points
 > (`send_long_message_raw_with_rollback_returning_receipts`,

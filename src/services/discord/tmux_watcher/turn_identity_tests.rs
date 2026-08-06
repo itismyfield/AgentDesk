@@ -963,18 +963,24 @@ fn watcher_legacy_short_and_long_same_generation_reset_reject_delayed_record_491
         let proof = super::super::terminal_long_chunks::WatcherTerminalDeliveryProof {
             anchor_msg_id: Some(poise::serenity_prelude::MessageId::new(anchor)),
             raw_body: a_body.to_string(),
+            receipt: None,
         };
+        // #5071 T1 S3a: `commit_legacy_watcher_delivery` now returns the guarded
+        // result; `legacy_watcher_delivery_committed` is the unchanged predicate
+        // this assertion always meant.
         assert!(
-            !super::super::terminal_long_chunks::commit_legacy_watcher_delivery(
-                crate::services::discord::tmux::WatcherDeliveryTarget {
-                    shared: &shared,
-                    provider: &provider,
-                    channel_id: channel,
-                    tmux_session_name: tmux,
-                },
-                identity_a,
-                (0, 128),
-                Some(&proof),
+            !super::super::terminal_long_chunks::legacy_watcher_delivery_committed(
+                super::super::terminal_long_chunks::commit_legacy_watcher_delivery(
+                    crate::services::discord::tmux::WatcherDeliveryTarget {
+                        shared: &shared,
+                        provider: &provider,
+                        channel_id: channel,
+                        tmux_session_name: tmux,
+                    },
+                    identity_a,
+                    (0, 128),
+                    Some(&proof),
+                )
             ),
             "legacy short and long landed POSTs both settle stale without advancing"
         );

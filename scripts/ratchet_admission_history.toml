@@ -93,3 +93,11 @@ old_cap = 2716
 new_cap = 2717
 decompose_issue = 5176
 count = 3
+
+[[admission]]
+ratchet = "hotfile_ratchet"
+file = "src/services/discord/tmux_watcher.rs"
+old_cap = 2502
+new_cap = 2544
+decompose_issue = 5071
+count = 4

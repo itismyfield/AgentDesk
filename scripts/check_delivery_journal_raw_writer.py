@@ -54,8 +54,21 @@ FAMILY_REGISTRY = (
 # uninstrumented. Whether the instrumentation is CORRECT is proven only by the
 # Rust runtime tests T1-T8 and their mutations M1-M7 (see the SOURCE-CONTRACT
 # block in tests/test_delivery_journal_raw_writer.py for the index).
-JOURNAL_FACADE_CALL = re.compile(r"\bself\.journal\.(?:begin_fresh|finish_fresh)\s*\(")
-UNINSTRUMENTED_FAMILY_BASELINE = 4
+#
+# #5071 T1 S3a extension. The watcher terminal family cannot spell the sink's
+# facade: `tmux_output_watcher_with_restore` is a free function with no `self`,
+# so it reaches the journal through the `journal::watcher` facade instead. The
+# pattern below is therefore an alternation of two EXACT call shapes, not a
+# loosened one — each alternative names its own module path and function, and
+# neither matches a bare `journal`, a bare `watcher`, or an arbitrary method.
+# Everything the S2 block says about what a match does NOT prove applies
+# unchanged to the new alternative: one token anywhere in the anchor file,
+# including a string literal or a test module, flips the family.
+JOURNAL_FACADE_CALL = re.compile(
+    r"\bself\.journal\.(?:begin_fresh|finish_fresh)\s*\("
+    r"|\bjournal_watcher::(?:begin_watcher_terminal|settle_watcher_terminal)\s*\("
+)
+UNINSTRUMENTED_FAMILY_BASELINE = 3
 
 
 def call_sites(root: Path) -> tuple[Counter[str], int]:

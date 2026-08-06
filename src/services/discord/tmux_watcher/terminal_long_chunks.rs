@@ -53,6 +53,13 @@ pub(in crate::services::discord) enum GuardedWatcherDeliveryResult {
 pub(in crate::services::discord) struct WatcherTerminalDeliveryProof {
     pub(in crate::services::discord) anchor_msg_id: Option<MessageId>,
     pub(in crate::services::discord) raw_body: String,
+    /// #5071 T1 S3a: the Discord response behind `anchor_msg_id`, carrying the
+    /// channel Discord actually returned. `None` on the controller/gateway path,
+    /// which reports message ids only — the shadow journal then leaves the
+    /// obligation open rather than synthesising a receipt that could never trip
+    /// the `channel_mismatch` branch.
+    pub(in crate::services::discord) receipt:
+        Option<crate::services::discord::outbound::DiscordTransportReceipt>,
 }
 
 /// Admit a delivery epilogue for the captured source identity.
@@ -199,13 +206,17 @@ pub(in crate::services::discord) fn record_watcher_terminal_delivery(
     }
 }
 
+/// #5071 T1 S3a: returns the guarded result rather than a bare bool so the caller
+/// can both keep its legacy `frontier_committed` decision (via
+/// [`legacy_watcher_delivery_committed`]) and journal the honest distinction
+/// between a durably recorded delivery and a proof-less advance.
 pub(in crate::services::discord) fn commit_legacy_watcher_delivery(
     target: WatcherDeliveryTarget<'_>,
     identity: WatcherDeliveryIdentity,
     range: (u64, u64),
     proof: Option<&WatcherTerminalDeliveryProof>,
-) -> bool {
-    let result = proof.map_or_else(
+) -> GuardedWatcherDeliveryResult {
+    proof.map_or_else(
         || advance_watcher_terminal_delivery(target, identity, range.1),
         |proof| {
             record_watcher_terminal_delivery(
@@ -216,7 +227,14 @@ pub(in crate::services::discord) fn commit_legacy_watcher_delivery(
                 &proof.raw_body,
             )
         },
-    );
+    )
+}
+
+/// The legacy frontier-committed predicate, unchanged in meaning: both a durable
+/// record and a proof-less advance moved the watermark.
+pub(in crate::services::discord) fn legacy_watcher_delivery_committed(
+    result: GuardedWatcherDeliveryResult,
+) -> bool {
     matches!(
         result,
         GuardedWatcherDeliveryResult::Persisted
@@ -459,14 +477,23 @@ pub(in crate::services::discord) async fn apply_watcher_long_chunks_legacy(
     frozen_rollover_msg_ids: &mut Vec<MessageId>,
     inflight_before_relay: Option<&crate::services::discord::InflightTurnState>,
     watcher_long_chunk_anchor_msg_id: &mut Option<MessageId>,
+    // #5071 T1 S3a: the receipt for the same chunk `watcher_long_chunk_anchor_msg_id`
+    // names, so the journal's `T` carries Discord's returned channel.
+    watcher_long_chunk_anchor_receipt: &mut Option<
+        crate::services::discord::outbound::DiscordTransportReceipt,
+    >,
     locals: WatcherLongChunksLocals<'_>,
 ) {
-    match crate::services::discord::formatting::send_long_message_raw_with_rollback(
+    match crate::services::discord::formatting::send_long_message_raw_with_rollback_returning_receipts(
         http, channel_id, msg_id, relay_text, shared,
     )
     .await
-    {
-        Ok(message_ids) => {
+    .and_then(|receipts| {
+        crate::services::discord::formatting::message_ids_from_receipts(receipts.clone())
+            .map(|message_ids| (message_ids, receipts))
+    }) {
+        Ok((message_ids, receipts)) => {
+            *watcher_long_chunk_anchor_receipt = receipts.last().cloned();
             *locals.direct_send_delivered = true;
             *locals.tui_direct_anchor_terminal_body_visible = true;
             *locals.external_input_lease_consumed_by_relay =

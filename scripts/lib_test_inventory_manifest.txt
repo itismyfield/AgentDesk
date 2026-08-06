@@ -4133,6 +4133,11 @@ services::discord::session_relay_sink::journal::tests::execution_id_changes_for_
 services::discord::session_relay_sink::journal::tests::finish_fresh_emits_transport_and_commit_as_one_batch
 services::discord::session_relay_sink::journal::tests::shadow_candidate_delivered_requires_transport_confirmed
 services::discord::session_relay_sink::journal::tests::shadow_receipt_uses_returned_channel
+services::discord::session_relay_sink::journal::watcher::watcher_terminal_semantics_tests::w10_terminal_obligation_identity_covers_every_coordinate
+services::discord::session_relay_sink::journal::watcher::watcher_terminal_semantics_tests::w5_only_a_persisted_guarded_advance_is_a_commit
+services::discord::session_relay_sink::journal::watcher::watcher_terminal_semantics_tests::w6_terminal_settle_derives_commit_from_the_proof_and_is_single_use
+services::discord::session_relay_sink::journal::watcher::watcher_terminal_semantics_tests::w8_watcher_terminal_delivery_classifies_as_candidate_delivered
+services::discord::session_relay_sink::journal::watcher::watcher_terminal_semantics_tests::w9_only_a_watcher_held_lease_is_a_watcher_terminal_obligation
 services::discord::session_relay_sink::orphan_reclaim::tests::cross_session_reclaim_uses_row_owner_and_unblocks_iterating_session
 services::discord::session_relay_sink::orphan_reclaim::tests::delivered_at_scan_time_suppressed_by_unlocked_first_line_filter
 services::discord::session_relay_sink::orphan_reclaim::tests::live_producer_that_survives_is_not_falsely_reclaimed

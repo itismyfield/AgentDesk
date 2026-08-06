@@ -17,12 +17,29 @@ use super::RelaySinkError;
 use super::delivery_frontier::SinkDeliveryProofResult;
 
 mod pg_store;
+pub(in crate::services::discord) mod watcher;
 
 const JOURNAL_NAMESPACE: Uuid = Uuid::from_u128(0xd9829c0b_8692_4ef0_9396_f7d83aa84dd5);
 const MAILBOX_CAPACITY: usize = 256;
 
+/// The one observer per process.
+///
+/// Q1 puts every PG append behind a single actor per process. The sink used to
+/// own its instance outright; #5071 T1 S3a adds a second family (the watcher)
+/// that reaches the journal from a free function with no sink in scope, so the
+/// instance moved here and both families share the one mailbox and one actor.
+static PROCESS_OBSERVER: std::sync::LazyLock<JournalObserver> =
+    std::sync::LazyLock::new(JournalObserver::default);
+
+pub(super) fn process_observer() -> &'static JournalObserver {
+    &PROCESS_OBSERVER
+}
+
+/// The type is visible to the whole `discord` module so the watcher facade can
+/// return what it emitted; every field stays private to `journal`, so no caller
+/// outside can read or construct one.
 #[derive(Clone)]
-pub(super) struct JournalEvent {
+pub(in crate::services::discord) struct JournalEvent {
     event_id: Uuid,
     obligation_id: Uuid,
     attempt_id: Option<Uuid>,
