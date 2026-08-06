@@ -194,10 +194,22 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
     // #5142: standing backlog of the auto-queue post-commit cleanup outbox.
     // `dead_lettered` counts rows that burned through the attempt cap and will
     // never be retried again, so their run's slot token and residual provider
-    // session id are stranded. Count-only (no run/dispatch ids), which is why it
-    // is safe on the unauthenticated public projection — and it has to be there,
-    // because the whole point is that an operator can see the number without
-    // holding a credential or tailing the policy tick's logs.
+    // session id are stranded.
+    //
+    // Detail-only, deliberately — it follows `dispatch_outbox` exactly. That
+    // block's `permanent_failures` is the structural twin of `dead_lettered`
+    // (a count of work items that will never be retried), and the repo's
+    // established treatment of it is: the block lives on `/api/health/detail`
+    // only, is absent from `public_health_json`'s allowlist, and the operator
+    // surface is `agentdesk doctor`, which reads the detail payload and fails
+    // the `dispatch_outbox` Core check when `permanent_failures > 0`
+    // (`src/cli/doctor/orchestrator.rs:1147`). An earlier round of this change
+    // put `auto_queue_cleanup` on the public projection instead, arguing an
+    // operator must be able to read it without a credential; that argument does
+    // not survive the comparison, because `/api/health/detail` is already
+    // reachable locally without one and the twin counter accepted exactly this
+    // gating. Diverging here would have made two count-only "permanently failed
+    // work" gauges answer the same question in two different places.
     let auto_queue_cleanup_json =
         health_diagnostics::load_auto_queue_cleanup_backlog(state.pg_pool_ref())
             .await
@@ -719,20 +731,12 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     let startup_degraded_reasons = json.get("startup_degraded_reasons").cloned();
     let delivery_record_rollout = json.get("delivery_record_rollout").cloned();
     let intake_routing = json.get("intake_routing").cloned();
-    // #5142: the auto-queue cleanup backlog is two integers and no identifiers,
-    // so it passes the public allowlist unchanged. It has to be on the public
-    // shape rather than only on `/api/health/detail`: a dead-lettered cleanup row
-    // is permanently parked work, and the only pre-existing trace of it was a
-    // single `tracing::warn!` in the policy tick.
-    let auto_queue_cleanup = json.get("auto_queue_cleanup").map(|block| {
-        serde_json::json!({
-            "pending": block.get("pending").cloned().unwrap_or(serde_json::json!(0)),
-            "dead_lettered": block
-                .get("dead_lettered")
-                .cloned()
-                .unwrap_or(serde_json::json!(0)),
-        })
-    });
+    // #5142 note for future readers: `auto_queue_cleanup` is deliberately NOT
+    // read here. It is a detail-only diagnostic block, exactly like its
+    // structural twin `dispatch_outbox`; see the comment in `health_response`.
+    // `auto_queue_cleanup_is_detail_only_like_dispatch_outbox` pins the pair so
+    // adding it back is a test failure rather than a silent contract change.
+    //
     // Public OpenCode summary is count-only and never includes the per-server
     // `warm_servers` array, pids, ports, or startup tails (spec C-3). The
     // upstream `opencode_warm_pool_json(false)` already produced a count-only
@@ -783,9 +787,6 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     }
     if let Some(intake_routing) = intake_routing {
         public["intake_routing"] = intake_routing;
-    }
-    if let Some(auto_queue_cleanup) = auto_queue_cleanup {
-        public["auto_queue_cleanup"] = auto_queue_cleanup;
     }
     if let Some(opencode_public) = opencode_public {
         public["opencode"] = opencode_public;
@@ -2691,6 +2692,94 @@ mod tests {
         assert_eq!(public["intake_routing"]["recent_decision_count"], json!(17));
         assert_eq!(public["intake_routing"]["warning_count"], json!(0));
         assert_eq!(public["ok"], json!(true));
+    }
+
+    /// **#5142 — the public/detail split for the auto-queue cleanup backlog.**
+    ///
+    /// `auto_queue_cleanup.dead_lettered` and `dispatch_outbox.permanent_failures`
+    /// are the same thing wearing two names: a count of work items that will
+    /// never be retried again. They must therefore be reachable in the same
+    /// place, and the place this repo already chose is `/api/health/detail`.
+    ///
+    /// The assertion is deliberately a *pair*. Asserting only that
+    /// `auto_queue_cleanup` is absent would pass if someone deleted the block
+    /// entirely; asserting it next to `dispatch_outbox` states the actual
+    /// contract — these two travel together — so promoting either one alone
+    /// fails here.
+    #[test]
+    fn auto_queue_cleanup_is_detail_only_like_dispatch_outbox() {
+        let public = public_health_json(json!({
+            "status": "healthy",
+            "version": "0.1.2",
+            "db": true,
+            "dashboard": true,
+            "server_up": true,
+            "dispatch_outbox": {
+                "pending": 2,
+                "retrying": 1,
+                "permanent_failures": 3,
+                "oldest_pending_age": 60,
+            },
+            "auto_queue_cleanup": {
+                "pending": 4,
+                "dead_lettered": 5,
+            }
+        }));
+        assert!(
+            public.get("dispatch_outbox").is_none(),
+            "precondition — the twin block this one is being kept consistent \
+             with is detail-only: {public}"
+        );
+        assert!(
+            public.get("auto_queue_cleanup").is_none(),
+            "the auto-queue cleanup backlog is a detail-only diagnostic block, \
+             exactly like `dispatch_outbox`; promoting it to the unauthenticated \
+             projection makes two identical 'permanently failed work' counters \
+             answerable in two different places: {public}"
+        );
+    }
+
+    /// The detail projection must actually carry the block the test above keeps
+    /// off the public one — otherwise "detail-only" would be satisfied by the
+    /// gauge existing nowhere at all.
+    ///
+    /// `health_response` needs a live `AppState` (and a PostgreSQL pool) to run,
+    /// so the wiring itself is not reachable from a unit test. This is a source
+    /// guard on the two assignment sites instead — the same technique used
+    /// elsewhere in this tree for wiring that only an integration boot can
+    /// execute. It pins the call sites, not the runtime behaviour, and that
+    /// limit is the reason the pairing above is asserted behaviourally.
+    #[test]
+    fn auto_queue_cleanup_backlog_is_wired_into_both_detail_projections() {
+        // Everything above the test module, so this test's own string literals
+        // cannot satisfy its assertions.
+        let source = include_str!("health_api.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module is declared in this file")
+            .0;
+        assert_eq!(
+            source
+                .matches(r#"json["auto_queue_cleanup"] = backlog;"#)
+                .count(),
+            2,
+            "both `health_response` branches (with and without a Discord health \
+             registry) must attach the cleanup backlog to the detail payload; \
+             dropping either one removes the only operator-visible trace of a \
+             permanently parked cleanup row"
+        );
+        let public_fn = source
+            .split_once("fn public_health_json(")
+            .expect("public_health_json is defined in this module")
+            .1;
+        let public_fn = public_fn
+            .split_once("\nasync fn ")
+            .map(|(body, _)| body)
+            .unwrap_or(public_fn);
+        assert!(
+            !public_fn.contains(r#"json.get("auto_queue_cleanup")"#),
+            "and `public_health_json` must not read it back onto the \
+             unauthenticated shape"
+        );
     }
 
     #[test]

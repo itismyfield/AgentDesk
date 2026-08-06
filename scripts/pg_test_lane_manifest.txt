@@ -395,8 +395,11 @@ services::auto_queue::cancel_run::pg_tests::cancel_selected_runs_with_pg_preserv
 services::auto_queue::cancel_run::pg_tests::cancel_selected_runs_with_pg_preserves_foreign_entry_owner
 services::auto_queue::cancel_run::pg_tests::cancel_selected_runs_with_pg_preserves_foreign_phase_gate_owner
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::a_claimed_task_is_not_drained_twice_pg
-services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::a_failed_emit_mark_aborts_the_drain_before_any_side_effect_pg
+services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::a_failed_emit_mark_fires_no_emit_and_releases_no_slot_pg
+services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::a_failed_retirement_delete_records_an_attempt_pg
+services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::a_poison_row_whose_park_write_fails_is_not_reported_as_parked_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::an_already_emitted_task_is_never_re_emitted_pg
+services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::an_unrecordable_attempt_is_reported_instead_of_looking_like_a_retry_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::attempt_cap_dead_letter_is_counted_and_surfaced_on_health_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::crash_after_cancel_commit_converges_on_replay_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::drain_with_health_registry_clears_slot_thread_sessions_pg

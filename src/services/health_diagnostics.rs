@@ -43,6 +43,10 @@ pub struct DispatchOutboxStats {
 /// gone the moment the log rotates. A non-zero value here is an operator action
 /// item, not a statistic.
 ///
+/// Surfaced on `/api/health/detail` only, matching [`DispatchOutboxStats`]: its
+/// `permanent_failures` is the same kind of number and is gated the same way.
+/// `auto_queue_cleanup_is_detail_only_like_dispatch_outbox` pins the pair.
+///
 /// `pending` is the live half (rows still owed and still retrying) and is
 /// included so the two can be told apart at a glance.
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -518,7 +522,7 @@ pub async fn acknowledge_failed_dispatch_outbox_rows(
 
 #[cfg(test)]
 mod tests {
-    use super::{ACTIVE_SESSION_AUDIT_QUERY, DispatchOutboxStats};
+    use super::{ACTIVE_SESSION_AUDIT_QUERY, AutoQueueCleanupBacklog, DispatchOutboxStats};
     use serde_json::json;
 
     #[test]
@@ -545,6 +549,25 @@ mod tests {
                 "retrying": 1,
                 "permanent_failures": 3,
                 "oldest_pending_age": 60,
+            })
+        );
+    }
+
+    /// #5142: the sibling of `dispatch_outbox_stats_json_contract_keeps_field_names`.
+    /// `/api/health/detail` consumers key off these exact names, so a rename is a
+    /// silent contract break rather than a compile error.
+    #[test]
+    fn auto_queue_cleanup_backlog_json_contract_keeps_field_names() {
+        let backlog = AutoQueueCleanupBacklog {
+            pending: 4,
+            dead_lettered: 2,
+        };
+
+        assert_eq!(
+            serde_json::to_value(backlog).unwrap(),
+            json!({
+                "pending": 4,
+                "dead_lettered": 2,
             })
         );
     }

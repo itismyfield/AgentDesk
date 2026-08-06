@@ -35,19 +35,34 @@
 //!
 //! `emitted = TRUE` is committed **before** `emit()` is called, and a failed
 //! mark aborts the drain before any emit fires. That ordering is what makes the
-//! at-most-once claim exact rather than aspirational — it is the enumeration of
-//! how a drain's step 1 can end, not a slogan:
+//! at-most-once claim exact rather than aspirational. Here is every way a
+//! drain's step 1 can end — the enumeration is meant to be exhaustive, so the
+//! two shapes that are easy to leave out are spelled out rather than folded into
+//! the happy paths:
 //!
-//! 1. the mark fails → nothing was emitted, the failure is recorded as an
-//!    attempt, and the retry emits exactly once when the mark finally commits;
-//! 2. the mark commits and `emit()` runs → the durable flag makes `!task.emitted`
-//!    false for every later replay, so the event fires exactly once;
-//! 3. the mark commits and the process dies before `emit()` returns (or the
-//!    observability worker never flushes) → the event is lost, and no replay
-//!    will re-fire it.
+//! 1. the mark UPDATE fails and the failure is observed as a failure → nothing
+//!    was emitted, the failure is recorded as an attempt, and the retry emits
+//!    exactly once when the mark finally commits;
+//! 2. the mark commits and `emit()` runs for every entry in `pending_emits` →
+//!    the durable flag makes `!task.emitted` false for every later replay, so
+//!    each event fires exactly once;
+//! 3. the mark commits and the process dies before `emit()` runs (or before the
+//!    observability worker flushes its queue) → those events are lost, and no
+//!    replay will re-fire them. `pending_emits` can hold more than one event and
+//!    the flag covers the whole vector, so this case includes a **partial** loss:
+//!    the process can die after emitting entry 1 of 3, and entries 2 and 3 are
+//!    then lost while the flag says the batch is done;
+//! 4. **ambiguous commit** — the mark UPDATE actually commits in PostgreSQL but
+//!    the response is lost, so `execute()` returns `Err`. This looks like case 1
+//!    from inside the process and is handled as one (attempt recorded, retry
+//!    scheduled), but nothing was emitted and the retry reads `emitted = TRUE`,
+//!    so it skips step 1 **forever**: the events are never emitted at all. This
+//!    is a loss, not a repeat, so the at-most-once guarantee still holds — but
+//!    case 1's "the retry emits exactly once" is false here, which is why this
+//!    is listed separately instead of being folded into it.
 //!
-//! Case 3 is the accepted trade for never double-counting an event; it is not a
-//! claim that no emit is ever lost.
+//! Cases 3 and 4 are the accepted trade for never double-counting an event; they
+//! are not a claim that no emit is ever lost.
 //!
 //! ## What happens when the cleanup cannot succeed at all
 //!
@@ -57,9 +72,34 @@
 //! failed attempt left them — the convergence guarantee above stops there. That
 //! is a deliberate trade (one unfixable row must not block every cleanup queued
 //! behind it), and it is only defensible because the outcome is *observable*:
-//! `RunCleanupReplayStats::dead_lettered` counts the transition when it happens
-//! and `/api/health` carries the standing `auto_queue_cleanup.dead_lettered`
-//! backlog until an operator clears it. No row is abandoned silently.
+//! `RunCleanupReplayStats::dead_lettered` counts the transition when the parking
+//! UPDATE actually lands, and `/api/health/detail` carries the standing
+//! `auto_queue_cleanup.dead_lettered` backlog until an operator clears it. No row
+//! is abandoned silently.
+//!
+//! ## Bookkeeping writes can fail too
+//!
+//! Every terminal decision this module makes is itself a PostgreSQL write, so
+//! each one can fail. There are exactly three such writes and none of them may
+//! swallow its own failure, because a swallowed one produces a row that neither
+//! converges nor ever dead-letters — it just re-runs at lease-expiry rate
+//! forever, contradicting the paragraph above:
+//!
+//! 1. `record_task_failure_pg` — bumps `attempts`, arms the backoff, and parks
+//!    the row at the cap. If this UPDATE fails, `attempts` never rises and the
+//!    row can never reach the cap. It reports [`AttemptRecord::Unrecorded`]
+//!    instead of returning `false`, and the sweep counts it.
+//! 2. `dead_letter_task_pg` — parks an undecodable (poison) row. If this UPDATE
+//!    fails the row is not parked, so it is re-claimed and re-decoded forever.
+//!    It returns whether it landed; when it did not, the sweep falls back to the
+//!    ordinary attempt bookkeeping so the row still backs off and still reaches
+//!    the terminal cap.
+//! 3. the `DELETE` that retires a finished task — a failure here used to skip the
+//!    attempt bookkeeping entirely (#5142 r3 P3-3). It now records an attempt
+//!    like every other failure path.
+//!
+//! All three are the same class — a failed bookkeeping write — and all three are
+//! now on the same backoff and the same terminal cap.
 
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
@@ -96,6 +136,91 @@ pub(crate) struct RunCleanupDrainOutcome {
     /// good. Propagated so the attempt-cap dead-letter reaches a counter instead
     /// of just vanishing from the drain query (#5142 r3).
     pub(crate) dead_lettered: bool,
+    /// `true` when the drain failed *and* could not durably record that failure,
+    /// i.e. `record_task_failure_pg`'s own UPDATE failed. The row keeps its old
+    /// `attempts`, so it is neither closer to the cap nor backing off; the next
+    /// drainer picks it straight back up once the claim lease expires. Reported
+    /// rather than folded into "just another failed attempt", because those two
+    /// have opposite convergence properties.
+    pub(crate) attempt_unrecorded: bool,
+}
+
+/// Test-only footprint of the step 1 emit.
+///
+/// `CancelTransitionMeta::emit` hands the event to an in-process worker channel
+/// and discards the result, so nothing about it is observable from a test — which
+/// is why moving the emit loop back in front of the `emitted = TRUE` mark left
+/// the whole suite green in the #5142 r3 review. This recorder gives the emit an
+/// observable footprint so the ordering can be asserted directly instead of
+/// inferred.
+///
+/// Keyed by dispatch id because the tests in this binary run concurrently and
+/// each fixture seeds a unique `dispatch-cleanup-<suffix>`; a bare counter would
+/// make every test in the module race every other one.
+#[cfg(test)]
+pub(crate) mod emit_probe {
+    use std::sync::{Mutex, OnceLock};
+
+    fn log() -> &'static Mutex<Vec<String>> {
+        static LOG: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+        LOG.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    pub(crate) fn record(dispatch_id: &str) {
+        if let Ok(mut entries) = log().lock() {
+            entries.push(dispatch_id.to_string());
+        }
+    }
+
+    /// How many observability events this dispatch id has emitted in this
+    /// process so far.
+    pub(crate) fn emit_count(dispatch_id: &str) -> usize {
+        log()
+            .lock()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|entry| entry.as_str() == dispatch_id)
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+}
+
+/// Fire one owed observability event.
+///
+/// The `#[cfg(test)]` record is the *only* thing that makes step 1's ordering
+/// checkable; see [`emit_probe`].
+fn fire_pending_emit(meta: &CancelTransitionMeta) {
+    #[cfg(test)]
+    emit_probe::record(&meta.dispatch_id);
+    meta.emit();
+}
+
+/// What `record_task_failure_pg` managed to write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttemptRecord {
+    /// The attempt landed. `dead_lettered` is `true` when it was the attempt
+    /// that crossed [`MAX_CLEANUP_ATTEMPTS`] and parked the row.
+    Recorded { dead_lettered: bool },
+    /// The bookkeeping UPDATE itself failed, so nothing about this attempt is on
+    /// disk. See the module header's "Bookkeeping writes can fail too".
+    Unrecorded,
+}
+
+impl AttemptRecord {
+    fn dead_lettered(self) -> bool {
+        matches!(
+            self,
+            AttemptRecord::Recorded {
+                dead_lettered: true
+            }
+        )
+    }
+
+    fn unrecorded(self) -> bool {
+        matches!(self, AttemptRecord::Unrecorded)
+    }
 }
 
 /// Columns every drain path selects. Kept in one place so the batch sweep and
@@ -317,12 +442,20 @@ async fn claim_run_cleanup_task_batch_pg(
 /// Record a failed attempt: bump `attempts`, apply exponential backoff, release
 /// the claim, and dead-letter the row once it has burned through the cap.
 ///
-/// Returns `true` when the row is dead-lettered as a result, so the caller can
-/// count it. That return value is the whole point of this signature: before it
-/// existed the attempt-cap dead-letter was the one failure mode with no counter
-/// at all — `stats.dead_lettered` only ever saw undecodable payloads, and a row
-/// that burned its ten attempts simply stopped appearing in the drain query with
+/// Returns [`AttemptRecord::Recorded`] with `dead_lettered` set when the row is
+/// dead-lettered as a result, so the caller can count it. That return value is
+/// the whole point of this signature: before it existed the attempt-cap
+/// dead-letter was the one failure mode with no counter at all —
+/// `stats.dead_lettered` only ever saw undecodable payloads, and a row that
+/// burned its ten attempts simply stopped appearing in the drain query with
 /// nothing anywhere to say why.
+///
+/// [`AttemptRecord::Unrecorded`] means this UPDATE *itself* failed. That used to
+/// be a `tracing::warn!` and a bare `false`, which is indistinguishable from "the
+/// attempt was recorded and the row is not at the cap yet" — and the two have
+/// opposite convergence properties, because an unrecorded attempt leaves
+/// `attempts` where it was and therefore never reaches the cap at all. The caller
+/// counts it instead.
 ///
 /// The row is never deleted on dead-letter — the operator keeps the evidence and
 /// `last_error` — but it drops out of the drain query so it can no longer block
@@ -342,7 +475,7 @@ async fn claim_run_cleanup_task_batch_pg(
 /// plus the original would become two sources of truth for one task. Parking the
 /// row where it already is, and giving it a counter plus a health gauge, buys
 /// the same observability without any of that.
-async fn record_task_failure_pg(pool: &PgPool, id: i64, error: &str) -> bool {
+async fn record_task_failure_pg(pool: &PgPool, id: i64, error: &str) -> AttemptRecord {
     match sqlx::query_scalar::<_, bool>(
         "UPDATE auto_queue_run_cleanup_tasks
          SET attempts = attempts + 1,
@@ -369,14 +502,19 @@ async fn record_task_failure_pg(pool: &PgPool, id: i64, error: &str) -> bool {
     .fetch_optional(pool)
     .await
     {
-        Ok(dead_lettered) => dead_lettered.unwrap_or(false),
+        // `None` means the row is already gone (another drainer deleted it), so
+        // there is nothing left to park: that is a recorded non-dead-letter, not
+        // a bookkeeping failure.
+        Ok(dead_lettered) => AttemptRecord::Recorded {
+            dead_lettered: dead_lettered.unwrap_or(false),
+        },
         Err(update_error) => {
             tracing::warn!(
                 task_id = id,
                 error = %update_error,
                 "[auto-queue] failed to record cleanup task retry state"
             );
-            false
+            AttemptRecord::Unrecorded
         }
     }
 }
@@ -400,7 +538,15 @@ pub(crate) async fn dead_lettered_run_cleanup_task_count_pg(pool: &PgPool) -> Re
 /// queue; deleting it would destroy the only evidence of the corruption. It is
 /// parked instead, and counted, so the sweep reports it rather than silently
 /// skipping it.
-async fn dead_letter_task_pg(pool: &PgPool, id: i64, error: &str) {
+///
+/// Returns whether the park actually landed. This UPDATE used to swallow its own
+/// failure in a `tracing::warn!`, which made the sweep report a dead-letter that
+/// had not happened while the row stayed drainable and was re-decoded on every
+/// lease expiry — the same "bookkeeping write failed and nothing says so" shape
+/// the `DELETE` path was fixed for in r3. The caller uses the return value both
+/// to decide whether to count the transition and to fall back to the ordinary
+/// attempt bookkeeping.
+async fn dead_letter_task_pg(pool: &PgPool, id: i64, error: &str) -> bool {
     if let Err(update_error) = sqlx::query(
         "UPDATE auto_queue_run_cleanup_tasks
          SET dead_lettered_at = NOW(),
@@ -420,7 +566,9 @@ async fn dead_letter_task_pg(pool: &PgPool, id: i64, error: &str) {
             error = %update_error,
             "[auto-queue] failed to dead-letter undecodable cleanup task"
         );
+        return false;
     }
+    true
 }
 
 /// Release every slot still held by this task's runs AND persist the resulting
@@ -609,8 +757,13 @@ pub(crate) async fn drain_run_cleanup_task_pg(
         // `emitted = FALSE`, so the next replay sent the same events a second
         // time. In this order a failed mark means nothing was emitted yet, so
         // abandoning the attempt here costs nothing and the retry emits exactly
-        // once. The residual is case 3 in the header (mark commits, process dies
-        // before the event reaches the worker), which is a loss, never a repeat.
+        // once. The residuals are cases 3 and 4 in the header (mark commits and
+        // the events are lost anyway, or the mark commits ambiguously and is
+        // never re-attempted) — both losses, never repeats.
+        //
+        // Nothing in the emit path is observable at runtime, so this ordering is
+        // pinned by `fire_pending_emit`'s `#[cfg(test)]` probe rather than by
+        // inference; see `a_failed_emit_mark_fires_no_emit_and_releases_no_slot_pg`.
         if let Err(error) = sqlx::query(
             "UPDATE auto_queue_run_cleanup_tasks
              SET emitted = TRUE,
@@ -625,7 +778,7 @@ pub(crate) async fn drain_run_cleanup_task_pg(
                 "failed to mark auto-queue cleanup emits for task {}: {error}",
                 task.id
             );
-            let dead_lettered = record_task_failure_pg(pool, task.id, &error).await;
+            let record = record_task_failure_pg(pool, task.id, &error).await;
             warnings.push(error);
             return RunCleanupDrainOutcome {
                 slot_cleanup: SlotCleanupResult {
@@ -634,11 +787,12 @@ pub(crate) async fn drain_run_cleanup_task_pg(
                     warnings,
                 },
                 completed: false,
-                dead_lettered,
+                dead_lettered: record.dead_lettered(),
+                attempt_unrecorded: record.unrecorded(),
             };
         }
         for meta in &task.pending_emits {
-            meta.emit();
+            fire_pending_emit(meta);
         }
     }
     for meta in &task.pending_emits {
@@ -684,7 +838,7 @@ pub(crate) async fn drain_run_cleanup_task_pg(
                 task.dispatch_ids,
                 error
             );
-            let dead_lettered = record_task_failure_pg(pool, task.id, &error).await;
+            let record = record_task_failure_pg(pool, task.id, &error).await;
             warnings.push(format!(
                 "failed to clear postgres sessions for run cleanup dispatches {:?}: {}",
                 task.dispatch_ids, error
@@ -696,7 +850,8 @@ pub(crate) async fn drain_run_cleanup_task_pg(
                     warnings,
                 },
                 completed: false,
-                dead_lettered,
+                dead_lettered: record.dead_lettered(),
+                attempt_unrecorded: record.unrecorded(),
             };
         }
     };
@@ -707,7 +862,7 @@ pub(crate) async fn drain_run_cleanup_task_pg(
         match release_and_persist_slots_for_task_pg(pool, &task).await {
             Ok(value) => value,
             Err(error) => {
-                let dead_lettered = record_task_failure_pg(pool, task.id, &error).await;
+                let record = record_task_failure_pg(pool, task.id, &error).await;
                 warnings.push(error);
                 return RunCleanupDrainOutcome {
                     slot_cleanup: SlotCleanupResult {
@@ -716,7 +871,8 @@ pub(crate) async fn drain_run_cleanup_task_pg(
                         warnings,
                     },
                     completed: false,
-                    dead_lettered,
+                    dead_lettered: record.dead_lettered(),
+                    attempt_unrecorded: record.unrecorded(),
                 };
             }
         };
@@ -781,11 +937,12 @@ pub(crate) async fn drain_run_cleanup_task_pg(
     };
     if !all_slots_handled {
         let summary = slot_cleanup.warnings.join("; ");
-        let dead_lettered = record_task_failure_pg(pool, task.id, &summary).await;
+        let record = record_task_failure_pg(pool, task.id, &summary).await;
         return RunCleanupDrainOutcome {
             slot_cleanup,
             completed: false,
-            dead_lettered,
+            dead_lettered: record.dead_lettered(),
+            attempt_unrecorded: record.unrecorded(),
         };
     }
 
@@ -800,22 +957,32 @@ pub(crate) async fn drain_run_cleanup_task_pg(
             "[auto-queue] cleanup task finished but could not be deleted; a replay will repeat it"
         );
         // #5142 r3 P3-3: every other failure path records an attempt; this one
-        // used to skip it, which made an undeletable row the single shape of
-        // task that neither converged nor ever dead-lettered — it just re-ran
-        // the whole drain at lease-expiry rate (`CLAIM_LEASE_SECONDS`) forever,
-        // contradicting "no row occupies the queue indefinitely". The repeated
-        // steps are all idempotent, so putting it on the same backoff and the
-        // same terminal cap as everything else costs nothing but a parked row,
-        // and the parked row is now counted and reported.
+        // used to skip it, which made an undeletable row a task that neither
+        // converged nor ever dead-lettered — it just re-ran the whole drain at
+        // lease-expiry rate (`CLAIM_LEASE_SECONDS`) forever, contradicting "no
+        // row occupies the queue indefinitely". The repeated steps are all
+        // idempotent, so putting it on the same backoff and the same terminal cap
+        // as everything else costs nothing but a parked row, and the parked row
+        // is now counted and reported.
+        //
+        // r3 called this "the single shape" with that property. That was a guess
+        // dressed as an enumeration, and it was wrong: the same shape also lived
+        // in `record_task_failure_pg` (a failed attempt UPDATE returned a bare
+        // `false`, so `attempts` never rose and the cap was never reached) and in
+        // `dead_letter_task_pg` (a failed park UPDATE was swallowed by a
+        // `tracing::warn!`, so a poison row was re-claimed forever). The true
+        // enumeration is the three bookkeeping writes listed in the module
+        // header, and all three are now handled the same way.
         let error = format!(
             "delete finished auto-queue cleanup task {}: {error}",
             task.id
         );
-        let dead_lettered = record_task_failure_pg(pool, task.id, &error).await;
+        let record = record_task_failure_pg(pool, task.id, &error).await;
         return RunCleanupDrainOutcome {
             slot_cleanup,
             completed: false,
-            dead_lettered,
+            dead_lettered: record.dead_lettered(),
+            attempt_unrecorded: record.unrecorded(),
         };
     }
 
@@ -823,6 +990,7 @@ pub(crate) async fn drain_run_cleanup_task_pg(
         slot_cleanup,
         completed: true,
         dead_lettered: false,
+        attempt_unrecorded: false,
     }
 }
 
@@ -845,6 +1013,7 @@ pub(crate) async fn drain_run_cleanup_task_by_id_pg(
                 slot_cleanup: SlotCleanupResult::default(),
                 completed: true,
                 dead_lettered: false,
+                attempt_unrecorded: false,
             },
             // Row present but unclaimable: still owed, just not by us.
             //
@@ -863,6 +1032,7 @@ pub(crate) async fn drain_run_cleanup_task_by_id_pg(
                 },
                 completed: false,
                 dead_lettered: false,
+                attempt_unrecorded: false,
             },
             Err(error) => RunCleanupDrainOutcome {
                 slot_cleanup: SlotCleanupResult {
@@ -872,6 +1042,7 @@ pub(crate) async fn drain_run_cleanup_task_by_id_pg(
                 },
                 completed: false,
                 dead_lettered: false,
+                attempt_unrecorded: false,
             },
         },
         Err(error) => RunCleanupDrainOutcome {
@@ -882,6 +1053,7 @@ pub(crate) async fn drain_run_cleanup_task_by_id_pg(
             },
             completed: false,
             dead_lettered: false,
+            attempt_unrecorded: false,
         },
     }
 }
@@ -895,13 +1067,26 @@ pub(crate) struct RunCleanupReplayStats {
     /// `MAX_CLEANUP_ATTEMPTS`. Counted rather than silently skipped because a
     /// dead-letter is the one outcome the retry loop can never repair on its
     /// own, so it has to reach a human; the standing backlog is on
-    /// `/api/health` under `auto_queue_cleanup.dead_lettered`.
+    /// `/api/health/detail` under `auto_queue_cleanup.dead_lettered`.
+    ///
+    /// Only counted when the parking UPDATE actually landed. It used to be
+    /// incremented for every undecodable row, including rows whose `id` could not
+    /// be read (so nothing was addressed at all) and rows whose dead-letter
+    /// UPDATE failed — i.e. it reported a transition that had not happened.
     pub(crate) dead_lettered: usize,
+    /// Outcomes this sweep decided on but could not durably write: a dead-letter
+    /// UPDATE that failed, a failed attempt whose bookkeeping UPDATE failed, or a
+    /// row whose `id` could not be decoded so nothing could be addressed at all.
+    ///
+    /// These rows are not lost — they stay claimable and the next sweep
+    /// re-derives the same decision — but nothing this sweep decided reached
+    /// disk, so it is counted here instead of being reported as if it had landed.
+    pub(crate) unrecorded_failures: usize,
 }
 
 impl RunCleanupReplayStats {
     pub(crate) fn touched(&self) -> bool {
-        self.drained > 0 || self.dead_lettered > 0
+        self.drained > 0 || self.dead_lettered > 0 || self.unrecorded_failures > 0
     }
 }
 
@@ -928,10 +1113,34 @@ pub(crate) async fn replay_pending_run_cleanup_tasks_pg(
                     error = %error,
                     "[auto-queue] dead-lettering undecodable run cleanup task"
                 );
-                if let Some(id) = id {
-                    dead_letter_task_pg(pool, id, &error).await;
+                let Some(id) = id else {
+                    // Without an id nothing can be addressed: the row cannot be
+                    // parked, cannot be given an attempt, and will be re-claimed
+                    // on the next sweep. Counting it as `dead_lettered` (which is
+                    // what this used to do) reports a transition that did not
+                    // happen.
+                    stats.unrecorded_failures += 1;
+                    continue;
+                };
+                if dead_letter_task_pg(pool, id, &error).await {
+                    stats.dead_lettered += 1;
+                } else {
+                    // The park did not land. Fall back to the ordinary attempt
+                    // bookkeeping so the row at least backs off and still reaches
+                    // the terminal cap, instead of being re-decoded forever at
+                    // lease-expiry rate. If that fallback happens to be the
+                    // attempt that crosses the cap, the row really is parked and
+                    // the transition is counted as one; otherwise the sweep's
+                    // decision left no trace and is counted as unrecorded.
+                    if record_task_failure_pg(pool, id, &error)
+                        .await
+                        .dead_lettered()
+                    {
+                        stats.dead_lettered += 1;
+                    } else {
+                        stats.unrecorded_failures += 1;
+                    }
                 }
-                stats.dead_lettered += 1;
                 continue;
             }
         };
@@ -945,6 +1154,9 @@ pub(crate) async fn replay_pending_run_cleanup_tasks_pg(
             // just stopped matching the drain predicate and the sweep reported it
             // as one more incomplete drain.
             stats.dead_lettered += 1;
+        }
+        if outcome.attempt_unrecorded {
+            stats.unrecorded_failures += 1;
         }
     }
     Ok(stats)

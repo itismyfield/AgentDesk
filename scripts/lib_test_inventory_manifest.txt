@@ -847,6 +847,8 @@ server::routes::github::tests::create_issue_dry_run_reports_reserved_feature_cap
 server::routes::github::tests::create_issue_non_dry_run_maps_shared_service_github_failure
 server::routes::github::tests::create_issue_non_dry_run_maps_shared_service_success_response
 server::routes::github::tests::create_issue_rejects_reserved_fields_without_gh_side_effects
+server::routes::health_api::tests::auto_queue_cleanup_backlog_is_wired_into_both_detail_projections
+server::routes::health_api::tests::auto_queue_cleanup_is_detail_only_like_dispatch_outbox
 server::routes::health_api::tests::compute_fully_recovered_preserves_recovery_axis_when_runtime_degrades
 server::routes::health_api::tests::discord_bot_token_reload_router_rejects_non_loopback_auth_token_without_bearer
 server::routes::health_api::tests::discord_bot_token_reload_router_rejects_non_loopback_without_auth_token
@@ -984,6 +986,7 @@ server::worker_recovery::tests::restarts_after_unexpected_return
 server::worker_recovery::tests::shutdown_waits_for_inner_cleanup
 server::worker_recovery::tests::simultaneous_return_and_shutdown_is_expected_without_budget_use
 server::worker_recovery::tests::stable_run_resets_backoff
+server::worker_registry::leader_takeover_tests::policy_tick_hands_the_process_registry_to_the_spawned_tick
 server::worker_registry::leader_takeover_tests::policy_tick_is_started_with_the_process_health_registry
 server::worker_registry::leader_takeover_tests::supervisor_respawns_worker_after_lease_takeover
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests::fails_closed_on_column_decode_error
@@ -1027,8 +1030,11 @@ services::auto_queue::cancel_run::pg_tests::cancel_selected_runs_with_pg_preserv
 services::auto_queue::cancel_run::pg_tests::cancel_selected_runs_with_pg_preserves_foreign_entry_owner
 services::auto_queue::cancel_run::pg_tests::cancel_selected_runs_with_pg_preserves_foreign_phase_gate_owner
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::a_claimed_task_is_not_drained_twice_pg
-services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::a_failed_emit_mark_aborts_the_drain_before_any_side_effect_pg
+services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::a_failed_emit_mark_fires_no_emit_and_releases_no_slot_pg
+services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::a_failed_retirement_delete_records_an_attempt_pg
+services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::a_poison_row_whose_park_write_fails_is_not_reported_as_parked_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::an_already_emitted_task_is_never_re_emitted_pg
+services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::an_unrecordable_attempt_is_reported_instead_of_looking_like_a_retry_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::attempt_cap_dead_letter_is_counted_and_surfaced_on_health_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::crash_after_cancel_commit_converges_on_replay_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::drain_with_health_registry_clears_slot_thread_sessions_pg
@@ -6255,6 +6261,7 @@ services::health_active_session_audit::tests::active_session_audit_stalled_turn_
 services::health_active_session_audit::tests::active_session_audit_truncated_and_single_row_per_session
 services::health_active_session_audit::tests::active_session_audit_turn_active_no_dispatch_maps_to_stale_mailbox
 services::health_diagnostics::tests::active_session_audit_query_filters_foreign_and_background_rows
+services::health_diagnostics::tests::auto_queue_cleanup_backlog_json_contract_keeps_field_names
 services::health_diagnostics::tests::diagnostics_without_pg_pool_stay_safe
 services::health_diagnostics::tests::dispatch_outbox_stats_json_contract_keeps_field_names
 services::issue_announcements::tests::renders_active_card_with_agent_and_timestamp

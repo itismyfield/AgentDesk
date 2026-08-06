@@ -633,10 +633,30 @@ enum WorkerHandle {
 /// `None` while the process *has* a registry silently drops the runtime half of
 /// every replayed cleanup — an invisible regression (nothing fails, the DB state
 /// still converges, only the in-memory provider runtime is left behind) that a
-/// refactor can reintroduce by deleting one argument. The spawn closure below
-/// cannot be entered by a unit test, so `policy_tick_health_registry_*` pins the
-/// decision here instead; the remaining `tick_health_registry.clone()` at the
-/// call site is a bare move of this value with no policy left in it.
+/// refactor can reintroduce by deleting one argument.
+///
+/// ## Where the policy actually lives (#5142 r3 review, mutation ⓩ′)
+///
+/// An earlier revision of this comment claimed the call site was "a bare move of
+/// this value with no policy left in it". That was false. The policy is the
+/// *argument*: `policy_tick_health_registry(self.health_registry.as_ref())` at
+/// `:778-779`. Replacing that argument with `None` reintroduces the whole defect
+/// and this function still behaves perfectly, so no test of this function alone
+/// can ever catch it. (The `tick_health_registry.clone()` inside the spawn
+/// closure at `:810` really is a bare move — that part of the old claim was
+/// about the wrong line.)
+///
+/// The argument is not reachable from a unit test either: `start_worker` returns
+/// early unless `self.pg_pool` is `Some`, and everything after
+/// `register_thread` runs on a spawned OS thread that waits for cluster
+/// leadership and then builds a `PolicyEngine::new_for_tick`. Pinning it
+/// behaviourally therefore needs a full worker-thread harness (a live pool, a
+/// `ClusterRuntime` that grants leadership, and a way to observe what the loop
+/// was handed), which is more machinery than the one-line handoff justifies. It
+/// is pinned as a source guard instead —
+/// `policy_tick_hands_the_process_registry_to_the_spawned_tick` — which fixes the
+/// call site's text and nothing about its runtime behaviour. That limit is
+/// stated rather than papered over.
 fn policy_tick_health_registry(
     process_registry: Option<&Arc<HealthRegistry>>,
 ) -> Option<Arc<HealthRegistry>> {
@@ -1298,6 +1318,47 @@ mod leader_takeover_tests {
         // `server::run`) legitimately has no registry, and must stay `None`
         // rather than fabricate one.
         assert!(super::policy_tick_health_registry(None).is_none());
+    }
+
+    /// **#5142 r3 review, mutation ⓩ′.** The test above pins the *function*; this
+    /// one pins the *argument*, which is where the policy actually lives.
+    ///
+    /// `policy_tick_health_registry(self.health_registry.as_ref())` →
+    /// `policy_tick_health_registry(None)` reintroduces the entire defect while
+    /// the function under test above keeps behaving perfectly, so that test
+    /// cannot see it. Neither can any other unit test: the call site sits in
+    /// `start_worker`, which needs a live `pg_pool` and then hands everything to
+    /// an OS thread that waits for cluster leadership. See the doc comment on
+    /// `policy_tick_health_registry` for why a behavioural harness was judged
+    /// disproportionate here.
+    ///
+    /// This is a source guard, and its limit is exact: it fixes the text of one
+    /// call site. It does not prove the tick receives the registry at runtime —
+    /// `drain_with_health_registry_tears_down_provider_runtime_pg` is what proves
+    /// the registry does something once it arrives.
+    #[test]
+    fn policy_tick_hands_the_process_registry_to_the_spawned_tick() {
+        let source = include_str!("worker_registry.rs");
+        // Slice the PolicyTick match arm out of the file so the assertions below
+        // cannot be satisfied by this test's own string literals.
+        let arm = source
+            .split_once("ServerWorkerId::PolicyTick =>")
+            .expect("the policy-tick worker arm exists")
+            .1;
+        let arm = arm
+            .split_once("ServerWorkerId::RateLimitSync =>")
+            .expect("the arm after policy-tick exists")
+            .0;
+        assert!(
+            arm.contains("policy_tick_health_registry(self.health_registry.as_ref())"),
+            "the policy-tick worker must be started with the process health \
+             registry; passing anything else silently disables the runtime half \
+             of every replayed auto-queue cleanup"
+        );
+        assert!(
+            !arm.contains("policy_tick_health_registry(None)"),
+            "a hard-coded `None` here is the #5142 D-4 defect itself"
+        );
     }
 
     fn leader_only_spec_for_test() -> super::WorkerSpec {
