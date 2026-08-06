@@ -50,7 +50,7 @@ pub(super) fn terminal_delivery_should_send_new_chunks(
     can_chain_locally: bool,
     formatted_response: &str,
 ) -> bool {
-    can_chain_locally && formatted_response.len() > super::super::DISCORD_MSG_LIMIT
+    can_chain_locally && super::super::formatting::needs_multiple_messages(formatted_response)
 }
 
 pub(super) fn record_stopped_turn_terminal_replace_delivery(
@@ -1146,6 +1146,30 @@ mod tests {
         assert!(!terminal_delivery_should_send_new_chunks(false, &body));
     }
 
+    /// Korean is ~3 UTF-8 bytes per character, so the old `formatted_response
+    /// .len() > DISCORD_MSG_LIMIT` byte check fired at ~667 characters and sent
+    /// a single-message answer down the multi-chunk path instead of the
+    /// in-place edit. (It did not split the body: `split_message` already
+    /// counts characters and returns one chunk here.) The predicate must count
+    /// characters, like `split_message` does. (The ASCII fixtures above cannot
+    /// see this: for ASCII the byte and character counts agree.)
+    #[test]
+    fn korean_answer_under_the_character_limit_stays_one_message() {
+        let body = "한".repeat(900);
+        assert!(
+            body.len() > crate::services::discord::DISCORD_MSG_LIMIT,
+            "2700 bytes, over the byte limit"
+        );
+        assert!(!terminal_delivery_should_send_new_chunks(true, &body));
+
+        let overflowing = "한".repeat(2100);
+        assert!(terminal_delivery_should_send_new_chunks(true, &overflowing));
+        assert!(!terminal_delivery_should_send_new_chunks(
+            false,
+            &overflowing
+        ));
+    }
+
     #[tokio::test]
     async fn ordered_long_terminal_delivery_sends_all_chunks_and_deletes_placeholder() {
         let body = format!(
@@ -1870,9 +1894,13 @@ mod tests {
     // #3089 A0 — characterization of the terminal-delivery
     // should-send-new-chunks predicate (design §5 A0 item 1, surface:
     // turn_bridge terminal delivery). `terminal_delivery_should_send_new_chunks
-    // (can_chain_locally, body)` is one of the FOUR per-surface `len > 2000`
-    // predicates the #3089 controller unifies; its gate is
-    // `can_chain_locally && body.len() > DISCORD_MSG_LIMIT`. Pinned inline in
+    // (can_chain_locally, body)` is one of the FOUR per-surface "does this fit
+    // one Discord message" predicates the #3089 controller unifies. Its gate is
+    // now `can_chain_locally && needs_multiple_messages(body)`, i.e. a CHARACTER
+    // count — it read `body.len() > DISCORD_MSG_LIMIT` (UTF-8 BYTES) until the
+    // byte/character fix, which tripped Korean bodies at ~667 characters. The
+    // assertions below still use an ASCII fixture, where the two agree. Pinned
+    // inline in
     // this `#[cfg(test)] mod tests` block => ZERO production LoC.
     mod a0_characterization_tests {
         use super::super::terminal_delivery_should_send_new_chunks as should_send;
