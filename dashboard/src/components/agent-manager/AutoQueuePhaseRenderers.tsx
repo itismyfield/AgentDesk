@@ -80,9 +80,22 @@ export function createAutoQueuePhaseRenderers(ctx: AutoQueuePhaseRendererCtx) {
 
   // #5131: the deploy-flavoured variant of this indicator (blue / 🚀 / "배포
   // 게이트") was keyed off the retired `auto_queue_runs.deploy_phases` column,
-  // dropped by migration 0006. Nothing in the status payload replaces it —
-  // `PhaseGateView` (src/services/auto_queue.rs) carries no deploy flag — so the
-  // indicator now renders a single flavour driven purely by `phase_gates`.
+  // dropped by migration 0006. The server does still ship a per-entry
+  // `phase_gate_kind` on `AutoQueueStatusEntryView` (src/services/auto_queue.rs),
+  // defined by migration 0057 as the gate kind that follows that `batch_phase`;
+  // what is missing is on this side — the dashboard's `DispatchQueueEntry` type
+  // does not expose that field, so no deploy signal reaches this renderer.
+  // Rendering the single generic flavour is nonetheless accurate today:
+  // `deploy-gate` is unavailable in the catalog and migration 0100 rejects
+  // persisting it, so no deploy-flavoured row can exist. Re-typing
+  // `phase_gate_kind` on the dashboard is the prerequisite for reviving the
+  // variant.
+  //
+  // Whether this indicator renders at all is decided by `hasBatchPhases` and
+  // `phaseSections` at the `AutoQueuePanelView` call sites, not by
+  // `gatesByPhase`: when a phase has no gate row the generic "게이트" label
+  // still renders, and `gatesByPhase` only supplies the status badge and the
+  // failure reason.
   const renderPhaseGateIndicator = (phase: number) => {
     const gates = gatesByPhase.get(phase) ?? [];
 
