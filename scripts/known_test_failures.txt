@@ -48,7 +48,6 @@
 # lane -- widening is only what made them visible. #5185 isolates them so the
 # widened lane can land; each needs its own fix.
 # ---------------------------------------------------------------------------
-always | services::claude_command::chokepoint_guard_tests::gateway_primitives_are_confined_to_the_chokepoint | lane=non-pg-sweep | #5169 | base-red on main: claude_compact_trigger.rs references ClaudeGatewayProxyEnv and claude_gateway_proxy:: outside the chokepoint. Same surface as the OCX gateway removal, so the verdict belongs to that branch, not to this CI-coverage change.
 #
 # #5305: This test is red not because the classifier PREFIXES lacks an entry.
 # The real drift is that `render_status_panel` gives its header the `-# `

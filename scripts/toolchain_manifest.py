@@ -147,7 +147,7 @@ def tool_inventory() -> tuple[ToolSpec, ...]:
             "npm-exact",
             "@bitkyc08/opencodex",
             "ocx",
-            "proxy lifecycle and agent routing depend on it",
+            "Claude Code subagent routing depends on it (AgentDesk itself does not)",
             "https://www.npmjs.com/package/@bitkyc08/opencodex",
         ),
         ToolSpec(
