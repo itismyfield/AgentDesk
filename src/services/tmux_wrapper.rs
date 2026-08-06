@@ -23,7 +23,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::services::claude_command::{ClaudeCommandBuilder, ClaudeLaunchEnv, ClaudeLaunchIntent};
+use crate::services::claude_command::ClaudeCommandBuilder;
 use crate::utils::format::safe_prefix;
 
 #[cfg(unix)]
@@ -120,16 +120,10 @@ pub fn run(
         .unwrap_or_else(|| working_dir.to_string());
 
     // Spawn Claude with piped stdin (kept open for multi-turn). Route the spawn
-    // through the single chokepoint so the gateway launch env is applied
-    // by-construction — even on the public `agentdesk tmux-wrapper` CLI path.
-    // The wrapper is a config-less process, so this resolves to Scrub and
-    // strips any stale gateway env inherited from the operator's shell. The
-    // builder also applies the exec-path PATH derived from the binary path,
-    // replacing the former explicit `augment_exec_path` call.
-    let mut builder = claude_child_command_builder(
-        claude_bin,
-        ClaudeLaunchEnv::resolve(ClaudeLaunchIntent::Turn),
-    );
+    // through the single chokepoint so the sealed Claude binary and the
+    // exec-path PATH derived from it are applied by-construction, replacing the
+    // former explicit `augment_exec_path` call.
+    let mut builder = claude_child_command_builder(claude_bin);
     {
         let claude_command = builder.command_mut();
         crate::services::process::configure_child_process_group(claude_command);
@@ -479,14 +473,11 @@ pub fn run(
 
 /// Build the guarded Claude child `Command` for the tmux-wrapper host.
 ///
-/// `launch_env` is the gateway decision this config-less wrapper process
-/// resolved for itself; the builder applies it to the child by construction
-/// along with the exec-path PATH derived from the wrapped binary.
-fn claude_child_command_builder(
-    claude_bin: &str,
-    launch_env: ClaudeLaunchEnv,
-) -> ClaudeCommandBuilder {
-    ClaudeCommandBuilder::for_tmux_wrapper_argv(claude_bin, launch_env)
+/// The wrapper boundary is the sole untyped CLI argv ingress for a Claude
+/// binary path; wrapping it here seals the path inside `claude_command` and
+/// applies the exec-path PATH derived from it.
+fn claude_child_command_builder(claude_bin: &str) -> ClaudeCommandBuilder {
+    ClaudeCommandBuilder::for_tmux_wrapper_argv(claude_bin)
 }
 
 /// #3207 (part 1): is this `result` event a deliberate turn-abort (from a

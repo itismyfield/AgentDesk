@@ -1,35 +1,20 @@
 //! Single authority (chokepoint) for launching the Claude CLI.
 //!
-//! Historically every Claude spawn site assembled its own `Command` and then
-//! *remembered* to apply the gateway launch env (`ANTHROPIC_BASE_URL` /
-//! `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`, #4553). That made the guard a
-//! per-site obligation, and #4553's R3 review caught a spawn site that had
-//! silently bypassed it. Enumerating sites is only a snapshot — a future
-//! seventh site would bypass the guard again.
+//! [`ClaudeCommandBuilder`] is the only sanctioned way to obtain a `Command`
+//! that launches (or transitively spawns) the Claude CLI. Binary resolution is
+//! applied when the builder is constructed, and [`ClaudeBinary`] seals the
+//! resolved executable path so a caller physically cannot hand back a Claude
+//! command assembled outside this module.
 //!
-//! This module closes the class by *construction* instead of by enumeration:
-//!
-//!   * [`ClaudeLaunchEnv`] is the only carrier of the resolved gateway
-//!     Inject|Scrub decision, and it is produced solely by
-//!     [`ClaudeLaunchEnv::resolve`]. The launch-vs-probe policy therefore lives
-//!     in exactly one place, keyed off [`ClaudeLaunchIntent`].
-//!   * [`ClaudeCommandBuilder`] is the only sanctioned way to obtain a
-//!     `Command` that launches (or transitively spawns) the Claude CLI. Binary
-//!     resolution and the gateway launch env are applied when the builder is
-//!     constructed, so a caller physically cannot hand back a Claude command
-//!     that skipped the guard.
-//!
-//! The raw [`crate::services::claude_gateway_proxy`] primitives
-//! (`ClaudeGatewayProxyEnv`, `resolve_for_launch`, `apply_to_command`,
-//! `append_shell_env`) must be reached ONLY through this module. A
-//! source-scanning guard test (`chokepoint_guard_tests`) fails the build if any
-//! other module references them directly, so the single authority cannot erode.
+//! The raw [`crate::services::claude_gateway_proxy`] primitives must be reached
+//! ONLY through this module. A source-scanning guard test
+//! (`chokepoint_guard_tests`) fails the build if any other module references
+//! them directly, so the single authority cannot erode.
 
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::process::Command;
 
-use crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv;
 use crate::services::platform::BinaryResolution;
 
 /// Opaque capability for the builder's resolved Claude executable path.
@@ -116,192 +101,39 @@ impl ClaudeBinary {
     }
 }
 
-/// Why a Claude process is being spawned. Selects the gateway env policy so the
-/// launch-vs-probe decision is made in exactly one place.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ClaudeLaunchIntent {
-    /// A real turn / model-routing launch. The gateway env is resolved from
-    /// live config + reachability (Inject when the proxy is enabled and
-    /// reachable, Scrub otherwise).
-    Turn,
-    /// A `--version` (or otherwise non-model-routing) probe. `--version` never
-    /// routes models or spawns subagents, so probes always run native (Scrub),
-    /// independent of gateway/config state.
-    VersionProbe,
-}
-
-/// Resolved launch environment for a single Claude spawn.
-///
-/// This is the only value that carries the gateway Inject|Scrub decision to a
-/// launch site. It is produced solely by [`ClaudeLaunchEnv::resolve`] (or the
-/// test-only constructors) so the resolution policy is centralised.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ClaudeLaunchEnv {
-    gateway: ClaudeGatewayProxyEnv,
-}
-
-impl ClaudeLaunchEnv {
-    /// Resolve the gateway launch env for the given intent. This is the single
-    /// place that maps a launch intent onto the gateway Inject|Scrub decision.
-    pub(crate) fn resolve(intent: ClaudeLaunchIntent) -> Self {
-        Self {
-            gateway: resolve_gateway(
-                intent,
-                crate::services::claude_gateway_proxy::resolve_for_launch,
-            ),
-        }
-    }
-
-    /// Apply the resolved gateway env to a `Command` (Inject sets the proxy
-    /// vars, Scrub removes any inherited values). Used by launch sites that
-    /// build a `Command` outside [`ClaudeCommandBuilder`] (e.g. the wrapper
-    /// command assembled inside `session_backend`).
-    pub(crate) fn apply_to_command(&self, command: &mut Command) {
-        self.gateway.apply_to_command(command);
-    }
-
-    /// Render the resolved gateway env as `export`/`unset` shell lines for
-    /// launch sites that write a bash launch script rather than spawning a
-    /// `Command` directly (Claude-TUI launch script, legacy tmux wrapper).
-    pub(crate) fn append_shell_env(&self, output: &mut String) {
-        self.gateway.append_shell_env(output);
-    }
-
-    /// Borrow the resolved gateway decision this launch env carries.
-    ///
-    /// The `claude_compact_context` launch-provenance / auto-compact-window
-    /// helpers (#4591) read the effective Inject|Scrub decision to record pane
-    /// provenance and derive the immutable launch window. They are pure
-    /// consumers of the *already-resolved* decision (they never launch), so
-    /// exposing it here keeps [`ClaudeLaunchEnv`] the single carrier: those
-    /// sites obtain the gateway env through this chokepoint value rather than
-    /// re-resolving it themselves.
-    pub(crate) fn gateway_proxy_env(&self) -> &ClaudeGatewayProxyEnv {
-        &self.gateway
-    }
-
-    #[cfg(test)]
-    pub(crate) fn inject_for_test(base_url: &str) -> Self {
-        Self {
-            gateway: crate::services::claude_gateway_proxy::launch_env_for_test(
-                true, base_url, true,
-            ),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn scrub_for_test() -> Self {
-        Self {
-            gateway: crate::services::claude_gateway_proxy::launch_env_for_test(
-                false,
-                "http://unused.invalid",
-                true,
-            ),
-        }
-    }
-}
-
-/// Map a launch intent onto a gateway decision. `turn_gateway` supplies the
-/// config-gated `Turn` decision (production: `resolve_for_launch`). Factored out
-/// of [`ClaudeLaunchEnv::resolve`] so the `VersionProbe => Scrub` arm can be
-/// mutation-tested against a *distinguishable* `Turn` decision without touching
-/// process-global config (in unit tests `resolve_for_launch` collapses to Scrub,
-/// which would otherwise hide a flip of the probe arm).
-fn resolve_gateway(
-    intent: ClaudeLaunchIntent,
-    turn_gateway: impl FnOnce() -> ClaudeGatewayProxyEnv,
-) -> ClaudeGatewayProxyEnv {
-    match intent {
-        ClaudeLaunchIntent::Turn => turn_gateway(),
-        ClaudeLaunchIntent::VersionProbe => ClaudeGatewayProxyEnv::Scrub,
-    }
-}
-
 /// By-construction builder for a Claude-launching `Command`.
 ///
-/// The binary-resolution PATH (when the program is the Claude binary itself)
-/// and the gateway launch env are applied the moment the builder is created, so
-/// the wrapped `Command` is guarded from the first instant it exists. Callers
-/// finish configuring the command through [`ClaudeCommandBuilder::command_mut`]
-/// (args, cwd, other env, stdio, process group) and extract it with
-/// [`ClaudeCommandBuilder::into_command`]. No launch site can produce a Claude
-/// command that skipped the guard because the builder is the only constructor.
+/// The binary-resolution PATH (when the program is the Claude binary itself) is
+/// applied the moment the builder is created. Callers finish configuring the
+/// command through [`ClaudeCommandBuilder::command_mut`] (args, cwd, env,
+/// stdio, process group) and extract it with
+/// [`ClaudeCommandBuilder::into_command`].
 pub(crate) struct ClaudeCommandBuilder {
     command: Command,
 }
 
 impl ClaudeCommandBuilder {
-    /// Shared construction path for every builder flavour. This is the single
-    /// authority: `launch_env.apply_to_command` here is the gateway guard that
-    /// every Claude spawn site depends on. Removing it must break the mutation
-    /// test in `chokepoint_gateway_mutation_tests`.
-    fn build(
-        program: impl AsRef<OsStr>,
-        resolution: Option<&BinaryResolution>,
-        launch_env: ClaudeLaunchEnv,
-    ) -> Self {
+    /// Shared construction path for every builder flavour.
+    fn build(program: impl AsRef<OsStr>, resolution: Option<&BinaryResolution>) -> Self {
         let mut command = Command::new(program);
         if let Some(resolution) = resolution {
             crate::services::platform::apply_binary_resolution(&mut command, resolution);
         }
-        launch_env.apply_to_command(&mut command);
         Self { command }
     }
 
     /// Build a command that launches the Claude binary directly. Applies the
-    /// binary-resolution PATH and the gateway env for `intent` by construction.
-    pub(crate) fn for_binary(
-        binary: &ClaudeBinary,
-        resolution: &BinaryResolution,
-        intent: ClaudeLaunchIntent,
-    ) -> Self {
-        Self::build(
-            binary.program(),
-            Some(resolution),
-            ClaudeLaunchEnv::resolve(intent),
-        )
-    }
-
-    /// Binary-launch variant of [`for_binary`] that threads in an
-    /// already-resolved launch env instead of resolving it from an intent.
-    ///
-    /// The direct-stream native launch (#4591) resolves the launch env once so
-    /// the same gateway decision drives both the auto-compact-window
-    /// computation and the by-construction gateway guard; resolving twice could
-    /// probe the proxy twice and disagree. Applies the binary-resolution PATH
-    /// plus the supplied launch env through the shared `build` guard arm.
-    pub(crate) fn for_binary_with_env(
-        binary: &ClaudeBinary,
-        resolution: &BinaryResolution,
-        launch_env: ClaudeLaunchEnv,
-    ) -> Self {
-        Self::build(binary.program(), Some(resolution), launch_env)
+    /// binary-resolution PATH by construction.
+    pub(crate) fn for_binary(binary: &ClaudeBinary, resolution: &BinaryResolution) -> Self {
+        Self::build(binary.program(), Some(resolution))
     }
 
     /// Build a command that launches a wrapper program which transitively
-    /// spawns Claude (`agentdesk tmux-wrapper …`, `claude-e …`). The gateway env
-    /// is applied by construction to the wrapper and the wrapped Claude child
-    /// inherits it. The binary-resolution PATH is supplied separately by the
-    /// caller because the wrapper — not the Claude binary — is the program here.
-    pub(crate) fn for_wrapper(program: impl AsRef<OsStr>, intent: ClaudeLaunchIntent) -> Self {
-        Self::build(program, None, ClaudeLaunchEnv::resolve(intent))
-    }
-
-    /// Wrapper-launch variant of [`for_wrapper`] that threads in an
-    /// already-resolved launch env instead of resolving it from an intent.
-    ///
-    /// The ProcessBackend `claude-e` launch (#4591) must resolve the launch env
-    /// exactly once up front so the *same* gateway decision drives both the
-    /// auto-compact-window computation and the by-construction gateway guard;
-    /// resolving twice could probe the proxy twice and disagree. As with
-    /// [`for_wrapper`], no binary-resolution PATH is applied (the wrapper — not
-    /// the Claude binary — is the program), and the gateway env is still applied
-    /// through the shared `build` guard arm.
-    pub(crate) fn for_wrapper_with_env(
-        program: impl AsRef<OsStr>,
-        launch_env: ClaudeLaunchEnv,
-    ) -> Self {
-        Self::build(program, None, launch_env)
+    /// spawns Claude (`agentdesk tmux-wrapper …`, `claude-e …`). The
+    /// binary-resolution PATH is supplied separately by the caller because the
+    /// wrapper — not the Claude binary — is the program here.
+    pub(crate) fn for_wrapper(program: impl AsRef<OsStr>) -> Self {
+        Self::build(program, None)
     }
 
     /// Build the native Claude `--version` probe from a resolved capability.
@@ -311,11 +143,7 @@ impl ClaudeCommandBuilder {
         binary: &ClaudeBinary,
         resolution: &BinaryResolution,
     ) -> Self {
-        Self::build(
-            binary.program(),
-            Some(resolution),
-            ClaudeLaunchEnv::resolve(ClaudeLaunchIntent::VersionProbe),
-        )
+        Self::build(binary.program(), Some(resolution))
     }
 
     /// Build the native Claude version-smoke probe. This uses the CLI boundary
@@ -323,11 +151,7 @@ impl ClaudeCommandBuilder {
     pub(crate) fn for_version_smoke(program: &str, canonical_path: &str) -> Self {
         let binary = ClaudeBinary::from_cli_boundary(program);
         let canonical = ClaudeBinary::from_cli_boundary(canonical_path);
-        let mut builder = Self::build(
-            binary.program(),
-            None,
-            ClaudeLaunchEnv::resolve(ClaudeLaunchIntent::VersionProbe),
-        );
+        let mut builder = Self::build(binary.program(), None);
         canonical.augment_exec_path(builder.command_mut());
         builder
     }
@@ -335,39 +159,17 @@ impl ClaudeCommandBuilder {
     /// Build a command that launches the Claude binary delivered by the
     /// `agentdesk tmux-wrapper` boundary. The wrapper boundary is the sole
     /// untyped CLI argv ingress; once it is wrapped, the path cannot escape this
-    /// module. Applies the exec-path PATH plus the supplied (already-resolved)
-    /// launch env by construction.
-    pub(crate) fn for_tmux_wrapper_argv(program: &str, launch_env: ClaudeLaunchEnv) -> Self {
+    /// module. Applies the exec-path PATH by construction.
+    pub(crate) fn for_tmux_wrapper_argv(program: &str) -> Self {
         let binary = ClaudeBinary::from_tmux_wrapper_argv(program);
-        let mut builder = Self::build(binary.program(), None, launch_env);
+        let mut builder = Self::build(binary.program(), None);
         binary.augment_exec_path(builder.command_mut());
         builder
     }
 
-    /// Test-only constructor that injects a pre-resolved launch env, letting a
-    /// test exercise the exact production `build` path (and thus the gateway
-    /// guard arm) without a live config.
-    #[cfg(test)]
-    pub(crate) fn build_for_test(
-        program: impl AsRef<OsStr>,
-        resolution: Option<&BinaryResolution>,
-        launch_env: ClaudeLaunchEnv,
-    ) -> Self {
-        Self::build(program, resolution, launch_env)
-    }
-
-    #[cfg(test)]
-    fn build_for_binary_test(
-        binary: &ClaudeBinary,
-        resolution: Option<&BinaryResolution>,
-        launch_env: ClaudeLaunchEnv,
-    ) -> Self {
-        Self::build(binary.program(), resolution, launch_env)
-    }
-
     /// Mutable access to the wrapped command for site-specific configuration
-    /// (args, cwd, other env, stdio, process group). The gateway env and PATH
-    /// are already applied; sites never set the gateway vars themselves.
+    /// (args, cwd, env, stdio, process group). The binary-resolution PATH is
+    /// already applied.
     pub(crate) fn command_mut(&mut self) -> &mut Command {
         &mut self.command
     }
@@ -375,145 +177,6 @@ impl ClaudeCommandBuilder {
     /// Consume the builder and return the fully-guarded `Command`.
     pub(crate) fn into_command(self) -> Command {
         self.command
-    }
-}
-
-#[cfg(test)]
-fn command_env_map(command: &Command) -> std::collections::HashMap<String, Option<String>> {
-    command
-        .get_envs()
-        .map(|(key, value)| {
-            (
-                key.to_string_lossy().into_owned(),
-                value.map(|value| value.to_string_lossy().into_owned()),
-            )
-        })
-        .collect()
-}
-
-#[cfg(test)]
-mod chokepoint_gateway_mutation_tests {
-    use super::*;
-    use crate::services::platform::BinaryResolution;
-
-    const BASE_URL_ENV: &str = "ANTHROPIC_BASE_URL";
-    const DISCOVERY_ENV: &str = "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY";
-
-    fn claude_resolution() -> BinaryResolution {
-        BinaryResolution {
-            requested_binary: "claude".to_string(),
-            resolved_path: Some("claude".to_string()),
-            canonical_path: None,
-            source: Some("test".to_string()),
-            attempts: Vec::new(),
-            failure_kind: None,
-            exec_path: None,
-        }
-    }
-
-    fn claude_binary() -> ClaudeBinary {
-        ClaudeBinary::from_tmux_wrapper_argv("claude")
-    }
-
-    // Mutation target: `ClaudeCommandBuilder::build` applies the gateway env via
-    // `launch_env.apply_to_command`. Every Claude spawn site funnels through
-    // `build` (via `for_binary` / `for_wrapper`), so deleting that single line
-    // makes ALL of these assertions fail — proving the guard is applied by
-    // construction rather than remembered per site.
-
-    #[test]
-    fn for_binary_injects_gateway_env_by_construction() {
-        let resolution = claude_resolution();
-        let binary = claude_binary();
-        let builder = ClaudeCommandBuilder::build_for_binary_test(
-            &binary,
-            Some(&resolution),
-            ClaudeLaunchEnv::inject_for_test("http://127.0.0.1:10100"),
-        );
-        let envs = command_env_map(&builder.into_command());
-        // If the gateway arm is removed from `build`, ANTHROPIC_BASE_URL is
-        // never set and this assertion fails.
-        assert_eq!(
-            envs.get(BASE_URL_ENV),
-            Some(&Some("http://127.0.0.1:10100".to_string()))
-        );
-        assert_eq!(envs.get(DISCOVERY_ENV), Some(&Some("1".to_string())));
-    }
-
-    #[test]
-    fn for_binary_scrubs_inherited_gateway_env_by_construction() {
-        let resolution = claude_resolution();
-        let binary = claude_binary();
-        let builder = ClaudeCommandBuilder::build_for_binary_test(
-            &binary,
-            Some(&resolution),
-            ClaudeLaunchEnv::scrub_for_test(),
-        );
-        // Scrub records an `env_remove` for each gateway var, so `get_envs`
-        // reports `(var, None)`. If the gateway arm is removed from `build`, no
-        // removal is recorded and `get` returns `None` (not `Some(&None)`),
-        // failing these assertions.
-        let envs = command_env_map(&builder.into_command());
-        assert_eq!(envs.get(BASE_URL_ENV), Some(&None));
-        assert_eq!(envs.get(DISCOVERY_ENV), Some(&None));
-    }
-
-    #[test]
-    fn for_wrapper_applies_gateway_env_without_binary_resolution() {
-        let builder = ClaudeCommandBuilder::build_for_test(
-            "claude-e",
-            None,
-            ClaudeLaunchEnv::inject_for_test("http://127.0.0.1:10100"),
-        );
-        let envs = command_env_map(&builder.into_command());
-        assert_eq!(
-            envs.get(BASE_URL_ENV),
-            Some(&Some("http://127.0.0.1:10100".to_string()))
-        );
-        assert_eq!(envs.get(DISCOVERY_ENV), Some(&Some("1".to_string())));
-    }
-
-    #[test]
-    fn tmux_wrapper_argv_applies_launch_env_by_construction() {
-        // The tmux-wrapper constructor: gateway env applied through the shared
-        // `build` guard arm (removing it fails this), PATH added on top.
-        let builder = ClaudeCommandBuilder::for_tmux_wrapper_argv(
-            "/opt/claude/bin/claude",
-            ClaudeLaunchEnv::inject_for_test("http://127.0.0.1:10100"),
-        );
-        let envs = command_env_map(&builder.into_command());
-        assert_eq!(
-            envs.get(BASE_URL_ENV),
-            Some(&Some("http://127.0.0.1:10100".to_string()))
-        );
-        assert_eq!(envs.get(DISCOVERY_ENV), Some(&Some("1".to_string())));
-        // exec-path PATH is derived from the binary path (augment_exec_path).
-        assert!(envs.get("PATH").is_some());
-    }
-
-    fn inject(url: &str) -> ClaudeGatewayProxyEnv {
-        ClaudeGatewayProxyEnv::Inject {
-            base_url: url.to_string(),
-        }
-    }
-
-    fn scrub() -> ClaudeGatewayProxyEnv {
-        ClaudeGatewayProxyEnv::Scrub
-    }
-
-    #[test]
-    fn version_probe_arm_ignores_the_turn_gateway_decision() {
-        // Real mutation coverage for `resolve_gateway`'s probe arm: feed a Turn
-        // gateway that is DISTINGUISHABLE from Scrub (Inject) so flipping
-        // `VersionProbe => Scrub` to `=> turn_gateway()` is detectable — unlike
-        // the config-less unit-test `resolve_for_launch`, which is itself Scrub.
-        let turn_gateway = || inject("http://turn.example/");
-        let probe = resolve_gateway(ClaudeLaunchIntent::VersionProbe, turn_gateway);
-        assert_eq!(probe, scrub());
-
-        let turn_gateway = || inject("http://turn.example/");
-        let turn = resolve_gateway(ClaudeLaunchIntent::Turn, turn_gateway);
-        assert_eq!(turn, inject("http://turn.example/"));
     }
 }
 
