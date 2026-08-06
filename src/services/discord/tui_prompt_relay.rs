@@ -28,6 +28,7 @@ mod injected_prompt_policy;
 use self::injected_prompt_policy::{
     InjectedPromptClass, classify_injected_prompt, format_slash_command_control_note,
     format_ssh_direct_prompt_notification, format_system_continuation_note,
+    injected_prompt_suppresses_user_turn_lifecycle,
 };
 #[cfg(test)]
 use self::injected_prompt_policy::{
@@ -142,6 +143,8 @@ mod claude_idle_bridge;
 mod claude_idle_runtime;
 #[cfg(unix)]
 mod claude_idle_tail;
+// #5188: session-rotation settle pass (pure planner always compiled + tested).
+mod session_rotation_settle;
 #[cfg(unix)]
 #[allow(unused_imports)]
 use self::claude_idle_bridge::build_tui_direct_bridge_inflight_state;
@@ -181,6 +184,8 @@ use self::claude_idle_tail::{
 use self::claude_idle_tail::{
     maybe_spawn_claude_idle_response_tail, spawn_claude_idle_response_tail_once,
 };
+#[cfg(unix)]
+use self::session_rotation_settle::settle_claude_session_rotations;
 
 const SSH_DIRECT_PROMPT_PREVIEW_LIMIT: usize = 1500;
 const CODEX_IDLE_ROLLOUT_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -524,7 +529,12 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
              (adding with a different bot would leave an un-removable hourglass)"
         );
     }
-    let suppresses_user_turn_lifecycle = injected_class.suppresses_user_turn_lifecycle();
+    // #5188 (R3): kind-aware gate — a session-resetting `/clear` joins the
+    // passive classes; its inflight was pinned to a transcript about to freeze.
+    let suppresses_user_turn_lifecycle = injected_prompt_suppresses_user_turn_lifecycle(
+        injected_class,
+        relay_prompt_decision.slash_command_kind.as_deref(),
+    );
     // #3176: anchor id of THIS turn's synthetic inflight (set only on the anchor-
     // posting branch); the idle-tail drain-wait uses it to identity-pin our own row
     // (no self-deadlock) while still waiting on a genuinely distinct previous turn.
@@ -534,30 +544,17 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     // observer skips its own BridgeAdapter tail (no duplicate relay).
     let deferred_synthetic_start: bool;
     if suppresses_user_turn_lifecycle {
-        // #3178 (codex fix): only SystemContinuation reaches here now —
-        // SlashCommandControl was removed from `suppresses_user_turn_lifecycle`
-        // and takes the active-turn `else` block below.
-        let note = format_system_continuation_note(&prompt.tmux_session_name, &prompt.prompt);
-        match channel_id.say(&*notify_http, note).await {
-            Ok(message) => {
-                tracing::info!(
-                    provider = %prompt.provider,
-                    channel_id = channel_id.get(),
-                    tmux_session_name = %prompt.tmux_session_name,
-                    note_message_id = message.id.get(),
-                    "rendered system/compact continuation injection as neutral session note; no active-turn lifecycle, no external turn owner, no synthetic inflight"
-                );
-            }
-            Err(error) => {
-                tracing::warn!(
-                    provider = %prompt.provider,
-                    channel_id = channel_id.get(),
-                    tmux_session_name = %prompt.tmux_session_name,
-                    error = %error,
-                    "failed to send system/compact continuation session note"
-                );
-            }
-        }
+        // #3178/#5188: SystemContinuation and a session-resetting `/clear` render
+        // a neutral note and stop there — no anchor, no ⏳, no synthetic inflight.
+        // Every other SlashCommandControl takes the active-turn `else` block.
+        synthetic_start_wiring::post_suppressed_injection_note(
+            &notify_http,
+            channel_id,
+            &prompt,
+            injected_class,
+            relay_prompt_decision.slash_command_kind.as_deref(),
+        )
+        .await;
         return;
     } else {
         // #3178 (codex fix): a SlashCommandControl is a FULL active turn now (anchor +

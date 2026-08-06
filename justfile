@@ -132,6 +132,14 @@ test-non-pg:
     cargo test --lib services::discord::model_catalog -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::discord::commands::model_ui::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::discord::runtime_bootstrap::shutdown::lifecycle_tests -- --skip _pg --skip pg_ --skip postgres
+    # #5188: Claude session rotation (`/clear`). All three modules guard a silent
+    # permanent delivery loss, so keep them fully selected: the planner must drain
+    # the frozen transcript BEFORE following the rotation (losing that is data
+    # loss), a payload-adopted binding must outrank the stale launch script, and a
+    # session-resetting slash control must not mint an unfinalizable inflight.
+    cargo test --lib services::discord::tui_prompt_relay::session_rotation_settle::tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib services::discord::tui_prompt_relay::injected_prompt_policy::session_resetting_lifecycle_tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib services::tui_prompt_dedupe::session_rotation::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
     # `ClaudeBinary` capability invariants are compile-fail doctests in src/lib.rs.
     # Filter the real rustdoc harness to this public capability contract.

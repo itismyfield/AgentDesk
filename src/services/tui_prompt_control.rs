@@ -15,6 +15,19 @@ pub(crate) const LOCAL_ONLY_SLASH_COMMANDS: [&str; 4] =
 /// Claude-native controls observed from a TUI that also complete locally.
 pub(crate) const OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS: [&str; 1] = ["/model"];
 
+/// #5188: slash controls that RESET the provider session — Claude Code opens a
+/// brand-new transcript JSONL and stops writing to the current one.
+///
+/// These are load-bearing for turn lifecycle, not just rendering. Such a command
+/// produces NO assistant output, and any inflight created for it is bound to a
+/// transcript that will never grow again — so it can never receive a terminal
+/// signal and wedges the channel (`FOREIGN prior inflight is still live` on every
+/// later turn). They are deliberately kept OUT of
+/// [`is_local_only_slash_command_kind`] so the existing note-dedupe behaviour for
+/// local-only controls is untouched; this list only governs the active-turn
+/// lifecycle gate.
+pub(crate) const SESSION_RESETTING_SLASH_COMMANDS: [&str; 1] = ["/clear"];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LocalOnlySlashControl {
     pub(crate) kind: String,
@@ -59,6 +72,12 @@ pub(crate) fn classify_local_only_slash_control(prompt: &str) -> Option<LocalOnl
 pub(crate) fn is_local_only_slash_command_kind(kind: &str) -> bool {
     LOCAL_ONLY_SLASH_COMMANDS.contains(&kind)
         || OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS.contains(&kind)
+}
+
+/// #5188: does this slash-control kind rotate the provider session (new
+/// transcript JSONL, old one frozen)? See [`SESSION_RESETTING_SLASH_COMMANDS`].
+pub(crate) fn is_session_resetting_slash_command_kind(kind: &str) -> bool {
+    SESSION_RESETTING_SLASH_COMMANDS.contains(&kind)
 }
 
 /// Strip ANSI/terminal control sequences while preserving meaningful layout.
