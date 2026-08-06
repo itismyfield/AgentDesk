@@ -94,8 +94,10 @@ export function createAutoQueuePhaseRenderers(ctx: AutoQueuePhaseRendererCtx) {
   // Whether this indicator renders at all is decided by `hasBatchPhases` and
   // `phaseSections` at the `AutoQueuePanelView` call sites, not by
   // `gatesByPhase`: when a phase has no gate row the generic "게이트" label
-  // still renders, and `gatesByPhase` only supplies the status badge and the
-  // failure reason.
+  // still renders under the `"pending"` default. What `gatesByPhase` does feed
+  // is the gate row's `status` (driving `baseColor`, `statusIcon` and the
+  // `animate-pulse` active state) plus the two parts guarded on the row
+  // existing at all — the status badge and the failure reason.
   const renderPhaseGateIndicator = (phase: number) => {
     const gates = gatesByPhase.get(phase) ?? [];
 
