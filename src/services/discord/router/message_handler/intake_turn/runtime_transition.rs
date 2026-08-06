@@ -39,7 +39,7 @@ pub(super) async fn acquire_after_redirect_or_requeue(
     // #5170: the enqueue is unchanged, but it is NOT a race loss. Nothing
     // claimed the mailbox here — the transition lock was simply held at this
     // instant — so the requeue is tagged `SessionTransitionBusy` and takes the
-    // backoff wake policy (slow fail-open backstop) rather than the race-loss
+    // deferred wake policy (the fixed 60s fail-open backstop) rather than the race-loss
     // edge-trigger recheck, whose own transition wait re-entered intake against
     // a lock it had itself made unacquirable, requeueing on every rotation.
     match try_intake_runtime_transition_after_redirect(shared, channel_id, fallback_state).await {
