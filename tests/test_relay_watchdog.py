@@ -3034,6 +3034,46 @@ class TickChannelTests(unittest.TestCase):
         self.assertEqual(len(rt.alerts), 1)
         self.assertIn("attached_but_desynced", rt.alerts[0][0])
 
+    def test_real_desync_still_alarms_without_a_gap_corroborator(self):
+        # #5155 coupling disclosure: `delivery_gap_active` reads `alerting` /
+        # `gap_since`, so terminating a dead session's loss-state removes one of
+        # the three corroborators for `attached_but_desynced`. The corroborator
+        # it removes was a phantom — a five-day-dead session says nothing about
+        # the live channel — and the independent one survives: a transcript that
+        # is growing while nothing is being relayed and no inflight update is
+        # advancing still raises COVERAGE ALERT with no gap state at all.
+        rt = self.make_rt()
+        tick_at = self.now + 600
+        stale_ms = int(
+            (tick_at - COVERAGE_ACTIVITY_FRESH_SECS * 3) * 1000
+        )
+        self.arm_coverage(
+            rt,
+            self.active_foreground_probe(
+                queue_depth=1,
+                last_outbound_activity_ms=stale_ms,
+                last_relay_ts_ms=stale_ms,
+            ),
+        )
+        state = {
+            "coverage_uncovered_ticks": COVERAGE_CONFIRM_TICKS - 1,
+            "coverage_desync_since": self.now,
+        }
+        self.assertNotIn("gap_since", state)
+        self.assertNotIn("alerting", state)
+
+        tick_coverage(
+            rt,
+            TICK_CHANNEL,
+            state,
+            tick_at,
+            CoverageTranscriptProbe(growing=True, blocks=723, lost=0),
+        )
+
+        self.assertEqual(len(rt.alerts), 1, rt.log_lines)
+        self.assertIn("attached_but_desynced", rt.alerts[0][0])
+        self.assertTrue(state.get("coverage_alerting"))
+
     def _loss_corroboration_probe(self, tick_at):
         return self.active_foreground_probe(
             queue_depth=1,
@@ -7519,6 +7559,616 @@ exit 0
                 data["StandardOutPath"],
                 str(adk / "logs/relay-watchdog.launchd.out.log"),
             )
+
+
+class DeadWorktreeReverseMapTests(unittest.TestCase):
+    """The liveness predicate is only sound if slug→worktree is exact."""
+
+    def test_reverses_project_slug_to_the_owning_worktree_dir(self):
+        pattern = make_re()
+        transcript = (
+            "/Users/alice/.claude/projects/"
+            "-Users-alice--adk-release-worktrees-claude-adk-cc-20260731-220205/"
+            "8cf48ae8-10e0-44a5-af3e-defc060fdf5f.jsonl"
+        )
+        self.assertEqual(
+            relay_watchdog.worktree_dir_for_transcript(
+                transcript, WORKTREE_ROOT, pattern
+            ),
+            Path(WORKTREE_ROOT) / "claude-adk-cc-20260731-220205",
+        )
+
+    def test_refuses_to_resolve_a_foreign_or_thread_project_dir(self):
+        pattern = make_re()
+        for parent in (
+            "-Users-bob--adk-release-worktrees-claude-adk-cc-20260731-220205",
+            "-Users-alice--adk-release-worktrees-claude-adk-cc-t123-20260731-220205",
+            "-Users-alice--adk-release-worktrees-claude-adk-cc-20260731",
+        ):
+            with self.subTest(parent=parent):
+                self.assertIsNone(
+                    relay_watchdog.worktree_dir_for_transcript(
+                        f"/p/{parent}/s.jsonl", WORKTREE_ROOT, pattern
+                    )
+                )
+
+    def test_unreadable_directory_is_not_reported_as_absent(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        present = Path(tmp.name)
+        self.assertIs(relay_watchdog.directory_presence(present), True)
+        self.assertIs(
+            relay_watchdog.directory_presence(present / "nope"), False
+        )
+        with mock.patch.object(
+            relay_watchdog.os, "stat", side_effect=OSError(5, "I/O error")
+        ):
+            self.assertIsNone(relay_watchdog.directory_presence(present))
+
+
+class DeadWorktreeRetirementTests(unittest.TestCase):
+    """#5155: loss-state bound to a session that provably cannot come back.
+
+    Shape mirrors the live 2026-08-05 state read off
+    ``logs/relay-watchdog.state.json``: the transcript is a GAP owner and NOT
+    pending (``pending_transcripts: []``), its worktree directory was deleted,
+    and its last write was ~4.9 days before the tick — so nothing in the
+    existing machinery (idle skip, pending expiry, supersession) retires it and
+    the incident re-fires on its cooldown forever.
+    """
+
+    SESSION = "claude-adk-cc-20260731-220205"
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "logs").mkdir()
+        self.worktrees = self.root / "worktrees"
+        self.worktrees.mkdir()
+        self.projects = self.root / "projects"
+        self.proj_dir = self.projects / (
+            project_slug(str(self.worktrees)) + "-" + self.SESSION
+        )
+        self.proj_dir.mkdir(parents=True)
+        env = mock.patch.dict(
+            os.environ, {"CLAUDE_PROJECTS_ROOT": str(self.projects)}
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        self.channel = ChannelConfig(
+            channel_id="999",
+            sendmessage_key="k",
+            worktree_root=str(self.worktrees),
+        )
+        self.now = time.time()
+        self.transcript = self.proj_dir / "8cf48ae8.jsonl"
+
+    def create_worktree(self) -> None:
+        (self.worktrees / self.SESSION).mkdir()
+
+    def write_stale_transcript(self, age_secs: float) -> None:
+        epoch = self.now - age_secs
+        record = json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "00000000-0000-4000-8000-000000000001",
+                "timestamp": time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                ),
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "undelivered block behind lost=1"}
+                    ]
+                },
+            }
+        )
+        self.transcript.write_text(record + "\n", encoding="utf-8")
+        os.utime(self.transcript, (epoch, epoch))
+
+    def open_incident_state(self) -> dict:
+        """Persisted shape of an already-open gap incident on this path."""
+        path = str(self.transcript)
+        return {
+            "alerting": True,
+            "gap_since": self.now - 4.9 * 86400,
+            "issue_url": "https://example.test/issues/5072",
+            "last_alert": 0.0,
+            relay_watchdog.GAP_TRANSCRIPT_KEY: path,
+            relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY: [path],
+            relay_watchdog.PENDING_TRANSCRIPTS_KEY: [],
+            SELECTED_TRANSCRIPT_KEY: path,
+            relay_watchdog.TRANSCRIPT_SIZES_KEY: {
+                path: self.transcript.stat().st_size
+            },
+            relay_watchdog.PERMANENT_LOSS_TOMBSTONES_KEY: {
+                f"{index:064x}": {
+                    "confirmed_at": self.now - 5 * 86400,
+                    "epoch": self.now - 5 * 86400,
+                    "path": path,
+                }
+                for index in range(3)
+            },
+            relay_watchdog.PERMANENT_LOSS_TOTAL_KEY: 3,
+        }
+
+    def make_rt(self, **cfg_overrides) -> FakeRuntime:
+        cfg = Config(channels=(self.channel,), **cfg_overrides)
+        rt = FakeRuntime(cfg, self.root)
+        rt.haystack = ""
+        return rt
+
+    def tick(self, rt: FakeRuntime, state: dict, at: float) -> None:
+        tick_channel(rt, self.channel, state, at)
+
+    # ── dead ────────────────────────────────────────────────────────────────
+
+    def test_deleted_worktree_terminates_the_gap_incident(self):
+        self.write_stale_transcript(4.9 * 86400)
+        rt = self.make_rt()
+        state = {"999": self.open_incident_state()}
+        chs = state["999"]
+
+        # Tick 1 only opens the absence window; the incident is still live.
+        self.tick(rt, state, self.now)
+        self.assertTrue(chs.get("alerting"), rt.log_lines)
+        self.assertIn(
+            str(self.transcript),
+            chs.get(relay_watchdog.DEAD_WORKTREE_ABSENT_SINCE_KEY, {}),
+        )
+
+        self.tick(
+            rt, state, self.now + relay_watchdog.DEAD_WORKTREE_CONFIRM_SECS + 1
+        )
+
+        self.assertFalse(chs.get("alerting"), (chs, rt.log_lines))
+        self.assertNotIn("gap_since", chs)
+        self.assertNotIn("issue_url", chs)
+        self.assertNotIn(relay_watchdog.GAP_TRANSCRIPT_KEY, chs)
+        self.assertNotIn(relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY, chs)
+        self.assertIn(
+            str(self.transcript), chs[relay_watchdog.RETIRED_TRANSCRIPTS_KEY]
+        )
+        self.assertTrue(
+            any(
+                "dead-worktree-loss-state-retired" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+        # Retirement is not a delivery claim.
+        self.assertFalse(
+            any("릴레이 갭 해소" in body for body, _ in rt.alerts), rt.alerts
+        )
+        self.assertTrue(
+            any("죽은 세션" in body for body, _ in rt.alerts), rt.alerts
+        )
+        # The historical ledger is monotonic (#4954): retirement must not
+        # decrease the projection nor drop a tombstone.
+        self.assertEqual(permanent_loss_total(chs), 3)
+        self.assertEqual(
+            set(chs[relay_watchdog.PERMANENT_LOSS_TOMBSTONES_KEY]),
+            {f"{index:064x}" for index in range(3)},
+        )
+
+    def test_terminated_incident_stops_re_alerting(self):
+        self.write_stale_transcript(4.9 * 86400)
+        rt = self.make_rt()
+        state = {"999": self.open_incident_state()}
+        at = self.now
+        self.tick(rt, state, at)
+        at += relay_watchdog.DEAD_WORKTREE_CONFIRM_SECS + 1
+        self.tick(rt, state, at)
+        alerts_after_retirement = len(rt.alerts)
+        gap_alerts_before = sum(
+            1 for body, _ in rt.alerts if "릴레이 갭 감지" in body
+        )
+        # Five further re-alert windows must produce no new alert of any kind.
+        for _ in range(5):
+            at += rt.cfg.realert_secs + 1
+            self.tick(rt, state, at)
+        self.assertEqual(len(rt.alerts), alerts_after_retirement, rt.alerts)
+        self.assertEqual(
+            sum(1 for body, _ in rt.alerts if "릴레이 갭 감지" in body),
+            gap_alerts_before,
+            rt.alerts,
+        )
+
+    def test_absence_shorter_than_confirm_window_keeps_the_incident_open(self):
+        self.write_stale_transcript(4.9 * 86400)
+        rt = self.make_rt()
+        state = {"999": self.open_incident_state()}
+        chs = state["999"]
+        self.tick(rt, state, self.now)
+        self.tick(
+            rt, state, self.now + relay_watchdog.DEAD_WORKTREE_CONFIRM_SECS - 1
+        )
+        self.assertTrue(chs.get("alerting"), rt.log_lines)
+        self.assertIn(
+            str(self.transcript),
+            chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY],
+        )
+        self.assertTrue(
+            any(
+                "dead-worktree-absence-pending" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+
+    def test_selector_divergence_window_is_voided_with_the_dead_session(self):
+        self.write_stale_transcript(4.9 * 86400)
+        rt = self.make_rt()
+        state = {"999": self.open_incident_state()}
+        chs = state["999"]
+        chs["selector_alerting"] = True
+        chs["selector_diverged_since"] = self.now - 4.9 * 86400
+        chs[relay_watchdog.SELECTOR_DIVERGED_TRANSCRIPT_KEY] = str(
+            self.transcript
+        )
+        self.tick(rt, state, self.now)
+        self.tick(
+            rt, state, self.now + relay_watchdog.DEAD_WORKTREE_CONFIRM_SECS + 1
+        )
+        self.assertNotIn("selector_alerting", chs)
+        self.assertNotIn("selector_diverged_since", chs)
+        self.assertNotIn(relay_watchdog.SELECTOR_DIVERGED_TRANSCRIPT_KEY, chs)
+
+    # ── alive ───────────────────────────────────────────────────────────────
+
+    def test_live_but_idle_session_keeps_reporting_its_gap(self):
+        """NON-SUPPRESSION: quiet is not dead.
+
+        Identical to the dead case in every respect the watchdog can otherwise
+        observe — same 4.9-day-idle transcript, same open incident, same number
+        of ticks — except the worktree directory still exists. The gap must
+        survive untouched and keep alerting.
+        """
+        self.create_worktree()
+        self.write_stale_transcript(4.9 * 86400)
+        rt = self.make_rt()
+        state = {"999": self.open_incident_state()}
+        chs = state["999"]
+        at = self.now
+        self.tick(rt, state, at)
+        for _ in range(6):
+            at += relay_watchdog.DEAD_WORKTREE_CONFIRM_SECS + 1
+            self.tick(rt, state, at)
+
+        self.assertTrue(chs.get("alerting"), (chs, rt.log_lines))
+        self.assertIn(
+            str(self.transcript),
+            chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY],
+        )
+        self.assertNotIn(
+            str(self.transcript),
+            chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {}),
+        )
+        self.assertNotIn(relay_watchdog.DEAD_WORKTREE_ABSENT_SINCE_KEY, chs)
+        self.assertFalse(
+            any("dead-worktree" in line for line in rt.log_lines), rt.log_lines
+        )
+        self.assertTrue(
+            any("릴레이 갭 감지" in body for body, _ in rt.alerts), rt.alerts
+        )
+
+    def test_a_transient_listing_failure_never_retires_a_fresh_transcript(self):
+        """P1-A: a missing candidate must fail CLOSED, like the sibling guard.
+
+        `channel_project_dirs` returns [] on ANY OSError from `root.iterdir()`,
+        and `_regular_file_stat_without_symlink` returns None on a single failed
+        stat. One transient listing failure therefore empties
+        `candidate_by_path` — and a guard written as `candidate is not None and
+        ...` would skip entirely and retire a transcript written seconds ago.
+        """
+        self.write_stale_transcript(4.9 * 86400)
+        rt = self.make_rt()
+        state = {"999": self.open_incident_state()}
+        chs = state["999"]
+        self.tick(rt, state, self.now)
+        retire_at = self.now + relay_watchdog.DEAD_WORKTREE_CONFIRM_SECS + 1
+        # The session is writing again as of this very tick (idle 0s)...
+        os.utime(self.transcript, (retire_at, retire_at))
+        # ...but this tick's directory listing failed, so nothing is observed.
+        with mock.patch.object(
+            relay_watchdog, "transcript_candidates", return_value=[]
+        ):
+            self.tick(rt, state, retire_at)
+
+        self.assertNotIn(
+            str(self.transcript),
+            chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {}),
+        )
+        self.assertTrue(chs.get("alerting"), (chs, rt.log_lines))
+        self.assertIn(
+            str(self.transcript),
+            chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY],
+        )
+        self.assertTrue(
+            any(
+                "dead-worktree-retirement-declined reason=transcript_unobserved"
+                in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+
+    def test_termination_defers_while_the_notice_is_swallowed_by_cooldown(self):
+        """P1-B: loss-state never terminates in silence.
+
+        `_alert_pending_retirement` shares ONE cooldown key across every reason,
+        so an idle/read-failure retirement seconds earlier would otherwise
+        swallow the dead-session notice while the incident closed anyway.
+        """
+        self.write_stale_transcript(4.9 * 86400)
+        rt = self.make_rt()
+        state = {"999": self.open_incident_state()}
+        chs = state["999"]
+        self.tick(rt, state, self.now)
+        retire_at = self.now + relay_watchdog.DEAD_WORKTREE_CONFIRM_SECS + 1
+        # An unrelated retirement 10s ago burned the shared cooldown.
+        chs[relay_watchdog.LAST_PENDING_TRANSCRIPT_RETIREMENT_ALERT_KEY] = (
+            retire_at - 10
+        )
+        self.tick(rt, state, retire_at)
+
+        self.assertTrue(chs.get("alerting"), (chs, rt.log_lines))
+        self.assertIn(
+            str(self.transcript),
+            chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY],
+        )
+        self.assertNotIn(
+            str(self.transcript),
+            chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {}),
+        )
+        self.assertFalse(
+            any("죽은 세션" in body for body, _ in rt.alerts), rt.alerts
+        )
+        self.assertTrue(
+            any(
+                "dead-worktree-retirement-deferred" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+
+        # Only once the notice actually goes out does the incident close.
+        self.tick(rt, state, retire_at + rt.cfg.realert_secs + 1)
+        self.assertTrue(
+            any("죽은 세션" in body for body, _ in rt.alerts), rt.alerts
+        )
+        self.assertFalse(chs.get("alerting"), (chs, rt.log_lines))
+
+    def test_termination_defers_when_the_notice_cannot_be_delivered(self):
+        """P1-B: a failed post is 'not told', so the authority stays open."""
+        self.write_stale_transcript(4.9 * 86400)
+        rt = self.make_rt()
+        state = {"999": self.open_incident_state()}
+        chs = state["999"]
+        self.tick(rt, state, self.now)
+        rt.alert_succeeds = False
+        retire_at = self.now + relay_watchdog.DEAD_WORKTREE_CONFIRM_SECS + 1
+        self.tick(rt, state, retire_at)
+
+        self.assertTrue(chs.get("alerting"), (chs, rt.log_lines))
+        self.assertNotIn(
+            str(self.transcript),
+            chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {}),
+        )
+        self.assertTrue(
+            any(
+                "transcript-retirement-alert undelivered" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+        # The failed attempt must not have burned the cooldown: the very next
+        # tick after transport recovery closes it.
+        rt.alert_succeeds = True
+        self.tick(rt, state, retire_at + 1)
+        self.assertFalse(chs.get("alerting"), (chs, rt.log_lines))
+
+    def live_successor(self) -> Path:
+        """A second, still-existing session family for this same channel."""
+        name = "claude-adk-cc-20260805-200329"
+        (self.worktrees / name).mkdir()
+        live_dir = self.projects / (
+            project_slug(str(self.worktrees)) + "-" + name
+        )
+        live_dir.mkdir(parents=True)
+        return live_dir / "7e3abf13.jsonl"
+
+    def desynced_probe(self, at: float) -> WatcherStateProbe:
+        stale_ms = int((at - COVERAGE_ACTIVITY_FRESH_SECS * 3) * 1000)
+        return WatcherStateProbe(
+            status=200,
+            attached=True,
+            desynced=True,
+            relay_activity=CoverageActivityProbe(
+                relay_stall_state="active_foreground_stream",
+                active_turn="foreground",
+                queue_depth=1,
+                tmux_alive=True,
+                watcher_attached=True,
+                watcher_attached_stale=False,
+                watcher_owns_live_relay=True,
+                last_outbound_activity_ms=stale_ms,
+                last_relay_ts_ms=stale_ms,
+                desynced=True,
+            ),
+            inflight_updated_at=None,
+        )
+
+    def test_retirement_hands_the_desync_alarm_to_the_live_successor(self):
+        """P1-C: proven from the ACTUAL observed shape, not a convenient one.
+
+        Live log, one tick, 2026-08-05T22:03:50-51Z::
+
+            transcript-select reason=growth path=.../20260731-220205/8cf48ae8...
+            COVERAGE ALERT reason=attached_but_desynced ticks=18
+            gap persists path=.../20260731-220205/8cf48ae8... lost=1
+
+        The selected transcript is the DEAD path carrying `lost=1`, so
+        `zero_loss_observed` is False, `growing_relay_stall` is False, and that
+        COVERAGE ALERT was corroborated by `alerting`/`gap_since` ALONE — the two
+        keys this change pops. Starting from exactly that shape, this walks
+        retirement -> reselection -> alarm and pins that the alarm survives on
+        the independent corroborator once the selector reaches the live session.
+        """
+        self.write_stale_transcript(4.9 * 86400)
+        successor = self.live_successor()
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "uuid": f"00000000-0000-4000-8000-{abs(hash(text)) % 10**12:012d}",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        successor.write_text(
+            record(self.now - 30, "live block one delivered") + "\n",
+            encoding="utf-8",
+        )
+        os.utime(successor, (self.now - 30, self.now - 30))
+
+        rt = self.make_rt()
+        rt.haystack = norm("live block one delivered")
+        rt.live_sessions = {expected_tmux_session_name(self.channel)}
+        rt.watcher_probe = self.desynced_probe(self.now)
+        state = {"999": self.open_incident_state()}
+        chs = state["999"]
+        # The successor is already tracked (as in production), so it debuts as
+        # a known path and the selector stays stuck on the dead one — which is
+        # precisely the logged shape being reproduced.
+        chs[relay_watchdog.TRANSCRIPT_SIZES_KEY][str(successor)] = (
+            successor.stat().st_size
+        )
+
+        # Tick 1 reproduces the logged shape: dead path selected, lost=1, the
+        # gap incident open, the desync accumulating toward confirmation.
+        self.tick(rt, state, self.now)
+        self.assertEqual(chs[SELECTED_TRANSCRIPT_KEY], str(self.transcript))
+        self.assertTrue(chs.get("alerting"))
+        self.assertTrue(
+            any("**1건**" in body for body, _ in rt.alerts), rt.alerts
+        )
+
+        # Tick 2: the live session writes and is relayed; the dead session is
+        # retired and the selector moves to the successor.
+        at = self.now + rt.cfg.realert_secs + 1
+        with successor.open("a", encoding="utf-8") as f:
+            f.write(record(at - 5, "live block two delivered") + "\n")
+        os.utime(successor, (at - 5, at - 5))
+        rt.haystack = (
+            norm("live block one delivered")
+            + " "
+            + norm("live block two delivered")
+        )
+        rt.watcher_probe = self.desynced_probe(at)
+        rt.alerts.clear()
+        rt.log_lines.clear()
+        self.tick(rt, state, at)
+
+        # The gap corroborators are gone...
+        self.assertFalse(chs.get("alerting"), (chs, rt.log_lines))
+        self.assertNotIn("gap_since", chs)
+        self.assertEqual(chs[SELECTED_TRANSCRIPT_KEY], str(successor))
+        # ...and the desync still alarms, on `growing_relay_stall` alone.
+        self.assertTrue(
+            any("attached_but_desynced" in body for body, _ in rt.alerts),
+            (rt.alerts, rt.log_lines),
+        )
+        self.assertTrue(chs.get("coverage_alerting"))
+        self.assertFalse(
+            any(
+                "coverage desync uncorroborated" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+
+    def test_unreadable_worktree_root_never_retires_anything(self):
+        self.write_stale_transcript(4.9 * 86400)
+        rt = self.make_rt()
+        state = {"999": self.open_incident_state()}
+        chs = state["999"]
+        self.tick(rt, state, self.now)
+        self.assertIn(
+            str(self.transcript),
+            chs.get(relay_watchdog.DEAD_WORKTREE_ABSENT_SINCE_KEY, {}),
+        )
+        # The whole root disappears (dismount / rename): every worktree now
+        # stats absent, which must NOT be read as every session being dead.
+        self.worktrees.rmdir()
+        self.tick(
+            rt, state, self.now + relay_watchdog.DEAD_WORKTREE_CONFIRM_SECS + 1
+        )
+        self.assertTrue(chs.get("alerting"), (chs, rt.log_lines))
+        self.assertIn(
+            str(self.transcript),
+            chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY],
+        )
+        self.assertNotIn(relay_watchdog.DEAD_WORKTREE_ABSENT_SINCE_KEY, chs)
+        self.assertTrue(
+            any(
+                "dead-worktree-probe-reset" in line for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+
+    def test_a_still_writing_transcript_is_never_retired(self):
+        """Belt-and-braces: even with the directory gone, a growing file stays."""
+        self.write_stale_transcript(10.0)
+        rt = self.make_rt()
+        state = {"999": self.open_incident_state()}
+        chs = state["999"]
+        self.tick(rt, state, self.now)
+        self.tick(
+            rt, state, self.now + relay_watchdog.DEAD_WORKTREE_CONFIRM_SECS + 1
+        )
+        self.assertNotIn(
+            str(self.transcript),
+            chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {}),
+        )
+        self.assertTrue(
+            any(
+                "dead-worktree-retirement-declined" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+
+
+class AnnounceSkipLoggingTests(unittest.TestCase):
+    """#5155 correction 1: 'not attempted' must not read as 'attempted and failed'."""
+
+    def test_empty_announce_to_logs_that_the_primary_was_skipped(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        (root / "logs").mkdir()
+        ch = ChannelConfig(
+            channel_id="999", sendmessage_key="k", worktree_root=WORKTREE_ROOT
+        )
+        rt = Runtime(Config(channels=(ch,)), root)
+        lines: list[str] = []
+        rt.log = lines.append  # type: ignore[method-assign]
+        with mock.patch.object(
+            relay_watchdog.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 0, "", ""),
+        ) as run:
+            self.assertTrue(rt.alert(ch, "body"))
+        self.assertEqual(run.call_count, 1, "primary must not be attempted")
+        self.assertTrue(
+            any("announce bot skipped" in line for line in lines), lines
+        )
+
 
 
 if __name__ == "__main__":
