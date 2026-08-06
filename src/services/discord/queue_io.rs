@@ -1148,14 +1148,17 @@ mod presleep_tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn capped_retry_is_parked_while_unrelated_backlog_progresses_and_backstop_disarms_4893() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
-        let tmp = tempfile::tempdir().expect("temp runtime root");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+        // #5181: this test reads and writes `busy_followup_retry_store`, whose
+        // root is re-resolved from the process-global `AGENTDESK_ROOT_DIR` on
+        // EVERY call. Releasing the shared test env lock right after
+        // `make_shared_data_for_tests()` (as this test used to) left the rest of
+        // the body racing any sibling that repoints that variable at its own
+        // tempdir: the capped-retry records then become invisible, capped A is
+        // selected instead of parked, and this test fails ONLY under parallel
+        // execution. Hold the lock for the whole body via
+        // `scoped_runtime_root()`, like every other test in this module.
+        let _root = scoped_runtime_root();
         let shared = make_shared_data_for_tests();
-        drop(_lock);
 
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(4_893_310);
@@ -2362,11 +2365,18 @@ mod presleep_tests {
     }
 
     /// #4270 pin — sustained-busy convergence over the PRODUCTION defer
-    /// sequence (`take_next_soft` promote → `mailbox_requeue_intervention_front`
-    /// + slow-backstop arm, exactly what the `dispatch_queued_turn` promote gate
-    /// runs): repeated cycles converge to a SINGLE queue entry and a SINGLE
-    /// coalesced slow backstop (no accumulation / oscillation), and never fire a
-    /// fast kick.
+    /// sequence (`take_next_soft` promote → `mailbox_restore_dequeued_head`
+    /// with the promote's own dispatch lease + slow-backstop arm, exactly what
+    /// the `dispatch_queued_turn` promote gate runs — see
+    /// `router::intake_dispatch::queued`'s deferred-admission arm): repeated
+    /// cycles converge to a SINGLE queue entry and a SINGLE coalesced slow
+    /// backstop (no accumulation / oscillation), and never fire a fast kick.
+    ///
+    /// #5181/#4797 note: the front-restore is lease-AUTHORIZED. Since #4811 the
+    /// lease-less `mailbox_requeue_intervention_front` is refused with
+    /// `SourceIdPendingOrActive` once the promote has reserved
+    /// `pending_user_dispatch`, so threading the promote's lease through is what
+    /// makes the defer preserve the follow-up instead of dropping it.
     #[tokio::test(flavor = "current_thread")]
     async fn promote_defer_requeue_converges_no_oscillation_across_cycles_4270() {
         let _root = scoped_runtime_root();
@@ -2406,7 +2416,23 @@ mod presleep_tests {
             let intervention = taken
                 .intervention
                 .unwrap_or_else(|| panic!("cycle {cycle}: the follow-up must still be promotable"));
-            mailbox_requeue_intervention_front(&shared, &provider, channel_id, intervention).await;
+            let dispatch_lease = taken.dispatch_lease.unwrap_or_else(|| {
+                panic!("cycle {cycle}: the soft promote must hand back its dispatch lease")
+            });
+            let restored = mailbox_restore_dequeued_head(
+                &shared,
+                &provider,
+                channel_id,
+                intervention,
+                dispatch_lease,
+            )
+            .await;
+            assert!(
+                restored.enqueued,
+                "cycle {cycle}: the lease-authorized dequeued-head restore must preserve the \
+                 follow-up (refusal={:?})",
+                restored.refusal_reason
+            );
             arm_slow_idle_queue_backstop_if_queue_nonempty(
                 &shared,
                 &provider,
@@ -2559,7 +2585,23 @@ mod presleep_tests {
             .take_next_soft(queue_persistence_context(&shared, &provider, channel_id))
             .await;
         let intervention = taken.intervention.expect("promote once");
-        mailbox_requeue_intervention_front(&shared, &provider, channel_id, intervention).await;
+        let dispatch_lease = taken
+            .dispatch_lease
+            .expect("the soft promote must hand back its dispatch lease");
+        let restored = mailbox_restore_dequeued_head(
+            &shared,
+            &provider,
+            channel_id,
+            intervention,
+            dispatch_lease,
+        )
+        .await;
+        assert!(
+            restored.enqueued,
+            "the promote gate's lease-authorized restore must re-preserve the follow-up \
+             (refusal={:?})",
+            restored.refusal_reason
+        );
 
         // Watcher-idle drain: the TUI reached Idle, so the drain soft-takes and
         // claims. It must start exactly once and leave the queue empty.

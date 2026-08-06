@@ -307,7 +307,10 @@ targets = {
     # operational-alert targets to the path-filtered required high-risk lane.
     # #5170 re-pins after wiring the transition-busy requeue oracles, which the
     # lib inventory manifest counted while no curated filter executed them.
-    "job_sha256" => "dc85115bd40b9f4ce8b1595d3568ae2a0996c78d7ca1e0fa4f03576ebeb6f1d9",
+    # #5181 re-pins after widening that lane from the two named #5170 oracles to
+    # the whole `services::discord::queue_io::` module, now that the module's
+    # pre-existing #4270/#4893 failures are fixed rather than filtered around.
+    "job_sha256" => "6bf1e4fea9bf977a711f462b6992ac27452faf2ffaf5fea36fd964aaa6354936",
     "require_debug_env" => false,
     "cargo_steps" => {
       "Observe curated lane selections" => {
