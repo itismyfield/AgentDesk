@@ -28,9 +28,7 @@ const MAX_WORKING_MEMORY_LINES: usize = 6;
 const MAX_MEMORY_LINES: usize = 6;
 const MAX_SKIP_LINES: usize = 4;
 const MEMENTO_CONTEXT_FULL_TOKEN_BUDGET: u64 = 1_000;
-const MEMENTO_CONTEXT_IDENTITY_TOKEN_BUDGET: u64 = 450;
 const MEMENTO_CONTEXT_FULL_TYPES: &[&str] = &["preference", "error", "procedure", "decision"];
-const MEMENTO_CONTEXT_IDENTITY_TYPES: &[&str] = &["preference", "procedure"];
 const MAX_CAPTURE_TURN_CHARS: usize = 2_000;
 const MEMENTO_MODEL_OUTPUT_MAX_BYTES: usize = 16 * 1024;
 
@@ -374,42 +372,24 @@ impl MementoBackend {
         args.insert("agentId".to_string(), json!(agent_id));
         args.insert("sessionId".to_string(), json!(request.session_id));
         args.insert("structured".to_string(), json!(true));
-        let (token_budget, types) = match request.mode {
-            RecallMode::Full => (
-                MEMENTO_CONTEXT_FULL_TOKEN_BUDGET,
-                MEMENTO_CONTEXT_FULL_TYPES,
-            ),
-            RecallMode::IdentityOnly => (
-                MEMENTO_CONTEXT_IDENTITY_TOKEN_BUDGET,
-                MEMENTO_CONTEXT_IDENTITY_TYPES,
-            ),
-        };
-        args.insert("tokenBudget".to_string(), json!(token_budget));
-        args.insert("types".to_string(), json!(types));
+        args.insert(
+            "tokenBudget".to_string(),
+            json!(MEMENTO_CONTEXT_FULL_TOKEN_BUDGET),
+        );
+        args.insert("types".to_string(), json!(MEMENTO_CONTEXT_FULL_TYPES));
         if !workspace.trim().is_empty() {
             args.insert("workspace".to_string(), json!(workspace));
         }
         let result = self
             .call_tool(config, "context", Value::Object(args))
             .await?;
-        // #1083: Different formatter per mode — `Full` keeps every section,
-        // `IdentityOnly` strips down to the identity + current session lines.
-        let external_recall = match request.mode {
-            RecallMode::Full => {
-                // #2660 — collapse repeat emissions of the static slice
-                // (Ranked context / Core memory / Anchored fallback) within
-                // the per-(workspace, agent, session, mode) TTL.
-                let rendered = format_context_payload_for_external_recall(&result.payload);
-                let slice_key = build_static_slice_cache_key(
-                    workspace,
-                    &agent_id,
-                    &request.session_id,
-                    request.mode,
-                );
-                elide_static_slice_if_recent(rendered, &slice_key)
-            }
-            RecallMode::IdentityOnly => format_context_payload_for_identity_only(&result.payload),
-        };
+        // #2660 — collapse repeat emissions of the static slice
+        // (Ranked context / Core memory / Anchored fallback) within
+        // the per-(workspace, agent, session, mode) TTL.
+        let rendered = format_context_payload_for_external_recall(&result.payload);
+        let slice_key =
+            build_static_slice_cache_key(workspace, &agent_id, &request.session_id, request.mode);
+        let external_recall = elide_static_slice_if_recent(rendered, &slice_key);
         Ok(ContextFetchResult {
             external_recall,
             token_usage: result.token_usage,
@@ -754,7 +734,6 @@ fn build_static_slice_cache_key(
 ) -> String {
     let mode = match mode {
         RecallMode::Full => "full",
-        RecallMode::IdentityOnly => "identity_only",
     };
     [workspace.trim(), agent_id.trim(), session_id.trim(), mode].join("\u{1f}")
 }
@@ -774,7 +753,6 @@ fn build_recall_dedup_key(
     };
     let mode = match mode {
         RecallMode::Full => "full",
-        RecallMode::IdentityOnly => "identity_only",
     };
     [
         workspace.trim(),
@@ -1314,55 +1292,6 @@ fn format_skip_line(item: &Map<String, Value>) -> Option<(String, String)> {
     Some((skip_item, line))
 }
 
-/// #1083: Identity-only memento payload — emitted on default session-start
-/// turns when no recall trigger fires. Only the `identity` and the active
-/// `current_session` lines are kept so the model still knows who it is talking
-/// to without paying the full context cost.
-fn format_context_payload_for_identity_only(payload: &Value) -> Option<String> {
-    let mut sections = vec!["[External Recall — Identity Lite]".to_string()];
-
-    if let Some(hint) = search_event_feedback_hint(payload) {
-        sections.push(hint);
-    }
-
-    if let Some(identity) = payload
-        .get("identity")
-        .and_then(Value::as_str)
-        .map(normalize_whitespace)
-        .filter(|value| !value.is_empty())
-    {
-        sections.push(format!("Identity from Memento:\n{identity}"));
-    }
-
-    let working_session_lines = payload
-        .get("working")
-        .and_then(Value::as_object)
-        .and_then(|working| working.get("current_session"))
-        .and_then(Value::as_array)
-        .map(|items| {
-            dedup_lines(
-                items
-                    .iter()
-                    .filter_map(Value::as_object)
-                    .filter_map(|item| format_core_memory_line("session", item)),
-                MAX_WORKING_MEMORY_LINES,
-            )
-        })
-        .unwrap_or_default();
-    if !working_session_lines.is_empty() {
-        sections.push(format!(
-            "Current session context from Memento:\n- {}",
-            working_session_lines.join("\n- ")
-        ));
-    }
-
-    if sections.len() == 1 {
-        None
-    } else {
-        Some(sections.join("\n"))
-    }
-}
-
 fn format_context_payload_for_external_recall(payload: &Value) -> Option<String> {
     let mut sections = vec!["[External Recall]".to_string()];
 
@@ -1643,8 +1572,9 @@ fn split_static_slice_sections(text: &str) -> (String, Vec<String>) {
 }
 
 /// Heuristic: a "new section" header line is either the bracketed banner
-/// (`[External Recall]`, `[External Recall — Identity Lite]`) or one of the
-/// known `<label>: ` colon-terminated headers emitted by the formatter.
+/// (`[External Recall]`, the only banner still emitted — see
+/// [`format_context_payload_for_external_recall`]) or one of the known
+/// `<label>: ` colon-terminated headers emitted by the formatter.
 fn line_starts_new_section(line: &str) -> bool {
     if line.starts_with('[') && line.ends_with(']') {
         return true;
@@ -2057,9 +1987,6 @@ mod static_slice_cache_tests {
         let key_a = build_static_slice_cache_key("ws", "agent", "sess", RecallMode::Full);
         let key_b = build_static_slice_cache_key("ws", "agent", "sess", RecallMode::Full);
         assert_eq!(key_a, key_b);
-        let key_other_mode =
-            build_static_slice_cache_key("ws", "agent", "sess", RecallMode::IdentityOnly);
-        assert_ne!(key_a, key_other_mode);
         let key_other_session =
             build_static_slice_cache_key("ws", "agent", "other-sess", RecallMode::Full);
         assert_ne!(key_a, key_other_session);

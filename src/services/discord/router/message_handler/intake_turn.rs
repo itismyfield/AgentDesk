@@ -922,8 +922,6 @@ pub(super) async fn handle_text_message(
             .map(|resolved| resolved.role_binding.clone());
     }
     let memory_scope_channel_id = resolved_role_binding.memory_channel_id(channel_id);
-    let memory_channel_id = memory_scope_channel_id.get();
-    let memory_channel_name = resolved_role_binding.memory_channel_name(None);
     let role_binding = resolved_role_binding.role_binding;
 
     // For cross-channel dispatch reuse, override the provider so the turn

@@ -46,21 +46,12 @@ impl TokenUsage {
 }
 
 /// Controls how much memento payload the backend should fetch and emit.
-///
-/// #1083: Memento recall throttling — by default a turn no longer auto-injects
-/// the full memento `context` payload. The first turn of a fresh session
-/// requests `IdentityOnly` (lightweight identity + working session) while
-/// trigger-based turns request `Full`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum RecallMode {
     /// Full memento context payload — identity, working memory, ranked
-    /// memories, anchors, etc. Reserved for trigger-driven turns.
+    /// memories, anchors, etc.
     #[default]
     Full,
-    /// Lightweight identity-only payload. Used on default session-start turns
-    /// so the model still knows who it is talking to without paying the full
-    /// context cost.
-    IdentityOnly,
 }
 
 #[derive(Clone, Debug)]
