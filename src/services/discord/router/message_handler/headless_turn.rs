@@ -453,7 +453,6 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         }
     };
     let memory_scope_channel_id = resolved_role_binding.memory_channel_id(channel_id);
-    let memory_channel_id = memory_scope_channel_id.get();
     let inherited_memory_channel_name = resolved_role_binding.memory_channel_name(None);
     let role_binding = resolved_role_binding.role_binding.take();
     let provider = role_binding
