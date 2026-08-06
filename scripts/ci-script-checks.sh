@@ -105,6 +105,9 @@ echo "=== Inflight blind-save ratchet guard (#4259) ==="
 # #4511 post-deploy smoke WARN post-restart scoping
 bash tests/test_deploy_smoke_warn_scope_4511.sh
 
+echo "=== Cluster deploy peer verdict + terminal marker contract (#5189) ==="
+bash tests/test_cluster_deploy_peer_verdict_5189.sh
+
 echo "=== CI runner hardening guard ==="
 ./scripts/check-ci-runner-hardening.sh
 "$PYTHON" -m unittest tests.test_discord_thread_create_ci_wiring

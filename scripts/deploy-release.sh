@@ -741,6 +741,22 @@ _assert_release_binary_runtime_surface() {
     rm -f "$surface_dump"
 }
 
+_emit_terminal_deploy_marker() {
+    # EVERY deploy run must end its transcript on exactly one machine-greppable
+    # terminal line. Success is printed by the main body (`═══ Deploy Complete ═══`);
+    # this is its failure counterpart.
+    #
+    # #5189: this echo used to live inside _finalize_detached_helper, i.e. behind
+    # `DEPLOY_DETACHED_CHILD = 1` AND a non-empty report channel. An ssh-driven
+    # cluster peer leg satisfies neither, so a peer that refused promotion ended its
+    # transcript with NO terminal marker at all — leaving any log-based verdict with
+    # nothing to match and the operator with nothing to grep. The marker is the
+    # contract; the Discord notification below is the optional extra.
+    local status="${1:-0}"
+    [ "$status" -ne 0 ] || return 0
+    echo "═══ DEPLOY FAILED (exit=${status}) ═══"
+}
+
 _finalize_detached_helper() {
     local status="${1:-0}"
     [ "$DEPLOY_DETACHED_CHILD" = "1" ] || return 0
@@ -750,10 +766,6 @@ _finalize_detached_helper() {
     if [ "$status" -eq 0 ]; then
         content="✅ release deploy complete"
     else
-        # Emit a deterministic failure marker into the helper log so an operator
-        # tailing the log can poll for a single regex covering both outcomes
-        # (success: `═══ Deploy Complete ═══`, failure: this line).
-        echo "═══ DEPLOY FAILED (exit=${status}) ═══"
         content="❌ release deploy failed (exit ${status})
 log: ${DEPLOY_LOG_PATH:-n/a}"
         local summary
@@ -1089,6 +1101,7 @@ _cleanup_on_exit() {
     if [ -n "${DEPLOY_MKDIR_LOCK_DIR:-}" ] && [ -d "$DEPLOY_MKDIR_LOCK_DIR" ]; then
         rm -rf "$DEPLOY_MKDIR_LOCK_DIR" 2>/dev/null || true
     fi
+    _emit_terminal_deploy_marker "$status"
     _finalize_detached_helper "$status"
 }
 
@@ -1379,9 +1392,14 @@ EOF
     echo "    Poll the helper log in this turn until one terminal line appears:"
     echo "      success: ═══ Deploy Complete ═══"
     echo "      failure: ═══ DEPLOY FAILED (exit=N) ═══"
+    echo "    With --all-nodes these are printed only AFTER every peer leg has finished,"
+    echo "    so the wait below covers the cluster verdict too (#5189)."
     echo ""
     echo "    One-shot wait command (polling loop — self-terminates after match):"
-    echo "      LOG=$log_path; until [ -f \"\$LOG\" ] && grep -qm1 -E '═══ Deploy Complete ═══|═══ DEPLOY FAILED' \"\$LOG\"; do sleep 3; done; grep -E '═══ Deploy Complete ═══|═══ DEPLOY FAILED' \"\$LOG\" | tail -1"
+    # `^`-anchored: `grep -qm1` stops at the FIRST match, so a line that merely quotes
+    # a marker (the per-peer ✓ lines do) would end the wait early and be reported as
+    # the verdict. Terminal markers are emitted at column 0 (#5189).
+    echo "      LOG=$log_path; until [ -f \"\$LOG\" ] && grep -qm1 -E '^═══ Deploy Complete ═══|^═══ DEPLOY FAILED' \"\$LOG\"; do sleep 3; done; grep -E '^═══ Deploy Complete ═══|^═══ DEPLOY FAILED' \"\$LOG\" | tail -1"
     echo ""
     echo "    ⚠ DO NOT use 'tail -F | grep -m1' — grep -m1 exits on match but tail -F stays alive"
     echo "      on inotify wait, leaving the bash task hung past helper completion."
@@ -3348,8 +3366,18 @@ fi
 
 _write_release_source_manifest
 
-echo "═══ Deploy Complete ═══"
-
+# #5189: the terminal marker is the LAST line this run prints, on every path.
+# It used to be echoed HERE, before the cluster stage, and the polling command this
+# script hands the operator (see _spawn_detached_helper) stops at the FIRST match —
+# `grep -qm1` — so it locked onto this line and reported "Deploy Complete" while
+# peers were still unjudged. That is #5189's own defect on a second path. The window
+# is seconds today and grows to the 10-25 minutes a peer leg takes once peers deploy
+# in the ssh foreground.
+# Ordering is the fix, not a smarter regex: while peers are being deployed this
+# transcript carries NO terminal marker, which is the truth — there is no verdict
+# yet. A refused peer exits non-zero and the EXIT trap prints DEPLOY FAILED instead.
 if [ "$DEPLOY_ALL_NODES" = "1" ]; then
     _deploy_to_all_peers "$@"
 fi
+
+echo "═══ Deploy Complete ═══"
