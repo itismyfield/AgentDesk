@@ -6,6 +6,7 @@ use crate::services::discord::replace_outcome_policy::{
     WatcherRewindAttemptDisposition, classify_watcher_send_failure,
     watcher_rewind_attempt_disposition, watcher_send_failure_retry_plan,
 };
+use crate::services::discord::session_relay_sink::journal::watcher as journal_watcher;
 
 #[path = "tmux_watcher/entry.rs"]
 mod entry;
@@ -1006,6 +1007,25 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             &watcher_lease_key,
         );
 
+        // #5071 T1 S3a: open the watcher terminal obligation BEFORE transport. The
+        // predicate keeps the boundary behavioural rather than positional: the
+        // B2-skip, no-send, session-bound-delegation and #3089-A4 cutover arms are
+        // other families' obligations and must not be journalled twice here.
+        let mut watcher_journal_attempt = journal_watcher::begin_watcher_terminal(
+            &shared,
+            journal_watcher::WatcherObligationCoordinates {
+                provider: &watcher_provider,
+                channel_id,
+                tmux_session_name: &tmux_session_name,
+                generation_mtime_ns: source_authority.generation_mtime_ns,
+                range: (watcher_lease_start, watcher_lease_end),
+            },
+            journal_watcher::journals_watcher_terminal(
+                watcher_lease_acquired,
+                cutover_short_replace,
+            ),
+        );
+
         let mut retry_terminal_delivery_from_offset = false;
         // #4194: bound every await in the slot-held terminal relay expression.
         // On timeout, fall into the same failed-undelivered rewind path as a
@@ -1816,18 +1836,30 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 "watcher must be able to commit its own freshly-acquired lease"
             );
             if committed && commit_outcome == crate::services::discord::LeaseOutcome::Delivered {
+                let guarded_result = terminal_long_chunks::commit_legacy_watcher_delivery(
+                    crate::services::discord::tmux::WatcherDeliveryTarget {
+                        shared: &shared,
+                        provider: &watcher_provider,
+                        channel_id,
+                        tmux_session_name: &tmux_session_name,
+                    },
+                    watcher_long_chunk_identity,
+                    (watcher_lease_start, watcher_lease_end),
+                    watcher_terminal_delivery_proof.as_ref(),
+                );
                 watcher_response_frontier_committed =
-                    terminal_long_chunks::commit_legacy_watcher_delivery(
-                        crate::services::discord::tmux::WatcherDeliveryTarget {
-                            shared: &shared,
-                            provider: &watcher_provider,
-                            channel_id,
-                            tmux_session_name: &tmux_session_name,
-                        },
-                        watcher_long_chunk_identity,
-                        (watcher_lease_start, watcher_lease_end),
-                        watcher_terminal_delivery_proof.as_ref(),
-                    );
+                    terminal_long_chunks::legacy_watcher_delivery_committed(guarded_result);
+                // #5071 T1 S3a: settle the obligation opened before transport. Only a
+                // `Persisted` guarded result carries a durable record, so only it
+                // yields T+C; a gateway-only delivery has no receipt and settles into
+                // nothing.
+                journal_watcher::settle_watcher_terminal(
+                    &mut watcher_journal_attempt,
+                    watcher_terminal_delivery_proof
+                        .as_ref()
+                        .and_then(|proof| proof.receipt.clone()),
+                    guarded_result,
+                );
             }
             // Release (Unleased for the next turn). Inline same-holder compare-and-
             // release; idempotent no-op if the identity no longer matches (e.g. a dead
@@ -1847,6 +1879,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // Non-watcher-direct committed paths (relay-suppressed task notifications,
             // empty-turn cleanup, session-bound delegation that consumed the range) keep
             // the inline monotonic-CAS advance — NOT the lease-governed delivery path.
+            //
+            // #5071 T1 S3: NOT a missing site — this advance is deliberately left
+            // uninstrumented. A no-transport settlement site advances the frontier with
+            // no POST anywhere; this arm is mixed, because the session-bound-delegation
+            // case DID post and the sink direct family (S2) already journals that
+            // delivery. Emitting `S` here would call a real delivery no-transport (Q3
+            // excludes those from Delivered) AND put a second observation over the same
+            // bytes — not a slot collision, the sink and watcher obligation ids derive
+            // from different canonical keys, but two contradictory records of one turn.
+            // Splitting the three cases apart is tracked on #5071 for S4/S5.
             advance_watcher_confirmed_end(
                 &shared,
                 &watcher_provider,

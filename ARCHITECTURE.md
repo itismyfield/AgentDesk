@@ -778,7 +778,8 @@ src/
 │   │   │   └── voice.rs
 │   │   ├── session_relay_sink/
 │   │   │   ├── journal/
-│   │   │   │   └── pg_store.rs
+│   │   │   │   ├── pg_store.rs
+│   │   │   │   └── watcher.rs
 │   │   │   ├── delivery_commit.rs
 │   │   │   ├── delivery_frontier.rs
 │   │   │   ├── delivery_orchestration_tests.rs

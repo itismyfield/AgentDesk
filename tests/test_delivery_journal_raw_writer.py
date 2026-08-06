@@ -10,6 +10,11 @@ SCRIPT = ROOT / "scripts/check_delivery_journal_raw_writer.py"
 SPEC = importlib.util.spec_from_file_location("journal_writer_guard", SCRIPT)
 guard = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(guard)
+FACADE_MARKERS = (
+    " self.journal.begin_fresh();",
+    " self.journal.begin_fresh();",
+    " journal_watcher::begin_watcher_terminal();",
+)
 def write(root: Path, rel: str, body: str) -> None:
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -22,8 +27,12 @@ class RawWriterAllowlistTests(unittest.TestCase):
         subprocess.run(["git", "init", "-q"], cwd=root, check=True)
         write(root, "src/services/discord/session_relay_sink/journal/pg_store.rs", "fn append_delivery_journal_batch() {}\n")
         write(root, "src/services/discord/session_relay_sink/journal.rs", "fn actor() { append_delivery_journal_batch(); }\n")
+        # #5071 T1 S3a: the third instrumented family is the watcher, which spells
+        # the facade through `journal_watcher::` because its anchor is a free
+        # function with no `self`. Using the real token here means the fixture
+        # exercises BOTH alternations of JOURNAL_FACADE_CALL, not just the sink's.
         for index, (_, rel, symbol) in enumerate(guard.FAMILY_REGISTRY):
-            call = " self.journal.begin_fresh();" if index <= 1 else ""
+            call = FACADE_MARKERS[index] if index < len(FACADE_MARKERS) else ""
             write(root, rel, f"fn {symbol}() {{{call}}}\n")
         if extra:
             write(root, "src/services/discord/rogue.rs", extra)
@@ -71,7 +80,7 @@ class RawWriterAllowlistTests(unittest.TestCase):
         path = root / guard.FAMILY_REGISTRY[4][1]
         path.write_text(path.read_text(encoding="utf-8") + '#[cfg(test)] fn journal_probe() { self.journal.begin_fresh(); }\n', encoding="utf-8")
         self.assertTrue(guard.family_status(root)[0][4][1], "cfg(test) fn marker is a declared lexical match")
-        ok, message = guard.check(root); self.assertFalse(ok); self.assertIn("uninstrumented families: 3/6", message)
+        ok, message = guard.check(root); self.assertFalse(ok); self.assertIn("uninstrumented families: 2/6", message)
 
     def test_line_doc_comment_markers_are_known_limit_and_not_counted(self):
         """Known limitation and declared behavior: line doc comments are stripped after // on each line."""
@@ -85,14 +94,14 @@ class RawWriterAllowlistTests(unittest.TestCase):
         self.assertFalse(status[4][1], "line doc comment markers are excluded by the declared lexical cut")
         ok, message = guard.check(root)
         self.assertTrue(ok, message)
-        self.assertIn("uninstrumented families: 4/6", message)
+        self.assertIn("uninstrumented families: 3/6", message)
 
     def test_block_marker_strings_do_not_hide_real_facade_calls(self):
         """Evidence: block-marker strings no longer delete calls across lines."""
         root = self.fixture()
         path = root / guard.FAMILY_REGISTRY[0][1]
         path.write_text(path.read_text(encoding="utf-8") + 'const BLOCK_OPEN: &str = "/*";\nself.journal.begin_fresh();\nconst BLOCK_CLOSE: &str = "*/";\n', encoding="utf-8")
-        ok, message = guard.check(root); self.assertTrue(ok, message); self.assertIn("uninstrumented families: 4/6", message)
+        ok, message = guard.check(root); self.assertTrue(ok, message); self.assertIn("uninstrumented families: 3/6", message)
 
     def test_raw_string_marker_is_known_lexical_false_positive(self):
         """Known limit: raw strings are not parsed and may count as calls."""
@@ -118,9 +127,9 @@ class RawWriterAllowlistTests(unittest.TestCase):
     def test_family_baseline_is_measured_and_named(self):
         ok, message = guard.check(self.fixture())
         self.assertTrue(ok, message)
-        self.assertIn("uninstrumented families: 4/6", message)
+        self.assertIn("uninstrumented families: 3/6", message)
         self.assertIn("whole anchor file including tests", message)
-        self.assertIn("watcher terminal family", message)
+        self.assertIn("turn_bridge / controller family", message)
 
     def test_instrumentation_rule_is_mechanical(self):
         root = self.fixture()
@@ -150,11 +159,11 @@ class RawWriterAllowlistTests(unittest.TestCase):
     def test_baseline_increase_names_families(self):
         root = self.fixture()
         old = guard.UNINSTRUMENTED_FAMILY_BASELINE
-        guard.UNINSTRUMENTED_FAMILY_BASELINE = 3
+        guard.UNINSTRUMENTED_FAMILY_BASELINE = 2
         self.addCleanup(setattr, guard, "UNINSTRUMENTED_FAMILY_BASELINE", old)
         ok, message = guard.check(root)
         self.assertFalse(ok)
-        self.assertIn("watcher terminal family", message)
+        self.assertIn("turn_bridge / controller family", message)
 
     def test_baseline_decrease_requires_repin_command(self):
         root = self.fixture()
@@ -168,7 +177,7 @@ class RawWriterAllowlistTests(unittest.TestCase):
         result = subprocess.run(["python3", str(SCRIPT)], cwd=ROOT, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertRegex(result.stdout, r"scanned Rust files: [1-9][0-9]*")
-        self.assertIn("uninstrumented families: 4/6", result.stdout)
+        self.assertIn("uninstrumented families: 3/6", result.stdout)
 
     # SOURCE-CONTRACT block (#5071 T1 S2). Everything below matches TEXT in .rs
     # files: call ORDER, call COUNT, symbol PRESENCE. None of it executes Rust,
@@ -218,5 +227,60 @@ class RawWriterAllowlistTests(unittest.TestCase):
         than deleted still counts toward the 3."""
         source = (ROOT / "src/services/discord/session_relay_sink.rs").read_text(encoding="utf-8")
         self.assertEqual(source.count("journal::settle("), 3)
+
+    # #5071 T1 S3a additions.
+
+    def test_watcher_facade_alternation_matches_only_its_exact_call_shape(self):
+        """The S3a alternation must not be a loosening. Near misses stay
+        uninstrumented; only the declared call shapes match."""
+        for near_miss in (
+            " journal_watcher::begin_watcher();",
+            " journal_watcher.begin_watcher_terminal();",
+            " watcher::begin_watcher_terminal();",
+            " journal_watcher::journals_watcher_terminal();",
+        ):
+            self.assertIsNone(
+                guard.JOURNAL_FACADE_CALL.search(near_miss),
+                f"{near_miss!r} must not count as a facade call",
+            )
+        for exact in (
+            " journal_watcher::begin_watcher_terminal(",
+            " journal_watcher::settle_watcher_terminal(",
+            " self.journal.begin_fresh(",
+            " self.journal.finish_fresh(",
+        ):
+            self.assertIsNotNone(
+                guard.JOURNAL_FACADE_CALL.search(exact),
+                f"{exact!r} is a declared facade call",
+            )
+
+    def test_watcher_family_regresses_to_uninstrumented_when_its_facade_is_removed(self):
+        """Reverse mutation, in fixture form: the 4 -> 3 baseline drop is caused
+        by the instrumentation, not by the widened regex. Drop the watcher token
+        and the count returns over the re-pinned baseline of 3."""
+        root = self.fixture()
+        path = root / guard.FAMILY_REGISTRY[2][1]
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(FACADE_MARKERS[2], ""),
+            encoding="utf-8",
+        )
+        ok, message = guard.check(root)
+        self.assertFalse(ok)
+        self.assertIn("exceeds baseline", message)
+        self.assertIn("watcher terminal family", message)
+
+    def test_source_contract_watcher_anchor_begins_and_settles_exactly_once(self):
+        """Source text only: pins one begin and one settle in the watcher anchor
+        file, so deleting either -- which no runtime test can see, because
+        begin_watcher_terminal returns None without PG + Shadow -- fails in CI.
+        It cannot tell which branch the surviving call sits on."""
+        source = (ROOT / "src/services/discord/tmux_watcher.rs").read_text(encoding="utf-8")
+        self.assertEqual(source.count("journal_watcher::begin_watcher_terminal("), 1)
+        self.assertEqual(source.count("journal_watcher::settle_watcher_terminal("), 1)
+        self.assertLess(
+            source.index("journal_watcher::begin_watcher_terminal("),
+            source.index("journal_watcher::settle_watcher_terminal("),
+            "the obligation opens before transport and settles after the commit",
+        )
 if __name__ == "__main__":
     unittest.main()

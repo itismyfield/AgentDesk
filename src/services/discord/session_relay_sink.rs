@@ -41,7 +41,7 @@ mod delivery_commit;
 mod delivery_frontier;
 mod delivery_outcome_classify;
 mod idle_jsonl;
-mod journal;
+pub(in crate::services::discord) mod journal;
 mod short_controller;
 // #3960: orphaned `SessionBoundRelay` TUI-direct reclaim (producer-liveness TOCTOU).
 mod orphan_reclaim;
@@ -512,7 +512,9 @@ pub(in crate::services::discord) struct SessionBoundDiscordRelaySink {
     frames_total: AtomicU64,
     delivered_total: AtomicU64,
     by_session: Mutex<HashMap<String, SessionRelayParser>>,
-    journal: journal::JournalObserver,
+    // #5071 T1 S3a: borrowed from the process-wide observer rather than owned, so
+    // the sink direct family and the watcher family serialise onto one actor.
+    journal: &'static journal::JournalObserver,
     #[cfg(test)]
     lease_test_probe: Option<Arc<SinkLeaseTestProbe>>,
     #[cfg(test)]
@@ -532,7 +534,7 @@ impl SessionBoundDiscordRelaySink {
             frames_total: AtomicU64::new(0),
             delivered_total: AtomicU64::new(0),
             by_session: Mutex::new(HashMap::new()),
-            journal: journal::JournalObserver::default(),
+            journal: journal::process_observer(),
             #[cfg(test)]
             lease_test_probe: None,
             #[cfg(test)]
@@ -1029,7 +1031,7 @@ impl SessionBoundDiscordRelaySink {
                     "src/services/discord/session_relay_sink.rs:sink_long_chunks_advance",
                 );
                 journal::settle(
-                    &self.journal,
+                    self.journal,
                     &mut direct_journal_attempt,
                     chunk_anchor_receipt,
                     proof,
@@ -1102,7 +1104,7 @@ impl SessionBoundDiscordRelaySink {
                         "src/services/discord/session_relay_sink.rs:sink_legacy_short_edit_advance",
                     );
                     journal::settle(
-                        &self.journal,
+                        self.journal,
                         &mut direct_journal_attempt,
                         edit_anchor_receipt.take(),
                         proof,
@@ -1155,7 +1157,7 @@ impl SessionBoundDiscordRelaySink {
                         "src/services/discord/session_relay_sink.rs:sink_legacy_short_fallback_advance",
                     );
                     journal::settle(
-                        &self.journal,
+                        self.journal,
                         &mut direct_journal_attempt,
                         edit_anchor_receipt.take(),
                         proof,

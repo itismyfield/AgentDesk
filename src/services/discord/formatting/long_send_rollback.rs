@@ -183,6 +183,31 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
     )
 }
 
+/// Receipt-preserving sibling of
+/// [`send_long_message_raw_with_reference_rollback`]. #5071 T1 S3a: the watcher's
+/// placeholderless fresh-send arm consumes the real POST receipts here so its
+/// journal `T` carries Discord's returned channel instead of the requested one.
+pub(in crate::services::discord) async fn send_long_message_raw_with_reference_rollback_returning_receipts(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    rollback_anchor_msg_id: MessageId,
+    text: &str,
+    shared: &Arc<SharedData>,
+    reference: Option<(ChannelId, MessageId)>,
+) -> Result<Vec<TransportReceipt>, Error> {
+    send_long_message_raw_with_reference_rollback_policy(
+        http,
+        channel_id,
+        rollback_anchor_msg_id,
+        text,
+        shared,
+        reference,
+        false,
+        None,
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn send_long_message_raw_with_reference_rollback_policy(
     http: &serenity::Http,
