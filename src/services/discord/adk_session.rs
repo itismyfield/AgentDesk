@@ -929,11 +929,11 @@ pub(super) async fn backfill_completed_panel_usage_and_maybe_inject_compact(
         output_tokens: state.accum_output_tokens,
     };
     let occupied = usage.context_occupancy_input_tokens();
-    // Claude's real window belongs to the launch-time gateway provenance, not
-    // today's live config. Keep the provider fallback for panel display when a
-    // legacy/unregistered pane cannot prove launch provenance, but never use it
-    // to drive the authoritative compact trigger.
-    let claude_window_resolution = matches!(provider, ProviderKind::Claude)
+    // A Claude pane's real window belongs to its launch-time provenance, not
+    // today's live config. A mutable TUI can only ever prove the conservative
+    // launch-bound maximum, so the trigger uses that bound while panel display
+    // keeps the provider's model-derived window.
+    let claude_trigger_window = matches!(provider, ProviderKind::Claude)
         .then(|| {
             crate::services::claude_compact_context::context_window_for_turn(
                 tmux_session_name,
@@ -941,28 +941,9 @@ pub(super) async fn backfill_completed_panel_usage_and_maybe_inject_compact(
             )
         })
         .flatten();
-    let claude_launch_window = match claude_window_resolution {
-        Some(crate::services::claude_compact_context::TurnWindowResolution::Proven(window)) => {
-            Some(window)
-        }
-        _ => None,
-    };
-    let claude_trigger_window = claude_window_resolution.map(|resolution| match resolution {
-        crate::services::claude_compact_context::TurnWindowResolution::Proven(window) => window,
-        crate::services::claude_compact_context::TurnWindowResolution::UnprovenLaunchBound => {
-            crate::services::claude_compact_context::CLAUDE_AUTO_COMPACT_MAX_TOKENS
-        }
-    });
-    let compact_window_source = claude_window_resolution.map(|resolution| match resolution {
-        crate::services::claude_compact_context::TurnWindowResolution::Proven(_) => {
-            crate::services::claude_compact_trigger::CompactWindowSource::Proven
-        }
-        crate::services::claude_compact_context::TurnWindowResolution::UnprovenLaunchBound => {
-            crate::services::claude_compact_trigger::CompactWindowSource::FallbackMax
-        }
-    });
-    let context_window = claude_launch_window
-        .unwrap_or_else(|| provider.resolve_context_window(state.last_model.as_deref()));
+    let compact_window_source = claude_trigger_window
+        .map(|_| crate::services::claude_compact_trigger::CompactWindowSource::FallbackMax);
+    let context_window = provider.resolve_context_window(state.last_model.as_deref());
     let ctx_cfg = fetch_context_thresholds(shared.api_port).await;
     let compact_pct = ctx_cfg.compact_pct_for(provider);
 
@@ -985,11 +966,11 @@ pub(super) async fn backfill_completed_panel_usage_and_maybe_inject_compact(
     }
 
     // The token trigger runs even when `occupied == 0`: a post-compact usage
-    // reset is the observable re-arm signal handled inside the trigger. Exact
-    // catalog evidence uses the proven window; launch-bound but unproven panes use
-    // the conservative maximum-window threshold. Missing provenance/model remains
-    // a no-op. Idempotency is keyed on observable USAGE occupancy (`occupied`),
-    // never on a cosmetic `auto_compacted` string heuristic.
+    // reset is the observable re-arm signal handled inside the trigger.
+    // Launch-bound panes use the conservative maximum-window threshold; missing
+    // provenance/model remains a no-op. Idempotency is keyed on observable USAGE
+    // occupancy (`occupied`), never on a cosmetic `auto_compacted` string
+    // heuristic.
     if matches!(provider, ProviderKind::Claude)
         && let Some(turn_identity) =
             super::ManagedCompactTurnIdentity::capture_live(channel_id.get(), tmux_session_name)
