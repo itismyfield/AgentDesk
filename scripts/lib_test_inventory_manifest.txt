@@ -4181,6 +4181,7 @@ services::discord::session_relay_sink::tests::inflight_sink_marker::commit_not_d
 services::discord::session_relay_sink::tests::inflight_sink_marker::commit_then_drop_releases_to_unleased
 services::discord::session_relay_sink::tests::inflight_sink_marker::drop_without_commit_releases_without_committing
 services::discord::session_relay_sink::tests::inflightless_ranged_frame_acquires_sink_lease_before_terminal_delivery_4277
+services::discord::session_relay_sink::tests::korean_answer_under_the_character_limit_stays_one_message
 services::discord::session_relay_sink::tests::lease_guard_drop_clears_own_lease_and_is_inert_for_foreign_owner
 services::discord::session_relay_sink::tests::lease_guard_drop_preserves_newer_turn_lease_no_clobber
 services::discord::session_relay_sink::tests::lease_guard_drop_preserves_newer_unassigned_lease_by_generation
@@ -4347,6 +4348,7 @@ services::discord::standby_relay::tests::extract_result_text_strips_tui_no_respo
 services::discord::standby_relay::tests::heartbeat_offset_rewinds_to_pending_result_until_delivery_commits
 services::discord::standby_relay::tests::inflight_signal_broadcast_delivers_to_subscriber
 services::discord::standby_relay::tests::inflight_signal_filter_matches_own_channel_only
+services::discord::standby_relay::tests::korean_answer_under_the_character_limit_stays_one_message
 services::discord::standby_relay::tests::placeholder_long_terminal_delivery_uses_ordered_new_chunks
 services::discord::standby_relay::tests::poll_scan_defers_fallback_until_completed_grace_expires
 services::discord::standby_relay::tests::poll_scan_prefers_result_before_completed_fallback
@@ -4682,6 +4684,7 @@ services::discord::tmux::tmux_watcher::session_bound_ack::tests::inflight_sink_m
 services::discord::tmux::tmux_watcher::session_bound_ack::tests::inflight_sink_marker_gate::leased_sink_fresh_waits_in_flight
 services::discord::tmux::tmux_watcher::session_bound_ack::tests::inflight_sink_marker_gate::reclaim_then_late_sink_commit_cannot_corrupt_lease
 services::discord::tmux::tmux_watcher::session_bound_ack::tests::inflight_sink_marker_gate::unleased_defers_to_reconciliation
+services::discord::tmux::tmux_watcher::session_bound_ack::tests::korean_answer_under_the_character_limit_stays_one_message
 services::discord::tmux::tmux_watcher::session_bound_ack::tests::not_attempted_sentinel::ack_wait_with_no_target_still_returns_missing_target
 services::discord::tmux::tmux_watcher::session_bound_ack::tests::not_attempted_sentinel::not_attempted_folds_identically_to_missing_target
 services::discord::tmux::tmux_watcher::session_bound_ack::tests::not_attempted_sentinel::not_attempted_is_distinct_from_missing_target
@@ -5420,6 +5423,7 @@ services::discord::turn_bridge::recovery_text::tests::voluntary_feedback_reminde
 services::discord::turn_bridge::recovery_text::tests::voluntary_feedback_reminder_stash_take_and_put_back_round_trips_pg
 services::discord::turn_bridge::response_delivery::headless_completion_footer_tests::headless_enqueue_success_registers_completion_footer_text
 services::discord::turn_bridge::response_delivery::streaming_edit_text_tests::empty_response_notice_is_delivery_only_not_history_payload
+services::discord::turn_bridge::response_delivery::tests::korean_answer_under_the_character_limit_stays_one_message
 services::discord::turn_bridge::response_delivery::tests::long_authoritative_done_after_rollover_replays_full_body
 services::discord::turn_bridge::response_delivery::tests::prompt_too_long_guidance_round_trips_folded_provider_detail
 services::discord::turn_bridge::response_delivery::tests::terminal_delivery_after_rollover_includes_authoritative_tail
@@ -5609,6 +5613,7 @@ services::discord::turn_bridge::terminal_delivery::tests::bridge_skip_save_is_id
 services::discord::turn_bridge::terminal_delivery::tests::empty_sink_commits_nonempty_response_that_was_already_fully_consumed
 services::discord::turn_bridge::terminal_delivery::tests::empty_sink_preserves_retry_unless_resume_retry_was_queued
 services::discord::turn_bridge::terminal_delivery::tests::final_completion_delivery_stays_blocked_until_terminal_message_commits
+services::discord::turn_bridge::terminal_delivery::tests::korean_answer_under_the_character_limit_stays_one_message
 services::discord::turn_bridge::terminal_delivery::tests::long_terminal_response_uses_new_chunk_messages
 services::discord::turn_bridge::terminal_delivery::tests::ordered_long_terminal_delivery_rolls_back_partial_chunks_before_retry
 services::discord::turn_bridge::terminal_delivery::tests::ordered_long_terminal_delivery_sends_all_chunks_and_deletes_placeholder

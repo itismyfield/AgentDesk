@@ -421,7 +421,7 @@ pub(super) fn watcher_should_send_ordered_new_chunks_for_terminal_fallback(
     relay_text: &str,
 ) -> bool {
     session_bound_fallback_uses_full_body
-        && relay_text.len() > crate::services::discord::DISCORD_MSG_LIMIT
+        && crate::services::discord::formatting::needs_multiple_messages(relay_text)
 }
 
 /// #2840 (relay-stability P1): RAII guard for the cross-watcher emission slot

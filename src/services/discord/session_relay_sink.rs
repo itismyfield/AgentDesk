@@ -403,7 +403,7 @@ struct SinkPostHeartbeatGuard {
 impl toc::PostHeartbeatGuard for SinkPostHeartbeatGuard {}
 
 fn session_bound_should_send_new_chunks_for_placeholder(response_text: &str) -> bool {
-    response_text.len() > super::DISCORD_MSG_LIMIT
+    super::formatting::needs_multiple_messages(response_text)
 }
 
 /// Pick the one ordered coordinate used by every terminal sink path. Strict
@@ -1803,6 +1803,21 @@ mod tests {
         assert!(session_bound_should_send_new_chunks_for_placeholder(&body));
         assert!(!session_bound_should_send_new_chunks_for_placeholder(
             "[E2E:E15:BEGIN]\nE15-LINE-150\n[E2E:E15:END]"
+        ));
+    }
+
+    /// Twin of the standby-relay guard: a Korean answer that fits in one
+    /// Discord message must not be routed down the multi-chunk path just
+    /// because its UTF-8 byte length exceeds the character limit.
+    #[test]
+    fn korean_answer_under_the_character_limit_stays_one_message() {
+        let body = "한".repeat(900);
+        assert!(body.len() > super::super::DISCORD_MSG_LIMIT);
+        assert!(!session_bound_should_send_new_chunks_for_placeholder(&body));
+
+        let overflowing = "한".repeat(2100);
+        assert!(session_bound_should_send_new_chunks_for_placeholder(
+            &overflowing
         ));
     }
 

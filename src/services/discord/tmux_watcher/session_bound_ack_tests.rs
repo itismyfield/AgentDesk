@@ -723,3 +723,29 @@ mod inflight_sink_marker_gate {
         ));
     }
 }
+
+/// Korean is ~3 UTF-8 bytes per character, so the old `relay_text.len() >
+/// DISCORD_MSG_LIMIT` byte check in
+/// `watcher_should_send_ordered_new_chunks_for_terminal_fallback` fired at ~667
+/// characters and routed a single-message answer down the ordered-chunk
+/// fallback instead of the in-place edit. (It did not split the body:
+/// `split_message` already counts characters and returns one chunk here.)
+/// The predicate must count characters, like `split_message` does. (The
+/// `#3089` A0 characterization in
+/// `tmux_watcher/tests.rs` is ASCII-only, where the byte and character counts
+/// agree, so it cannot see this.)
+#[test]
+fn korean_answer_under_the_character_limit_stays_one_message() {
+    use super::watcher_should_send_ordered_new_chunks_for_terminal_fallback as should_send;
+
+    let body = "한".repeat(900);
+    assert!(
+        body.len() > crate::services::discord::DISCORD_MSG_LIMIT,
+        "2700 bytes, over the byte limit"
+    );
+    assert!(!should_send(true, &body));
+
+    let overflowing = "한".repeat(2100);
+    assert!(should_send(true, &overflowing));
+    assert!(!should_send(false, &overflowing));
+}

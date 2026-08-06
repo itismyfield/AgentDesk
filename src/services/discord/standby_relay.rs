@@ -530,7 +530,7 @@ fn standby_completed_drain_expired(
 }
 
 fn standby_should_send_new_chunks_for_placeholder(response_text: &str) -> bool {
-    response_text.len() > super::DISCORD_MSG_LIMIT
+    super::formatting::needs_multiple_messages(response_text)
 }
 
 fn standby_heartbeat_offset(
@@ -1389,6 +1389,22 @@ mod tests {
         assert!(!standby_should_send_new_chunks_for_placeholder(
             "[E2E:E15:BEGIN]\nE15-LINE-150\n[E2E:E15:END]"
         ));
+    }
+
+    /// Korean answers are ~3 bytes per character, so the old `text.len() >
+    /// DISCORD_MSG_LIMIT` byte check fired at ~667 characters and routed a
+    /// single-message answer down the delete-placeholder-and-POST-new-messages
+    /// path instead of the in-place edit. (It did not split the body:
+    /// `split_message` already counts characters and returns one chunk here.)
+    /// The predicate must track `split_message`, which counts characters.
+    #[test]
+    fn korean_answer_under_the_character_limit_stays_one_message() {
+        let body = "한".repeat(900);
+        assert!(body.len() > super::super::DISCORD_MSG_LIMIT);
+        assert!(!standby_should_send_new_chunks_for_placeholder(&body));
+
+        let overflowing = "한".repeat(2100);
+        assert!(standby_should_send_new_chunks_for_placeholder(&overflowing));
     }
 
     fn with_isolated_runtime_root<F: FnOnce()>(f: F) {

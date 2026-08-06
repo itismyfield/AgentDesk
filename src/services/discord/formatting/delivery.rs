@@ -9,7 +9,7 @@ pub(in crate::services::discord) async fn send_long_message_ctx(
     ctx: Context<'_>,
     text: &str,
 ) -> Result<(), Error> {
-    if char_count(text) <= DISCORD_MSG_LIMIT {
+    if !needs_multiple_messages(text) {
         tracing::debug!(
             target: "discord::chunker",
             path = "send_long_message_ctx",
@@ -47,7 +47,7 @@ pub(in crate::services::discord) async fn send_long_message_ctx(
 pub(in crate::services::discord) fn long_message_reply_builders(
     text: &str,
 ) -> Vec<poise::CreateReply> {
-    if char_count(text) <= DISCORD_MSG_LIMIT {
+    if !needs_multiple_messages(text) {
         return vec![poise::CreateReply::default().content(text.to_string())];
     }
 
@@ -123,7 +123,7 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
     reference: Option<(ChannelId, MessageId)>,
 ) -> Result<Vec<MessageId>, Error> {
     let payload_byte_len = text.len();
-    if char_count(text) <= DISCORD_MSG_LIMIT {
+    if !needs_multiple_messages(text) {
         tracing::debug!(
             target: "discord::chunker",
             path = "send_long_message_raw",
@@ -462,6 +462,85 @@ pub(in crate::services::discord) fn split_message(text: &str) -> Vec<String> {
     chunks
 }
 
+/// Whether `text` exceeds what one Discord message can carry.
+///
+/// Discord's 2000 limit counts **characters**, so this must too. Callers used
+/// to compare `text.len()` — a **byte** count — against `DISCORD_MSG_LIMIT`.
+/// For ASCII the two agree, which is why the ASCII-only tests passed; for
+/// Korean (3 bytes per character in UTF-8) the byte comparison trips at roughly
+/// 667 characters, so a comfortably single-message answer was routed down the
+/// multi-chunk path.
+///
+/// Over most of the affected range the mis-route does NOT split the answer
+/// body: [`split_message`] already counts characters, so a 667..=1990-character
+/// body yields exactly one chunk either way. The ceiling is 1990, not 2000 —
+/// the chunker's `effective_limit` is `DISCORD_MSG_LIMIT - tag_overhead - 10`,
+/// and the 10 characters reserved for code-fence repair apply even to text with
+/// no fence. What this predicate actually selects is HOW the answer reaches the
+/// channel — edit the placeholder in place, or delete it and POST fresh
+/// messages. Taking the second branch for a single-message answer costs the
+/// answer its channel position, its reply anchor and its message id, and moves
+/// delivery-lease ownership.
+///
+/// In 1991..=2000 this predicate and [`split_message`] genuinely disagree: this
+/// returns `false` (one message) while the chunker, asked, cuts the text into
+/// two or more chunks. Whether that disagreement is observable depends on which
+/// branch a caller's `false` leads to, and the ten call sites split into three
+/// kinds:
+///
+/// * **Direct-POST callers** — `send_long_message_ctx` (:12),
+///   `long_message_reply_builders` (:50) and
+///   `send_long_message_raw_with_reference_returning_message_ids` (:126). Their
+///   `false` branch hands `text` to Discord whole and never calls the chunker,
+///   and Discord accepts all 2000 characters. Here the disagreement really is
+///   unreachable.
+/// * **Replace callers** — the per-surface predicates that wrap this one. Their
+///   `false` branch falls through to `replace_long_message_raw_with_outcome`
+///   (verified: `standby_relay.rs:854` reaching `:900`, and
+///   `session_relay_sink.rs:980` reaching `:1049`), and both wrappers funnel
+///   into `replace_long_message_raw_deferred_returning_receipt`, which calls
+///   `split_message(text)` **unconditionally** at
+///   `formatting/replace_long_message.rs:229` — this predicate's answer never
+///   reaches it. Here the disagreement IS reachable and IS observable: a
+///   1995-character body is edited into the placeholder as chunk 0 and the
+///   remainder is POSTed as a continuation, so the answer lands as two messages
+///   even though this predicate said one.
+/// * **Attachment-inline budget checks** — `build_attachment_inline` (:587,
+///   :601) asks only whether an already-composed inline notice fits, and picks
+///   between two candidate strings; no chunker is involved on either answer, so
+///   the disagreement cannot surface there either.
+///
+/// That is still not a correctness defect, but for a narrower reason than "it
+/// cannot happen". On the replace path the split neither truncates nor
+/// over-sends. No chunk can exceed the Discord limit: a chunk is at most
+/// `tag_overhead + effective_limit + 4` characters, and since `effective_limit`
+/// is `DISCORD_MSG_LIMIT - tag_overhead - 10`, that is at most 1994 — the
+/// 10-character reserve covers the 4-character closing code fence. Nothing is
+/// dropped: the chunker's loop consumes `remaining` until it is empty, and
+/// `replace_long_message.rs` emits chunk 0 as the edit and every later chunk as
+/// a continuation POST. The only character it removes is a single newline at a
+/// boundary that begins with one (`rest.strip_prefix('\n')`), consumed as the
+/// message separator; code-fence repair only ADDS characters. So the cost of
+/// the disagreement is one extra continuation message and a line break promoted
+/// to a message break — not lost content and not a rejected send.
+///
+/// Deliberately not `split_message(text).len() > 1`. The reason is NOT that the
+/// disagreement is unreachable — on the replace path it is not. It is that
+/// 1991..=2000-character texts genuinely DO fit one Discord message, and the
+/// chunker's 1990 ceiling is a code-fence repair margin rather than a Discord
+/// constraint. Adopting the chunker as the predicate would push those texts
+/// down the multi-message path on every surface, including the three
+/// direct-POST callers that deliver them as one message today, and would cost
+/// the replace callers the placeholder's channel position, reply anchor and
+/// message id for a limit Discord does not impose. This predicate answers "does
+/// it fit at all"; [`split_message`] owns "how do I cut it once it doesn't".
+/// The residual seam — a 10-character band in which the replace path cuts a
+/// body this predicate calls single-message — is known and bounded, and the
+/// #3089 A0 characterization tests pin the current answer.
+pub(in crate::services::discord) fn needs_multiple_messages(text: &str) -> bool {
+    char_count(text) > DISCORD_MSG_LIMIT
+}
+
 /// Build an `(inline_message, attachment)` pair for content that exceeds
 /// `DISCORD_MSG_LIMIT`. The attachment carries the full unmodified `text` as a
 /// `.txt` file. The inline message uses `summary` when provided (so the sender
@@ -504,7 +583,12 @@ fn build_attachment_inline(text: &str, summary: Option<&str>) -> String {
 
     if let Some(summary) = trimmed_summary {
         let candidate = with_provenance(format!("{summary}{footer}"));
-        if char_count(&candidate) <= DISCORD_MSG_LIMIT {
+        // Same question, same definition: `!needs_multiple_messages(x)` is
+        // exactly `char_count(x) <= DISCORD_MSG_LIMIT`, which this used to
+        // open-code. Routed through the helper so "every surface that asks
+        // whether something fits one Discord message shares one definition"
+        // holds without an exception list.
+        if !needs_multiple_messages(&candidate) {
             return candidate;
         }
     }
@@ -518,7 +602,7 @@ fn build_attachment_inline(text: &str, summary: Option<&str>) -> String {
     // Discord limit, this attachment path has no second inline fallback and
     // the send will surface Discord's length rejection; keep this assertion so
     // that such a change is caught in debug/test builds rather than hidden.
-    debug_assert!(char_count(&fallback) <= DISCORD_MSG_LIMIT);
+    debug_assert!(!needs_multiple_messages(&fallback));
     fallback
 }
 
