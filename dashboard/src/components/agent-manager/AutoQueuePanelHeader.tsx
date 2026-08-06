@@ -1,8 +1,9 @@
 import { AUTOQUEUE_RUN_STATUS_TONES } from "../../theme/statusTokens";
 import { buildRequestGenerateGroups } from "./auto-queue-actions";
+import type { AutoQueuePanelCtx } from "./auto-queue-panel-ctx";
 import { formatTs } from "./auto-queue-panel-utils";
 
-export default function AutoQueuePanelHeader({ ctx }: { ctx: any }) {
+export default function AutoQueuePanelHeader({ ctx }: { ctx: AutoQueuePanelCtx }) {
   const {
     activating,
     completedCount,

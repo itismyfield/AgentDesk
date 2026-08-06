@@ -117,7 +117,7 @@ export function useSortableReorder(
   };
 }
 
-type SortableReorderController = ReturnType<typeof useSortableReorder>;
+export type SortableReorderController = ReturnType<typeof useSortableReorder>;
 
 export function SortableEntryRow({
   entry,

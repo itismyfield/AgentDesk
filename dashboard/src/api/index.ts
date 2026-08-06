@@ -208,6 +208,7 @@ export type {
   TimelineEvent,
   PipelineConfigResponse,
   PhaseGateInfo,
+  ThreadGroupStatus,
   VoiceConfigPutBody,
   VoiceConfigResponse,
   // #2050 P3 finding 16 — type companions to getHomeKpiTrends.

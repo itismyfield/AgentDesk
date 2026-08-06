@@ -2,12 +2,12 @@ import type { ReactNode } from "react";
 import type { DispatchQueueEntry as DispatchQueueEntryType } from "../../api";
 import { getBatchPhaseColor } from "../../theme/statusTokens";
 import { EntryRow } from "./AutoQueueEntryRow";
+import type { AutoQueuePhaseRendererCtx } from "./auto-queue-panel-ctx";
 import { batchPhaseLabel, isCompletedEntry, threadGroupColor } from "./auto-queue-panel-utils";
 
-export function createAutoQueuePhaseRenderers(ctx: any) {
+export function createAutoQueuePhaseRenderers(ctx: AutoQueuePhaseRendererCtx) {
   const {
     currentBatchPhase,
-    deployPhases,
     gatesByPhase,
     hasBatchPhases,
     handleEntryStatusUpdate,
@@ -78,9 +78,13 @@ export function createAutoQueuePhaseRenderers(ctx: any) {
     );
   };
 
+  // #5131: the deploy-flavoured variant of this indicator (blue / 🚀 / "배포
+  // 게이트") was keyed off the retired `auto_queue_runs.deploy_phases` column,
+  // dropped by migration 0006. Nothing in the status payload replaces it —
+  // `PhaseGateView` (src/services/auto_queue.rs) carries no deploy flag — so the
+  // indicator now renders a single flavour driven purely by `phase_gates`.
   const renderPhaseGateIndicator = (phase: number) => {
     const gates = gatesByPhase.get(phase) ?? [];
-    const isDeploy = deployPhases.has(phase);
 
     const gate = gates[0];
     const gateStatus = gate?.status ?? "pending";
@@ -94,9 +98,9 @@ export function createAutoQueuePhaseRenderers(ctx: any) {
       : isFailed
         ? "#ef4444"
         : isActive
-          ? isDeploy ? "#60a5fa" : "#f59e0b"
+          ? "#f59e0b"
           : "#6b7280";
-    const statusIcon = isPassed ? "✓" : isFailed ? "✗" : isActive ? (isDeploy ? "🚀" : "⏳") : "○";
+    const statusIcon = isPassed ? "✓" : isFailed ? "✗" : isActive ? "⏳" : "○";
     const statusLabel = isPassed
       ? tr("통과", "Passed")
       : isFailed
@@ -104,7 +108,7 @@ export function createAutoQueuePhaseRenderers(ctx: any) {
         : isActive
           ? tr("진행중", "In Progress")
           : tr("대기", "Pending");
-    const gateLabel = isDeploy ? tr("배포 게이트", "Deploy Gate") : tr("게이트", "Gate");
+    const gateLabel = tr("게이트", "Gate");
 
     return (
       <div
