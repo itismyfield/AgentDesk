@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::services::claude_command::{ClaudeBinary, ClaudeLaunchEnv};
+use crate::services::claude_command::ClaudeBinary;
 use crate::services::claude_tui::hook_bundle::{HookBundleConfig, write_claude_hook_settings};
 use crate::services::process::shell_escape;
 
@@ -279,7 +279,6 @@ pub struct ClaudeTuiLaunchConfig {
     pub system_prompt: Option<String>,
     pub model: Option<String>,
     pub resume: bool,
-    pub(crate) launch_env: ClaudeLaunchEnv,
 }
 
 impl ClaudeTuiLaunchConfig {
@@ -409,9 +408,7 @@ fn write_launch_script(
     // prompt entirely, the placeholder semantics here should be
     // revisited. Track upstream PY6 changes and reflect them in this
     // comment + the unit tests.
-    let mut gateway_exports = String::new();
-    // Chokepoint base: resolved gateway launch env (#4559).
-    config.launch_env.append_shell_env(&mut gateway_exports);
+    let mut env_exports = String::new();
     // Compact-window isolation fence (#4591 revision): an interactive TUI can
     // change model after launch, so a launch-model-derived absolute window
     // would go stale. This launch therefore never exports an absolute window —
@@ -419,7 +416,7 @@ fn write_launch_script(
     // leaving AgentDesk's exact-token `/compact` steering as the sole compact
     // authority and Claude Code's own defaults underneath it.
     crate::services::claude_compact_context::append_auto_compact_window_shell_env(
-        &mut gateway_exports,
+        &mut env_exports,
         None,
     );
     let mut escaped_claude_bin = String::new();
@@ -430,11 +427,11 @@ fn write_launch_script(
         "#!/bin/bash\n\
          cd {cwd}\n\
          export CLAUDE_CODE_RESUME_PROMPT=\"_\"\n\
-         {gateway_exports}\
+         {env_exports}\
          exec {claude_bin} {args}\n",
         cwd = shell_escape(&config.working_dir.display().to_string()),
         claude_bin = escaped_claude_bin,
-        gateway_exports = gateway_exports,
+        env_exports = env_exports,
         args = args,
     );
     std::fs::write(path, script)
@@ -460,7 +457,6 @@ mod tests {
             system_prompt: Some("system prompt".to_string()),
             model: Some("sonnet".to_string()),
             resume: false,
-            launch_env: ClaudeLaunchEnv::scrub_for_test(),
         }
     }
 
@@ -568,12 +564,11 @@ mod tests {
     }
 
     #[test]
-    fn launch_script_fences_compact_window_and_gates_gateway_proxy() {
+    fn launch_script_fences_the_absolute_compact_window() {
         let _context_guard = context_state_guard();
         let dir = tempfile::tempdir().unwrap();
         let mut config = sample_config();
         config.model = Some("sonnet".to_string());
-        config.launch_env = ClaudeLaunchEnv::inject_for_test("http://proxy.example/it's-ready");
         let launch_script_path = dir.path().join("launch.sh");
 
         write_launch_script(
@@ -589,24 +584,7 @@ mod tests {
             !script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW="),
             "a TUI launch must leave the exact-token steering path as the sole compact authority"
         );
-        assert!(
-            script.contains("export ANTHROPIC_BASE_URL='http://proxy.example/it'\\''s-ready'\n")
-        );
-        assert!(script.contains("export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1\n"));
         assert!(!script.contains("CLAUDE_CODE_EXTENDED_CACHE_TTL"));
-
-        config.launch_env = ClaudeLaunchEnv::scrub_for_test();
-        write_launch_script(
-            &launch_script_path,
-            &config,
-            Path::new("/tmp/settings.json"),
-        )
-        .unwrap();
-        let disabled_script = std::fs::read_to_string(&launch_script_path).unwrap();
-        assert!(disabled_script.contains("unset CLAUDE_CODE_AUTO_COMPACT_WINDOW\n"));
-        assert!(!disabled_script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW="));
-        assert!(disabled_script.contains("unset ANTHROPIC_BASE_URL\n"));
-        assert!(disabled_script.contains("unset CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY\n"));
     }
 
     #[test]

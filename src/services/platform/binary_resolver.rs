@@ -873,20 +873,6 @@ where
     output
 }
 
-fn configure_version_probe_command(command: &mut Command, resolution: &BinaryResolution) {
-    apply_binary_resolution(command, resolution);
-    if resolution.requested_binary == "claude" {
-        // `--version` never routes models or spawns subagents, so probes always
-        // run native (Scrub). The gateway policy for this launch class lives in
-        // the single chokepoint authority (`VersionProbe => Scrub`); turn
-        // launches take the `Turn` intent there.
-        crate::services::claude_command::ClaudeLaunchEnv::resolve(
-            crate::services::claude_command::ClaudeLaunchIntent::VersionProbe,
-        )
-        .apply_to_command(command);
-    }
-}
-
 pub fn probe_resolved_binary_version(
     binary_path: impl AsRef<OsStr>,
     resolution: &BinaryResolution,
@@ -903,7 +889,7 @@ pub fn probe_resolved_binary_version(
         .into_command()
     } else {
         let mut command = Command::new(binary_path);
-        configure_version_probe_command(&mut command, resolution);
+        apply_binary_resolution(&mut command, resolution);
         command
     };
     command.arg("--version");
@@ -1497,57 +1483,6 @@ fn record_context_launch_artifact(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn configured_probe_env(provider: &str) -> HashMap<String, Option<String>> {
-        let resolution = BinaryResolution {
-            requested_binary: provider.to_string(),
-            resolved_path: Some(format!("/test/bin/{provider}")),
-            canonical_path: None,
-            source: Some("test".to_string()),
-            attempts: Vec::new(),
-            failure_kind: None,
-            exec_path: Some("/test/bin".to_string()),
-        };
-        let mut command = Command::new(provider);
-        command
-            .env("ANTHROPIC_BASE_URL", "http://inherited.example:9999")
-            .env(
-                "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
-                "inherited-value",
-            );
-        configure_version_probe_command(&mut command, &resolution);
-        command
-            .get_envs()
-            .map(|(key, value)| {
-                (
-                    key.to_string_lossy().into_owned(),
-                    value.map(|value| value.to_string_lossy().into_owned()),
-                )
-            })
-            .collect()
-    }
-
-    #[test]
-    fn version_probe_scrubs_gateway_env_only_for_claude() {
-        let claude_env = configured_probe_env("claude");
-        assert_eq!(claude_env.get("ANTHROPIC_BASE_URL"), Some(&None));
-        assert_eq!(
-            claude_env.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
-            Some(&None)
-        );
-
-        for provider in ["codex", "qwen"] {
-            let provider_env = configured_probe_env(provider);
-            assert_eq!(
-                provider_env.get("ANTHROPIC_BASE_URL"),
-                Some(&Some("http://inherited.example:9999".to_string()))
-            );
-            assert_eq!(
-                provider_env.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
-                Some(&Some("inherited-value".to_string()))
-            );
-        }
-    }
 
     #[test]
     fn parses_codex_cli_semver_from_version_output() {
