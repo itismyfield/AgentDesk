@@ -687,6 +687,9 @@ pub(super) async fn run_terminal_outcome_delivery(
                     user_msg_id,
                     adk_session_key.as_deref(),
                     inflight_state.delivery_bot.as_deref(),
+                    // #5159: the identity this answer posts under is decided
+                    // from the turn's provider, not from the delivery path.
+                    &provider,
                     &delivery_response,
                     Some(cancel_token.as_ref()),
                 )
