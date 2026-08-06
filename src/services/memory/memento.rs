@@ -1572,8 +1572,9 @@ fn split_static_slice_sections(text: &str) -> (String, Vec<String>) {
 }
 
 /// Heuristic: a "new section" header line is either the bracketed banner
-/// (`[External Recall]`, `[External Recall — Identity Lite]`) or one of the
-/// known `<label>: ` colon-terminated headers emitted by the formatter.
+/// (`[External Recall]`, the only banner still emitted — see
+/// [`format_context_payload_for_external_recall`]) or one of the known
+/// `<label>: ` colon-terminated headers emitted by the formatter.
 fn line_starts_new_section(line: &str) -> bool {
     if line.starts_with('[') && line.ends_with(']') {
         return true;

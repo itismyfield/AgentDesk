@@ -30,13 +30,6 @@ impl ResolvedThreadRoleBinding {
             .map(|(parent_id, _)| *parent_id)
             .unwrap_or(channel_id)
     }
-
-    pub(super) fn memory_channel_name(&self, channel_name: Option<&str>) -> Option<String> {
-        self.inherited_parent
-            .as_ref()
-            .and_then(|(_, parent_name)| parent_name.clone())
-            .or_else(|| channel_name.map(String::from))
-    }
 }
 fn inheritable_thread_parent(
     thread_parent: Option<&(ChannelId, Option<String>)>,
@@ -854,7 +847,6 @@ mod thread_role_inheritance_tests {
             workspace.to_str()
         );
         assert_eq!(resolved.memory_channel_id(child), parent.0);
-        assert_eq!(resolved.memory_channel_name(None), parent.1);
         let memory = settings::ResolvedMemorySettings {
             backend: settings::MemoryBackendKind::Memento,
             ..Default::default()
@@ -907,10 +899,6 @@ mod thread_role_inheritance_tests {
         assert!(resolved.role_binding.is_none());
         assert!(resolve_thread_workspace(child, Some("thread"), Some(&parent)).is_none());
         assert_eq!(resolved.memory_channel_id(child), child);
-        assert_eq!(
-            resolved.memory_channel_name(Some("t")).as_deref(),
-            Some("t")
-        );
     }
 
     #[test]
