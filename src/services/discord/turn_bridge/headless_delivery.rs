@@ -210,7 +210,9 @@ pub(super) async fn cleanup_headless_streaming_placeholder_after_delivery(
 /// runtime (`routines::agent_executor`) puts there. Ordinary user turns and
 /// restart-recovery turns carry no such metadata, so this is `None` for them.
 fn caller_supplied_delivery_bot(delivery_bot: Option<&str>) -> Option<&str> {
-    delivery_bot.map(str::trim).filter(|value| !value.is_empty())
+    delivery_bot
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 /// #5159: which bot identity a headless terminal delivery posts under.
@@ -589,9 +591,7 @@ mod headless_delivery_tests {
     /// provider http.
     #[test]
     fn direct_fallback_notify_http_preference_is_caller_supplied_only() {
-        assert!(headless_direct_fallback_prefers_notify_http(Some(
-            "notify"
-        )));
+        assert!(headless_direct_fallback_prefers_notify_http(Some("notify")));
         assert!(headless_direct_fallback_prefers_notify_http(Some("dm")));
         assert!(!headless_direct_fallback_prefers_notify_http(None));
         assert!(!headless_direct_fallback_prefers_notify_http(Some("   ")));
