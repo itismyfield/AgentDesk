@@ -140,6 +140,30 @@ pub(super) async fn maybe_finalize_run_after_terminal_entry_pg(
     maybe_finalize_run_if_ready_pg(tx, run_id).await
 }
 
+/// #5142 P2 — why this writer does NOT take the cancel path's per-run advisory
+/// lock (`pg_advisory_xact_lock(hashtext('aq_run:' || id))`, taken by
+/// `terminalize_selected_runs_with_pg`).
+///
+/// What serializes this function against a concurrent cancel/End is the
+/// `auto_queue_runs` row lock plus the compare-and-set predicate below: both
+/// writers flip the status with `AND status IN (...)`, so the second one to
+/// reach the row sees a status outside its predicate, gets `rows_affected() ==
+/// 0`, and stops before releasing slots or queueing the completion notify.
+/// Taking the advisory lock as well would not change that outcome — it would
+/// only order the two waits.
+///
+/// It would, however, invert a lock order. `update_entry_status_on_pg_tx`
+/// updates the `auto_queue_entries` row first and then calls into this function
+/// on the same transaction, while `terminalize_selected_runs_with_pg` takes the
+/// advisory lock first and only then runs `SELECT ... FROM auto_queue_entries
+/// ... FOR UPDATE`. Adding the lock here makes those two an ABBA pair.
+///
+/// Reachability of the original concern is still open: no interleaving of the
+/// cancel path and this writer that produces observable damage has been
+/// reproduced. Note that `phase_gates::lock_phase_gate_state_on_pg_tx` uses the
+/// TWO-argument `pg_advisory_xact_lock(hashtext(run_id), hashtext(phase))`,
+/// which is a separate lock space from the one-argument key above and therefore
+/// never serialized against the cancel path either.
 pub(crate) async fn maybe_finalize_run_if_ready_pg(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
@@ -260,6 +284,13 @@ pub async fn resume_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, Strin
     Ok(updated > 0)
 }
 
+/// #5142 P2: like `maybe_finalize_run_if_ready_pg`, this writer deliberately
+/// does not take the cancel path's `aq_run:<id>` advisory lock. The guarded
+/// status UPDATE below is the serialization point — the rollback on
+/// `updated == 0` is what keeps a run that a concurrent cancel already
+/// terminalized from being released or notified twice. See the note on
+/// `maybe_finalize_run_if_ready_pg` for the lock-order inversion that adding it
+/// would introduce.
 pub async fn complete_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, String> {
     let mut tx = pool
         .begin()

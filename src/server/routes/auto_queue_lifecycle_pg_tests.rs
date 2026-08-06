@@ -223,7 +223,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn patch_completed_no_longer_skips_lifecycle_side_effects_pg() {
+    async fn patch_completed_is_rejected_and_performs_no_lifecycle_side_effects_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
         seed_agent(&pool).await;

@@ -590,6 +590,30 @@ async fn policy_tick_loop(
                     }
                 }
 
+                // #5142: resume the post-commit cleanup a previous process left
+                // owed. The rows were committed with the cancel/end state
+                // change, so this is the path by which a restarted process
+                // converges residual provider sessions and slot tokens.
+                match crate::services::auto_queue::cleanup_tasks::replay_pending_run_cleanup_tasks_pg(
+                    None, pool,
+                )
+                .await
+                {
+                    Ok(stats) if stats.touched() => {
+                        tracing::warn!(
+                            drained = stats.drained,
+                            completed = stats.completed,
+                            "[policy-tick] replayed auto-queue run cleanup tasks left by an earlier process"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            "[policy-tick] auto-queue run cleanup replay failed: {error}"
+                        );
+                    }
+                }
+
                 match crate::reconcile::reconcile_auto_queue_pending_delivery_orphans_pg(pool).await
                 {
                     Ok(stats) if stats.touched() => {

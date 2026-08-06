@@ -530,6 +530,11 @@
       "path": "migrations/postgres/0103_delivery_journal.sql",
       "sha256": "a8b316673f275edc3636bc2cd1b94ca4ba6ef28e870e229c674022d7a4623b7c",
       "version": 103
+    },
+    {
+      "path": "migrations/postgres/0104_auto_queue_run_cleanup_tasks.sql",
+      "sha256": "00fd023c4feec1b9e7f0431845e8ca1246d2832d38a10815f38dc0da004a8b21",
+      "version": 104
     }
   ],
   "version": 1

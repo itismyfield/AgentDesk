@@ -795,7 +795,7 @@ server::routes::auth::tests::is_websocket_upgrade_detects_handshake_header
 server::routes::auth::tests::loopback_peer_detection
 server::routes::auth::tests::peer_addr_from_request_reads_connect_info
 server::routes::auto_queue_lifecycle_pg_tests::tests::manual_rebind_accepts_every_canonical_live_status_pg
-server::routes::auto_queue_lifecycle_pg_tests::tests::patch_completed_no_longer_skips_lifecycle_side_effects_pg
+server::routes::auto_queue_lifecycle_pg_tests::tests::patch_completed_is_rejected_and_performs_no_lifecycle_side_effects_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::patch_pending_start_and_metadata_updates_remain_supported_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::patch_retired_deploy_phases_returns_client_error_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::postgres_auto_queue_lifecycle_http_routes_use_canonical_writers_pg
@@ -1025,6 +1025,10 @@ services::auto_queue::cancel_run::pg_tests::cancel_selected_runs_with_pg_atomica
 services::auto_queue::cancel_run::pg_tests::cancel_selected_runs_with_pg_preserves_foreign_context_owner
 services::auto_queue::cancel_run::pg_tests::cancel_selected_runs_with_pg_preserves_foreign_entry_owner
 services::auto_queue::cancel_run::pg_tests::cancel_selected_runs_with_pg_preserves_foreign_phase_gate_owner
+services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::crash_after_cancel_commit_converges_on_replay_pg
+services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::drain_with_health_registry_clears_slot_thread_sessions_pg
+services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::replay_skips_slot_threads_after_slot_reassignment_pg
+services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::session_clear_failure_stays_retry_eligible_pg
 services::auto_queue::route::activate_command::tests::depth_gate_activate_pg_tests::absent_scope_depth_never_creates_plan_no_regression_pg
 services::auto_queue::route::activate_command::tests::depth_gate_activate_pg_tests::card_without_scope_assessment_entry_binds_no_regression_pg
 services::auto_queue::route::activate_command::tests::depth_gate_activate_pg_tests::late_entry_direct_depth_creates_impl_no_plan_pg

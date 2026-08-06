@@ -96,6 +96,12 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg(
 /// Observability metadata captured while cancelling a dispatch so the
 /// commit-owning caller can fire the canonical writer's emits after the
 /// transaction durably lands (#3039).
+///
+/// #5142: the metadata is serialized into `auto_queue_run_cleanup_tasks` so a
+/// process that dies after the commit but before `emit()` can still fire the
+/// emit on the next drain. Only the auto-queue cancel/end paths persist it; the
+/// other callers keep the in-process handoff.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CancelTransitionMeta {
     pub(crate) dispatch_id: String,
     kanban_card_id: Option<String>,

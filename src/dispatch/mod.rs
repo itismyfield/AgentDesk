@@ -10,6 +10,9 @@ pub(crate) mod test_support;
 mod types;
 
 pub(crate) use dispatch_cancel::cancel_dispatches_for_runs_on_pg_tx_with_meta;
+// #5142: the auto-queue cleanup outbox persists this metadata so a restarted
+// process can still fire the emit the dead process owed.
+pub(crate) use dispatch_cancel::CancelTransitionMeta;
 pub use dispatch_cancel::{
     cancel_dispatch_and_reset_auto_queue_on_pg, cancel_dispatch_and_reset_auto_queue_on_pg_tx,
 };
