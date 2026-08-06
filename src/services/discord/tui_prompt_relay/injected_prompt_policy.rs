@@ -70,6 +70,63 @@ impl InjectedPromptClass {
     }
 }
 
+/// #5188 (R3): the kind-aware active-turn lifecycle gate.
+///
+/// [`InjectedPromptClass::suppresses_user_turn_lifecycle`] is kind-blind, so
+/// every `SlashCommandControl` took the full synthetic lifecycle (anchor + `⏳` +
+/// inflight) even though its own Discord note says *"시스템 주입 (활성 턴 아님)"*.
+/// For a SESSION-RESETTING control (`/clear`) that combination is not merely
+/// cosmetic — it is the wedge:
+///
+/// * `/clear` makes Claude Code open a NEW transcript JSONL and freeze the
+///   current one, and it emits no assistant output of its own;
+/// * the inflight the lifecycle creates is pinned to the FROZEN transcript, so
+///   nothing can ever deliver a terminal for it;
+/// * every later turn on the channel then reads `FOREIGN prior inflight is still
+///   live` → `ABORTING` → `KICKOFF: skipped queued turn`, permanently.
+///
+/// Two things disagreed — the note ("not an active turn") and the code (full
+/// active turn). We resolve it in favour of the NOTE: a session-resetting
+/// control creates no inflight at all, so there is nothing left to settle. The
+/// user still gets the same "머신 슬래시 명령" note.
+///
+/// `/loop` and `/compact` are deliberately excluded: they DO produce assistant
+/// output that must be relayed under a real turn (#3178), and `/compact` rewrites
+/// the SAME transcript path rather than rotating away from it (#4549/#4841).
+///
+/// ## Load-bearing precondition: this gate only sees ENVELOPED slash commands
+/// The gate fires on [`InjectedPromptClass::SlashCommandControl`], and
+/// [`is_slash_command_control_prompt`] recognises `/clear` **only** inside a
+/// `<command-name>/clear</command-name>` envelope (or the other machine-echo
+/// forms it lists). A BARE `/clear` line classifies as
+/// [`InjectedPromptClass::HumanTuiDirect`], so this gate never runs for it and
+/// the pre-#5188 lifecycle — including the inflight pinned to the transcript
+/// `/clear` is about to freeze — is created exactly as before.
+///
+/// Note where the dependency actually is: `slash_command_control_kind` returns
+/// `/clear` for the bare line too, so the `slash_command_kind` argument is NOT
+/// what discriminates. Only the class is.
+///
+/// That is safe today because the production evidence is the enveloped machine
+/// form (the Discord note reads "머신 슬래시 명령", which only that path emits),
+/// and it is pinned by `a_bare_clear_without_the_command_envelope_bypasses_the_gate`
+/// below. It is nevertheless a coupling to the OBSERVED SHAPE of the prompt
+/// rather than to its meaning: if a future input path ever delivers a bare
+/// `/clear` — a raw pane write, a differently-wrapped injector — the wedge comes
+/// back silently, and the fix belongs in the classifier, not here.
+pub(super) fn injected_prompt_suppresses_user_turn_lifecycle(
+    injected_class: InjectedPromptClass,
+    slash_command_kind: Option<&str>,
+) -> bool {
+    if injected_class.suppresses_user_turn_lifecycle() {
+        return true;
+    }
+    matches!(injected_class, InjectedPromptClass::SlashCommandControl)
+        && slash_command_kind.is_some_and(
+            crate::services::tui_prompt_control::is_session_resetting_slash_command_kind,
+        )
+}
+
 /// Pure classifier for injected TUI prompt text. Order is load-bearing:
 /// start-anchored subagent envelopes win before generic continuation banners
 /// because Provider Session Reuse may wrap the machine-event tail.
@@ -428,4 +485,138 @@ pub(super) fn format_count_with_commas(count: usize) -> String {
 
 pub(super) fn sanitize_inline_code(value: &str) -> String {
     value.replace('`', "'")
+}
+
+#[cfg(test)]
+mod session_resetting_lifecycle_tests {
+    use super::*;
+
+    const CLEAR_ECHO: &str = "<command-name>/clear</command-name>";
+
+    // #5188 (R3): the note and the code used to disagree — the note said "활성 턴
+    // 아님" while the code ran the full active-turn lifecycle and left an inflight
+    // pinned to the transcript `/clear` was about to freeze. Resolved in favour of
+    // the note: no inflight is created, so there is nothing left to settle.
+    #[test]
+    fn clear_suppresses_the_active_turn_lifecycle_it_already_says_it_is_not() {
+        let class = classify_injected_prompt(CLEAR_ECHO);
+        assert_eq!(
+            class,
+            InjectedPromptClass::SlashCommandControl,
+            "`/clear` is still a machine slash control"
+        );
+        assert_eq!(
+            slash_command_control_kind(CLEAR_ECHO),
+            "/clear",
+            "the lifecycle gate keys off this kind"
+        );
+        assert!(
+            !class.suppresses_user_turn_lifecycle(),
+            "the kind-blind predicate still says 'full active turn' — which is the \
+             bug; only the kind-aware gate may override it"
+        );
+        assert!(
+            injected_prompt_suppresses_user_turn_lifecycle(class, Some("/clear")),
+            "`/clear` rotates the session, so an inflight created for it is pinned \
+             to a transcript that can never grow again and would wedge the channel"
+        );
+        // The user-facing note is unchanged: the fix makes the code agree with it,
+        // it does not remove it.
+        assert!(
+            format_slash_command_control_note("AgentDesk-claude-adk-cc", "/clear", CLEAR_ECHO)
+                .contains("활성 턴 아님"),
+            "the `/clear` note must still render as a system injection"
+        );
+    }
+
+    /// R7. Pins the precondition the whole gate rests on, so the coupling is a
+    /// stated fact rather than an assumption nobody wrote down.
+    ///
+    /// The bypass is in the CLASSIFIER, not in the kind extractor.
+    /// `slash_command_control_kind` happily reports `/clear` for a bare line, so
+    /// inspecting the kind suggests the gate applies — but the gate is reached
+    /// only through `SlashCommandControl`, and
+    /// [`is_slash_command_control_prompt`] grants that class to `/clear` ONLY
+    /// inside a `<command-name>` envelope. A bare `/clear` is `HumanTuiDirect`,
+    /// so the gate does not run and the pre-#5188 lifecycle (inflight included)
+    /// is created exactly as before — i.e. the wedge this issue fixed would be
+    /// back.
+    ///
+    /// Production emits the enveloped form, so this is currently correct, not a
+    /// live hole. It is asserted here so that a change to the input shape fails
+    /// a test instead of silently re-opening the defect.
+    #[test]
+    fn a_bare_clear_without_the_command_envelope_bypasses_the_gate() {
+        let bare = classify_injected_prompt("/clear");
+        assert_eq!(
+            bare,
+            InjectedPromptClass::HumanTuiDirect,
+            "an un-enveloped `/clear` is not recognised as a machine slash control"
+        );
+        assert_eq!(
+            slash_command_control_kind("/clear"),
+            "/clear",
+            "the KIND extractor is envelope-independent — so the bypass is not \
+             here, and reading the kind alone would suggest the gate applies"
+        );
+        assert!(
+            !injected_prompt_suppresses_user_turn_lifecycle(bare, Some("/clear")),
+            "even handed the kind explicitly, a HumanTuiDirect prompt keeps its \
+             full lifecycle — so a bare `/clear` would still create the inflight \
+             that #5188 removed. The gate protects the ENVELOPED form only"
+        );
+
+        // ...and the enveloped form, which is what production actually sends, is
+        // the one that gets the protection.
+        assert!(
+            injected_prompt_suppresses_user_turn_lifecycle(
+                classify_injected_prompt(CLEAR_ECHO),
+                Some("/clear"),
+            ),
+            "the enveloped machine echo is the shape this gate is written for"
+        );
+    }
+
+    // The blast radius must stop at session-resetting controls. `/loop` and
+    // `/compact` DO produce assistant output that has to be relayed under a real
+    // turn (#3178), and `/compact` rewrites the SAME transcript path rather than
+    // rotating away from it (#4549/#4841).
+    #[test]
+    fn output_producing_slash_controls_keep_their_active_turn() {
+        for (prompt, kind) in [
+            ("/loop check the deploy", "/loop"),
+            ("/compact", "/compact"),
+            ("<command-name>/model</command-name>", "/model"),
+        ] {
+            let class = classify_injected_prompt(prompt);
+            assert_eq!(
+                class,
+                InjectedPromptClass::SlashCommandControl,
+                "{prompt} classification changed"
+            );
+            assert!(
+                !injected_prompt_suppresses_user_turn_lifecycle(class, Some(kind)),
+                "{kind} still owns a full active turn; suppressing it would drop its \
+                 assistant output on the floor"
+            );
+        }
+    }
+
+    #[test]
+    fn human_and_passive_classes_are_unaffected_by_the_kind_aware_gate() {
+        let human = classify_injected_prompt("please fix the build");
+        assert!(!injected_prompt_suppresses_user_turn_lifecycle(human, None));
+        assert!(
+            !injected_prompt_suppresses_user_turn_lifecycle(human, Some("/clear")),
+            "a human prompt must never be suppressed just because a kind was passed"
+        );
+
+        let continuation = classify_injected_prompt(
+            "This session is being continued from a previous conversation",
+        );
+        assert!(
+            injected_prompt_suppresses_user_turn_lifecycle(continuation, None),
+            "pre-existing passive suppression is preserved"
+        );
+    }
 }

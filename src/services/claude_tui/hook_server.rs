@@ -284,6 +284,14 @@ async fn receive_hook(
                     &tmux_session_name,
                     payload_session_id,
                 ) {
+                    // #5188: the old wording ("adopted Claude continuation
+                    // session") read as if the whole delivery path had followed
+                    // the rotation. It had not — only the in-memory runtime
+                    // binding was rebound, and the launch-script rehydration pass
+                    // could then revert even that. The message now states exactly
+                    // what this call site changes and defers the rest to the
+                    // rotation ledger, so a reader cannot mistake it for
+                    // end-to-end success.
                     Ok(changed) => tracing::warn!(
                         provider,
                         command_session_id,
@@ -291,7 +299,8 @@ async fn receive_hook(
                         tmux_session_name,
                         transcript_path,
                         persistent_artifacts_changed = changed,
-                        "adopted Claude continuation session from hook payload"
+                        "rebound Claude TUI runtime binding to the continuation session reported by \
+                         the hook payload; rotation queued for delivery-path propagation (#5188)"
                     ),
                     Err(error) => tracing::error!(
                         provider,

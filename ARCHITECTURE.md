@@ -912,6 +912,7 @@ src/
 │   │   │   ├── observed_prompt_decision.rs
 │   │   │   ├── rehydration.rs
 │   │   │   ├── relay_ownership.rs
+│   │   │   ├── session_rotation_settle.rs
 │   │   │   ├── synthetic_orphan_reclaim.rs
 │   │   │   ├── synthetic_start.rs
 │   │   │   ├── synthetic_start_wiring.rs
@@ -1343,6 +1344,7 @@ src/
 │   │   ├── extract.rs
 │   │   ├── observation.rs
 │   │   ├── runtime_binding.rs
+│   │   ├── session_rotation.rs
 │   │   ├── state.rs
 │   │   ├── synthetic_prompt.rs
 │   │   └── tests.rs

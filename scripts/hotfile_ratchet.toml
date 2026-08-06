@@ -128,7 +128,7 @@
 # #3833: 4007 -> 999 by moving external-input ownership, synthetic-start, and
 # Claude idle-tail/runtime/bridge glue into `tui_prompt_relay/` child modules;
 # behavior-preserving decomposition.
-"src/services/discord/tui_prompt_relay.rs" = 907 # 2026-07-11 #4055: 992 -> 907, task-notification prompt handling moved to tui_prompt_relay/task_notification_prompt.rs; lock in the smaller hotfile.
+"src/services/discord/tui_prompt_relay.rs" = 899 # 2026-08-07 #5188: 907 -> 899, the suppressed-injection neutral-note branch moved to tui_prompt_relay/synthetic_start_wiring.rs (which already owns the #4082 neutral-note gate) and the rotation settle pass is reached through a single-name re-import; the fix lands BELOW the pre-existing ceiling rather than raising it.
 # #3560: 6612 -> 6621 (+9), reviewable admission — footer-mode separate-panel
 # migration reconcile call + comment at the resume entry. Helper body lives in
 # turn_bridge/status_panel.rs; this is the minimal call-site cost.

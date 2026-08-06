@@ -17,6 +17,60 @@
 
 use super::*;
 
+/// Post the neutral session note for an injection that does NOT claim the
+/// active-turn lifecycle, and nothing else — no anchor, no `⏳`, no external turn
+/// owner, no synthetic inflight.
+///
+/// #4082 gated neutral notes out of the synthetic-start wiring; this is the
+/// other half of that gate, moved here from [`relay_observed_prompt`]'s inline
+/// block so the parent stays under its hot-file LOC ratchet.
+///
+/// Two classes reach it. `SystemContinuation` (compact/resume banners) always
+/// did. Since #5188 a SESSION-RESETTING `SlashCommandControl` (`/clear`) does
+/// too: it produces no assistant output and rotates Claude onto a new transcript,
+/// so the inflight the active-turn path used to create was pinned to a file that
+/// would never grow again and could never be finalized.
+///
+/// Each class keeps its OWN note text. A `/clear` must still render as
+/// "⚙️ 머신 슬래시 명령 … 시스템 주입 (활성 턴 아님)" — the #5188 fix makes the code
+/// agree with that note rather than replacing it with a compact banner.
+///
+/// [`relay_observed_prompt`]: super::relay_observed_prompt
+pub(super) async fn post_suppressed_injection_note(
+    notify_http: &Arc<serenity::Http>,
+    channel_id: ChannelId,
+    prompt: &ObservedTuiPrompt,
+    injected_class: InjectedPromptClass,
+    slash_command_kind: Option<&str>,
+) {
+    let session_resetting_slash_control =
+        matches!(injected_class, InjectedPromptClass::SlashCommandControl);
+    let note = if session_resetting_slash_control {
+        let kind = slash_command_kind.expect("slash command control decisions carry a kind");
+        format_slash_command_control_note(&prompt.tmux_session_name, kind, &prompt.prompt)
+    } else {
+        format_system_continuation_note(&prompt.tmux_session_name, &prompt.prompt)
+    };
+    match channel_id.say(&**notify_http, note).await {
+        Ok(message) => tracing::info!(
+            provider = %prompt.provider,
+            channel_id = channel_id.get(),
+            tmux_session_name = %prompt.tmux_session_name,
+            note_message_id = message.id.get(),
+            session_resetting_slash_control,
+            slash_command_kind = slash_command_kind.unwrap_or(""),
+            "rendered system/compact continuation injection as neutral session note; no active-turn lifecycle, no external turn owner, no synthetic inflight"
+        ),
+        Err(error) => tracing::warn!(
+            provider = %prompt.provider,
+            channel_id = channel_id.get(),
+            tmux_session_name = %prompt.tmux_session_name,
+            error = %error,
+            "failed to send system/compact continuation session note"
+        ),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct SyntheticLifecycleAnchor {
     pub(super) message_id: MessageId,
