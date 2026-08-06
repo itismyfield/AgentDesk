@@ -905,9 +905,25 @@ class EvaluateBoundaryTests(unittest.TestCase):
         self.assertEqual(v.state, STATE_GAP)
 
     def test_no_delivery_ever_with_stale_lost_is_gap(self):
+        # The VERDICT is unchanged: a relay that died before it ever delivered
+        # must still alert. What changed with #5190 is that the verdict no
+        # longer carries `inf` as if it were a measured elapsed time — the two
+        # claims ("never observed" vs "infinitely stale") had collapsed into
+        # one value that auto-passed every threshold and outranked every real
+        # measurement in tick_channel's verdict ordering.
         v = self._eval([(self.NOW - 4000, "never arrived")], "")
         self.assertEqual(v.state, STATE_GAP)
-        self.assertEqual(v.gap_secs, float("inf"))
+        self.assertEqual(v.gap_secs, relay_watchdog.GAP_SECS_UNOBSERVED)
+        self.assertTrue(relay_watchdog.gap_is_unobserved(v))
+        self.assertNotEqual(v.gap_secs, float("inf"))
+
+    def test_5190_a_measured_gap_is_never_reported_as_unobserved(self):
+        delivered_block = (self.NOW - self.GAP - 1, "delivered payload")
+        lost_block = (self.NOW - self.GRACE - 60, "missing payload")
+        v = self._eval([delivered_block, lost_block], "delivered payload")
+        self.assertEqual(v.state, STATE_GAP)
+        self.assertFalse(relay_watchdog.gap_is_unobserved(v))
+        self.assertAlmostEqual(v.gap_secs, self.GAP + 1)
 
     def test_no_blocks_is_ok(self):
         v = self._eval([], "")
@@ -2210,6 +2226,9 @@ class FakeRuntime(Runtime):
         self.log_lines: list[str] = []
         self.haystack: str | None = ""
         self.issue_calls = 0
+        # #5190: what the watchdog would put in the auto-filed issue. `None`
+        # means "no delivery on record"; the defect was rendering that as 999.
+        self.issue_gap_mins: list[int | None] = []
         self.alert_succeeds = True
         self.live_sessions: set[str] | None = set()
         self.watcher_probe = WatcherStateProbe(None)
@@ -2235,8 +2254,9 @@ class FakeRuntime(Runtime):
         self.alerts.append((body, trigger_turn))
         return self.alert_succeeds
 
-    def file_github_issue(self, ch, gap_min: int, lost: int) -> str:
+    def file_github_issue(self, ch, gap_min: int | None, lost: int) -> str:
         self.issue_calls += 1
+        self.issue_gap_mins.append(gap_min)
         return f"https://example.test/issues/{self.issue_calls}"
 
 
@@ -5110,6 +5130,288 @@ class TickChannelTests(unittest.TestCase):
         self.assertTrue(chs.get("alerting"), (chs, rt.log_lines))
         self.assertIn(str(owner), chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY])
         self.assertNotIn(str(owner), chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {}))
+
+    # ── #5190: an orphan transcript must not pin the channel in GAP ──────────
+    #
+    # A `/clear`ed session leaves a frozen transcript holding blocks that no
+    # future delivery can recover: its delivery frontier cannot advance (so the
+    # tombstone path, which needs two advances, never confirms), its worktree is
+    # still alive (so dead-worktree retirement never fires), and STATE_OK can
+    # never arrive (so the pending authority never releases). Live incident:
+    # three identical alerts 16 minutes apart, each claiming "999 minutes since
+    # the last delivery" about a session that had been frozen for half an hour
+    # while the channel kept delivering normally on a different transcript.
+    #
+    # The counter-pressure runs through every test below: the orphan handling
+    # buys its silence with positive proof of delivery elsewhere, so a relay
+    # that is actually down never gets quieter.
+
+    ORPHAN_STRANDED_KEY = relay_watchdog.ORPHAN_STRANDED_SINCE_KEY
+
+    @staticmethod
+    def _5190_record(epoch: float, text: str) -> str:
+        return json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                ),
+                "message": {"content": [{"type": "text", "text": text}]},
+            }
+        )
+
+    def _5190_live_channel(self) -> tuple[FakeRuntime, dict, Path, Path]:
+        """Tick 1: only the live session exists, and it is delivering."""
+        live = self.proj_dir / "4648aa76-0239-47a7-9a39-8487c7fd216a.jsonl"
+        orphan = self.proj_dir / "67f48e65-74dd-4751-92c2-405145f1370b.jsonl"
+        live.write_text(
+            self._5190_record(self.now - 60, "live session first block") + "\n",
+            encoding="utf-8",
+        )
+        os.utime(live, (self.now, self.now))
+        rt = self.make_rt()
+        rt.haystack = norm("live session first block")
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        return rt, state, live, orphan
+
+    def _5190_strand_orphan(self, orphan: Path, frozen_at: float) -> None:
+        """The blocks #5188 stranded, and then the session goes silent forever.
+
+        The watchdog only meets this file after it froze, so whatever it once
+        delivered has long rolled out of the bounded Discord window: from here
+        on it has never been seen delivering anything.
+        """
+        orphan.write_text(
+            self._5190_record(frozen_at - 600, "stranded orphan block one")
+            + "\n"
+            + self._5190_record(frozen_at - 500, "stranded orphan block two")
+            + "\n",
+            encoding="utf-8",
+        )
+        os.utime(orphan, (frozen_at, frozen_at))
+
+    def _5190_live_delivery(
+        self, rt: FakeRuntime, live: Path, at: float, text: str
+    ) -> None:
+        with live.open("a", encoding="utf-8") as stream:
+            stream.write(self._5190_record(at - 30, text) + "\n")
+        os.utime(live, (at, at))
+        rt.haystack = norm(f"{rt.haystack} {text}")
+
+    def _5190_retire_orphan(
+        self, rt: FakeRuntime, state: dict, live: Path, orphan: Path
+    ) -> float:
+        """Run the channel forward until the stranded orphan is closed out."""
+        discovered_at = self.now + rt.cfg.orphan_abandon_secs + 600
+        self._5190_strand_orphan(orphan, self.now)
+        self._5190_live_delivery(rt, live, discovered_at, "live block two")
+        tick_channel(rt, TICK_CHANNEL, state, discovered_at)
+        retire_at = (
+            discovered_at + relay_watchdog.ORPHAN_STRANDED_CONFIRM_SECS
+        )
+        self._5190_live_delivery(rt, live, retire_at, "live block three")
+        tick_channel(rt, TICK_CHANNEL, state, retire_at)
+        return retire_at
+
+    def test_5190_frozen_orphan_stops_pinning_a_delivering_channel_in_gap(self):
+        rt, state, live, orphan = self._5190_live_channel()
+        chs = state["999"]
+
+        discovered_at = self.now + rt.cfg.orphan_abandon_secs + 600
+        self._5190_strand_orphan(orphan, self.now)
+        self._5190_live_delivery(rt, live, discovered_at, "live block two")
+        tick_channel(rt, TICK_CHANNEL, state, discovered_at)
+
+        # The channel is provably delivering on `live`, so `orphan`'s unmatched
+        # blocks are not evidence of a relay gap and must not be alerted as one.
+        self.assertEqual(chs[SELECTED_TRANSCRIPT_KEY], str(live))
+        self.assertEqual(
+            [body for body, _ in rt.alerts if "릴레이 갭 감지" in body],
+            [],
+            rt.log_lines,
+        )
+        self.assertIn(str(orphan), chs[self.ORPHAN_STRANDED_KEY])
+        self.assertTrue(
+            any("orphan-stranded-marker-opened" in line for line in rt.log_lines)
+        )
+
+        retire_at = discovered_at + relay_watchdog.ORPHAN_STRANDED_CONFIRM_SECS
+        self._5190_live_delivery(rt, live, retire_at, "live block three")
+        tick_channel(rt, TICK_CHANNEL, state, retire_at)
+
+        # ...and once the finding has held through the confirmation window the
+        # authority is closed out, which is the exit #5190 had none of.
+        self.assertNotIn(
+            str(orphan), chs.get(relay_watchdog.PENDING_TRANSCRIPTS_KEY, [])
+        )
+        self.assertNotIn(
+            str(orphan), chs.get(relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY, [])
+        )
+        self.assertIn(
+            str(orphan), chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {})
+        )
+        self.assertNotIn(str(orphan), chs.get(self.ORPHAN_STRANDED_KEY, {}))
+        self.assertFalse(chs.get("alerting"), (chs, rt.log_lines))
+        self.assertNotIn("gap_since", chs)
+        retirement = [body for body, _ in rt.alerts if "고아 세션" in body]
+        self.assertEqual(len(retirement), 1, rt.alerts)
+        self.assertIn("회수 불가", retirement[0])
+        # Retirement is not a delivery claim: no recovery notice may go out.
+        self.assertFalse(any("릴레이 갭 해소" in body for body, _ in rt.alerts))
+        self.assertTrue(
+            any(
+                "orphan-stranded-authority-retired" in line
+                for line in rt.log_lines
+            )
+        )
+
+        # A full re-alert cycle later the channel is still quiet: the 15-minute
+        # forever-loop is gone, not merely delayed.
+        quiet_at = retire_at + rt.cfg.realert_secs + 1
+        self._5190_live_delivery(rt, live, quiet_at, "live block four")
+        tick_channel(rt, TICK_CHANNEL, state, quiet_at)
+        self.assertEqual(
+            [body for body, _ in rt.alerts if "릴레이 갭 감지" in body], []
+        )
+        self.assertEqual(
+            len([body for body, _ in rt.alerts if "고아 세션" in body]), 1
+        )
+
+    def test_5190_reverse_frozen_orphan_still_alerts_when_nothing_delivers(self):
+        """THE reverse direction: no delivery anywhere ⇒ no silence anywhere.
+
+        Same frozen orphan, same elapsed time — only the corroborating delivery
+        is missing, because the relay is down. Nothing may be reclassified.
+        """
+        rt, state, live, orphan = self._5190_live_channel()
+        chs = state["999"]
+
+        outage_at = self.now + rt.cfg.orphan_abandon_secs + 600
+        self._5190_strand_orphan(orphan, self.now)
+        # The live session keeps writing and NOTHING arrives in Discord.
+        with live.open("a", encoding="utf-8") as stream:
+            stream.write(
+                self._5190_record(outage_at - 700, "live block lost in outage")
+                + "\n"
+            )
+        os.utime(live, (outage_at, outage_at))
+        tick_channel(rt, TICK_CHANNEL, state, outage_at)
+
+        gap_alerts = [body for body, _ in rt.alerts if "릴레이 갭 감지" in body]
+        self.assertEqual(len(gap_alerts), 1, (rt.alerts, rt.log_lines))
+        self.assertIn(live.name, gap_alerts[0])
+        self.assertTrue(chs.get("alerting"))
+        self.assertNotIn(str(orphan), chs.get(self.ORPHAN_STRANDED_KEY, {}))
+        self.assertNotIn(
+            str(orphan), chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {})
+        )
+
+    def test_5190_reverse_relay_death_after_orphan_retirement_still_alerts(self):
+        """The retirement must not desensitize the channel it retired from."""
+        rt, state, live, orphan = self._5190_live_channel()
+        chs = state["999"]
+        retire_at = self._5190_retire_orphan(rt, state, live, orphan)
+        self.assertIn(
+            str(orphan), chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {})
+        )
+        self.assertEqual(
+            [body for body, _ in rt.alerts if "릴레이 갭 감지" in body], []
+        )
+
+        outage_at = retire_at + 3600
+        with live.open("a", encoding="utf-8") as stream:
+            stream.write(
+                self._5190_record(outage_at - 700, "post-retirement block lost")
+                + "\n"
+            )
+        os.utime(live, (outage_at, outage_at))
+        tick_channel(rt, TICK_CHANNEL, state, outage_at)
+
+        gap_alerts = [body for body, _ in rt.alerts if "릴레이 갭 감지" in body]
+        self.assertEqual(len(gap_alerts), 1, (rt.alerts, rt.log_lines))
+        self.assertIn(live.name, gap_alerts[0])
+        self.assertTrue(chs.get("alerting"))
+
+    def test_5190_young_orphan_gap_names_the_session_and_narrows_the_claim(self):
+        """Below the freeze floor nothing is reclassified — #4435 lives here.
+
+        A session swapped in moments ago and losing blocks right now is also
+        unmatched, also not the selected transcript, and also has a delivering
+        sibling. Only elapsed silence separates it from #5190's corpse, so the
+        alert still fires; what changes is that it now says WHICH session it is
+        talking about and stops claiming a live relay failure.
+        """
+        rt, state, live, orphan = self._5190_live_channel()
+        young_at = self.now + rt.cfg.orphan_abandon_secs - 600
+        self._5190_strand_orphan(orphan, self.now)
+        self._5190_live_delivery(rt, live, young_at, "live block two")
+        tick_channel(rt, TICK_CHANNEL, state, young_at)
+
+        gap_alerts = [body for body, _ in rt.alerts if "릴레이 갭 감지" in body]
+        self.assertEqual(len(gap_alerts), 1, (rt.alerts, rt.log_lines))
+        body = gap_alerts[0]
+        self.assertIn(orphan.name, body)
+        self.assertIn(live.name, body)
+        self.assertIn("고아 세션(현재 활성 세션 아님)", body)
+        self.assertIn("과거 세션에 미도달 블록이", body)
+        # R2: an unknown elapsed time is stated as unknown, not as 999 minutes.
+        self.assertIn("배달이 확인된 이력이 없습니다", body)
+        self.assertNotIn("999분", body)
+        self.assertNotIn("**999**", body)
+        self.assertNotIn(
+            str(orphan), state["999"].get(self.ORPHAN_STRANDED_KEY, {})
+        )
+
+    def test_5190_unobserved_elapsed_time_never_renders_as_a_measurement(self):
+        rt = self.gap_rt(github_repo="owner/repo")
+        rt.watcher_probe = WatcherStateProbe(200, True, False)
+        # A populated by-path delivery map with no entry for this transcript is
+        # the production shape: the watchdog met the file after its deliveries
+        # had already rolled out of the bounded Discord window.
+        state = {
+            "999": {
+                "gap_since": self.now - rt.cfg.issue_after_secs - 1,
+                relay_watchdog.LAST_ACTUAL_DELIVERY_BY_PATH_KEY: {
+                    "/other/session.jsonl": self.now,
+                },
+            }
+        }
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        body = rt.alerts[0][0]
+        self.assertIn("릴레이 갭 감지", body)
+        self.assertIn("배달이 확인된 이력이 없습니다", body)
+        self.assertNotIn("999분", body)
+        self.assertNotIn("**999**", body)
+        # The sentinel must not reach the issue the watchdog files about itself.
+        self.assertEqual(rt.issue_gap_mins, [None])
+
+        channel = ChannelConfig(
+            channel_id="555", sendmessage_key="k", worktree_root=WORKTREE_ROOT
+        )
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="https://example.test/issues/9\n", stderr=""
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            real = Runtime(
+                Config(channels=(channel,), github_repo="owner/repo"), Path(tmp)
+            )
+            with mock.patch.object(
+                relay_watchdog.subprocess, "run", side_effect=fake_run
+            ):
+                real.file_github_issue(channel, None, 2)
+
+        # The runtime snapshot shells out first; find the `gh issue create`.
+        create = next(argv for argv in calls if "--title" in argv)
+        title = create[create.index("--title") + 1]
+        self.assertNotIn("999", title)
+        self.assertIn("no confirmed delivery on record", title)
 
     def test_invariant_4435_retiring_one_of_two_gap_owners_keeps_incident_clock(self):
         owner_a = self.proj_dir / "multi-gap-a.jsonl"

@@ -144,6 +144,23 @@ MAX_DEAD_WORKTREE_ABSENCES = 64
 # a transient stat failure resets the window instead of accumulating.
 DEAD_WORKTREE_CONFIRM_SECS = 600
 DEAD_WORKTREE_RETIREMENT_REASON = "dead_worktree"
+# #5190. Per-path timestamp of the FIRST tick on which an ORPHAN transcript (not
+# the channel's active session, never observed delivering) was seen holding
+# stranded blocks while another transcript on the same channel was demonstrably
+# still delivering. That co-occurrence is the only positive evidence that the
+# blocks are unrecoverable rather than symptoms of a live relay outage.
+ORPHAN_STRANDED_SINCE_KEY = "orphan_stranded_since"
+ORPHAN_STRANDED_RETIREMENT_REASON = "orphan_stranded"
+# Continuous corroboration required before a stranded-orphan marker may close
+# the authority. Same shape and rationale as DEAD_WORKTREE_CONFIRM_SECS: five
+# consecutive polls at the shipped poll_secs default, so one anomalous tick can
+# never retire anything.
+ORPHAN_STRANDED_CONFIRM_SECS = 600
+# `Verdict.gap_secs` when NO delivery was ever matched for a path. It is not a
+# duration and must never be rendered as one (#5190/#5052): "never observed"
+# and "infinitely stale" are different claims, and `float("inf")` collapsed
+# them into one that auto-passed every threshold comparison.
+GAP_SECS_UNOBSERVED = -1.0
 RECOVERED_GAP_GUARDS_KEY = "recovered_gap_replay_guards"
 ISSUE_FILING_SUPPRESSION_REASON_KEY = "issue_filing_suppression_reason"
 ISSUE_FILING_SUPPRESSION_SINCE_KEY = "issue_filing_suppression_since"
@@ -169,6 +186,9 @@ MAX_TRANSCRIPT_HISTORY = 64
 MAX_KNOWN_TRANSCRIPTS = 256
 MAX_PENDING_TRANSCRIPTS = 32
 MAX_GAP_OWNER_TRANSCRIPTS = MAX_PENDING_TRANSCRIPTS + 1
+# Stranded-orphan markers are a subset of the GAP owners, so they inherit that
+# budget and add no new delivery authority (#5190).
+MAX_ORPHAN_STRANDED_PATHS = MAX_GAP_OWNER_TRANSCRIPTS
 MAX_RECOVERED_GAP_GUARDS = MAX_KNOWN_TRANSCRIPTS
 MAX_RETIRED_TRANSCRIPTS = 32
 # Selected, pending, unresolved GAP-owner, and recovered replay-guard paths
@@ -279,6 +299,16 @@ class Config:
     # Transcript older than this ⇒ no live session; a stale gap is not a live
     # gap. Never alert on it.
     idle_quiet_secs: int = 2 * 3600
+    # #5190. How long a non-selected transcript must sit frozen before its
+    # undelivered blocks may be classified as stranded rather than as an active
+    # relay failure. This floor is what separates #5190's dead `/clear`ed
+    # session from #4435's freshly swapped-in session whose blocks are being
+    # lost right now: both are unmatched and non-selected, and only elapsed
+    # silence tells them apart. Two full re-alert cycles (`realert_secs` 900s),
+    # so a live session between turns can never be mistaken for an abandoned
+    # one. Shorter than `idle_quiet_secs` because classification additionally
+    # demands positive proof that the channel is still delivering elsewhere.
+    orphan_abandon_secs: int = 1800
     # Deploys restart dcserver, so short gaps during a deploy window are
     # expected. deploy-release.sh touches the marker file when it stops the
     # release service; alerts are suppressed while the marker is fresh.
@@ -346,6 +376,7 @@ def parse_config(raw: dict[str, Any]) -> Config:
         "gap_alert_secs",
         "realert_secs",
         "idle_quiet_secs",
+        "orphan_abandon_secs",
         "deploy_quiet_secs",
         "issue_after_secs",
         "read_fail_alert_after",
@@ -837,6 +868,115 @@ def _store_gap_owner_transcripts(
     else:
         channel_state.pop(GAP_OWNER_TRANSCRIPTS_KEY, None)
     return bounded
+
+
+def gap_is_unobserved(verdict: "Verdict") -> bool:
+    """True when no delivery was ever matched for this path (#5190).
+
+    The verdict then carries no measurement at all: its `gap_secs` is the
+    `GAP_SECS_UNOBSERVED` sentinel, not an elapsed time. Callers that render a
+    duration, rank gaps against each other, or weigh evidence must branch here
+    first.
+    """
+    return verdict.gap_secs < 0.0
+
+
+def _validated_orphan_stranded_since(
+    channel_state: Mapping[str, Any],
+) -> dict[str, float]:
+    """Return the bounded path -> first-stranded-tick map (#5190)."""
+    raw = channel_state.get(ORPHAN_STRANDED_SINCE_KEY, {})
+    if not isinstance(raw, dict):
+        return {}
+    stranded: dict[str, float] = {}
+    for path, since in raw.items():
+        if len(stranded) >= MAX_ORPHAN_STRANDED_PATHS:
+            break
+        if not isinstance(path, str) or not path:
+            continue
+        if not _is_finite_nonnegative_number(since):
+            continue
+        stranded[path] = float(since)
+    return stranded
+
+
+def _store_orphan_stranded_since(
+    channel_state: dict[str, Any], stranded: Mapping[str, float]
+) -> None:
+    bounded = dict(sorted(stranded.items())[:MAX_ORPHAN_STRANDED_PATHS])
+    if bounded:
+        channel_state[ORPHAN_STRANDED_SINCE_KEY] = bounded
+    else:
+        channel_state.pop(ORPHAN_STRANDED_SINCE_KEY, None)
+
+
+def _orphan_authority_matured(
+    channel_state: Mapping[str, Any], path: str, now: float
+) -> bool:
+    """True once a stranded-orphan marker has held long enough to close out.
+
+    The marker itself carries the evidence — it is only written on a tick where
+    the path was already frozen past `orphan_abandon_secs` AND the channel was
+    provably delivering on another transcript — so this only asks whether that
+    finding has survived the confirmation window. Reading the persisted marker
+    means the answer is available before any of this tick's verdicts exist,
+    which is what lets the pending authority be released in the same pass that
+    evaluates it.
+    """
+    since = _validated_orphan_stranded_since(channel_state).get(path)
+    if since is None:
+        return False
+    return now - since >= ORPHAN_STRANDED_CONFIRM_SECS
+
+
+def _channel_has_live_delivery(
+    evaluated: list[tuple[TranscriptCandidate, Verdict]],
+    fresh_undelivered_by_path: Mapping[str, int],
+    exclude_path: str,
+    now: float,
+    gap_alert_secs: int,
+) -> bool:
+    """Is some OTHER transcript on this channel demonstrably still delivering?
+
+    This is the whole safety hinge of the #5190 orphan handling, so it demands
+    positive proof rather than the absence of a complaint: a sibling path with a
+    clean verdict, nothing fresh outstanding, and a delivery actually matched
+    inside the same window that would have declared a gap. When the relay is
+    genuinely down every transcript fails at least one of those, this returns
+    False, and the gap alert proceeds untouched.
+    """
+    for candidate, verdict in evaluated:
+        path = str(candidate.path)
+        if path == exclude_path:
+            continue
+        if verdict.state != STATE_OK:
+            continue
+        if fresh_undelivered_by_path.get(path, 0) > 0:
+            continue
+        if gap_is_unobserved(verdict) or not verdict.delivered_ts:
+            continue
+        if now - verdict.delivered_ts > gap_alert_secs:
+            continue
+        return True
+    return False
+
+
+def _confirmed_gap_minutes(
+    verdict: Verdict, last_actual_delivery_at: float, now: float
+) -> int | None:
+    """Minutes since the last CONFIRMED delivery, or None when there is none.
+
+    None means "no delivery is on record for this session" — a fact the caller
+    has to state in words. The old code substituted `999` here and the alert
+    rendered it as "999 minutes since the last delivery" (#5190 §2): a sentinel
+    wearing the clothes of a measurement, which then propagated into the title
+    of the issue the watchdog filed about itself.
+    """
+    if last_actual_delivery_at:
+        return int(max(0.0, now - last_actual_delivery_at) // 60)
+    if gap_is_unobserved(verdict) or not math.isfinite(verdict.gap_secs):
+        return None
+    return int(verdict.gap_secs // 60)
 
 
 def _validated_recovered_gap_guards(
@@ -1565,6 +1705,8 @@ class Verdict:
     stale: int
     lost: int
     delivered_ts: float
+    # `GAP_SECS_UNOBSERVED` when no delivery was ever matched for this path.
+    # Read it through `gap_is_unobserved()`; never render it as a duration.
     gap_secs: float
 
 
@@ -2381,8 +2523,19 @@ def evaluate(
         for block, matched in stale
         if block[0] > delivered_ts and not matched
     ]
-    gap_secs = (now - delivered_ts) if delivered_ts else float("inf")
-    if lost and gap_secs > gap_alert_secs:
+    # #5190/#5052: "this path never delivered anything we could match" is
+    # UNKNOWN, not "the gap is infinitely old". `float("inf")` collapsed the two
+    # so an orphan transcript — a `/clear`ed session that can never deliver
+    # again — auto-passed the threshold comparison AND outranked every real,
+    # measured gap in the verdict ordering below. The unobserved case still
+    # reaches STATE_GAP on its own explicit branch (a relay that died before it
+    # ever delivered must alert); what it no longer does is masquerade as the
+    # oldest measurement on the channel.
+    delivered_observed = delivered_ts > 0.0
+    gap_secs = (
+        (now - delivered_ts) if delivered_observed else GAP_SECS_UNOBSERVED
+    )
+    if lost and (not delivered_observed or gap_secs > gap_alert_secs):
         state = STATE_GAP
     elif lost:
         state = STATE_LAGGING
@@ -2995,19 +3148,38 @@ class Runtime:
             self.log(f"discord-sendmessage error: {e}")
         return False
 
-    def file_github_issue(self, ch: ChannelConfig, gap_min: int, lost: int) -> str:
+    def file_github_issue(
+        self, ch: ChannelConfig, gap_min: int | None, lost: int
+    ) -> str:
         """Auto-file a GitHub issue for a persistent gap (06-29 relay-gap-watch
-        behavior, see #3893). Best-effort: failure is logged, never fatal."""
+        behavior, see #3893). Best-effort: failure is logged, never fatal.
+
+        `gap_min is None` means no delivery was ever confirmed for the session.
+        It is reported as that sentence, never as a number: #5190 was filed by
+        this method with `999m since last delivery` in its own title, and the
+        false measurement survived into human triage.
+        """
         gh = shutil.which("gh") or "/opt/homebrew/bin/gh"
+        elapsed_phrase = (
+            f"{gap_min}m since last delivery"
+            if gap_min is not None
+            else "no confirmed delivery on record for this session"
+        )
         title = (
             f"[auto][relay-watchdog] relay gap on channel {ch.channel_id}: "
-            f"{lost} undelivered blocks, {gap_min}m since last delivery"
+            f"{lost} undelivered blocks, {elapsed_phrase}"
+        )
+        elapsed_line = (
+            f"- minutes since last successful delivery: **{gap_min}**\n"
+            if gap_min is not None
+            else "- last successful delivery: **none on record for this "
+            "session**\n"
         )
         body = (
             f"Filed automatically by the out-of-band relay watchdog (#4381).\n\n"
             f"- channel: `{ch.channel_id}`\n"
             f"- undelivered assistant blocks: **{lost}**\n"
-            f"- minutes since last successful delivery: **{gap_min}**\n"
+            f"{elapsed_line}"
             f"- runtime snapshot: {self.dcserver_snapshot()}\n\n"
             f"The watchdog compares session transcripts against delivered "
             f"Discord messages; see `scripts/relay_watchdog.py`."
@@ -3508,6 +3680,16 @@ def _alert_pending_retirement(
         detail = (
             "세션 활동이 idle 한계를 넘겨 더 이상 live GAP으로 반복 평가하지 "
             "않습니다. 미도달 여부가 해결됐다고 주장하는 복구 알림은 보내지 않습니다."
+        )
+    elif reason == ORPHAN_STRANDED_RETIREMENT_REASON:
+        title = "고아 세션의 미도달 블록 회수 불가 확정"
+        detail = (
+            "현재 활성 세션이 아닌 과거 세션의 트랜스크립트가 계속 정지해 있는 "
+            "동안 이 채널의 다른 세션은 정상 배달을 이어갔습니다 — 릴레이 장애가 "
+            "아니라 그 세션이 다시 배달할 수 없는 상태입니다. 해당 미도달 블록을 "
+            "회수 불가로 확정하고 반복 평가에서 내립니다. 배달이 확인됐다는 뜻이 "
+            "아니며(복구 알림은 보내지 않습니다), 이 경보가 해당 경로에 대한 "
+            "마지막 통지입니다."
         )
     elif reason == DEAD_WORKTREE_RETIREMENT_REASON:
         title = "죽은 세션의 릴레이 loss-state 종결"
@@ -4389,6 +4571,7 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     chs.pop(LAST_ACTUAL_DELIVERY_AT_KEY, None)
     unreadable_paths: list[str] = []
     escalated_pending_paths: list[str] = []
+    orphan_retired_paths: list[str] = []
     remaining_pending = list(pending_paths)
     for candidate in active_candidates:
         path = str(candidate.path)
@@ -4555,6 +4738,16 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             and not matched
         )
         fresh_undelivered_by_path[path] = fresh_undelivered
+        # #5190: a stranded-orphan marker written on an earlier tick matures
+        # into an abandonment once the window has elapsed and the file is still
+        # frozen. Resurrection (semantic growth) voids it below, so a session
+        # that starts writing again is never closed out behind its own back.
+        orphan_matured = (
+            path not in semantic_growth_paths
+            and _orphan_authority_matured(chs, path, now)
+        )
+        if orphan_matured:
+            orphan_retired_paths.append(path)
         if tombstone_update.newly_tombstoned:
             rt.log(
                 f"[{cid}] permanent-loss-confirmed path={path} "
@@ -4573,11 +4766,16 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
                 f"state={verdict.state} lost={verdict.lost} "
                 f"fresh_undelivered={fresh_undelivered}"
             )
+            # A clean verdict is the normal release. It is also unreachable for
+            # an orphan holding permanently undelivered blocks — STATE_OK can
+            # never arrive on a session that will never write again — which is
+            # what pinned #5190's pending authority open forever. A matured
+            # stranded-orphan marker is the second, evidence-backed exit.
             if (
                 verdict.state == STATE_OK
                 and fresh_undelivered == 0
                 and read_result.blocks
-            ):
+            ) or orphan_matured:
                 remaining_pending = [
                     pending for pending in remaining_pending if pending != path
                 ]
@@ -4724,9 +4922,108 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
                 f"successor={selected_path} count={len(superseded_gap_owners)}"
             )
 
+    # ── Stranded orphan transcripts (#5190) ──────────────────────────────────
+    # A session abandoned by `/clear` can leave blocks that no future delivery
+    # can ever recover: its delivery frontier cannot advance, so the tombstone
+    # path (which requires two advances) never confirms; its worktree is still
+    # alive, so dead-worktree retirement never fires; and STATE_OK can never
+    # arrive, so the pending authority never releases. Every exit the watchdog
+    # had was blocked by the very condition it was built to resolve, and the
+    # channel re-alerted every `realert_secs` about a session that had been
+    # frozen for hours.
+    #
+    # The exit here rests on positive evidence rather than on silence: the path
+    # is NOT the active session, has never been seen delivering, is not growing,
+    # and — decisively — another transcript on the same channel is delivering
+    # right now. A relay that is actually down produces none of that last part,
+    # so nothing below can silence a real outage.
+    stranded_since = _validated_orphan_stranded_since(chs)
+    orphan_unattributable_paths: set[str] = set()
+    for candidate, verdict in evaluated:
+        path = str(candidate.path)
+        # The freeze floor is load-bearing, not cosmetic. Without it this same
+        # shape swallows #4435: a session that has just been swapped in, is not
+        # yet selected, and whose blocks are being lost RIGHT NOW looks
+        # identical to an abandoned one except for how long it has been silent.
+        eligible = (
+            path != selected_path
+            and verdict.state == STATE_GAP
+            and gap_is_unobserved(verdict)
+            and path not in semantic_growth_paths
+            and now - candidate.mtime >= cfg.orphan_abandon_secs
+        )
+        if not eligible:
+            # Resurrection, recovery, or promotion to the active session voids
+            # the marker: this path is back under ordinary judgment.
+            if stranded_since.pop(path, None) is not None:
+                rt.log(f"[{cid}] orphan-stranded-marker-cleared path={path}")
+            continue
+        if path not in stranded_since and not _channel_has_live_delivery(
+            evaluated,
+            fresh_undelivered_by_path,
+            path,
+            now,
+            cfg.gap_alert_secs,
+        ):
+            # No corroborating delivery anywhere on the channel — this may well
+            # be a live outage. Leave it to the normal gap path.
+            continue
+        if path not in stranded_since:
+            stranded_since[path] = now
+            rt.log(
+                f"[{cid}] orphan-stranded-marker-opened path={path} "
+                f"lost={verdict.lost} selected={selected_path}"
+            )
+        orphan_unattributable_paths.add(path)
+    if orphan_retired_paths:
+        retired_orphans = set(orphan_retired_paths)
+        for path in orphan_retired_paths:
+            candidate = candidate_by_path.get(path)
+            if candidate is not None:
+                retired_transcripts[path] = (candidate.size, now)
+            stranded_since.pop(path, None)
+        _store_retired_transcripts(chs, retired_transcripts)
+        # The pending authority itself was already released in the evaluation
+        # loop above, on the same `orphan_matured` predicate; what remains is to
+        # drop the path from this tick's judgment and close the incident.
+        evaluated = [
+            (candidate, verdict)
+            for candidate, verdict in evaluated
+            if str(candidate.path) not in retired_orphans
+        ]
+        orphan_unattributable_paths -= retired_orphans
+        rt.log(
+            f"[{cid}] orphan-stranded-authority-retired "
+            f"count={len(orphan_retired_paths)} "
+            f"frozen_floor={int(cfg.orphan_abandon_secs)}s "
+            f"confirm={ORPHAN_STRANDED_CONFIRM_SECS}s"
+        )
+        _alert_pending_retirement(
+            rt,
+            ch,
+            chs,
+            orphan_retired_paths,
+            now,
+            reason=ORPHAN_STRANDED_RETIREMENT_REASON,
+        )
+        _clear_gap_alert_without_recovery(rt, chs, cid, orphan_retired_paths)
+        retired_pending_paths.extend(orphan_retired_paths)
+    _store_orphan_stranded_since(chs, stranded_since)
+    if not evaluated:
+        observe_coverage()
+        return
+
     state_rank = {STATE_OK: 0, STATE_LAGGING: 1, STATE_GAP: 2}
+    # An unattributable orphan must never be the channel's alert subject while a
+    # path with real evidence is available; it stays in `evaluated` (and thus a
+    # GAP owner) so it keeps being judged until it matures or resurrects.
+    rankable = [
+        item
+        for item in evaluated
+        if str(item[0].path) not in orphan_unattributable_paths
+    ] or evaluated
     verdict_candidate, v = max(
-        evaluated,
+        rankable,
         key=lambda item: (
             state_rank[item[1].state],
             item[1].gap_secs,
@@ -4906,11 +5203,7 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         last_actual_delivery_at = last_actual_delivery_by_path.get(
             verdict_path, 0.0
         )
-        gap_min = (
-            int(max(0.0, now - last_actual_delivery_at) // 60)
-            if last_actual_delivery_at
-            else (int(v.gap_secs // 60) if v.delivered_ts else 999)
-        )
+        gap_min = _confirmed_gap_minutes(v, last_actual_delivery_at, now)
         if not chs.get("gap_since"):
             chs["gap_since"] = now
         issue_due = (
@@ -4932,12 +5225,42 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             issue_line = (
                 f"\n자동 등록 이슈: {chs['issue_url']}" if chs.get("issue_url") else ""
             )
+            # #5190 R2: an unknown elapsed time is stated as unknown. The old
+            # code printed the sentinel 999 into "마지막 정상 도달 이후 999분
+            # 경과" and into the title of the issue it filed about itself.
+            elapsed_line = (
+                f"마지막 정상 도달 이후 **{gap_min}분** 경과.\n"
+                if gap_min is not None
+                else "이 세션에서 배달이 확인된 이력이 없습니다 "
+                "(경과 시간을 측정할 기준점 없음).\n"
+            )
+            # #5190 R4/R5: the alerting transcript is not always the channel's
+            # active session, and the two cases call for different responses.
+            # Naming the file and narrowing the claim is the difference between
+            # "the relay is down right now" and "a past session left blocks
+            # behind".
+            orphan_gap = bool(selected_path) and verdict_path != selected_path
+            headline = (
+                "🚨 **릴레이 갭 감지 (out-of-band 워치독) — 고아 세션**"
+                if orphan_gap
+                else "🚨 **릴레이 갭 감지 (out-of-band 워치독)**"
+            )
+            scope_line = (
+                f"대상 세션: `{Path(verdict_path).name}` — "
+                "**고아 세션(현재 활성 세션 아님)**. 현재 활성 세션은 "
+                f"`{Path(str(selected_path)).name}` 입니다. 즉 이 경보는 "
+                "\"지금 릴레이가 죽었다\"가 아니라 \"과거 세션에 미도달 블록이 "
+                "남아 있다\"는 뜻입니다.\n"
+                if orphan_gap
+                else f"대상 세션: `{Path(verdict_path).name}` (현재 활성 세션).\n"
+            )
             rt.alert(
                 ch,
-                f"🚨 **릴레이 갭 감지 (out-of-band 워치독)**\n\n"
+                f"{headline}\n\n"
                 f"소스(세션 트랜스크립트)에는 있는데 Discord에 도착하지 않은 "
                 f"assistant 블록 **{v.lost}건**.\n"
-                f"마지막 정상 도달 이후 **{gap_min}분** 경과.\n\n"
+                f"{scope_line}"
+                f"{elapsed_line}\n"
                 f"런타임: {rt.dcserver_snapshot()}{issue_line}\n\n"
                 f"이 알림은 turn-relay 경로가 아니라 out-of-band로 직접 나갑니다 — "
                 f"릴레이가 죽어도 도착합니다.",
@@ -4945,7 +5268,9 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             chs["last_alert"] = now
             chs["alerting"] = True
             rt.log(
-                f"[{cid}] ALERT path={verdict_path} lost={v.lost} gap_min={gap_min}"
+                f"[{cid}] ALERT path={verdict_path} lost={v.lost} "
+                f"gap_min={gap_min if gap_min is not None else 'unobserved'} "
+                f"orphan={orphan_gap}"
             )
         else:
             rt.log(
