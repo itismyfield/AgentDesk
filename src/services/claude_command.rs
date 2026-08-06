@@ -130,25 +130,11 @@ pub(crate) enum ClaudeLaunchIntent {
     VersionProbe,
 }
 
-/// Marker env var that managed dcserver callers (the legacy tmux-wrapper launch
-/// script and the ProcessBackend wrapper) set on the `agentdesk tmux-wrapper`
-/// process. The wrapper runs as a separate process with no installed config, so
-/// it cannot itself run the config-gated [`ClaudeLaunchEnv::resolve`]. Its
-/// managed parent — which *does* have config — resolves the gateway decision and
-/// applies it to the wrapper's environment; this marker tells the wrapper that
-/// an authority already decided, so it reconstructs that decision from the
-/// inherited env instead of re-resolving (which, config-less, would collapse to
-/// Scrub and strip a managed Inject). A direct public-CLI invocation carries no
-/// marker, so the wrapper resolves fresh (Scrub without config — the safe native
-/// default that also strips any stale gateway env from the operator's shell).
-pub(crate) const TMUX_WRAPPER_GATEWAY_RESOLVED_ENV: &str = "AGENTDESK_CLAUDE_GATEWAY_RESOLVED";
-
 /// Resolved launch environment for a single Claude spawn.
 ///
 /// This is the only value that carries the gateway Inject|Scrub decision to a
-/// launch site. It is produced solely by [`ClaudeLaunchEnv::resolve`] /
-/// [`ClaudeLaunchEnv::for_tmux_wrapper`] (or the test-only constructors) so the
-/// resolution policy is centralised.
+/// launch site. It is produced solely by [`ClaudeLaunchEnv::resolve`] (or the
+/// test-only constructors) so the resolution policy is centralised.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ClaudeLaunchEnv {
     gateway: ClaudeGatewayProxyEnv,
@@ -166,45 +152,12 @@ impl ClaudeLaunchEnv {
         }
     }
 
-    /// Launch env for the `agentdesk tmux-wrapper` process's own Claude spawn.
-    ///
-    /// The wrapper is a config-less separate process, so the decision authority
-    /// depends on who launched it:
-    ///   * managed caller (marker present) — the parent resolved with config and
-    ///     applied the decision to this process's env; reconstruct and re-apply
-    ///     it (idempotent: Inject with the inherited base URL, or Scrub).
-    ///   * public CLI (no marker) — resolve fresh as a `Turn`; with no installed
-    ///     config that is Scrub, stripping any stale gateway env.
-    pub(crate) fn for_tmux_wrapper() -> Self {
-        Self {
-            gateway: tmux_wrapper_gateway(
-                std::env::var_os(TMUX_WRAPPER_GATEWAY_RESOLVED_ENV).is_some(),
-                crate::services::claude_gateway_proxy::reconstruct_launch_env_from_process,
-                crate::services::claude_gateway_proxy::resolve_for_launch,
-            ),
-        }
-    }
-
     /// Apply the resolved gateway env to a `Command` (Inject sets the proxy
     /// vars, Scrub removes any inherited values). Used by launch sites that
     /// build a `Command` outside [`ClaudeCommandBuilder`] (e.g. the wrapper
     /// command assembled inside `session_backend`).
     pub(crate) fn apply_to_command(&self, command: &mut Command) {
         self.gateway.apply_to_command(command);
-    }
-
-    /// Apply this launch env to a **managed ProcessBackend** (pipe-mode) wrapper
-    /// `Command`: the resolved gateway decision, then the managed-launch marker
-    /// ([`mark_managed_launch_command`]) that tells the spawned
-    /// `agentdesk tmux-wrapper` to *reconstruct* this decision rather than
-    /// re-resolve config-less to a bare Scrub. Folding both steps here (rather
-    /// than leaving them as two lines in the `session_backend` launch closure)
-    /// makes the Command-leg marker wiring mutation-testable: deleting the
-    /// `mark_managed_launch_command` call below fails
-    /// `managed_process_command_marks_wrapper_env`.
-    pub(crate) fn apply_to_managed_process_command(&self, command: &mut Command) {
-        self.apply_to_command(command);
-        mark_managed_launch_command(command);
     }
 
     /// Render the resolved gateway env as `export`/`unset` shell lines for
@@ -262,38 +215,6 @@ fn resolve_gateway(
         ClaudeLaunchIntent::Turn => turn_gateway(),
         ClaudeLaunchIntent::VersionProbe => ClaudeGatewayProxyEnv::Scrub,
     }
-}
-
-/// Choose the tmux-wrapper's gateway decision. Factored out of
-/// [`ClaudeLaunchEnv::for_tmux_wrapper`] so the managed-vs-public branch is
-/// testable without mutating the process environment: a managed marker means an
-/// upstream authority already decided (reconstruct it), otherwise resolve fresh.
-fn tmux_wrapper_gateway(
-    managed_marker_present: bool,
-    reconstruct: impl FnOnce() -> ClaudeGatewayProxyEnv,
-    resolve_fresh: impl FnOnce() -> ClaudeGatewayProxyEnv,
-) -> ClaudeGatewayProxyEnv {
-    if managed_marker_present {
-        reconstruct()
-    } else {
-        resolve_fresh()
-    }
-}
-
-/// Stamp the managed-launch marker ([`TMUX_WRAPPER_GATEWAY_RESOLVED_ENV`]) that
-/// tells the `agentdesk tmux-wrapper` process the gateway decision now in this
-/// environment was resolved by a config-holding dcserver authority, so the
-/// wrapper reconstructs it rather than re-resolving to a bare Scrub. Shared by
-/// the two managed launch sites (legacy tmux launch script + ProcessBackend) so
-/// the marker literal lives in exactly one place next to the const it uses.
-pub(crate) fn append_managed_launch_marker_shell(output: &mut String) {
-    output.push_str(&format!("export {TMUX_WRAPPER_GATEWAY_RESOLVED_ENV}=1\n"));
-}
-
-/// `Command` counterpart of [`append_managed_launch_marker_shell`] for the
-/// ProcessBackend wrapper launch path.
-pub(crate) fn mark_managed_launch_command(command: &mut Command) {
-    command.env(TMUX_WRAPPER_GATEWAY_RESOLVED_ENV, "1");
 }
 
 /// By-construction builder for a Claude-launching `Command`.
@@ -593,69 +514,6 @@ mod chokepoint_gateway_mutation_tests {
         let turn_gateway = || inject("http://turn.example/");
         let turn = resolve_gateway(ClaudeLaunchIntent::Turn, turn_gateway);
         assert_eq!(turn, inject("http://turn.example/"));
-    }
-
-    #[test]
-    fn tmux_wrapper_marker_present_reconstructs_managed_decision() {
-        // Managed marker present → reconstruct the authority's decision
-        // (idempotent), and IGNORE the fresh-resolve path. Inverting the branch
-        // in `tmux_wrapper_gateway` would return Scrub here.
-        let decision = tmux_wrapper_gateway(true, || inject("http://managed/"), scrub);
-        assert_eq!(decision, inject("http://managed/"));
-    }
-
-    #[test]
-    fn tmux_wrapper_without_marker_resolves_fresh_and_ignores_stale() {
-        // Public CLI (no marker) → resolve fresh; the (stale) reconstruct path
-        // is IGNORED so a stale inherited ANTHROPIC_BASE_URL cannot leak through.
-        let decision = tmux_wrapper_gateway(false, || inject("http://stale/"), scrub);
-        assert_eq!(decision, scrub());
-    }
-
-    // Mutation coverage for the ProcessBackend (pipe-mode) managed launch. The
-    // #4559 R-B finding was that `mark_managed_launch_command` on the Command
-    // leg had NO test — deleting it left every test green. This exercises the
-    // exact production wiring (`apply_to_managed_process_command`, which the
-    // `session_backend` launch closure calls) with a real resolved launch env —
-    // it does NOT stamp the marker directly. Deleting the
-    // `mark_managed_launch_command` call in that method drops the marker entry
-    // and fails the marker assertion; deleting `apply_to_command` fails the
-    // gateway assertion.
-    #[test]
-    fn managed_process_command_marks_wrapper_env() {
-        let mut command = Command::new("agentdesk");
-        ClaudeLaunchEnv::inject_for_test("http://managed.proxy/")
-            .apply_to_managed_process_command(&mut command);
-        let envs = command_env_map(&command);
-        // Gateway decision is applied to the wrapper Command…
-        assert_eq!(
-            envs.get(BASE_URL_ENV),
-            Some(&Some("http://managed.proxy/".to_string()))
-        );
-        assert_eq!(envs.get(DISCOVERY_ENV), Some(&Some("1".to_string())));
-        // …and the managed marker is stamped so the wrapper reconstructs rather
-        // than re-resolving config-less to a bare Scrub.
-        assert_eq!(
-            envs.get(TMUX_WRAPPER_GATEWAY_RESOLVED_ENV),
-            Some(&Some("1".to_string())),
-            "managed ProcessBackend launch must mark the wrapper env"
-        );
-    }
-
-    // Scrub counterpart: even when the managed authority decided Scrub (proxy
-    // disabled/unreachable), the marker is STILL stamped so the wrapper knows an
-    // authority already decided and reconstructs the Scrub instead of resolving
-    // fresh. Guards against a "only mark on Inject" regression.
-    #[test]
-    fn managed_process_command_marks_wrapper_env_even_when_scrubbed() {
-        let mut command = Command::new("agentdesk");
-        ClaudeLaunchEnv::scrub_for_test().apply_to_managed_process_command(&mut command);
-        let envs = command_env_map(&command);
-        assert_eq!(envs.get(BASE_URL_ENV), Some(&None));
-        assert_eq!(
-            envs.get(TMUX_WRAPPER_GATEWAY_RESOLVED_ENV),
-            Some(&Some("1".to_string()))
-        );
     }
 }
 
