@@ -20,8 +20,7 @@ pub(crate) use memento::{
     resolve_memento_workspace, sanitize_memento_workspace_segment,
 };
 pub(crate) use memento_throttle::{
-    RecallSizeBucket, memento_call_metrics_snapshot, note_memento_tool_feedback_trigger,
-    note_recall_context_size,
+    memento_call_metrics_snapshot, note_memento_tool_feedback_trigger,
 };
 pub(crate) use runtime_state::{backend_is_active, backend_state, refresh_backend_health};
 

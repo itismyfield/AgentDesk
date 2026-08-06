@@ -2,10 +2,7 @@ use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone, Utc};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
-    sync::{
-        Mutex, OnceLock,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -503,13 +500,15 @@ pub(crate) fn memento_call_metrics_snapshot(window_hours: usize) -> Value {
         .into_iter()
         .map(|(trigger_type, count)| (trigger_type, json!(count)))
         .collect::<serde_json::Map<String, Value>>();
-    let full_turns = FULL_CONTEXT_TURNS.load(Ordering::Relaxed);
-    let full_bytes = FULL_CONTEXT_BYTES_TOTAL.load(Ordering::Relaxed);
-    let identity_turns = IDENTITY_CONTEXT_TURNS.load(Ordering::Relaxed);
-    let identity_bytes = IDENTITY_CONTEXT_BYTES_TOTAL.load(Ordering::Relaxed);
-    let identity_empty_turns = IDENTITY_EMPTY_CONTEXT_TURNS.load(Ordering::Relaxed);
-    let skipped_turns = SKIPPED_CONTEXT_TURNS.load(Ordering::Relaxed);
-
+    // #5168: the `recall_context` block is gone. Every one of its counters was
+    // fed only by `note_recall_context_size`, called from the two server-side
+    // recall sites in `message_handler/{intake,headless}_turn.rs` that slice 2
+    // (`abb72d261`) deleted. Under path B the model calls memento itself, so
+    // AgentDesk cannot measure a context payload it never fetches — the block
+    // could only have reported a structural zero. Removed rather than
+    // documented as permanently-zero: no consumer was found (no dashboard,
+    // script or doc reads it beyond the `/api/stats/memento` example, which is
+    // updated in the same change).
     json!({
         "generated_at": now.with_timezone(&kst).to_rfc3339(),
         "timezone": "Asia/Seoul",
@@ -519,22 +518,8 @@ pub(crate) fn memento_call_metrics_snapshot(window_hours: usize) -> Value {
         "searchObservability": {
             "feedback_counts_by_trigger_type": feedback_trigger_json,
         },
-        "recall_context": {
-            "full_turns": full_turns,
-            "full_bytes": full_bytes,
-            "full_average_bytes": average_bytes(full_bytes, full_turns),
-            "identity_only_turns": identity_turns,
-            "identity_only_bytes": identity_bytes,
-            "identity_only_average_bytes": average_bytes(identity_bytes, identity_turns),
-            "identity_only_empty_turns": identity_empty_turns,
-            "skipped_turns": skipped_turns,
-        },
         "hours": hours,
     })
-}
-
-fn average_bytes(total: u64, turns: u64) -> u64 {
-    if turns == 0 { 0 } else { total / turns }
 }
 
 fn normalize_feedback_trigger_type(trigger_type: &str) -> String {
@@ -549,75 +534,14 @@ fn normalize_feedback_trigger_type(trigger_type: &str) -> String {
     }
 }
 
-// #1083: Track recall context size emitted per mode so #1083 can compare
-// before/after average context bytes per channel without wiring a full A/B
-// harness. Counters are global (process-wide); the call site logs the per-turn
-// size and the average is computed by `recall_size_average_bytes`.
-static FULL_CONTEXT_BYTES_TOTAL: AtomicU64 = AtomicU64::new(0);
-static FULL_CONTEXT_TURNS: AtomicU64 = AtomicU64::new(0);
-static IDENTITY_CONTEXT_BYTES_TOTAL: AtomicU64 = AtomicU64::new(0);
-static IDENTITY_CONTEXT_TURNS: AtomicU64 = AtomicU64::new(0);
-static IDENTITY_EMPTY_CONTEXT_TURNS: AtomicU64 = AtomicU64::new(0);
-static SKIPPED_CONTEXT_TURNS: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum RecallSizeBucket {
-    Full,
-    IdentityOnly,
-    Skipped,
-}
-
-pub(crate) fn note_recall_context_size(bucket: RecallSizeBucket, bytes: usize) {
-    match bucket {
-        RecallSizeBucket::Full => {
-            FULL_CONTEXT_BYTES_TOTAL.fetch_add(bytes as u64, Ordering::Relaxed);
-            FULL_CONTEXT_TURNS.fetch_add(1, Ordering::Relaxed);
-        }
-        RecallSizeBucket::IdentityOnly => {
-            IDENTITY_CONTEXT_BYTES_TOTAL.fetch_add(bytes as u64, Ordering::Relaxed);
-            IDENTITY_CONTEXT_TURNS.fetch_add(1, Ordering::Relaxed);
-            if bytes == 0 {
-                IDENTITY_EMPTY_CONTEXT_TURNS.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        RecallSizeBucket::Skipped => {
-            SKIPPED_CONTEXT_TURNS.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-}
-
 #[cfg(test)]
 // Module name kept as-is on purpose: the #2655 forget:recall alarm it was
 // named for is gone (#5168), but `scripts/test_lane_coverage_baseline.txt` is
 // an append-forbidden ratchet, so renaming the module would register as
-// baseline growth and fail the gate. The two surviving tests cover the
-// recall-size and tool_feedback-trigger metric counters.
+// baseline growth and fail the gate. The surviving test covers the
+// tool_feedback-trigger metric counter.
 mod forget_ratio_tests {
     use super::*;
-
-    #[test]
-    fn identity_only_empty_recall_is_exposed_in_stats() {
-        let before =
-            memento_call_metrics_snapshot(1)["recall_context"]["identity_only_empty_turns"]
-                .as_u64()
-                .unwrap_or(0);
-
-        note_recall_context_size(RecallSizeBucket::IdentityOnly, 0);
-
-        let recall_context = memento_call_metrics_snapshot(1)["recall_context"].clone();
-        assert!(
-            recall_context["identity_only_empty_turns"]
-                .as_u64()
-                .unwrap_or(0)
-                >= before.saturating_add(1)
-        );
-        assert!(
-            recall_context["identity_only_turns"].as_u64().unwrap_or(0)
-                >= recall_context["identity_only_empty_turns"]
-                    .as_u64()
-                    .unwrap_or(0)
-        );
-    }
 
     #[test]
     fn unsubmitted_stop_flush_is_exposed_in_the_seven_day_process_snapshot() {

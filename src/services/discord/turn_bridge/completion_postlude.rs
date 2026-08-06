@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use super::guards::{CompletionGuard, InflightCleanupGuard};
+use super::memory_lifecycle::note_memento_context_from_turn;
 use super::*;
 
 mod channel_writeback;
@@ -277,6 +278,10 @@ pub(super) async fn run_completion_postlude(
         Some(turn_key) => channel_canonical_session_key.as_deref() != Some(turn_key),
         None => false,
     };
+    // #5168: path-B reflect gate. Scanned once here and reused by the
+    // tool_feedback analysis below, so the transcript is walked a single time.
+    let memento_tool_call_observed =
+        transcript_contains_explicit_memento_tool_call(&transcript_events);
     let session_id_to_persist = {
         let mut data = shared_owned.core.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id) {
@@ -303,6 +308,17 @@ pub(super) async fn run_completion_postlude(
                 // A snapshot turn must not reflect/capture the channel session
                 // either — both mutate or summarize `data.sessions[channel_id]`.
                 if !isolated_from_channel {
+                    // #5168: the model owns memento recall now (path B), so the
+                    // session's reflect gate is armed by the model's OWN memento
+                    // tool calls in this turn's transcript. Runs after the
+                    // writeback so the flag lands on the session id this turn
+                    // just established, and before the reflect take below so a
+                    // session that ends on the same turn still reflects.
+                    note_memento_context_from_turn(
+                        session,
+                        isolated_from_channel,
+                        memento_tool_call_observed,
+                    );
                     if let Some(reason) = memory_plan.session_end_reason {
                         reflect_request = take_memento_reflect_request(
                             session,
@@ -350,13 +366,12 @@ pub(super) async fn run_completion_postlude(
     }
 
     let memory_role_id = resolve_memory_role_id(role_binding.as_ref());
-    let mut recall_feedback_analysis = if should_analyze_recall_feedback
-        || transcript_contains_explicit_memento_tool_call(&transcript_events)
-    {
-        Some(analyze_recall_feedback_turn(&transcript_events))
-    } else {
-        None
-    };
+    let mut recall_feedback_analysis =
+        if should_analyze_recall_feedback || memento_tool_call_observed {
+            Some(analyze_recall_feedback_turn(&transcript_events))
+        } else {
+            None
+        };
     if let Some(analysis) = recall_feedback_analysis.as_ref()
         && let Some(reminder) = channel_writeback::feedback_reminder_to_stash(
             isolated_from_channel,

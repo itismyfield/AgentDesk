@@ -5416,9 +5416,12 @@ services::discord::turn_bridge::headless_delivery::headless_delivery_tests::head
 services::discord::turn_bridge::headless_delivery::headless_delivery_tests::routine_supplied_delivery_bot_is_never_overridden
 services::discord::turn_bridge::headless_delivery::headless_delivery_tests::unregistered_provider_still_falls_back_to_the_notify_bot
 services::discord::turn_bridge::headless_delivery::headless_delivery_tests::user_turn_answer_posts_as_the_agent_bot_not_notify
+services::discord::turn_bridge::memory_lifecycle::background_memory_task_tests::model_memento_tool_call_arms_session_end_reflect
 services::discord::turn_bridge::memory_lifecycle::background_memory_task_tests::observes_background_memory_tasks_under_one_timeout_window
 services::discord::turn_bridge::memory_lifecycle::background_memory_task_tests::observes_reflect_and_capture_background_memory_tasks
 services::discord::turn_bridge::memory_lifecycle::background_memory_task_tests::observes_single_background_memory_task
+services::discord::turn_bridge::memory_lifecycle::background_memory_task_tests::snapshot_turn_memento_tool_call_does_not_arm_channel_reflect
+services::discord::turn_bridge::memory_lifecycle::background_memory_task_tests::turn_without_memento_tool_call_leaves_reflect_disarmed
 services::discord::turn_bridge::output_lifecycle::tests::bridge_disconnect_handoff_flags_do_not_create_legacy_owner
 services::discord::turn_bridge::output_lifecycle::tests::bridge_output_owner_characterizes_standby_relay_contract
 services::discord::turn_bridge::output_lifecycle::tests::bridge_output_owner_is_absent_for_bridge_owned_delivery
@@ -6264,7 +6267,6 @@ services::memory::memento::static_slice_cache_tests::static_slice_split_separate
 services::memory::memento::tool_feedback_trigger_type_tests::normalizes_automatic_tool_feedback_trigger_to_sampled
 services::memory::memento::workspace_scope_tests::memento_workspace_from_channel_workspace_uses_path_basename
 services::memory::memento::workspace_scope_tests::unbound_memento_workspace_falls_back_to_channel_scope
-services::memory::memento_throttle::forget_ratio_tests::identity_only_empty_recall_is_exposed_in_stats
 services::memory::memento_throttle::forget_ratio_tests::unsubmitted_stop_flush_is_exposed_in_the_seven_day_process_snapshot
 services::message_outbox::dedupe_key_tests::actionable_ops_alert_registry_is_exact_and_excludes_recovery_noise
 services::message_outbox::dedupe_key_tests::content_dedupe_key_keeps_content_identity_without_reason_code
