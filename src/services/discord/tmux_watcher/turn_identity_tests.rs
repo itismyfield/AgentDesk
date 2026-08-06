@@ -289,61 +289,217 @@ fn no_inflight_offset_key_still_refuses_append_edit_tail_duplicate_4277() {
     );
 }
 
-#[test]
-fn soft_terminal_authority_requires_owner_exact_resume_floor_and_nonce() {
-    let session = "AgentDesk-claude-adk-cc";
-    let mut state = state_with_offsets(42, session, Some(63_621_206), 63_621_206);
+// #5175 shared fixture. `SESSION_5175` is the wedged channel's tmux session;
+// the frame under relay covers transcript bytes [FRAME_START, FRAME_END) and
+// the turn that produced it started inside that range.
+const SESSION_5175: &str = "AgentDesk-claude-adk-cc";
+const FRAME_START_5175: u64 = 1_534_426;
+const TURN_START_5175: u64 = 1_534_500;
+const FRAME_END_5175: u64 = 1_650_085;
+
+/// A watcher-owned inflight row for a turn that started inside the relayed
+/// frame — i.e. exactly what a TUI-direct turn leaves behind at turn END, and
+/// exactly what the `startup_inflight_snapshot` could never contain.
+fn pre_relay_row_5175() -> InflightTurnState {
+    let mut state = state_with_offsets(0, SESSION_5175, Some(TURN_START_5175), TURN_START_5175);
     state.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
-    let nonce = state.turn_nonce.clone().unwrap();
+    state
+}
 
-    assert!(watcher_soft_terminal_has_turn_authority(
-        Some(&state),
-        session,
-        63_621_206,
-        Some(&nonce),
-    ));
-    assert!(!watcher_soft_terminal_has_turn_authority(
-        Some(&state),
-        session,
-        130_740_943,
-        Some(&nonce),
-    ));
-    assert!(!watcher_soft_terminal_has_turn_authority(
-        Some(&state),
-        session,
-        63_621_206,
-        Some("newer-turn-nonce"),
-    ));
-
-    state.tmux_session_name = Some("AgentDesk-claude-other".to_string());
-    assert!(!watcher_soft_terminal_has_turn_authority(
-        Some(&state),
-        session,
-        63_621_206,
-        Some(&nonce),
-    ));
+/// The watcher binding as captured at turn-stream exit, carrying the nonce the
+/// watcher bound while consuming the turn. The startup snapshot is `None` for a
+/// TUI-direct turn: the watcher re-entered the collector before the user typed.
+fn binding_5175(watcher_turn_nonce: Option<&str>) -> WatcherSoftTerminalAuthority {
+    watcher_soft_terminal_has_turn_authority(
+        None,
+        SESSION_5175,
+        FRAME_START_5175,
+        watcher_turn_nonce,
+    )
 }
 
 #[test]
-fn ownerless_or_nonce_less_inflight_cannot_authorize_soft_terminal() {
-    let session = "AgentDesk-claude-adk-cc";
-    let mut state = state_with_offsets(42, session, Some(63_621_206), 63_621_206);
-    let nonce = state.turn_nonce.clone().unwrap();
+fn tui_direct_soft_terminal_gains_authority_from_pre_relay_inflight_5175() {
+    let row = pre_relay_row_5175();
+    let nonce = row.turn_nonce.clone().unwrap();
+    let binding = binding_5175(Some(&nonce));
 
-    assert!(!watcher_soft_terminal_has_turn_authority(
-        Some(&state),
-        session,
-        63_621_206,
-        Some(&nonce),
-    ));
-    state.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
-    state.turn_nonce = None;
-    assert!(!watcher_soft_terminal_has_turn_authority(
-        Some(&state),
-        session,
-        63_621_206,
-        None,
-    ));
+    // Direction ①: the pre-turn snapshot verdict was and stays false — the row
+    // did not exist yet — but the row that exists at turn END authorizes.
+    assert!(
+        !binding.startup_snapshot_authorized(),
+        "the pre-#5175 snapshot rule must still refuse; the fix must not come from the snapshot"
+    );
+    assert_eq!(
+        binding.authorize_pre_relay_inflight(Some(&row), FRAME_END_5175),
+        Ok(()),
+        "a TUI-direct soft terminal whose own inflight row started inside the relayed frame must hold delivery authority"
+    );
+}
+
+#[test]
+fn soft_terminal_authority_accepts_turn_start_inside_frame_without_exact_match_5175() {
+    let row = pre_relay_row_5175();
+    let nonce = row.turn_nonce.clone().unwrap();
+    let binding = binding_5175(Some(&nonce));
+
+    // The old rule demanded `resume floor == data_start_offset`. This row's turn
+    // start is 74 bytes past the frame start — rejected by the exact-equality
+    // term, accepted by containment.
+    assert_ne!(TURN_START_5175, FRAME_START_5175);
+    assert_eq!(
+        binding.authorize_pre_relay_inflight(Some(&row), FRAME_END_5175),
+        Ok(())
+    );
+}
+
+#[test]
+fn soft_terminal_authority_refuses_row_that_started_before_the_relayed_frame_5175() {
+    // A historical row (e.g. re-exposed by a `/compact` rewrite) whose turn
+    // began before this frame is outside the range and must not authorize.
+    let mut row = pre_relay_row_5175();
+    row.turn_start_offset = Some(FRAME_START_5175 - 1);
+    let nonce = row.turn_nonce.clone().unwrap();
+
+    assert_eq!(
+        binding_5175(Some(&nonce)).authorize_pre_relay_inflight(Some(&row), FRAME_END_5175),
+        Err(SoftTerminalAuthorityDenial::TurnStartOutsideFrame)
+    );
+}
+
+#[test]
+fn soft_terminal_authority_refuses_newer_followup_row_starting_after_the_frame_5175() {
+    // Offset-aliasing hazard shared with `pinned_finalize_user_msg_id`: a newer
+    // turn on the same session that begins at/after the consumed offset must not
+    // lend its anchor to this frame's terminal.
+    let mut row = pre_relay_row_5175();
+    row.turn_start_offset = Some(FRAME_END_5175);
+    let nonce = row.turn_nonce.clone().unwrap();
+
+    assert_eq!(
+        binding_5175(Some(&nonce)).authorize_pre_relay_inflight(Some(&row), FRAME_END_5175),
+        Err(SoftTerminalAuthorityDenial::TurnStartOutsideFrame)
+    );
+}
+
+#[test]
+fn soft_terminal_authority_refuses_missing_pre_relay_row_5175() {
+    assert_eq!(
+        binding_5175(Some("turn-nonce-0")).authorize_pre_relay_inflight(None, FRAME_END_5175),
+        Err(SoftTerminalAuthorityDenial::NoInflightRow)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #5175 direction ②: the four surviving conjuncts must each independently
+// refuse a forged soft terminal. Over-permissiveness is the real risk of moving
+// the authority read to the pre-relay row, so every conjunct is pinned on its
+// own, with all the others satisfied.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn forged_soft_terminal_from_another_tmux_session_is_refused_5175() {
+    let mut row = pre_relay_row_5175();
+    row.tmux_session_name = Some("AgentDesk-claude-other".to_string());
+    let nonce = row.turn_nonce.clone().unwrap();
+
+    assert_eq!(
+        binding_5175(Some(&nonce)).authorize_pre_relay_inflight(Some(&row), FRAME_END_5175),
+        Err(SoftTerminalAuthorityDenial::SessionMismatch)
+    );
+}
+
+#[test]
+fn forged_soft_terminal_with_ownerless_row_is_refused_5175() {
+    let mut row = pre_relay_row_5175();
+    row.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::None);
+    let nonce = row.turn_nonce.clone().unwrap();
+
+    assert_eq!(
+        binding_5175(Some(&nonce)).authorize_pre_relay_inflight(Some(&row), FRAME_END_5175),
+        Err(SoftTerminalAuthorityDenial::RelayOwnerNone)
+    );
+}
+
+#[test]
+fn forged_soft_terminal_with_nonce_less_row_is_refused_5175() {
+    let mut row = pre_relay_row_5175();
+    row.turn_nonce = None;
+
+    assert_eq!(
+        binding_5175(Some("turn-nonce-0")).authorize_pre_relay_inflight(Some(&row), FRAME_END_5175),
+        Err(SoftTerminalAuthorityDenial::TurnNonceMissing)
+    );
+    // A nonce-less row is refused even when the watcher itself holds no nonce,
+    // so "both absent" can never read as a match.
+    assert_eq!(
+        binding_5175(None).authorize_pre_relay_inflight(Some(&row), FRAME_END_5175),
+        Err(SoftTerminalAuthorityDenial::TurnNonceMissing)
+    );
+}
+
+#[test]
+fn forged_soft_terminal_from_compact_rewritten_turn_nonce_is_refused_5175() {
+    // `/compact` (or any newer turn that replaced the row mid-frame) leaves a
+    // row whose nonce is NOT the one this watcher bound while consuming the
+    // turn. The compared nonce comes from the binding captured BEFORE the
+    // pre-relay read, so this conjunct is not self-authenticating.
+    let row = pre_relay_row_5175();
+
+    assert_eq!(
+        binding_5175(Some("nonce-bound-while-consuming-this-turn"))
+            .authorize_pre_relay_inflight(Some(&row), FRAME_END_5175),
+        Err(SoftTerminalAuthorityDenial::TurnNonceMismatch)
+    );
+}
+
+#[test]
+fn startup_snapshot_verdict_is_telemetry_only_and_never_grants_authority_5175() {
+    // The legacy snapshot verdict can be true (an exact-resume-floor match on
+    // the pre-turn snapshot) while the row at turn end is forged. Authority
+    // must follow the row, not the snapshot.
+    let mut snapshot =
+        state_with_offsets(42, SESSION_5175, Some(FRAME_START_5175), FRAME_START_5175);
+    snapshot.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+    let snapshot_nonce = snapshot.turn_nonce.clone().unwrap();
+    let binding = watcher_soft_terminal_has_turn_authority(
+        Some(&snapshot),
+        SESSION_5175,
+        FRAME_START_5175,
+        Some(&snapshot_nonce),
+    );
+    assert!(binding.startup_snapshot_authorized());
+
+    let mut forged = pre_relay_row_5175();
+    forged.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::None);
+    assert_eq!(
+        binding.authorize_pre_relay_inflight(Some(&forged), FRAME_END_5175),
+        Err(SoftTerminalAuthorityDenial::RelayOwnerNone)
+    );
+}
+
+#[test]
+fn soft_terminal_denial_labels_name_the_failing_conjunct_5175() {
+    // The flight recorder's `route` label keeps its historical prefix so
+    // existing greps still match; the per-conjunct suffix is what makes the
+    // silent loss attributable.
+    for denial in [
+        SoftTerminalAuthorityDenial::NoInflightRow,
+        SoftTerminalAuthorityDenial::SessionMismatch,
+        SoftTerminalAuthorityDenial::TurnStartOutsideFrame,
+        SoftTerminalAuthorityDenial::RelayOwnerNone,
+        SoftTerminalAuthorityDenial::TurnNonceMissing,
+        SoftTerminalAuthorityDenial::TurnNonceMismatch,
+    ] {
+        assert_eq!(
+            denial.route_label(),
+            format!("soft_terminal_no_authority:{}", denial.as_str())
+        );
+        assert_eq!(
+            denial.metric_name(),
+            format!("relay_terminal_authority_denied_{}", denial.as_str())
+        );
+    }
 }
 
 #[test]

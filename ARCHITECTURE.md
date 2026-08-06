@@ -830,6 +830,8 @@ src/
 │   │   ├── tmux_watcher/
 │   │   │   ├── streaming_status_tick/
 │   │   │   │   └── types.rs
+│   │   │   ├── turn_identity/
+│   │   │   │   └── soft_terminal_authority.rs
 │   │   │   ├── commit_decisions.rs
 │   │   │   ├── committed_placeholder_cleanup.rs
 │   │   │   ├── completion_gate.rs
@@ -871,6 +873,7 @@ src/
 │   │   │   ├── terminal_readiness.rs
 │   │   │   ├── terminal_readiness_tests.rs
 │   │   │   ├── terminal_relay_plan.rs
+│   │   │   ├── terminal_relay_plan_tests.rs
 │   │   │   ├── terminal_send.rs
 │   │   │   ├── terminal_token_update.rs
 │   │   │   ├── tests.rs

@@ -19,7 +19,10 @@ pub(super) struct TerminalRelayPlanContext<'a> {
     pub(super) session_bound_relay_turn_fully_mirrored: bool,
     pub(super) session_bound_relay_turn_first_forwarded_sequence: Option<u64>,
     pub(super) split_trailing_turn_follows: bool,
-    pub(super) startup_soft_terminal_authority: bool,
+    /// #5175: the watcher's turn-identity binding captured at turn-stream exit.
+    /// Soft-terminal authority is re-decided HERE against `inflight_before_relay`
+    /// instead of the pre-turn snapshot verdict this field used to carry.
+    pub(super) startup_soft_terminal_authority: WatcherSoftTerminalAuthority,
 }
 
 pub(super) struct TerminalRelayPlanLocals<'a> {
@@ -71,6 +74,31 @@ pub(super) struct TerminalRelayPlan<'a> {
     pub(super) tui_direct_anchor_or_lease_present_for_lifecycle: bool,
 }
 
+/// #5175: decide whether this watcher may direct-send the terminal body.
+///
+/// Split out of `run_terminal_relay_plan` so the decision has a seam that can
+/// be pinned by tests: the whole defect was that the inputs were wrong, not
+/// that the predicate was. `binding` is the watcher's turn-identity binding
+/// captured at turn-stream exit; `inflight_before_relay` is the row loaded a
+/// few lines before the relay — the row that actually exists when the turn
+/// ENDS. Authority must be read from the latter. `binding`'s own pre-turn
+/// snapshot verdict is deliberately not consulted here.
+fn watcher_soft_terminal_direct_send_authority(
+    binding: &WatcherSoftTerminalAuthority,
+    inflight_before_relay: Option<&InflightTurnState>,
+    current_offset: u64,
+    terminal_kind: Option<WatcherTerminalKind>,
+) -> (bool, Option<SoftTerminalAuthorityDenial>) {
+    let denial = binding
+        .authorize_pre_relay_inflight(inflight_before_relay, current_offset)
+        .err();
+    let authorized = watcher_direct_fallback_has_turn_authority(terminal_kind, denial.is_none());
+    // A hard provider result keeps its recovery fallback regardless of the soft
+    // contract, so a denial recorded there is not the reason anybody skipped
+    // delivery — report it only when it actually gated the send.
+    (authorized, denial.filter(|_| !authorized))
+}
+
 fn write_terminal_relay_plan_state(
     state: &mut TerminalRelayPlanState<'_>,
     all_data_session_bound_relay_ack: Option<SessionBoundRelayAckTarget>,
@@ -106,7 +134,7 @@ pub(super) async fn run_terminal_relay_plan<'a>(
     let session_bound_relay_turn_first_forwarded_sequence =
         context.session_bound_relay_turn_first_forwarded_sequence;
     let split_trailing_turn_follows = context.split_trailing_turn_follows;
-    let startup_soft_terminal_authority = context.startup_soft_terminal_authority;
+    let startup_soft_terminal_authority = &context.startup_soft_terminal_authority;
     let TerminalRelayPlanLocals {
         current_offset,
         data_start_offset,
@@ -291,10 +319,20 @@ pub(super) async fn run_terminal_relay_plan<'a>(
             session_bound_ack_outcome,
             relay_owner_present,
         );
-        let watcher_direct_fallback_authorized = watcher_direct_fallback_has_turn_authority(
-            terminal_kind,
-            startup_soft_terminal_authority,
-        );
+        // #5175: authenticate the soft terminal against the inflight row that
+        // exists AT TURN END — the very row loaded a few lines above and logged
+        // below as `inflight_present` / `inflight_relay_owner` — instead of the
+        // `startup_inflight_snapshot` taken BEFORE the turn produced a byte. A
+        // TUI-direct turn's row does not exist yet at snapshot time, so the old
+        // wiring denied it authority permanently while the session-bound sink
+        // skipped delivery believing the watcher owned it (nobody sent the body).
+        let (watcher_direct_fallback_authorized, soft_terminal_authority_denial) =
+            watcher_soft_terminal_direct_send_authority(
+                startup_soft_terminal_authority,
+                inflight_before_relay.as_ref(),
+                current_offset,
+                terminal_kind,
+            );
         let watcher_direct_fallback_intended =
             watcher_direct_fallback_requested && watcher_direct_fallback_authorized;
         // #3041 P1-3 (Part b, §3.2): reconcile a non-`Delivered` ACK before re-send against the offset
@@ -510,7 +548,13 @@ pub(super) async fn run_terminal_relay_plan<'a>(
             } else if direct_terminal_response_refused_duplicate {
                 "duplicate_guard_refused"
             } else if watcher_direct_fallback_requested && !watcher_direct_fallback_authorized {
-                "soft_terminal_no_authority"
+                // #5175: name the conjunct that denied authority. The historical
+                // `soft_terminal_no_authority` prefix is preserved so existing
+                // prefix greps keep matching; `soft_terminal_denial` below is the
+                // stable exact-match field.
+                soft_terminal_authority_denial
+                    .map(SoftTerminalAuthorityDenial::route_label)
+                    .unwrap_or("soft_terminal_no_authority")
             } else if watcher_direct_fallback_after_session_bound_ack {
                 "watcher_direct"
             } else if relay_decision.suppressed {
@@ -518,6 +562,12 @@ pub(super) async fn run_terminal_relay_plan<'a>(
             } else {
                 "none"
             },
+            // #5175: stable exact-match denial field + the pre-#5175 snapshot
+            // verdict, so a lane that only the new rule authorizes is visible.
+            soft_terminal_denial = soft_terminal_authority_denial
+                .map(SoftTerminalAuthorityDenial::as_str)
+                .unwrap_or("none"),
+            startup_snapshot_authority = startup_soft_terminal_authority.startup_snapshot_authorized(),
             prompt_anchor_present,
             ssh_direct_pending,
             external_input_lease_present,
@@ -527,6 +577,37 @@ pub(super) async fn run_terminal_relay_plan<'a>(
             frame_ack_outcome = ?session_bound_ack_outcome,
             "relay flight recorder"
         );
+        // #5175: a terminal frame that the sink did not deliver AND the watcher
+        // is not authorized to deliver has NO owner — the body is silently lost
+        // and the delivery frontier never advances, so redrive re-publishes the
+        // previous answer forever. This used to leave only an INFO-level route
+        // string, which is why the watchdog scored the wedged channel `gap 0 /
+        // wedge 0` for a week. Promote it to WARN + a per-conjunct counter.
+        if let Some(denial) = soft_terminal_authority_denial
+            .filter(|_| watcher_direct_fallback_requested && !watcher_direct_fallback_authorized)
+        {
+            crate::services::observability::metrics::record_relay_terminal_authority_denied(
+                channel_id.get(),
+                watcher_provider.as_str(),
+                denial.metric_name(),
+            );
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                provider = watcher_provider.as_str(),
+                channel_id = channel_id.get(),
+                tmux_session = %tmux_session_name,
+                data_start_offset,
+                current_offset,
+                terminal_kind = terminal_kind.map(WatcherTerminalKind::as_str).unwrap_or("unknown"),
+                soft_terminal_denial = denial.as_str(),
+                inflight_present = inflight_before_relay.is_some(),
+                inflight_relay_owner = inflight_relay_owner_kind,
+                startup_snapshot_authority = startup_soft_terminal_authority.startup_snapshot_authorized(),
+                full_response_len = current_response.len(),
+                ?session_bound_ack_outcome,
+                "  [{ts}] ⚠ #5175: terminal frame has NO delivery owner — sink did not deliver and the soft terminal is unauthorized; body dropped and the delivery frontier will not advance"
+            );
+        }
         // #3041 P1-3 (codex P1-3 R7): turn-boundary ACK reset. THIS turn's terminal
         // ACK has now been waited on (`session_bound_ack_outcome` is captured) and
         // logged. If a forward on this pass SPLIT a result-bearing chunk with a
@@ -575,3 +656,7 @@ pub(super) async fn run_terminal_relay_plan<'a>(
         })
     }
 }
+
+#[cfg(test)]
+#[path = "terminal_relay_plan_tests.rs"]
+mod soft_terminal_direct_send_authority_tests;

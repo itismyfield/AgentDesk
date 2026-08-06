@@ -166,27 +166,17 @@ pub(super) fn matching_watcher_turn_identity(
         .map(crate::services::discord::inflight::InflightTurnIdentity::from_state)
 }
 
-/// Authenticate a soft terminal against authority that existed before this
-/// frame was parsed. The owner, resume floor, and nonce must all name the same
-/// turn so historical transcript markers cannot borrow a newer turn's anchor or
-/// mint authority while the watcher is already consuming backlog.
-pub(super) fn watcher_soft_terminal_has_turn_authority(
-    state: Option<&crate::services::discord::inflight::InflightTurnState>,
-    tmux_session_name: &str,
-    data_start_offset: u64,
-    watcher_turn_nonce: Option<&str>,
-) -> bool {
-    state.is_some_and(|state| {
-        state.tmux_session_name.as_deref() == Some(tmux_session_name)
-            && state.last_offset.max(state.turn_start_offset.unwrap_or(0)) == data_start_offset
-            && !matches!(
-                state.effective_relay_owner_kind(),
-                crate::services::discord::inflight::RelayOwnerKind::None
-            )
-            && state.turn_nonce.as_deref().is_some()
-            && state.turn_nonce.as_deref() == watcher_turn_nonce
-    })
-}
+// `turn_identity` is itself reached through a `#[path]` declaration, so name the
+// child file explicitly instead of relying on directory-relative resolution.
+#[path = "turn_identity/soft_terminal_authority.rs"]
+mod soft_terminal_authority;
+
+// #5175: the soft-terminal authority contract lives in its own module; keep it
+// reachable under the historical `turn_identity::` path the watcher globs in.
+pub(super) use soft_terminal_authority::{
+    SoftTerminalAuthorityDenial, WatcherSoftTerminalAuthority,
+    watcher_soft_terminal_has_turn_authority,
+};
 
 pub(super) fn matching_watcher_turn_nonce(
     state: Option<&crate::services::discord::inflight::InflightTurnState>,
