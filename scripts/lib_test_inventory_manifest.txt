@@ -6266,11 +6266,6 @@ services::memory::memento::static_slice_cache_tests::static_slice_split_separate
 services::memory::memento::tool_feedback_trigger_type_tests::normalizes_automatic_tool_feedback_trigger_to_sampled
 services::memory::memento::workspace_scope_tests::memento_workspace_from_channel_workspace_uses_path_basename
 services::memory::memento::workspace_scope_tests::unbound_memento_workspace_falls_back_to_channel_scope
-services::memory::memento_instructions_cache::tests::first_seen_after_only_missing_observations
-services::memory::memento_instructions_cache::tests::first_seen_then_unchanged_then_changed
-services::memory::memento_instructions_cache::tests::missing_does_not_invalidate_previous_hash
-services::memory::memento_instructions_cache::tests::stable_hash_is_deterministic
-services::memory::memento_instructions_cache::tests::stats_track_each_outcome
 services::memory::memento_throttle::forget_ratio_tests::alarm_fires_once_then_cools_down
 services::memory::memento_throttle::forget_ratio_tests::empty_scope_falls_back_to_default_bucket
 services::memory::memento_throttle::forget_ratio_tests::identity_only_empty_recall_is_exposed_in_stats
