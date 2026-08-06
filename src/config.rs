@@ -1610,13 +1610,6 @@ pub struct RuntimeSettingsConfig {
     /// can share the lower-bound policy without inheriting Claude's transport.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_compact_lower_bound_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub claude_gateway_proxy_enabled: bool,
-    #[serde(
-        default = "default_claude_gateway_proxy_url",
-        skip_serializing_if = "is_default_claude_gateway_proxy_url"
-    )]
-    pub claude_gateway_proxy_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_poll_sec: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1774,8 +1767,6 @@ impl RuntimeSettingsConfig {
             && self.context_compact_percent_codex.is_none()
             && self.context_compact_percent_claude.is_none()
             && self.context_compact_lower_bound_tokens.is_none()
-            && !self.claude_gateway_proxy_enabled
-            && is_default_claude_gateway_proxy_url(&self.claude_gateway_proxy_url)
             && self.dispatch_poll_sec.is_none()
             && self.agent_sync_sec.is_none()
             && self.github_issue_sync_sec.is_none()
@@ -1809,28 +1800,8 @@ impl RuntimeSettingsConfig {
     }
 }
 
-pub(crate) const DEFAULT_CLAUDE_GATEWAY_PROXY_URL: &str = "http://127.0.0.1:10100";
-
-fn default_claude_gateway_proxy_url() -> String {
-    DEFAULT_CLAUDE_GATEWAY_PROXY_URL.to_string()
-}
-
-fn is_default_claude_gateway_proxy_url(value: &str) -> bool {
-    value.is_empty() || value == DEFAULT_CLAUDE_GATEWAY_PROXY_URL
-}
-
 fn is_zero_u8(value: &u8) -> bool {
     *value == 0
-}
-
-impl RuntimeSettingsConfig {
-    pub(crate) fn resolved_claude_gateway_proxy_url(&self) -> &str {
-        if self.claude_gateway_proxy_url.is_empty() {
-            DEFAULT_CLAUDE_GATEWAY_PROXY_URL
-        } else {
-            &self.claude_gateway_proxy_url
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1844,6 +1815,19 @@ mod runtime_hook_registry_config_tests {
     #[test]
     fn hook_registry_keys_count_toward_is_empty() {
         assert!(RuntimeSettingsConfig::default().is_empty());
+
+        // The DESERIALIZED empty section must also report empty, not just the
+        // `Default` impl. These are separate paths: serde builds each field from
+        // its own `#[serde(default = "…")]` attribute, so a field whose serde
+        // default diverges from `Default` (or whose non-`Option` default is not
+        // accounted for in `is_empty`) makes `{}` deserialize to a non-empty
+        // section while the assertion above still passes. That would mark the
+        // `runtime` section present in EVERY config, and only this positive
+        // direction catches it — the negative assertions below never can.
+        // Inherited from #5169's deleted `claude_gateway_proxy` defaults test,
+        // which was the only place that covered the serde path.
+        let absent: RuntimeSettingsConfig = serde_yaml::from_str("{}").unwrap();
+        assert!(absent.is_empty());
 
         let ttl_only = RuntimeSettingsConfig {
             tui_hook_buffer_ttl_secs: Some(45),
@@ -1863,26 +1847,6 @@ mod runtime_hook_registry_config_tests {
             ..RuntimeSettingsConfig::default()
         };
         assert!(!disabled.is_empty());
-    }
-
-    #[test]
-    fn claude_gateway_proxy_defaults_off_with_loopback_url() {
-        let parsed: RuntimeSettingsConfig = serde_yaml::from_str("{}").unwrap();
-        assert!(!parsed.claude_gateway_proxy_enabled);
-        assert_eq!(
-            parsed.claude_gateway_proxy_url,
-            DEFAULT_CLAUDE_GATEWAY_PROXY_URL
-        );
-        assert!(parsed.is_empty());
-
-        let enabled: RuntimeSettingsConfig =
-            serde_yaml::from_str("claude_gateway_proxy_enabled: true\n").unwrap();
-        assert!(enabled.claude_gateway_proxy_enabled);
-        assert_eq!(
-            enabled.resolved_claude_gateway_proxy_url(),
-            DEFAULT_CLAUDE_GATEWAY_PROXY_URL
-        );
-        assert!(!enabled.is_empty());
     }
 
     // The keys survive a YAML round-trip with their types intact, and an absent

@@ -5,11 +5,6 @@
 //! applied when the builder is constructed, and [`ClaudeBinary`] seals the
 //! resolved executable path so a caller physically cannot hand back a Claude
 //! command assembled outside this module.
-//!
-//! The raw [`crate::services::claude_gateway_proxy`] primitives must be reached
-//! ONLY through this module. A source-scanning guard test
-//! (`chokepoint_guard_tests`) fails the build if any other module references
-//! them directly, so the single authority cannot erode.
 
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
@@ -182,48 +177,16 @@ impl ClaudeCommandBuilder {
 
 #[cfg(test)]
 mod chokepoint_guard_tests {
-    //! Text-heuristic chokepoint guard. It catches direct primitives and
-    //! function-item aliases, but cannot fully detect direct `Command::env`
-    //! gateway setup or raw spawns hidden by renamed bindings. Those cases need
-    //! an AST-based follow-up, in the same family as the raw-spawn limitation
-    //! self-disclosed below.
+    //! Text-heuristic chokepoint guard. It catches the raw-spawn spellings and
+    //! sealed-seam references below, but cannot detect raw spawns hidden by
+    //! renamed bindings. Those cases need an AST-based follow-up, in the same
+    //! family as the raw-spawn limitation self-disclosed below.
 
     use std::path::{Path, PathBuf};
 
-    /// Exact crate-relative definition sites permitted to define or apply the raw
-    /// gateway primitives. These are authorities, not consumer exemptions.
-    const DEFINITION_SITES: &[&str] = &[
-        "src/services/claude_gateway_proxy.rs",
-        "src/services/claude_command.rs",
-    ];
-
-    /// The sole sanctioned consumer path. Full-path matching prevents a file with
-    /// the same basename in another directory from inheriting this exemption.
-    const SANCTIONED: &[&str] = &["src/services/claude_compact_context.rs"];
-
-    /// Substrings whose presence outside the chokepoint definition sites signals
-    /// a launch site reaching around the chokepoint. The gateway type and module
-    /// path are permitted only for the narrow sanctioned consumer above.
-    const FORBIDDEN_PRIMITIVES: &[&str] = &[
-        "ClaudeGatewayProxyEnv",
-        "resolve_for_launch",
-        "claude_gateway_proxy::",
-    ];
-
-    /// Behaviors that remain forbidden even in the sanctioned consumer. The
-    /// accessor-chain needles close the method-syntax bypass where the concrete
-    /// gateway type is absent from the call expression; path needles catch
-    /// function-item aliases that omit the call's opening parenthesis.
-    const FORBIDDEN_CONSUMER_BEHAVIORS: &[&str] = &[
-        "resolve_for_launch",
-        "::resolve_for_launch",
-        "ClaudeGatewayProxyEnv::apply_to_command",
-        "ClaudeGatewayProxyEnv::append_shell_env",
-        "apply_to_command(",
-        "append_shell_env(",
-        ".gateway_proxy_env().apply",
-        ".gateway_proxy_env().append",
-    ];
+    /// Exact crate-relative site permitted to define or apply the raw Claude
+    /// launch primitives. This is an authority, not a consumer exemption.
+    const DEFINITION_SITES: &[&str] = &["src/services/claude_command.rs"];
 
     /// Defense-in-depth text guard for raw `Command::new(<claude binary var>)`
     /// idioms. The primary defense is [`ClaudeBinary`]: its private path field
@@ -285,23 +248,6 @@ mod chokepoint_guard_tests {
         files
     }
 
-    fn gateway_primitive_violations(relative_path: &str, contents: &str) -> Vec<String> {
-        if DEFINITION_SITES.contains(&relative_path) {
-            return Vec::new();
-        }
-
-        let needles = if SANCTIONED.contains(&relative_path) {
-            FORBIDDEN_CONSUMER_BEHAVIORS
-        } else {
-            FORBIDDEN_PRIMITIVES
-        };
-        needles
-            .iter()
-            .filter(|needle| contents.contains(**needle))
-            .map(|needle| format!("{relative_path} references `{needle}`"))
-            .collect()
-    }
-
     /// Read the crate's actual source set into the same path/content entry form
     /// consumed by the scanner. Keeping collection separate lets synthetic tests
     /// exercise the production scan loop without filesystem setup.
@@ -312,20 +258,6 @@ mod chokepoint_guard_tests {
                 let relative_path = crate_relative_path(&file)?;
                 let contents = std::fs::read_to_string(file).ok()?;
                 Some((relative_path, contents))
-            })
-            .collect()
-    }
-
-    /// Run the primitive classifier over path/content entries. Both the full-crate
-    /// guard and mutation tests use this pipeline, so test fixtures cannot bypass
-    /// the path classification that selects a sanctioned consumer exemption.
-    fn scan_gateway_primitive_sources<'a>(
-        sources: impl IntoIterator<Item = (&'a str, &'a str)>,
-    ) -> Vec<String> {
-        sources
-            .into_iter()
-            .flat_map(|(relative_path, contents)| {
-                gateway_primitive_violations(relative_path, contents)
             })
             .collect()
     }
@@ -351,27 +283,6 @@ mod chokepoint_guard_tests {
             .collect()
     }
 
-    /// By-construction guard. Fails if any module other than the sanctioned
-    /// definition sites references raw gateway launch primitives. The compact
-    /// context consumer may inspect only the already-resolved gateway decision;
-    /// resolution and application remain confined to this chokepoint.
-    #[test]
-    fn gateway_primitives_are_confined_to_the_chokepoint() {
-        let sources = crate_source_entries();
-        let violations = scan_gateway_primitive_sources(
-            sources
-                .iter()
-                .map(|(relative_path, contents)| (relative_path.as_str(), contents.as_str())),
-        );
-
-        assert!(
-            violations.is_empty(),
-            "gateway launch primitives leaked outside the chokepoint \
-             (route these through claude_command::ClaudeCommandBuilder / ClaudeLaunchEnv):\n{}",
-            violations.join("\n")
-        );
-    }
-
     /// Defense-in-depth regression tripwire for the specific raw-spawn spelling
     /// R-B found. `ClaudeBinary` is the primary by-construction guard; this scan
     /// stays intentionally narrow to catch an untyped wrapper-argv regression.
@@ -392,94 +303,25 @@ mod chokepoint_guard_tests {
         );
     }
 
+    /// Mutation coverage for the raw-spawn scanner: a foreign file that spells a
+    /// forbidden `Command::new(claude_bin…)` idiom is flagged, while the
+    /// chokepoint definition site itself stays exempt. Inverting the exemption
+    /// check or emptying `FORBIDDEN_RAW_SPAWN` is caught here.
     #[test]
-    fn sanctioned_consumer_still_rejects_gateway_application_and_raw_spawns() {
-        let consumer_source = r#"
-            launch_env.gateway_proxy_env().apply_to_command(&mut command);
-            launch_env.gateway_proxy_env().append_shell_env(&mut output);
-            let direct_apply = value.apply_to_command(&mut command);
-            let direct_append = value.append_shell_env(&mut output);
-            let resolve = resolve_for_launch();
-            let apply_item = ClaudeGatewayProxyEnv::apply_to_command;
-            let append_item = ClaudeGatewayProxyEnv::append_shell_env;
-            let resolve_item = crate::services::claude_gateway_proxy::resolve_for_launch;
-        "#;
-        let gateway_violations = scan_gateway_primitive_sources([(SANCTIONED[0], consumer_source)]);
-        let raw_spawn_violations =
-            scan_raw_spawn_sources([(SANCTIONED[0], "let command = Command::new(claude_bin);")]);
+    fn raw_spawn_guard_flags_foreign_spawns_and_exempts_the_chokepoint() {
+        let spawn_source = "let command = std::process::Command::new(claude_e_bin);";
+        let foreign = scan_raw_spawn_sources([("src/services/other.rs", spawn_source)]);
+        assert!(
+            foreign
+                .iter()
+                .any(|violation| violation.starts_with("src/services/other.rs")),
+            "a foreign raw spawn must be flagged"
+        );
 
+        let sanctioned = scan_raw_spawn_sources([(DEFINITION_SITES[0], spawn_source)]);
         assert!(
-            gateway_violations
-                .iter()
-                .any(|violation| violation.contains("`.gateway_proxy_env().apply`"))
-        );
-        assert!(
-            gateway_violations
-                .iter()
-                .any(|violation| violation.contains("`.gateway_proxy_env().append`"))
-        );
-        assert!(
-            gateway_violations
-                .iter()
-                .any(|violation| violation.contains("`apply_to_command(`"))
-        );
-        assert!(
-            gateway_violations
-                .iter()
-                .any(|violation| violation.contains("`append_shell_env(`"))
-        );
-        assert!(
-            gateway_violations
-                .iter()
-                .any(|violation| violation.contains("`resolve_for_launch`"))
-        );
-        assert!(
-            gateway_violations
-                .iter()
-                .any(|violation| violation.contains("`ClaudeGatewayProxyEnv::apply_to_command`"))
-        );
-        assert!(
-            gateway_violations
-                .iter()
-                .any(|violation| violation.contains("`ClaudeGatewayProxyEnv::append_shell_env`"))
-        );
-        assert!(
-            gateway_violations
-                .iter()
-                .any(|violation| violation.contains("`::resolve_for_launch`"))
-        );
-        assert!(!raw_spawn_violations.is_empty());
-    }
-
-    #[test]
-    fn scanner_pipeline_keeps_sanctioned_consumer_exemption_path_exact() {
-        let consumer_source = r#"
-            use crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv;
-            use crate::services::claude_command::ClaudeLaunchEnv;
-            impl From<&ClaudeGatewayProxyEnv> for ClaudeLaunchProvenance {}
-            fn consume(gateway: &ClaudeGatewayProxyEnv, launch: &ClaudeLaunchEnv) {}
-        "#;
-        let matching_basename_outside_sanctioned_path = "src/other/claude_compact_context.rs";
-        let violations = scan_gateway_primitive_sources([
-            (SANCTIONED[0], consumer_source),
-            (matching_basename_outside_sanctioned_path, consumer_source),
-        ]);
-
-        assert!(
-            !violations
-                .iter()
-                .any(|violation| violation.starts_with(SANCTIONED[0])),
-            "the exact sanctioned consumer may inspect the resolved gateway type"
-        );
-        // If SANCTIONED matching is regressed to a basename comparison, this
-        // assert fails: the second entry inherits the exemption and produces no
-        // violation despite not being the one sanctioned path.
-        assert!(
-            violations.iter().any(|violation| {
-                violation.starts_with(matching_basename_outside_sanctioned_path)
-                    && violation.contains("`ClaudeGatewayProxyEnv`")
-            }),
-            "a matching basename outside the exact consumer path must not be sanctioned"
+            sanctioned.is_empty(),
+            "the chokepoint definition site must stay exempt"
         );
     }
 

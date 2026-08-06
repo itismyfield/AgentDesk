@@ -136,12 +136,10 @@ services::claude::launch_env_tests
 services::claude::local_tmux_lifecycle_tests
 services::claude::simple_launch_env_tests
 services::claude::simple_timeout_2387_tests
-services::claude_command::chokepoint_gateway_mutation_tests
 services::claude_command::chokepoint_guard_tests
 services::claude_compact_context::tests
 services::claude_compact_trigger::tests
 services::claude_e::process::tests
-services::claude_gateway_proxy::tests
 services::claude_tui::composer_lock::claude_tui_composer_lock_tests
 services::claude_tui::hook_bundle::tests
 services::claude_tui::hook_output_guard_tests
@@ -579,7 +577,6 @@ services::provider::poll_output_file_tests
 services::provider::prompt_reuse_tests
 services::provider::ready_input_prompt_tests
 services::provider_auth::tests
-services::provider_cli::smoke::tests
 services::provider_error_transcript::tests
 services::provider_hosting::tests
 services::provider_output_guard_tests
@@ -604,7 +601,6 @@ services::tmux_common::channel_binding_tests
 services::tmux_common::mcp_auth_required_tests
 services::tmux_common::selector_overlay_tests
 services::tmux_diagnostics::tests
-services::tmux_wrapper::marker_one_hop_tests
 services::tmux_wrapper::stderr_redaction_tests
 services::tmux_wrapper::turn_abort_classification_tests
 services::tool_output_guard::tests

@@ -1359,7 +1359,6 @@ src/
 │   ├── claude_command.rs
 │   ├── claude_compact_context.rs
 │   ├── claude_compact_trigger.rs
-│   ├── claude_gateway_proxy.rs
 │   ├── codex.rs
 │   ├── codex_remote_policy.rs
 │   ├── codex_tmux_wrapper.rs
