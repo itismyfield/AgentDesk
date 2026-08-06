@@ -567,6 +567,12 @@ pub struct PendingQueueSnapshot {
     // preservation check (which only compares depth + presence).
     #[allow(dead_code)]
     pub disk_path: Option<std::path::PathBuf>,
+    /// #5176: the primary Discord message id of every queued intervention, in
+    /// queue order. Depth alone told operators that a cancel lost "one item"
+    /// and nothing else — not which user instruction vanished, and not whether
+    /// a same-depth queue had actually been swapped out underneath them. A
+    /// user-message-lossless contract cannot be audited by counting.
+    pub message_ids: Vec<u64>,
 }
 
 async fn snapshot_pending_queue_state_for_shared(
@@ -574,12 +580,16 @@ async fn snapshot_pending_queue_state_for_shared(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> PendingQueueSnapshot {
-    let queue_depth = shared
+    let queued = shared
         .mailbox(channel_id)
         .snapshot()
         .await
-        .intervention_queue
-        .len();
+        .intervention_queue;
+    let queue_depth = queued.len();
+    let message_ids = queued
+        .iter()
+        .map(|intervention| intervention.message_id.get())
+        .collect();
     let disk_path = discord::runtime_store::discord_pending_queue_root().map(|root| {
         root.join(provider.as_str())
             .join(&shared.token_hash)
@@ -593,6 +603,7 @@ async fn snapshot_pending_queue_state_for_shared(
         queue_depth,
         disk_present,
         disk_path,
+        message_ids,
     }
 }
 

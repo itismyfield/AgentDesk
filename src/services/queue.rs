@@ -692,7 +692,7 @@ impl QueueService {
         };
 
         tracing::info!(
-            "[queue-api] Cancelled turn: channel={}, session={:?}, tmux={}, killed={}, dispatch={:?}, lifecycle={}, agent={:?}, requested_provider={:?}, exact_match={}, queue_preserved={}, queued_before={:?}, queued_after={:?}, queue_disk_before={}, queue_disk_after={}, queue_purged={:?}, mailbox_foreground_free={:?}",
+            "[queue-api] Cancelled turn: channel={}, session={:?}, tmux={}, killed={}, dispatch={:?}, lifecycle={}, agent={:?}, requested_provider={:?}, exact_match={}, queue_preserved={}, queued_before={:?}, queued_after={:?}, queue_disk_before={}, queue_disk_after={}, queue_purged={:?}, mailbox_foreground_free={:?}, queue_dropped_message_ids={:?}",
             channel_id,
             session_key,
             reported_tmux_session,
@@ -709,6 +709,7 @@ impl QueueService {
             lifecycle.queue_disk_present_after,
             queue_purged_count,
             lifecycle.mailbox_foreground_free,
+            lifecycle.queue_dropped_message_ids,
         );
 
         Ok(json!({
@@ -733,6 +734,10 @@ impl QueueService {
             // actually let go of its foreground slot. `false` means the channel
             // is still blocked no matter what `turn_status` says.
             "mailbox_foreground_free": lifecycle.mailbox_foreground_free,
+            // #5176: which user instructions the cancel destroyed, by primary
+            // Discord message id. Empty is the contract; non-empty is a bug
+            // report the operator can act on.
+            "queue_dropped_message_ids": lifecycle.queue_dropped_message_ids,
             "dispatch_cancelled": dispatch_id,
             "turn_status": finalizer.status,
             "turn_completed_at": finalizer.completed_at.to_rfc3339(),
