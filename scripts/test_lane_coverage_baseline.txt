@@ -548,7 +548,6 @@ services::memory::local::tests
 services::memory::memento::static_slice_cache_tests
 services::memory::memento::tool_feedback_trigger_type_tests
 services::memory::memento::workspace_scope_tests
-services::memory::memento_instructions_cache::tests
 services::memory::memento_throttle::forget_ratio_tests
 services::message_outbox::stop_turn_notify_removal_tests
 services::message_outbox_circuit_authority_tests

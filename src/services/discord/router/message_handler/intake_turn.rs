@@ -1549,84 +1549,14 @@ pub(super) async fn handle_text_message(
     )
     .await;
 
-    let (memory_settings, memory_backend) = build_memory_backend(role_binding.as_ref());
-    let memento_recall_gate = memento_recall_gate_decision(
-        &memory_settings,
-        memento_context_loaded,
-        user_text,
-        dispatch_profile,
-    );
-    let memory_recall = if !memento_recall_gate.should_recall {
-        RecallResponse::default()
-    } else {
-        memory_backend
-            .recall(RecallRequest {
-                provider: provider.clone(),
-                role_id: resolve_memory_role_id(role_binding.as_ref()),
-                channel_id: memory_channel_id,
-                channel_name: memory_channel_name.clone().or(channel_name.clone()),
-                session_id: resolve_memory_session_id(session_id.as_deref(), memory_channel_id),
-                dispatch_profile,
-                user_text: user_text.to_string(),
-                mode: memento_recall_gate.mode,
-            })
-            .await
-    };
-    if memory_settings.backend == settings::MemoryBackendKind::Memento {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        let recall_bytes = memory_recall
-            .external_recall
-            .as_deref()
-            .map(str::len)
-            .unwrap_or(0);
-        let bucket = if !memento_recall_gate.should_recall {
-            RecallSizeBucket::Skipped
-        } else {
-            match memento_recall_gate.mode {
-                RecallMode::Full => RecallSizeBucket::Full,
-                RecallMode::IdentityOnly => RecallSizeBucket::IdentityOnly,
-            }
-        };
-        note_recall_context_size(bucket, recall_bytes);
-        tracing::info!(
-            "  [{ts}] [memory] memento recall gate for channel {}: decision={} mode={:?} reason={} context_loaded={} recall_bytes={} input_tokens={} output_tokens={}",
-            channel_id.get(),
-            if memento_recall_gate.should_recall {
-                "inject"
-            } else {
-                "skip"
-            },
-            memento_recall_gate.mode,
-            memento_recall_gate.reason,
-            memento_context_loaded,
-            recall_bytes,
-            memory_recall.token_usage.input_tokens,
-            memory_recall.token_usage.output_tokens
-        );
-    }
-    if should_note_memento_context_loaded(&memory_settings, memento_context_loaded, &memory_recall)
-    {
-        let mut data = shared.core.lock().await;
-        if let Some(session) = data.sessions.get_mut(&channel_id) {
-            session.note_memento_context_loaded();
-        }
-    }
-    for warning in &memory_recall.warnings {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] [memory] recall warning for channel {}: {}",
-            channel_id.get(),
-            warning
-        );
-    }
+    // #5168: no server-side recall. The turn only needs the resolved memory
+    // settings so the prompt can name the backend and emit the memento scope
+    // hint; the model performs its own `context`/`recall` through the MCP.
+    let memory_settings = settings::memory_settings_for_binding(role_binding.as_ref());
     // Prepend pending file uploads
     let mut context_chunks = Vec::new();
-    let memory_injection_plan = build_memory_injection_plan(
-        &provider,
-        session_id.is_some(),
-        dispatch_profile,
-        &memory_recall,
-    );
+    let memory_injection_plan =
+        build_memory_injection_plan(&provider, session_id.is_some(), dispatch_profile);
     let channel_recent_context = load_channel_recent_context(
         shared.pg_pool.as_ref(),
         channel_id,
@@ -1651,9 +1581,6 @@ pub(super) async fn handle_text_message(
     }
     if let Some(ref knowledge) = memory_injection_plan.shared_knowledge_for_context {
         context_chunks.push(knowledge.to_string());
-    }
-    if let Some(external_recall) = memory_injection_plan.external_recall_for_context {
-        context_chunks.push(external_recall.to_string());
     }
     context_chunks.push(wrap_user_prompt_with_author(
         request_owner_name,
@@ -1689,11 +1616,6 @@ pub(super) async fn handle_text_message(
             github_issue_url: info.github_issue_url.as_deref(),
         }
     });
-    let memory_recall_manifest = super::super::super::prompt_builder::MemoryRecallManifestInput {
-        should_recall: memento_recall_gate.should_recall,
-        gate_reason: memento_recall_gate.reason,
-        external_recall: memory_recall.external_recall.as_deref(),
-    };
     let recovery_context_for_manifest =
         session_retry_context
             .as_ref()
@@ -1714,13 +1636,12 @@ pub(super) async fn handle_text_message(
         dispatch_type_str.as_deref(),
         current_task_context.as_ref(),
         sak_for_system,
-        memory_injection_plan.longterm_catalog_for_system_prompt,
+        None,
         Some(&memory_settings),
         crate::services::mcp_config::provider_has_memento_mcp(&provider),
         matches!(&provider, ProviderKind::Claude),
         recovery_context_for_manifest.as_ref(),
         channel_recent_context.as_ref(),
-        Some(&memory_recall_manifest),
         Some(&turn_id),
     );
     let system_prompt_owned = built_system_prompt.system_prompt;
@@ -2531,7 +2452,7 @@ pub(super) async fn handle_text_message(
                 dispatch_type_str.as_deref(),
             )
             .map(str::to_string),
-            memory_recall_usage: memory_recall.token_usage,
+            memory_recall_usage: crate::services::memory::TokenUsage::default(),
             context_window_tokens: model_context_window,
             context_compact_percent: compact_percent,
             current_msg_id: Some(placeholder_msg_id),

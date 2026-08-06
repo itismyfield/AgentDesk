@@ -1241,7 +1241,6 @@ src/
 │   ├── memory/
 │   │   ├── local.rs
 │   │   ├── memento.rs
-│   │   ├── memento_instructions_cache.rs
 │   │   ├── memento_throttle.rs
 │   │   ├── mod.rs
 │   │   └── runtime_state.rs

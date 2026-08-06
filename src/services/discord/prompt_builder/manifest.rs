@@ -10,12 +10,11 @@ use std::sync::LazyLock;
 use super::DispatchProfile;
 use super::channel_recent_context::ChannelRecentContextManifestInput;
 use super::dispatch_contract::{CurrentTaskContext, render_dispatch_contract};
-use super::memory_guidance::MemoryRecallManifestInput;
 use crate::db::prompt_manifests::{
     PromptContentVisibility, PromptManifest, PromptManifestBuilder, PromptManifestLayer,
     estimate_tokens_from_chars,
 };
-use crate::services::discord::settings::{MemoryBackendKind, ResolvedMemorySettings, RoleBinding};
+use crate::services::discord::settings::RoleBinding;
 use crate::services::observability::recovery_audit::{
     RecoveryAuditRecord, recovery_context_sha256,
 };
@@ -30,8 +29,6 @@ pub(super) const RECOVERY_CONTEXT_LAYER_REASON: &str = "provider-native resume f
 pub(super) const CHANNEL_RECENT_CONTEXT_LAYER_NAME: &str = "channel_recent_context";
 pub(super) const CHANNEL_RECENT_CONTEXT_LAYER_SOURCE: &str = "session_transcripts.channel_id";
 pub(super) const ROLE_PROMPT_LAYER_NAME: &str = "role_prompt";
-pub(super) const MEMORY_RECALL_LAYER_NAME: &str = "memory_recall";
-pub(super) const MEMORY_RECALL_LAYER_SOURCE: &str = "memento";
 const ADK_PROMPT_MANIFEST_PREVIEW_MAX_BYTES: usize = 200;
 
 pub(super) fn prompt_manifest_layer(
@@ -277,68 +274,6 @@ pub(super) fn role_prompt_manifest_layer(
         layer.full_content = None;
     }
     layer
-}
-
-pub(super) fn memory_recall_manifest_layer(
-    memory_settings: Option<&ResolvedMemorySettings>,
-    memento_mcp_available: bool,
-    recall: Option<&MemoryRecallManifestInput<'_>>,
-) -> Option<PromptManifestLayer> {
-    let memory_settings = memory_settings?;
-    let (enabled, reason, content) = if memory_settings.backend != MemoryBackendKind::Memento {
-        (
-            false,
-            format!("memory_backend={}", memory_settings.backend.as_str()),
-            "",
-        )
-    } else if !memento_mcp_available {
-        (
-            false,
-            "memory_backend=memento;mcp_unavailable".to_string(),
-            "",
-        )
-    } else if let Some(recall) = recall {
-        let content = recall.external_recall.map(str::trim).unwrap_or_default();
-        if recall.should_recall {
-            (
-                true,
-                format!("memory_backend=memento;recall={}", recall.gate_reason),
-                content,
-            )
-        } else {
-            (
-                false,
-                format!(
-                    "memory_backend=memento;recall_skipped={}",
-                    recall.gate_reason
-                ),
-                "",
-            )
-        }
-    } else {
-        (
-            false,
-            "memory_backend=memento;recall_state=unknown".to_string(),
-            "",
-        )
-    };
-
-    let (chars, tokens_est, content_sha256) = prompt_manifest_content_stats(content);
-    let mut layer = PromptManifestLayer::from_content(
-        MEMORY_RECALL_LAYER_NAME,
-        enabled,
-        Some(MEMORY_RECALL_LAYER_SOURCE),
-        Some(reason),
-        PromptContentVisibility::UserDerived,
-        content.to_string(),
-    );
-    layer.chars = chars;
-    layer.tokens_est = tokens_est;
-    layer.content_sha256 = content_sha256;
-    layer.redacted_preview =
-        (!content.is_empty()).then(|| redacted_prompt_manifest_preview(content));
-    layer.full_content = None;
-    Some(layer)
 }
 
 pub(super) fn prompt_manifest_profile(profile: DispatchProfile) -> &'static str {

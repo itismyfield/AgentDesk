@@ -11,8 +11,8 @@ use super::dispatch_trigger::{
 };
 use super::response_format::{
     build_headless_trigger_context, build_memory_injection_plan, build_race_requeued_intervention,
-    build_system_discord_context, dispatch_profile_label, memento_recall_gate_decision,
-    merge_reply_contexts, should_note_memento_context_loaded, wrap_user_prompt_with_author,
+    build_system_discord_context, dispatch_profile_label, merge_reply_contexts,
+    wrap_user_prompt_with_author,
 };
 pub(in crate::services::discord) use super::turn_start::reserve_headless_turn;
 pub(crate) use super::turn_start::{
@@ -33,10 +33,6 @@ use super::turn_start::{session_strategy_lifecycle_event, should_emit_session_st
 use crate::services::agent_protocol::RuntimeHandoffKind;
 #[cfg(unix)]
 use crate::services::discord::tmux_reaper::heal_stale_busy_mailbox;
-use crate::services::memory::{
-    RecallMode, RecallRequest, RecallResponse, RecallSizeBucket, build_memory_backend,
-    note_recall_context_size, resolve_memory_role_id, resolve_memory_session_id,
-};
 #[cfg(test)]
 use crate::services::observability::turn_lifecycle::TurnEvent;
 use crate::services::provider::CancelToken;

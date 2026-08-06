@@ -16,7 +16,6 @@ pub(crate) use channel_recent_context::{
 };
 pub(crate) use dispatch_contract::CurrentTaskContext;
 pub(crate) use manifest::RecoveryContextManifestInput;
-pub(crate) use memory_guidance::MemoryRecallManifestInput;
 
 use dispatch_contract::{render_current_task_section, render_dispatch_contract};
 use layer_rendering::{
@@ -25,8 +24,8 @@ use layer_rendering::{
 };
 use manifest::{
     build_prompt_manifest, channel_recent_context_manifest_layer, current_task_manifest_layer,
-    dispatch_contract_manifest_layer, memory_recall_manifest_layer, prompt_manifest_layer,
-    recovery_context_manifest_layer, role_prompt_manifest_layer,
+    dispatch_contract_manifest_layer, prompt_manifest_layer, recovery_context_manifest_layer,
+    role_prompt_manifest_layer,
 };
 use memory_guidance::proactive_memory_guidance;
 
@@ -181,7 +180,6 @@ pub(super) fn build_system_prompt(
         None,
         None,
         None,
-        None,
     )
     .system_prompt
 }
@@ -206,7 +204,6 @@ pub(super) fn build_system_prompt_with_manifest(
     is_claude_harness: bool,
     recovery_context: Option<&RecoveryContextManifestInput<'_>>,
     channel_recent_context: Option<&ChannelRecentContextManifestInput>,
-    memory_recall_manifest: Option<&MemoryRecallManifestInput<'_>>,
     turn_id: Option<&str>,
 ) -> BuiltSystemPrompt {
     let PromptProfiles {
@@ -593,13 +590,6 @@ pub(super) fn build_system_prompt_with_manifest(
         dispatch_type,
         current_task,
     ));
-    if let Some(layer) = memory_recall_manifest_layer(
-        memory_settings,
-        memento_mcp_available,
-        memory_recall_manifest,
-    ) {
-        prompt_manifest_layers.push(layer);
-    }
     match recovery_context_manifest_layer(recovery_context) {
         Ok(layer) => prompt_manifest_layers.push(layer),
         Err(error) => {
@@ -651,8 +641,7 @@ pub(super) fn build_system_prompt_with_manifest(
                 layer.enabled
                     && matches!(
                         layer.layer_name.as_str(),
-                        manifest::MEMORY_RECALL_LAYER_NAME
-                            | manifest::RECOVERY_CONTEXT_LAYER_NAME
+                        manifest::RECOVERY_CONTEXT_LAYER_NAME
                             | manifest::CHANNEL_RECENT_CONTEXT_LAYER_NAME
                     )
             })

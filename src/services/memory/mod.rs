@@ -1,6 +1,5 @@
 mod local;
 mod memento;
-mod memento_instructions_cache;
 mod memento_throttle;
 mod runtime_state;
 
@@ -20,17 +19,9 @@ pub(crate) use memento::{
     MementoBackend, MementoRememberRequest, MementoToolFeedbackRequest, resolve_memento_agent_id,
     resolve_memento_workspace, sanitize_memento_workspace_segment,
 };
-pub(crate) use memento_instructions_cache::{
-    InstructionsDelta, instructions_cache_stats, record_instructions,
-};
 pub(crate) use memento_throttle::{
-    ForgetRatioAlarmDecision, RecallSizeBucket, memento_call_metrics_snapshot,
-    note_memento_forget_call, note_memento_recall_call, note_memento_tool_feedback_trigger,
-    note_recall_context_size,
+    memento_call_metrics_snapshot, note_memento_tool_feedback_trigger,
 };
-#[cfg(test)]
-#[allow(unused_imports)]
-pub(crate) use memento_throttle::{ForgetRatioSnapshot, observe_memento_forget_recall};
 pub(crate) use runtime_state::{backend_is_active, backend_state, refresh_backend_health};
 
 pub(crate) const UNBOUND_MEMORY_ROLE_ID: &str = "__unbound_role__";
@@ -157,14 +148,6 @@ pub(crate) trait MemoryBackend: Send + Sync {
             }
         })
     }
-}
-
-pub(crate) fn build_memory_backend(
-    role_binding: Option<&RoleBinding>,
-) -> (ResolvedMemorySettings, Box<dyn MemoryBackend + Send + Sync>) {
-    let settings = crate::services::discord::settings::memory_settings_for_binding(role_binding);
-    let backend = build_resolved_memory_backend(&settings);
-    (settings, backend)
 }
 
 pub(crate) fn build_resolved_memory_backend(
