@@ -533,7 +533,7 @@
     },
     {
       "path": "migrations/postgres/0104_auto_queue_run_cleanup_tasks.sql",
-      "sha256": "d60ed984e7b663fdf2bfeed13aad0e9d0ac661b79ee9cf41ddab760ebfe0ec46",
+      "sha256": "658c3e35c36fcaa06f868810b264882524f1a11a1acb4181c6ded003475115d8",
       "version": 104
     }
   ],

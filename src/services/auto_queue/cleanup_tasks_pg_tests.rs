@@ -177,6 +177,53 @@ mod pg_tests {
         .expect("arm released_slots persist trap"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
     }
 
+    /// Reject exactly one statement: an UPDATE that re-marks an already-emitted
+    /// row as emitted while touching nothing else.
+    ///
+    /// The drain's emit step is `UPDATE .. SET emitted = TRUE, updated_at =
+    /// NOW()` and nothing more, so the extra predicates below let every other
+    /// writer through — the claim (changes `claim_owner`), a recorded failure
+    /// (changes `attempts`) and the slot-release bookkeeping (changes
+    /// `released_slots`) are all untouched. What is left is a faithful trap for
+    /// "this drain is about to fire the emits again", because the mark now
+    /// precedes `emit()`.
+    async fn arm_emit_remark_trap(pool: &PgPool) {
+        sqlx::query(
+            "CREATE OR REPLACE FUNCTION reject_emit_remark()
+             RETURNS trigger AS $$
+             BEGIN
+                 IF OLD.emitted AND NEW.emitted
+                    AND NEW.attempts = OLD.attempts
+                    AND NEW.claim_owner IS NOT DISTINCT FROM OLD.claim_owner
+                    AND NEW.released_slots IS NOT DISTINCT FROM OLD.released_slots THEN
+                     RAISE EXCEPTION 'injected re-mark of an already-emitted cleanup task';
+                 END IF;
+                 RETURN NEW;
+             END;
+             $$ LANGUAGE plpgsql",
+        )
+        .execute(pool)
+        .await
+        .expect("define emit re-mark trap"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+        sqlx::query(
+            "CREATE TRIGGER reject_emit_remark_trigger
+             BEFORE UPDATE ON auto_queue_run_cleanup_tasks
+             FOR EACH ROW EXECUTE FUNCTION reject_emit_remark()",
+        )
+        .execute(pool)
+        .await
+        .expect("arm emit re-mark trap"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+    }
+
+    async fn disarm_emit_remark_trap(pool: &PgPool) {
+        sqlx::query(
+            "DROP TRIGGER IF EXISTS reject_emit_remark_trigger ON auto_queue_run_cleanup_tasks",
+        )
+        .execute(pool)
+        .await
+        .expect("disarm emit re-mark trap"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+    }
+
     async fn disarm_released_slots_persist_failure(pool: &PgPool) {
         sqlx::query(
             "DROP TRIGGER reject_released_slots_persist_trigger
@@ -822,6 +869,14 @@ mod pg_tests {
 
     /// **#5142 D-2.** A task that keeps failing must be dead-lettered once it
     /// burns through the attempt cap, instead of retrying forever.
+    ///
+    /// **Known limitation — read before trusting this test.** The fast-forward
+    /// below reads `MAX_CLEANUP_ATTEMPTS` from the constant it is meant to
+    /// protect, so the assertions hold for *any* value of it. This test proves
+    /// "there is a cap and crossing it dead-letters the row"; it does not pin
+    /// where the cap is. The `assert_eq!` on the literals in
+    /// `attempt_cap_dead_letter_is_counted_and_surfaced_on_health_pg` is what
+    /// pins the value and the wall-clock budget that follows from it.
     #[tokio::test]
     async fn repeatedly_failing_task_dead_letters_at_the_attempt_cap_pg() {
         let pg_db = TestPostgresDb::create().await;
@@ -948,6 +1003,331 @@ mod pg_tests {
             .await
             .expect("replay after the lease expired"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
         assert_eq!(recovered.completed, 1);
+        assert_eq!(slot_assignment(&pool).await, None);
+        assert_eq!(provider_session_ids(&pool).await, vec![None]);
+    }
+
+    // ---------------------------------------------------------------------
+    // #5142 round 3 — the two silent losses round 2 left behind.
+    // ---------------------------------------------------------------------
+
+    /// **The attempt-cap dead-letter must be observable.**
+    ///
+    /// Round 2 dead-lettered a row that burned through `MAX_CLEANUP_ATTEMPTS`
+    /// and then said nothing about it: `stats.dead_lettered` only ever counted
+    /// undecodable payloads, no query anywhere read `dead_lettered_at`, and the
+    /// row simply stopped matching the drain predicate. The run's slot token and
+    /// residual provider session id were stranded with no signal at all — the
+    /// #5068 shape (a recovery owner exists, but some rows are never recovered
+    /// and nothing says so).
+    ///
+    /// This test fixes both halves and keeps them apart:
+    ///
+    /// - the **counter** is a transition count — it fires on the sweep that
+    ///   parks the row and never again;
+    /// - the **health gauge** is a standing backlog — it keeps reporting the
+    ///   parked row until an operator deals with it.
+    ///
+    /// A regression in either one alone still fails here.
+    #[tokio::test]
+    async fn attempt_cap_dead_letter_is_counted_and_surfaced_on_health_pg() {
+        // Pin the cap itself. `repeatedly_failing_task_dead_letters_at_the_
+        // attempt_cap_pg` reads the constant it is asserting on, so it holds for
+        // any value; these literals are the only place the number and the wall
+        // clock that follows from it are actually fixed.
+        assert_eq!(
+            MAX_CLEANUP_ATTEMPTS, 10,
+            "the attempt cap is part of the operational contract, not a tunable"
+        );
+        assert_eq!(
+            MAX_BACKOFF_SECONDS, 256,
+            "the clamp must equal the ceiling of POWER(2, LEAST(attempts + 1, 8)); \
+             a larger value is unreachable and documents a bound the code cannot hit"
+        );
+        let total_backoff: i64 = (1..MAX_CLEANUP_ATTEMPTS)
+            .map(|attempt| MAX_BACKOFF_SECONDS.min(1i64 << attempt.min(8)))
+            .sum();
+        assert_eq!(
+            total_backoff, 766,
+            "2+4+8+16+32+64+128+256+256 seconds of backoff before the cap fires. \
+             With the 30s policy tick rounding each delay up, a cleanup step that \
+             keeps failing for roughly 13-17 minutes is parked permanently"
+        );
+
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "deadletter").await;
+
+        let cancelled =
+            cancel_live_dispatches_for_runs_pg(&pool, &[run_id.clone()], "auto_queue_cancel")
+                .await
+                .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+
+        // Nothing is parked yet, so the gauge must read zero — otherwise a
+        // non-zero reading below would prove nothing.
+        let before = crate::services::health_diagnostics::load_auto_queue_cleanup_backlog_pg(&pool)
+            .await
+            .expect("load cleanup backlog"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+        assert_eq!(before.pending, 1);
+        assert_eq!(before.dead_lettered, 0);
+
+        // Spend everything but the last attempt, then make that last one fail.
+        sqlx::query("UPDATE auto_queue_run_cleanup_tasks SET attempts = $1 WHERE id = $2")
+            .bind(MAX_CLEANUP_ATTEMPTS - 1)
+            .bind(cancelled.cleanup_task_id)
+            .execute(&pool)
+            .await
+            .expect("fast-forward attempts"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+        sqlx::query("ALTER TABLE sessions RENAME TO sessions_hidden")
+            .execute(&pool)
+            .await
+            .expect("hide sessions table"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+
+        let stats = replay_pending_run_cleanup_tasks_pg(None, &pool)
+            .await
+            .expect("replay onto the attempt cap"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+
+        sqlx::query("ALTER TABLE sessions_hidden RENAME TO sessions")
+            .execute(&pool)
+            .await
+            .expect("restore sessions table"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+
+        // Axis 1 — the counter. Round 2 reported `drained: 1, completed: 0,
+        // dead_lettered: 0` here, which reads as an ordinary retry and is a lie:
+        // this row will never be retried again.
+        assert_eq!(stats.drained, 1);
+        assert_eq!(stats.completed, 0);
+        assert_eq!(
+            stats.dead_lettered, 1,
+            "burning the attempt cap must be counted, not merely absent from \
+             `completed` — this is the only moment anything can report it"
+        );
+        assert!(
+            stats.touched(),
+            "a sweep that parked a row is not a no-op sweep"
+        );
+        assert!(
+            task_retry_state(&pool, cancelled.cleanup_task_id).await.2,
+            "precondition for the gauge: the row really is parked"
+        );
+
+        // Axis 2 — the standing backlog on `/api/health`. The slot token and the
+        // provider session id are still on disk and nothing will ever retry
+        // them, so the number has to survive past the sweep that produced it.
+        let after = crate::services::health_diagnostics::load_auto_queue_cleanup_backlog_pg(&pool)
+            .await
+            .expect("load cleanup backlog"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+        assert_eq!(
+            after.dead_lettered, 1,
+            "a parked cleanup row must be visible to an operator who never saw \
+             the sweep's log line"
+        );
+        assert_eq!(
+            after.pending, 0,
+            "and it must not be counted as live work that is still retrying"
+        );
+        assert_eq!(
+            slot_assignment(&pool).await,
+            Some(run_id.clone()),
+            "the stranded state the gauge is reporting: the slot token is still held"
+        );
+
+        // The two axes are genuinely different measurements. A later sweep finds
+        // nothing to do (no new transition) while the backlog is unchanged.
+        wind_back_next_attempt(&pool).await;
+        let quiet = replay_pending_run_cleanup_tasks_pg(None, &pool)
+            .await
+            .expect("replay after the row was parked"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+        assert_eq!(
+            quiet,
+            RunCleanupReplayStats::default(),
+            "the counter counts the transition, so it must not re-count a row \
+             that was already parked"
+        );
+        assert_eq!(
+            crate::services::health_diagnostics::load_auto_queue_cleanup_backlog_pg(&pool)
+                .await
+                .expect("load cleanup backlog") // agentdesk-audit: allow-unwrap — production entrypoint assertion
+                .dead_lettered,
+            1,
+            "the gauge is a standing backlog, so it must survive the sweep that \
+             found nothing to do"
+        );
+    }
+
+    /// **The `!task.emitted` guard is what makes "never double-counting" true.**
+    ///
+    /// The module header promises the observability emit is at-most-once. The
+    /// only thing enforcing that is `!task.emitted` in step 1, and no test
+    /// observed it: deleting the guard left the whole suite green.
+    ///
+    /// The emit itself is fire-and-forget into an in-process channel, so it
+    /// cannot be observed directly. What can be observed is the statement that
+    /// now immediately precedes it — the `emitted = TRUE` mark, which round 3
+    /// moved *ahead* of `emit()` precisely so that "about to emit" has a durable,
+    /// interceptable footprint. `arm_emit_remark_trap` rejects exactly that
+    /// statement when the row is already marked, so a drain that tries to emit
+    /// again fails loudly instead of silently duplicating an event.
+    ///
+    /// With the guard: the drain never touches the emit path and converges.
+    /// Without it: the mark re-fires, the trap raises, and the drain reports
+    /// `completed: false` with the slot still held.
+    #[tokio::test]
+    async fn an_already_emitted_task_is_never_re_emitted_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "reemit").await;
+
+        let cancelled =
+            cancel_live_dispatches_for_runs_pg(&pool, &[run_id.clone()], "auto_queue_cancel")
+                .await
+                .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+
+        // Without a pending emit the guard is vacuous and this test would pass
+        // for the wrong reason.
+        let pending_emits = sqlx::query_scalar::<_, Option<i32>>(
+            "SELECT jsonb_array_length(pending_emits)
+             FROM auto_queue_run_cleanup_tasks WHERE id = $1",
+        )
+        .bind(cancelled.cleanup_task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count pending emits"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
+        assert_eq!(
+            pending_emits,
+            Some(1),
+            "the cancel must have persisted the emit it owes, or the guard under \
+             test is never reached"
+        );
+
+        // Model the state a crashed drain leaves behind after step 1 committed:
+        // the events are out and durably marked, and everything after them is
+        // still owed.
+        sqlx::query("UPDATE auto_queue_run_cleanup_tasks SET emitted = TRUE WHERE id = $1")
+            .bind(cancelled.cleanup_task_id)
+            .execute(&pool)
+            .await
+            .expect("mark the emits as already fired"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+
+        arm_emit_remark_trap(&pool).await;
+        let outcome = drain_run_cleanup_task_by_id_pg(None, &pool, cancelled.cleanup_task_id).await;
+        disarm_emit_remark_trap(&pool).await;
+
+        assert!(
+            outcome.completed,
+            "the replay must skip step 1 entirely and finish the remaining steps; \
+             re-marking the row means it was about to fire the same observability \
+             events a second time: {outcome:?}"
+        );
+        assert!(
+            !outcome.dead_lettered,
+            "a clean drain must not park the row: {outcome:?}"
+        );
+        assert!(
+            outcome.slot_cleanup.warnings.is_empty(),
+            "no step may have degraded into a warning: {outcome:?}"
+        );
+        assert_eq!(
+            slot_assignment(&pool).await,
+            None,
+            "and the steps the crashed drain still owed must have run"
+        );
+        assert_eq!(provider_session_ids(&pool).await, vec![None]);
+        assert_eq!(
+            pending_run_cleanup_task_count_pg(&pool)
+                .await
+                .expect("count cleanup tasks"), // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
+            0
+        );
+    }
+
+    /// **Round 3, P2-2 companion.** A failed emit mark must abort the drain.
+    ///
+    /// Round 2 pushed a warning and carried on. That mattered because the mark
+    /// failing and a later step failing are highly correlated (both mean
+    /// PostgreSQL is unwell): the row then survived with `emitted = FALSE` while
+    /// the events had already been sent, and the next replay sent them again.
+    /// The fix is the ordering — mark first, emit second — plus this early
+    /// return, which makes a failed mark cost nothing at all because no event
+    /// left the process.
+    #[tokio::test]
+    async fn a_failed_emit_mark_aborts_the_drain_before_any_side_effect_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "markfail").await;
+
+        let cancelled =
+            cancel_live_dispatches_for_runs_pg(&pool, &[run_id.clone()], "auto_queue_cancel")
+                .await
+                .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+
+        // Reject the mark itself: any UPDATE that flips `emitted` to TRUE.
+        sqlx::query(
+            "CREATE OR REPLACE FUNCTION reject_emit_mark()
+             RETURNS trigger AS $$
+             BEGIN
+                 IF NEW.emitted AND NOT OLD.emitted THEN
+                     RAISE EXCEPTION 'injected emitted-mark failure';
+                 END IF;
+                 RETURN NEW;
+             END;
+             $$ LANGUAGE plpgsql",
+        )
+        .execute(&pool)
+        .await
+        .expect("define emit mark trap"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+        sqlx::query(
+            "CREATE TRIGGER reject_emit_mark_trigger
+             BEFORE UPDATE ON auto_queue_run_cleanup_tasks
+             FOR EACH ROW EXECUTE FUNCTION reject_emit_mark()",
+        )
+        .execute(&pool)
+        .await
+        .expect("arm emit mark trap"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+
+        let outcome = drain_run_cleanup_task_by_id_pg(None, &pool, cancelled.cleanup_task_id).await;
+        assert!(
+            !outcome.completed,
+            "a drain that could not durably record its emits must not report success"
+        );
+        assert!(
+            outcome
+                .slot_cleanup
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("mark auto-queue cleanup emits")),
+            "the cause must be surfaced: {:?}",
+            outcome.slot_cleanup.warnings
+        );
+
+        // Nothing downstream ran, and the failure is a real recorded attempt
+        // rather than a warning string that disappears with the process.
+        assert_eq!(
+            slot_assignment(&pool).await,
+            Some(run_id.clone()),
+            "the drain must stop before releasing the slot"
+        );
+        let (attempts, last_error, dead_lettered) =
+            task_retry_state(&pool, cancelled.cleanup_task_id).await;
+        assert_eq!(
+            attempts, 1,
+            "the failed mark must be recorded as an attempt"
+        );
+        assert!(last_error.is_some_and(|error| error.contains("mark auto-queue cleanup emits")));
+        assert!(!dead_lettered, "one failure is far from the cap");
+
+        sqlx::query("DROP TRIGGER reject_emit_mark_trigger ON auto_queue_run_cleanup_tasks")
+            .execute(&pool)
+            .await
+            .expect("disarm emit mark trap"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+
+        // And the retry converges, emitting exactly once.
+        wind_back_next_attempt(&pool).await;
+        let stats = replay_pending_run_cleanup_tasks_pg(None, &pool)
+            .await
+            .expect("replay after the mark trap was removed"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+        assert_eq!(stats.completed, 1);
+        assert_eq!(stats.dead_lettered, 0);
         assert_eq!(slot_assignment(&pool).await, None);
         assert_eq!(provider_session_ids(&pool).await, vec![None]);
     }

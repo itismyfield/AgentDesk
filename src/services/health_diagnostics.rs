@@ -31,6 +31,61 @@ pub struct DispatchOutboxStats {
     pub oldest_pending_age: i64,
 }
 
+/// #5142: standing backlog of the auto-queue post-commit cleanup outbox
+/// (`auto_queue_run_cleanup_tasks`).
+///
+/// `dead_lettered` is the number the module exists for. A cleanup row that burns
+/// through `MAX_CLEANUP_ATTEMPTS` (~13–17 minutes of failing retries) is parked
+/// permanently: it leaves both drain queries and nothing retries it again, so
+/// its run's slot token and residual provider session id stay on disk. Until
+/// this gauge existed no counter, query or endpoint read `dead_lettered_at` at
+/// all — the only trace was one `tracing::warn!` in the policy tick, which is
+/// gone the moment the log rotates. A non-zero value here is an operator action
+/// item, not a statistic.
+///
+/// `pending` is the live half (rows still owed and still retrying) and is
+/// included so the two can be told apart at a glance.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct AutoQueueCleanupBacklog {
+    pub pending: i64,
+    pub dead_lettered: i64,
+}
+
+/// Load the auto-queue cleanup backlog. `None` when there is no pool or the
+/// query fails, which keeps a health probe from turning a diagnostics read into
+/// an outage.
+pub async fn load_auto_queue_cleanup_backlog(
+    pg_pool: Option<&PgPool>,
+) -> Option<AutoQueueCleanupBacklog> {
+    let pool = pg_pool?;
+    match load_auto_queue_cleanup_backlog_pg(pool).await {
+        Ok(backlog) => Some(backlog),
+        Err(error) => {
+            tracing::warn!("[health] failed to load auto_queue_run_cleanup_tasks backlog: {error}");
+            None
+        }
+    }
+}
+
+pub(crate) async fn load_auto_queue_cleanup_backlog_pg(
+    pool: &PgPool,
+) -> Result<AutoQueueCleanupBacklog, String> {
+    let dead_lettered =
+        crate::services::auto_queue::cleanup_tasks::dead_lettered_run_cleanup_task_count_pg(pool)
+            .await?;
+    let pending = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM auto_queue_run_cleanup_tasks
+         WHERE dead_lettered_at IS NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|error| format!("count pending auto-queue run cleanup tasks: {error}"))?;
+    Ok(AutoQueueCleanupBacklog {
+        pending,
+        dead_lettered,
+    })
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ChannelSessionState {
     pub agent_id: Option<String>,

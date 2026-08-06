@@ -191,6 +191,22 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         .as_ref()
         .map(|stats| stats.oldest_pending_age)
         .unwrap_or(0);
+    // #5142: standing backlog of the auto-queue post-commit cleanup outbox.
+    // `dead_lettered` counts rows that burned through the attempt cap and will
+    // never be retried again, so their run's slot token and residual provider
+    // session id are stranded. Count-only (no run/dispatch ids), which is why it
+    // is safe on the unauthenticated public projection — and it has to be there,
+    // because the whole point is that an operator can see the number without
+    // holding a credential or tailing the policy tick's logs.
+    let auto_queue_cleanup_json =
+        health_diagnostics::load_auto_queue_cleanup_backlog(state.pg_pool_ref())
+            .await
+            .map(|backlog| {
+                serde_json::json!({
+                    "pending": backlog.pending,
+                    "dead_lettered": backlog.dead_lettered,
+                })
+            });
     let config_audit_report =
         health_diagnostics::load_config_audit_report_pg(state.pg_pool_ref()).await;
     let pipeline_override_report =
@@ -330,6 +346,9 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         if let Some(stats) = outbox_json {
             json["dispatch_outbox"] = stats;
         }
+        if let Some(backlog) = auto_queue_cleanup_json {
+            json["auto_queue_cleanup"] = backlog;
+        }
         if let Some(report) = config_audit_report.clone() {
             json["config_audit"] = report;
         }
@@ -446,6 +465,9 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         }
         if let Some(stats) = outbox_json {
             json["dispatch_outbox"] = stats;
+        }
+        if let Some(backlog) = auto_queue_cleanup_json {
+            json["auto_queue_cleanup"] = backlog;
         }
         if let Some(report) = config_audit_report {
             json["config_audit"] = report;
@@ -697,6 +719,20 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     let startup_degraded_reasons = json.get("startup_degraded_reasons").cloned();
     let delivery_record_rollout = json.get("delivery_record_rollout").cloned();
     let intake_routing = json.get("intake_routing").cloned();
+    // #5142: the auto-queue cleanup backlog is two integers and no identifiers,
+    // so it passes the public allowlist unchanged. It has to be on the public
+    // shape rather than only on `/api/health/detail`: a dead-lettered cleanup row
+    // is permanently parked work, and the only pre-existing trace of it was a
+    // single `tracing::warn!` in the policy tick.
+    let auto_queue_cleanup = json.get("auto_queue_cleanup").map(|block| {
+        serde_json::json!({
+            "pending": block.get("pending").cloned().unwrap_or(serde_json::json!(0)),
+            "dead_lettered": block
+                .get("dead_lettered")
+                .cloned()
+                .unwrap_or(serde_json::json!(0)),
+        })
+    });
     // Public OpenCode summary is count-only and never includes the per-server
     // `warm_servers` array, pids, ports, or startup tails (spec C-3). The
     // upstream `opencode_warm_pool_json(false)` already produced a count-only
@@ -747,6 +783,9 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     }
     if let Some(intake_routing) = intake_routing {
         public["intake_routing"] = intake_routing;
+    }
+    if let Some(auto_queue_cleanup) = auto_queue_cleanup {
+        public["auto_queue_cleanup"] = auto_queue_cleanup;
     }
     if let Some(opencode_public) = opencode_public {
         public["opencode"] = opencode_public;

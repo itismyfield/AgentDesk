@@ -23,7 +23,7 @@
 //! This machinery makes the *database-visible* cleanup (provider session ids,
 //! slot tokens, slot-thread sessions) crash-safe: every one of those steps is
 //! re-derived from the durable row and retried until it succeeds, so they are
-//! at-least-once and converge.
+//! at-least-once and converge — up to the attempt cap described below.
 //!
 //! The observability emit in step 1 is **not** covered by that guarantee and is
 //! deliberately at-most-once. `CancelTransitionMeta::emit` hands the event to an
@@ -31,10 +31,35 @@
 //! (`observability/emit.rs`: `if let Some(sender) = worker_sender() { let _ =
 //! sender.send(..) }`), so the event is silently dropped when the worker is not
 //! running, when the channel send fails, or when the process dies before the
-//! worker flushes its queue to PostgreSQL. Because `emitted = TRUE` is committed
-//! straight after the send, a replay will never re-fire it. Losing an
-//! observability row is the accepted trade for never double-counting one; it is
-//! not a claim that no emit is ever lost.
+//! worker flushes its queue to PostgreSQL.
+//!
+//! `emitted = TRUE` is committed **before** `emit()` is called, and a failed
+//! mark aborts the drain before any emit fires. That ordering is what makes the
+//! at-most-once claim exact rather than aspirational — it is the enumeration of
+//! how a drain's step 1 can end, not a slogan:
+//!
+//! 1. the mark fails → nothing was emitted, the failure is recorded as an
+//!    attempt, and the retry emits exactly once when the mark finally commits;
+//! 2. the mark commits and `emit()` runs → the durable flag makes `!task.emitted`
+//!    false for every later replay, so the event fires exactly once;
+//! 3. the mark commits and the process dies before `emit()` returns (or the
+//!    observability worker never flushes) → the event is lost, and no replay
+//!    will re-fire it.
+//!
+//! Case 3 is the accepted trade for never double-counting an event; it is not a
+//! claim that no emit is ever lost.
+//!
+//! ## What happens when the cleanup cannot succeed at all
+//!
+//! A row that fails `MAX_CLEANUP_ATTEMPTS` times is dead-lettered: it is parked
+//! on disk with its `last_error` and leaves both drain queries permanently. Its
+//! slot token and provider session id then stay in whatever state the last
+//! failed attempt left them — the convergence guarantee above stops there. That
+//! is a deliberate trade (one unfixable row must not block every cleanup queued
+//! behind it), and it is only defensible because the outcome is *observable*:
+//! `RunCleanupReplayStats::dead_lettered` counts the transition when it happens
+//! and `/api/health` carries the standing `auto_queue_cleanup.dead_lettered`
+//! backlog until an operator clears it. No row is abandoned silently.
 
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
@@ -67,6 +92,10 @@ pub(crate) struct RunCleanupDrainOutcome {
     pub(crate) slot_cleanup: SlotCleanupResult,
     /// `false` when the row was deliberately left behind for a later retry.
     pub(crate) completed: bool,
+    /// `true` when *this* drain burned the row's last attempt and parked it for
+    /// good. Propagated so the attempt-cap dead-letter reaches a counter instead
+    /// of just vanishing from the drain query (#5142 r3).
+    pub(crate) dead_lettered: bool,
 }
 
 /// Columns every drain path selects. Kept in one place so the batch sweep and
@@ -81,10 +110,27 @@ const REPLAY_BATCH_LIMIT: i64 = 50;
 /// Without a cap a permanently failing row keeps the oldest `created_at` and
 /// therefore the head of the drain order forever, so `REPLAY_BATCH_LIMIT`
 /// unfixable rows would stop every newly queued cleanup from ever draining.
+///
+/// See [`MAX_BACKOFF_SECONDS`] for what this cap costs in wall clock: a cleanup
+/// step that keeps failing for roughly a quarter of an hour is parked for good.
 const MAX_CLEANUP_ATTEMPTS: i32 = 10;
 
 /// Upper bound on the exponential retry delay, in seconds.
-const MAX_BACKOFF_SECONDS: i64 = 300;
+///
+/// The delay is `POWER(2, LEAST(attempts + 1, 8))`, so the exponent cap already
+/// tops the series out at `2^8 = 256`. This constant is the belt-and-braces
+/// clamp beside it, set to the same 256 so the two bounds cannot disagree — at
+/// 300 it was simply unreachable and the doc comment described a ceiling the
+/// code could never hit.
+///
+/// The full series a task gets before [`MAX_CLEANUP_ATTEMPTS`] dead-letters it
+/// is therefore `2 + 4 + 8 + 16 + 32 + 64 + 128 + 256 + 256 = 766` seconds of
+/// backoff. The replay sweep only runs on the 30-second policy tick, so each
+/// delay rounds up to the next tick: **about 13–17 minutes of wall clock**.
+/// Read that as the operational contract — *a cleanup step that keeps failing
+/// for ~15 minutes is parked permanently* — and note that the only thing which
+/// will say so afterwards is the `/api/health` `auto_queue_cleanup` backlog.
+const MAX_BACKOFF_SECONDS: i64 = 256;
 
 /// How long a claim is honoured before another drainer may steal the row.
 /// A process that dies mid-drain must not strand its claim permanently.
@@ -271,11 +317,33 @@ async fn claim_run_cleanup_task_batch_pg(
 /// Record a failed attempt: bump `attempts`, apply exponential backoff, release
 /// the claim, and dead-letter the row once it has burned through the cap.
 ///
+/// Returns `true` when the row is dead-lettered as a result, so the caller can
+/// count it. That return value is the whole point of this signature: before it
+/// existed the attempt-cap dead-letter was the one failure mode with no counter
+/// at all — `stats.dead_lettered` only ever saw undecodable payloads, and a row
+/// that burned its ten attempts simply stopped appearing in the drain query with
+/// nothing anywhere to say why.
+///
 /// The row is never deleted on dead-letter — the operator keeps the evidence and
 /// `last_error` — but it drops out of the drain query so it can no longer block
 /// the queue behind it.
-async fn record_task_failure_pg(pool: &PgPool, id: i64, error: &str) {
-    if let Err(update_error) = sqlx::query(
+///
+/// ## Why this does not write to `db::relay_dead_letter`
+///
+/// That table is the relay's *message-content* sink (#4260): a
+/// `kind`/`channel_id`/`content`/`reason` row that preserves text which was
+/// already lost, written fire-and-forget and **auto-pruned after
+/// `relay_dead_letter::RETENTION_DAYS`**. None of that shape fits here. This row
+/// is not a copy of something lost — it *is* the work item, and it carries the
+/// `run_ids`/`dispatch_ids`/`released_slots`/`pending_emits` that a later code
+/// fix or an operator needs in order to resume the cleanup. Flattening that into
+/// a `content` TEXT column would make it unresumable, the 30-day retention sweep
+/// would delete the evidence the paragraph above promises to keep, and the copy
+/// plus the original would become two sources of truth for one task. Parking the
+/// row where it already is, and giving it a counter plus a health gauge, buys
+/// the same observability without any of that.
+async fn record_task_failure_pg(pool: &PgPool, id: i64, error: &str) -> bool {
+    match sqlx::query_scalar::<_, bool>(
         "UPDATE auto_queue_run_cleanup_tasks
          SET attempts = attempts + 1,
              last_error = $2,
@@ -291,21 +359,39 @@ async fn record_task_failure_pg(pool: &PgPool, id: i64, error: &str) {
              claim_owner = NULL,
              claimed_at = NULL,
              updated_at = NOW()
-         WHERE id = $1",
+         WHERE id = $1
+         RETURNING dead_lettered_at IS NOT NULL",
     )
     .bind(id)
     .bind(error)
     .bind(MAX_BACKOFF_SECONDS)
     .bind(MAX_CLEANUP_ATTEMPTS)
-    .execute(pool)
+    .fetch_optional(pool)
     .await
     {
-        tracing::warn!(
-            task_id = id,
-            error = %update_error,
-            "[auto-queue] failed to record cleanup task retry state"
-        );
+        Ok(dead_lettered) => dead_lettered.unwrap_or(false),
+        Err(update_error) => {
+            tracing::warn!(
+                task_id = id,
+                error = %update_error,
+                "[auto-queue] failed to record cleanup task retry state"
+            );
+            false
+        }
     }
+}
+
+/// Rows that are parked and will never be drained again, i.e. the standing
+/// dead-letter backlog. `/api/health` reports this so a task that burned its
+/// attempt cap cannot sit in the table unnoticed; see the module header.
+pub(crate) async fn dead_lettered_run_cleanup_task_count_pg(pool: &PgPool) -> Result<i64, String> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM auto_queue_run_cleanup_tasks
+         WHERE dead_lettered_at IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|error| format!("count dead-lettered auto-queue run cleanup tasks: {error}"))
 }
 
 /// Dead-letter a row whose payload cannot be decoded at all.
@@ -444,6 +530,26 @@ async fn release_and_persist_slots_for_task_pg(
 /// run picked the slot up in the meantime — the A-B-A hazard that
 /// `clear_slot_threads_for_slot_pg` cannot see, because it keys on
 /// `(agent_id, slot_index)` and carries no run identity.
+///
+/// ## Residual TOCTOU window (#5142 D-7) — sized honestly
+///
+/// This check and the clear it guards are separate statements, so a run that
+/// takes the slot *between* them is still cleared. That window is not "one
+/// database round-trip": the caller's path from here to the write is
+/// `slot_taken_by_foreign_run_pg` → `slot_has_active_dispatch_excluding_pg` →
+/// `build_slot_clear_target_pg` → `filter_safe_slot_thread_reset_targets` →
+/// `archive_slot_threads` → `clear_slot_sessions_pg`, and `archive_slot_threads`
+/// makes **Discord HTTP calls**, so a full round of provider API latency sits
+/// inside the window. Order the seconds, not the milliseconds.
+///
+/// That sequence is base code; this module only added the ownership probe in
+/// front of it. The damage stays P3 because
+/// `filter_safe_slot_thread_reset_targets` already excludes threads with a live
+/// dispatch, so the worst outcome is that a freshly-arrived run loses provider
+/// session continuity and re-establishes it on its next turn. Closing it
+/// properly means moving the ownership predicate into the clearing statement
+/// itself (or fencing on a slot generation counter), which is a change to the
+/// base slot-clearing path and belongs in its own issue rather than here.
 async fn slot_taken_by_foreign_run_pg(
     pool: &PgPool,
     run_ids: &[String],
@@ -496,9 +602,15 @@ pub(crate) async fn drain_run_cleanup_task_pg(
     // `dispatch_outbox` row, so it is a reconciliation sweep: running it twice
     // re-reads rows the first sweep already cleared and needs no dedup key.
     if !task.emitted && !task.pending_emits.is_empty() {
-        for meta in &task.pending_emits {
-            meta.emit();
-        }
+        // The mark is committed BEFORE `emit()` fires, and a failed mark returns
+        // immediately. The other order — emit, then mark — is what made the
+        // module header's "never double-counting" broader than the code: a mark
+        // that failed while the events were already out left the row at
+        // `emitted = FALSE`, so the next replay sent the same events a second
+        // time. In this order a failed mark means nothing was emitted yet, so
+        // abandoning the attempt here costs nothing and the retry emits exactly
+        // once. The residual is case 3 in the header (mark commits, process dies
+        // before the event reaches the worker), which is a loss, never a repeat.
         if let Err(error) = sqlx::query(
             "UPDATE auto_queue_run_cleanup_tasks
              SET emitted = TRUE,
@@ -509,10 +621,24 @@ pub(crate) async fn drain_run_cleanup_task_pg(
         .execute(pool)
         .await
         {
-            warnings.push(format!(
+            let error = format!(
                 "failed to mark auto-queue cleanup emits for task {}: {error}",
                 task.id
-            ));
+            );
+            let dead_lettered = record_task_failure_pg(pool, task.id, &error).await;
+            warnings.push(error);
+            return RunCleanupDrainOutcome {
+                slot_cleanup: SlotCleanupResult {
+                    released_slots: 0,
+                    cleared_slot_sessions: 0,
+                    warnings,
+                },
+                completed: false,
+                dead_lettered,
+            };
+        }
+        for meta in &task.pending_emits {
+            meta.emit();
         }
     }
     for meta in &task.pending_emits {
@@ -558,7 +684,7 @@ pub(crate) async fn drain_run_cleanup_task_pg(
                 task.dispatch_ids,
                 error
             );
-            record_task_failure_pg(pool, task.id, &error).await;
+            let dead_lettered = record_task_failure_pg(pool, task.id, &error).await;
             warnings.push(format!(
                 "failed to clear postgres sessions for run cleanup dispatches {:?}: {}",
                 task.dispatch_ids, error
@@ -570,6 +696,7 @@ pub(crate) async fn drain_run_cleanup_task_pg(
                     warnings,
                 },
                 completed: false,
+                dead_lettered,
             };
         }
     };
@@ -580,7 +707,7 @@ pub(crate) async fn drain_run_cleanup_task_pg(
         match release_and_persist_slots_for_task_pg(pool, &task).await {
             Ok(value) => value,
             Err(error) => {
-                record_task_failure_pg(pool, task.id, &error).await;
+                let dead_lettered = record_task_failure_pg(pool, task.id, &error).await;
                 warnings.push(error);
                 return RunCleanupDrainOutcome {
                     slot_cleanup: SlotCleanupResult {
@@ -589,6 +716,7 @@ pub(crate) async fn drain_run_cleanup_task_pg(
                         warnings,
                     },
                     completed: false,
+                    dead_lettered,
                 };
             }
         };
@@ -653,10 +781,11 @@ pub(crate) async fn drain_run_cleanup_task_pg(
     };
     if !all_slots_handled {
         let summary = slot_cleanup.warnings.join("; ");
-        record_task_failure_pg(pool, task.id, &summary).await;
+        let dead_lettered = record_task_failure_pg(pool, task.id, &summary).await;
         return RunCleanupDrainOutcome {
             slot_cleanup,
             completed: false,
+            dead_lettered,
         };
     }
 
@@ -670,15 +799,30 @@ pub(crate) async fn drain_run_cleanup_task_pg(
             error = %error,
             "[auto-queue] cleanup task finished but could not be deleted; a replay will repeat it"
         );
+        // #5142 r3 P3-3: every other failure path records an attempt; this one
+        // used to skip it, which made an undeletable row the single shape of
+        // task that neither converged nor ever dead-lettered — it just re-ran
+        // the whole drain at lease-expiry rate (`CLAIM_LEASE_SECONDS`) forever,
+        // contradicting "no row occupies the queue indefinitely". The repeated
+        // steps are all idempotent, so putting it on the same backoff and the
+        // same terminal cap as everything else costs nothing but a parked row,
+        // and the parked row is now counted and reported.
+        let error = format!(
+            "delete finished auto-queue cleanup task {}: {error}",
+            task.id
+        );
+        let dead_lettered = record_task_failure_pg(pool, task.id, &error).await;
         return RunCleanupDrainOutcome {
             slot_cleanup,
             completed: false,
+            dead_lettered,
         };
     }
 
     RunCleanupDrainOutcome {
         slot_cleanup,
         completed: true,
+        dead_lettered: false,
     }
 }
 
@@ -700,8 +844,15 @@ pub(crate) async fn drain_run_cleanup_task_by_id_pg(
             Ok(false) => RunCleanupDrainOutcome {
                 slot_cleanup: SlotCleanupResult::default(),
                 completed: true,
+                dead_lettered: false,
             },
             // Row present but unclaimable: still owed, just not by us.
+            //
+            // `dead_lettered` stays false here even though one of the three
+            // reasons is "already dead-lettered": this field counts the
+            // *transition*, and the transition was counted by whichever drain
+            // performed it. The standing backlog is the health gauge's job
+            // (`dead_lettered_run_cleanup_task_count_pg`), not this counter's.
             Ok(true) => RunCleanupDrainOutcome {
                 slot_cleanup: SlotCleanupResult {
                     released_slots: 0,
@@ -711,6 +862,7 @@ pub(crate) async fn drain_run_cleanup_task_by_id_pg(
                     )],
                 },
                 completed: false,
+                dead_lettered: false,
             },
             Err(error) => RunCleanupDrainOutcome {
                 slot_cleanup: SlotCleanupResult {
@@ -719,6 +871,7 @@ pub(crate) async fn drain_run_cleanup_task_by_id_pg(
                     warnings: vec![error],
                 },
                 completed: false,
+                dead_lettered: false,
             },
         },
         Err(error) => RunCleanupDrainOutcome {
@@ -728,6 +881,7 @@ pub(crate) async fn drain_run_cleanup_task_by_id_pg(
                 warnings: vec![error],
             },
             completed: false,
+            dead_lettered: false,
         },
     }
 }
@@ -736,8 +890,12 @@ pub(crate) async fn drain_run_cleanup_task_by_id_pg(
 pub(crate) struct RunCleanupReplayStats {
     pub(crate) drained: usize,
     pub(crate) completed: usize,
-    /// Rows parked because their payload could not be decoded. Counted rather
-    /// than silently skipped so an undecodable row is visible in the logs.
+    /// Rows this sweep parked and removed from the drain order for good — both
+    /// the undecodable payloads (poison) and the rows that burned through
+    /// `MAX_CLEANUP_ATTEMPTS`. Counted rather than silently skipped because a
+    /// dead-letter is the one outcome the retry loop can never repair on its
+    /// own, so it has to reach a human; the standing backlog is on
+    /// `/api/health` under `auto_queue_cleanup.dead_lettered`.
     pub(crate) dead_lettered: usize,
 }
 
@@ -778,11 +936,15 @@ pub(crate) async fn replay_pending_run_cleanup_tasks_pg(
             }
         };
         stats.drained += 1;
-        if drain_run_cleanup_task_pg(health_registry.clone(), pool, task)
-            .await
-            .completed
-        {
+        let outcome = drain_run_cleanup_task_pg(health_registry.clone(), pool, task).await;
+        if outcome.completed {
             stats.completed += 1;
+        }
+        if outcome.dead_lettered {
+            // The attempt-cap dead-letter. It used to be counted nowhere: the row
+            // just stopped matching the drain predicate and the sweep reported it
+            // as one more incomplete drain.
+            stats.dead_lettered += 1;
         }
     }
     Ok(stats)

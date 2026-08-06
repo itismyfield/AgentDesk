@@ -50,9 +50,17 @@ CREATE TABLE auto_queue_run_cleanup_tasks (
     -- as the lease clock so a process that died mid-drain does not strand the row.
     claim_owner TEXT,
     claimed_at TIMESTAMPTZ,
-    -- Dead letter. Set once `attempts` crosses the cap (or the payload cannot be
-    -- decoded at all). The row is retained rather than deleted so operators keep
-    -- the evidence, but it is excluded from the drain query so it stops blocking.
+    -- Dead letter. Set once `attempts` crosses the cap (~13-17 minutes of
+    -- failing retries; see `MAX_BACKOFF_SECONDS`) or the payload cannot be
+    -- decoded at all. The row is retained rather than deleted so the evidence
+    -- survives, but it is excluded from the drain query, so nothing will ever
+    -- retry it and the run's slot token and residual provider session id stay
+    -- as the last failed attempt left them.
+    --
+    -- Retention only helps if someone can find the row, so this column is read
+    -- by `dead_lettered_run_cleanup_task_count_pg` and surfaced on `/api/health`
+    -- as `auto_queue_cleanup.dead_lettered`. A non-zero value there is an
+    -- operator action item. Do not let this become a write-only column again.
     dead_lettered_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

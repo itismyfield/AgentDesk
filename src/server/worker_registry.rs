@@ -624,6 +624,25 @@ enum WorkerHandle {
     SpawnHelper,
 }
 
+/// #5142 D-4: the `HealthRegistry` handle the `policy-tick` worker is started
+/// with.
+///
+/// This is a one-line clone, and it is a named function purely so the decision
+/// is reachable from a test. The tick's auto-queue cleanup replay reaches
+/// `clear_provider_channel_runtime` only through this handle, so returning
+/// `None` while the process *has* a registry silently drops the runtime half of
+/// every replayed cleanup — an invisible regression (nothing fails, the DB state
+/// still converges, only the in-memory provider runtime is left behind) that a
+/// refactor can reintroduce by deleting one argument. The spawn closure below
+/// cannot be entered by a unit test, so `policy_tick_health_registry_*` pins the
+/// decision here instead; the remaining `tick_health_registry.clone()` at the
+/// call site is a bare move of this value with no policy left in it.
+fn policy_tick_health_registry(
+    process_registry: Option<&Arc<HealthRegistry>>,
+) -> Option<Arc<HealthRegistry>> {
+    process_registry.cloned()
+}
+
 struct RunningWorker {
     spec: WorkerSpec,
     _handle: WorkerHandle,
@@ -756,7 +775,8 @@ impl SupervisedWorkerRegistry {
                 // #5142 D-4: hand the tick loop the health registry so the
                 // auto-queue cleanup replay can complete its runtime-side
                 // teardown instead of silently skipping it.
-                let tick_health_registry = self.health_registry.clone();
+                let tick_health_registry =
+                    policy_tick_health_registry(self.health_registry.as_ref());
                 self.register_thread(spec, "policy-tick", move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
@@ -1255,6 +1275,30 @@ mod leader_takeover_tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
+
+    /// **#5142 D-4 regression.** The policy tick must be started with the
+    /// process `HealthRegistry`, not `None`.
+    ///
+    /// Today's code is correct, and that is exactly why this exists: the failure
+    /// mode is silent. With `None` the cleanup replay still converges every
+    /// PostgreSQL-visible thing it owes, so no test, log line or health check
+    /// notices — only `clear_provider_channel_runtime` is skipped, leaving the
+    /// in-memory provider runtime for the cleared slot threads alive. Before this
+    /// test the wiring had no coverage at all: replacing the handoff with `None`
+    /// left the whole suite green.
+    #[test]
+    fn policy_tick_is_started_with_the_process_health_registry() {
+        let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+        assert!(
+            super::policy_tick_health_registry(Some(&registry)).is_some(),
+            "the tick must receive the process registry — `None` here silently \
+             disables the runtime half of every replayed auto-queue cleanup"
+        );
+        // Standalone / no-Discord mode (`launch.rs` passes `None` to
+        // `server::run`) legitimately has no registry, and must stay `None`
+        // rather than fabricate one.
+        assert!(super::policy_tick_health_registry(None).is_none());
+    }
 
     fn leader_only_spec_for_test() -> super::WorkerSpec {
         WORKER_SPECS

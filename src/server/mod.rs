@@ -480,8 +480,17 @@ async fn policy_tick_loop(
     // #5142 D-4: the auto-queue cleanup replay below tears down provider runtime
     // state (`clear_provider_channel_runtime`) for the slot threads it clears,
     // and that teardown is reachable only through the health registry. This loop
-    // used to have no registry at all and passed `None`, so the runtime half of
-    // the cleanup was permanently skipped on every replayed task.
+    // used to have no registry parameter at all and hard-coded `None`, so the
+    // runtime half of the cleanup was permanently skipped on every replayed task.
+    //
+    // It is still an `Option`, and `None` is still a legitimate value: a process
+    // started without Discord providers has no registry to hand over
+    // (`launch.rs` calls `server::run(.., None, ..)`). What changed is only that
+    // the tick now receives whatever the process actually has instead of
+    // discarding it — see `worker_registry::policy_tick_health_registry`. On a
+    // registry-less node the replay converges every PostgreSQL-visible part of
+    // the cleanup and skips only the in-memory teardown, which is correct there
+    // because there is no provider runtime to tear down.
     health_registry: Option<Arc<HealthRegistry>>,
 ) {
     tracing::info!("[policy-tick] 3-tier tick started: 30s / 1min / 5min");
