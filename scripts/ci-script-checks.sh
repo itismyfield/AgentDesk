@@ -112,7 +112,12 @@ echo "=== CI runner hardening guard ==="
 ./scripts/check-ci-runner-hardening.sh
 "$PYTHON" -m unittest tests.test_discord_thread_create_ci_wiring
 
-echo "=== PR infrastructure failure rerun classifier (#4392) ==="
+echo "=== PR infrastructure failure rerun classifier (#4392/#5207) ==="
+# The self-test also enforces the #5207 sibling-regex sync contract: the
+# classifier's INFRA_TERMINATION_REGEX must stay byte-identical to
+# log_has_infra_termination in scripts/main-ci-triage.sh, and drift fails here.
+# tests/test_infra_failure_classifier_5207.sh (tests/*.sh loop below) carries
+# the discriminating matrix and proves drift detection actually discriminates.
 ./scripts/ci/infra-failure-rerun.sh --self-test
 
 echo "=== CI timeout wrapper tests (#4413) ==="
