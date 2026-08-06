@@ -303,8 +303,27 @@ mod tests {
         )
         .expect("memento guidance must be produced");
 
+        // Retained target #1: the channel -> workspace/agentId mapping. This is
+        // now its ONLY production consumer (`resolve_memento_workspace` +
+        // `resolve_memento_agent_id` at the top of this module), so the
+        // assertion below is what keeps the mapping from being collected as
+        // dead code along with the removed injection path. The expected values
+        // are exactly what those two helpers return for an unregistered channel
+        // bound to no role.
+        let channel_id = 4_242_u64;
+        assert_eq!(
+            resolve_memento_workspace(UNBOUND_MEMORY_ROLE_ID, channel_id, None),
+            "channel-4242"
+        );
+        assert_eq!(
+            resolve_memento_agent_id(UNBOUND_MEMORY_ROLE_ID, channel_id),
+            "agentdesk-channel-4242"
+        );
         assert!(
-            guidance.contains("scope hints: project=`workspace=repo, agentId=default`"),
+            guidance.contains(
+                "scope hints: project=`workspace=repo, agentId=default`; \
+                 agent-private=`workspace=channel-4242, agentId=agentdesk-channel-4242`."
+            ),
             "the channel->workspace/agentId scope hint must survive, got: {guidance}"
         );
         assert!(
