@@ -21,9 +21,15 @@ pub(crate) const VALVE_CLEARED_DISPATCH_MARKER_GRACE: Duration = Duration::from_
 pub(super) fn set_pending_user_dispatch(
     state: &mut ChannelMailboxState,
     message_id: MessageId,
+    source_message_ids: &[MessageId],
 ) -> Arc<DispatchLease> {
     let lease = Arc::new(DispatchLease);
     state.pending_user_dispatch = Some(message_id);
+    // #5191: carry the merged head's absorbed ids through the dequeue→claim
+    // window. `queued_message_ids()` unions primary + sources while the entry
+    // is queued; the reservation must preserve that same union or the catch-up
+    // scan re-recovers an absorbed id and runs its content a second time.
+    state.pending_user_dispatch_source_ids = source_message_ids.to_vec();
     state.pending_user_dispatch_since = Some(Instant::now());
     state.pending_user_dispatch_yield_count = 0;
     state.pending_user_dispatch_lease = Some(Arc::clone(&lease));
@@ -32,6 +38,7 @@ pub(super) fn set_pending_user_dispatch(
 
 pub(super) fn clear_pending_user_dispatch(state: &mut ChannelMailboxState) -> Option<MessageId> {
     let cleared = state.pending_user_dispatch.take();
+    state.pending_user_dispatch_source_ids.clear();
     state.pending_user_dispatch_since = None;
     state.pending_user_dispatch_yield_count = 0;
     state.pending_user_dispatch_lease = None;

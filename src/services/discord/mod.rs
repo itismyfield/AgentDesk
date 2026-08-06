@@ -52,10 +52,12 @@ mod queue_io;
 mod queue_marker;
 mod queue_overflow_dlq;
 mod queue_reactions;
+// #5191: catch-up recovery dedup identity set (queue + active + reservation).
 mod queued_placeholders_store;
 mod reaction_cleanup;
 mod reaction_lifecycle;
 mod readopted_mailbox_ledger;
+mod recovery_known_ids;
 mod relay_coord;
 mod relay_health;
 pub(crate) mod relay_recovery;
@@ -354,30 +356,9 @@ const DEAD_SESSION_REAP_INTERVAL: Duration = Duration::from_secs(60); // 1 minut
 const RESTART_REPORT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const DEFERRED_RESTART_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
-pub(in crate::services::discord) fn queued_message_ids(
-    snapshot: &ChannelMailboxSnapshot,
-) -> std::collections::HashSet<u64> {
-    let mut ids = std::collections::HashSet::new();
-    for item in &snapshot.intervention_queue {
-        ids.insert(item.message_id.get());
-        ids.extend(
-            item.source_message_ids
-                .iter()
-                .map(|message_id| message_id.get()),
-        );
-    }
-    ids
-}
-
-pub(in crate::services::discord) fn recovery_known_message_ids(
-    snapshot: &ChannelMailboxSnapshot,
-) -> std::collections::HashSet<u64> {
-    let mut ids = queued_message_ids(snapshot);
-    if let Some(active_id) = snapshot.active_user_message_id {
-        ids.insert(active_id.get());
-    }
-    ids
-}
+pub(in crate::services::discord) use recovery_known_ids::{
+    queued_message_ids, recovery_known_message_ids,
+};
 
 pub(in crate::services::discord) fn advance_last_message_checkpoint(
     shared: &SharedData,
