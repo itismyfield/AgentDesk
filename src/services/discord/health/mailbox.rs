@@ -5,6 +5,7 @@ use poise::serenity_prelude::ChannelId;
 use crate::services::discord::SharedData;
 use crate::services::discord::relay_health::{RelayHealthSnapshot, RelayStallState};
 use crate::services::provider::ProviderKind;
+use crate::services::turn_orchestrator::ChannelMailboxSnapshot;
 use crate::services::turn_orchestrator::registry_purge::MailboxPurgeOutcome;
 
 use super::HealthRegistry;
@@ -29,6 +30,70 @@ pub(super) struct MailboxHealthSnapshot {
     pub(super) stall_shadow_verdict: Option<StallVerdict>,
     pub(super) relay_stall_state: RelayStallState,
     pub(super) relay_health: RelayHealthSnapshot,
+}
+
+/// How a guarded-finish residue is sitting on this channel's mailbox, as the
+/// finalizer reconciler's own predicates answer it (#5068 r3).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::services::discord) enum ResidualOccupancy {
+    /// No residue is anchored to the owner the mailbox currently reports.
+    None,
+    /// A residue is anchored but the reconciler has NOT been handed release
+    /// authority. Nothing resolves this on its own: it takes a user cancel or a
+    /// newer episode taking the channel. Reporting it as `active` — which is
+    /// what this surface did before r3 — makes a permanently stranded mailbox
+    /// indistinguishable from a turn that is simply running.
+    Held,
+    /// A residue is anchored AND authorized. The reconciler releases it as soon
+    /// as its I/O evidence gates clear, so this state is transient by
+    /// construction.
+    Releasable,
+}
+
+pub(in crate::services::discord) const fn mailbox_agent_turn_status(
+    has_cancel_token: bool,
+    residual: ResidualOccupancy,
+) -> &'static str {
+    match residual {
+        ResidualOccupancy::Releasable => "residual",
+        ResidualOccupancy::Held => "residual_held",
+        ResidualOccupancy::None if has_cancel_token => "active",
+        ResidualOccupancy::None => "idle",
+    }
+}
+
+/// #5068: health REPORTS the question the finalizer reconciler DECIDES, by
+/// calling its predicates instead of restating them — an observer that says
+/// `residual` where the decider says "held, evidence insufficient" is the #5052
+/// split-brain shape.
+///
+/// r3 splits the answer in two rather than collapsing it. Both arms come from
+/// the SAME two predicates the reconciler branches on
+/// (`matches_observed_owner`, `release_authorized`), so there is still exactly
+/// one definition of release authority in the codebase; what changed is only
+/// that health stopped throwing away the second bit. Health deliberately does
+/// NOT consult the I/O evidence gates (`inflight_state_present`,
+/// `tui_structurally_idle`) — those decide WHEN the reconciler acts, not whether
+/// a residue exists, and a residue waiting on them is still one an operator
+/// wants to see. That keeps this a projection of the decider's state, never a
+/// second opinion about it.
+pub(in crate::services::discord) fn residual_occupancy(
+    shared: &super::super::SharedData,
+    channel: ChannelId,
+    snapshot: &ChannelMailboxSnapshot,
+) -> ResidualOccupancy {
+    shared
+        .turn_finalizer
+        .guarded_finish_residues()
+        .get(&channel)
+        .filter(|residue| residue.matches_observed_owner(snapshot))
+        .map_or(ResidualOccupancy::None, |residue| {
+            if residue.release_authorized(snapshot) {
+                ResidualOccupancy::Releasable
+            } else {
+                ResidualOccupancy::Held
+            }
+        })
 }
 
 /// #3293 (c): probe a channel's mailbox state WITHOUT creating a registry
@@ -109,5 +174,31 @@ pub async fn purge_idle_channel_mailbox_registry_entry(
     MailboxRegistryPurgeResult {
         removed,
         skipped_reason,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ResidualOccupancy, mailbox_agent_turn_status};
+
+    #[test]
+    fn agent_turn_status_separates_releasable_and_permanently_held_residue() {
+        assert_eq!(
+            mailbox_agent_turn_status(true, ResidualOccupancy::Releasable),
+            "residual"
+        );
+        assert_eq!(
+            mailbox_agent_turn_status(true, ResidualOccupancy::Held),
+            "residual_held",
+            "a residue nothing will release on its own must never read as an ordinary active turn"
+        );
+        assert_eq!(
+            mailbox_agent_turn_status(true, ResidualOccupancy::None),
+            "active"
+        );
+        assert_eq!(
+            mailbox_agent_turn_status(false, ResidualOccupancy::None),
+            "idle"
+        );
     }
 }

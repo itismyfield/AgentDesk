@@ -2987,11 +2987,8 @@ async fn kickoff_idle_queue_channel(
     let fresh_snapshot = mailbox_snapshot(shared, channel_id).await;
     if !idle_queue_channel_has_kickable_backlog(shared, provider, channel_id, &fresh_snapshot).await
     {
-        tracing::info!(
-            channel_id = channel_id.get(),
-            provider = provider.as_str(),
-            "KICKOFF: skipped queued turn after fresh mailbox/TUI guard"
-        );
+        turn_finalizer::handle_idle_queue_guard_skip(shared, provider, channel_id, &fresh_snapshot)
+            .await;
         return IdleQueueKickoffChannelOutcome::default();
     }
 

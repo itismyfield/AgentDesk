@@ -116,6 +116,154 @@ async fn seed_owner(
     token
 }
 
+/// What `/health` would print for this channel right now.
+async fn health_status(shared: &Arc<SharedData>, channel_id: ChannelId) -> &'static str {
+    use crate::services::discord::health::mailbox;
+    let snapshot = crate::services::discord::mailbox_snapshot(shared, channel_id).await;
+    mailbox::mailbox_agent_turn_status(
+        snapshot.cancel_token.is_some(),
+        mailbox::residual_occupancy(shared, channel_id, &snapshot),
+    )
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn kickoff_guard_skip_preserves_queue_and_arms_recovery() {
+    crate::services::discord::turn_finalizer::tests::with_isolated_runtime_root(|| async move {
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+        let channel_id = ChannelId::new(5_068_050);
+        let active_user_msg_id = 5_068_051;
+        let queued_user_msg_id = 5_068_052;
+        seed_active_with_queue(&shared, channel_id, active_user_msg_id, queued_user_msg_id).await;
+
+        let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
+        super::handle_idle_queue_guard_skip(&shared, &ProviderKind::Claude, channel_id, &snapshot)
+            .await;
+
+        let after = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
+        assert_eq!(
+            after.intervention_queue.len(),
+            1,
+            "guard skip must not dequeue"
+        );
+        assert_eq!(
+            after.intervention_queue[0].message_id.get(),
+            queued_user_msg_id
+        );
+        assert!(
+            shared
+                .restart
+                .deferred_hook_channels
+                .contains_key(&channel_id),
+            "guard skip with preserved backlog must leave a retry owner"
+        );
+    })
+    .await;
+}
+
+/// #5068 r3 (R2) — the state health used to be unable to name.
+///
+/// A residue with no terminal episode nonce is held by the reconciler FOREVER:
+/// no I/O gate clears, and nothing but a user cancel or a newer episode changes
+/// the answer. Before r3 `residual_occupancy` collapsed to a single bool, so
+/// this channel reported `active` — byte-identical to a turn that is simply
+/// running, which is precisely the case an operator most needs to spot. Health
+/// still refuses to claim `residual` (the reconciler will not act), but it now
+/// says the mailbox is held rather than pretending it is busy.
+#[tokio::test(flavor = "current_thread")]
+async fn health_names_the_permanently_held_residue_instead_of_calling_it_active() {
+    crate::services::discord::turn_finalizer::tests::with_isolated_runtime_root(|| async move {
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+        let channel_id = ChannelId::new(5_068_500);
+        let terminal_user_msg_id = 5_068_501;
+        seed_owner(
+            &shared,
+            channel_id,
+            5_068_502,
+            5_068_503,
+            Arc::new(CancelToken::from_persisted_turn_nonce(None)),
+        )
+        .await;
+        let mut nonceless_terminal = terminal_snapshot(terminal_user_msg_id, "");
+        nonceless_terminal.turn_nonce = None;
+
+        do_finalize(
+            TurnKey::new(channel_id, terminal_user_msg_id, 0),
+            ProviderKind::Claude,
+            &TerminalEvent::Complete,
+            FinalizeContext::bridge(),
+            Some(&nonceless_terminal),
+            &shared,
+        )
+        .await;
+        reconcile_once(&shared).await;
+
+        assert!(
+            crate::services::discord::mailbox_snapshot(&shared, channel_id)
+                .await
+                .cancel_token
+                .is_some(),
+            "fixture premise: the reconciler holds this residue and never resolves it"
+        );
+        assert_eq!(
+            health_status(&shared, channel_id).await,
+            "residual_held",
+            "an indefinitely stranded mailbox must not be reported as an ordinary active turn"
+        );
+    })
+    .await;
+}
+
+/// #5068 r3 (R3) — the documented asymmetry, on the shape that actually has an
+/// inflight row instead of one where the conjunct is vacuous.
+///
+/// `residual_occupancy` claims it does not consult the I/O evidence gates,
+/// because a residue waiting on a turn-bridge owner is transient and still worth
+/// showing. This pins that claim against the reconciler's real behaviour in the
+/// same fixture: the reconciler HOLDS (the row is on disk) and health
+/// nevertheless reports `residual`, not `active` and not `residual_held`.
+#[tokio::test(flavor = "current_thread")]
+async fn health_still_shows_residual_while_an_inflight_owner_holds_the_release() {
+    crate::services::discord::turn_finalizer::tests::with_isolated_runtime_root(|| async move {
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+        let channel_id = ChannelId::new(5_068_600);
+        let terminal_user_msg_id = 5_068_601;
+        let token = seed_active_with_queue(&shared, channel_id, 5_068_602, 5_068_603).await;
+        let nonce = token.turn_nonce().expect("fresh token nonce").to_string();
+        let inflight_row = seed_inflight_row(channel_id);
+
+        do_finalize(
+            TurnKey::new(channel_id, terminal_user_msg_id, 0),
+            ProviderKind::Claude,
+            &TerminalEvent::Complete,
+            FinalizeContext::bridge(),
+            Some(&terminal_snapshot(terminal_user_msg_id, &nonce)),
+            &shared,
+        )
+        .await;
+        reconcile_once(&shared).await;
+
+        assert!(
+            crate::services::discord::mailbox_snapshot(&shared, channel_id)
+                .await
+                .cancel_token
+                .is_some(),
+            "fixture premise: the inflight row makes the reconciler hold this tick"
+        );
+        assert_eq!(
+            health_status(&shared, channel_id).await,
+            "residual",
+            "a residue held only by an I/O gate stays visible as residual"
+        );
+
+        // And the label tracks the decider: once the gate clears and the
+        // reconciler releases, health stops reporting occupancy at all.
+        std::fs::remove_file(&inflight_row).expect("clear inflight row");
+        reconcile_once(&shared).await;
+        assert_eq!(health_status(&shared, channel_id).await, "idle");
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn guarded_miss_residue_reconcile_releases_same_terminal_episode_and_rearms_queue() {
     crate::services::discord::turn_finalizer::tests::with_isolated_runtime_root(|| async move {
