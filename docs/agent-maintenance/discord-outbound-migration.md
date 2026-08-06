@@ -1,5 +1,17 @@
 # Discord Outbound Migration — Coverage Map (#1006 v3 / #1280 / #1436 / #1457)
 
+> Last refreshed: 2026-08-06 (#5071 T1 S3b — the five **no-transport** watcher
+> frontier advances now record themselves. Silent-turn suppression, cancel-tombstone
+> suppression, fresh ready-for-input idle, post-terminal-without-inflight suppression
+> and the dead-tmux tail drain each advance the frontier with no POST, no attempt and
+> no receipt, so each emits `O`+`S` only and is never counted as Delivered. The
+> post-terminal arm re-enters with the same range on every poll pass, so its
+> observation shares the one-shot range test that already keeps its warning from
+> repeating. The non-lease committed-path advance in `tmux_watcher.rs` is deliberately
+> NOT one of these — its session-bound-delegation case really POSTed and the sink
+> family already journals it; a comment there records why. No delivery behaviour
+> changes, so the coverage rows below are unchanged.)
+
 > Last refreshed: 2026-08-06 (#5071 T1 S3a — the **watcher terminal family** joined the
 > shadow journal. The watcher's own leased direct send opens an obligation before
 > transport and settles it from the guarded delivery result, so only a `Persisted`

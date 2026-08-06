@@ -1,7 +1,12 @@
-//! #5071 T1 S3a — the watcher terminal family.
+//! #5071 T1 S3a/S3b — the watcher terminal family and the no-transport
+//! settlement sites.
 //!
-//! The watcher's own leased direct send really POSTs, so it opens an obligation
-//! with `O`+`A` before transport and settles it with `T`+`C` (or `U`) after.
+//! Two shapes, and the difference is the point. The **terminal delivery** path
+//! really POSTs: `O`+`A` before transport, `T`+`C` (or `U`) after. The
+//! **no-transport settlement** sites advance the watcher frontier with no POST,
+//! no attempt and no receipt: they emit `O`+`S` only, and Q3 is explicit that
+//! `SettledWithoutTransport` is NOT counted as Delivered.
+//!
 //! Shadow only: nothing here is read back by live delivery.
 
 use std::sync::Arc;
@@ -25,6 +30,37 @@ use super::{
 };
 
 pub(super) const TERMINAL_DISPOSITION: &str = "watcher_terminal";
+
+/// The disposition class of a frontier advance that transported nothing. Closed,
+/// so a new no-transport site cannot appear without naming itself, and so a
+/// repeated settlement's canonical payload is byte-identical.
+#[rustfmt::skip]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) enum SettlementReason {
+    /// `terminal_preflight.rs` — `silent_turn` suppressed the terminal output.
+    SilentTurnSuppressed,
+    /// `terminal_preflight.rs` — a recent turn stop tombstoned the output.
+    CancelTombstoneSuppressed,
+    /// `no_result_exits.rs` — structural / pane-idle completion with no body.
+    ReadyForInputFreshIdle,
+    /// `loop_poll_prologue.rs` — post-terminal output with no inflight.
+    PostTerminalNoInflightSuppressed,
+    /// `tmux.rs` — dead-tmux tail drained to EOF before watcher shutdown.
+    MissingInflightDeadTmuxDrain,
+}
+
+impl SettlementReason {
+    #[rustfmt::skip]
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SilentTurnSuppressed => "silent_turn_suppressed",
+            Self::CancelTombstoneSuppressed => "cancel_tombstone_suppressed",
+            Self::ReadyForInputFreshIdle => "ready_for_input_fresh_idle",
+            Self::PostTerminalNoInflightSuppressed => "post_terminal_no_inflight_suppressed",
+            Self::MissingInflightDeadTmuxDrain => "missing_inflight_dead_tmux_drain",
+        }
+    }
+}
 
 /// The coordinates a watcher observation is keyed on.
 ///
@@ -92,6 +128,60 @@ pub(super) fn admit(
         return None;
     }
     Some(pool)
+}
+
+/// The `O`+`S` pair for one no-transport settlement.
+///
+/// Pure and total: the same coordinates and reason yield the same `event_id`,
+/// `idempotency_key` and canonical payload every time, so a repeated advance of
+/// the same range lands on the same two `(obligation_id, event_seq)` slots and
+/// the 0103 `ON CONFLICT DO NOTHING` insert reports `DuplicateNoOp` instead of
+/// appending. `S` takes slot 1 — the slot `A` would have taken — which is what
+/// makes the two mutually exclusive.
+#[rustfmt::skip]
+pub(super) fn settlement_events(
+    coordinates: WatcherObligationCoordinates<'_>,
+    reason: SettlementReason,
+) -> Vec<JournalEvent> {
+    let disposition_class = reason.as_str();
+    let obligation_id = watcher_obligation_id(coordinates, disposition_class);
+    vec![
+        event(obligation_id, None, "O", 0, obligation_payload(coordinates, disposition_class)),
+        event(obligation_id, None, "S", 1, json!({"reason": disposition_class,
+            "frontier_start": coordinates.range.0, "frontier_end": coordinates.range.1})),
+    ]
+}
+
+/// Observe a frontier advance that transported nothing. Returns what it emitted
+/// so a test can assert on it; an empty return means shadow mode was off, there
+/// was no pool, or the cohort did not select this channel.
+pub(in crate::services::discord) fn settle_without_transport(
+    shared: &SharedData,
+    coordinates: WatcherObligationCoordinates<'_>,
+    reason: SettlementReason,
+) -> Vec<JournalEvent> {
+    let events = settlement_events(coordinates, reason);
+    let Some(pool) = admit(shared, coordinates.channel_id, events[0].obligation_id) else {
+        return Vec::new();
+    };
+    process_observer().submit(AppendCommand {
+        pool,
+        events: events.clone(),
+    });
+    events
+}
+
+/// `loop_poll_prologue` re-enters its suppression arm on every poll pass while
+/// the same bytes stay suppressed, and already tracks the last suppressed range
+/// to keep its warning one-shot. This is that same first-observation test, named
+/// so the settlement can share it: without it a stuck suppression would submit an
+/// `O`+`S` batch per pass and a mailbox of 256 would drop, which Q4 says
+/// invalidates the whole observation window.
+pub(in crate::services::discord) fn first_observation_of_suppressed_range(
+    last_suppressed_range: Option<(u64, u64)>,
+    suppressed_range: (u64, u64),
+) -> bool {
+    last_suppressed_range != Some(suppressed_range)
 }
 
 /// An open watcher terminal obligation, held across the POST by the watcher
@@ -196,6 +286,61 @@ mod watcher_terminal_semantics_tests {
             obligation_id: Uuid::from_u128(11), attempt_id: Uuid::from_u128(12), frontier: (10, 20),
             pool: sqlx::Pool::<sqlx::Postgres>::connect_lazy("postgres://localhost/agentdesk_test")
                 .expect("lazy test pool URL is valid") } })
+    }
+
+    const POST_TERMINAL: SettlementReason = SettlementReason::PostTerminalNoInflightSuppressed;
+
+    fn obligation_of(coordinates: WatcherObligationCoordinates<'_>, reason: SettlementReason) -> Uuid {
+        settlement_events(coordinates, reason)[0].obligation_id
+    }
+
+    /// W1 (kills M-W1). Q3 is explicit that `O`+`S` is not a delivery. A
+    /// settlement that grew an A/T/C would be counted as Delivered by the
+    /// verifier — the exact forgery this family can commit.
+    #[test]
+    fn w1_settlement_is_o_plus_s_only_and_is_not_delivered() {
+        let events = settlement_events(coordinates((10, 20)), SettlementReason::SilentTurnSuppressed);
+        assert_eq!(events.iter().map(|event| event.kind).collect::<Vec<_>>(), vec!["O", "S"],
+            "a no-transport settlement emits exactly O and S");
+        assert_eq!(events[1].seq, 1, "S takes the slot A would have taken");
+        assert!(events.iter().all(|event| event.attempt_id.is_none()),
+            "no attempt was started, so no event may carry an attempt id");
+        assert!(events.iter().all(|event| event.receipt.is_none()),
+            "nothing was transported, so no event may carry a receipt");
+        assert_eq!(classify_shadow_observation(&events, false), ShadowClassification::SettledWithoutTransport);
+        assert_ne!(classify_shadow_observation(&events, true), ShadowClassification::CandidateDelivered,
+            "an elapsed grace must not promote a settlement into a delivery");
+    }
+
+    /// W3 (kills M-W3). Settlement identity must move when the observation is
+    /// genuinely different, or every settlement in the process would collapse
+    /// onto one row.
+    #[test]
+    fn w3_settlement_identity_separates_range_reason_and_source() {
+        let base = obligation_of(coordinates((10, 20)), POST_TERMINAL);
+        let mut moved = coordinates((10, 21));
+        assert_ne!(base, obligation_of(moved, POST_TERMINAL), "a different end offset is a different observation");
+        moved.range = (11, 20);
+        assert_ne!(base, obligation_of(moved, POST_TERMINAL), "a different start offset is a different observation");
+        moved = coordinates((10, 20)); moved.generation_mtime_ns = 78;
+        assert_ne!(base, obligation_of(moved, POST_TERMINAL), "the same bytes under a new wrapper generation are new");
+        moved = coordinates((10, 20)); moved.channel_id = ChannelId::new(4_243);
+        assert_ne!(base, obligation_of(moved, POST_TERMINAL), "channel participates in obligation identity");
+        for reason in [SettlementReason::SilentTurnSuppressed, SettlementReason::CancelTombstoneSuppressed,
+                       SettlementReason::ReadyForInputFreshIdle, SettlementReason::MissingInflightDeadTmuxDrain] {
+            assert_ne!(base, obligation_of(coordinates((10, 20)), reason),
+                "{reason:?} is a different disposition class over the same range");
+        }
+    }
+
+    /// W4 (kills M-W4). A settlement and a real delivery over the SAME range must
+    /// not share an obligation, or the delivery's `A` and the settlement's `S`
+    /// would compete for slot 1 and one would be an `InvariantConflict`.
+    #[test]
+    fn w4_settlement_and_terminal_delivery_are_separate_obligations() {
+        assert_ne!(obligation_of(coordinates((10, 20)), POST_TERMINAL),
+            watcher_obligation_id(coordinates((10, 20)), TERMINAL_DISPOSITION),
+            "the delivery and suppression dispositions are distinct obligations");
     }
 
     /// W5 (kills M-W5). Journalling `AdvancedWithoutProof` as delivered is the
