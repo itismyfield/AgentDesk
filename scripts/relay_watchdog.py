@@ -982,6 +982,7 @@ def _channel_has_live_delivery(
     exclude_path: str,
     now: float,
     gap_alert_secs: int,
+    newer_than: float = 0.0,
 ) -> bool:
     """Is some OTHER transcript on this channel demonstrably still delivering?
 
@@ -998,6 +999,22 @@ def _channel_has_live_delivery(
     carries only what this tick actually matched. When the relay is genuinely
     down nothing matches, this returns False, and the gap alert proceeds
     untouched.
+
+    KNOWN LIMIT of the `gap_alert_secs` bound (#5190 R3 P2-D). The timestamps in
+    `current_delivered_by_path` are block WRITE epochs, not delivery times. A
+    match proves the block was delivered somewhere in `[epoch, now]`, so the
+    bound really says "a delivery happened within the last `gap_alert_secs`" —
+    NOT "a delivery is happening now". An idle sibling whose last block was
+    written `gap_alert_secs - 1` ago and is still inside the bounded Discord
+    read window therefore keeps voting "alive" for that whole span, even if the
+    relay died immediately after. Nothing in the haystack carries a Discord
+    message timestamp, so this cannot be tightened here.
+
+    `newer_than` is how the caller closes that window when it matters: passing
+    the tick a finding was first made requires a match whose block was WRITTEN
+    after that moment, which no relay that was already dead could have produced.
+    It is a lower bound on the evidence, not a replacement for the freshness
+    bound above — both must hold.
     """
     for candidate, verdict in evaluated:
         path = str(candidate.path)
@@ -1009,6 +1026,8 @@ def _channel_has_live_delivery(
             continue
         matched_ts = current_delivered_by_path.get(path, 0.0)
         if matched_ts <= 0.0:
+            continue
+        if matched_ts <= newer_than:
             continue
         if now - matched_ts > gap_alert_secs:
             continue
@@ -3713,9 +3732,24 @@ def _alert_pending_retirement(
     now: float,
     *,
     reason: str,
-) -> bool:
+) -> str:
+    """Send a retirement notice; report WHY it did or did not go out.
+
+    #5190 R3 P2-E: this used to answer a bare bool, and every caller read the
+    False as "nobody could be told". Two very different things produce it. A
+    send failure means the notice never left the box. A cooldown hit means the
+    box is fine and something else — possibly an unrelated `idle` or
+    `read_failure` retirement on the SAME shared cooldown key — spoke within
+    `realert_secs`. Callers gate identically on both (neither is a notice about
+    THESE paths), but the log line must not call a cooldown an undelivered
+    message: that is a false statement about the relay's health, which is the
+    exact defect class this campaign keeps closing.
+
+    Returns one of: `"sent"`, `"cooldown"`, `"undelivered"`, `"empty"`. Only
+    `"sent"` means someone was told about `paths`.
+    """
     if not paths:
-        return False
+        return "empty"
     raw_last_alert = channel_state.get(
         LAST_PENDING_TRANSCRIPT_RETIREMENT_ALERT_KEY, 0.0
     )
@@ -3729,7 +3763,7 @@ def _alert_pending_retirement(
             f"[{ch.channel_id}] transcript-retirement-alert suppressed "
             f"reason={reason} count={len(paths)} cooldown"
         )
-        return False
+        return "cooldown"
     if reason == "idle":
         title = "릴레이 트랜스크립트 평가 권한 만료"
         detail = (
@@ -3776,9 +3810,9 @@ def _alert_pending_retirement(
             f"[{ch.channel_id}] transcript-retirement-alert undelivered "
             f"reason={reason} count={len(paths)}"
         )
-        return False
+        return "undelivered"
     channel_state[LAST_PENDING_TRANSCRIPT_RETIREMENT_ALERT_KEY] = now
-    return True
+    return "sent"
 
 
 def _reset_issue_filing_suppression(channel_state: dict[str, Any]) -> None:
@@ -3990,13 +4024,14 @@ def _retire_dead_worktree_authorities(
     # would otherwise swallow this one and close the incident in total silence.
     # Nothing below has mutated state yet, so deferring simply retries next tick
     # with the absence window intact.
-    if not _alert_pending_retirement(
+    dead_notice = _alert_pending_retirement(
         rt, ch, chs, dead, now, reason=DEAD_WORKTREE_RETIREMENT_REASON
-    ):
+    )
+    if dead_notice != "sent":
         _store_worktree_absences(chs, next_absences)
         rt.log(
             f"[{cid}] dead-worktree-retirement-deferred "
-            f"reason=notice_undelivered count={len(dead)}"
+            f"notice={dead_notice} count={len(dead)}"
         )
         return []
 
@@ -4510,9 +4545,23 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         rt.log(
             f"[{cid}] transcript-pending-expired count={len(expired_pending_paths)}"
         )
-        _alert_pending_retirement(
+        # #5190 R3 R7 — TWO CONVENTIONS NOW COEXIST IN THIS FILE, on purpose and
+        # under protest. This path retires FIRST and notifies second; the
+        # orphan-stranded and dead-worktree retirements below treat the notice
+        # AS the retirement and defer the whole thing when nobody was told.
+        # Aligning this one means deferring state that the block above has
+        # already mutated, which is a distinct change with its own regression
+        # surface and is tracked as a #5190 follow-up. What does not wait is
+        # saying so: an unannounced retirement is logged rather than dropped, so
+        # the divergence is visible in the record instead of being silent.
+        idle_notice = _alert_pending_retirement(
             rt, ch, chs, expired_pending_paths, now, reason="idle"
         )
+        if idle_notice != "sent":
+            rt.log(
+                f"[{cid}] transcript-pending-expired-unannounced "
+                f"notice={idle_notice} count={len(expired_pending_paths)}"
+            )
         _clear_gap_alert_without_recovery(
             rt, chs, cid, expired_pending_paths
         )
@@ -4905,7 +4954,9 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             f"[{cid}] transcript-pending-escalated "
             f"count={len(escalated_pending_paths)}"
         )
-        _alert_pending_retirement(
+        # Same divergence as the idle expiry above (#5190 R3 R7): retired first,
+        # announced second. Logged rather than silently dropped.
+        escalated_notice = _alert_pending_retirement(
             rt,
             ch,
             chs,
@@ -4913,6 +4964,11 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             now,
             reason="read_failure",
         )
+        if escalated_notice != "sent":
+            rt.log(
+                f"[{cid}] transcript-pending-escalated-unannounced "
+                f"notice={escalated_notice} count={len(escalated_pending_paths)}"
+            )
         _clear_gap_alert_without_recovery(
             rt, chs, cid, escalated_pending_paths
         )
@@ -5010,6 +5066,9 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     # last part, so nothing below can silence a real outage.
     stranded_since = _validated_orphan_stranded_since(chs)
     orphan_unattributable_paths: set[str] = set()
+    # Paths whose stranded finding is re-corroborated on THIS tick, and so the
+    # only ones a matured marker may actually close out (#5190 R3 P2-A).
+    orphan_corroborated_paths: set[str] = set()
     for candidate, verdict in evaluated:
         path = str(candidate.path)
         # The freeze floor is load-bearing, not cosmetic. Without it this same
@@ -5023,7 +5082,29 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         # strictly stronger bar: twice the freeze floor, a delivery frontier
         # that has itself gone a full freeze floor without advancing (it is not
         # simply lagging), and dcserver proving the channel has moved to another
-        # session. Every one of those is falsified by a live relay outage.
+        # session.
+        #
+        # #5190 R3 P2-B — what those three actually are. An earlier revision of
+        # this comment claimed "every one of those is falsified by a live relay
+        # outage". That was false, and false in the direction that flatters the
+        # code:
+        #   · the doubled freeze floor is a TIME FILTER. An outage neither
+        #     satisfies nor falsifies it; it only sets how long a corpse must
+        #     lie still before anyone may say so.
+        #   · the stale delivery frontier is an ANTI-LAGGING filter. An outage
+        #     does not falsify it — an outage SATISFIES it, because a frontier
+        #     that stops advancing is exactly what a stopped relay produces. It
+        #     argues FOR the marker during an outage, not against it.
+        #   · successor binding is evidence of SESSION ROTATION, not of
+        #     delivery. The watcher stays bound to the current session while the
+        #     relay is stone dead, so dcserver goes on answering yes.
+        # Exactly one check in this mechanism can tell a dead session from a
+        # dead relay: `_channel_has_live_delivery` — a SIBLING transcript
+        # matching a block of its own in THIS tick's haystack. It holds that
+        # line alone. Everything above only decides who is eligible to be asked;
+        # that one call is the only thing that answers, which is why it is
+        # re-run before any marker is allowed to close (#5190 R3 P2-A) and why
+        # its own freshness limits are documented rather than glossed.
         observed_history = not gap_is_unobserved(verdict)
         freeze_floor = cfg.orphan_abandon_secs * (
             ORPHAN_OBSERVED_FREEZE_MULTIPLIER if observed_history else 1
@@ -5047,18 +5128,27 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             if stranded_since.pop(path, None) is not None:
                 rt.log(f"[{cid}] orphan-stranded-marker-cleared path={path}")
             continue
-        if path not in stranded_since and not _channel_has_live_delivery(
-            evaluated,
-            fresh_undelivered_by_path,
-            current_delivered_by_path,
-            path,
-            now,
-            cfg.gap_alert_secs,
-        ):
-            # No corroborating delivery anywhere on the channel — this may well
-            # be a live outage. Leave it to the normal gap path.
-            continue
-        if path not in stranded_since:
+        # #5190 R3 P2-A: the marker records a finding made on ONE earlier tick,
+        # and `_orphan_authority_matured` only asks whether the clock has run
+        # out since. Everything that justified opening it has to still hold at
+        # the moment it is cashed in, or the retirement rests on evidence nobody
+        # re-read. Reaching this line already re-establishes ①③ and the freeze
+        # floor for this tick — `eligible` above is the very predicate that
+        # opened the marker — so what is left to re-prove is ④, which is also
+        # the only one of them a relay outage can falsify.
+        marker_since = stranded_since.get(path)
+        if marker_since is None:
+            if not _channel_has_live_delivery(
+                evaluated,
+                fresh_undelivered_by_path,
+                current_delivered_by_path,
+                path,
+                now,
+                cfg.gap_alert_secs,
+            ):
+                # No corroborating delivery anywhere on the channel — this may
+                # well be a live outage. Leave it to the normal gap path.
+                continue
             stranded_since[path] = now
             rt.log(
                 f"[{cid}] orphan-stranded-marker-opened path={path} "
@@ -5066,25 +5156,87 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
                 f"observed_history={observed_history} "
                 f"freeze_floor={int(freeze_floor)}s"
             )
+        elif _channel_has_live_delivery(
+            evaluated,
+            fresh_undelivered_by_path,
+            current_delivered_by_path,
+            path,
+            now,
+            cfg.gap_alert_secs,
+            newer_than=marker_since,
+        ):
+            # Corroboration strong enough to CLOSE on, which is a stricter thing
+            # than the corroboration that opened the marker: the sibling's block
+            # was WRITTEN after the finding was made, so no relay that had
+            # already died by then could have delivered it. This is what shuts
+            # the write-epoch window documented on `_channel_has_live_delivery`
+            # (#5190 R3 P2-D), where an idle sibling's one old-but-still-matched
+            # block could vote "alive" for a full `gap_alert_secs` — longer than
+            # the confirmation window it would have been carrying.
+            orphan_corroborated_paths.add(path)
         orphan_unattributable_paths.add(path)
-    if orphan_retired_paths and not _alert_pending_retirement(
-        rt,
-        ch,
-        chs,
-        orphan_retired_paths,
-        now,
-        reason=ORPHAN_STRANDED_RETIREMENT_REASON,
-    ):
-        # #5190 R1: the notice IS the retirement. Retiring anyway would drop the
-        # pending authority, clear the gap, and delete the only surviving record
-        # of these blocks with nobody ever told — an observation failure
-        # collapsed into a success. The marker survives untouched, so the next
-        # tick resumes from exactly here and the alert keeps firing meanwhile.
-        rt.log(
-            f"[{cid}] orphan-stranded-retirement-deferred "
-            f"count={len(orphan_retired_paths)} notice=undelivered"
+    if orphan_retired_paths:
+        # #5190 R3 P2-A: a matured marker is a claim, not a licence. Three
+        # shapes reach here with an expired timer and no corroboration this
+        # tick, and all three used to retire anyway:
+        #   (a) the channel stopped delivering after the marker was opened — a
+        #       live outage read as proof of abandonment, which is precisely the
+        #       inversion this whole mechanism is built to avoid;
+        #   (b) the orphan was PROMOTED to this channel's active session, so
+        #       retiring it drops the channel's gap ownership to zero and the
+        #       currently-running session loses its own loss record;
+        #   (c) the path went unevaluated for a tick and came back to find its
+        #       timer already run out, closing without ④ ever being asked.
+        # (a) and (c) fail the ④ re-check below; (b) never reaches it, because
+        # `eligible` above rejects a selected path and clears its marker.
+        unconfirmed = [
+            path
+            for path in orphan_retired_paths
+            if path not in orphan_corroborated_paths
+        ]
+        if unconfirmed:
+            # The marker itself survives: the finding may well still be true,
+            # and nothing about this tick disproves it. What it no longer does
+            # is close anything out on its own authority.
+            rt.log(
+                f"[{cid}] orphan-stranded-maturity-unconfirmed "
+                f"count={len(unconfirmed)} selected={selected_path} "
+                f"paths={','.join(sorted(unconfirmed))}"
+            )
+            orphan_retired_paths = [
+                path
+                for path in orphan_retired_paths
+                if path in orphan_corroborated_paths
+            ]
+    if orphan_retired_paths:
+        orphan_notice = _alert_pending_retirement(
+            rt,
+            ch,
+            chs,
+            orphan_retired_paths,
+            now,
+            reason=ORPHAN_STRANDED_RETIREMENT_REASON,
         )
-        orphan_retired_paths = []
+        if orphan_notice != "sent":
+            # #5190 R1: the notice IS the retirement. Retiring anyway would drop
+            # the pending authority, clear the gap, and delete the only
+            # surviving record of these blocks with nobody ever told — an
+            # observation failure collapsed into a success. The marker survives
+            # untouched, so the next tick resumes from exactly here and the
+            # alert keeps firing meanwhile.
+            #
+            # #5190 R3 P2-E: `notice=` reports WHICH of those happened.
+            # `undelivered` means the message never left the box; `cooldown`
+            # means it was suppressed by the retirement cooldown key that all
+            # reasons share, so an unrelated idle/read_failure/dead_worktree
+            # notice within `realert_secs` delays this one by up to that long.
+            # The old line said `notice=undelivered` for both, which made the
+            # log lie about the relay in the cooldown case.
+            rt.log(
+                f"[{cid}] orphan-stranded-retirement-deferred "
+                f"count={len(orphan_retired_paths)} notice={orphan_notice}"
+            )
+            orphan_retired_paths = []
     if orphan_retired_paths:
         retired_orphans = set(orphan_retired_paths)
         for path in orphan_retired_paths:
@@ -5351,7 +5503,17 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             # the relay's health; that claim belongs to the delivering sibling,
             # which is a separate check. A true enumeration beats a false
             # universal.
-            not_selected = bool(selected_path) and verdict_path != selected_path
+            # #5190 R3 P2-F: this is a THREE-state question, not two. There is a
+            # tick on which `selected_path` is None — reached whenever the
+            # selected transcript expires out of the pending set in this very
+            # pass, because `tr` is cleared there and `selected` is resolved
+            # from it immediately after, while a different path keeps its GAP
+            # ownership and stays the alert subject. Folding that case into the
+            # `not not_selected` arm rendered "대상 세션: X (현재 활성 세션)" on a
+            # channel with no active session at all — an unproven PRESENTNESS
+            # asserted, the exact mirror of the unproven pastness R5 removed.
+            selection_known = bool(selected_path)
+            not_selected = selection_known and verdict_path != selected_path
             frozen_secs = max(0.0, now - verdict_candidate.mtime)
             frozen_min = int(frozen_secs) // 60
             orphan_gap = (
@@ -5372,7 +5534,22 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
                 if orphan_gap
                 else "🚨 **릴레이 갭 감지 (out-of-band 워치독)**"
             )
-            if not not_selected:
+            if not selection_known:
+                scope_line = (
+                    f"대상 세션: `{Path(verdict_path).name}` — 이 채널에는 현재 "
+                    "활성 세션으로 판정된 트랜스크립트가 없습니다(이번 점검에서 "
+                    "선택 권한이 확정되지 않음). 따라서 이 경로가 활성 세션인지 "
+                    "과거 세션인지는 이번 점검으로 판정되지 않았습니다.\n"
+                    + (
+                        "이 채널의 다른 세션은 이번 점검에서 실제로 배달이 "
+                        "확인됐습니다 — 릴레이 전체 장애가 아니라 이 "
+                        "트랜스크립트의 미도달 블록 문제입니다.\n"
+                        if delivering_elsewhere
+                        else "이 채널에서 지금 배달 중인 다른 세션은 확인되지 "
+                        "않았습니다 — 릴레이 장애 가능성이 남아 있습니다.\n"
+                    )
+                )
+            elif not not_selected:
                 scope_line = (
                     f"대상 세션: `{Path(verdict_path).name}` (현재 활성 세션).\n"
                 )

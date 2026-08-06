@@ -5629,6 +5629,608 @@ class TickChannelTests(unittest.TestCase):
         self.assertIn("릴레이 장애 가능성이 남아 있습니다", body)
         self.assertNotIn("실제로 배달이 확인됐습니다", body)
 
+    # ── #5190 R3: a matured marker is a claim, and claims get re-checked ─────
+    #
+    # r2 re-verified STATE_GAP and semantic growth at maturity and stopped
+    # there, so three of the four conditions that justified OPENING the marker
+    # were never asked again before it was cashed in. Each test below is one of
+    # the ways that let a retirement — a user-facing "회수 불가" statement — be
+    # made on evidence nobody had re-read.
+
+    def _5190_marker_open(
+        self, rt: FakeRuntime, state: dict, live: Path, orphan: Path
+    ) -> float:
+        """Tick the channel to the point where the stranded marker is open."""
+        discovered_at = self.now + rt.cfg.orphan_abandon_secs + 600
+        self._5190_strand_orphan(orphan, self.now)
+        self._5190_live_delivery(rt, live, discovered_at, "live block two")
+        tick_channel(rt, TICK_CHANNEL, state, discovered_at)
+        self.assertIn(str(orphan), state["999"][self.ORPHAN_STRANDED_KEY])
+        return discovered_at
+
+    def test_5190_r3_a_matured_marker_does_not_close_through_an_outage(self):
+        """(a) The relay dies inside the confirmation window.
+
+        The marker was opened on proof that a sibling was delivering. If that
+        stops being true before the window elapses, the finding has lost the
+        one piece of evidence that distinguished a dead session from a dead
+        relay — and retiring anyway sends "회수 불가" about blocks whose only
+        real problem is that the relay is down. This is the exact inversion the
+        whole mechanism exists to prevent.
+        """
+        rt, state, live, orphan = self._5190_live_channel()
+        chs = state["999"]
+        discovered_at = self._5190_marker_open(rt, state, live, orphan)
+
+        outage_at = (
+            discovered_at + relay_watchdog.ORPHAN_STRANDED_CONFIRM_SECS + 400
+        )
+        with live.open("a", encoding="utf-8") as stream:
+            stream.write(
+                self._5190_record(outage_at - 700, "live block lost in outage")
+                + "\n"
+            )
+        os.utime(live, (outage_at, outage_at))
+        tick_channel(rt, TICK_CHANNEL, state, outage_at)
+
+        self.assertNotIn(
+            str(orphan), chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {})
+        )
+        self.assertEqual([b for b, _ in rt.alerts if "회수 불가" in b], [])
+        # The finding is not disproved either — the marker survives, so the
+        # first tick that can prove it again completes the retirement.
+        self.assertIn(str(orphan), chs.get(self.ORPHAN_STRANDED_KEY, {}))
+        self.assertTrue(
+            any(
+                "orphan-stranded-maturity-unconfirmed" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+        # And the outage is loud, not silent.
+        self.assertTrue(chs.get("alerting"))
+
+    def test_5190_r3_a_pre_marker_delivery_cannot_corroborate_a_retirement(self):
+        """(a') The write-epoch window — #5190 R3 P2-D's 900-second blind spot.
+
+        `current_delivered_by_path` holds block WRITE epochs, not delivery
+        times, so an idle sibling whose last block still matches keeps voting
+        "the relay is alive" for a full `gap_alert_secs`. That is LONGER than
+        the confirmation window it is carrying, so a relay that died the moment
+        the marker opened was indistinguishable from a healthy one for the
+        entire window. Nothing here writes a new block; the only evidence is a
+        match that predates the finding.
+        """
+        rt, state, live, orphan = self._5190_live_channel()
+        chs = state["999"]
+        discovered_at = self._5190_marker_open(rt, state, live, orphan)
+
+        retire_at = (
+            discovered_at + relay_watchdog.ORPHAN_STRANDED_CONFIRM_SECS
+        )
+        # The sibling's newest matched block is the one from the marker tick,
+        # and it is still inside the freshness bound — or this proves nothing.
+        self.assertLess(
+            retire_at - (discovered_at - 30),
+            rt.cfg.gap_alert_secs,
+            "stale match must still pass the freshness bound",
+        )
+        tick_channel(rt, TICK_CHANNEL, state, retire_at)
+
+        self.assertNotIn(
+            str(orphan), chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {})
+        )
+        self.assertEqual([b for b, _ in rt.alerts if "회수 불가" in b], [])
+        self.assertIn(str(orphan), chs.get(self.ORPHAN_STRANDED_KEY, {}))
+        self.assertTrue(
+            any(
+                "orphan-stranded-maturity-unconfirmed" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+
+    def test_5190_r3_an_orphan_promoted_to_the_active_session_is_not_retired(
+        self,
+    ):
+        """(b) The orphan IS the channel's current session by the time it matures.
+
+        The worst of the three: retiring the selected transcript drops the
+        channel's GAP ownership to zero, so the session that is running RIGHT
+        NOW loses its own loss record and the incident closes with nobody told.
+        `eligible` already rejects a selected path — what was missing is that
+        maturity never consulted it.
+        """
+        rt, state, live, orphan = self._5190_live_channel()
+        chs = state["999"]
+        discovered_at = self._5190_marker_open(rt, state, live, orphan)
+
+        # The live transcript is gone, so the selector falls back to the only
+        # candidate left: the orphan itself.
+        live.unlink()
+        retire_at = (
+            discovered_at + relay_watchdog.ORPHAN_STRANDED_CONFIRM_SECS
+        )
+        tick_channel(rt, TICK_CHANNEL, state, retire_at)
+
+        self.assertEqual(chs.get(SELECTED_TRANSCRIPT_KEY), str(orphan))
+        self.assertNotIn(
+            str(orphan), chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {})
+        )
+        self.assertEqual([b for b, _ in rt.alerts if "회수 불가" in b], [])
+        # Gap ownership did NOT drop to zero.
+        self.assertIn(
+            str(orphan), chs.get(relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY, [])
+        )
+        self.assertTrue(
+            any(
+                "orphan-stranded-marker-cleared" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+
+    def test_5190_r3_a_marker_that_matured_unevaluated_still_needs_proof(self):
+        """(c) The path was not judged for a tick and came back to an expired timer.
+
+        The marker is persisted state and its clock does not care whether
+        anyone was looking. A path that drops out of the candidate set for a
+        tick — a transient enumeration or read failure — returns to find the
+        window already elapsed, and the pre-fix code closed it out on the first
+        tick that saw it again, without ④ ever having been asked since the
+        finding was made.
+        """
+        rt, state, live, orphan = self._5190_live_channel()
+        chs = state["999"]
+        discovered_at = self._5190_marker_open(rt, state, live, orphan)
+        content = orphan.read_text(encoding="utf-8")
+
+        orphan.unlink()
+        tick_channel(rt, TICK_CHANNEL, state, discovered_at + 60)
+        self.assertIn(str(orphan), chs.get(self.ORPHAN_STRANDED_KEY, {}))
+
+        orphan.write_text(content, encoding="utf-8")
+        os.utime(orphan, (self.now, self.now))
+        back_at = discovered_at + relay_watchdog.ORPHAN_STRANDED_CONFIRM_SECS
+        tick_channel(rt, TICK_CHANNEL, state, back_at)
+
+        self.assertNotIn(
+            str(orphan), chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {})
+        )
+        self.assertEqual([b for b, _ in rt.alerts if "회수 불가" in b], [])
+
+        # A deferral, not a dead end: a tick that CAN prove the channel is
+        # delivering completes exactly the same retirement.
+        proven_at = back_at + 60
+        self._5190_live_delivery(rt, live, proven_at, "live block three")
+        tick_channel(rt, TICK_CHANNEL, state, proven_at)
+        self.assertIn(
+            str(orphan), chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {})
+        )
+        self.assertEqual(
+            len([b for b, _ in rt.alerts if "회수 불가" in b]), 1, rt.alerts
+        )
+
+    def test_5190_r3_reverse_a_fully_corroborated_orphan_still_retires(self):
+        """THE reverse direction for every re-check added above.
+
+        Four new conditions now stand between a matured marker and a
+        retirement, and a guard that can never be satisfied is not a guard —
+        it is the #5190 defect with extra steps. A genuine orphan on a
+        genuinely delivering channel must still close out, in one notice, with
+        no unconfirmed deferral anywhere in the log.
+        """
+        rt, state, live, orphan = self._5190_live_channel()
+        chs = state["999"]
+        self._5190_retire_orphan(rt, state, live, orphan)
+
+        self.assertIn(
+            str(orphan), chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {})
+        )
+        self.assertNotIn(str(orphan), chs.get(self.ORPHAN_STRANDED_KEY, {}))
+        self.assertEqual(
+            len([b for b, _ in rt.alerts if "회수 불가" in b]), 1, rt.alerts
+        )
+        self.assertFalse(
+            any(
+                "orphan-stranded-maturity-unconfirmed" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+        self.assertTrue(
+            any(
+                "orphan-stranded-authority-retired" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+
+    def test_5190_r3_a_marker_may_not_close_before_the_confirmation_window(
+        self,
+    ):
+        """⑤ on its own: the window is what makes one anomalous tick harmless.
+
+        Everything else the retirement needs is true here — the orphan is
+        frozen, unselected, still in GAP, and the channel is delivering fresh
+        blocks. Only the clock has not run out. Nothing may close.
+        """
+        rt, state, live, orphan = self._5190_live_channel()
+        chs = state["999"]
+        discovered_at = self._5190_marker_open(rt, state, live, orphan)
+
+        early_at = (
+            discovered_at + relay_watchdog.ORPHAN_STRANDED_CONFIRM_SECS - 60
+        )
+        self._5190_live_delivery(rt, live, early_at, "live block three")
+        tick_channel(rt, TICK_CHANNEL, state, early_at)
+
+        self.assertNotIn(
+            str(orphan), chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {})
+        )
+        self.assertIn(str(orphan), chs.get(self.ORPHAN_STRANDED_KEY, {}))
+        self.assertEqual([b for b, _ in rt.alerts if "회수 불가" in b], [])
+        self.assertFalse(
+            any(
+                "orphan-stranded-authority-retired" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+
+        # ...and the tick that DOES reach the window closes it, so this pins
+        # the window rather than "nothing ever retires".
+        retire_at = (
+            discovered_at + relay_watchdog.ORPHAN_STRANDED_CONFIRM_SECS
+        )
+        self._5190_live_delivery(rt, live, retire_at, "live block four")
+        tick_channel(rt, TICK_CHANNEL, state, retire_at)
+        self.assertIn(
+            str(orphan), chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {})
+        )
+
+    def test_5190_r3_live_delivery_freshness_bound_rejects_a_stale_match(self):
+        """② of `_channel_has_live_delivery`, exercised on its own.
+
+        Every end-to-end test reaches this helper through the `matched_ts <=
+        0.0` branch (an empty haystack), so the freshness clause — the
+        difference between "this sibling matched something" and "this sibling
+        matched something RECENTLY" — was never executed by any assertion.
+        Deleting it changed no test result, which is the definition of an
+        untested safeguard. The reachable production shape is an idle sibling
+        whose old block is still inside the bounded Discord read window.
+        """
+        now = 1_000_000.0
+        gap_alert_secs = 900
+        sibling = relay_watchdog.TranscriptCandidate(
+            path=Path("/tmp/sibling.jsonl"), size=10, mtime=now
+        )
+        verdict = relay_watchdog.Verdict(
+            state=relay_watchdog.STATE_OK,
+            blocks=1,
+            stale=0,
+            lost=0,
+            delivered_ts=now - 10,
+            gap_secs=10.0,
+        )
+        evaluated = [(sibling, verdict)]
+
+        def probe(matched_ts: float, **kwargs) -> bool:
+            return relay_watchdog._channel_has_live_delivery(
+                evaluated,
+                {},
+                {str(sibling.path): matched_ts},
+                "/tmp/orphan.jsonl",
+                now,
+                gap_alert_secs,
+                **kwargs,
+            )
+
+        self.assertTrue(probe(now))
+        self.assertTrue(probe(now - (gap_alert_secs - 1)))
+        # The boundary is inclusive on the fresh side...
+        self.assertTrue(probe(now - gap_alert_secs))
+        # ...and one second past it the match is no longer evidence that
+        # anything is delivering now.
+        self.assertFalse(probe(now - (gap_alert_secs + 1)))
+
+        # `newer_than` is a SEPARATE, stricter lower bound: it does not replace
+        # the freshness bound, and neither one alone is sufficient.
+        self.assertFalse(probe(now - 100, newer_than=now - 50))
+        self.assertTrue(probe(now - 30, newer_than=now - 50))
+        self.assertFalse(probe(now - (gap_alert_secs + 1), newer_than=0.0))
+
+    def test_5190_r3_retirement_notice_reports_cooldown_apart_from_failure(
+        self,
+    ):
+        """#5190 R3 P2-E: "nothing went out" has two causes, not one.
+
+        The retirement notice shares ONE cooldown key across every reason, so
+        an unrelated idle/read_failure/dead_worktree notice within
+        `realert_secs` suppresses this one. The old code answered a bare bool
+        and the caller logged `notice=undelivered` for both — a false statement
+        about the relay written into the record every time the real cause was a
+        cooldown.
+        """
+        rt = self.make_rt()
+        chs: dict = {}
+        now = self.now
+
+        self.assertEqual(
+            relay_watchdog._alert_pending_retirement(
+                rt, TICK_CHANNEL, chs, [], now, reason="idle"
+            ),
+            "empty",
+        )
+        self.assertEqual(
+            relay_watchdog._alert_pending_retirement(
+                rt, TICK_CHANNEL, chs, ["/a.jsonl"], now, reason="idle"
+            ),
+            "sent",
+        )
+        # A DIFFERENT reason, moments later, on the shared key.
+        self.assertEqual(
+            relay_watchdog._alert_pending_retirement(
+                rt,
+                TICK_CHANNEL,
+                chs,
+                ["/b.jsonl"],
+                now + 60,
+                reason=relay_watchdog.ORPHAN_STRANDED_RETIREMENT_REASON,
+            ),
+            "cooldown",
+        )
+        self.assertFalse(
+            any(
+                "transcript-retirement-alert undelivered" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+
+        rt.alert_succeeds = False
+        self.assertEqual(
+            relay_watchdog._alert_pending_retirement(
+                rt,
+                TICK_CHANNEL,
+                chs,
+                ["/c.jsonl"],
+                now + rt.cfg.realert_secs + 1,
+                reason="idle",
+            ),
+            "undelivered",
+        )
+        self.assertTrue(
+            any(
+                "transcript-retirement-alert undelivered" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+
+    def test_5190_r3_orphan_retirement_deferred_by_cooldown_says_cooldown(self):
+        """The same distinction where a human reads it: the deferral log line."""
+        rt, state, live, orphan = self._5190_live_channel()
+        chs = state["999"]
+        discovered_at = self._5190_marker_open(rt, state, live, orphan)
+
+        retire_at = (
+            discovered_at + relay_watchdog.ORPHAN_STRANDED_CONFIRM_SECS
+        )
+        self._5190_live_delivery(rt, live, retire_at, "live block three")
+        # An unrelated retirement notice went out moments ago on the shared key.
+        chs[relay_watchdog.LAST_PENDING_TRANSCRIPT_RETIREMENT_ALERT_KEY] = (
+            retire_at - 10
+        )
+        tick_channel(rt, TICK_CHANNEL, state, retire_at)
+
+        self.assertNotIn(
+            str(orphan), chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {})
+        )
+        self.assertTrue(
+            any(
+                "orphan-stranded-retirement-deferred" in line
+                and "notice=cooldown" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+        self.assertFalse(
+            any("notice=undelivered" in line for line in rt.log_lines),
+            rt.log_lines,
+        )
+
+    def test_5190_r3_a_rewound_mtime_cannot_manufacture_an_orphan(self):
+        """② alone, where it is the ONLY thing holding the line (#5190 R3 P2-C).
+
+        Safeguard ① (the doubled freeze floor) reads `mtime` — filesystem
+        METADATA, which any restore can set to whatever it likes: `cp -p`,
+        `rsync -t` and `tar -x` all stamp a file with an mtime older than the
+        newest record it actually contains. Safeguard ② reads the block
+        timestamps the watchdog parsed out of the file's CONTENT, so it is the
+        one check a rewound mtime cannot fool.
+
+        On honest metadata ② is slack — ① implies it, which is why forcing ②
+        true changed no test result before this one existed. Here the metadata
+        lies: the file claims to have been frozen for over an hour while its
+        own records show it delivering 16 minutes ago. ① passes. Only ② stands
+        between a live session and a "회수 불가" notice about its blocks.
+        """
+        rt, state, live, orphan = self._5190_live_channel()
+        chs = state["999"]
+        at = self.now + 4000
+        floor = rt.cfg.orphan_abandon_secs * (
+            relay_watchdog.ORPHAN_OBSERVED_FREEZE_MULTIPLIER
+        )
+
+        # Content: delivered 1000s ago, stranded a block 950s ago. That gap is
+        # past `gap_alert_secs` (so STATE_GAP) but well inside
+        # `orphan_abandon_secs` (so the frontier is NOT stale).
+        orphan.write_text(
+            self._5190_record(at - 1000, "orphan block that did arrive")
+            + "\n"
+            + self._5190_record(at - 950, "orphan block stranded")
+            + "\n",
+            encoding="utf-8",
+        )
+        rt.haystack = norm(f"{rt.haystack} orphan block that did arrive")
+        # Metadata: rewound to look frozen for over an hour.
+        os.utime(orphan, (at - 3700, at - 3700))
+        self._5190_live_delivery(rt, live, at, "live block two")
+        rt.watcher_probe = WatcherStateProbe(
+            200, attached=True, desynced=False, bound_output_path=str(live)
+        )
+        tick_channel(rt, TICK_CHANNEL, state, at)
+
+        # The preconditions this test exists to isolate: ① passes on the lie,
+        # every other safeguard is satisfied, and ② is the sole objection.
+        self.assertGreaterEqual(at - orphan.stat().st_mtime, floor)
+        frontier = relay_watchdog.delivered_watermark_for_path(chs, orphan)
+        self.assertGreater(frontier, 0.0)
+        self.assertLess(at - frontier, rt.cfg.orphan_abandon_secs)
+        self.assertGreater(at - frontier, rt.cfg.gap_alert_secs)
+
+        # Therefore: no marker, no retirement, and the gap stays loud.
+        self.assertNotIn(str(orphan), chs.get(self.ORPHAN_STRANDED_KEY, {}))
+        self.assertNotIn(
+            str(orphan), chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {})
+        )
+        self.assertEqual([b for b, _ in rt.alerts if "회수 불가" in b], [])
+        gap_alerts = [body for body, _ in rt.alerts if "릴레이 갭 감지" in body]
+        self.assertEqual(len(gap_alerts), 1, (rt.alerts, rt.log_lines))
+        self.assertIn(orphan.name, gap_alerts[0])
+
+    def test_5190_r3_reverse_an_honest_frontier_still_opens_the_marker(self):
+        """The reverse of the above: ② must not block a genuine orphan.
+
+        The freshest delivery frontier an observed orphan can honestly have is
+        one where the last block it ever wrote is one that arrived. On truthful
+        metadata ① already implies ②, so the marker opens — a guard that is
+        slack in the normal case and binding only when `mtime` lies is exactly
+        what it should be.
+        """
+        rt, state, live, orphan = self._5190_live_channel()
+        chs = state["999"]
+        floor = rt.cfg.orphan_abandon_secs * (
+            relay_watchdog.ORPHAN_OBSERVED_FREEZE_MULTIPLIER
+        )
+        orphan.write_text(
+            self._5190_record(self.now - 2, "orphan tail that did arrive")
+            + "\n"
+            + self._5190_record(self.now - 1, "orphan tail stranded")
+            + "\n",
+            encoding="utf-8",
+        )
+        os.utime(orphan, (self.now, self.now))
+        rt.haystack = norm(f"{rt.haystack} orphan tail that did arrive")
+        at = self.now + floor + 60
+        self._5190_live_delivery(rt, live, at, "live block two")
+        rt.watcher_probe = WatcherStateProbe(
+            200, attached=True, desynced=False, bound_output_path=str(live)
+        )
+        tick_channel(rt, TICK_CHANNEL, state, at)
+
+        self.assertIn(str(orphan), chs[self.ORPHAN_STRANDED_KEY])
+        self.assertTrue(
+            any(
+                "orphan-stranded-marker-opened" in line
+                and "observed_history=True" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+        frontier = relay_watchdog.delivered_watermark_for_path(chs, orphan)
+        self.assertLessEqual(frontier, orphan.stat().st_mtime)
+        self.assertGreaterEqual(at - frontier, rt.cfg.orphan_abandon_secs)
+
+    def _5190_no_selection_tick(self) -> tuple[FakeRuntime, dict, dict, Path]:
+        """Drive the channel to a tick that alerts with NOTHING selected.
+
+        Reachability, not hypothesis (#5190 R3 P2-F). The route, all of it
+        ordinary production behaviour:
+
+        1. `live` delivers, is selected, and therefore leaves the pending set.
+        2. `live` strands a block. It becomes a GAP owner — and because it is
+           not pending, no pending expiry can ever remove it.
+        3. A brand-new transcript debuts with a later mtime and takes the
+           selection on the `unseen_newer` rule. It has delivered nothing, so
+           it stays pending.
+        4. The channel goes quiet past `idle_quiet_secs`. The pending expiry
+           fires on the SELECTED path and clears `tr` — and it does so upstream
+           of the line that resolves `selected` from `tr`, so `selected` is None
+           for the rest of the pass while `live` is still a GAP owner and still
+           the alert subject.
+        """
+        rt, state, live, _orphan = self._5190_live_channel()
+        chs = state["999"]
+        anchor = self.now
+
+        with live.open("a", encoding="utf-8") as stream:
+            stream.write(
+                self._5190_record(anchor + 300, "live block never delivered")
+                + "\n"
+            )
+        os.utime(live, (anchor + 1000, anchor + 1000))
+        tick_channel(rt, TICK_CHANNEL, state, anchor + 1000)
+        self.assertIn(
+            str(live), chs.get(relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY, [])
+        )
+        self.assertNotIn(
+            str(live), chs.get(relay_watchdog.PENDING_TRANSCRIPTS_KEY, [])
+        )
+
+        successor = self.proj_dir / "aaaaaaaa-1111-2222-3333-444444444444.jsonl"
+        successor.write_text(
+            self._5190_record(anchor + 1950, "successor block undelivered")
+            + "\n",
+            encoding="utf-8",
+        )
+        os.utime(successor, (anchor + 2000, anchor + 2000))
+        tick_channel(rt, TICK_CHANNEL, state, anchor + 2000)
+        self.assertEqual(chs[SELECTED_TRANSCRIPT_KEY], str(successor))
+        self.assertIn(
+            str(successor), chs.get(relay_watchdog.PENDING_TRANSCRIPTS_KEY, [])
+        )
+
+        quiet_at = anchor + 2000 + rt.cfg.idle_quiet_secs + 60
+        before = len(rt.alerts)
+        tick_channel(rt, TICK_CHANNEL, state, quiet_at)
+        return rt, state, chs, live, before
+
+    def test_5190_r6_a_tick_with_no_active_session_never_claims_one(self):
+        """No selection means no claim about selection (#5190 R3 P2-F).
+
+        `not_selected` was `bool(selected_path) and path != selected_path`, so a
+        tick that selected nothing collapsed into the "it IS the selection" arm
+        and rendered "대상 세션: X (현재 활성 세션)" on a channel that had no
+        active session at all. It is the mirror image of the overclaim R5
+        removed: there an unproven pastness was asserted, here an unproven
+        presentness.
+        """
+        rt, _state, chs, live, before = self._5190_no_selection_tick()
+
+        # The precondition this test exists to exercise: nothing is selected.
+        self.assertIsNone(chs.get(SELECTED_TRANSCRIPT_KEY))
+        self.assertIn(
+            str(live), chs.get(relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY, [])
+        )
+        gap_alerts = [
+            body for body, _ in rt.alerts[before:] if "릴레이 갭 감지" in body
+        ]
+        self.assertEqual(len(gap_alerts), 1, (rt.alerts[before:], rt.log_lines))
+        body = gap_alerts[0]
+        self.assertIn(live.name, body)
+        # The false claim, and the true statement that replaced it.
+        self.assertNotIn("(현재 활성 세션)", body)
+        self.assertIn("현재 활성 세션으로 판정된 트랜스크립트가 없습니다", body)
+        self.assertIn("이번 점검으로 판정되지 않았습니다", body)
+        # Pastness is not asserted either — non-selection cannot be read off a
+        # tick that selected nothing.
+        self.assertNotIn("고아 세션", body)
+        self.assertNotIn("아니냐", body)
+        # And the relay-health clause stays honest: nothing delivered here.
+        self.assertIn("릴레이 장애 가능성이 남아 있습니다", body)
+
     def test_5190_unobserved_elapsed_time_never_renders_as_a_measurement(self):
         rt = self.gap_rt(github_repo="owner/repo")
         rt.watcher_probe = WatcherStateProbe(200, True, False)
