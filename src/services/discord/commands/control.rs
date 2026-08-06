@@ -583,7 +583,7 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
             // foreground anchor forever and every queued user message stays
             // locked behind it. The guard inside
             // `release_zombie_foreground_turn` is what keeps a live turn safe.
-            let release = super::super::release_zombie_foreground_turn(
+            let release = super::super::zombie_foreground_release::release_zombie_foreground_turn(
                 &ctx.data().shared,
                 &ctx.data().provider,
                 channel_id,

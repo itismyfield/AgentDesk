@@ -173,7 +173,7 @@ pub async fn reconcile_stale_turn(
                     )
                     .await
                 }
-                None => crate::services::discord::ZombieForegroundReleaseOutcome::default(),
+                None => crate::services::discord::zombie_foreground_release::ZombieForegroundReleaseOutcome::default(),
             };
             Ok((
                 StatusCode::OK,

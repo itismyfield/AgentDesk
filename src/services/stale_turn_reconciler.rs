@@ -159,7 +159,7 @@ fn channel_inflight_state_present(session_key: &str, provider: &str) -> Inflight
     if tmux_provider != db_provider {
         return InflightPresence::Unknown;
     }
-    if crate::services::discord::inflight_state_present_for_tmux_name(
+    if crate::services::discord::zombie_foreground_release::inflight_state_present_for_tmux_name(
         &db_provider,
         &identity.tmux_name,
     ) {
@@ -603,7 +603,7 @@ mod tests {
     /// inflight turn record, and a pane parked at the prompt is a zombie, and
     /// the operator endpoint must be able to reconcile it.
     #[tokio::test]
-    async fn keyed_reconcile_releases_busy_session_without_inflight_pg() {
+    async fn keyed_reconcile_pg_releases_busy_session_without_inflight() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         // 30s: far inside STALE_TURN_GRACE, i.e. the heartbeat guard says LIVE.
@@ -646,7 +646,7 @@ mod tests {
     /// turn is alive must independently keep the row `turn_active`. Over-release
     /// here is worse than the zombie — it abandons work a user is waiting on.
     #[tokio::test]
-    async fn keyed_reconcile_never_idles_a_live_busy_session_pg() {
+    async fn keyed_reconcile_pg_never_idles_a_live_busy_session() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
@@ -738,7 +738,7 @@ mod tests {
     /// still require an expired heartbeat, so a fresh busy row is untouched even
     /// when every local probe looks terminal.
     #[tokio::test]
-    async fn periodic_sweep_still_requires_an_expired_heartbeat_pg() {
+    async fn periodic_sweep_pg_still_requires_an_expired_heartbeat() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         seed_session(&pool, "host:sweep-fresh", "turn_active", None, 30).await;

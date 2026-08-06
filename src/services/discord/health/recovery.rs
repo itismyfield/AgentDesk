@@ -490,7 +490,7 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
     // so the channel stays permanently locked while the response reports a
     // successful cancel. Ask the single release authority whether the anchor may
     // go, and report what actually happened rather than what was attempted.
-    let release = discord::release_zombie_foreground_turn(
+    let release = discord::zombie_foreground_release::release_zombie_foreground_turn(
         &shared,
         &provider,
         channel_id,
@@ -1297,15 +1297,15 @@ pub(crate) async fn release_zombie_foreground_turn_by_tmux_name(
     registry: Option<&HealthRegistry>,
     tmux_name: &str,
     stop_source: &'static str,
-) -> discord::ZombieForegroundReleaseOutcome {
+) -> discord::zombie_foreground_release::ZombieForegroundReleaseOutcome {
     let Some(registry) = registry else {
-        return discord::ZombieForegroundReleaseOutcome::default();
+        return discord::zombie_foreground_release::ZombieForegroundReleaseOutcome::default();
     };
     let Some(runtime) = find_runtime_channel_match(registry, None, None, Some(tmux_name)).await
     else {
-        return discord::ZombieForegroundReleaseOutcome::default();
+        return discord::zombie_foreground_release::ZombieForegroundReleaseOutcome::default();
     };
-    discord::release_zombie_foreground_turn(
+    discord::zombie_foreground_release::release_zombie_foreground_turn(
         &runtime.shared,
         &runtime.provider,
         runtime.channel_id,

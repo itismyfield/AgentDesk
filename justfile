@@ -63,6 +63,9 @@ test-non-pg:
     # #4788: raw attachment preparation must remain behind local admission.
     cargo test --lib attachment -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib mailbox_reaction_tests -- --skip _pg --skip pg_ --skip postgres
+    # #5176: cancel success is mailbox foreground release; both directions of the
+    # release guard (free the zombie / never touch a live turn) stay in a lane.
+    cargo test --lib services::discord::zombie_foreground_release::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib queue_marker::tests -- --skip _pg --skip pg_ --skip postgres
     # #5035: contract G is the only permission to destroy a shared queued card.
     cargo test --lib services::discord::placeholder_controller::queued_card_gate::tests -- --skip _pg --skip pg_ --skip postgres

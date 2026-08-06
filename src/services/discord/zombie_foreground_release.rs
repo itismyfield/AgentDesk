@@ -169,6 +169,21 @@ fn tui_structurally_idle(provider: &ProviderKind, token: &Arc<CancelToken>) -> b
     )
 }
 
+/// #5176 — is a persistent inflight-turn record still claiming this tmux
+/// session? The stale-turn reconciler needs the same "no turn-bridge loop owns
+/// this" evidence the release guard uses, but a session key carries a tmux name
+/// rather than a Discord channel id, so presence is resolved by tmux name there.
+/// `rebind_origin` rows are synthetic reattach markers, not a running turn, and
+/// must not read as liveness.
+pub(crate) fn inflight_state_present_for_tmux_name(
+    provider: &ProviderKind,
+    tmux_name: &str,
+) -> bool {
+    super::inflight::load_inflight_states(provider)
+        .into_iter()
+        .any(|state| !state.rebind_origin && state.tmux_session_name.as_deref() == Some(tmux_name))
+}
+
 pub(in crate::services::discord) fn collect_zombie_foreground_evidence(
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -390,12 +405,19 @@ mod tests {
 
         use crate::services::discord::inflight::InflightTurnState;
         use crate::services::provider::{CancelToken, ProviderKind};
-        use crate::services::turn_orchestrator::test_support::TEST_ENV_LOCK;
         use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 
         use super::super::{ZombieForegroundVerdict, release_zombie_foreground_turn};
 
         const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
+
+        /// Isolate the runtime root (inflight records + pending-queue files) for
+        /// one test. `TestEnvVarGuard` is the canonical serialization path here:
+        /// it owns the shared test-env mutex for its whole lifetime, so the root
+        /// stays set across the awaits without a bare lock guard on the stack.
+        fn isolated_runtime_root(tmp: &tempfile::TempDir) -> crate::config::TestEnvVarGuard {
+            crate::config::TestEnvVarGuard::set_path(AGENTDESK_ROOT_DIR_ENV, tmp.path())
+        }
 
         fn queued_user_message(message_id: u64) -> Intervention {
             Intervention {
@@ -474,17 +496,10 @@ mod tests {
         /// survives the release and gets a promotion scheduled. `/stop` and the
         /// cancel API both reach this code through
         /// `release_zombie_foreground_turn`, so pinning it here pins both.
-        // SAFETY (await_holding_lock): `TEST_ENV_LOCK` serializes env-mutating
-        // tests and must stay held across the awaits. Test-only.
-        #[allow(clippy::await_holding_lock)]
         #[tokio::test]
         async fn zombie_foreground_turn_is_released_and_the_queue_survives() {
-            let _lock = match TEST_ENV_LOCK.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
             let tmp = tempfile::tempdir().unwrap();
-            unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+            let _root = isolated_runtime_root(&tmp);
 
             let provider = ProviderKind::Claude;
             let channel_id = ChannelId::new(5_176_001);
@@ -516,22 +531,14 @@ mod tests {
                 "an idle mailbox with a backlog must arm a promotion, or the message stays parked"
             );
             drop(token);
-
-            unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
         }
 
         /// The dangerous direction. A turn that nobody cancelled keeps its
         /// foreground slot even though the other two evidences look terminal.
-        // SAFETY (await_holding_lock): see above. Test-only.
-        #[allow(clippy::await_holding_lock)]
         #[tokio::test]
         async fn uncancelled_live_turn_keeps_its_foreground_slot() {
-            let _lock = match TEST_ENV_LOCK.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
             let tmp = tempfile::tempdir().unwrap();
-            unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+            let _root = isolated_runtime_root(&tmp);
 
             let provider = ProviderKind::Claude;
             let channel_id = ChannelId::new(5_176_002);
@@ -554,8 +561,6 @@ mod tests {
                     .is_some_and(|active| Arc::ptr_eq(active, &token)),
                 "a turn nobody asked to stop must survive the release probe"
             );
-
-            unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
         }
 
         /// The other dangerous direction, and the one that matters most: a
@@ -563,16 +568,10 @@ mod tests {
         /// present) must keep its foreground slot, because that loop will run
         /// the canonical exit itself. Releasing here would let a second turn
         /// start on top of a running one.
-        // SAFETY (await_holding_lock): see above. Test-only.
-        #[allow(clippy::await_holding_lock)]
         #[tokio::test]
         async fn cancelled_turn_with_live_inflight_keeps_its_foreground_slot() {
-            let _lock = match TEST_ENV_LOCK.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
             let tmp = tempfile::tempdir().unwrap();
-            unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+            let _root = isolated_runtime_root(&tmp);
 
             let provider = ProviderKind::Claude;
             let channel_id = ChannelId::new(5_176_003);
@@ -599,8 +598,6 @@ mod tests {
                     .is_some_and(|active| Arc::ptr_eq(active, &token)),
                 "a live turn-bridge loop owns the canonical exit; the release must not steal it"
             );
-
-            unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
         }
     }
 
