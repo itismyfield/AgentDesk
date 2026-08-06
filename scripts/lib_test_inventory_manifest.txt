@@ -1025,10 +1025,17 @@ services::auto_queue::cancel_run::pg_tests::cancel_selected_runs_with_pg_atomica
 services::auto_queue::cancel_run::pg_tests::cancel_selected_runs_with_pg_preserves_foreign_context_owner
 services::auto_queue::cancel_run::pg_tests::cancel_selected_runs_with_pg_preserves_foreign_entry_owner
 services::auto_queue::cancel_run::pg_tests::cancel_selected_runs_with_pg_preserves_foreign_phase_gate_owner
+services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::a_claimed_task_is_not_drained_twice_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::crash_after_cancel_commit_converges_on_replay_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::drain_with_health_registry_clears_slot_thread_sessions_pg
+services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::drain_with_health_registry_tears_down_provider_runtime_pg
+services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::enqueue_is_atomic_with_the_state_change_pg
+services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::poison_and_exhausted_tasks_dead_letter_instead_of_blocking_pg
+services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::repeatedly_failing_task_dead_letters_at_the_attempt_cap_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::replay_skips_slot_threads_after_slot_reassignment_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::session_clear_failure_stays_retry_eligible_pg
+services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::session_clear_is_a_structural_no_op_after_the_cancel_commit_pg
+services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::slot_release_and_its_durable_record_commit_together_pg
 services::auto_queue::route::activate_command::tests::depth_gate_activate_pg_tests::absent_scope_depth_never_creates_plan_no_regression_pg
 services::auto_queue::route::activate_command::tests::depth_gate_activate_pg_tests::card_without_scope_assessment_entry_binds_no_regression_pg
 services::auto_queue::route::activate_command::tests::depth_gate_activate_pg_tests::late_entry_direct_depth_creates_impl_no_plan_pg

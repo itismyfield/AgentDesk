@@ -753,6 +753,10 @@ impl SupervisedWorkerRegistry {
                 let tick_config = self.config.clone();
                 let tick_cluster_runtime = self.cluster_runtime.clone();
                 let shutdown = self.shutdown.clone();
+                // #5142 D-4: hand the tick loop the health registry so the
+                // auto-queue cleanup replay can complete its runtime-side
+                // teardown instead of silently skipping it.
+                let tick_health_registry = self.health_registry.clone();
                 self.register_thread(spec, "policy-tick", move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
@@ -783,6 +787,7 @@ impl SupervisedWorkerRegistry {
                                     Some(tick_pg_pool.clone()),
                                     Some(tick_cluster_runtime.clone()),
                                     Some(shutdown.clone()),
+                                    tick_health_registry.clone(),
                                 ));
                             }
                             Err(error) => {

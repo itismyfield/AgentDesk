@@ -2,7 +2,6 @@ use super::{AutoQueueLogContext, AutoQueueService};
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::db::auto_queue::run_status::is_live_run_status;
@@ -270,6 +269,7 @@ pub(crate) async fn cancel_live_dispatches_for_runs_pg(
 
 /// Dispatches cancelled by a committed transaction plus the durable cleanup row
 /// that still owes the post-commit steps for them (#5142).
+#[derive(Debug)]
 pub(crate) struct CancelledDispatchesWithCleanup {
     pub(crate) dispatch_ids: Vec<String>,
     pub(crate) cleanup_task_id: i64,

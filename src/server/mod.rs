@@ -477,6 +477,12 @@ async fn policy_tick_loop(
     pg_pool: Option<Arc<PgPool>>,
     cluster_runtime: Option<cluster::ClusterRuntime>,
     shutdown: Option<Arc<AtomicBool>>,
+    // #5142 D-4: the auto-queue cleanup replay below tears down provider runtime
+    // state (`clear_provider_channel_runtime`) for the slot threads it clears,
+    // and that teardown is reachable only through the health registry. This loop
+    // used to have no registry at all and passed `None`, so the runtime half of
+    // the cleanup was permanently skipped on every replayed task.
+    health_registry: Option<Arc<HealthRegistry>>,
 ) {
     tracing::info!("[policy-tick] 3-tier tick started: 30s / 1min / 5min");
 
@@ -595,7 +601,8 @@ async fn policy_tick_loop(
                 // change, so this is the path by which a restarted process
                 // converges residual provider sessions and slot tokens.
                 match crate::services::auto_queue::cleanup_tasks::replay_pending_run_cleanup_tasks_pg(
-                    None, pool,
+                    health_registry.clone(),
+                    pool,
                 )
                 .await
                 {
@@ -603,6 +610,7 @@ async fn policy_tick_loop(
                         tracing::warn!(
                             drained = stats.drained,
                             completed = stats.completed,
+                            dead_lettered = stats.dead_lettered,
                             "[policy-tick] replayed auto-queue run cleanup tasks left by an earlier process"
                         );
                     }

@@ -17,6 +17,24 @@
 //! restarted process calls to pick the leftovers back up.
 //!
 //! Retry safety of each replayed step is analysed at its call site below.
+//!
+//! ## Delivery guarantee — read this before claiming "nothing is lost"
+//!
+//! This machinery makes the *database-visible* cleanup (provider session ids,
+//! slot tokens, slot-thread sessions) crash-safe: every one of those steps is
+//! re-derived from the durable row and retried until it succeeds, so they are
+//! at-least-once and converge.
+//!
+//! The observability emit in step 1 is **not** covered by that guarantee and is
+//! deliberately at-most-once. `CancelTransitionMeta::emit` hands the event to an
+//! in-process worker channel and discards the result
+//! (`observability/emit.rs`: `if let Some(sender) = worker_sender() { let _ =
+//! sender.send(..) }`), so the event is silently dropped when the worker is not
+//! running, when the channel send fails, or when the process dies before the
+//! worker flushes its queue to PostgreSQL. Because `emitted = TRUE` is committed
+//! straight after the send, a replay will never re-fire it. Losing an
+//! observability row is the accepted trade for never double-counting one; it is
+//! not a claim that no emit is ever lost.
 
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
@@ -51,9 +69,43 @@ pub(crate) struct RunCleanupDrainOutcome {
     pub(crate) completed: bool,
 }
 
+/// Columns every drain path selects. Kept in one place so the batch sweep and
+/// the single-row claim cannot drift apart.
+const TASK_COLUMNS: &str = "id, run_ids, dispatch_ids, released_slots, pending_emits, emitted";
+
+/// Rows drained per replay sweep.
+const REPLAY_BATCH_LIMIT: i64 = 50;
+
+/// Attempts a task gets before it is dead-lettered.
+///
+/// Without a cap a permanently failing row keeps the oldest `created_at` and
+/// therefore the head of the drain order forever, so `REPLAY_BATCH_LIMIT`
+/// unfixable rows would stop every newly queued cleanup from ever draining.
+const MAX_CLEANUP_ATTEMPTS: i32 = 10;
+
+/// Upper bound on the exponential retry delay, in seconds.
+const MAX_BACKOFF_SECONDS: i64 = 300;
+
+/// How long a claim is honoured before another drainer may steal the row.
+/// A process that dies mid-drain must not strand its claim permanently.
+const CLAIM_LEASE_SECONDS: i64 = 300;
+
+/// Identifies the claim holder in `claim_owner`. Only used for diagnostics —
+/// correctness comes from the `FOR UPDATE SKIP LOCKED` claim itself.
+fn claim_owner_tag() -> String {
+    format!("pid:{}", std::process::id())
+}
+
 /// Insert the durable cleanup record. MUST be called on the same transaction
 /// that commits the dispatch cancel / run terminalization, otherwise the record
 /// and the state change can diverge.
+///
+/// "Same transaction" is the entire P0 argument: if this INSERT were moved to a
+/// transaction of its own after the commit, a crash in between would leave the
+/// cancel durable with no record that cleanup is owed, which is precisely the
+/// defect this module exists to remove. `enqueue_is_atomic_with_the_state_change_pg`
+/// pins that by failing the INSERT and asserting the state change rolls back
+/// with it.
 pub(crate) async fn enqueue_run_cleanup_task_on_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_ids: &[String],
@@ -107,23 +159,8 @@ fn task_from_row(row: &sqlx::postgres::PgRow) -> Result<RunCleanupTask, String> 
     })
 }
 
-pub(crate) async fn load_run_cleanup_task_pg(
-    pool: &PgPool,
-    id: i64,
-) -> Result<Option<RunCleanupTask>, String> {
-    let row = sqlx::query(
-        "SELECT id, run_ids, dispatch_ids, released_slots, pending_emits, emitted
-         FROM auto_queue_run_cleanup_tasks
-         WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| format!("load auto-queue run cleanup task {id}: {error}"))?;
-    row.as_ref().map(task_from_row).transpose()
-}
-
 /// Number of cleanup rows still owed. Tests use it to prove convergence.
+#[cfg(test)]
 pub(crate) async fn pending_run_cleanup_task_count_pg(pool: &PgPool) -> Result<i64, String> {
     sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM auto_queue_run_cleanup_tasks")
         .fetch_one(pool)
@@ -131,16 +168,135 @@ pub(crate) async fn pending_run_cleanup_task_count_pg(pool: &PgPool) -> Result<i
         .map_err(|error| format!("count auto-queue run cleanup tasks: {error}"))
 }
 
+/// True when the row is still on disk, whatever its claim/backoff state.
+///
+/// Used to tell "another drainer already finished this task" (row gone) apart
+/// from "another drainer currently owns it, or it is backing off" (row present
+/// but unclaimable). Reporting the second case as `completed` would make the
+/// replay statistics lie.
+async fn run_cleanup_task_exists_pg(pool: &PgPool, id: i64) -> Result<bool, String> {
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM auto_queue_run_cleanup_tasks WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .map(|count| count > 0)
+        .map_err(|error| format!("probe auto-queue run cleanup task {id}: {error}"))
+}
+
+/// Claim one specific row for this drainer.
+///
+/// The inline post-commit drain and the policy-tick replay sweep both target
+/// live rows, so without a claim they can run the same task concurrently and
+/// fire its observability emits twice. Claiming under `FOR UPDATE SKIP LOCKED`
+/// makes exactly one of them the owner and lets the loser skip immediately
+/// instead of blocking on a row lock.
+async fn claim_run_cleanup_task_pg(
+    pool: &PgPool,
+    id: i64,
+) -> Result<Option<RunCleanupTask>, String> {
+    let sql = format!(
+        "UPDATE auto_queue_run_cleanup_tasks AS t
+         SET claim_owner = $2,
+             claimed_at = NOW(),
+             updated_at = NOW()
+         FROM (
+             SELECT id
+             FROM auto_queue_run_cleanup_tasks
+             WHERE id = $1
+               AND dead_lettered_at IS NULL
+               AND next_attempt_at <= NOW()
+               AND (claimed_at IS NULL
+                    OR claimed_at < NOW() - ($3::BIGINT * INTERVAL '1 second'))
+             FOR UPDATE SKIP LOCKED
+         ) AS c
+         WHERE t.id = c.id
+         RETURNING {}",
+        TASK_COLUMNS
+            .split(", ")
+            .map(|column| format!("t.{column}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let row = sqlx::query(&sql)
+        .bind(id)
+        .bind(claim_owner_tag())
+        .bind(CLAIM_LEASE_SECONDS)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("claim auto-queue run cleanup task {id}: {error}"))?;
+    row.as_ref().map(task_from_row).transpose()
+}
+
+/// Claim up to `REPLAY_BATCH_LIMIT` drainable rows for the replay sweep.
+///
+/// Ordering by `next_attempt_at` first (not `created_at`) is what makes the
+/// backoff effective: a row that just failed sorts to the back until its delay
+/// elapses, so it stops occupying a batch slot that newer work needs.
+async fn claim_run_cleanup_task_batch_pg(
+    pool: &PgPool,
+) -> Result<Vec<sqlx::postgres::PgRow>, String> {
+    let sql = format!(
+        "UPDATE auto_queue_run_cleanup_tasks AS t
+         SET claim_owner = $1,
+             claimed_at = NOW(),
+             updated_at = NOW()
+         FROM (
+             SELECT id
+             FROM auto_queue_run_cleanup_tasks
+             WHERE dead_lettered_at IS NULL
+               AND next_attempt_at <= NOW()
+               AND (claimed_at IS NULL
+                    OR claimed_at < NOW() - ($2::BIGINT * INTERVAL '1 second'))
+             ORDER BY next_attempt_at ASC, created_at ASC, id ASC
+             LIMIT $3
+             FOR UPDATE SKIP LOCKED
+         ) AS c
+         WHERE t.id = c.id
+         RETURNING {}",
+        TASK_COLUMNS
+            .split(", ")
+            .map(|column| format!("t.{column}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    sqlx::query(&sql)
+        .bind(claim_owner_tag())
+        .bind(CLAIM_LEASE_SECONDS)
+        .bind(REPLAY_BATCH_LIMIT)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| format!("claim pending auto-queue run cleanup tasks: {error}"))
+}
+
+/// Record a failed attempt: bump `attempts`, apply exponential backoff, release
+/// the claim, and dead-letter the row once it has burned through the cap.
+///
+/// The row is never deleted on dead-letter — the operator keeps the evidence and
+/// `last_error` — but it drops out of the drain query so it can no longer block
+/// the queue behind it.
 async fn record_task_failure_pg(pool: &PgPool, id: i64, error: &str) {
     if let Err(update_error) = sqlx::query(
         "UPDATE auto_queue_run_cleanup_tasks
          SET attempts = attempts + 1,
              last_error = $2,
+             next_attempt_at = NOW()
+                 + (LEAST(
+                        $3::BIGINT,
+                        POWER(2::NUMERIC, LEAST(attempts + 1, 8))::BIGINT
+                    ) * INTERVAL '1 second'),
+             dead_lettered_at = CASE
+                 WHEN attempts + 1 >= $4 THEN NOW()
+                 ELSE dead_lettered_at
+             END,
+             claim_owner = NULL,
+             claimed_at = NULL,
              updated_at = NOW()
          WHERE id = $1",
     )
     .bind(id)
     .bind(error)
+    .bind(MAX_BACKOFF_SECONDS)
+    .bind(MAX_CLEANUP_ATTEMPTS)
     .execute(pool)
     .await
     {
@@ -152,39 +308,69 @@ async fn record_task_failure_pg(pool: &PgPool, id: i64, error: &str) {
     }
 }
 
-async fn persist_released_slots_pg(
-    pool: &PgPool,
-    id: i64,
-    released_slots: &[ReleasedSlot],
-) -> Result<(), String> {
-    let payload = serde_json::to_value(released_slots)
-        .map_err(|error| format!("serialize auto-queue cleanup released slots: {error}"))?;
-    sqlx::query(
+/// Dead-letter a row whose payload cannot be decoded at all.
+///
+/// A poison row can never succeed, so retrying it forever would starve the
+/// queue; deleting it would destroy the only evidence of the corruption. It is
+/// parked instead, and counted, so the sweep reports it rather than silently
+/// skipping it.
+async fn dead_letter_task_pg(pool: &PgPool, id: i64, error: &str) {
+    if let Err(update_error) = sqlx::query(
         "UPDATE auto_queue_run_cleanup_tasks
-         SET released_slots = $2,
+         SET dead_lettered_at = NOW(),
+             last_error = $2,
+             claim_owner = NULL,
+             claimed_at = NULL,
              updated_at = NOW()
          WHERE id = $1",
     )
     .bind(id)
-    .bind(payload)
+    .bind(error)
     .execute(pool)
     .await
-    .map(|_| ())
-    .map_err(|error| format!("persist auto-queue cleanup released slots for task {id}: {error}"))
+    {
+        tracing::warn!(
+            task_id = id,
+            error = %update_error,
+            "[auto-queue] failed to dead-letter undecodable cleanup task"
+        );
+    }
 }
 
-/// Release every slot still held by this task's runs, merging the result into
-/// the durably recorded set.
+/// Release every slot still held by this task's runs AND persist the resulting
+/// set on the task row — in one transaction.
+///
+/// ## Why the single transaction is load-bearing (#5142 D-1)
+///
+/// These were two separate statements against the pool, so each committed on its
+/// own. A crash in between left the slots released on disk with the task row
+/// still carrying an empty `released_slots`. The replay then re-ran the slot
+/// UPDATE, matched zero rows (the slots were already `NULL`), merged that into an
+/// empty persisted set, found nothing to iterate in step 4, and **deleted the row
+/// while reporting `completed`** — skipping the slot-thread clear, leaving the
+/// residual provider session id behind, and destroying the retry evidence. That
+/// is the exact defect this module was written to remove, one layer down.
+///
+/// Committing both writes together closes it: either the slots are still held and
+/// the whole thing is retried from scratch, or they are released and the durable
+/// row already names them.
 ///
 /// Retry safety: the CAS predicate `assigned_run_id = ANY($1)` means a replay
 /// that arrives after the slot was handed to a different run matches no row, so
 /// the slot is never stolen back. A replay that arrives after this task already
 /// released the slot also matches no row — which is exactly why the released set
-/// is persisted before the slot-thread clear runs.
-async fn release_slots_for_task_pg(
+/// is persisted in the same commit as the release.
+async fn release_and_persist_slots_for_task_pg(
     pool: &PgPool,
     task: &RunCleanupTask,
 ) -> Result<(Vec<ReleasedSlot>, usize), String> {
+    let mut tx = pool.begin().await.map_err(|error| {
+        format!(
+            "begin postgres slot release for cleanup task {}: {error}",
+            task.id
+        )
+    })?;
+
     let rows = sqlx::query(
         "UPDATE auto_queue_slots
          SET assigned_run_id = NULL,
@@ -194,7 +380,7 @@ async fn release_slots_for_task_pg(
          RETURNING agent_id, slot_index",
     )
     .bind(&task.run_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await
     .map_err(|error| {
         format!(
@@ -220,6 +406,35 @@ async fn release_slots_for_task_pg(
             merged.push(slot);
         }
     }
+
+    if merged != task.released_slots {
+        let payload = serde_json::to_value(&merged)
+            .map_err(|error| format!("serialize auto-queue cleanup released slots: {error}"))?;
+        sqlx::query(
+            "UPDATE auto_queue_run_cleanup_tasks
+             SET released_slots = $2,
+                 updated_at = NOW()
+             WHERE id = $1",
+        )
+        .bind(task.id)
+        .bind(payload)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| {
+            format!(
+                "persist auto-queue cleanup released slots for task {}: {error}",
+                task.id
+            )
+        })?;
+    }
+
+    tx.commit().await.map_err(|error| {
+        format!(
+            "commit postgres slot release for cleanup task {}: {error}",
+            task.id
+        )
+    })?;
+
     Ok((merged, newly_released))
 }
 
@@ -260,6 +475,8 @@ async fn slot_taken_by_foreign_run_pg(
 /// succeed. A step that fails leaves the row in place, which is what keeps a
 /// failed `clear_sessions_for_dispatches_pg` retry-eligible instead of reducing
 /// it to a warning string.
+///
+/// The caller must already hold the row's claim.
 pub(crate) async fn drain_run_cleanup_task_pg(
     health_registry: Option<std::sync::Arc<crate::services::discord::health::HealthRegistry>>,
     pool: &PgPool,
@@ -271,9 +488,8 @@ pub(crate) async fn drain_run_cleanup_task_pg(
     //
     // Retry safety: `emit()` appends observability rows and has no dedup key, so
     // it is NOT idempotent; the durable `emitted` flag is the idempotency key
-    // that stops a replay from repeating it. The flag is set after the emit, so
-    // a crash inside that window can still duplicate — at-least-once, never
-    // lost.
+    // that stops a replay from repeating it. See the module header for why that
+    // makes the emit at-most-once rather than lossless.
     //
     // `spawn_cached_constraint_release_wake` ignores the dispatch id except for
     // logging (`wait_queue.rs:69`) and re-evaluates every waiting
@@ -313,6 +529,18 @@ pub(crate) async fn drain_run_cleanup_task_pg(
     // Retry safety: the UPDATE is scoped to `active_dispatch_id = $2` and to
     // non-terminal statuses, so a second run matches nothing and changes
     // nothing.
+    //
+    // #5142 D-3 — this step is a structural no-op on both production paths, and
+    // that is deliberate rather than accidental. The transaction that cancels the
+    // dispatch already runs `UPDATE sessions SET active_dispatch_id = NULL WHERE
+    // active_dispatch_id = $2` (`dispatch_cancel.rs`), so by the time this
+    // post-commit call runs, its `WHERE active_dispatch_id = ANY(..)` predicate
+    // can never match. It is kept as the retry gate for the case where that
+    // in-transaction clear is ever narrowed, and because a failure here (PG
+    // unreachable) must still stop the drain before it releases slot tokens.
+    // `session_clear_is_a_structural_no_op_after_the_cancel_commit_pg` pins the
+    // zero-row fact so nobody mistakes it for the step that clears
+    // `claude_session_id` — that is step 4, via the slot's threads.
     let cleared_dispatch_sessions = match clear_sessions_for_dispatches_pg(pool, &task.dispatch_ids)
         .await
     {
@@ -346,37 +574,24 @@ pub(crate) async fn drain_run_cleanup_task_pg(
         }
     };
 
-    // Step 3 — slot release, persisted before the slot-thread clear so a crash
-    // between the two still leaves the slot keys on disk.
-    let (released_slots, newly_released) = match release_slots_for_task_pg(pool, &task).await {
-        Ok(value) => value,
-        Err(error) => {
-            record_task_failure_pg(pool, task.id, &error).await;
-            warnings.push(error);
-            return RunCleanupDrainOutcome {
-                slot_cleanup: SlotCleanupResult {
-                    released_slots: 0,
-                    cleared_slot_sessions: cleared_dispatch_sessions,
-                    warnings,
-                },
-                completed: false,
-            };
-        }
-    };
-    if released_slots != task.released_slots
-        && let Err(error) = persist_released_slots_pg(pool, task.id, &released_slots).await
-    {
-        record_task_failure_pg(pool, task.id, &error).await;
-        warnings.push(error);
-        return RunCleanupDrainOutcome {
-            slot_cleanup: SlotCleanupResult {
-                released_slots: newly_released,
-                cleared_slot_sessions: cleared_dispatch_sessions,
-                warnings,
-            },
-            completed: false,
+    // Step 3 — slot release, committed together with the durable record of which
+    // slots were released so a crash between the two is impossible.
+    let (released_slots, newly_released) =
+        match release_and_persist_slots_for_task_pg(pool, &task).await {
+            Ok(value) => value,
+            Err(error) => {
+                record_task_failure_pg(pool, task.id, &error).await;
+                warnings.push(error);
+                return RunCleanupDrainOutcome {
+                    slot_cleanup: SlotCleanupResult {
+                        released_slots: 0,
+                        cleared_slot_sessions: cleared_dispatch_sessions,
+                        warnings,
+                    },
+                    completed: false,
+                };
+            }
         };
-    }
 
     // Step 4 — slot-thread clear, guarded against the A-B-A hazard above.
     //
@@ -467,18 +682,44 @@ pub(crate) async fn drain_run_cleanup_task_pg(
     }
 }
 
-/// Drain the task identified by `task_id`, tolerating a row that another drain
-/// already removed.
+/// Claim and drain the task identified by `task_id`.
+///
+/// `completed` is reported honestly: `true` only when this call finished every
+/// step, or when the row is already gone (another drainer finished it). A row
+/// that exists but could not be claimed — someone else owns it, it is backing
+/// off, or it is dead-lettered — is reported as *not* completed.
 pub(crate) async fn drain_run_cleanup_task_by_id_pg(
     health_registry: Option<std::sync::Arc<crate::services::discord::health::HealthRegistry>>,
     pool: &PgPool,
     task_id: i64,
 ) -> RunCleanupDrainOutcome {
-    match load_run_cleanup_task_pg(pool, task_id).await {
+    match claim_run_cleanup_task_pg(pool, task_id).await {
         Ok(Some(task)) => drain_run_cleanup_task_pg(health_registry, pool, task).await,
-        Ok(None) => RunCleanupDrainOutcome {
-            slot_cleanup: SlotCleanupResult::default(),
-            completed: true,
+        Ok(None) => match run_cleanup_task_exists_pg(pool, task_id).await {
+            // Row gone: a concurrent drain already carried it to completion.
+            Ok(false) => RunCleanupDrainOutcome {
+                slot_cleanup: SlotCleanupResult::default(),
+                completed: true,
+            },
+            // Row present but unclaimable: still owed, just not by us.
+            Ok(true) => RunCleanupDrainOutcome {
+                slot_cleanup: SlotCleanupResult {
+                    released_slots: 0,
+                    cleared_slot_sessions: 0,
+                    warnings: vec![format!(
+                        "auto-queue cleanup task {task_id} is claimed elsewhere, backing off, or dead-lettered"
+                    )],
+                },
+                completed: false,
+            },
+            Err(error) => RunCleanupDrainOutcome {
+                slot_cleanup: SlotCleanupResult {
+                    released_slots: 0,
+                    cleared_slot_sessions: 0,
+                    warnings: vec![error],
+                },
+                completed: false,
+            },
         },
         Err(error) => RunCleanupDrainOutcome {
             slot_cleanup: SlotCleanupResult {
@@ -495,15 +736,16 @@ pub(crate) async fn drain_run_cleanup_task_by_id_pg(
 pub(crate) struct RunCleanupReplayStats {
     pub(crate) drained: usize,
     pub(crate) completed: usize,
+    /// Rows parked because their payload could not be decoded. Counted rather
+    /// than silently skipped so an undecodable row is visible in the logs.
+    pub(crate) dead_lettered: usize,
 }
 
 impl RunCleanupReplayStats {
     pub(crate) fn touched(&self) -> bool {
-        self.drained > 0
+        self.drained > 0 || self.dead_lettered > 0
     }
 }
-
-const REPLAY_BATCH_LIMIT: i64 = 50;
 
 /// Resume every cleanup task a previous process left behind.
 ///
@@ -515,26 +757,23 @@ pub(crate) async fn replay_pending_run_cleanup_tasks_pg(
     health_registry: Option<std::sync::Arc<crate::services::discord::health::HealthRegistry>>,
     pool: &PgPool,
 ) -> Result<RunCleanupReplayStats, String> {
-    let rows = sqlx::query(
-        "SELECT id, run_ids, dispatch_ids, released_slots, pending_emits, emitted
-         FROM auto_queue_run_cleanup_tasks
-         ORDER BY created_at ASC, id ASC
-         LIMIT $1",
-    )
-    .bind(REPLAY_BATCH_LIMIT)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| format!("load pending auto-queue run cleanup tasks: {error}"))?;
+    let rows = claim_run_cleanup_task_batch_pg(pool).await?;
 
     let mut stats = RunCleanupReplayStats::default();
     for row in &rows {
         let task = match task_from_row(row) {
             Ok(task) => task,
             Err(error) => {
+                let id: Option<i64> = row.try_get("id").ok();
                 tracing::warn!(
+                    task_id = ?id,
                     error = %error,
-                    "[auto-queue] skipping undecodable run cleanup task"
+                    "[auto-queue] dead-lettering undecodable run cleanup task"
                 );
+                if let Some(id) = id {
+                    dead_letter_task_pg(pool, id, &error).await;
+                }
+                stats.dead_lettered += 1;
                 continue;
             }
         };

@@ -34,10 +34,32 @@ CREATE TABLE auto_queue_run_cleanup_tasks (
     emitted BOOLEAN NOT NULL DEFAULT FALSE,
     attempts INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
+    -- Availability controls, mirroring the `intake_outbox` convention.
+    --
+    -- Without them a permanently failing row keeps its place at the head of the
+    -- drain order and starves every task queued behind it: the sweep reads the
+    -- oldest rows first, so `REPLAY_BATCH_LIMIT` dead rows are enough to stop
+    -- new cleanup from ever draining.
+    --
+    -- `next_attempt_at` is pushed into the future by each failure (exponential
+    -- backoff), so a failing row yields its slot back to newer work.
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- Row claim. The inline post-commit drain and the policy-tick replay sweep
+    -- would otherwise both pick up the same row and emit its observability rows
+    -- twice; the claim makes exactly one of them the owner. `claimed_at` doubles
+    -- as the lease clock so a process that died mid-drain does not strand the row.
+    claim_owner TEXT,
+    claimed_at TIMESTAMPTZ,
+    -- Dead letter. Set once `attempts` crosses the cap (or the payload cannot be
+    -- decoded at all). The row is retained rather than deleted so operators keep
+    -- the evidence, but it is excluded from the drain query so it stops blocking.
+    dead_lettered_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Drain order for the replay sweep.
+-- Drain order for the replay sweep. Partial on the live set so dead-lettered
+-- rows leave the index entirely instead of being scanned and filtered forever.
 CREATE INDEX auto_queue_run_cleanup_tasks_drain_idx
-    ON auto_queue_run_cleanup_tasks (created_at ASC, id ASC);
+    ON auto_queue_run_cleanup_tasks (next_attempt_at ASC, created_at ASC, id ASC)
+    WHERE dead_lettered_at IS NULL;

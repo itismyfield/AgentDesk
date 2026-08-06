@@ -119,6 +119,19 @@
   before every side effect is considered failover-safe. Scheduled messages are
   leader-started and additionally fence each delivery attempt with a Postgres
   lease, a per-attempt `claim_token`, and a durable fire-slot uniqueness key.
+  #5142: the `policy-tick` worker now also receives the process `HealthRegistry`
+  (`src/server/worker_registry.rs`, `policy_tick_loop` in `src/server/mod.rs`).
+  This does not change the worker's classification — it stays `leader_only`
+  behind the existing PG advisory lock — but it does mean the tick's auto-queue
+  cleanup replay performs provider-runtime teardown
+  (`clear_provider_channel_runtime`) against *this node's* registry. That
+  teardown is node-local by construction: a leader can only tear down runtimes it
+  hosts, so a replayed cleanup whose slot threads belong to another node still
+  converges the PostgreSQL state (session ids, slot tokens, slot-thread bindings)
+  while the remote node's in-memory runtime is left to its own recovery path. The
+  durable rows in `auto_queue_run_cleanup_tasks` are claimed with
+  `FOR UPDATE SKIP LOCKED` plus a lease, so two nodes draining concurrently
+  cannot double-run a task.
 - invariants: `singleton_on_leader`, `pg_lease_backed_claim`.
 - allowed_changes: `bugfix` for existing workers. `new_feature` workers must add
   a leader-only, lease-backed, or worker-local classification in the same change.
