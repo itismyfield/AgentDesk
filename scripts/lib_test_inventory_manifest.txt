@@ -847,8 +847,7 @@ server::routes::github::tests::create_issue_dry_run_reports_reserved_feature_cap
 server::routes::github::tests::create_issue_non_dry_run_maps_shared_service_github_failure
 server::routes::github::tests::create_issue_non_dry_run_maps_shared_service_success_response
 server::routes::github::tests::create_issue_rejects_reserved_fields_without_gh_side_effects
-server::routes::health_api::tests::auto_queue_cleanup_backlog_is_wired_into_both_detail_projections
-server::routes::health_api::tests::auto_queue_cleanup_is_detail_only_like_dispatch_outbox
+server::routes::health_api::tests::auto_queue_cleanup_backlog_is_served_from_both_health_response_arms
 server::routes::health_api::tests::compute_fully_recovered_preserves_recovery_axis_when_runtime_degrades
 server::routes::health_api::tests::discord_bot_token_reload_router_rejects_non_loopback_auth_token_without_bearer
 server::routes::health_api::tests::discord_bot_token_reload_router_rejects_non_loopback_without_auth_token
@@ -866,6 +865,9 @@ server::routes::health_api::tests::discord_send_caller_class_keeps_headerless_lo
 server::routes::health_api::tests::discord_send_caller_class_uses_header_when_present
 server::routes::health_api::tests::discord_send_router_applies_explicit_cli_source_gate_on_loopback
 server::routes::health_api::tests::health_detail_reports_provider_runtime_bot_token_restart_required
+server::routes::health_api::tests::public_auto_queue_cleanup_backlog_does_not_move_ok_or_degraded_reasons
+server::routes::health_api::tests::public_auto_queue_cleanup_backlog_is_served_on_the_unauthenticated_endpoint
+server::routes::health_api::tests::public_auto_queue_cleanup_projection_is_count_only
 server::routes::health_api::tests::public_health_json_degraded_iff_reasons_nonempty
 server::routes::health_api::tests::public_health_json_degraded_status_reports_not_ok
 server::routes::health_api::tests::public_health_json_keeps_degraded_and_startup_reasons_distinct
@@ -986,8 +988,7 @@ server::worker_recovery::tests::restarts_after_unexpected_return
 server::worker_recovery::tests::shutdown_waits_for_inner_cleanup
 server::worker_recovery::tests::simultaneous_return_and_shutdown_is_expected_without_budget_use
 server::worker_recovery::tests::stable_run_resets_backoff
-server::worker_registry::leader_takeover_tests::policy_tick_hands_the_process_registry_to_the_spawned_tick
-server::worker_registry::leader_takeover_tests::policy_tick_is_started_with_the_process_health_registry
+server::worker_registry::leader_takeover_tests::policy_tick_thread_captures_the_process_health_registry
 server::worker_registry::leader_takeover_tests::supervisor_respawns_worker_after_lease_takeover
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests::fails_closed_on_column_decode_error
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests::fails_closed_on_other_errors

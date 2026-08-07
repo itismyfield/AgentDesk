@@ -622,10 +622,32 @@ decompose_issue = "#4710"
 # drain, replay, attempt-cap dead-lettering, and the backlog gauge projection are
 # all statements about one row lifecycle in `auto_queue_run_cleanup_tasks`; the
 # at-most-once emit invariant is only checkable while they sit together.
+#
+# `decision = "keep"` re-judged in #5142 r5, because the landing round chose it
+# without review and this file — unlike every other entry here — is NEW, so it is
+# registered as a giant on the same commit that creates it. Two measurements
+# decide it:
+#
+#   * Of 1132 production lines, 663 are code and 424 are comment/doc lines (39%
+#     of all non-blank lines). The file crosses the 1000-line signal on
+#     documentation density, not on code volume; its executable body is a third
+#     under the threshold. Splitting it would move prose, not complexity.
+#   * The 15 top-level functions are one row lifecycle. The at-most-once emit
+#     invariant is enforced by the interaction of the `emitted` mark, the mark's
+#     ordering against the emit, the claim lease and the attempt cap. A split
+#     that put the mark and the emit in different modules would spread that
+#     invariant across a boundary the compiler cannot hold — and that invariant
+#     is exactly what rounds 3-5 of this issue kept getting wrong.
+#
+# `shrink` was rejected as well as unearned: every `decompose_issue` in this
+# registry points at #4710/#4711/#4712, all three of which are CLOSED on GitHub
+# while `giant_file_issue_metadata.json` still records them as `"open"`. Adding a
+# fourth dead deadline pointer would register debt nobody tracks. That snapshot
+# defect is out of scope here and is filed as a follow-up (see the r5 report).
 file = "src/services/auto_queue/cleanup_tasks.rs"
 owner = "automation-pipeline"
 decision = "keep"
-keep_reason = "Enqueue-on-transaction, claim/drain, replay, attempt-cap dead-lettering, and the backlog gauge are one durable row-lifecycle contract for auto_queue_run_cleanup_tasks; splitting them separates the at-most-once emit invariant from the code that enforces it, so keep the cohesive verified boundary until a scoped split is planned."
+keep_reason = "Enqueue-on-transaction, claim/drain, replay, attempt-cap dead-lettering, and the backlog gauge are one durable row-lifecycle contract for auto_queue_run_cleanup_tasks; splitting them separates the at-most-once emit invariant from the code that enforces it. Measured 663 code lines against 424 comment lines, so the file exceeds the giant signal on documentation density rather than code volume, and a split would relocate prose while breaking a compiler-unenforceable invariant."
 
 [[entry]]
 # Standby JSONL relay has completion draining, terminal response selection, and

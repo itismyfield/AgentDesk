@@ -43,9 +43,14 @@ pub struct DispatchOutboxStats {
 /// gone the moment the log rotates. A non-zero value here is an operator action
 /// item, not a statistic.
 ///
-/// Surfaced on `/api/health/detail` only, matching [`DispatchOutboxStats`]: its
-/// `permanent_failures` is the same kind of number and is gated the same way.
-/// `auto_queue_cleanup_is_detail_only_like_dispatch_outbox` pins the pair.
+/// Surfaced on `/api/health/detail` in full and projected count-only onto the
+/// credential-free `/api/health`. It does NOT follow [`DispatchOutboxStats`],
+/// which is detail-only: that block has a row-level list endpoint, an ack
+/// endpoint and an `agentdesk doctor` Core check behind it, and this one has no
+/// reader at all — so hiding it behind the protected router would leave a
+/// permanently stalled cleanup outbox reporting `ok: true` and nothing else.
+/// `public_auto_queue_cleanup_backlog_is_served_on_the_unauthenticated_endpoint`
+/// pins the public half against a real HTTP response.
 ///
 /// `pending` is the live half (rows still owed and still retrying) and is
 /// included so the two can be told apart at a glance.
@@ -55,12 +60,61 @@ pub struct AutoQueueCleanupBacklog {
     pub dead_lettered: i64,
 }
 
+/// Test-only injection point for [`load_auto_queue_cleanup_backlog`].
+///
+/// The backlog is a PostgreSQL read, so in a unit test the health handler can
+/// only ever produce `None` and every claim about *where the block surfaces*
+/// would have to be a source-text guard. #5142 r5 deleted two such guards —
+/// each defeated by a single adjacent line — and replaced them with
+/// router-level tests that inject a backlog here and then assert on the real
+/// HTTP body of `/health` and `/health/detail`.
+///
+/// [`inject`] holds a process-wide lock for the lifetime of its guard, so the
+/// injecting tests serialize against each other and leave nothing behind for
+/// the rest of the binary.
+#[cfg(test)]
+pub(crate) mod backlog_probe {
+    use super::AutoQueueCleanupBacklog;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    static SERIALIZE: OnceLock<Mutex<()>> = OnceLock::new();
+    static VALUE: Mutex<Option<AutoQueueCleanupBacklog>> = Mutex::new(None);
+
+    /// Clears the injected value and releases the serialization lock on drop.
+    pub(crate) struct InjectedBacklog {
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl Drop for InjectedBacklog {
+        fn drop(&mut self) {
+            *VALUE.lock().unwrap_or_else(|poison| poison.into_inner()) = None;
+        }
+    }
+
+    pub(crate) fn inject(backlog: AutoQueueCleanupBacklog) -> InjectedBacklog {
+        let lock = SERIALIZE
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        *VALUE.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(backlog);
+        InjectedBacklog { _lock: lock }
+    }
+
+    pub(crate) fn injected() -> Option<AutoQueueCleanupBacklog> {
+        *VALUE.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+}
+
 /// Load the auto-queue cleanup backlog. `None` when there is no pool or the
 /// query fails, which keeps a health probe from turning a diagnostics read into
 /// an outage.
 pub async fn load_auto_queue_cleanup_backlog(
     pg_pool: Option<&PgPool>,
 ) -> Option<AutoQueueCleanupBacklog> {
+    #[cfg(test)]
+    if let Some(injected) = backlog_probe::injected() {
+        return Some(injected);
+    }
     let pool = pg_pool?;
     match load_auto_queue_cleanup_backlog_pg(pool).await {
         Ok(backlog) => Some(backlog),

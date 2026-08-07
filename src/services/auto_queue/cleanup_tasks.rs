@@ -73,9 +73,12 @@
 //! is a deliberate trade (one unfixable row must not block every cleanup queued
 //! behind it), and it is only defensible because the outcome is *observable*:
 //! `RunCleanupReplayStats::dead_lettered` counts the transition when the parking
-//! UPDATE actually lands, and `/api/health/detail` carries the standing
-//! `auto_queue_cleanup.dead_lettered` backlog until an operator clears it. No row
-//! is abandoned silently.
+//! UPDATE actually lands, and the standing `auto_queue_cleanup.dead_lettered`
+//! backlog is carried on the credential-free `/api/health` (count-only) as well
+//! as in full on `/api/health/detail`, until an operator clears it. The public
+//! half is the one that matters here: `/api/health/detail` is behind
+//! `protected_api_domain`, so without it a monitor with no token reads `ok: true`
+//! over a cleanup queue that stopped converging. No row is abandoned silently.
 //!
 //! ## Bookkeeping writes can fail too
 //!
@@ -145,57 +148,20 @@ pub(crate) struct RunCleanupDrainOutcome {
     pub(crate) attempt_unrecorded: bool,
 }
 
-/// Test-only footprint of the step 1 emit.
+/// Test-only footprint of the observability emit, re-exported from the emit
+/// itself.
 ///
-/// `CancelTransitionMeta::emit` hands the event to an in-process worker channel
-/// and discards the result, so nothing about it is observable from a test — which
-/// is why moving the emit loop back in front of the `emitted = TRUE` mark left
-/// the whole suite green in the #5142 r3 review. This recorder gives the emit an
-/// observable footprint so the ordering can be asserted directly instead of
-/// inferred.
-///
-/// Keyed by dispatch id because the tests in this binary run concurrently and
-/// each fixture seeds a unique `dispatch-cleanup-<suffix>`; a bare counter would
-/// make every test in the module race every other one.
+/// The recorder lives on `CancelTransitionMeta::emit` — the real boundary — and
+/// not on a wrapper in this module. Round 4 recorded inside a
+/// `fire_pending_emit` helper instead, which made the probe narrower than the
+/// name it backed: a bare `meta.emit()` written in front of the `emitted = TRUE`
+/// mark reintroduced the exact double-emit defect the ordering exists to
+/// prevent, emitted the real events, and was invisible to
+/// `a_failed_emit_mark_fires_no_emit_and_releases_no_slot_pg` because it never
+/// went through the wrapper. Every route to an emit is now counted, so the test
+/// name is true of the code rather than of one call site.
 #[cfg(test)]
-pub(crate) mod emit_probe {
-    use std::sync::{Mutex, OnceLock};
-
-    fn log() -> &'static Mutex<Vec<String>> {
-        static LOG: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
-        LOG.get_or_init(|| Mutex::new(Vec::new()))
-    }
-
-    pub(crate) fn record(dispatch_id: &str) {
-        if let Ok(mut entries) = log().lock() {
-            entries.push(dispatch_id.to_string());
-        }
-    }
-
-    /// How many observability events this dispatch id has emitted in this
-    /// process so far.
-    pub(crate) fn emit_count(dispatch_id: &str) -> usize {
-        log()
-            .lock()
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter(|entry| entry.as_str() == dispatch_id)
-                    .count()
-            })
-            .unwrap_or(0)
-    }
-}
-
-/// Fire one owed observability event.
-///
-/// The `#[cfg(test)]` record is the *only* thing that makes step 1's ordering
-/// checkable; see [`emit_probe`].
-fn fire_pending_emit(meta: &CancelTransitionMeta) {
-    #[cfg(test)]
-    emit_probe::record(&meta.dispatch_id);
-    meta.emit();
-}
+pub(crate) use crate::dispatch::emit_probe;
 
 /// What `record_task_failure_pg` managed to write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -762,8 +728,10 @@ pub(crate) async fn drain_run_cleanup_task_pg(
         // never re-attempted) — both losses, never repeats.
         //
         // Nothing in the emit path is observable at runtime, so this ordering is
-        // pinned by `fire_pending_emit`'s `#[cfg(test)]` probe rather than by
-        // inference; see `a_failed_emit_mark_fires_no_emit_and_releases_no_slot_pg`.
+        // pinned by the `#[cfg(test)]` probe on `CancelTransitionMeta::emit`
+        // itself rather than by inference; any emit reaching this row before the
+        // mark commits — through this loop or written directly — is counted. See
+        // `a_failed_emit_mark_fires_no_emit_and_releases_no_slot_pg`.
         if let Err(error) = sqlx::query(
             "UPDATE auto_queue_run_cleanup_tasks
              SET emitted = TRUE,
@@ -792,7 +760,7 @@ pub(crate) async fn drain_run_cleanup_task_pg(
             };
         }
         for meta in &task.pending_emits {
-            fire_pending_emit(meta);
+            meta.emit();
         }
     }
     for meta in &task.pending_emits {
@@ -1066,8 +1034,8 @@ pub(crate) struct RunCleanupReplayStats {
     /// the undecodable payloads (poison) and the rows that burned through
     /// `MAX_CLEANUP_ATTEMPTS`. Counted rather than silently skipped because a
     /// dead-letter is the one outcome the retry loop can never repair on its
-    /// own, so it has to reach a human; the standing backlog is on
-    /// `/api/health/detail` under `auto_queue_cleanup.dead_lettered`.
+    /// own, so it has to reach a human; the standing backlog is on `/api/health`
+    /// and `/api/health/detail` under `auto_queue_cleanup.dead_lettered`.
     ///
     /// Only counted when the parking UPDATE actually landed. It used to be
     /// incremented for every undecodable row, including rows whose `id` could not

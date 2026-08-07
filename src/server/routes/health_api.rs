@@ -196,20 +196,32 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
     // never be retried again, so their run's slot token and residual provider
     // session id are stranded.
     //
-    // Detail-only, deliberately — it follows `dispatch_outbox` exactly. That
-    // block's `permanent_failures` is the structural twin of `dead_lettered`
-    // (a count of work items that will never be retried), and the repo's
-    // established treatment of it is: the block lives on `/api/health/detail`
-    // only, is absent from `public_health_json`'s allowlist, and the operator
-    // surface is `agentdesk doctor`, which reads the detail payload and fails
-    // the `dispatch_outbox` Core check when `permanent_failures > 0`
-    // (`src/cli/doctor/orchestrator.rs:1147`). An earlier round of this change
-    // put `auto_queue_cleanup` on the public projection instead, arguing an
-    // operator must be able to read it without a credential; that argument does
-    // not survive the comparison, because `/api/health/detail` is already
-    // reachable locally without one and the twin counter accepted exactly this
-    // gating. Diverging here would have made two count-only "permanently failed
-    // work" gauges answer the same question in two different places.
+    // Attached to the detail payload here and projected count-only onto the
+    // public one by `public_health_json`, because this gauge has no other
+    // reader. An earlier round of this change made it detail-only by analogy
+    // with `dispatch_outbox.permanent_failures`; four of the five premises of
+    // that analogy were measured false and the change is reverted here:
+    //
+    //   * `agentdesk doctor` is NOT the operator surface. It checks
+    //     `dispatch_outbox` and references `auto_queue_cleanup` nowhere
+    //     (`src/cli/doctor/orchestrator.rs`).
+    //   * `/api/health/detail` is NOT credential-free. It is mounted under
+    //     `protected_api_domain` (`routes/domains/ops.rs`), so once a token is
+    //     configured a loopback caller still needs a Bearer or same-origin
+    //     header before `health_detail_handler`'s local allowance is even
+    //     reached (`routes/auth.rs`).
+    //   * `dispatch_outbox.permanent_failures` is NOT a structural twin. It has
+    //     a row-level list endpoint, an ack endpoint and a doctor Core check;
+    //     a dead-lettered cleanup row has none of those, and what it strands is
+    //     a slot token plus a residual provider session.
+    //   * Publishing it does NOT move the deploy gate. `ok` is computed purely
+    //     from `status`, and this backlog worsens neither `status` nor
+    //     `degraded_reasons` — see
+    //     `public_auto_queue_cleanup_backlog_does_not_move_ok_or_degraded_reasons`.
+    //
+    // The one true premise was "no consumer reads it yet", which licenses
+    // removal but does not require it. Keeping it public preserves the only
+    // credential-free standing signal that cleanup has stopped converging.
     let auto_queue_cleanup_json =
         health_diagnostics::load_auto_queue_cleanup_backlog(state.pg_pool_ref())
             .await
@@ -731,12 +743,27 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     let startup_degraded_reasons = json.get("startup_degraded_reasons").cloned();
     let delivery_record_rollout = json.get("delivery_record_rollout").cloned();
     let intake_routing = json.get("intake_routing").cloned();
-    // #5142 note for future readers: `auto_queue_cleanup` is deliberately NOT
-    // read here. It is a detail-only diagnostic block, exactly like its
-    // structural twin `dispatch_outbox`; see the comment in `health_response`.
-    // `auto_queue_cleanup_is_detail_only_like_dispatch_outbox` pins the pair so
-    // adding it back is a test failure rather than a silent contract change.
+    // #5142: the auto-queue cleanup backlog is carried onto the public shape,
+    // count-only. `dead_lettered > 0` means cleanup rows burned the attempt cap
+    // and will never be retried, so a slot token and a provider session stay
+    // stranded — and nothing else reports that: `agentdesk doctor` does not read
+    // this block, and `/api/health/detail` is behind `protected_api_domain`.
+    // Without this the only credential-free reading of a permanently stalled
+    // cleanup outbox is `ok: true`.
     //
+    // Re-projected field by field rather than cloned, so a later field added to
+    // the detail block (an id, a run id, an error string) cannot reach the
+    // unauthenticated shape by default. It is deliberately NOT fed into
+    // `degraded_reasons` or `status`; see the comment in `health_response`.
+    let auto_queue_cleanup = json.get("auto_queue_cleanup").map(|block| {
+        serde_json::json!({
+            "pending": block.get("pending").cloned().unwrap_or(serde_json::json!(0)),
+            "dead_lettered": block
+                .get("dead_lettered")
+                .cloned()
+                .unwrap_or(serde_json::json!(0)),
+        })
+    });
     // Public OpenCode summary is count-only and never includes the per-server
     // `warm_servers` array, pids, ports, or startup tails (spec C-3). The
     // upstream `opencode_warm_pool_json(false)` already produced a count-only
@@ -790,6 +817,9 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     }
     if let Some(opencode_public) = opencode_public {
         public["opencode"] = opencode_public;
+    }
+    if let Some(auto_queue_cleanup) = auto_queue_cleanup {
+        public["auto_queue_cleanup"] = auto_queue_cleanup;
     }
     public
 }
@@ -2694,91 +2724,196 @@ mod tests {
         assert_eq!(public["ok"], json!(true));
     }
 
-    /// **#5142 — the public/detail split for the auto-queue cleanup backlog.**
-    ///
-    /// `auto_queue_cleanup.dead_lettered` and `dispatch_outbox.permanent_failures`
-    /// are the same thing wearing two names: a count of work items that will
-    /// never be retried again. They must therefore be reachable in the same
-    /// place, and the place this repo already chose is `/api/health/detail`.
-    ///
-    /// The assertion is deliberately a *pair*. Asserting only that
-    /// `auto_queue_cleanup` is absent would pass if someone deleted the block
-    /// entirely; asserting it next to `dispatch_outbox` states the actual
-    /// contract — these two travel together — so promoting either one alone
-    /// fails here.
-    #[test]
-    fn auto_queue_cleanup_is_detail_only_like_dispatch_outbox() {
-        let public = public_health_json(json!({
-            "status": "healthy",
-            "version": "0.1.2",
-            "db": true,
-            "dashboard": true,
-            "server_up": true,
-            "dispatch_outbox": {
-                "pending": 2,
-                "retrying": 1,
-                "permanent_failures": 3,
-                "oldest_pending_age": 60,
+    /// Build a `/health` or `/health/detail` request from a loopback peer.
+    fn health_get(uri: &str) -> Request<Body> {
+        let mut request = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .body(Body::empty())
+            .expect("valid health request");
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            "127.0.0.1:8791"
+                .parse::<std::net::SocketAddr>()
+                .expect("loopback peer"),
+        ));
+        request
+    }
+
+    /// Serve one health request against a freshly built router and return the
+    /// decoded body. `registry` selects which arm of `health_response` runs:
+    /// `Some` is the Discord-registry arm, `None` the standalone arm.
+    async fn health_body(
+        uri: &str,
+        registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    ) -> serde_json::Value {
+        let mut config = crate::config::Config::default();
+        config.server.host = "0.0.0.0".to_string();
+        let app = test_api_router_with_config_and_registry(config, registry);
+        let response = app.oneshot(health_get(uri)).await.expect("health response");
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("health body");
+        serde_json::from_slice(&bytes).expect("health body is JSON")
+    }
+
+    fn injected_backlog(
+        pending: i64,
+        dead_lettered: i64,
+    ) -> crate::services::health_diagnostics::backlog_probe::InjectedBacklog {
+        crate::services::health_diagnostics::backlog_probe::inject(
+            crate::services::health_diagnostics::AutoQueueCleanupBacklog {
+                pending,
+                dead_lettered,
             },
-            "auto_queue_cleanup": {
-                "pending": 4,
-                "dead_lettered": 5,
-            }
-        }));
-        assert!(
-            public.get("dispatch_outbox").is_none(),
-            "precondition — the twin block this one is being kept consistent \
-             with is detail-only: {public}"
+        )
+    }
+
+    /// **#5142 r5 — the auto-queue cleanup backlog reaches the credential-free
+    /// endpoint, measured on a real HTTP response.**
+    ///
+    /// `dead_lettered > 0` means cleanup rows burned the attempt cap and will
+    /// never be retried, leaving a slot token and a provider session stranded.
+    /// Nothing else reports that: `agentdesk doctor` does not read this block,
+    /// and `/api/health/detail` sits under `protected_api_domain`. Drop it from
+    /// the public projection and a permanently stalled cleanup outbox reads as
+    /// `ok: true` to every credential-free monitor.
+    ///
+    /// Round 4 pinned this with `public_health_json(json!(…))` over a fixture
+    /// built inside the test. That could not see the two things that actually
+    /// decide the answer — whether the loader is reached at all, and whether
+    /// anything re-shapes the payload after the projection — so a re-exposure
+    /// gated on `outbox_age`, or a loader stubbed to `None`, both passed it.
+    /// This drives the router instead: the value is injected at the loader and
+    /// read back off the serialized body.
+    #[tokio::test]
+    async fn public_auto_queue_cleanup_backlog_is_served_on_the_unauthenticated_endpoint() {
+        let _injected = injected_backlog(4, 5);
+        let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+
+        let public = health_body("/health", Some(registry)).await;
+
+        assert_eq!(
+            public["auto_queue_cleanup"]["dead_lettered"],
+            json!(5),
+            "the permanently parked cleanup count must be readable without a \
+             credential; it is the only standing signal that a slot token and a \
+             provider session are stranded: {public}"
+        );
+        assert_eq!(public["auto_queue_cleanup"]["pending"], json!(4));
+        // `outbox_age` is 0 on this path, so a re-exposure conditional on a
+        // non-zero outbox age would leave the block absent here.
+        assert_eq!(
+            public["outbox_age"],
+            serde_json::Value::Null,
+            "precondition: the public shape carries no outbox age, so nothing \
+             above may gate the cleanup block on one"
         );
         assert!(
-            public.get("auto_queue_cleanup").is_none(),
-            "the auto-queue cleanup backlog is a detail-only diagnostic block, \
-             exactly like `dispatch_outbox`; promoting it to the unauthenticated \
-             projection makes two identical 'permanently failed work' counters \
-             answerable in two different places: {public}"
+            public.get("dispatch_outbox").is_none(),
+            "and this is not a licence to publish the unrelated dispatch outbox \
+             block, which does have a doctor check and an ack endpoint behind \
+             it: {public}"
         );
     }
 
-    /// The detail projection must actually carry the block the test above keeps
-    /// off the public one — otherwise "detail-only" would be satisfied by the
-    /// gauge existing nowhere at all.
-    ///
-    /// `health_response` needs a live `AppState` (and a PostgreSQL pool) to run,
-    /// so the wiring itself is not reachable from a unit test. This is a source
-    /// guard on the two assignment sites instead — the same technique used
-    /// elsewhere in this tree for wiring that only an integration boot can
-    /// execute. It pins the call sites, not the runtime behaviour, and that
-    /// limit is the reason the pairing above is asserted behaviourally.
-    #[test]
-    fn auto_queue_cleanup_backlog_is_wired_into_both_detail_projections() {
-        // Everything above the test module, so this test's own string literals
-        // cannot satisfy its assertions.
-        let source = include_str!("health_api.rs")
-            .split_once("\n#[cfg(test)]\nmod tests {")
-            .expect("the test module is declared in this file")
-            .0;
-        assert_eq!(
-            source
-                .matches(r#"json["auto_queue_cleanup"] = backlog;"#)
-                .count(),
-            2,
-            "both `health_response` branches (with and without a Discord health \
-             registry) must attach the cleanup backlog to the detail payload; \
-             dropping either one removes the only operator-visible trace of a \
-             permanently parked cleanup row"
-        );
-        let public_fn = source
-            .split_once("fn public_health_json(")
-            .expect("public_health_json is defined in this module")
-            .1;
-        let public_fn = public_fn
-            .split_once("\nasync fn ")
-            .map(|(body, _)| body)
-            .unwrap_or(public_fn);
+    /// The standalone arm of `health_response` (no Discord registry) builds its
+    /// payload from scratch rather than from a health snapshot, so it is a
+    /// second, independent attachment site. Round 4 covered both arms by
+    /// counting `json["auto_queue_cleanup"] = backlog;` in the file's own text,
+    /// which a comment carrying the same characters satisfied.
+    #[tokio::test]
+    async fn auto_queue_cleanup_backlog_is_served_from_both_health_response_arms() {
+        let _injected = injected_backlog(1, 2);
+
+        for registry in [
+            Some(Arc::new(
+                crate::services::discord::health::HealthRegistry::new(),
+            )),
+            None,
+        ] {
+            let detail = health_body("/health/detail", registry.clone()).await;
+            assert_eq!(
+                detail["auto_queue_cleanup"]["pending"],
+                json!(1),
+                "detail payload lost the cleanup backlog (registry present: {}): {detail}",
+                registry.is_some()
+            );
+            assert_eq!(detail["auto_queue_cleanup"]["dead_lettered"], json!(2));
+
+            let public = health_body("/health", registry.clone()).await;
+            assert_eq!(
+                public["auto_queue_cleanup"]["dead_lettered"],
+                json!(2),
+                "public payload lost the cleanup backlog (registry present: {}): {public}",
+                registry.is_some()
+            );
+        }
+    }
+
+    /// **The deploy gate must not move.** `ok` is computed from `status` alone,
+    /// and the cleanup backlog worsens neither `status` nor `degraded_reasons`
+    /// — it is a gauge, not a verdict. Publishing it therefore cannot flip a
+    /// readiness probe or a deploy gate, and this pins that separation from
+    /// both directions: a parked backlog and an empty one must produce byte
+    /// identical verdict fields.
+    #[tokio::test]
+    async fn public_auto_queue_cleanup_backlog_does_not_move_ok_or_degraded_reasons() {
+        let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+
+        let quiet = {
+            let _injected = injected_backlog(0, 0);
+            health_body("/health", Some(registry.clone())).await
+        };
+        let parked = {
+            let _injected = injected_backlog(9, 9);
+            health_body("/health", Some(registry.clone())).await
+        };
+
+        assert_eq!(parked["auto_queue_cleanup"]["dead_lettered"], json!(9));
+        assert_eq!(quiet["auto_queue_cleanup"]["dead_lettered"], json!(0));
+        for field in ["ok", "status", "degraded", "degraded_reasons"] {
+            assert_eq!(
+                parked[field], quiet[field],
+                "a parked cleanup backlog must not move `{field}`: a gauge that \
+                 fails a deploy gate is a different change with different risk"
+            );
+        }
         assert!(
-            !public_fn.contains(r#"json.get("auto_queue_cleanup")"#),
-            "and `public_health_json` must not read it back onto the \
-             unauthenticated shape"
+            parked["degraded_reasons"]
+                .as_array()
+                .expect("degraded_reasons is always an array on the public shape")
+                .iter()
+                .all(|reason| reason.as_str() != Some("auto_queue_cleanup_dead_lettered")),
+            "no cleanup reason may appear on the axis that decides `ok`: {parked}"
+        );
+    }
+
+    /// The public block is re-projected field by field, not cloned. A field
+    /// added to the detail block later — a run id, a task id, an error string —
+    /// must not reach the unauthenticated shape by inheritance.
+    #[test]
+    fn public_auto_queue_cleanup_projection_is_count_only() {
+        let public = public_health_json(json!({
+            "status": "healthy",
+            "auto_queue_cleanup": {
+                "pending": 4,
+                "dead_lettered": 5,
+                "oldest_dead_lettered_run_id": "run-secret",
+                "last_error": "connection string leaked here",
+            }
+        }));
+
+        assert_eq!(public["auto_queue_cleanup"]["pending"], json!(4));
+        assert_eq!(public["auto_queue_cleanup"]["dead_lettered"], json!(5));
+        let block = public["auto_queue_cleanup"]
+            .as_object()
+            .expect("the public cleanup block is an object");
+        assert_eq!(
+            block.len(),
+            2,
+            "count-only: exactly `pending` and `dead_lettered` cross to the \
+             unauthenticated shape, and a future detail field does not tag \
+             along: {public}"
         );
     }
 

@@ -1390,9 +1390,17 @@ mod pg_tests {
     /// lie.** The emit is fire-and-forget into an in-process channel, so nothing
     /// in this test counted it as a side effect: moving the emit loop back in
     /// front of the mark left this test — and the whole module — green (#5142 r3
-    /// review, mutation ⓟ). `fire_pending_emit`'s `#[cfg(test)]` probe is what
-    /// makes the emit observable, and the name now enumerates exactly the two
-    /// things asserted below rather than claiming everything.
+    /// review, mutation ⓟ). The `#[cfg(test)]` probe on
+    /// `CancelTransitionMeta::emit` is what makes the emit observable, and the
+    /// name now enumerates exactly the two things asserted below rather than
+    /// claiming everything.
+    ///
+    /// **The probe sits on the emit, not on a wrapper.** Round 4 recorded inside
+    /// a `fire_pending_emit` helper, so `fires_no_emit` was true only of emits
+    /// routed through that helper: writing a bare `meta.emit()` in front of the
+    /// mark fired the real events and this test still passed (#5142 r5, mutation
+    /// S1). Counting at the boundary makes the name a statement about the code
+    /// rather than about one call site.
     #[tokio::test]
     async fn a_failed_emit_mark_fires_no_emit_and_releases_no_slot_pg() {
         let pg_db = TestPostgresDb::create().await;
