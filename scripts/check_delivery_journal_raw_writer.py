@@ -144,12 +144,49 @@ FAMILY_REGISTRY = (
 # one the S2 block declares, it is unchanged by S5a, and it is measured: adding an
 # uninstrumented `write_delivered_frontier` to a non-anchor family file leaves
 # this gate green and every test in the suite green.
+#
+# #5071 T1 S5b adds the fourth alternative on the same terms, now that S5a has
+# pointed this family's anchor at the file that actually writes its delivery. The
+# recovery family reaches the journal through `recovery_engine::unix_journal`,
+# which re-exports `session_relay_sink::journal::recovery`, so the alternative
+# names that module path and its two exact functions. `unix_journal::` now
+# prefixes TWO different doors — turn_bridge's from S4 and recovery_engine's from
+# S5b — and they stay separated by function name alone; a bare `unix_journal`, a
+# bare `recovery`, or any other method on either does NOT match.
+#
+# The baseline moves 2 -> 1 because the anchor file now contains the token, and
+# for no other reason. The one remaining uninstrumented family (pipe stream
+# epoch) is untouched by S5b, and its anchor is the open question S5a raised and
+# did not answer. That the drop is caused by the instrumentation rather than by
+# the widened pattern is proven by the reverse mutation
+# `test_recovery_family_regresses_to_uninstrumented`.
+#
+# PLATFORM BLINDNESS applies here for the same reason it applies to the cutover
+# family: `mod recovery_engine`, `mod recovery_paths` and `mod outbound` are all
+# ungated while the journal is `#[cfg(unix)]`, so on non-unix this family's
+# frontier advances UNINSTRUMENTED and this text scan reports it as instrumented
+# anyway. Read `uninstrumented families: 1/6` as "one family carries no facade
+# token ON UNIX". The door is
+# src/services/discord/recovery_engine/unix_journal.rs, and what holds the
+# boundary is
+# `test_source_contract_recovery_reaches_the_journal_through_one_cfg_gated_door`.
+#
+# What S5b does NOT observe, stated here because a green gate says nothing about
+# it. This family's obligation opens AFTER transport (two of its three entry
+# points only learn they advance the frontier from the edit transport's own
+# answer), so a recovery delivery lost mid-POST leaves no trace at all. It emits
+# no `T` either: no receipt is observable on this path, and synthesising one from
+# the anchor message id would make `requested == returned` structurally true. The
+# journal is shadow-only and nothing reads it back, and the recovery path's
+# bypass of the `shadow_mirror_delivered_frontier` funnel is deliberately still
+# there — S5b measures that bypass, #5071 T1 S7 closes it.
 JOURNAL_FACADE_CALL = re.compile(
     r"\bself\.journal\.(?:begin_fresh|finish_fresh)\s*\("
     r"|\bjournal_watcher::(?:begin_watcher_terminal|settle_watcher_terminal|settle_without_transport)\s*\("
     r"|\bunix_journal::(?:begin_controller_terminal|settle_controller_terminal)\s*\("
+    r"|\bunix_journal::(?:begin_recovery_terminal|settle_recovery_terminal)\s*\("
 )
-UNINSTRUMENTED_FAMILY_BASELINE = 2
+UNINSTRUMENTED_FAMILY_BASELINE = 1
 
 
 def call_sites(root: Path) -> tuple[Counter[str], int]:

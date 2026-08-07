@@ -252,7 +252,9 @@ where
             ..
         } => {
             if let Some(context) = recovery_context {
-                context.record_successful_fresh_send(anchor, body);
+                context.record_successful_fresh_send_after_controller_edit_fallback(
+                    shared, anchor, body,
+                );
             } else {
                 tracing::warn!(
                     channel_id = channel_id.get(),
