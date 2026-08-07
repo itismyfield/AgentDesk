@@ -401,6 +401,17 @@ class RawWriterAllowlistTests(unittest.TestCase):
             "the gate this contract protects moved; re-derive the rule instead of relaxing it",
         )
         door = "src/services/discord/turn_bridge/terminal_controller_cutover/unix_journal.rs"
+        # This literal is self-validating below: point it at the wrong file and
+        # the real door lands in `offenders`. The gate script's PLATFORM
+        # BLINDNESS block sends readers to the same path in prose, where nothing
+        # validates it -- it went stale the moment the door moved under
+        # terminal_controller_cutover/. Pin the two copies together here so the
+        # next move cannot leave a pointer to a file that does not exist.
+        self.assertTrue(
+            door in SCRIPT.read_text(encoding="utf-8"),
+            f"scripts/check_delivery_journal_raw_writer.py points readers at a "
+            f"door path that is not {door}",
+        )
         offenders = []
         gated = 0
         for path in sorted((ROOT / "src/services/discord/turn_bridge").rglob("*.rs")):

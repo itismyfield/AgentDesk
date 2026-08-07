@@ -90,8 +90,9 @@ FAMILY_REGISTRY = (
 # unix. Read `uninstrumented families: N/6` as "N families carry no facade token
 # on unix". The one thing that actually holds the boundary the regression broke
 # is `test_source_contract_turn_bridge_reaches_the_journal_through_one_cfg_gated_door`
-# in tests/test_delivery_journal_raw_writer.py; see also
-# src/services/discord/turn_bridge/unix_journal.rs.
+# in tests/test_delivery_journal_raw_writer.py, which owns the door path as the
+# literal `door` it scans for; see also
+# src/services/discord/turn_bridge/terminal_controller_cutover/unix_journal.rs.
 JOURNAL_FACADE_CALL = re.compile(
     r"\bself\.journal\.(?:begin_fresh|finish_fresh)\s*\("
     r"|\bjournal_watcher::(?:begin_watcher_terminal|settle_watcher_terminal|settle_without_transport)\s*\("
