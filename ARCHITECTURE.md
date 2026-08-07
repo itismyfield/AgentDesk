@@ -783,6 +783,7 @@ src/
 │   │   │   └── voice.rs
 │   │   ├── session_relay_sink/
 │   │   │   ├── journal/
+│   │   │   │   ├── controller.rs
 │   │   │   │   ├── pg_store.rs
 │   │   │   │   └── watcher.rs
 │   │   │   ├── delivery_commit.rs
@@ -958,6 +959,8 @@ src/
 │   │   │   │   └── types.rs
 │   │   │   ├── stream_tick/
 │   │   │   │   └── guarded_persist.rs
+│   │   │   ├── terminal_controller_cutover/
+│   │   │   │   └── unix_journal.rs
 │   │   │   ├── terminal_outcome_delivery/
 │   │   │   │   ├── empty_response_recovery/
 │   │   │   │   │   ├── guidance.rs

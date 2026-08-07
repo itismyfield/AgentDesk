@@ -14,6 +14,7 @@ FACADE_MARKERS = (
     " self.journal.begin_fresh();",
     " self.journal.begin_fresh();",
     " journal_watcher::begin_watcher_terminal();",
+    " unix_journal::begin_controller_terminal();",
 )
 def write(root: Path, rel: str, body: str) -> None:
     path = root / rel
@@ -29,8 +30,10 @@ class RawWriterAllowlistTests(unittest.TestCase):
         write(root, "src/services/discord/session_relay_sink/journal.rs", "fn actor() { append_delivery_journal_batch(); }\n")
         # #5071 T1 S3a: the third instrumented family is the watcher, which spells
         # the facade through `journal_watcher::` because its anchor is a free
-        # function with no `self`. Using the real token here means the fixture
-        # exercises BOTH alternations of JOURNAL_FACADE_CALL, not just the sink's.
+        # function with no `self`. #5071 T1 S4 adds the fourth, the turn_bridge
+        # cutover, spelling it through `unix_journal::`. Using the real tokens here
+        # means the fixture exercises ALL THREE alternations of
+        # JOURNAL_FACADE_CALL, not just the sink's.
         for index, (_, rel, symbol) in enumerate(guard.FAMILY_REGISTRY):
             call = FACADE_MARKERS[index] if index < len(FACADE_MARKERS) else ""
             write(root, rel, f"fn {symbol}() {{{call}}}\n")
@@ -80,7 +83,7 @@ class RawWriterAllowlistTests(unittest.TestCase):
         path = root / guard.FAMILY_REGISTRY[4][1]
         path.write_text(path.read_text(encoding="utf-8") + '#[cfg(test)] fn journal_probe() { self.journal.begin_fresh(); }\n', encoding="utf-8")
         self.assertTrue(guard.family_status(root)[0][4][1], "cfg(test) fn marker is a declared lexical match")
-        ok, message = guard.check(root); self.assertFalse(ok); self.assertIn("uninstrumented families: 2/6", message)
+        ok, message = guard.check(root); self.assertFalse(ok); self.assertIn("uninstrumented families: 1/6", message)
 
     def test_line_doc_comment_markers_are_known_limit_and_not_counted(self):
         """Known limitation and declared behavior: line doc comments are stripped after // on each line."""
@@ -94,14 +97,14 @@ class RawWriterAllowlistTests(unittest.TestCase):
         self.assertFalse(status[4][1], "line doc comment markers are excluded by the declared lexical cut")
         ok, message = guard.check(root)
         self.assertTrue(ok, message)
-        self.assertIn("uninstrumented families: 3/6", message)
+        self.assertIn("uninstrumented families: 2/6", message)
 
     def test_block_marker_strings_do_not_hide_real_facade_calls(self):
         """Evidence: block-marker strings no longer delete calls across lines."""
         root = self.fixture()
         path = root / guard.FAMILY_REGISTRY[0][1]
         path.write_text(path.read_text(encoding="utf-8") + 'const BLOCK_OPEN: &str = "/*";\nself.journal.begin_fresh();\nconst BLOCK_CLOSE: &str = "*/";\n', encoding="utf-8")
-        ok, message = guard.check(root); self.assertTrue(ok, message); self.assertIn("uninstrumented families: 3/6", message)
+        ok, message = guard.check(root); self.assertTrue(ok, message); self.assertIn("uninstrumented families: 2/6", message)
 
     def test_raw_string_marker_is_known_lexical_false_positive(self):
         """Known limit: raw strings are not parsed and may count as calls."""
@@ -127,9 +130,9 @@ class RawWriterAllowlistTests(unittest.TestCase):
     def test_family_baseline_is_measured_and_named(self):
         ok, message = guard.check(self.fixture())
         self.assertTrue(ok, message)
-        self.assertIn("uninstrumented families: 3/6", message)
+        self.assertIn("uninstrumented families: 2/6", message)
         self.assertIn("whole anchor file including tests", message)
-        self.assertIn("turn_bridge / controller family", message)
+        self.assertIn("recovery / fresh-send / orphan family", message)
 
     def test_instrumentation_rule_is_mechanical(self):
         root = self.fixture()
@@ -159,11 +162,11 @@ class RawWriterAllowlistTests(unittest.TestCase):
     def test_baseline_increase_names_families(self):
         root = self.fixture()
         old = guard.UNINSTRUMENTED_FAMILY_BASELINE
-        guard.UNINSTRUMENTED_FAMILY_BASELINE = 2
+        guard.UNINSTRUMENTED_FAMILY_BASELINE = 1
         self.addCleanup(setattr, guard, "UNINSTRUMENTED_FAMILY_BASELINE", old)
         ok, message = guard.check(root)
         self.assertFalse(ok)
-        self.assertIn("turn_bridge / controller family", message)
+        self.assertIn("recovery / fresh-send / orphan family", message)
 
     def test_baseline_decrease_requires_repin_command(self):
         root = self.fixture()
@@ -177,7 +180,7 @@ class RawWriterAllowlistTests(unittest.TestCase):
         result = subprocess.run(["python3", str(SCRIPT)], cwd=ROOT, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertRegex(result.stdout, r"scanned Rust files: [1-9][0-9]*")
-        self.assertIn("uninstrumented families: 3/6", result.stdout)
+        self.assertIn("uninstrumented families: 2/6", result.stdout)
 
     # SOURCE-CONTRACT block (#5071 T1 S2). Everything below matches TEXT in .rs
     # files: call ORDER, call COUNT, symbol PRESENCE. None of it executes Rust,
@@ -306,6 +309,134 @@ class RawWriterAllowlistTests(unittest.TestCase):
         self.assertEqual(total, 5, "the design names exactly five no-transport settlement sites")
 
     # #5071 T1 S3c addition.
+
+    # #5071 T1 S4 additions.
+
+    def test_controller_facade_alternation_matches_only_its_exact_call_shape(self):
+        """The S4 alternation must not be a loosening either. Near misses stay
+        uninstrumented; only the two declared call shapes match."""
+        for near_miss in (
+            " unix_journal::begin_controller();",
+            " unix_journal.begin_controller_terminal();",
+            " ctl::begin_controller_terminal();",
+            " unix_journal::controller_obligation_id();",
+            " unix_journal::settle_controller();",
+        ):
+            self.assertIsNone(
+                guard.JOURNAL_FACADE_CALL.search(near_miss),
+                f"{near_miss!r} must not count as a facade call",
+            )
+        for exact in (
+            " unix_journal::begin_controller_terminal(",
+            " unix_journal::settle_controller_terminal(",
+        ):
+            self.assertIsNotNone(
+                guard.JOURNAL_FACADE_CALL.search(exact),
+                f"{exact!r} is a declared facade call",
+            )
+
+    def test_controller_family_regresses_to_uninstrumented(self):
+        """Reverse mutation, in fixture form: the 3 -> 2 baseline drop is caused
+        by the instrumentation, not by the widened regex. Drop the controller
+        token and the count returns over the re-pinned baseline of 2."""
+        root = self.fixture()
+        path = root / guard.FAMILY_REGISTRY[3][1]
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(FACADE_MARKERS[3], ""),
+            encoding="utf-8",
+        )
+        ok, message = guard.check(root)
+        self.assertFalse(ok)
+        self.assertIn("exceeds baseline", message)
+        self.assertIn("turn_bridge / controller family", message)
+
+    def test_source_contract_controller_anchor_covers_every_durable_writer(self):
+        """Source text only: the S4 design names exactly three durable delivered-
+        frontier writes in the cutover anchor -- one short-replace mirror and two
+        long-chunk records -- and each is opened by its own pre-transport begin.
+        Adding a fourth durable write, or dropping a begin, fails here. Five
+        settles, not three: the two long-chunk sites settle `true` inside their
+        commit arm and call the single-use settle once more on the way out, so a
+        completed-but-uncommitted delivery closes as `U` instead of dangling. It
+        is a text count -- it cannot prove any call is reached."""
+        source = (
+            ROOT / "src/services/discord/turn_bridge/terminal_controller_cutover.rs"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(source.count("dr::shadow_mirror_delivered_frontier("), 1)
+        self.assertEqual(source.count("dr::record_long_chunk_terminal_delivery("), 2)
+        self.assertEqual(source.count("unix_journal::begin_controller_terminal("), 3)
+        self.assertEqual(source.count("unix_journal::settle_controller_terminal("), 5)
+        self.assertLess(
+            source.index("unix_journal::begin_controller_terminal("),
+            source.index("unix_journal::settle_controller_terminal("),
+            "the first obligation opens before any settle",
+        )
+        self.assertLess(
+            source.rindex("unix_journal::begin_controller_terminal("),
+            source.rindex("unix_journal::settle_controller_terminal("),
+            "the last obligation opens before its settle",
+        )
+
+    def test_source_contract_turn_bridge_reaches_the_journal_through_one_cfg_gated_door(self):
+        """Source text only, and the one check that would have caught the S4
+        windows regression. `mod session_relay_sink` is `#[cfg(unix)]` while `mod
+        turn_bridge` is not, so ANY reference from turn_bridge into that module
+        which is not itself behind `#[cfg(unix)]` breaks windows-latest with
+        E0433 -- which is exactly how S4 first landed. This pins both halves of
+        the fix: the reference lives in exactly ONE turn_bridge file
+        (`unix_journal.rs`, the single door), and every occurrence there is
+        immediately preceded by `#[cfg(unix)]`.
+
+        What it is not: it does not compile anything, least of all for windows.
+        It is a line scan that strips only `//` suffixes, it looks only inside
+        `turn_bridge/`, and it says nothing about cross-`cfg` references
+        elsewhere in the tree. It substitutes a text rule for a target this
+        repository cannot build locally (the msvc target needs a Windows C
+        toolchain), so CI's `Fast check + non-PG tests (windows-latest)` stays
+        the authority."""
+        mod_rs = (ROOT / "src/services/discord/mod.rs").read_text(encoding="utf-8")
+        self.assertIn(
+            "#[cfg(unix)]\nmod session_relay_sink;",
+            mod_rs,
+            "the gate this contract protects moved; re-derive the rule instead of relaxing it",
+        )
+        door = "src/services/discord/turn_bridge/terminal_controller_cutover/unix_journal.rs"
+        # This literal is self-validating below: point it at the wrong file and
+        # the real door lands in `offenders`. The gate script's PLATFORM
+        # BLINDNESS block sends readers to the same path in prose, where nothing
+        # validates it -- it went stale the moment the door moved under
+        # terminal_controller_cutover/. Pin the two copies together here so the
+        # next move cannot leave a pointer to a file that does not exist.
+        self.assertTrue(
+            door in SCRIPT.read_text(encoding="utf-8"),
+            f"scripts/check_delivery_journal_raw_writer.py points readers at a "
+            f"door path that is not {door}",
+        )
+        offenders = []
+        gated = 0
+        for path in sorted((ROOT / "src/services/discord/turn_bridge").rglob("*.rs")):
+            rel = path.relative_to(ROOT).as_posix()
+            lines = path.read_text(encoding="utf-8").splitlines()
+            for index, line in enumerate(lines):
+                if "session_relay_sink" not in line.split("//", 1)[0]:
+                    continue
+                previous = ""
+                for candidate in reversed(lines[:index]):
+                    stripped = candidate.strip()
+                    if stripped and not stripped.startswith("//"):
+                        previous = stripped
+                        break
+                if rel == door and previous == "#[cfg(unix)]":
+                    gated += 1
+                else:
+                    offenders.append(f"{rel}:{index + 1}: {line.strip()}")
+        self.assertEqual(
+            offenders,
+            [],
+            "turn_bridge may reach session_relay_sink only from unix_journal.rs, "
+            "and only directly behind #[cfg(unix)]",
+        )
+        self.assertEqual(gated, 1, "the door is a single re-export, not a scattered set")
 
     def test_source_contract_repeated_suppression_arm_gates_its_observation(self):
         """Source text only: the post-terminal suppression arm is the one site
