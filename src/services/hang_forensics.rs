@@ -98,6 +98,179 @@
 //! commit that brackets the public `GET /api/health` path enumerates the
 //! sites, their conditions and the deliberate omissions here.
 //!
+//! ## What the log evidence actually supports
+//!
+//! Stated as an enumeration with **the predicate, the window and the base rate
+//! attached**, because the tempting summary ("a watchdog failure means the
+//! database was slow") is not true as a universal, and because a bare "X
+//! happened just before Y" is not evidence at all until X is shown to be rare
+//! at a random moment.
+//!
+//! ### How to reproduce every number below
+//!
+//! An earlier draft gave figures without saying what it had counted, and three
+//! of them then turned out to be wrong in ways nobody could check from the
+//! text. So, exactly:
+//!
+//! 1. **Corpus.** `~/.adk/release/logs/dcserver.stdout.log` plus its 10 rotated
+//!    siblings `.1`–`.10`, **restricted to
+//!    `[2026-07-12T23:50:43.386222Z, 2026-08-07T03:18:28.232513Z]`** — 11 files,
+//!    **603.462 h** of covered wall clock (the union of each file's first→last
+//!    stamp; the files abut to within a second and do not overlap).
+//!
+//!    ⚠️ **These logs rotate, so the figures below reproduce only inside that
+//!    window** and are not stable properties of the deployment. Two
+//!    recomputations four days apart disagreed on the corpus length (638.0 h vs
+//!    603.5 h) purely because `.10` had aged out; every count and base rate
+//!    moves with it. Re-derive rather than trust, and if the window is gone,
+//!    say so instead of quoting these numbers.
+//!
+//!    Strip the ANSI SGR escapes, then read the RFC3339 stamp at the head of
+//!    each line. **That
+//!    stamp is UTC**; the `[HH:MM:SS]` inside the message is KST (UTC+9), and
+//!    so are the `adk-hang-<pid>-<YYYYMMDD>-<HHMMSS>.txt` dump names. Parse the
+//!    head stamp as an *aware* UTC instant — an earlier analysis parsed it
+//!    naive, re-rendered through `utcfromtimestamp`, and shifted every reported
+//!    time by −9 h. **Six of the 13 kills land on a different calendar day
+//!    under that shift**, including the 2026-08-03 one an earlier draft
+//!    therefore reported as 08-02.
+//! 2. **Watchdog events.** `watchdog: health check failed (n/3)`,
+//!    `watchdog: runtime unresponsive`, `watchdog: health recovered`. A *streak*
+//!    opens at `(1/3)` and closes at the next `recovered` or `unresponsive`.
+//!    Corpus totals: **33 streaks, 13 of them ending in a kill, 20 recovering**.
+//! 3. **Postgres error — `P_pg`.** The pool-acquisition failures the watchdog
+//!    can actually be delayed by: a line matching
+//!    `pool timed out|PoolTimedOut|Connection refused \(os error 61\)` —
+//!    **13 061 lines** in the window.
+//!
+//!    ⚠️ **`P_pg` is the predicate for every Postgres figure below, with no
+//!    per-figure exceptions.** An earlier draft published this regex but
+//!    computed three bullets from `pool timed out|PoolTimedOut` alone (944
+//!    lines) and one from a fourth predicate; each was individually
+//!    reproducible and none was reproducible *from the text*, which is the only
+//!    property this section is for. A different predicate, where genuinely
+//!    needed, is named at the point of use.
+//! 4. **Base rate.** Not 20 000 Monte-Carlo draws: at these hit counts that
+//!    estimator has ±30 % noise and is not reproducible without the seed.
+//!    Compute it *analytically* as the covered fraction of the union of
+//!    `[error, error + W]` windows. Same definition, deterministic answer.
+//!
+//!    ⚠️ **What that comparison assumes.** Comparing 11/13 against a base rate
+//!    over *uniformly random covered instants* treats kill times as drawn from
+//!    that same uniform distribution — i.e. as carrying no information about
+//!    when in the corpus they fall, independently of Postgres. Not free: both
+//!    `P_pg` lines and kills are clumped, so a common cause raising both
+//!    densities in the same hours (a busy period, a restart storm) would
+//!    produce lift without either causing the other. The lift is large enough
+//!    that this is unlikely to explain all of it, but it is why the module
+//!    ships `db_in_flight` and the beacon rather than resting on correlation.
+//!
+//! ### The findings
+//!
+//! * **Kills preceded by a `P_pg` line: 11 of 13, within 5 s.** The 11 deltas
+//!   are 0.06, 0.12, 0.44, 0.46, 0.92, 1.04, 1.16, 1.27, 2.56, 2.62 and 4.04 s.
+//!   Base rate of that predicate at a uniformly random covered instant:
+//!   **0.07975 %** (W = 5 s), so the lift is **≈1060×**. It survives the window
+//!   choice — at W = 6 s still 11 of 13 against 0.08589 % (≈985×), at W = 20 s
+//!   still 11 of 13 against 0.15772 % (≈537×). That lift is what makes this the
+//!   thing the module is built around. The three most recent kills
+//!   (`2026-08-04T12:41:08Z`, `2026-08-04T16:43:06Z`, `2026-08-05T16:05:13Z`)
+//!   are 3 of 3, at **0.44 s, 4.04 s and 1.04 s** — named events rather than a
+//!   trailing-window rate, because an earlier draft's "most recent 58.8 h"
+//!   stopped being computable the moment the corpus rotated.
+//! * **The two exceptions are not database-quiet — they are a different
+//!   database failure.** `2026-08-02T13:21:36Z` and `2026-08-03T03:21:51Z`
+//!   (dump names `adk-hang-84772-20260802-222136` and
+//!   `adk-hang-32033-20260803-122151`, which are KST — an earlier draft read
+//!   both as 08-02) had gone **5.2 h and 19.2 h** with no `P_pg` line. That on
+//!   its own is unremarkable — `P_pg` lines are heavily clumped, and the corpus
+//!   holds 54 `P_pg`-free stretches of an hour or more, the longest 77.4 h. What
+//!   singles these two out is only that they are the two kills the 11-of-13
+//!   above does not cover.
+//!
+//!   What they do have is `EADDRNOTAVAIL`, the kernel refusing a *new outbound
+//!   connection*. Predicate `P_eaddr` = `Can't assign requested address`:
+//!   **20 lines, and every one of them falls between `2026-08-02T13:17:42Z` and
+//!   `2026-08-03T03:21:30Z`** — nowhere else in 603 h. Twelve precede the two
+//!   kills (13:17:42–13:21:10Z, 03:20:31–03:21:30Z); the other eight are
+//!   `[startup] postgres warmup pool unavailable` / `[config-audit]` pairs from
+//!   processes that had just restarted (13:22:24, 13:32:36, 15:06:28, 20:51:26),
+//!   i.e. downstream of a kill, not before one. ⚠️ An earlier draft said "the
+//!   only **9** occurrences, in exactly two bursts (7 and 2)" — those 9 are
+//!   `P_eaddr` **also restricted to `[policy-tick] advisory lock failed`**, a
+//!   filter the text never disclosed. "Confined to these two days" survives the
+//!   correction; "exactly two bursts" does not.
+//! * **…and those same two streaks own all four instant-fail probes.** Of the
+//!   29 consecutive-failure gaps, 23 are 35.02–35.32 s (below) and **4 are
+//!   30.07–30.19 s — all four inside these two kills** (08-02: 30.13, 30.15;
+//!   08-03: 30.07, 30.19). A 30.1 s gap against a 30 s `CHECK_INTERVAL` means
+//!   the probe returned in ~0.1 s: it consumed none of its 5 s timeout, which
+//!   is what a `connect()` that fails immediately looks like. So the two facts
+//!   an earlier draft listed as separate bullets — "kills with no Postgres
+//!   error" and "probes that failed without waiting" — are **the same two
+//!   events**.
+//!
+//!   ⚠️ **That co-location is all this says. n = 2, and no cause is claimed.**
+//!   An earlier draft called both "consistent with the host having run out of
+//!   the thing a new connection needs" — a mechanism sketched to fit two
+//!   observations, and "consistent with" is how a hypothesis gets quoted back
+//!   as a conclusion. With two events there is no base rate to test it against,
+//!   the direction is untested (the port shortage could as easily be a
+//!   *symptom* of whatever wedged the runtime), and one episode has `P_eaddr`
+//!   lines both before and after its kill. This module exists partly because
+//!   the last confident correlation here (`routines::loader`, below) was noise.
+//!   What it does buy is a prediction: if the ephemeral-port reading is right,
+//!   the next such event renders `stage=connect_failed` with `verdict` at
+//!   `listener_gone` or `undetermined_no_beacon`, never `handler_*`. That is
+//!   falsifiable; the mechanism as stated was not.
+//! * **First failures whose last `P_pg` line was an hour or more earlier:
+//!   11 of 33** — 2.0, 5.2, 5.2, 5.2, 11.2, 18.5, 19.2, 19.9, 23.2, 23.3,
+//!   27.7 h. **Two** of those escalated to a kill (the two above). (An earlier
+//!   draft listed 2.0, 13.1, 18.5, 19.9, 23.2, 23.3, 30.7, 30.7, 30.8, 44.8,
+//!   53.3 h — the same 11 streaks against `pool timed out|PoolTimedOut` instead
+//!   of `P_pg`; same count, same membership, same two kills, only shorter gaps,
+//!   because `P_pg` also sees the refused connections. And an earlier draft said
+//!   *four* kills, from a `kill_time - first_failure < 180 s` proximity test
+//!   that also matched two streaks which *recovered* after a single failure —
+//!   2026-08-02T13:18:04Z and 13:19:05Z — because a later, unrelated kill fell
+//!   inside the window.) Attribute a kill to the streak that logged it, not to
+//!   the clock.
+//!   Something other than Postgres delays the probe often enough to matter, it
+//!   is not modelled here, and the beacon plus `db_in_flight` are what will
+//!   tell the two apart next time.
+//! * **No second trigger has been identified.** An earlier draft attributed
+//!   those hour-gap failures to a `routines::loader` burst. That is **withdrawn
+//!   as a base-rate error**, and recorded rather than deleted because the next
+//!   investigator will find the same correlation and should not have to
+//!   re-derive that it is noise. In the 60 s before each of the 11 hour-gap
+//!   failures the loader emitted 28, 44, 52, 56, 56, 56, 56, 56, 56, 56, 56
+//!   lines, against a control of **p20 = 52, median = 56, p90 = 58** at random
+//!   covered instants: eight sit exactly at the modal density and three sit
+//!   *below* it. There is no burst. Across all 33 first failures the sign
+//!   reverses — 6.1 % have a loader line within 5 s, versus 15.2 % of random
+//!   instants. Two corrections travel with this: the control's p10 is **0**,
+//!   not 50 (10.4 % of the corpus — 62.7 h — has no loader line in the preceding
+//!   minute at all, in stretches beginning at the kills themselves, e.g. 17.9 h
+//!   from `2026-08-04T16:42Z`), and the loader's mean rate of 0.62 line/s is
+//!   dropped rather than quoted, because 0.62 × 60 = 37 is below every observed
+//!   count and so makes a *modal* minute look like a burst. The output is
+//!   clumped; only the density-controlled comparison discriminates.
+//! * **Failing probes wait the timeout out: 23 of 29** consecutive-failure gaps
+//!   are 35.02–35.32 s against a 30 s `CHECK_INTERVAL` — the probe's own 5 s
+//!   read timeout elapsing in full, so those probes *waited* rather than being
+//!   refused: "connected, handler never answered", and not a dead listening
+//!   socket. The other 6 are **not** that, and the earlier "~35 s vs ~30 s"
+//!   phrasing hid them: 4 are the 30.1 s instant-fails above, 2 are 60.4 s and
+//!   90.7 s (2× and 3× the interval, with a successful check between).
+//!   ⚠️ The denominator 29 is "diffs between consecutive failure LINES ≤ 100 s".
+//!   Every *within-streak* gap with no cutoff gives 31 instead: the 60.4/90.7 s
+//!   pair drops out (a `health recovered` line sits between them) and four long
+//!   ones come in — 238, 962, 1375, 1865 s. Three are in streaks that recovered;
+//!   **the 962 s one is in a kill streak** (2026-07-14T17:16:04Z, first
+//!   failure→kill 997.6 s against ~70 s for every other kill). The watchdog
+//!   thread's own scheduling is not modelled here, and that outlier is the
+//!   corpus's only evidence that it is not always prompt.
+//!
 //! ## Cost and deadlock-safety
 //!
 //! The recording path is [`DbProbeGuard::new`] plus exactly one of `finish` /
