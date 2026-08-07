@@ -107,6 +107,26 @@ resolved with balanced-brace tracking over comment/string-stripped text.
   repaired, because changing a landed gate's counting rule is not this slice's
   to do -- it is recorded so the next slice can.
 
+#5071 T1 S7 MOVED FIVE COUNTS, AND THIS IS THE PARAGRAPH THIS GATE EXISTS FOR.
+The recovery path stopped bypassing the funnel, so:
+
+  write_delivered_frontier                 recovery_engine/...  1 -> 0
+  write_proven_gone_equal_range_frontier   recovery_engine/...  1 -> 0  (now {})
+  append_completed_turn                    recovery_engine/...  1 -> 0
+  shadow_mirror_delivered_frontier_inner   delivery_record.rs   2 -> 3
+  record_recovery_terminal_delivery        recovery_engine/...  0 -> 1  (new pin)
+
+Net -1 (42 -> 41) over one more pinned symbol (23 -> 24). Every one of those
+five is the SAME move seen from a different symbol: three raw calls left the
+recovery file and one funnel call took their place.
+
+WHAT THIS GATE DOES NOT SAY ABOUT THAT MOVE, measured in the same slice. It
+counts spellings, so it cannot tell that the funnel call reaches the same bytes
+the raw calls did. `shadow_mirror_delivered_frontier_inner` going 2 -> 3 says a
+third caller exists, not that it is the recovery one; that binding is held by
+`EXPECTED_CALL_SITES["record_recovery_terminal_delivery"]` naming the recovery
+file and by the Rust tests in delivery_record.rs.
+
 TO CHANGE A COUNT. Edit `EXPECTED_CALL_SITES` in the same commit as the code
 move, and say in the commit message which call site moved and why. That edit is
 the reviewable artefact this gate exists to force.
@@ -124,12 +144,11 @@ from pathlib import Path
 # on 0bde0675b.
 EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
     # -- store 1: durable delivery record ------------------------------------
+    # #5071 T1 S7 removed this symbol's recovery_engine call site: the recovery
+    # path now reaches the funnel instead of this raw writer. The one site left
+    # is the dormant fresh-send one.
     "write_delivered_frontier": {
         "src/services/discord/outbound/turn_output_controller/fresh_send.rs": 1,
-        "src/services/discord/recovery_engine/terminal_text_idempotency.rs": 1,
-    },
-    "write_proven_gone_equal_range_frontier": {
-        "src/services/discord/recovery_engine/terminal_text_idempotency.rs": 1,
     },
     "commit_ordered_jsonl_range": {
         "src/services/discord/session_relay_sink.rs": 1,
@@ -151,8 +170,11 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
         "src/services/discord/outbound/delivery_record.rs": 3,
         "src/services/discord/turn_bridge/terminal_controller_cutover.rs": 1,
     },
+    # 2 -> 3 in #5071 T1 S7: `record_recovery_terminal_delivery` joins
+    # `shadow_mirror_delivered_frontier` and `record_watcher_terminal_delivery`
+    # as the funnel's third private caller.
     "shadow_mirror_delivered_frontier_inner": {
-        "src/services/discord/outbound/delivery_record.rs": 2,
+        "src/services/discord/outbound/delivery_record.rs": 3,
     },
     "record_delivered_frontier_with_body": {
         "src/services/discord/turn_bridge/terminal_delivery.rs": 1,
@@ -165,12 +187,29 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
     "record_watcher_terminal_delivery": {
         "src/services/discord/tmux_watcher/terminal_long_chunks.rs": 2,
     },
+    # #5071 T1 S7. The recovery family's single durable-frontier entry point,
+    # and the replacement for the three raw calls this slice removed from
+    # `recovery_engine/terminal_text_idempotency.rs`
+    # (`write_delivered_frontier`, `write_proven_gone_equal_range_frontier` and
+    # the `append_completed_turn` above them). Pinned at exactly one production
+    # caller: a second one would mean a second recovery write path.
+    "record_recovery_terminal_delivery": {
+        "src/services/discord/recovery_engine/terminal_text_idempotency.rs": 1,
+    },
     # -- store 1: write APIs with no production caller, pinned at zero -------
     # Each is `pub(in crate::services::discord)` and compiles, so the compiler
     # does not hold this boundary; only this map does. Reached only from
     # `#[cfg(test)]` code, or (for the lease/record lifecycle three) not even
     # that -- their tests drive the private `*_at` variants instead.
     "write_confirmed_delivery": {},
+    # #5071 T1 S7: its only production caller was the recovery path's
+    # proven-GONE re-anchor, which now selects
+    # `EqualRangeAnchorPolicy::ReplaceProvenGone` through the funnel instead.
+    # UNLIKE THE OTHER FIVE this one is `#[cfg(test)]`, so its zero is held by
+    # the compiler too and this entry is the weaker of the two guards -- it is
+    # kept so that un-gating the fn without a call still reads as a deliberate
+    # edit here, and so the symbol cannot re-enter production silently.
+    "write_proven_gone_equal_range_frontier": {},
     "upsert_lease": {},
     "clear_lease": {},
     "delete_record": {},
@@ -197,9 +236,12 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
         "src/services/discord/session_relay_sink/task_notification_context.rs": 1,
     },
     # -- store 2: completed-turn ledger --------------------------------------
+    # 3 -> 2 in #5071 T1 S7: the recovery path no longer appends the
+    # completed-turn ledger itself. Both remaining sites are the funnel's own --
+    # the unknown-generation branch and the post-persist branch -- which is the
+    # ordering (D5) the slice was about.
     "append_completed_turn": {
         "src/services/discord/outbound/delivery_record.rs": 2,
-        "src/services/discord/recovery_engine/terminal_text_idempotency.rs": 1,
     },
     # -- store 3: in-memory watermark CAS ------------------------------------
     "advance_watcher_confirmed_end": {

@@ -19,10 +19,12 @@
 //!
 //! ## On non-unix this family is UNINSTRUMENTED — that is not the same as a no-op
 //!
-//! The durable writes this family observes are NOT `cfg`-gated:
-//! `delivery_record::write_delivered_frontier`,
+//! The durable write this family observes is NOT `cfg`-gated:
+//! `delivery_record::record_recovery_terminal_delivery` compiles on every
+//! target, as did the three raw calls it replaced in #5071 T1 S7
+//! (`delivery_record::write_delivered_frontier`,
 //! `delivery_record::write_proven_gone_equal_range_frontier` and
-//! `completed_turn_ledger::append_completed_turn` all compile on every target.
+//! `completed_turn_ledger::append_completed_turn`).
 //! The journal that observes them is gated. So on non-unix the recovery frontier
 //! advances with no shadow observation at all, and no row for this family can
 //! ever exist there.
@@ -81,6 +83,7 @@ pub(in crate::services::discord) enum Settlement {
     NoTmuxSessionName,
     NoGenerationMarker,
     DurableWriteFailed,
+    FrontierResetDuringDelivery,
     DeliveryNotRecorded,
 }
 

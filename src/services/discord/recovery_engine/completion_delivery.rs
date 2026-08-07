@@ -27,6 +27,7 @@ pub(super) async fn relay_recovery_terminal_notice(
         return RecoveryRelayOutcome::TransientFailure;
     };
     let recovery_context = RecoveryDeliveryContext::from_state(
+        shared,
         provider,
         state,
         None,

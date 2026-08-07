@@ -29,11 +29,18 @@ SPEC = importlib.util.spec_from_file_location("durable_frontier_writer_guard", S
 guard = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(guard)
 
-# Measured on 0bde0675b, the base this slice branched from.
-TOTAL_CALL_SITES = 42
-PINNED_SYMBOLS = 23
+# Measured on 0bde0675b, the base S7' branched from, then re-measured on this
+# slice: #5071 T1 S7 moved five counts for a net 42 -> 41 over 23 -> 24 symbols.
+# Three raw calls left `recovery_engine/terminal_text_idempotency.rs`
+# (`write_delivered_frontier`, `write_proven_gone_equal_range_frontier`,
+# `append_completed_turn`), one funnel call replaced them
+# (`record_recovery_terminal_delivery`), and the funnel body gained its third
+# private caller.
+TOTAL_CALL_SITES = 41
+PINNED_SYMBOLS = 24
 ZERO_PINNED = {
     "write_confirmed_delivery",
+    "write_proven_gone_equal_range_frontier",
     "upsert_lease",
     "clear_lease",
     "delete_record",
@@ -68,6 +75,12 @@ MANUAL_CLASSIFICATION = [
     ("src/services/discord/tmux.rs", "advance_watcher_confirmed_end", 1, 1),
     ("src/services/discord/outbound/delivery_record.rs", "shadow_mirror_delivered_frontier", 3, 12),
     ("src/services/discord/outbound/delivery_record.rs", "append_completed_turn", 2, 2),
+    # #5071 T1 S7. Hand-verified: the recovery file's `#[cfg(test)] mod tests`
+    # opens at the end of the file, and the ONE production spelling of the new
+    # funnel entry point sits in `record_durable_frontier`. Both numbers pin the
+    # replacement, so a raw writer sneaking back beside it moves neither.
+    ("src/services/discord/recovery_engine/terminal_text_idempotency.rs",
+     "record_recovery_terminal_delivery", 1, 1),
     ("src/services/discord/tmux_watcher/terminal_long_chunks.rs", "record_watcher_terminal_delivery", 2, 2),
     ("src/services/discord/turn_bridge/terminal_controller_cutover.rs", "record_long_chunk_terminal_delivery", 2, 2),
 ]
