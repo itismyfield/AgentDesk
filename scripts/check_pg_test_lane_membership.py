@@ -54,6 +54,17 @@ SECTIONS = ("rule1", "rule2", "rule3", "rule4")
 # no debt at all, so it has nothing to ratchet and is enforced directly in
 # `check_analysis`. Adding it to SECTIONS would also make the checked-in
 # baseline unparseable against `origin/main`, which has no `[rule5]` section.
+#
+# The baseline is only one of the two ways a gate gets talked down, and rule5
+# is closed against both. The other is the allowlist, and it used to be wide
+# open here: `analyze` subtracts allowlisted ids before any rule runs, so
+# appending the ids rule5 had just named -- with any non-empty text after the
+# `#`, since nothing validates the reason -- deleted the finding, and a
+# follow-up `--write-snapshots` cleared the rule2/rule3 stale entries that were
+# the only thing still failing. Four steps, one file, and the required context
+# this whole check exists to protect was green again. rule5 now reads the
+# unfiltered inventory (see `analyze`) and `--write-snapshots` refuses to run
+# while rule5 is dirty (see `main`), so neither lever reaches it.
 UNBASELINED_SECTIONS = ("rule5",)
 PR_WORKFLOW_REL = ".github/workflows/ci-pr.yml"
 CONFIGURATION_ERROR_FINDINGS = frozenset({"jobs-empty"})
@@ -906,7 +917,15 @@ def analyze(repo_root: Path, allowlist_path: Path | None = None) -> Analysis:
         "rule2": {name for name in active_tests if any(lane.selects_test(name) for lane in pgless_lanes)},
         "rule3": {path for path in set(active_tests.values()) if not path_selected(path, patterns)},
         "rule4": {job.key for job in jobs if "postgres-service.sh start" in job.text and not re.search(r"^\s+AGENTDESK_REQUIRE_PG:\s*['\"]?1['\"]?\s*$", job.text, re.MULTILINE)},
-        "rule5": {name for name in active_tests if any(lane.selects_test(name) for lane in pr_pgless_lanes)},
+        # rule5 reads `inventory.tests`, deliberately NOT `active_tests`. Every
+        # other rule is scoped to the allowlist-filtered set, which is right for
+        # them: they are budgets, and a proven classifier false positive should
+        # not spend budget. rule5 is not a budget -- it names a job that can
+        # never go green -- so an exemption there does not buy accuracy, it just
+        # switches the gate off. Reading the unfiltered inventory is what makes
+        # the "no allowance" claim in the SECTIONS comment true rather than
+        # aspirational: no line anyone can add to the allowlist reaches rule5.
+        "rule5": {name for name in inventory.tests if any(lane.selects_test(name) for lane in pr_pgless_lanes)},
     }
     return Analysis(
         PgInventory(active_tests),
@@ -1052,7 +1071,10 @@ def check_analysis(
             if stale:
                 failed = True
     counts = analysis.debts
-    # rule5: no ratchet, no allowance. A PR-workflow job that runs cargo test
+    # rule5: no ratchet, and the allowlist cannot reach it. Both halves are
+    # properties of the code above rather than intentions -- `analyze` computes
+    # this set from the unfiltered inventory, and rule5 is absent from SECTIONS
+    # so nothing baselines it. A PR-workflow job that runs cargo test
     # without starting the PostgreSQL service must select no PG-dependent test.
     # Unlike rule1-rule4 this is not a budget: the failure mode it names is not
     # "debt that should shrink" but "this required context can never be green",
@@ -1069,9 +1091,10 @@ def check_analysis(
             "Give that job `./scripts/ci/postgres-service.sh start` plus the "
             "`AGENTDESK_REQUIRE_PG: \"1\"` env rule4 tracks (rule4 only WARNs "
             "on a missing one -- it is a ledger, not a guard), or narrow its "
-            "selection so it stops choosing these ids. There is no baseline "
-            "for this rule and the allowlist only exempts classifier false "
-            "positives.",
+            "selection so it stops choosing these ids. Those are the only two "
+            "fixes: this rule has no baseline, and the allowlist does not "
+            "apply to it -- rule5 is computed before allowlist filtering, so "
+            "adding these ids there will not clear this failure.",
             file=sys.stderr,
         )
         failed = True
@@ -1125,6 +1148,23 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"FAIL: [{finding.kind}] {finding.source}: {finding.detail}", file=sys.stderr)
             if configuration_errors:
                 return 2
+            # Refuse to regenerate while rule5 is dirty. Snapshot regeneration
+            # is how the other rules absorb a tree's current state, and that is
+            # exactly the wrong move here: rule5 admits no debt, so there is no
+            # state to absorb, and a rewrite performed under a live rule5
+            # violation only clears the rule2/rule3 stale entries that were
+            # still holding the gate red. Regenerating is a maintenance step,
+            # not an escape hatch -- fix the workflow first, then rewrite.
+            if analysis.debts["rule5"]:
+                print(
+                    f"FAIL: refusing to write snapshots while [rule5] names "
+                    f"{len(analysis.debts['rule5'])} test(s). Snapshots record "
+                    f"ratcheted debt, and rule5 carries none. Fix the "
+                    f"{PR_WORKFLOW_REL} job first, then rerun with "
+                    f"--write-snapshots.",
+                    file=sys.stderr,
+                )
+                return 1
             manifest.write_text(render_manifest(analysis.inventory), "utf-8")
             baseline.write_text(render_baseline(analysis.debts), "utf-8")
             print(f"wrote {manifest} and {baseline}")

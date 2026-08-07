@@ -479,6 +479,104 @@ class RuleMutations(FixtureCase):
         # absorb it the way rule1-rule4 debt can.
         self.assertNotIn("rule5", membership.render_baseline(debts))
 
+    # ------------------------------------------------------------------
+    # The allowlist bypass. `analyze` subtracts allowlisted ids before any rule
+    # runs, which is the right scope for rule1-rule4 -- they are budgets, and a
+    # proven classifier false positive should not spend budget -- and was the
+    # wrong scope for rule5, which is not a budget. The three tests below pin
+    # the fix from both sides: rule5 stops reading the allowlist, and rule1-
+    # rule4 keep reading it exactly as they did.
+    # ------------------------------------------------------------------
+    def test_rule5_ignores_the_allowlist_that_still_clears_rule1_and_rule2(self) -> None:
+        self.write_pg_test()
+        self.fx.write_pr(("src/db/**",), sweep=self.SWEEP)
+        before = self.fx.analysis()
+        self.assertEqual(before.allowlist_count, 0)
+        self.assertEqual(before.debts["rule5"], {"db::service::tests::case"})
+        self.assertEqual(before.debts["rule1"], {"db::service::tests::case"})
+        self.assertEqual(before.debts["rule2"], {"db::service::tests::case"})
+
+        (self.root / "scripts/pg_test_lane_allowlist.txt").write_text(
+            "test:db::service::tests::case  # false positive, tracked in #9999\n", "utf-8"
+        )
+        after = self.fx.analysis()
+        self.assertEqual(after.allowlist_count, 1)
+        # rule1-rule4 keep the allowance they were designed with. Changing this
+        # would be a separate decision about a separate rule; the entry above is
+        # accepted by `load_allowlist` on the strength of an unverified issue
+        # number, which is precisely why rule5 must not be reachable this way.
+        self.assertEqual(after.debts["rule1"], set())
+        self.assertEqual(after.debts["rule2"], set())
+        # rule5 does not. It is computed over the unfiltered inventory.
+        self.assertEqual(after.debts["rule5"], {"db::service::tests::case"})
+
+    def test_write_snapshots_refuses_to_regenerate_over_a_live_rule5(self) -> None:
+        self.write_pg_test()
+        self.fx.write_pr(("src/db/**",), sweep=self.SWEEP)
+        manifest = self.root / membership.MANIFEST_REL
+        baseline = self.root / membership.BASELINE_REL
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            rc = membership.main(["--repo-root", str(self.root), "--write-snapshots"])
+        self.assertEqual(rc, 1)
+        self.assertIn("refusing to write snapshots", stderr.getvalue())
+        self.assertFalse(manifest.exists())
+        self.assertFalse(baseline.exists())
+
+        # Fixing the workflow, not the snapshot, is what unblocks regeneration.
+        self.fx.write_pr(("src/db/**",), sweep=self.SWEEP, sweep_starts_service=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = membership.main(["--repo-root", str(self.root), "--write-snapshots"])
+        self.assertEqual(rc, 0)
+        self.assertTrue(manifest.exists())
+        self.assertTrue(baseline.exists())
+
+    def test_four_step_allowlist_bypass_of_rule5_is_refused(self) -> None:
+        """The reviewed attack in order: mutate, allowlist, regenerate, recheck."""
+        # 1. a tree whose PR sweep starts the service owes nothing.
+        self.write_pg_test()
+        self.fx.write_pr(("src/db/**",), sweep=self.SWEEP, sweep_starts_service=True)
+        self.assertEqual(self.fx.analysis().debts["rule5"], set())
+
+        # 2. delete the service step. rule5 names the test it now strands.
+        self.fx.write_pr(("src/db/**",), sweep=self.SWEEP)
+        named = self.fx.analysis().debts["rule5"]
+        self.assertEqual(named, {"db::service::tests::case"})
+
+        # 3. feed every id rule5 just printed back to the allowlist, in the form
+        #    `load_allowlist` accepts: any non-empty text after the `#`.
+        (self.root / "scripts/pg_test_lane_allowlist.txt").write_text(
+            "".join(f"test:{name}  # false positive, tracked in #9999\n" for name in sorted(named)),
+            "utf-8",
+        )
+        analysis = self.fx.analysis()
+        self.assertEqual(analysis.allowlist_count, len(named))
+        self.assertEqual(analysis.debts["rule5"], named)
+
+        # 4. regenerate the snapshots -- the step that used to clear the leftover
+        #    rule2/rule3 stale entries and take the whole run to rc=0.
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(membership.main(["--repo-root", str(self.root), "--write-snapshots"]), 1)
+
+        # The allowlist has emptied `active_tests`, so rule1-rule4 are clean and
+        # the manifest matches: rule5 is the only thing left holding this red.
+        self.assertEqual(analysis.debts["rule1"], set())
+        self.assertEqual(analysis.debts["rule2"], set())
+        self.assertEqual(analysis.debts["rule3"], set())
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            verdict = membership.check_analysis(
+                analysis,
+                {section: set() for section in membership.SECTIONS},
+                {section: set() for section in membership.SECTIONS},
+                membership.render_manifest(analysis.inventory),
+                reference_label="fixture base",
+                allowlist_label="fixture allowlist",
+            )
+        self.assertEqual(verdict, 1)
+        self.assertIn("FAIL: [rule5]", stderr.getvalue())
+        self.assertIn("the allowlist does not apply to it", stderr.getvalue())
+
     def test_rule4_bad_and_pgless_counterexample(self) -> None:
         workflow = self.root / ".github/workflows/ci-main.yml"
         workflow.write_text(self.fx.workflow("cargo test postgres_", start=True), "utf-8")
