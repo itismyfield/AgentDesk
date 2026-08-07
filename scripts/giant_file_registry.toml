@@ -618,6 +618,16 @@ decompose_issue = "#4710"
 # registry doc and rejects ghost registrations.
 
 [[entry]]
+# #5142: the auto-queue run-cleanup transactional outbox. Enqueue-on-tx, claim,
+# drain, replay, attempt-cap dead-lettering, and the backlog gauge projection are
+# all statements about one row lifecycle in `auto_queue_run_cleanup_tasks`; the
+# at-most-once emit invariant is only checkable while they sit together.
+file = "src/services/auto_queue/cleanup_tasks.rs"
+owner = "automation-pipeline"
+decision = "keep"
+keep_reason = "Enqueue-on-transaction, claim/drain, replay, attempt-cap dead-lettering, and the backlog gauge are one durable row-lifecycle contract for auto_queue_run_cleanup_tasks; splitting them separates the at-most-once emit invariant from the code that enforces it, so keep the cohesive verified boundary until a scoped split is planned."
+
+[[entry]]
 # Standby JSONL relay has completion draining, terminal response selection, and
 # identity-guarded delivery in one module; split its polling and delivery paths
 # without changing durable cursor or result-first semantics.
