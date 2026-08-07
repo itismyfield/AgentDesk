@@ -15,6 +15,7 @@ FACADE_MARKERS = (
     " self.journal.begin_fresh();",
     " journal_watcher::begin_watcher_terminal();",
     " unix_journal::begin_controller_terminal();",
+    " unix_journal::begin_recovery_terminal();",
 )
 def write(root: Path, rel: str, body: str) -> None:
     path = root / rel
@@ -31,9 +32,12 @@ class RawWriterAllowlistTests(unittest.TestCase):
         # #5071 T1 S3a: the third instrumented family is the watcher, which spells
         # the facade through `journal_watcher::` because its anchor is a free
         # function with no `self`. #5071 T1 S4 adds the fourth, the turn_bridge
-        # cutover, spelling it through `unix_journal::`. Using the real tokens here
-        # means the fixture exercises ALL THREE alternations of
-        # JOURNAL_FACADE_CALL, not just the sink's.
+        # cutover, spelling it through `unix_journal::`. #5071 T1 S5b adds the
+        # fifth, the recovery family, whose door happens to be named
+        # `unix_journal` too -- so the fixture also proves the two doors' shapes
+        # stay separated by function name. Using the real tokens here means the
+        # fixture exercises ALL FOUR alternations of JOURNAL_FACADE_CALL, not
+        # just the sink's.
         for index, (_, rel, symbol) in enumerate(guard.FAMILY_REGISTRY):
             call = FACADE_MARKERS[index] if index < len(FACADE_MARKERS) else ""
             write(root, rel, f"fn {symbol}() {{{call}}}\n")
@@ -71,68 +75,68 @@ class RawWriterAllowlistTests(unittest.TestCase):
     def test_test_area_and_string_facade_markers_count_as_declared(self):
         """Evidence: whole-file lexical scanning counts test and string text."""
         root = self.fixture()
-        path = root / guard.FAMILY_REGISTRY[4][1]
+        path = root / guard.FAMILY_REGISTRY[5][1]
         path.write_text(path.read_text(encoding="utf-8") +
                         'const STRING_MARKER: &str = "self.journal.finish_fresh(";\n#[cfg(all(test, unix))]\nmod tests {\n    fn dishonest() { self.journal.begin_fresh(); }\n    const TEST_MARKER: &str = "self.journal.begin_fresh(";\n}\n',
                         encoding="utf-8")
-        self.assertTrue(guard.family_status(root)[0][4][1], "test/string markers are declared lexical matches")
+        self.assertTrue(guard.family_status(root)[0][5][1], "test/string markers are declared lexical matches")
 
     def test_cfg_test_fn_facade_marker_counts_as_known_limit(self):
         """Evidence: a top-level cfg(test) function is counted, not parsed away."""
         root = self.fixture()
-        path = root / guard.FAMILY_REGISTRY[4][1]
+        path = root / guard.FAMILY_REGISTRY[5][1]
         path.write_text(path.read_text(encoding="utf-8") + '#[cfg(test)] fn journal_probe() { self.journal.begin_fresh(); }\n', encoding="utf-8")
-        self.assertTrue(guard.family_status(root)[0][4][1], "cfg(test) fn marker is a declared lexical match")
-        ok, message = guard.check(root); self.assertFalse(ok); self.assertIn("uninstrumented families: 1/6", message)
+        self.assertTrue(guard.family_status(root)[0][5][1], "cfg(test) fn marker is a declared lexical match")
+        ok, message = guard.check(root); self.assertFalse(ok); self.assertIn("uninstrumented families: 0/6", message)
 
     def test_line_doc_comment_markers_are_known_limit_and_not_counted(self):
         """Known limitation and declared behavior: line doc comments are stripped after // on each line."""
         root = self.fixture()
-        path = root / guard.FAMILY_REGISTRY[4][1]
+        path = root / guard.FAMILY_REGISTRY[5][1]
         path.write_text(path.read_text(encoding="utf-8") +
                         "//! self.journal.begin_fresh();\n/// self.journal.begin_fresh();\n",
                         encoding="utf-8")
         status, error = guard.family_status(root)
         self.assertEqual(error, "")
-        self.assertFalse(status[4][1], "line doc comment markers are excluded by the declared lexical cut")
+        self.assertFalse(status[5][1], "line doc comment markers are excluded by the declared lexical cut")
         ok, message = guard.check(root)
         self.assertTrue(ok, message)
-        self.assertIn("uninstrumented families: 2/6", message)
+        self.assertIn("uninstrumented families: 1/6", message)
 
     def test_block_marker_strings_do_not_hide_real_facade_calls(self):
         """Evidence: block-marker strings no longer delete calls across lines."""
         root = self.fixture()
         path = root / guard.FAMILY_REGISTRY[0][1]
         path.write_text(path.read_text(encoding="utf-8") + 'const BLOCK_OPEN: &str = "/*";\nself.journal.begin_fresh();\nconst BLOCK_CLOSE: &str = "*/";\n', encoding="utf-8")
-        ok, message = guard.check(root); self.assertTrue(ok, message); self.assertIn("uninstrumented families: 2/6", message)
+        ok, message = guard.check(root); self.assertTrue(ok, message); self.assertIn("uninstrumented families: 1/6", message)
 
     def test_raw_string_marker_is_known_lexical_false_positive(self):
         """Known limit: raw strings are not parsed and may count as calls."""
         root = self.fixture()
-        path = root / guard.FAMILY_REGISTRY[4][1]
+        path = root / guard.FAMILY_REGISTRY[5][1]
         path.write_text(path.read_text(encoding="utf-8") +
                         'const RAW: &str = r#"x" self.journal.begin_fresh("#;\n', encoding="utf-8")
         status, error = guard.family_status(root)
         self.assertEqual(error, "")
-        self.assertTrue(status[4][1], "raw-string marker intentionally pierces lexical scan")
+        self.assertTrue(status[5][1], "raw-string marker intentionally pierces lexical scan")
 
     def test_macro_facade_marker_is_known_lexical_match(self):
         """Pin the declared behavior: facade-call text in a macro counts."""
         root = self.fixture()
-        path = root / guard.FAMILY_REGISTRY[4][1]
+        path = root / guard.FAMILY_REGISTRY[5][1]
         path.write_text(path.read_text(encoding="utf-8") +
                         "macro_rules! journal_probe { () => { self.journal.begin_fresh(); } }\n",
                         encoding="utf-8")
         status, error = guard.family_status(root)
         self.assertEqual(error, "")
-        self.assertTrue(status[4][1], "macro facade-call text is a declared lexical match")
+        self.assertTrue(status[5][1], "macro facade-call text is a declared lexical match")
 
     def test_family_baseline_is_measured_and_named(self):
         ok, message = guard.check(self.fixture())
         self.assertTrue(ok, message)
-        self.assertIn("uninstrumented families: 2/6", message)
+        self.assertIn("uninstrumented families: 1/6", message)
         self.assertIn("whole anchor file including tests", message)
-        self.assertIn("recovery / fresh-send / orphan family", message)
+        self.assertIn("pipe stream epoch", message)
 
     def test_instrumentation_rule_is_mechanical(self):
         root = self.fixture()
@@ -162,11 +166,13 @@ class RawWriterAllowlistTests(unittest.TestCase):
     def test_baseline_increase_names_families(self):
         root = self.fixture()
         old = guard.UNINSTRUMENTED_FAMILY_BASELINE
-        guard.UNINSTRUMENTED_FAMILY_BASELINE = 1
+        # 0, not 1: S5b re-pinned the live baseline to 1, so 1 is no longer an
+        # increase over what the fixture measures.
+        guard.UNINSTRUMENTED_FAMILY_BASELINE = 0
         self.addCleanup(setattr, guard, "UNINSTRUMENTED_FAMILY_BASELINE", old)
         ok, message = guard.check(root)
         self.assertFalse(ok)
-        self.assertIn("recovery / fresh-send / orphan family", message)
+        self.assertIn("pipe stream epoch", message)
 
     def test_baseline_decrease_requires_repin_command(self):
         root = self.fixture()
@@ -180,7 +186,7 @@ class RawWriterAllowlistTests(unittest.TestCase):
         result = subprocess.run(["python3", str(SCRIPT)], cwd=ROOT, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertRegex(result.stdout, r"scanned Rust files: [1-9][0-9]*")
-        self.assertIn("uninstrumented families: 2/6", result.stdout)
+        self.assertIn("uninstrumented families: 1/6", result.stdout)
 
     # SOURCE-CONTRACT block (#5071 T1 S2). Everything below matches TEXT in .rs
     # files: call ORDER, call COUNT, symbol PRESENCE. None of it executes Rust,
@@ -261,7 +267,9 @@ class RawWriterAllowlistTests(unittest.TestCase):
     def test_watcher_family_regresses_to_uninstrumented_when_its_facade_is_removed(self):
         """Reverse mutation, in fixture form: the 4 -> 3 baseline drop is caused
         by the instrumentation, not by the widened regex. Drop the watcher token
-        and the count returns over the re-pinned baseline of 3."""
+        and the count returns over the baseline S3a re-pinned to 3 -- and over
+        every lower baseline since, which is why the assertion reads the message
+        rather than a number."""
         root = self.fixture()
         path = root / guard.FAMILY_REGISTRY[2][1]
         path.write_text(
@@ -338,7 +346,9 @@ class RawWriterAllowlistTests(unittest.TestCase):
     def test_controller_family_regresses_to_uninstrumented(self):
         """Reverse mutation, in fixture form: the 3 -> 2 baseline drop is caused
         by the instrumentation, not by the widened regex. Drop the controller
-        token and the count returns over the re-pinned baseline of 2."""
+        token and the count returns over the baseline S4 re-pinned to 2 -- and
+        over every lower baseline since, which is why the assertion reads the
+        message rather than a number."""
         root = self.fixture()
         path = root / guard.FAMILY_REGISTRY[3][1]
         path.write_text(
@@ -572,12 +582,18 @@ class RawWriterAllowlistTests(unittest.TestCase):
         write and the proven-GONE equal-range re-anchor. Adding a fourth durable
         write to that file, or moving one out, fails here.
 
+        #5071 T1 S5b adds the other half: one pre-funnel begin opens the
+        obligation those three writes live under, and three settles close it.
+        Three, not one -- the funnel returns its own verdict, the anchor-bind
+        failure arm closes the obligation itself, and a trailing single-use settle
+        keeps a future early return from leaving one dangling. Eight
+        `Settlement::` mentions is that arithmetic plus the six variants the
+        funnel's exits name.
+
         Counted over the production prefix only (everything before `#[cfg(test)]
         mod tests {`), because the file's own fixtures call the same durable
         writer twice and a whole-file count would move whenever a test is added.
-        It is a text count: it cannot prove any call is reached, and it says
-        nothing about instrumentation -- this family is still uninstrumented and
-        the baseline of 2 still says so."""
+        It is a text count: it cannot prove any call is reached."""
         source = (
             ROOT / "src/services/discord/recovery_engine/terminal_text_idempotency.rs"
         ).read_text(encoding="utf-8")
@@ -588,10 +604,23 @@ class RawWriterAllowlistTests(unittest.TestCase):
             production.count("delivery_record::write_proven_gone_equal_range_frontier("), 1
         )
         self.assertEqual(production.count("fn record_successful_fresh_send("), 1)
+        self.assertEqual(production.count("unix_journal::begin_recovery_terminal("), 1)
+        self.assertEqual(production.count("unix_journal::settle_recovery_terminal("), 3)
+        self.assertEqual(production.count("unix_journal::Settlement::"), 8)
         self.assertLess(
             production.index("fn record_successful_fresh_send("),
             production.index("completed_turn_ledger::append_completed_turn("),
             "the anchor symbol is the entry point of the funnel that holds the writers",
+        )
+        self.assertLess(
+            production.index("unix_journal::begin_recovery_terminal("),
+            production.index("completed_turn_ledger::append_completed_turn("),
+            "the obligation opens before the funnel it observes",
+        )
+        self.assertLess(
+            production.index("unix_journal::begin_recovery_terminal("),
+            production.index("unix_journal::settle_recovery_terminal("),
+            "the obligation opens before any settle",
         )
 
     def test_source_contract_dormant_fresh_send_writer_is_pinned_uninstrumented(self):
@@ -632,6 +661,160 @@ class RawWriterAllowlistTests(unittest.TestCase):
         self.assertIsNone(
             guard.JOURNAL_FACADE_CALL.search(fresh_send),
             "fresh_send.rs carries no facade token; it is declared uninstrumented, not covered",
+        )
+    # #5071 T1 S5b additions — the instrumentation.
+
+    def test_recovery_facade_alternation_matches_only_its_exact_call_shape(self):
+        """The S5b alternation must not be a loosening either. It shares the
+        `unix_journal::` prefix with S4's controller door — two different modules
+        now carry that name — so the two alternatives stay separated by function
+        name and nothing else is admitted."""
+        for near_miss in (
+            " unix_journal::begin_recovery();",
+            " unix_journal.begin_recovery_terminal();",
+            " rec::begin_recovery_terminal();",
+            " unix_journal::recovery_obligation_id();",
+            " unix_journal::settle_recovery();",
+            " unix_journal::Settlement::FrontierPersisted;",
+        ):
+            self.assertIsNone(
+                guard.JOURNAL_FACADE_CALL.search(near_miss),
+                f"{near_miss!r} must not count as a facade call",
+            )
+        for exact in (
+            " unix_journal::begin_recovery_terminal(",
+            " unix_journal::settle_recovery_terminal(",
+        ):
+            self.assertIsNotNone(
+                guard.JOURNAL_FACADE_CALL.search(exact),
+                f"{exact!r} is a declared facade call",
+            )
+
+    def test_recovery_family_regresses_to_uninstrumented(self):
+        """Reverse mutation, in fixture form: the 2 -> 1 baseline drop is caused
+        by the instrumentation, not by the widened regex. Drop the recovery token
+        and the count returns over the re-pinned baseline of 1."""
+        root = self.fixture()
+        path = root / guard.FAMILY_REGISTRY[4][1]
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(FACADE_MARKERS[4], ""),
+            encoding="utf-8",
+        )
+        ok, message = guard.check(root)
+        self.assertFalse(ok)
+        self.assertIn("exceeds baseline", message)
+        self.assertIn("recovery / fresh-send / orphan family", message)
+
+    def test_source_contract_recovery_reaches_the_journal_through_one_cfg_gated_door(self):
+        """Source text only, and the S5b half of the check that would have caught
+        the S4 windows regression. `mod session_relay_sink` is `#[cfg(unix)]`
+        while `mod recovery_engine`, `mod recovery_paths` and `mod outbound` are
+        not, so ANY reference from those three subtrees into that module which is
+        not itself behind `#[cfg(unix)]` breaks windows-latest with E0433. This
+        pins both halves: the reference lives in exactly ONE file
+        (`recovery_engine/unix_journal.rs`, the single door), and every occurrence
+        there is immediately preceded by `#[cfg(unix)]`.
+
+        What it is not: it does not compile anything, least of all for windows. It
+        is a line scan that strips only `//` suffixes, and it says nothing about
+        cross-`cfg` references outside these three subtrees. It substitutes a text
+        rule for a target this repository cannot build locally (the msvc target
+        needs a Windows C toolchain), so CI's `Fast check + non-PG tests
+        (windows-latest)` stays the authority."""
+        mod_rs = (ROOT / "src/services/discord/mod.rs").read_text(encoding="utf-8")
+        self.assertIn(
+            "#[cfg(unix)]\nmod session_relay_sink;",
+            mod_rs,
+            "the gate this contract protects moved; re-derive the rule instead of relaxing it",
+        )
+        for ungated in (
+            "\nmod recovery_engine;",
+            "\nmod recovery_paths;",
+            "\npub(crate) mod outbound;",
+        ):
+            self.assertIn(
+                ungated,
+                mod_rs,
+                f"{ungated.strip()!r} is expected to carry no cfg gate; if it gained one, "
+                f"this contract's premise changed",
+            )
+        door = "src/services/discord/recovery_engine/unix_journal.rs"
+        # Self-validating exactly as the turn_bridge contract's literal is: point
+        # this at the wrong file and the real door lands in `offenders`. The gate
+        # script names the same path in prose, where nothing validates it, so the
+        # two copies are pinned together here.
+        self.assertTrue(
+            door in SCRIPT.read_text(encoding="utf-8"),
+            f"scripts/check_delivery_journal_raw_writer.py points readers at a "
+            f"door path that is not {door}",
+        )
+        paths = [ROOT / "src/services/discord/recovery_engine.rs"]
+        for root in (
+            ROOT / "src/services/discord/recovery_engine",
+            ROOT / "src/services/discord/recovery_paths",
+            ROOT / "src/services/discord/outbound",
+        ):
+            paths.extend(sorted(root.rglob("*.rs")))
+        offenders = []
+        gated = 0
+        for path in paths:
+            rel = path.relative_to(ROOT).as_posix()
+            lines = path.read_text(encoding="utf-8").splitlines()
+            for index, line in enumerate(lines):
+                if "session_relay_sink" not in line.split("//", 1)[0]:
+                    continue
+                previous = ""
+                for candidate in reversed(lines[:index]):
+                    stripped = candidate.strip()
+                    if stripped and not stripped.startswith("//"):
+                        previous = stripped
+                        break
+                if rel == door and previous == "#[cfg(unix)]":
+                    gated += 1
+                else:
+                    offenders.append(f"{rel}:{index + 1}: {line.strip()}")
+        self.assertEqual(
+            offenders,
+            [],
+            "recovery_engine / recovery_paths / outbound may reach session_relay_sink "
+            "only from recovery_engine/unix_journal.rs, and only directly behind #[cfg(unix)]",
+        )
+        self.assertEqual(gated, 1, "the door is a single re-export, not a scattered set")
+
+    def test_source_contract_recovery_family_emits_no_transport_receipt(self):
+        """The signal this family does NOT invent, pinned in source as well as in
+        the runtime test R5.
+
+        No transport on this path returns a `DiscordTransportReceipt`, and the
+        obligation opens after the transport in any case, so there is no honest
+        `T` to emit. Synthesising one from the anchor message id would make
+        `requested == returned` true by construction — a receipt that could never
+        trip the `channel_mismatch` branch. This pins that the recovery facade
+        names no receipt type and builds no `T` event, so a later slice cannot add
+        one without deleting an assertion and reading why it was there.
+
+        The runtime proof is `r5_recovery_family_never_classifies_as_delivered`;
+        this is the cheap text guard that also covers a `T` added on a branch no
+        test happens to drive."""
+        facade = (
+            ROOT / "src/services/discord/session_relay_sink/journal/recovery.rs"
+        ).read_text(encoding="utf-8")
+        code = "\n".join(line.split("//", 1)[0] for line in facade.splitlines())
+        production = code[: code.index("#[cfg(test)]")]
+        self.assertEqual(
+            production.count("DiscordTransportReceipt"),
+            0,
+            "the recovery facade must not name a transport receipt type",
+        )
+        self.assertEqual(
+            production.count('"T"'),
+            0,
+            "the recovery facade must not construct a T event: no receipt is observable here",
+        )
+        self.assertIn(
+            'r5_recovery_family_never_classifies_as_delivered',
+            facade,
+            "the runtime test that proves the ceiling must live beside the ceiling",
         )
 if __name__ == "__main__":
     unittest.main()

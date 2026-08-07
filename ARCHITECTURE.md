@@ -690,7 +690,8 @@ src/
 │   │   │   ├── terminal_text_idempotency.rs
 │   │   │   ├── terminal_watcher.rs
 │   │   │   ├── tmux_probe.rs
-│   │   │   └── two_message_panel.rs
+│   │   │   ├── two_message_panel.rs
+│   │   │   └── unix_journal.rs
 │   │   ├── recovery_paths/
 │   │   │   ├── controller_cutover.rs
 │   │   │   ├── mod.rs
@@ -785,6 +786,7 @@ src/
 │   │   │   ├── journal/
 │   │   │   │   ├── controller.rs
 │   │   │   │   ├── pg_store.rs
+│   │   │   │   ├── recovery.rs
 │   │   │   │   └── watcher.rs
 │   │   │   ├── delivery_commit.rs
 │   │   │   ├── delivery_frontier.rs

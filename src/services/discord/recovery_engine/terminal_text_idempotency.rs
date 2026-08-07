@@ -6,6 +6,10 @@ use poise::serenity_prelude::{self as serenity, ChannelId, MessageId};
 
 use super::super::{formatting, recovery_paths};
 use super::RecoveryRelayOutcome;
+// #5071 T1 S5: the family's ONE door to the `#[cfg(unix)]` delivery journal.
+// Imported under its own name, never aliased, so every call site below reads the
+// platform bound in the identifier itself.
+use super::unix_journal;
 use crate::services::discord::inflight::{opt_channel_id, opt_message_id};
 use crate::services::discord::outbound::{
     completed_turn_ledger, delivery_frontier_probe, delivery_record,
@@ -217,11 +221,83 @@ impl RecoveryDeliveryContext {
         (start, start.saturating_add(width))
     }
 
-    pub(in crate::services::discord) fn record_successful_fresh_send(
+    /// The leased no-anchor fresh send confirmed its POST
+    /// (`relay_no_anchor_terminal_text`).
+    pub(in crate::services::discord) fn record_successful_fresh_send_after_no_anchor_post(
         &self,
+        shared: &SharedData,
         anchor: MessageId,
         text: &str,
     ) {
+        self.record_successful_fresh_send(
+            shared,
+            anchor,
+            text,
+            unix_journal::Disposition::NoAnchorFreshSend,
+        );
+    }
+
+    /// The anchored replace fell back to a POST after its edit failed
+    /// (`replace_anchored_terminal_text`).
+    pub(in crate::services::discord) fn record_successful_fresh_send_after_anchored_edit_fallback(
+        &self,
+        shared: &SharedData,
+        anchor: MessageId,
+        text: &str,
+    ) {
+        self.record_successful_fresh_send(
+            shared,
+            anchor,
+            text,
+            unix_journal::Disposition::AnchoredEditFallback,
+        );
+    }
+
+    /// The same edit-failure fallback, driven through the turn-output controller
+    /// (`recovery_paths/controller_cutover.rs`).
+    ///
+    /// The three entry points exist so the journal's disposition never appears in
+    /// a caller's signature: `controller_cutover.rs` sits in a subtree that is not
+    /// `#[cfg(unix)]`, and naming a journal type there would reopen exactly the
+    /// `E0433` windows break #5071 T1 S4 landed and then had to fix.
+    pub(in crate::services::discord) fn record_successful_fresh_send_after_controller_edit_fallback(
+        &self,
+        shared: &SharedData,
+        anchor: MessageId,
+        text: &str,
+    ) {
+        self.record_successful_fresh_send(
+            shared,
+            anchor,
+            text,
+            unix_journal::Disposition::ControllerEditFallback,
+        );
+    }
+
+    /// The family's single confirmed-delivery funnel. Every caller has already
+    /// seen Discord accept the message; what is still unknown is whether the
+    /// durable frontier advances, which is the whole of what #5071 T1 S5 observes.
+    ///
+    /// The observation opens here and not before the transport: two of the three
+    /// entry points only learn that they advance the frontier at all from the edit
+    /// transport's own answer. `session_relay_sink/journal/recovery.rs` records
+    /// what that costs — this family can never see a delivery lost mid-POST.
+    fn record_successful_fresh_send(
+        &self,
+        shared: &SharedData,
+        anchor: MessageId,
+        text: &str,
+        disposition: unix_journal::Disposition,
+    ) {
+        let mut observation = unix_journal::begin_recovery_terminal(
+            shared,
+            &self.provider,
+            disposition,
+            (self.record_channel_id, self.channel_id),
+            self.tmux_session_name.as_deref(),
+            self.expected_current_msg_id,
+            self.durable_range,
+        );
         let bind = inflight::bind_recovery_anchor_if_matches_identity(
             &self.provider,
             self.channel_id.get(),
@@ -238,8 +314,14 @@ impl RecoveryDeliveryContext {
             bind,
             inflight::GuardedSaveOutcome::Saved | inflight::GuardedSaveOutcome::Missing
         ) {
-            self.record_durable_frontier(anchor);
+            let settlement = self.record_durable_frontier(anchor);
+            unix_journal::settle_recovery_terminal(&mut observation, Some(anchor), settlement);
         } else {
+            unix_journal::settle_recovery_terminal(
+                &mut observation,
+                Some(anchor),
+                unix_journal::Settlement::AnchorBindNotPersisted,
+            );
             tracing::warn!(
                 provider = %self.provider.as_str(),
                 channel_id = self.channel_id.get(),
@@ -248,9 +330,24 @@ impl RecoveryDeliveryContext {
                 "recovery no-anchor delivery: inflight anchor bind did not persist; skipping durable anchor write"
             );
         }
+        // Backstop, single-use: both branches above already closed the
+        // obligation, so this appends nothing today. It is here so a future early
+        // return added to this fn leaves a `U` rather than a dangling `O`+`A`.
+        unix_journal::settle_recovery_terminal(
+            &mut observation,
+            Some(anchor),
+            unix_journal::Settlement::DeliveryNotRecorded,
+        );
     }
 
-    fn record_durable_frontier(&self, anchor: MessageId) {
+    /// Returns the funnel's own verdict about the durable frontier so the caller
+    /// can settle the journal obligation with it. #5071 T1 S5 widened the return
+    /// type from `()` and added nothing else: every condition, every early return,
+    /// and every argument handed to the two durable writers is byte-identical to
+    /// the pre-slice code. The recovery path's bypass of the
+    /// `shadow_mirror_delivered_frontier` funnel (see `user_msg_id` above) is
+    /// deliberately left in place — joining the funnels is #5071 T1 S7.
+    fn record_durable_frontier(&self, anchor: MessageId) -> unix_journal::Settlement {
         // #4564: reaching here means a recovery terminal delivery was CONFIRMED
         // (the caller bound the anchor after a successful send), so append the
         // inbound turn to the completed-turn ledger. Keyed by the delivery
@@ -265,7 +362,10 @@ impl RecoveryDeliveryContext {
             self.user_msg_id,
         );
         let Some(range) = self.durable_range else {
-            return;
+            // Unreachable with an open obligation: `begin_recovery_terminal`
+            // refuses the same two range cases this fn does, so nothing was
+            // opened. The variant keeps the exit named all the same.
+            return unix_journal::Settlement::DeliveryNotRecorded;
         };
         if range.1 <= range.0 {
             tracing::warn!(
@@ -274,7 +374,7 @@ impl RecoveryDeliveryContext {
                 range = ?range,
                 "recovery no-anchor delivery: refusing to record empty durable range"
             );
-            return;
+            return unix_journal::Settlement::DeliveryNotRecorded;
         }
         let Some(tmux_session_name) = self.tmux_session_name.as_deref() else {
             tracing::warn!(
@@ -282,7 +382,7 @@ impl RecoveryDeliveryContext {
                 channel_id = self.channel_id.get(),
                 "recovery no-anchor delivery: no tmux session name; durable anchor unavailable"
             );
-            return;
+            return unix_journal::Settlement::NoTmuxSessionName;
         };
         let generation_mtime_ns = delivery_record::current_generation_mtime_ns(tmux_session_name);
         if generation_mtime_ns == 0 {
@@ -292,7 +392,7 @@ impl RecoveryDeliveryContext {
                 tmux_session_name,
                 "recovery no-anchor delivery: no current generation marker; durable anchor unavailable"
             );
-            return;
+            return unix_journal::Settlement::NoGenerationMarker;
         }
         let commit = delivery_record::DeliveredCommit {
             range,
@@ -329,7 +429,9 @@ impl RecoveryDeliveryContext {
                 error = %error,
                 "recovery no-anchor delivery: durable anchor write failed"
             );
+            return unix_journal::Settlement::DurableWriteFailed;
         }
+        unix_journal::Settlement::FrontierPersisted
     }
 }
 
@@ -350,12 +452,13 @@ pub(in crate::services::discord) async fn replace_anchored_terminal_text(
         &mut None,
     )
     .await?;
-    record_anchored_fallback_replacement(recovery_context, channel_id, &outcome, text);
+    record_anchored_fallback_replacement(recovery_context, shared, channel_id, &outcome, text);
     formatting::replace_long_message_outcome_to_result(outcome)
 }
 
 fn record_anchored_fallback_replacement(
     recovery_context: Option<&RecoveryDeliveryContext>,
+    shared: &Arc<SharedData>,
     channel_id: ChannelId,
     outcome: &formatting::ReplaceLongMessageOutcome,
     text: &str,
@@ -368,7 +471,7 @@ fn record_anchored_fallback_replacement(
         return;
     };
     if let Some(context) = recovery_context {
-        context.record_successful_fresh_send(*anchor, text);
+        context.record_successful_fresh_send_after_anchored_edit_fallback(shared, *anchor, text);
     } else {
         tracing::warn!(
             channel_id = channel_id.get(),
@@ -422,7 +525,7 @@ pub(in crate::services::discord) async fn relay_no_anchor_terminal_text(
             // regenerate continuations, not edit a tail continuation.
             if let Some(anchor) = message_ids.first().copied() {
                 if committed {
-                    context.record_successful_fresh_send(anchor, text);
+                    context.record_successful_fresh_send_after_no_anchor_post(shared, anchor, text);
                 } else {
                     tracing::warn!(
                         channel_id = channel_id.get(),
@@ -541,6 +644,20 @@ mod tests {
         std::fs::write(path, "1").expect("generation marker");
     }
 
+    /// #5071 T1 S5: the confirmed-delivery funnel now takes the `SharedData` the
+    /// journal's shadow-admission gate reads, plus the entry point that confirmed
+    /// the delivery. A test process has no PG pool, so `begin_recovery_terminal`
+    /// returns `None` and every assertion below observes exactly the durable
+    /// writes it observed before the slice.
+    fn record_fresh_send_for_test(ctx: &RecoveryDeliveryContext, anchor: MessageId, text: &str) {
+        ctx.record_successful_fresh_send(
+            &make_shared_data_for_tests(),
+            anchor,
+            text,
+            unix_journal::Disposition::NoAnchorFreshSend,
+        );
+    }
+
     fn inflight_state_path_for_test(
         agentdesk_root: &std::path::Path,
         provider: &ProviderKind,
@@ -585,7 +702,7 @@ mod tests {
         let delivery_generation = 42;
         let ctx = RecoveryDeliveryContext::from_state(&provider, &state, None, delivery_generation)
             .expect("non-zero test channel id");
-        ctx.record_successful_fresh_send(MessageId::new(77_000), "answer");
+        record_fresh_send_for_test(&ctx, MessageId::new(77_000), "answer");
 
         let persisted =
             inflight::load_inflight_state(&provider, state.channel_id).expect("persisted row");
@@ -629,7 +746,7 @@ mod tests {
             .expect("first attempt acquires");
         fresh_posts += 1;
         assert!(lease.commit(LeaseOutcome::Delivered));
-        ctx.record_successful_fresh_send(MessageId::new(77_001), "answer");
+        record_fresh_send_for_test(&ctx, MessageId::new(77_001), "answer");
         lease.release();
 
         assert_eq!(ctx.recorded_anchor(), Some(MessageId::new(77_001)));
@@ -657,7 +774,7 @@ mod tests {
         newer.turn_start_offset = Some(512);
         inflight::save_inflight_state(&newer).expect("save newer inflight");
 
-        ctx.record_successful_fresh_send(MessageId::new(77_002), "answer");
+        record_fresh_send_for_test(&ctx, MessageId::new(77_002), "answer");
 
         assert!(
             delivery_frontier_probe::current_generation_delivered_anchor(
@@ -687,7 +804,7 @@ mod tests {
         let ctx = RecoveryDeliveryContext::from_state(&provider, &state, Some((128, 256)), 42)
             .expect("non-zero test channel id");
 
-        ctx.record_successful_fresh_send(MessageId::new(77_006), "answer");
+        record_fresh_send_for_test(&ctx, MessageId::new(77_006), "answer");
 
         assert!(
             delivery_frontier_probe::current_generation_delivered_anchor(
@@ -714,7 +831,7 @@ mod tests {
         let ctx = RecoveryDeliveryContext::from_state(&provider, &state, Some((128, 256)), 42)
             .expect("non-zero test channel id");
 
-        ctx.record_successful_fresh_send(MessageId::new(77_007), "answer");
+        record_fresh_send_for_test(&ctx, MessageId::new(77_007), "answer");
 
         let anchor = delivery_frontier_probe::current_generation_delivered_anchor(
             &provider,
@@ -761,7 +878,7 @@ mod tests {
             .try_acquire_fresh_send_lease(&shared, "answer")
             .expect("first attempt acquires");
         assert!(lease.commit(LeaseOutcome::Delivered));
-        ctx.record_successful_fresh_send(MessageId::new(77_003), "answer");
+        record_fresh_send_for_test(&ctx, MessageId::new(77_003), "answer");
         lease.release();
 
         let fresh_shared_after_restart = make_shared_data_for_tests();
@@ -838,7 +955,7 @@ mod tests {
             .try_acquire_fresh_send_lease(&shared, "replacement")
             .expect("repost attempt acquires");
         assert!(lease.commit(LeaseOutcome::Delivered));
-        ctx.record_successful_fresh_send(MessageId::new(88_008), "replacement");
+        record_fresh_send_for_test(&ctx, MessageId::new(88_008), "replacement");
         lease.release();
 
         let matched_anchor = delivery_frontier_probe::current_generation_delivered_anchor(
@@ -907,7 +1024,7 @@ mod tests {
             .try_acquire_fresh_send_lease(&shared, "replacement")
             .expect("repost attempt acquires");
         assert!(lease.commit(LeaseOutcome::Delivered));
-        ctx.record_successful_fresh_send(MessageId::new(88_004), "replacement");
+        record_fresh_send_for_test(&ctx, MessageId::new(88_004), "replacement");
         lease.release();
 
         let retry_ctx = RecoveryDeliveryContext::from_state(
@@ -947,6 +1064,7 @@ mod tests {
 
         record_anchored_fallback_replacement(
             Some(&ctx),
+            &make_shared_data_for_tests(),
             ChannelId::new(state.channel_id),
             &outcome,
             "replacement",

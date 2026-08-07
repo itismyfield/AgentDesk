@@ -18,6 +18,7 @@ use super::delivery_frontier::SinkDeliveryProofResult;
 
 pub(in crate::services::discord) mod controller;
 mod pg_store;
+pub(in crate::services::discord) mod recovery;
 pub(in crate::services::discord) mod watcher;
 
 const JOURNAL_NAMESPACE: Uuid = Uuid::from_u128(0xd9829c0b_8692_4ef0_9396_f7d83aa84dd5);

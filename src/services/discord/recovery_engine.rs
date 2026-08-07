@@ -72,6 +72,12 @@ mod manual_rebind_override;
 mod routing_orphan;
 #[path = "recovery_engine/terminal_text_idempotency.rs"]
 mod terminal_text_idempotency;
+// #5071 T1 S5: the ONE `cfg` door between this ungated subtree and the
+// `#[cfg(unix)]` delivery journal. Private on purpose — only
+// `terminal_text_idempotency` may reach the journal, and it may reach it only
+// through here.
+#[path = "recovery_engine/unix_journal.rs"]
+mod unix_journal;
 // #3834: behavior-preserving extraction of the runtime-rediscovery recovery path
 // (`reregister_active_turn_from_inflight` + its private
 // `reseed_watcher_owned_finalizer_ledger` helper and unit tests) into a leaf
