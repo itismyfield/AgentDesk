@@ -524,7 +524,9 @@ DUAL_MIRROR="$TMP_D/release"
 mkdir -p "$DUAL_PRIMARY"
 
 dual_nonce_of() {
-  grep '^nonce=' "$1" 2>/dev/null | head -1 | cut -d= -f2-
+  # Never fails: a missing file yields the empty string so an assertion below
+  # reports the mismatch instead of `set -e` aborting the suite mid-run.
+  grep '^nonce=' "$1" 2>/dev/null | head -1 | cut -d= -f2- || true
 }
 
 # --- 8a (F): a single request lands in BOTH roots under ONE nonce ------------
@@ -549,8 +551,8 @@ if [ -f "$DUAL_PRIMARY/restart_cancelled" ] && [ -f "$DUAL_MIRROR/restart_cancel
 else
   fail "8e: cancellation reaches both roots, not just the one the shell owns"
 fi
-cancel_primary_nonce=$(dual_nonce_of "$DUAL_PRIMARY/restart_cancelled")
-cancel_mirror_nonce=$(dual_nonce_of "$DUAL_MIRROR/restart_cancelled")
+cancel_primary_nonce=$(dual_nonce_of "$DUAL_PRIMARY/restart_cancelled" || true)
+cancel_mirror_nonce=$(dual_nonce_of "$DUAL_MIRROR/restart_cancelled" || true)
 if [ -n "$cancel_primary_nonce" ] && [ "$cancel_primary_nonce" = "$cancel_mirror_nonce" ]; then
   pass "both roots were cancelled under the same nonce ($cancel_primary_nonce)"
 else
@@ -595,12 +597,50 @@ AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
 set -e
 wait "$OBS_PID" 2>/dev/null || true
 unset -f _launchd_job_state
-armed_primary=$(grep '^primary=' "$TMP_D/armed" | cut -d= -f2)
-armed_mirror=$(grep '^mirror=' "$TMP_D/armed" | cut -d= -f2)
-armed_same_nonce=$(grep '^same=' "$TMP_D/armed" | cut -d= -f2)
+armed_primary=$( (grep '^primary=' "$TMP_D/armed" 2>/dev/null || echo 'primary=absent') | cut -d= -f2)
+armed_mirror=$( (grep '^mirror=' "$TMP_D/armed" 2>/dev/null || echo 'mirror=absent') | cut -d= -f2)
+armed_same_nonce=$( (grep '^same=' "$TMP_D/armed" 2>/dev/null || echo 'same=absent') | cut -d= -f2)
 assert_eq "8a: request armed restart_pending in the shell's own root" "1" "$armed_primary"
 assert_eq "8a: request armed restart_pending in the runtime's root (mirror)" "1" "$armed_mirror"
 assert_eq "8a: both roots carry the same nonce" "1" "$armed_same_nonce"
+
+# --- 8m: a new request pre-cleans EVERY root it will later consult ----------
+# Not cosmetic. gateway_lease_recovery.rs (~:428) treats the mere presence of a
+# restart_persisted written during the current process lifetime as proof that a
+# promotion handoff committed — that check is lifetime-scoped, not nonce-scoped.
+# Two deploys inside one runtime lifetime is the ordinary retry pattern, so an
+# acknowledgement from the previous request left lying in the runtime root is a
+# stale positive for the next one. The old code pre-cleaned only the directory
+# it wrote to; now that both are written, both must be cleaned.
+rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
+printf 'nonce=stale-request\n' >"$DUAL_PRIMARY/restart_persisted"
+printf 'nonce=stale-request\n' >"$DUAL_PRIMARY/restart_cancelled"
+printf 'nonce=stale-request\n' >"$DUAL_MIRROR/restart_persisted"
+printf 'nonce=stale-request\n' >"$DUAL_MIRROR/restart_cancelled"
+_launchd_job_state() { echo "running"; }
+set +e
+AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
+  PATH="$TMP_FIXTURE_DIR/bin_fail:$PATH" \
+  AGENTDESK_RESTART_DRAIN_ACK_WAIT=1 \
+  request_restart_drain_mode_or_fail "test" "test.label" 0 "$DUAL_PRIMARY" "smoke-test" \
+  >/dev/null 2>&1
+set -e
+unset -f _launchd_job_state
+if [ -e "$DUAL_PRIMARY/restart_persisted" ]; then
+  fail "8m: stale ack removed from the shell root before the new request arms"
+else
+  pass "8m: stale ack removed from the shell root before the new request arms"
+fi
+if [ -e "$DUAL_MIRROR/restart_persisted" ]; then
+  fail "8m: stale ack removed from the runtime root before the new request arms"
+else
+  pass "8m: stale ack removed from the runtime root before the new request arms"
+fi
+if grep -q '^nonce=stale-request$' "$DUAL_MIRROR/restart_cancelled" 2>/dev/null; then
+  fail "8m: the previous request's cancellation does not survive into this one"
+else
+  pass "8m: the previous request's cancellation does not survive into this one"
+fi
 
 # --- 8b/8c (A/B): acknowledgement from EITHER root is accepted ---------------
 rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
