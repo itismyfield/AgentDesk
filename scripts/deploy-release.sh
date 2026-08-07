@@ -2137,6 +2137,15 @@ fi
 # durable; the replacement watcher then resumes from those committed offsets.
 AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS=1
 export AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS
+# #5245: this deploy has always written its restart request to "$ADK_REL/runtime"
+# while the process that must observe it watches "$ADK_REL" — crate::
+# agentdesk_runtime_root() (src/config.rs) returns $AGENTDESK_ROOT_DIR verbatim,
+# and no Rust code reads "$ROOT/runtime/restart_*". At deploy time the observer
+# is always the OLD binary, so the mirror is what reaches an unupgraded node.
+# Stated, not derived: this is the same $ADK_REL the call below appends
+# "/runtime" to — `dirname` of the argument would be a different claim.
+AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$ADK_REL"
+export AGENTDESK_RESTART_MARKER_MIRROR_ROOT
 if ! request_restart_drain_mode_or_fail \
     "release" "$PLIST_REL" "$REL_PORT" "$ADK_REL/runtime" "deploy-release"; then
     exit 1

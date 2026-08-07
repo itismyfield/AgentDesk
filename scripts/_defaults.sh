@@ -787,6 +787,12 @@ assert_restart_helpers_loaded() {
   # restart-drain helpers. Returns non-zero (so callers can `if !` and exit 1)
   # instead of letting a missing function silently `command not found`. See
   # #1447: silent fail of agentdesk-restart when these helpers were absent.
+  # Public entry points only. The #5245 internal helpers (_set_restart_marker_roots,
+  # _restart_marker_consumed_root, _release_unacknowledged_restart_lease) are
+  # deliberately NOT listed: this contract is checked against a possibly older
+  # mirror of this file (restart_agentdesk.sh sources the release workspace copy),
+  # and such a copy is self-consistent — listing them would make the restart skill
+  # hard-fail on an un-updated node for no correctness gain.
   local missing=()
   local fn
   for fn in \
@@ -806,26 +812,126 @@ assert_restart_helpers_loaded() {
   return 0
 }
 
+# --- #5245 phase 1: the shell and the runtime watch different directories ---
+#
+# deploy-release.sh passes "$ADK_REL/runtime" as the restart marker directory
+# (scripts/deploy-release.sh, the request_restart_drain_mode_or_fail call).
+# The runtime resolves its own marker directory through
+# crate::agentdesk_runtime_root() (src/config.rs), which returns
+# $AGENTDESK_ROOT_DIR verbatim — i.e. "$ADK_REL", without the "runtime"
+# component. No Rust code reads or writes "$ROOT/runtime/restart_*". The two
+# writers therefore never met: the deploy wrote restart_pending where nothing
+# was watching, and waited for restart_persisted where nothing was writing.
+#
+# Moving the Rust side alone cannot repair a node, because the process that has
+# to observe a deploy's restart request is always the binary that is *already
+# running* — the old one. So phase 1 makes the shell write to and read from
+# BOTH directories; the Rust move and the removal of the old directory are
+# separate, later slices.
+#
+# The second directory is never derived from the first. `dirname` would be
+# wrong for skills/agentdesk-restart/scripts/restart_agentdesk.sh, which passes
+# "$HOME/.adk/release" — already the runtime's own root, whose dirname is
+# "$HOME/.adk". The caller states the mirror explicitly through
+# AGENTDESK_RESTART_MARKER_MIRROR_ROOT; deploy-release.sh sets it to the same
+# $ADK_REL it appends "/runtime" to. Unset or empty (every other caller) keeps
+# the single-root behaviour byte for byte.
+_set_restart_marker_roots() {
+  local primary="$1"
+  local mirror="${AGENTDESK_RESTART_MARKER_MIRROR_ROOT:-}"
+  RESTART_MARKER_ROOTS=()
+  if [ -z "$primary" ]; then
+    return 1
+  fi
+  RESTART_MARKER_ROOTS+=("$primary")
+  if [ -n "$mirror" ] && [ "$mirror" != "$primary" ]; then
+    RESTART_MARKER_ROOTS+=("$mirror")
+  fi
+  return 0
+}
+
+_restart_marker_consumed_root() {
+  # Prints the first root whose restart_pending has disappeared, or returns 1
+  # when every root still holds its marker. "Any", not "all": during this
+  # transition exactly one of the two markers gets consumed, because the
+  # running binary watches exactly one directory. Requiring both to vanish
+  # would silently delete the idle-runtime acknowledgement path.
+  local root
+  for root in "$@"; do
+    if [ ! -e "$root/restart_pending" ]; then
+      printf '%s' "$root"
+      return 0
+    fi
+  done
+  return 1
+}
+
+_release_unacknowledged_restart_lease() {
+  # Called once the runtime has acknowledged durability. The runtime that
+  # published the acknowledgement removes its own restart_pending and exits
+  # (runtime_bootstrap/spawns.rs). The other root has no consumer at all — no
+  # Rust code reads "$ROOT/runtime/restart_*" — so its marker would outlive
+  # this deploy and make the next request fail O_EXCL acquisition with
+  # "restart drain marker already owned". Before #5245 this leak was
+  # unreachable because the acknowledgement never arrived and every exit from
+  # the gate went through clear_restart_drain_mode.
+  #
+  # The acknowledged root is deliberately left alone: deleting its marker would
+  # race the runtime's post-rename recheck, which reads a missing marker as
+  # "superseded" and withdraws the acknowledgement it just published.
+  local expected_nonce="$1"; shift
+  local ack_root="$1"; shift
+  local root marker
+  for root in "$@"; do
+    if [ "$root" = "$ack_root" ]; then
+      continue
+    fi
+    marker="$root/restart_pending"
+    # Only ever release the lease this request owns.
+    if [ -f "$marker" ] \
+      && grep -Fqx "nonce=${expected_nonce}" "$marker" 2>/dev/null; then
+      rm -f "$marker" 2>/dev/null || true
+    fi
+  done
+  return 0
+}
+
 clear_restart_drain_mode() {
   local runtime_root="$1"
-  local marker="$runtime_root/restart_pending"
-  local cancel="$runtime_root/restart_cancelled"
-  local cancel_tmp="${cancel}.$$"
+  local roots=()
+  local root marker cancel cancel_tmp
   local nonce=""
+  local rc=0
   if [ -z "$runtime_root" ]; then
     echo "✗ [gate] runtime root is required to clear restart drain mode" >&2
     return 1
   fi
-  if [ -f "$marker" ]; then
-    nonce=$(grep '^nonce=' "$marker" 2>/dev/null | cut -d= -f2- | tr -d '\n')
-  fi
-  # Publish cancellation before removing the request. A poller dropped in
-  # this handoff then still finds its nonce-bound cancellation marker and
-  # rolls its admission fence back instead of leaving restart state stranded.
-  {
-    [ -n "$nonce" ] && printf 'nonce=%s\n' "$nonce"
-    printf 'cancelled_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-  } >"$cancel_tmp" && mv "$cancel_tmp" "$cancel" && rm -f "$marker"
+  _set_restart_marker_roots "$runtime_root" || return 1
+  roots=("${RESTART_MARKER_ROOTS[@]}")
+
+  # One request writes one nonce to every root, so the first marker that still
+  # carries a nonce describes the whole request. Read before any removal: the
+  # root whose marker the runtime already consumed must still receive a
+  # nonce-bound cancellation, otherwise a poller mid-handoff there is stranded.
+  for root in "${roots[@]}"; do
+    if [ -z "$nonce" ] && [ -f "$root/restart_pending" ]; then
+      nonce=$(grep '^nonce=' "$root/restart_pending" 2>/dev/null | cut -d= -f2- | tr -d '\n')
+    fi
+  done
+
+  for root in "${roots[@]}"; do
+    marker="$root/restart_pending"
+    cancel="$root/restart_cancelled"
+    cancel_tmp="${cancel}.$$"
+    # Publish cancellation before removing the request. A poller dropped in
+    # this handoff then still finds its nonce-bound cancellation marker and
+    # rolls its admission fence back instead of leaving restart state stranded.
+    {
+      [ -n "$nonce" ] && printf 'nonce=%s\n' "$nonce"
+      printf 'cancelled_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    } >"$cancel_tmp" && mv "$cancel_tmp" "$cancel" && rm -f "$marker" || rc=1
+  done
+  return "$rc"
 }
 
 _health_origin_header() {
@@ -881,26 +987,44 @@ wait_for_restart_persistence_or_fail() {
   local expected_nonce="$3"
   local max_wait="${4:-30}"
   local waited=0
-  local marker="$runtime_root/restart_pending"
-  local ack="$runtime_root/restart_persisted"
+  local roots=()
+  local root ack
 
   if [ -z "$runtime_root" ]; then
     echo "✗ [gate] ${scope} runtime root is required for restart persistence" >&2
     return 1
   fi
+  if [ -z "$expected_nonce" ]; then
+    # Widening WHERE the acknowledgement may appear must not widen WHAT counts
+    # as one. With an empty expected nonce the `grep -Fqx` below would match a
+    # bare "nonce=" line, so an empty nonce is refused rather than compared.
+    echo "✗ [gate] ${scope} restart persistence requires this request's nonce" >&2
+    return 1
+  fi
+  _set_restart_marker_roots "$runtime_root" || return 1
+  roots=("${RESTART_MARKER_ROOTS[@]}")
 
   while [ "$waited" -lt "$max_wait" ]; do
-    if [ -f "$ack" ] \
-      && grep -Fqx "nonce=${expected_nonce}" "$ack" 2>/dev/null; then
-      echo "✓ [gate] ${scope} restart persistence acknowledged by runtime"
-      return 0
-    fi
+    for root in "${roots[@]}"; do
+      ack="$root/restart_persisted"
+      # Nonce equality remains the entire gate. An acknowledgement carrying any
+      # other nonce belongs to another request and proves nothing about this
+      # one; absence of the file at every root proves nothing either.
+      if [ -f "$ack" ] \
+        && grep -Fqx "nonce=${expected_nonce}" "$ack" 2>/dev/null; then
+        echo "✓ [gate] ${scope} restart persistence acknowledged by runtime at ${root}"
+        _release_unacknowledged_restart_lease "$expected_nonce" "$root" "${roots[@]}"
+        return 0
+      fi
+    done
     sleep 1
     waited=$((waited + 1))
   done
 
   clear_restart_drain_mode "$runtime_root" || true
-  rm -f "$ack" 2>/dev/null || true
+  for root in "${roots[@]}"; do
+    rm -f "$root/restart_persisted" 2>/dev/null || true
+  done
   echo "✗ [gate] ${scope} restart persistence was not acknowledged within ${max_wait}s" >&2
   echo "  Cleared restart_pending and refused bootout: the in-flight delivery frontier is not durable." >&2
   return 1
@@ -980,7 +1104,10 @@ request_restart_drain_mode_or_fail() {
   local exempt_csv="${6:-${AGENTDESK_RESTART_EXEMPT_CHANNELS:-}}"
   local ack_wait="${AGENTDESK_RESTART_DRAIN_ACK_WAIT:-20}"
   local waited=0
-  local marker
+  local roots=()
+  local acquired=()
+  local root
+  local consumed_root
   local tmp_marker
   local job_state
   local nonce
@@ -992,6 +1119,8 @@ request_restart_drain_mode_or_fail() {
     echo "✗ [gate] ${scope} runtime root is required for restart drain mode" >&2
     return 1
   fi
+  _set_restart_marker_roots "$runtime_root" || return 1
+  roots=("${RESTART_MARKER_ROOTS[@]}")
 
   # 2026-05-26 adk-cdx incident: block restart_pending when any non-exempt
   # channel has a live turn. Without this, destructive E2E that restart
@@ -1003,27 +1132,38 @@ request_restart_drain_mode_or_fail() {
     return 1
   fi
 
-  rm -f "$runtime_root/restart_persisted" "$runtime_root/restart_cancelled" 2>/dev/null || true
+  for root in "${roots[@]}"; do
+    rm -f "$root/restart_persisted" "$root/restart_cancelled" 2>/dev/null || true
+  done
 
-  mkdir -p "$runtime_root" || {
-    echo "✗ [gate] failed to create ${scope} runtime root: $runtime_root" >&2
-    return 1
-  }
+  for root in "${roots[@]}"; do
+    mkdir -p "$root" || {
+      echo "✗ [gate] failed to create ${scope} runtime root: $root" >&2
+      return 1
+    }
+  done
 
-  marker="$runtime_root/restart_pending"
   nonce="$(date -u '+%Y%m%dT%H%M%S')-$$-${RANDOM:-0}"
   # O_EXCL ownership: never overwrite another restart nonce. The marker is the
-  # process-wide restart lease, shared with standby promotion.
-  if ! ( set -o noclobber; {
-    printf 'nonce=%s\n' "$nonce"
-    printf 'source=%s\n' "$source"
-    printf 'scope=%s\n' "$scope"
-    printf 'label=%s\n' "$label"
-    date -u '+requested_at=%Y-%m-%dT%H:%M:%SZ'
-  } >"$marker" ) 2>/dev/null; then
-    echo "✗ [gate] restart drain marker already owned: $marker" >&2
-    return 1
-  fi
+  # process-wide restart lease, shared with standby promotion. Every root must
+  # be acquired under the same nonce or none is: a half-owned lease would let
+  # this deploy proceed while another owner still holds the other directory.
+  for root in "${roots[@]}"; do
+    if ! ( set -o noclobber; {
+      printf 'nonce=%s\n' "$nonce"
+      printf 'source=%s\n' "$source"
+      printf 'scope=%s\n' "$scope"
+      printf 'label=%s\n' "$label"
+      date -u '+requested_at=%Y-%m-%dT%H:%M:%SZ'
+    } >"$root/restart_pending" ) 2>/dev/null; then
+      echo "✗ [gate] restart drain marker already owned: $root/restart_pending" >&2
+      if [ "${#acquired[@]}" -gt 0 ]; then
+        rm -f "${acquired[@]}" 2>/dev/null || true
+      fi
+      return 1
+    fi
+    acquired+=("$root/restart_pending")
+  done
 
   while [ "$waited" -lt "$ack_wait" ]; do
     if _restart_pending_acknowledged "$port"; then
@@ -1033,10 +1173,10 @@ request_restart_drain_mode_or_fail() {
     fi
     # #1447 review P2: idle runtime may consume the marker (restart_ctrl
     # deletes restart_pending and calls exit(0) once all turns drain) before
-    # our 1s poll observes the in-memory flag. If the marker we just wrote
+    # our 1s poll observes the in-memory flag. If a marker we just wrote
     # has disappeared, the runtime acknowledged it the only way it can.
-    if [ ! -e "$marker" ]; then
-      echo "▸ [gate] ${scope} restart drain marker consumed by runtime — treating as acknowledged"
+    if consumed_root="$(_restart_marker_consumed_root "${roots[@]}")"; then
+      echo "▸ [gate] ${scope} restart drain marker consumed by runtime at ${consumed_root} — treating as acknowledged"
       AGENTDESK_RESTART_REQUEST_NONCE="$nonce"
       return 0
     fi
@@ -1051,16 +1191,18 @@ request_restart_drain_mode_or_fail() {
     # and call exit(0) — flapping under KeepAlive. The service is not
     # running, so there is nothing to drain; clear the marker and report
     # success.
-    rm -f "$marker" "$runtime_root/restart_persisted" \
-      "$runtime_root/restart_cancelled" 2>/dev/null || true
+    for root in "${roots[@]}"; do
+      rm -f "$root/restart_pending" "$root/restart_persisted" \
+        "$root/restart_cancelled" 2>/dev/null || true
+    done
     AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=1
     echo "▸ [gate] ${scope} launchd job is not running; cleared restart drain marker (no in-flight turns to drain)"
     return 0
   fi
-  # Late-arriving consumption: marker may have been consumed between the
+  # Late-arriving consumption: a marker may have been consumed between the
   # last poll and the post-loop launchd check. Same ack semantics as above.
-  if [ ! -e "$marker" ]; then
-    echo "▸ [gate] ${scope} restart drain marker consumed by runtime during timeout window — treating as acknowledged"
+  if consumed_root="$(_restart_marker_consumed_root "${roots[@]}")"; then
+    echo "▸ [gate] ${scope} restart drain marker consumed by runtime at ${consumed_root} during timeout window — treating as acknowledged"
     AGENTDESK_RESTART_REQUEST_NONCE="$nonce"
     return 0
   fi

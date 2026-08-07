@@ -507,6 +507,393 @@ set -e
 unset -f _launchd_job_state
 assert_eq "skip=1 + zero live turns returns 0" "0" "$rc"
 
+echo "== Test 8: #5245 — shell writes and reads BOTH marker directories =="
+# The deploy shell passes "$ADK_REL/runtime" while the running runtime watches
+# "$ADK_REL" (crate::agentdesk_runtime_root returns $AGENTDESK_ROOT_DIR
+# verbatim; no Rust code touches "$ROOT/runtime/restart_*"). Phase 1 mirrors
+# request/cancellation to both and accepts an acknowledgement from either.
+#
+# These cases are the discrimination: 8b/8c prove the widening works, 8d/8e/8f
+# prove it did NOT turn the gate into something that approves anything, and
+# 8a/8h/8k prove the second path is really written and really comes from the
+# explicit variable rather than from dirname.
+TMP_D=$(mktemp -d)
+trap 'rm -rf "$TMP_FIXTURE_DIR" "$TMP_RUNTIME" "$TMPDIR_TEST" "$TMP_RUNTIME2" "$TMP_RUNTIME3" "$TMP_D"' EXIT
+DUAL_PRIMARY="$TMP_D/release/runtime"
+DUAL_MIRROR="$TMP_D/release"
+mkdir -p "$DUAL_PRIMARY"
+
+dual_nonce_of() {
+  # Never fails: a missing file yields the empty string so an assertion below
+  # reports the mismatch instead of `set -e` aborting the suite mid-run.
+  grep '^nonce=' "$1" 2>/dev/null | head -1 | cut -d= -f2- || true
+}
+
+# --- 8a (F): a single request lands in BOTH roots under ONE nonce ------------
+_launchd_job_state() { echo "running"; }
+set +e
+AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
+  PATH="$TMP_FIXTURE_DIR/bin_fail:$PATH" \
+  AGENTDESK_RESTART_DRAIN_ACK_WAIT=1 \
+  request_restart_drain_mode_or_fail "test" "test.label" 0 "$DUAL_PRIMARY" "smoke-test" \
+  >/dev/null 2>&1
+rc=$?
+set -e
+unset -f _launchd_job_state
+assert_eq "dual-root request returns 0 (drain timeout path)" "0" "$rc"
+if [ -f "$DUAL_PRIMARY/restart_pending" ] || [ -f "$DUAL_MIRROR/restart_pending" ]; then
+  fail "timeout path clears the request marker in both roots"
+else
+  pass "timeout path clears the request marker in both roots"
+fi
+if [ -f "$DUAL_PRIMARY/restart_cancelled" ] && [ -f "$DUAL_MIRROR/restart_cancelled" ]; then
+  pass "8e: cancellation reaches both roots, not just the one the shell owns"
+else
+  fail "8e: cancellation reaches both roots, not just the one the shell owns"
+fi
+cancel_primary_nonce=$(dual_nonce_of "$DUAL_PRIMARY/restart_cancelled" || true)
+cancel_mirror_nonce=$(dual_nonce_of "$DUAL_MIRROR/restart_cancelled" || true)
+if [ -n "$cancel_primary_nonce" ] && [ "$cancel_primary_nonce" = "$cancel_mirror_nonce" ]; then
+  pass "both roots were cancelled under the same nonce ($cancel_primary_nonce)"
+else
+  fail "both roots were cancelled under the same nonce (primary=$cancel_primary_nonce mirror=$cancel_mirror_nonce)"
+fi
+
+# Same request again, this time observed while it is still armed: the marker
+# must exist in both roots with an identical nonce. A single-root write (the
+# pre-#5245 behaviour, or a regression that drops one of the two writes) fails
+# here even though the deploy itself would still report success.
+rm -f "$DUAL_PRIMARY/restart_cancelled" "$DUAL_MIRROR/restart_cancelled"
+mkdir -p "$TMP_FIXTURE_DIR/bin_hold"
+cat >"$TMP_FIXTURE_DIR/bin_hold/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 7
+EOF
+chmod +x "$TMP_FIXTURE_DIR/bin_hold/curl"
+_launchd_job_state() { echo "running"; }
+armed_primary=0
+armed_mirror=0
+armed_same_nonce=0
+( for _ in $(seq 1 60); do
+    if [ -f "$DUAL_PRIMARY/restart_pending" ] && [ -f "$DUAL_MIRROR/restart_pending" ]; then
+      break
+    fi
+    sleep 0.1
+  done
+  a=$(grep '^nonce=' "$DUAL_PRIMARY/restart_pending" 2>/dev/null | head -1 | cut -d= -f2- || true)
+  b=$(grep '^nonce=' "$DUAL_MIRROR/restart_pending" 2>/dev/null | head -1 | cut -d= -f2- || true)
+  printf 'primary=%s\nmirror=%s\n' \
+    "$([ -f "$DUAL_PRIMARY/restart_pending" ] && echo 1 || echo 0)" \
+    "$([ -f "$DUAL_MIRROR/restart_pending" ] && echo 1 || echo 0)" >"$TMP_D/armed"
+  printf 'same=%s\n' "$([ -n "$a" ] && [ "$a" = "$b" ] && echo 1 || echo 0)" >>"$TMP_D/armed"
+) &
+OBS_PID=$!
+set +e
+AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
+  PATH="$TMP_FIXTURE_DIR/bin_hold:$PATH" \
+  AGENTDESK_RESTART_DRAIN_ACK_WAIT=4 \
+  request_restart_drain_mode_or_fail "test" "test.label" 0 "$DUAL_PRIMARY" "smoke-test" \
+  >/dev/null 2>&1
+set -e
+wait "$OBS_PID" 2>/dev/null || true
+unset -f _launchd_job_state
+armed_primary=$( (grep '^primary=' "$TMP_D/armed" 2>/dev/null || echo 'primary=absent') | cut -d= -f2)
+armed_mirror=$( (grep '^mirror=' "$TMP_D/armed" 2>/dev/null || echo 'mirror=absent') | cut -d= -f2)
+armed_same_nonce=$( (grep '^same=' "$TMP_D/armed" 2>/dev/null || echo 'same=absent') | cut -d= -f2)
+assert_eq "8a: request armed restart_pending in the shell's own root" "1" "$armed_primary"
+assert_eq "8a: request armed restart_pending in the runtime's root (mirror)" "1" "$armed_mirror"
+assert_eq "8a: both roots carry the same nonce" "1" "$armed_same_nonce"
+
+# --- 8m: a new request pre-cleans EVERY root it will later consult ----------
+# Not cosmetic. gateway_lease_recovery.rs (~:428) treats the mere presence of a
+# restart_persisted written during the current process lifetime as proof that a
+# promotion handoff committed — that check is lifetime-scoped, not nonce-scoped.
+# Two deploys inside one runtime lifetime is the ordinary retry pattern, so an
+# acknowledgement from the previous request left lying in the runtime root is a
+# stale positive for the next one. The old code pre-cleaned only the directory
+# it wrote to; now that both are written, both must be cleaned.
+rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
+printf 'nonce=stale-request\n' >"$DUAL_PRIMARY/restart_persisted"
+printf 'nonce=stale-request\n' >"$DUAL_PRIMARY/restart_cancelled"
+printf 'nonce=stale-request\n' >"$DUAL_MIRROR/restart_persisted"
+printf 'nonce=stale-request\n' >"$DUAL_MIRROR/restart_cancelled"
+_launchd_job_state() { echo "running"; }
+set +e
+AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
+  PATH="$TMP_FIXTURE_DIR/bin_fail:$PATH" \
+  AGENTDESK_RESTART_DRAIN_ACK_WAIT=1 \
+  request_restart_drain_mode_or_fail "test" "test.label" 0 "$DUAL_PRIMARY" "smoke-test" \
+  >/dev/null 2>&1
+set -e
+unset -f _launchd_job_state
+if [ -e "$DUAL_PRIMARY/restart_persisted" ]; then
+  fail "8m: stale ack removed from the shell root before the new request arms"
+else
+  pass "8m: stale ack removed from the shell root before the new request arms"
+fi
+if [ -e "$DUAL_MIRROR/restart_persisted" ]; then
+  fail "8m: stale ack removed from the runtime root before the new request arms"
+else
+  pass "8m: stale ack removed from the runtime root before the new request arms"
+fi
+if grep -q '^nonce=stale-request$' "$DUAL_MIRROR/restart_cancelled" 2>/dev/null; then
+  fail "8m: the previous request's cancellation does not survive into this one"
+else
+  pass "8m: the previous request's cancellation does not survive into this one"
+fi
+
+# --- 8b/8c (A/B): acknowledgement from EITHER root is accepted ---------------
+rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
+printf 'nonce=dual-nonce\n' >"$DUAL_MIRROR/restart_persisted"
+set +e
+AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
+  wait_for_restart_persistence_or_fail "test" "$DUAL_PRIMARY" "dual-nonce" 2 >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "8b (A): ack written ONLY at the runtime root is accepted" "0" "$rc"
+
+rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
+printf 'nonce=dual-nonce\n' >"$DUAL_PRIMARY/restart_persisted"
+set +e
+AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
+  wait_for_restart_persistence_or_fail "test" "$DUAL_PRIMARY" "dual-nonce" 2 >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "8c (B): ack written ONLY at the shell root is accepted" "0" "$rc"
+
+# --- 8d (C): no ack anywhere still fails ------------------------------------
+# This is the safety property of the whole change: widening WHERE we look must
+# not make "nothing acknowledged" pass.
+rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
+touch "$DUAL_PRIMARY/restart_pending" "$DUAL_MIRROR/restart_pending"
+set +e
+AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
+  wait_for_restart_persistence_or_fail "test" "$DUAL_PRIMARY" "dual-nonce" 1 >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "8d (C): ack absent from BOTH roots still refuses bootout" "1" "$rc"
+
+# The refusal must also be observable in both roots, otherwise the runtime that
+# does watch the other directory keeps a fenced admission path forever.
+if [ -f "$DUAL_PRIMARY/restart_cancelled" ] && [ -f "$DUAL_MIRROR/restart_cancelled" ]; then
+  pass "8d: refusal publishes cancellation to both roots"
+else
+  fail "8d: refusal publishes cancellation to both roots"
+fi
+
+# --- 8e (D): an ack with the wrong nonce is not an ack ----------------------
+rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
+printf 'nonce=someone-elses-nonce\n' >"$DUAL_MIRROR/restart_persisted"
+printf 'nonce=another-nonce\n' >"$DUAL_PRIMARY/restart_persisted"
+set +e
+AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
+  wait_for_restart_persistence_or_fail "test" "$DUAL_PRIMARY" "dual-nonce" 1 >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "8e (D): ack present in both roots with a different nonce still fails" "1" "$rc"
+
+rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
+printf 'nonce=dual-nonce-suffix\n' >"$DUAL_MIRROR/restart_persisted"
+set +e
+AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
+  wait_for_restart_persistence_or_fail "test" "$DUAL_PRIMARY" "dual-nonce" 1 >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "8e (D): a nonce that merely starts with ours is not a match" "1" "$rc"
+
+# --- 8f: an empty expected nonce is refused, not compared -------------------
+rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
+printf 'nonce=\n' >"$DUAL_MIRROR/restart_persisted"
+set +e
+AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
+  wait_for_restart_persistence_or_fail "test" "$DUAL_PRIMARY" "" 1 >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "8f: empty nonce is refused even when a bare 'nonce=' ack exists" "1" "$rc"
+
+# --- 8g (E): cancellation recovers the nonce from whichever root still has it
+# The runtime consumes the marker in the ONE directory it watches. The nonce
+# for the cancellation must then be read from the other root, or the surviving
+# poller receives a cancellation it cannot bind to its own request.
+rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
+printf 'nonce=consumed-by-runtime\n' >"$DUAL_PRIMARY/restart_pending"
+set +e
+AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
+  clear_restart_drain_mode "$DUAL_PRIMARY" >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "8g (E): clear succeeds when only one root still holds the marker" "0" "$rc"
+if grep -q '^nonce=consumed-by-runtime$' "$DUAL_MIRROR/restart_cancelled" 2>/dev/null \
+  && grep -q '^nonce=consumed-by-runtime$' "$DUAL_PRIMARY/restart_cancelled" 2>/dev/null; then
+  pass "8g: nonce-bound cancellation reaches the root whose marker was consumed"
+else
+  fail "8g: nonce-bound cancellation reaches the root whose marker was consumed"
+fi
+
+rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
+printf 'nonce=only-in-mirror\n' >"$DUAL_MIRROR/restart_pending"
+set +e
+AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
+  clear_restart_drain_mode "$DUAL_PRIMARY" >/dev/null 2>&1
+set -e
+if grep -q '^nonce=only-in-mirror$' "$DUAL_PRIMARY/restart_cancelled" 2>/dev/null; then
+  pass "8g: nonce is recovered from the mirror when the shell root has none"
+else
+  fail "8g: nonce is recovered from the mirror when the shell root has none"
+fi
+
+# --- 8h: the second root is the stated variable, never dirname --------------
+# skills/agentdesk-restart passes "$HOME/.adk/release", whose dirname is
+# "$HOME/.adk" — deriving the mirror would write markers into an unrelated
+# directory. Point the mirror at a sibling and require the marker to follow the
+# variable, with nothing created at dirname(primary).
+DUAL_SIBLING="$TMP_D/sibling"
+mkdir -p "$DUAL_SIBLING"
+rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
+_launchd_job_state() { echo "not running"; }
+set +e
+AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_SIBLING" \
+  PATH="$TMP_FIXTURE_DIR/bin_fail:$PATH" \
+  AGENTDESK_RESTART_DRAIN_ACK_WAIT=1 \
+  request_restart_drain_mode_or_fail "test" "sibling.label" 0 "$DUAL_PRIMARY" "smoke-test" \
+  >/dev/null 2>&1
+set -e
+unset -f _launchd_job_state
+# The job-not-running branch clears every root it armed; the observable proof
+# is that the sibling was cleaned and dirname(primary) was never written.
+if [ -e "$DUAL_MIRROR/restart_pending" ] || [ -e "$DUAL_MIRROR/restart_cancelled" ]; then
+  fail "8h: mirror root is taken from the variable, not from dirname(primary)"
+else
+  pass "8h: mirror root is taken from the variable, not from dirname(primary)"
+fi
+if [ -e "$DUAL_SIBLING/restart_pending" ]; then
+  fail "8h: sibling mirror marker cleared on the not-running branch"
+else
+  pass "8h: sibling mirror marker cleared on the not-running branch"
+fi
+
+# --- 8i: consumption in EITHER root is the idle-runtime acknowledgement -----
+# Only one binary is running, so only one of the two markers is ever consumed.
+# Requiring both to vanish would delete the #1447 ack path outright.
+rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
+_launchd_job_state() { echo "running"; }
+( for _ in $(seq 1 60); do
+    [ -e "$DUAL_MIRROR/restart_pending" ] && break
+    sleep 0.1
+  done
+  command rm -f "$DUAL_MIRROR/restart_pending" ) &
+BG_PID=$!
+set +e
+consumed_out=$(AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
+  PATH="$TMP_FIXTURE_DIR/bin_fail:$PATH" \
+  AGENTDESK_RESTART_DRAIN_ACK_WAIT=10 \
+  request_restart_drain_mode_or_fail "test" "test.label" 0 "$DUAL_PRIMARY" "smoke-test" \
+  2>&1)
+rc=$?
+set -e
+wait "$BG_PID" 2>/dev/null || true
+unset -f _launchd_job_state
+assert_eq "8i: marker consumed in the runtime root alone counts as ack" "0" "$rc"
+case "$consumed_out" in
+  *"consumed by runtime at $DUAL_MIRROR"*)
+    pass "8i: ack names the root whose marker was consumed" ;;
+  *)
+    fail "8i: ack names the root whose marker was consumed (got: $consumed_out)" ;;
+esac
+
+# Negative twin: while BOTH markers survive, the consumed-branch must not fire.
+rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
+_launchd_job_state() { echo "running"; }
+set +e
+survived_out=$(AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
+  PATH="$TMP_FIXTURE_DIR/bin_fail:$PATH" \
+  AGENTDESK_RESTART_DRAIN_ACK_WAIT=2 \
+  request_restart_drain_mode_or_fail "test" "test.label" 0 "$DUAL_PRIMARY" "smoke-test" \
+  2>&1)
+set -e
+unset -f _launchd_job_state
+case "$survived_out" in
+  *"consumed by runtime"*)
+    fail "8i: both markers intact must NOT be read as consumption" ;;
+  *)
+    pass "8i: both markers intact must NOT be read as consumption" ;;
+esac
+
+# --- 8k: a half-owned lease is never left behind ---------------------------
+rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
+printf 'nonce=foreign-owner\n' >"$DUAL_MIRROR/restart_pending"
+_launchd_job_state() { echo "running"; }
+set +e
+AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
+  PATH="$TMP_FIXTURE_DIR/bin_fail:$PATH" \
+  AGENTDESK_RESTART_DRAIN_ACK_WAIT=1 \
+  request_restart_drain_mode_or_fail "test" "test.label" 0 "$DUAL_PRIMARY" "smoke-test" \
+  >/dev/null 2>&1
+rc=$?
+set -e
+unset -f _launchd_job_state
+assert_eq "8k: request fails when the mirror root is owned by another nonce" "1" "$rc"
+if [ -e "$DUAL_PRIMARY/restart_pending" ]; then
+  fail "8k: the root acquired first is rolled back on partial acquisition"
+else
+  pass "8k: the root acquired first is rolled back on partial acquisition"
+fi
+if grep -q '^nonce=foreign-owner$' "$DUAL_MIRROR/restart_pending" 2>/dev/null; then
+  pass "8k: the foreign owner's marker is left untouched"
+else
+  fail "8k: the foreign owner's marker is left untouched"
+fi
+
+# --- 8n: a successful acknowledgement releases the lease nobody consumes ----
+# Before #5245 the acknowledgement never arrived, so every exit from the gate
+# ran through clear_restart_drain_mode and no marker survived. Now that the gate
+# can succeed, the root that no runtime watches keeps its marker unless it is
+# released — and the next deploy's O_EXCL acquisition would fail with
+# "restart drain marker already owned".
+rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
+printf 'nonce=ack-release\n' >"$DUAL_PRIMARY/restart_pending"
+printf 'nonce=ack-release\n' >"$DUAL_MIRROR/restart_pending"
+printf 'nonce=ack-release\n' >"$DUAL_MIRROR/restart_persisted"
+set +e
+AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
+  wait_for_restart_persistence_or_fail "test" "$DUAL_PRIMARY" "ack-release" 2 >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "8n: ack at the runtime root is accepted" "0" "$rc"
+if [ -e "$DUAL_PRIMARY/restart_pending" ]; then
+  fail "8n: the unwatched root's lease is released so the next deploy can acquire"
+else
+  pass "8n: the unwatched root's lease is released so the next deploy can acquire"
+fi
+if [ -e "$DUAL_MIRROR/restart_pending" ]; then
+  pass "8n: the acknowledging runtime's own marker is left for it to remove"
+else
+  fail "8n: the acknowledging runtime's own marker is left for it to remove"
+fi
+
+# The release is nonce-scoped: a marker owned by somebody else is never freed.
+rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
+printf 'nonce=someone-else\n' >"$DUAL_PRIMARY/restart_pending"
+printf 'nonce=ack-release\n' >"$DUAL_MIRROR/restart_persisted"
+set +e
+AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
+  wait_for_restart_persistence_or_fail "test" "$DUAL_PRIMARY" "ack-release" 2 >/dev/null 2>&1
+set -e
+if grep -q '^nonce=someone-else$' "$DUAL_PRIMARY/restart_pending" 2>/dev/null; then
+  pass "8n: a lease held under another nonce is not released"
+else
+  fail "8n: a lease held under another nonce is not released"
+fi
+
+# --- 8l: with no mirror configured, behaviour is byte-for-byte the old one --
+rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
+printf 'nonce=single-root\n' >"$DUAL_MIRROR/restart_persisted"
+set +e
+wait_for_restart_persistence_or_fail "test" "$DUAL_PRIMARY" "single-root" 1 >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "8l: without the mirror variable the parent directory is NOT consulted" "1" "$rc"
+
 echo
 echo "==== Results ===="
 echo "  PASS: $PASS"
