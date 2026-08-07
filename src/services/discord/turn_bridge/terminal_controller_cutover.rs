@@ -17,6 +17,9 @@ use super::super::inflight::RelayOwnerKind;
 use super::super::outbound::delivery_record as dr;
 use super::super::outbound::turn_output_controller as toc;
 use super::super::placeholder_controller::{PlaceholderKey, PlaceholderLifecycle};
+use super::super::session_relay_sink::journal::controller::{
+    self as journal_ctl, ControllerDisposition as Disposition,
+};
 use super::super::turn_finalizer::TurnKey;
 use crate::services::discord::{
     DeliveryLeaseCell, DeliveryLeaseHeartbeat, DeliveryLeaseKey, LeaseHolder, lease_now_ms,
@@ -246,6 +249,10 @@ pub(super) async fn deliver_short_replace_via_controller(
         );
         true
     };
+    // #5071 T1 S4: open the controller family's shadow obligation BEFORE transport.
+    #[rustfmt::skip]
+    let mut journal = journal_ctl::begin_controller_terminal(shared, provider,
+        Disposition::ShortReplace, (watcher_owner_channel_id, channel_id), Some((start, end)));
     let outcome = toc::deliver_turn_output(
         gateway,
         toc::TurnOutputCtx {
@@ -314,13 +321,14 @@ pub(super) async fn deliver_short_replace_via_controller(
     // Some(msg_id)`. The frontier KEY stays `watcher_owner_channel_id` (offset
     // authority unchanged — B2b's fusion still shares one channel key); only the
     // recorded anchor pair points at the edit channel/message.
+    let delivered = dr::outcome_is_shadow_delivered(&outcome);
     dr::shadow_mirror_delivered_frontier(
         shared,
         provider,
         watcher_owner_channel_id,
         tmux_session_name,
         (start, end),
-        dr::outcome_is_shadow_delivered(&outcome),
+        delivered,
         Some(msg_id.get()),
         Some(channel_id.get()),
         Some(delivered_body),
@@ -328,6 +336,7 @@ pub(super) async fn deliver_short_replace_via_controller(
         // keyed by the delivery channel (`channel_id`), NOT `watcher_owner_channel_id`.
         Some(turn.user_msg_id),
     );
+    journal_ctl::settle_controller_terminal(&mut journal, Some(msg_id), delivered);
     outcome
 }
 
@@ -368,6 +377,9 @@ pub(super) async fn deliver_long_chunks_via_controller(
         true
     };
     let chunk_count = super::super::formatting::split_message(relay_text).len();
+    #[rustfmt::skip]
+    let mut journal = journal_ctl::begin_controller_terminal(shared, provider,
+        Disposition::LongChunks, (watcher_owner_channel_id, channel_id), Some((start, end)));
     let outcome = toc::deliver_turn_output(
         gateway,
         toc::TurnOutputCtx {
@@ -417,7 +429,9 @@ pub(super) async fn deliver_long_chunks_via_controller(
             // #4564: explicit inbound turn id; ledger keyed by delivery `channel_id`.
             Some(turn.user_msg_id),
         );
+        journal_ctl::settle_controller_terminal(&mut journal, chunks.tail_message_id, true);
     }
+    journal_ctl::settle_controller_terminal(&mut journal, None, false); // no-op if settled
     outcome
 }
 
@@ -529,6 +543,10 @@ pub(super) async fn apply_bridge_long_chunks_legacy(
         BridgeLeaseAcquire::Held(lease) => Some(lease),
         _ => None,
     };
+    #[rustfmt::skip]
+    let mut journal = journal_ctl::begin_controller_terminal(shared, provider,
+        Disposition::LongChunksLegacy, (watcher_owner_channel_id, channel_id),
+        lease.as_ref().map(|lease| lease.range()));
     match send_ordered_long_terminal_response(
         shared,
         gateway,
@@ -571,6 +589,7 @@ pub(super) async fn apply_bridge_long_chunks_legacy(
                         delivered_body,
                         Some(ledger_user_msg_id),
                     );
+                    journal_ctl::settle_controller_terminal(&mut journal, last_chunk_msg_id, true);
                 }
             }
         }
@@ -592,6 +611,7 @@ pub(super) async fn apply_bridge_long_chunks_legacy(
             *locals.preserve_inflight_for_cleanup_retry = true;
         }
     }
+    journal_ctl::settle_controller_terminal(&mut journal, None, false); // no-op if settled
 }
 
 #[allow(clippy::too_many_arguments)]

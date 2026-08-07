@@ -64,11 +64,23 @@ FAMILY_REGISTRY = (
 # Everything the S2 block says about what a match does NOT prove applies
 # unchanged to the new alternative: one token anywhere in the anchor file,
 # including a string literal or a test module, flips the family.
+#
+# #5071 T1 S4 adds the third alternative on the same terms. The turn_bridge
+# cutover family reaches the journal through `journal::controller`, aliased
+# `journal_ctl` at its anchor, so the alternative names that module path and its
+# two exact functions — a bare `journal_ctl`, a bare `controller`, or any other
+# method on either does NOT match. The baseline moves 3 -> 2 because that anchor
+# file now contains the token, and for no other reason: the two remaining
+# uninstrumented families (recovery/fresh-send/orphan, pipe stream epoch) are
+# unchanged by S4. That the drop is caused by the instrumentation rather than by
+# the widened pattern is proven in tests/test_delivery_journal_raw_writer.py by
+# the reverse mutation `test_controller_family_regresses_to_uninstrumented`.
 JOURNAL_FACADE_CALL = re.compile(
     r"\bself\.journal\.(?:begin_fresh|finish_fresh)\s*\("
     r"|\bjournal_watcher::(?:begin_watcher_terminal|settle_watcher_terminal|settle_without_transport)\s*\("
+    r"|\bjournal_ctl::(?:begin_controller_terminal|settle_controller_terminal)\s*\("
 )
-UNINSTRUMENTED_FAMILY_BASELINE = 3
+UNINSTRUMENTED_FAMILY_BASELINE = 2
 
 
 def call_sites(root: Path) -> tuple[Counter[str], int]:
