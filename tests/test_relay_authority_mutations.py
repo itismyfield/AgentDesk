@@ -15,6 +15,67 @@ TERMINAL_HANDOFF = Path("src/services/discord/session_relay_sink/terminal_handof
 SESSION_RELAY_SINK = Path("src/services/discord/session_relay_sink.rs")
 
 
+def _cargo_log(body: str) -> str:
+    """A fixture-runner body that replays a realistic `cargo test --lib` log.
+
+    #5243: the oracle grades the log of the single cargo invocation, so a fixture
+    runner that prints nothing is no longer a stand-in for a killed mutant.
+    """
+    return "cat <<'RELAY_AUTHORITY_LOG'\n" + body + "RELAY_AUTHORITY_LOG\n"
+
+
+COMPILED_HEADER = """   Compiling agentdesk v0.1.2 (/repo)
+    Finished test profile [unoptimized + debuginfo] target(s) in 12.34s
+     Running unittests src/lib.rs (target/debug/deps/agentdesk-0123456789abcdef)
+
+"""
+
+# The test named for the mutation ran and failed: a real kill.
+KILLED_RUNNER = _cargo_log(
+    COMPILED_HEADER
+    + """running 1 test
+test the_named_target ... FAILED
+
+failures:
+    the_named_target
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 130 filtered out; finished in 0.02s
+"""
+) + "exit 101\n"
+
+# The test ran and passed: the mutation survived.
+SURVIVED_RUNNER = _cargo_log(
+    COMPILED_HEADER
+    + """running 1 test
+test the_named_target ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 130 filtered out; finished in 0.02s
+"""
+) + "exit 0\n"
+
+# rustc rejected the mutant: cargo still answers 101, and the build leaves no
+# fingerprint, so the cache proof still sees compiling=1 fresh=0.
+BUILD_BROKEN_RUNNER = _cargo_log(
+    """   Compiling agentdesk v0.1.2 (/repo)
+error[E0425]: cannot find value `terminal_not_delivered` in this scope
+   --> src/services/discord/session_relay_sink/terminal_handoff.rs:111:31
+
+error: aborting due to 1 previous error
+
+error: could not compile `agentdesk` (lib test) due to 1 previous error
+"""
+) + "exit 101\n"
+
+# The named test no longer exists: the filter matches nothing and cargo says rc=0.
+NO_TEST_RAN_RUNNER = _cargo_log(
+    COMPILED_HEADER
+    + """running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 131 filtered out; finished in 0.00s
+"""
+) + "exit 0\n"
+
+
 class RelayAuthorityMutationScriptTests(unittest.TestCase):
     maxDiff = None
 
@@ -51,18 +112,23 @@ class RelayAuthorityMutationScriptTests(unittest.TestCase):
         return runner
 
     @staticmethod
-    def write_fake_cargo(root: Path) -> Path:
+    def write_fake_cargo(root: Path, *, cached: bool = False) -> Path:
         bin_dir = root / "fake-bin"
         bin_dir.mkdir()
         cargo = bin_dir / "cargo"
+        marker = "Fresh" if cached else "Compiling"
         cargo.write_text(
-            """#!/usr/bin/env bash
+            f"""#!/usr/bin/env bash
 set -euo pipefail
-if [[ "${CARGO_TERM_COLOR-}" == "never" ]]; then
-    printf '   Compiling agentdesk v0.1.0 (fake)\\n'
+if [[ "${{CARGO_TERM_COLOR-}}" == "never" ]]; then
+    printf '   {marker} agentdesk v0.1.0 (fake)\\n'
 else
-    printf '\\033[1m\\033[92m   Compiling\\033[0m agentdesk v0.1.0 (fake)\\n'
+    printf '\\033[1m\\033[92m   {marker}\\033[0m agentdesk v0.1.0 (fake)\\n'
 fi
+printf '     Running unittests src/lib.rs (target/debug/deps/agentdesk-0123456789ab)\\n'
+printf 'running 1 test\\n'
+printf 'test the_named_target ... FAILED\\n'
+printf 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out\\n'
 exit 101
 """,
             encoding="utf-8",
@@ -100,10 +166,78 @@ exit 101
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.count("compiling_agentdesk=1"), 4, result.stdout)
         self.assertNotIn("cache-proof=invalid", result.stderr)
+        # #5243 case E control: a freshly built, genuinely killed mutant must not
+        # be misgraded by the new build/test gates.
+        self.assertNotIn("status=BUILD-BROKEN", result.stderr)
+        self.assertNotIn("status=NO-TEST-RAN", result.stderr)
+        self.assertEqual(
+            result.stdout.count("compile_ok=yes tests_passed=0 tests_failed=1"), 4, result.stdout
+        )
+
+    def test_cache_proof_still_trips_on_a_cached_tree(self) -> None:
+        root = self.copy_fixture()
+        cargo = self.write_fake_cargo(root, cached=True)
+
+        result = self.run_script_with_fake_cargo(root, cargo)
+
+        self.assertEqual(result.returncode, 96, result.stdout + result.stderr)
+        self.assertIn("cache-proof=invalid", result.stderr)
+        self.assertNotIn("status=BUILD-BROKEN", result.stderr)
+        self.assertNotIn("status=NO-TEST-RAN", result.stderr)
+        self.assert_sources_restored(self, root)
+
+    def test_killed_mutation_records_the_evidence_that_killed_it(self) -> None:
+        root = self.copy_fixture()
+        runner = self.write_runner(root, KILLED_RUNNER)
+
+        result = self.run_script(root, runner)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for mutation in ("M10", "M6", "M8", "anchor-drop"):
+            self.assertIn(
+                f"MUTATION_ORACLE mutation={mutation} compile_ok=yes "
+                "tests_passed=0 tests_failed=1",
+                result.stdout,
+            )
+
+    def test_mutant_that_does_not_compile_is_build_broken_not_killed(self) -> None:
+        root = self.copy_fixture()
+        runner = self.write_runner(
+            root,
+            'if [[ "$1" == "M8" ]]; then\n' + BUILD_BROKEN_RUNNER + "fi\n" + KILLED_RUNNER,
+        )
+
+        result = self.run_script(root, runner)
+
+        self.assertEqual(result.returncode, 95, result.stdout + result.stderr)
+        self.assertIn("MUTATION_ORACLE mutation=M8 compile_ok=no", result.stdout)
+        self.assertIn("status=BUILD-BROKEN", result.stderr)
+        self.assertIn("mutation=M8", result.stderr)
+        self.assertNotIn("MUTATION_RESULT mutation=M8 status=KILLED", result.stdout)
+        self.assertNotIn("MUTATION_SUMMARY", result.stdout)
+        self.assertIn("could not compile `agentdesk`", result.stderr)
+        self.assert_sources_restored(self, root)
+
+    def test_lost_test_name_is_no_test_ran_not_a_survived_report(self) -> None:
+        root = self.copy_fixture()
+        runner = self.write_runner(
+            root,
+            'if [[ "$1" == "M6" ]]; then\n' + NO_TEST_RAN_RUNNER + "fi\n" + KILLED_RUNNER,
+        )
+
+        result = self.run_script(root, runner)
+
+        self.assertEqual(result.returncode, 94, result.stdout + result.stderr)
+        self.assertIn("status=NO-TEST-RAN", result.stderr)
+        self.assertIn("mutation=M6", result.stderr)
+        self.assertNotIn("mutation survived", result.stderr)
+        self.assertNotIn("status=SURVIVED", result.stderr)
+        self.assertNotIn("MUTATION_SUMMARY", result.stdout)
+        self.assert_sources_restored(self, root)
 
     def test_four_fixed_mutations_are_killed_and_sources_restore(self) -> None:
         root = self.copy_fixture()
-        runner = self.write_runner(root, "exit 101\n")
+        runner = self.write_runner(root, KILLED_RUNNER)
 
         result = self.run_script(root, runner)
 
@@ -125,7 +259,7 @@ exit 101
 
     def test_concurrent_run_fails_closed_without_modifying_sources(self) -> None:
         root = self.copy_fixture()
-        runner = self.write_runner(root, "exit 101\n")
+        runner = self.write_runner(root, KILLED_RUNNER)
         lock_dir = root / "target/relay-authority-mutations.lock"
         lock_dir.mkdir(parents=True)
         before = {
@@ -142,7 +276,7 @@ exit 101
 
     def test_normal_exit_releases_lock_for_subsequent_run(self) -> None:
         root = self.copy_fixture()
-        runner = self.write_runner(root, "exit 101\n")
+        runner = self.write_runner(root, KILLED_RUNNER)
         lock_dir = root / "target/relay-authority-mutations.lock"
 
         first = self.run_script(root, runner)
@@ -158,7 +292,7 @@ exit 101
         root = self.copy_fixture()
         runner = self.write_runner(
             root,
-            'if [[ "$1" == "M6" ]]; then exit 0; fi\nexit 101\n',
+            'if [[ "$1" == "M6" ]]; then\n' + SURVIVED_RUNNER + "fi\n" + KILLED_RUNNER,
         )
 
         result = self.run_script(root, runner)
@@ -166,11 +300,18 @@ exit 101
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("MUTATION_RESULT mutation=M6 status=SURVIVED rc=0", result.stderr)
         self.assertIn("ERROR mutation survived: M6", result.stderr)
+        # #5243 case D: a test that ran and passed is still SURVIVED, not
+        # NO-TEST-RAN — the two rc=0 shapes must stay distinguishable.
+        self.assertIn(
+            "MUTATION_ORACLE mutation=M6 compile_ok=yes tests_passed=1 tests_failed=0",
+            result.stdout,
+        )
+        self.assertNotIn("status=NO-TEST-RAN", result.stderr)
         self.assert_sources_restored(self, root)
 
     def test_signal_exit_releases_lock_and_restores_sources(self) -> None:
         root = self.copy_fixture()
-        runner = self.write_runner(root, 'kill -TERM "$PPID"\nsleep 1\nexit 101\n')
+        runner = self.write_runner(root, 'kill -TERM "$PPID"\nsleep 1\n' + KILLED_RUNNER)
         lock_dir = root / "target/relay-authority-mutations.lock"
 
         result = self.run_script(root, runner)
@@ -181,7 +322,7 @@ exit 101
 
     def test_missing_mutation_anchor_fails_closed_and_restores_sources(self) -> None:
         root = self.copy_fixture()
-        runner = self.write_runner(root, "exit 101\n")
+        runner = self.write_runner(root, KILLED_RUNNER)
         source = root / TERMINAL_HANDOFF
         source.write_text(
             source.read_text(encoding="utf-8").replace(
@@ -201,7 +342,7 @@ exit 101
 
     def test_mutation_count_floor_is_at_least_four(self) -> None:
         root = self.copy_fixture()
-        runner = self.write_runner(root, "exit 101\n")
+        runner = self.write_runner(root, KILLED_RUNNER)
 
         result = self.run_script(root, runner)
 

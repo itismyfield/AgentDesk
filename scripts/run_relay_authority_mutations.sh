@@ -17,6 +17,20 @@
 # In that same follow-up commit, flip condition3_mutations_present to true in
 # scripts/relay_authority_contract_targets.json and re-pin the
 # relay-authority-contract job_sha256 in scripts/check-ci-runner-hardening.sh.
+#
+# Exit codes. Every non-zero code below is a gate failure; there is no
+# "tolerated" non-zero exit.
+#     0  every mutation was killed by the test named for it
+#     1  a mutation SURVIVED the test that is supposed to kill it
+#     2  invalid invocation: bad test mode, missing fixture runner, bad source
+#    75  another relay-authority mutation run holds the lock
+#    94  NO-TEST-RAN: the named test never executed, so nothing was proven (#5243)
+#    95  BUILD-BROKEN: the mutant did not compile, so it is not a valid mutant
+#         and cargo's rc=101 does not mean "the test caught it" (#5243)
+#    96  cache proof invalid: the mutant's build was reused from cache
+#    97  source restoration or lock release failed
+#    98  per-row source restoration hash mismatch
+#   129  HUP / 130 INT / 143 TERM
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -156,35 +170,71 @@ restore_after_row() {
 }
 
 run_target() {
-  local mutation=$1 target=$2 log=$3 rc
+  local mutation=$1 target=$2 log=$3 rc compile_count test_result rest passed failed
   if [[ "$MODE" == "fixture" ]]; then
     set +e
     "$FIXTURE_RUNNER" "$mutation" "$target" >"$log" 2>&1
     rc=$?
     set -e
-    return "$rc"
+  else
+    set +e
+    (
+      cd "$REPO_ROOT"
+      env -u RUSTC_WRAPPER -u AGENTDESK_ROOT_DIR \
+        CARGO_TERM_COLOR=never CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="$TARGET_DIR" \
+        cargo test --offline --lib "$target" -- --exact --test-threads=1
+    ) >"$log" 2>&1
+    rc=$?
+    set -e
+
+    compile_count="$(grep -Fc 'Compiling agentdesk v' "$log" || true)"
+    if [[ "$compile_count" != "1" ]] || grep -Fq 'Fresh agentdesk v' "$log"; then
+      printf 'ERROR mutation=%s cache-proof=invalid compile_count=%s expected=1 and no Fresh agentdesk\n' "$mutation" "$compile_count" >&2
+      cat "$log" >&2
+      return 96
+    fi
+
+    # CARGO_TERM_COLOR=never above makes both cache-proof markers stable for grep.
+    printf 'CACHE_PROOF mutation=%s compiling_agentdesk=%s fresh_agentdesk=0\n' "$mutation" "$compile_count"
   fi
 
-  set +e
-  (
-    cd "$REPO_ROOT"
-    env -u RUSTC_WRAPPER -u AGENTDESK_ROOT_DIR \
-      CARGO_TERM_COLOR=never CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="$TARGET_DIR" \
-      cargo test --offline --lib "$target" -- --exact --test-threads=1
-  ) >"$log" 2>&1
-  rc=$?
-  set -e
-
-  local compile_count
-  compile_count="$(grep -Fc 'Compiling agentdesk v' "$log" || true)"
-  if [[ "$compile_count" != "1" ]] || grep -Fq 'Fresh agentdesk v' "$log"; then
-    printf 'ERROR mutation=%s cache-proof=invalid compile_count=%s expected=1 and no Fresh agentdesk\n' "$mutation" "$compile_count" >&2
+  # #5243: rc alone cannot separate "the test caught the mutant" from "the mutant
+  # did not compile" — cargo returns 101 for both. A failed build also writes no
+  # fingerprint, so it recompiles on every retry and satisfies the cache proof
+  # above with the same compiling=1 fresh=0 values a real kill produces. Judge on
+  # the log of this same single invocation. Do not add a second cargo call: a
+  # preceding `cargo check` would make this run Fresh and trip the cache proof.
+  if grep -Fq 'could not compile `agentdesk`' "$log"; then
+    printf 'MUTATION_ORACLE mutation=%s compile_ok=no tests_passed=0 tests_failed=0\n' "$mutation"
+    printf 'ERROR mutation=%s status=BUILD-BROKEN rc=%d target=%s (mutant did not compile)\n' "$mutation" "$rc" "$target" >&2
     cat "$log" >&2
-    return 96
+    return 95
   fi
 
-  # CARGO_TERM_COLOR=never above makes both cache-proof markers stable for grep.
-  printf 'CACHE_PROOF mutation=%s compiling_agentdesk=%s fresh_agentdesk=0\n' "$mutation" "$compile_count"
+  # The named test must actually have executed. `cargo test --lib <name> --exact`
+  # answers rc=0 with "0 passed; 0 failed" when the filter matches nothing, which
+  # the old script reported as "mutation survived" — red, but for the wrong
+  # reason. --exact names exactly one test, so exactly one must have run.
+  test_result="$( { grep -E '^test result: (ok|FAILED)\. [0-9]+ passed; [0-9]+ failed;' "$log" || true; } | head -n 1)"
+  case "$test_result" in
+    'test result: ok. 1 passed; 0 failed;'* | 'test result: FAILED. 0 passed; 1 failed;'*) ;;
+    *)
+      printf 'MUTATION_ORACLE mutation=%s compile_ok=yes tests_passed=0 tests_failed=0\n' "$mutation"
+      printf 'ERROR mutation=%s status=NO-TEST-RAN rc=%d target=%s (named test did not execute)\n' "$mutation" "$rc" "$target" >&2
+      cat "$log" >&2
+      return 94
+      ;;
+  esac
+
+  rest="${test_result#*. }"
+  passed="${rest%% passed;*}"
+  rest="${rest#* passed; }"
+  failed="${rest%% failed;*}"
+  # #5243: the KILLED path deletes its own log, so a green run used to leave no
+  # trace of what killed the mutant. Emit the verdict's evidence on stdout, where
+  # the existing MUTATION_* markers already go, rather than inventing a new
+  # artifact path.
+  printf 'MUTATION_ORACLE mutation=%s compile_ok=yes tests_passed=%s tests_failed=%s\n' "$mutation" "$passed" "$failed"
   return "$rc"
 }
 
@@ -209,9 +259,10 @@ run_mutation() {
     rm -f "$log"
     exit 1
   fi
-  if ((rc == 96)); then
+  # 94/95/96 already streamed the full log to stderr inside run_target.
+  if ((rc == 94 || rc == 95 || rc == 96)); then
     rm -f "$log"
-    exit 96
+    exit "$rc"
   fi
 
   printf 'MUTATION_RESULT mutation=%s status=KILLED rc=%d target=%s\n' "$mutation" "$rc" "$target"
