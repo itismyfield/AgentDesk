@@ -888,12 +888,26 @@ jobs:
   # What is host-independent is the direction, and that is all this evidence is
   # asked to carry: with a live server the 61 run and are adjudicated on the
   # change. With a closed port they still run -- one review measured `57 FAILED
-  # / 4 ok` in 915.72 s -- but nothing about that result is about the change.
-  # The failure is the fixture's, per the paragraph above: `create()` panics
-  # through `.expect(...)`, the soft-skip variants burn the wall-clock on
-  # connect retries, and which of the two a given test does is a property of
-  # the test, not of the diff. So the harm is not that the lane goes unrun; it
-  # is that the lane goes red, slowly, with a verdict it did not earn.
+  # / 4 ok` in 915.72 s. What that red reports can be listed, and the list is
+  # short: which of the two fixture behaviours each id takes -- `create()`
+  # panicking through `.expect(...)`, or a soft-skip variant burning its
+  # connect-retry budget -- and that the port was closed. Which of the two a
+  # given id does is a property of the test, not of the diff. What it does not
+  # report is whether the assertions past the fixture call hold, and those are
+  # where a change is normally adjudicated.
+  #
+  # It does not follow that such a run says nothing about a change, and an
+  # earlier revision of this comment claimed exactly that. The lines before the
+  # fixture call are diffable, and this branch diffs them: three of the 61 live
+  # in `src/services/session_resume.rs`, which this branch edits, and
+  # `resume_production_path_clears_stale_binding_and_rebinds_runtime` there now
+  # takes its `TEST_LOCK` with `unwrap_or_else(|poison| poison.into_inner())`
+  # on the line above its own `TestPostgresDb::create()` call. A closed port is
+  # what makes that `create()` panic, and that panic is what poisons the lock
+  # the edit exists to survive -- so against a closed port the fixture, not the
+  # assertion, decides what that edit is worth. State the harm that way: the
+  # lane does not go unrun, it goes red slowly, and it answers a narrower
+  # question than the pull request asked.
   #
   # So the service below is not defensive: without it
   # this required context can never be green, and with it the 56 of those 61
