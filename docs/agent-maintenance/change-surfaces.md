@@ -1699,6 +1699,18 @@ time for diagnostics; neither is a stored approval value.
   `src/services/auto_queue/cancel_run.rs` (frozen giant surface) is the canonical
   auto-queue cancellation and run-stop command surface; split before adding
   non-bugfix behavior.
+  `src/services/auto_queue/cleanup_tasks.rs` (frozen giant surface, #5142) is the
+  canonical run-cleanup transactional outbox: `enqueue_run_cleanup_task_on_tx`
+  writes the task in the same transaction that commits the cancel/end state
+  change, `drain_run_cleanup_task_pg` only deletes a row once every step
+  succeeded, and `replay_pending_run_cleanup_tasks_pg` resumes the backlog after
+  a restart. Enqueue, claim/drain, replay, attempt-cap dead-lettering, and the
+  backlog gauge are one durable row-lifecycle contract over
+  `auto_queue_run_cleanup_tasks`; the at-most-once emit invariant is only
+  checkable while they sit together, so this surface is registered
+  `decision = "keep"` in `scripts/giant_file_registry.toml` rather than carrying
+  a shrink deadline. Split only behind a scoped issue that moves the invariant
+  and its enforcement together.
 - legacy_modules: none; retired route fallback history is documented in
   `known-legacy.md`.
 - do_not_edit_without_migration_plan (giant-file routes):
