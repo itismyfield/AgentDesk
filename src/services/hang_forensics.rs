@@ -92,11 +92,52 @@
 //!
 //! ### 3. What the database was doing — [`Breadcrumbs`]
 //!
-//! [`observe_db`] brackets one Postgres await with a [`DbProbeGuard`], so
-//! `db_in_flight` says how many are outstanding right now and
-//! `db_probes_started/failed` how many have run. Nothing calls it yet; the
-//! commit that brackets the public `GET /api/health` path enumerates the
-//! sites, their conditions and the deliberate omissions here.
+//! Every Postgres await on the **public `GET /api/health` path** — the endpoint
+//! the watchdog probes — brackets itself with a [`DbProbeGuard`]. Enumerated,
+//! because a partial claim would misread as `db_in_flight=0` == "the database is
+//! innocent" (all in `services::health_diagnostics`):
+//!
+//! | await site                              | acquires | reached when                                    |
+//! |-----------------------------------------|----------|-------------------------------------------------|
+//! | `probe_server_up`                       | 1        | always                                          |
+//! | `load_dispatch_outbox_stats_pg`         | 4        | always                                          |
+//! | `load_config_audit_report_pg`           | 1        | always                                          |
+//! | `load_pipeline_override_report_pg`      | 1        | always                                          |
+//! | `load_dispatch_gate_runtime_overrides`  | 1        | a `health_registry` is attached                 |
+//! | `is_recent_cluster_worker`              | 1        | …and the node is a cluster standby with none    |
+//!
+//! That is **7 unconditional sequential acquires**, an 8th whenever the handler
+//! has a `health_registry` (`server::routes::health_api`'s `if let Some(ref
+//! registry) = state.health_registry` — always true for the `dcserver` runtime
+//! the watchdog probes, false for the standalone server), and a 9th when a
+//! cluster-standby node reports no providers. Each can block for the pool's
+//! `acquire_timeout` (10s), so the worst case is 70s / 80s / 90s against a 5s
+//! probe timeout — which is why a merely slow database, not a deadlock, is the
+//! leading explanation for these kills.
+//!
+//! **Not covered**, stated explicitly so a future reader does not infer more
+//! than the counters carry:
+//!
+//! * `load_channel_session_state`, reached once per mailbox from
+//!   `enrich_mailbox_session_state` on `GET /api/health/detail` only. It is
+//!   shared with two non-health repair routes, so bracketing it *inside the
+//!   function* would count DB work no health probe performed. Bracketing its
+//!   health-only call site instead is open and the only obstacle is small — it
+//!   returns `Option`, so the predicate has to be `|_| true` rather than
+//!   `Result::is_ok`, which would score "no row" as a failure. Left undone
+//!   because `/api/health/detail` is not the probed endpoint, **not** because
+//!   it cannot be done. That endpoint's active-session audit query is bracketed
+//!   anyway, being health-only.
+//!
+//! The enumeration above is held by the *types* in `health_diagnostics`, not by
+//! a test: every health-path function there shadows its `Option<&PgPool>` with
+//! a [`ProbedPool`] and the two that take a pool directly take a `ProbedPool`,
+//! so no raw handle is in scope to await unbracketed. The exempt routes are
+//! exactly the ones that still hold a `&PgPool`. That scope is the **module**,
+//! not the health *path*: an await added to a health route elsewhere
+//! (`server::routes::health_api`) is outside anything here can see and would
+//! silently reopen the `db_in_flight=0` misreading. `ProbedPool`'s own docs
+//! list the rest of what the construction does not cover.
 //!
 //! ## What the log evidence actually supports
 //!
@@ -421,6 +462,62 @@ pub(crate) async fn observe_db<T>(
     let outcome = query.await;
     guard.finish(succeeded(&outcome));
     outcome
+}
+
+/// A `PgPool` that can only be awaited through a [`DbProbeGuard`].
+///
+/// #5147: `services::health_diagnostics` wraps its `Option<&PgPool>` parameter
+/// in one of these at the top of every function on the public `GET /api/health`
+/// path, **shadowing the raw pool out of scope**. The inner handle is never
+/// exposed, so inside those functions there is no `&PgPool` to hand to
+/// `.fetch_one`/`.fetch_optional`/`.fetch_all` — an unbracketed health-path
+/// await is a type error rather than something a guard has to notice.
+///
+/// This replaces a test that counted `observe_db(` occurrences against
+/// `.fetch_*(` occurrences in the module source. Counting cannot prove
+/// *pairing*: adversarial review deleted the bracket from the second
+/// `dispatch_outbox` query and added one to an exempt repair route, the totals
+/// matched, and the guard stayed green while a health-path await went
+/// unrecorded. Nothing here counts anything.
+///
+/// **What this does not cover**, stated so nobody reads it as total:
+///
+/// * A *new* sibling in that module taking `Option<&PgPool>` instead of
+///   wrapping it can still await unbracketed — nothing forces the parameter
+///   type. The converted functions are additionally pinned behaviourally by
+///   `assert_bracketed!`; a new one would have neither.
+/// * One [`probe`](ProbedPool::probe) whose closure `await`s twice records one
+///   probe for two round trips. Every call site issues exactly one query — a
+///   convention, not a constraint.
+/// * It covers only *this* module, not the health *path*
+///   (`server::routes::health_api` is the obvious gap).
+pub(crate) struct ProbedPool<'p> {
+    pool: &'p sqlx::PgPool,
+}
+
+impl<'p> ProbedPool<'p> {
+    /// Wraps a health-path pool. Returns `None` for `None` so callers keep
+    /// their existing "no pool, no work" early return.
+    pub(crate) fn wrap(pool: Option<&'p sqlx::PgPool>) -> Option<Self> {
+        pool.map(|pool| Self { pool })
+    }
+
+    /// Runs one query under a [`DbProbeGuard`].
+    ///
+    /// `build` receives the raw handle so `sqlx`'s builders can bind to it, and
+    /// its future is awaited *inside* the bracket. The handle never escapes:
+    /// `build` returns a future, it is not `async` itself, so it cannot await
+    /// out from under the guard.
+    pub(crate) async fn probe<T, Fut>(
+        &self,
+        build: impl FnOnce(&'p sqlx::PgPool) -> Fut,
+        succeeded: impl FnOnce(&T) -> bool,
+    ) -> T
+    where
+        Fut: std::future::Future<Output = T>,
+    {
+        observe_db(build(self.pool), succeeded).await
+    }
 }
 
 /// Records one proof that the tokio runtime is still scheduling tasks.

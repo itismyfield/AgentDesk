@@ -1,7 +1,33 @@
 //! DB-backed health diagnostics shared by the health API routes.
+//!
+//! #5147: every Postgres await reachable from the public `GET /api/health` — the
+//! endpoint the self-watchdog probes — is bracketed with
+//! [`observe_db`](crate::services::hang_forensics::observe_db). The handler
+//! awaits **seven** of them in sequence unconditionally — an eighth
+//! (`load_dispatch_gate_runtime_overrides`) whenever a `health_registry` is
+//! attached, which is always true for the `dcserver` runtime the watchdog
+//! probes, and a ninth on a cluster standby with no providers. Each can block
+//! for the pool's 10s `acquire_timeout` against a 5s watchdog probe timeout, so
+//! a stall here reads as an unresponsive runtime. The brackets are what let a
+//! kill line say which it was; `hang_forensics`' module docs enumerate the
+//! sites, their conditions and the one deliberate omission.
+//!
+//! The bracketing is enforced by type, not by inspection. Every health-path
+//! function here shadows its `Option<&PgPool>` parameter with a
+//! [`ProbedPool`](crate::services::hang_forensics::ProbedPool), and
+//! `load_dispatch_outbox_stats_pg` / `load_active_session_audit_rows` take one
+//! directly, so no raw `&PgPool` is in scope to hand to `.fetch_one` — an
+//! unbracketed await on this path is a compile error. The routes that are
+//! deliberately *not* probes (`load_channel_session_state`,
+//! `mark_channel_sessions_disconnected`, `load_failed_dispatch_outbox_rows`,
+//! `acknowledge_failed_dispatch_outbox_rows`) keep the raw handle, which is
+//! how they stay readable as exemptions. `ProbedPool`'s own docs state what
+//! this construction still does not cover.
 
 use serde::Serialize;
 use sqlx::{PgPool, Row, postgres::PgRow};
+
+use crate::services::hang_forensics::ProbedPool;
 
 use crate::services::health_active_session_audit::{
     ActiveSessionAuditReport, ActiveSessionAuditSettings, RawSessionRow,
@@ -154,20 +180,34 @@ pub struct ChannelSessionState {
 }
 
 pub async fn probe_server_up(pg_pool: Option<&PgPool>) -> bool {
-    if let Some(pool) = pg_pool {
-        return sqlx::query_scalar::<_, i32>("SELECT 1")
-            .fetch_one(pool)
-            .await
-            .is_ok();
-    }
-    false
+    // #5147 site 1/7: the first thing `GET /api/health` awaits. It has no
+    // timeout of its own, so it can block for the pool's `acquire_timeout`
+    // (10s) — twice the watchdog's 5s read timeout. The wrap shadows the raw
+    // `&PgPool` out of scope, so the await below cannot skip the bracket.
+    let Some(pg_pool) = ProbedPool::wrap(pg_pool) else {
+        return false;
+    };
+    pg_pool
+        .probe(
+            |pool| sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(pool),
+            Result::is_ok,
+        )
+        .await
+        .is_ok()
 }
 
 pub async fn load_config_audit_report_pg(pg_pool: Option<&PgPool>) -> Option<serde_json::Value> {
-    let pool = pg_pool?;
-    let raw = sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
-        .bind("config_audit_report")
-        .fetch_optional(pool)
+    // #5147 site 6/7.
+    let pg_pool = ProbedPool::wrap(pg_pool)?;
+    let raw = pg_pool
+        .probe(
+            |pool| {
+                sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
+                    .bind("config_audit_report")
+                    .fetch_optional(pool)
+            },
+            Result::is_ok,
+        )
         .await
         .ok()
         .flatten()?;
@@ -177,10 +217,17 @@ pub async fn load_config_audit_report_pg(pg_pool: Option<&PgPool>) -> Option<ser
 pub async fn load_pipeline_override_report_pg(
     pg_pool: Option<&PgPool>,
 ) -> Option<serde_json::Value> {
-    let pool = pg_pool?;
-    let raw = sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
-        .bind("pipeline_override_health_report")
-        .fetch_optional(pool)
+    // #5147 site 7/7 — the last unconditional one.
+    let pg_pool = ProbedPool::wrap(pg_pool)?;
+    let raw = pg_pool
+        .probe(
+            |pool| {
+                sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
+                    .bind("pipeline_override_health_report")
+                    .fetch_optional(pool)
+            },
+            Result::is_ok,
+        )
         .await
         .ok()
         .flatten()?;
@@ -190,17 +237,26 @@ pub async fn load_pipeline_override_report_pg(
 pub async fn load_dispatch_gate_runtime_overrides(
     pg_pool: Option<&PgPool>,
 ) -> (Option<bool>, Option<u64>) {
-    let Some(pool) = pg_pool else {
+    // #5147 conditional 8th site: `health_api::health_response` reaches this
+    // only inside `if let Some(ref registry) = state.health_registry`. Always
+    // true for the dcserver runtime the watchdog probes; false for the
+    // standalone server, which is why the unconditional count is 7 and not 8.
+    let Some(pg_pool) = ProbedPool::wrap(pg_pool) else {
         return (None, None);
     };
-    let runtime_config =
-        sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
-            .bind("runtime-config")
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    let runtime_config = pg_pool
+        .probe(
+            |pool| {
+                sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
+                    .bind("runtime-config")
+                    .fetch_optional(pool)
+            },
+            Result::is_ok,
+        )
+        .await
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
     let (enabled, danger, _stale) =
         crate::services::dispatch_gate::persisted_runtime_overrides(runtime_config.as_ref());
     (enabled, danger)
@@ -211,7 +267,7 @@ pub async fn is_recent_cluster_worker(
     instance_id: &str,
     lease_ttl_secs: u64,
 ) -> bool {
-    let Some(pool) = pg_pool else {
+    let Some(pg_pool) = ProbedPool::wrap(pg_pool) else {
         return false;
     };
     let instance_id = instance_id.trim();
@@ -219,21 +275,30 @@ pub async fn is_recent_cluster_worker(
         return false;
     }
     let ttl_secs = lease_ttl_secs.max(1) as f64;
-    sqlx::query_scalar::<_, String>(
-        r#"
+    // #5147 conditional 9th site: reached only when a cluster node with a
+    // `health_registry` reports no providers, but it awaits the same pool as
+    // the other eight.
+    pg_pool
+        .probe(
+            |pool| {
+                sqlx::query_scalar::<_, String>(
+                    r#"
         SELECT effective_role
           FROM worker_nodes
          WHERE instance_id = $1
            AND last_heartbeat_at >= NOW() - ($2::double precision * INTERVAL '1 second')
         "#,
-    )
-    .bind(instance_id)
-    .bind(ttl_secs)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()
-    .as_deref()
+                )
+                .bind(instance_id)
+                .bind(ttl_secs)
+                .fetch_optional(pool)
+            },
+            Result::is_ok,
+        )
+        .await
+        .ok()
+        .flatten()
+        .as_deref()
         == Some("worker")
 }
 
@@ -345,12 +410,12 @@ pub async fn build_active_session_audit(
         return ActiveSessionAuditReport::disabled(settings.stale_secs);
     }
 
-    let Some(pool) = pg_pool else {
+    let Some(pg_pool) = ProbedPool::wrap(pg_pool) else {
         return ActiveSessionAuditReport::disabled(settings.stale_secs);
     };
 
     let (rows, raw_matches_total) =
-        load_active_session_audit_rows(pool, settings.max_candidates, local_instance_id).await;
+        load_active_session_audit_rows(pg_pool, settings.max_candidates, local_instance_id).await;
     let mut resolver = crate::services::session_activity::SessionActivityResolver::new();
     classify_active_session_audit(
         &rows,
@@ -362,17 +427,28 @@ pub async fn build_active_session_audit(
 }
 
 async fn load_active_session_audit_rows(
-    pool: &PgPool,
+    pool: ProbedPool<'_>,
     max_candidates: u64,
     local_instance_id: Option<&str>,
 ) -> (Vec<RawSessionRow>, usize) {
     let capped = max_candidates.min(i64::MAX as u64) as usize;
     let limit = max_candidates.saturating_add(1).min(i64::MAX as u64) as i64;
     let local_instance_id = local_instance_id.map(str::trim).unwrap_or("");
-    let query = sqlx::query(ACTIVE_SESSION_AUDIT_QUERY)
-        .bind(limit)
-        .bind(local_instance_id);
-    let rows = match query.fetch_all(pool).await {
+    // #5147: `/api/health/detail` only, so not on the watchdog's probe path —
+    // bracketed anyway because it is health-exclusive and shares the pool the
+    // public probe has to acquire from.
+    let rows = match pool
+        .probe(
+            |pool| {
+                sqlx::query(ACTIVE_SESSION_AUDIT_QUERY)
+                    .bind(limit)
+                    .bind(local_instance_id)
+                    .fetch_all(pool)
+            },
+            Result::is_ok,
+        )
+        .await
+    {
         Ok(rows) => rows,
         Err(error) => {
             tracing::debug!(
@@ -411,8 +487,8 @@ fn pg_timestamp_to_rfc3339(row: &PgRow, column: &str) -> Option<String> {
 }
 
 pub async fn load_dispatch_outbox_stats(pg_pool: Option<&PgPool>) -> Option<DispatchOutboxStats> {
-    if let Some(pool) = pg_pool {
-        if let Some(stats) = load_dispatch_outbox_stats_pg(pool).await {
+    if let Some(pg_pool) = ProbedPool::wrap(pg_pool) {
+        if let Some(stats) = load_dispatch_outbox_stats_pg(pg_pool).await {
             return Some(stats);
         }
         tracing::warn!("[health] failed to load dispatch_outbox stats from PostgreSQL");
@@ -420,41 +496,70 @@ pub async fn load_dispatch_outbox_stats(pg_pool: Option<&PgPool>) -> Option<Disp
     None
 }
 
-async fn load_dispatch_outbox_stats_pg(pool: &PgPool) -> Option<DispatchOutboxStats> {
-    let pending = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::BIGINT FROM dispatch_outbox WHERE status = 'pending'",
-    )
-    .fetch_one(pool)
-    .await
+/// #5147 sites 2–5/7: four sequential pool acquires, the largest single block
+/// of database work on the public health path and therefore the most likely
+/// place for the handler to be sitting when the watchdog gives up. An
+/// unbracketed await here would report `db_in_flight=0` at kill time and clear
+/// the database of the stall it was causing.
+async fn load_dispatch_outbox_stats_pg(probed: ProbedPool<'_>) -> Option<DispatchOutboxStats> {
+    let pending = probed
+        .probe(
+            |pool| {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*)::BIGINT FROM dispatch_outbox WHERE status = 'pending'",
+                )
+                .fetch_one(pool)
+            },
+            Result::is_ok,
+        )
+        .await
+        .ok()?;
+    let retrying = probed
+        .probe(
+            |pool| {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*)::BIGINT FROM dispatch_outbox WHERE status = 'pending' AND retry_count > 0",
+                )
+                .fetch_one(pool)
+            },
+            Result::is_ok,
+        )
+        .await
     .ok()?;
-    let retrying = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::BIGINT FROM dispatch_outbox WHERE status = 'pending' AND retry_count > 0",
-    )
-    .fetch_one(pool)
-    .await
-    .ok()?;
-    let failed = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::BIGINT FROM dispatch_outbox WHERE status = 'failed'",
-    )
-    .fetch_one(pool)
-    .await
-    .ok()?;
-    let oldest_pending_age = sqlx::query_scalar::<_, i64>(
-        "SELECT COALESCE(
-             CAST(
-                 EXTRACT(
-                     EPOCH FROM (NOW() - MIN(COALESCE(next_attempt_at, created_at)))
-                 ) AS BIGINT
-             ),
-             0
-         )
-         FROM dispatch_outbox
-         WHERE status = 'pending'
-           AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())",
-    )
-    .fetch_one(pool)
-    .await
-    .ok()?;
+    let failed = probed
+        .probe(
+            |pool| {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*)::BIGINT FROM dispatch_outbox WHERE status = 'failed'",
+                )
+                .fetch_one(pool)
+            },
+            Result::is_ok,
+        )
+        .await
+        .ok()?;
+    let oldest_pending_age = probed
+        .probe(
+            |pool| {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COALESCE(
+                     CAST(
+                         EXTRACT(
+                             EPOCH FROM (NOW() - MIN(COALESCE(next_attempt_at, created_at)))
+                         ) AS BIGINT
+                     ),
+                     0
+                 )
+                 FROM dispatch_outbox
+                 WHERE status = 'pending'
+                   AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())",
+                )
+                .fetch_one(pool)
+            },
+            Result::is_ok,
+        )
+        .await
+        .ok()?;
 
     Some(DispatchOutboxStats {
         pending,
@@ -577,7 +682,143 @@ pub async fn acknowledge_failed_dispatch_outbox_rows(
 #[cfg(test)]
 mod tests {
     use super::{ACTIVE_SESSION_AUDIT_QUERY, AutoQueueCleanupBacklog, DispatchOutboxStats};
+    use crate::services::hang_forensics;
     use serde_json::json;
+
+    /// A pool that resolves but can never connect, so every await reaches the
+    /// bracket and then fails fast. Port 1 is numeric (no DNS) and refuses
+    /// instantly; the short `acquire_timeout` bounds sqlx's retry window.
+    ///
+    /// This is what makes the instrumentation testable without a database: the
+    /// counters must move for a *failed* round trip exactly as for a successful
+    /// one, because a stalled probe is precisely the case they exist to report.
+    fn unreachable_pool() -> sqlx::PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(150))
+            .connect_lazy("postgres://127.0.0.1:1/agentdesk_forensics_probe")
+            .expect("a lazy pool never connects at construction")
+    }
+
+    /// #5147: the breadcrumbs are only trustworthy if *every* health-path
+    /// await is bracketed. One that is not reports `db_in_flight=0` while the
+    /// handler is stuck inside it — the exact misreading this PR exists to
+    /// prevent. `ProbedPool` makes an unbracketed health-path await a type
+    /// error rather than a test failure; this pins the other half — that the
+    /// bracket which *is* there actually runs and actually records, once per
+    /// await, with no leaked in-flight slot.
+    #[tokio::test]
+    async fn every_health_path_database_await_is_bracketed() {
+        let _serial = hang_forensics::counter_test_lock();
+        let pool = unreachable_pool();
+
+        macro_rules! assert_bracketed {
+            ($label:expr, $expected:expr, $call:expr) => {{
+                let before = hang_forensics::snapshot();
+                let _ = $call.await;
+                let after = hang_forensics::snapshot();
+                assert_eq!(
+                    after.db_probes_started - before.db_probes_started,
+                    $expected,
+                    "{} must bracket exactly {} database await(s)",
+                    $label,
+                    $expected
+                );
+                assert_eq!(
+                    after.db_probes_failed - before.db_probes_failed,
+                    $expected,
+                    "{} awaits an unreachable database, so every bracketed await \
+                     must be recorded as a failed probe",
+                    $label
+                );
+                assert_eq!(
+                    after.db_in_flight, before.db_in_flight,
+                    "{} must not leak an in-flight slot",
+                    $label
+                );
+            }};
+        }
+
+        // The public `GET /api/health` path in handler order, plus the
+        // conditional cluster-standby probe.
+        assert_bracketed!("probe_server_up", 1, super::probe_server_up(Some(&pool)));
+        // 1, not 4: `load_dispatch_outbox_stats_pg` short-circuits on `.ok()?`,
+        // so an unreachable database only ever reaches its first await. That
+        // makes this assertion cover the first bracket only; the other three
+        // are covered by construction — that function is handed a `ProbedPool`
+        // and never sees a `&PgPool`, so an unbracketed await in it does not
+        // compile.
+        assert_bracketed!(
+            "load_dispatch_outbox_stats",
+            1,
+            super::load_dispatch_outbox_stats(Some(&pool))
+        );
+        assert_bracketed!(
+            "load_config_audit_report_pg",
+            1,
+            super::load_config_audit_report_pg(Some(&pool))
+        );
+        assert_bracketed!(
+            "load_pipeline_override_report_pg",
+            1,
+            super::load_pipeline_override_report_pg(Some(&pool))
+        );
+        assert_bracketed!(
+            "load_dispatch_gate_runtime_overrides",
+            1,
+            super::load_dispatch_gate_runtime_overrides(Some(&pool))
+        );
+        assert_bracketed!(
+            "is_recent_cluster_worker",
+            1,
+            super::is_recent_cluster_worker(Some(&pool), "node-1", 30)
+        );
+        // Detail-only, bracketed because it is health-exclusive.
+        assert_bracketed!(
+            "load_active_session_audit_rows",
+            1,
+            super::load_active_session_audit_rows(
+                hang_forensics::ProbedPool::wrap(Some(&pool)).expect("a Some pool wraps"),
+                10,
+                Some("node-1")
+            )
+        );
+    }
+
+    /// A stuck probe must be *visible while it is stuck* — a bracket that only
+    /// records on completion would leave `db_in_flight=0` for the whole stall.
+    #[tokio::test]
+    async fn a_pending_health_await_is_visible_as_in_flight() {
+        let _serial = hang_forensics::counter_test_lock();
+        let pool = unreachable_pool();
+
+        let before = hang_forensics::snapshot();
+        // Boxed, not `pin!`ed: the point of the test is to drop the future
+        // itself, and dropping a `Pin<&mut _>` would drop only the pointer.
+        let mut probe = Box::pin(super::probe_server_up(Some(&pool)));
+        tokio::select! {
+            biased;
+            _ = &mut probe => panic!("an unreachable pool must not answer within 20ms"),
+            () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+        }
+
+        let during = hang_forensics::snapshot();
+        assert_eq!(
+            during.db_in_flight,
+            before.db_in_flight + 1,
+            "a health await that has not returned must read as in flight"
+        );
+
+        // Cancelling mid-query must release the slot — this is the shape of a
+        // watchdog-killed request, and a leak here would make every later kill
+        // line overstate the database.
+        drop(probe);
+        let after = hang_forensics::snapshot();
+        assert_eq!(
+            after.db_in_flight, before.db_in_flight,
+            "a cancelled health await must not leak an in-flight slot"
+        );
+    }
 
     #[test]
     fn active_session_audit_query_filters_foreign_and_background_rows() {
