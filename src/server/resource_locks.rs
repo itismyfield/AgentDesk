@@ -243,13 +243,25 @@ mod resource_locks_pg_tests {
     use uuid::Uuid;
 
     struct TestPostgresDb {
+        admin_url: String,
         database_url: String,
         database_name: String,
     }
 
     impl TestPostgresDb {
-        async fn create() -> Self {
-            let base = postgres_base_database_url();
+        /// `None` means one thing only: the shared fixture base is unconfigured,
+        /// so there is no server this fixture is entitled to talk to. It never
+        /// means "Postgres answered and failed" — every call below still panics
+        /// on error, so a reachable-but-broken server cannot be laundered into a
+        /// green run. `postgres_test_database_url_base()` additionally panics
+        /// when `AGENTDESK_REQUIRE_PG=1`, so the PG lanes treat a missing base
+        /// as fatal rather than skippable (#4979 S2 contract).
+        ///
+        /// There is deliberately no host fallback. Inventing an address made
+        /// this fixture connect to whatever Postgres happened to listen on the
+        /// developer's loopback and create/drop databases there (#5218).
+        async fn create() -> Option<Self> {
+            let base = crate::db::postgres::postgres_test_database_url_base()?;
             let database_name = format!("agentdesk_resource_locks_{}", Uuid::new_v4().simple());
             let admin_url = format!("{base}/postgres");
             crate::db::postgres::create_test_database(
@@ -259,10 +271,11 @@ mod resource_locks_pg_tests {
             )
             .await
             .expect("create resource_locks postgres test database");
-            Self {
+            Some(Self {
+                admin_url,
                 database_url: format!("{base}/{database_name}"),
                 database_name,
-            }
+            })
         }
 
         async fn connect_and_migrate(&self) -> sqlx::PgPool {
@@ -275,10 +288,8 @@ mod resource_locks_pg_tests {
         }
 
         async fn drop(self) {
-            let base = postgres_base_database_url();
-            let admin_url = format!("{base}/postgres");
             crate::db::postgres::drop_test_database(
-                &admin_url,
+                &self.admin_url,
                 &self.database_name,
                 "resource_locks tests",
             )
@@ -289,7 +300,9 @@ mod resource_locks_pg_tests {
 
     #[tokio::test]
     async fn resource_lock_allows_only_one_active_holder() {
-        let pg_db = TestPostgresDb::create().await;
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
         let pool = pg_db.connect_and_migrate().await;
         let lock_key = unreal_project_lock_key("CookingHeart");
 
@@ -351,7 +364,9 @@ mod resource_locks_pg_tests {
 
     #[tokio::test]
     async fn resource_lock_reclaims_expired_holder() {
-        let pg_db = TestPostgresDb::create().await;
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
         let pool = pg_db.connect_and_migrate().await;
         let lock_key = unreal_project_lock_key("CookingHeart");
 
@@ -396,21 +411,5 @@ mod resource_locks_pg_tests {
 
         pool.close().await;
         pg_db.drop().await;
-    }
-
-    fn postgres_base_database_url() -> String {
-        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
-            let trimmed = base.trim();
-            if !trimmed.is_empty() {
-                return trimmed.trim_end_matches('/').to_string();
-            }
-        }
-
-        let user = std::env::var("PGUSER")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| std::env::var("USER").ok())
-            .unwrap_or_else(|| "postgres".to_string());
-        format!("postgres://{user}@127.0.0.1:5432")
     }
 }

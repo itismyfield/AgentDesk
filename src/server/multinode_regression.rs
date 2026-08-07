@@ -1,5 +1,16 @@
 #[cfg(test)]
-mod tests {
+/// The module name carries the `_pg_` lane token deliberately. Two different
+/// skip filters guard the PG-less lanes and they are not the same string set:
+/// the PR sweep skips `_pg`/`pg_`/`postgres`, while the nightly `full_macos`
+/// and `full_windows` jobs skip `_pg_`/`postgres_` — underscores on both sides.
+/// A trailing `_pg` suffix satisfies the first and slips through the second, so
+/// the token has to sit *inside* the path. As `tests` this module carried no
+/// token at all and ran in every PG-less lane (#5218).
+///
+/// Renaming only fixes scheduling. Safety comes from the fixture below, which
+/// has no host fallback: even if a filter regresses, these tests cannot reach a
+/// Postgres server that the lane did not hand them.
+mod multinode_regression_pg_tests {
     use crate::db::postgres::AdvisoryLockLease;
     use crate::server::cluster::CLUSTER_LEADER_ADVISORY_LOCK_ID;
     use crate::server::resource_locks::{
@@ -10,13 +21,25 @@ mod tests {
     use uuid::Uuid;
 
     struct TestPostgresDb {
+        admin_url: String,
         database_url: String,
         database_name: String,
     }
 
     impl TestPostgresDb {
-        async fn create() -> Self {
-            let base = postgres_base_database_url();
+        /// `None` means one thing only: the shared fixture base is unconfigured,
+        /// so there is no server this fixture is entitled to talk to. It never
+        /// means "Postgres answered and failed" — every call below still panics
+        /// on error, so a reachable-but-broken server cannot be laundered into a
+        /// green run. `postgres_test_database_url_base()` additionally panics
+        /// when `AGENTDESK_REQUIRE_PG=1`, so the PG lanes treat a missing base
+        /// as fatal rather than skippable (#4979 S2 contract).
+        ///
+        /// There is deliberately no host fallback. Inventing an address made
+        /// this fixture connect to whatever Postgres happened to listen on the
+        /// developer's loopback and create/drop databases there (#5218).
+        async fn create() -> Option<Self> {
+            let base = crate::db::postgres::postgres_test_database_url_base()?;
             let database_name = format!("agentdesk_multinode_{}", Uuid::new_v4().simple());
             let admin_url = format!("{base}/postgres");
             crate::db::postgres::create_test_database(
@@ -26,10 +49,11 @@ mod tests {
             )
             .await
             .expect("create multinode regression postgres test database");
-            Self {
+            Some(Self {
+                admin_url,
                 database_url: format!("{base}/{database_name}"),
                 database_name,
-            }
+            })
         }
 
         async fn connect_and_migrate(&self) -> sqlx::PgPool {
@@ -50,10 +74,8 @@ mod tests {
         }
 
         async fn drop(self) {
-            let base = postgres_base_database_url();
-            let admin_url = format!("{base}/postgres");
             crate::db::postgres::drop_test_database(
-                &admin_url,
+                &self.admin_url,
                 &self.database_name,
                 "multinode regression tests",
             )
@@ -64,7 +86,9 @@ mod tests {
 
     #[tokio::test]
     async fn multinode_single_leader_lock_allows_one_holder() {
-        let pg_db = TestPostgresDb::create().await;
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
         let leader_pool = pg_db.connect_and_migrate().await;
         let worker_pool = pg_db.connect_pool().await;
 
@@ -99,7 +123,9 @@ mod tests {
 
     #[tokio::test]
     async fn multinode_dispatch_claims_exactly_once_then_reclaims_expired_lease() {
-        let pg_db = TestPostgresDb::create().await;
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
         let pool_a = pg_db.connect_and_migrate().await;
         let pool_b = pg_db.connect_pool().await;
         insert_claim_fixture(&pool_a).await;
@@ -156,7 +182,9 @@ mod tests {
 
     #[tokio::test]
     async fn multinode_dispatch_claims_prefer_label_but_fallback_when_preferred_node_offline() {
-        let pg_db = TestPostgresDb::create().await;
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
         let pool = pg_db.connect_and_migrate().await;
 
         sqlx::query("INSERT INTO agents (id, name) VALUES ('agent-1', 'Agent 1')")
@@ -221,7 +249,9 @@ mod tests {
 
     #[tokio::test]
     async fn multinode_dispatch_claims_route_mixed_required_and_preferred_to_best_online_node() {
-        let pg_db = TestPostgresDb::create().await;
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
         let pool = pg_db.connect_and_migrate().await;
 
         sqlx::query("INSERT INTO agents (id, name) VALUES ('agent-1', 'Agent 1')")
@@ -308,7 +338,9 @@ mod tests {
 
     #[tokio::test]
     async fn multinode_unreal_resource_lock_is_exclusive() {
-        let pg_db = TestPostgresDb::create().await;
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
         let pool = pg_db.connect_and_migrate().await;
         let lock_key = unreal_project_lock_key("CookingHeart");
 
@@ -399,21 +431,5 @@ mod tests {
                 .await
                 .unwrap();
         assert!(required.is_some());
-    }
-
-    fn postgres_base_database_url() -> String {
-        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
-            let trimmed = base.trim();
-            if !trimmed.is_empty() {
-                return trimmed.trim_end_matches('/').to_string();
-            }
-        }
-
-        let user = std::env::var("PGUSER")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| std::env::var("USER").ok())
-            .unwrap_or_else(|| "postgres".to_string());
-        format!("postgres://{user}@127.0.0.1:5432")
     }
 }

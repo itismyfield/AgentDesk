@@ -321,6 +321,7 @@ src/
 │   ├── cluster_session_routing.rs
 │   ├── cron_catalog.rs
 │   ├── dashboard_provision.rs
+│   ├── database_fixture_invariant_tests.rs
 │   ├── issue_specs.rs
 │   ├── mod.rs
 │   ├── multinode_regression.rs

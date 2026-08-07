@@ -2,6 +2,8 @@ pub(crate) mod cluster;
 pub(crate) mod cluster_session_routing;
 pub(crate) mod cron_catalog;
 mod dashboard_provision;
+#[cfg(test)]
+mod database_fixture_invariant_tests;
 pub mod dto;
 pub(crate) mod issue_specs;
 pub(crate) mod maintenance;

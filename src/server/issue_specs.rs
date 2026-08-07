@@ -325,10 +325,36 @@ mod tests {
             ]
         );
     }
+}
 
+#[cfg(test)]
+/// Split out of `tests` so the two parser tests above keep running in every
+/// lane while the Postgres-backed test below is scheduled only where a server
+/// exists. The module name carries the `_pg_` lane token deliberately: the PR
+/// sweep skips `_pg`/`pg_`/`postgres`, while the nightly `full_macos` and
+/// `full_windows` jobs skip `_pg_`/`postgres_` — underscores on both sides. A
+/// trailing `_pg` suffix satisfies the first and slips through the second, so
+/// the token has to sit *inside* the path. Inside a bare `tests` module this
+/// test carried no token at all and ran in every PG-less lane (#5218).
+mod issue_specs_pg_tests {
+    use super::*;
+
+    /// `None` means one thing only: the shared fixture base is unconfigured, so
+    /// there is no server this test is entitled to talk to. It never means
+    /// "Postgres answered and failed" — every call below still panics on error,
+    /// so a reachable-but-broken server cannot be laundered into a green run.
+    /// `postgres_test_database_url_base()` additionally panics when
+    /// `AGENTDESK_REQUIRE_PG=1`, so the PG lanes treat a missing base as fatal
+    /// rather than skippable (#4979 S2 contract).
+    ///
+    /// There is deliberately no host fallback. Inventing an address made this
+    /// test connect to whatever Postgres happened to listen on the developer's
+    /// loopback and create/drop databases there (#5218).
     #[tokio::test]
     async fn upsert_issue_spec_persists_parsed_contract() {
-        let base = postgres_base_database_url();
+        let Some(base) = crate::db::postgres::postgres_test_database_url_base() else {
+            return;
+        };
         let database_name = format!("agentdesk_issue_specs_{}", uuid::Uuid::new_v4().simple());
         let admin_url = format!("{base}/postgres");
         crate::db::postgres::create_test_database(&admin_url, &database_name, "issue_specs tests")
@@ -376,21 +402,5 @@ mod tests {
         crate::db::postgres::drop_test_database(&admin_url, &database_name, "issue_specs tests")
             .await
             .expect("drop issue_specs test database");
-    }
-
-    fn postgres_base_database_url() -> String {
-        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
-            let trimmed = base.trim();
-            if !trimmed.is_empty() {
-                return trimmed.trim_end_matches('/').to_string();
-            }
-        }
-
-        let user = std::env::var("PGUSER")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| std::env::var("USER").ok())
-            .unwrap_or_else(|| "postgres".to_string());
-        format!("postgres://{user}@127.0.0.1:5432")
     }
 }
