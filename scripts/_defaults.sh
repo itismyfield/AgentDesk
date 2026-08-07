@@ -787,6 +787,12 @@ assert_restart_helpers_loaded() {
   # restart-drain helpers. Returns non-zero (so callers can `if !` and exit 1)
   # instead of letting a missing function silently `command not found`. See
   # #1447: silent fail of agentdesk-restart when these helpers were absent.
+  # Public entry points only. The #5245 internal helpers (_set_restart_marker_roots,
+  # _restart_marker_consumed_root, _release_unacknowledged_restart_lease) are
+  # deliberately NOT listed: this contract is checked against a possibly older
+  # mirror of this file (restart_agentdesk.sh sources the release workspace copy),
+  # and such a copy is self-consistent — listing them would make the restart skill
+  # hard-fail on an un-updated node for no correctness gain.
   local missing=()
   local fn
   for fn in \
