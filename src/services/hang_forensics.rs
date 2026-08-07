@@ -54,15 +54,13 @@
 //!   a scheduling symptom — which is why this is the one failure stage
 //!   [`verdict`] settles without the beacon.
 //!
-//!   State the limit of that, because the stage is a fold and the conclusion is
-//!   not: [`probe_health_once`] sets a write timeout of the same `TCP_TIMEOUT`
-//!   and maps **every** `write_all` error here, so a write that merely timed out
-//!   (`ErrorKind::TimedOut`) lands here too and is *not* a peer reset. The
-//!   request is 70 bytes to loopback against a far larger socket buffer, so that
-//!   is not a realistic outcome and has never been observed — but if it happens,
-//!   `verdict` prints `connection_reset_before_request` with no evidence behind
-//!   it, in the one place that does not consult the beacon. `err=` on the same
-//!   line distinguishes them; read it before believing this stage.
+//!   State the limit, because the stage is a fold and the conclusion is not:
+//!   [`probe_health_once`] maps **every** `write_all` error here, so a write
+//!   that merely timed out is *not* a peer reset. The request is 70 bytes to
+//!   loopback against a far larger socket buffer, so that has never been
+//!   observed — but if it happens, `verdict` prints
+//!   `connection_reset_before_request` with no evidence behind it, in the one
+//!   place that skips the beacon. `err=` on the same line distinguishes them.
 //!
 //! ### 2. Whether the runtime is scheduling tasks — [`RuntimeLiveness`]
 //!
@@ -97,23 +95,11 @@
 //! because a partial claim would misread as `db_in_flight=0` == "the database is
 //! innocent" (all in `services::health_diagnostics`):
 //!
-//! | await site                              | acquires | reached when                                    |
-//! |-----------------------------------------|----------|-------------------------------------------------|
-//! | `probe_server_up`                       | 1        | always                                          |
-//! | `load_dispatch_outbox_stats_pg`         | 4        | always                                          |
-//! | `load_config_audit_report_pg`           | 1        | always                                          |
-//! | `load_pipeline_override_report_pg`      | 1        | always                                          |
-//! | `load_dispatch_gate_runtime_overrides`  | 1        | a `health_registry` is attached                 |
-//! | `is_recent_cluster_worker`              | 1        | …and the node is a cluster standby with none    |
-//!
-//! That is **7 unconditional sequential acquires**, an 8th whenever the handler
-//! has a `health_registry` (`server::routes::health_api`'s `if let Some(ref
-//! registry) = state.health_registry` — always true for the `dcserver` runtime
-//! the watchdog probes, false for the standalone server), and a 9th when a
-//! cluster-standby node reports no providers. Each can block for the pool's
-//! `acquire_timeout` (10s), so the worst case is 70s / 80s / 90s against a 5s
-//! probe timeout — which is why a merely slow database, not a deadlock, is the
-//! leading explanation for these kills.
+//! The site-by-site enumeration and the rule for what counts as one acquire
+//! live in `health_diagnostics`' module docs, next to the code. Headline:
+//! **9 unconditional sequential acquires**, a 10th with a `health_registry`, an
+//! 11th on a providerless cluster standby, each able to block for the pool's
+//! 10s `acquire_timeout` against a 5s probe timeout.
 //!
 //! **Not covered**, stated explicitly so a future reader does not infer more
 //! than the counters carry:
@@ -161,10 +147,9 @@
 //!
 //!    ⚠️ **These logs rotate, so the figures below reproduce only inside that
 //!    window** and are not stable properties of the deployment. Two
-//!    recomputations four days apart disagreed on the corpus length (638.0 h vs
-//!    603.5 h) purely because `.10` had aged out; every count and base rate
-//!    moves with it. Re-derive rather than trust, and if the window is gone,
-//!    say so instead of quoting these numbers.
+//!    recomputations four days apart disagreed on corpus length (638.0 h vs
+//!    603.5 h) purely because `.10` had aged out. Re-derive rather than trust;
+//!    if the window is gone, say so instead of quoting these numbers.
 //!
 //!    Strip the ANSI SGR escapes, then read the RFC3339 stamp at the head of
 //!    each line. **That
@@ -187,24 +172,23 @@
 //!    ⚠️ **`P_pg` is the predicate for every Postgres figure below, with no
 //!    per-figure exceptions.** An earlier draft published this regex but
 //!    computed three bullets from `pool timed out|PoolTimedOut` alone (944
-//!    lines) and one from a fourth predicate; each was individually
-//!    reproducible and none was reproducible *from the text*, which is the only
-//!    property this section is for. A different predicate, where genuinely
-//!    needed, is named at the point of use.
+//!    lines) and one from a fourth; each was individually reproducible and none
+//!    reproducible *from the text*, the only property this section is for. A
+//!    different predicate, where needed, is named at the point of use.
 //! 4. **Base rate.** Not 20 000 Monte-Carlo draws: at these hit counts that
 //!    estimator has ±30 % noise and is not reproducible without the seed.
 //!    Compute it *analytically* as the covered fraction of the union of
-//!    `[error, error + W]` windows. Same definition, deterministic answer.
+//!    `[error, error + W]` windows — **for every control in this section, not
+//!    just the Postgres ones**. Same definition, deterministic answer.
 //!
 //!    ⚠️ **What that comparison assumes.** Comparing 11/13 against a base rate
 //!    over *uniformly random covered instants* treats kill times as drawn from
-//!    that same uniform distribution — i.e. as carrying no information about
-//!    when in the corpus they fall, independently of Postgres. Not free: both
-//!    `P_pg` lines and kills are clumped, so a common cause raising both
-//!    densities in the same hours (a busy period, a restart storm) would
-//!    produce lift without either causing the other. The lift is large enough
-//!    that this is unlikely to explain all of it, but it is why the module
-//!    ships `db_in_flight` and the beacon rather than resting on correlation.
+//!    that same distribution — as carrying no information about when in the
+//!    corpus they fall, independently of Postgres. Not free: both are clumped,
+//!    so a common cause raising both densities in the same hours (a busy period,
+//!    a restart storm) would produce lift without either causing the other. The
+//!    lift is large enough that this is unlikely to explain all of it, but it is
+//!    why the module ships `db_in_flight` and the beacon, not just correlation.
 //!
 //! ### The findings
 //!
@@ -225,7 +209,10 @@
 //!   `adk-hang-32033-20260803-122151`, which are KST — an earlier draft read
 //!   both as 08-02) had gone **5.2 h and 19.2 h** with no `P_pg` line. That on
 //!   its own is unremarkable — `P_pg` lines are heavily clumped, and the corpus
-//!   holds 54 `P_pg`-free stretches of an hour or more, the longest 77.4 h. What
+//!   holds 54 `P_pg`-free stretches of an hour or more, the longest 77.4 h.
+//!   (**Endpoint rule**: gaps *between consecutive `P_pg` lines* only. The
+//!   right-censored tail — last line to end of coverage, 33.00 h — is excluded;
+//!   include it and it is 55. The left head is 0.00 h.) What
 //!   singles these two out is only that they are the two kills the 11-of-13
 //!   above does not cover.
 //!
@@ -237,10 +224,9 @@
 //!   `[startup] postgres warmup pool unavailable` / `[config-audit]` pairs from
 //!   processes that had just restarted (13:22:24, 13:32:36, 15:06:28, 20:51:26),
 //!   i.e. downstream of a kill, not before one. ⚠️ An earlier draft said "the
-//!   only **9** occurrences, in exactly two bursts (7 and 2)" — those 9 are
-//!   `P_eaddr` **also restricted to `[policy-tick] advisory lock failed`**, a
-//!   filter the text never disclosed. "Confined to these two days" survives the
-//!   correction; "exactly two bursts" does not.
+//!   only **9**, in exactly two bursts (7 and 2)" — those 9 are `P_eaddr` **also
+//!   restricted to `[policy-tick] advisory lock failed`**, an undisclosed
+//!   filter. "Confined to these two days" survives; "two bursts" does not.
 //! * **…and those same two streaks own all four instant-fail probes.** Of the
 //!   29 consecutive-failure gaps, 23 are 35.02–35.32 s (below) and **4 are
 //!   30.07–30.19 s — all four inside these two kills** (08-02: 30.13, 30.15;
@@ -248,8 +234,7 @@
 //!   the probe returned in ~0.1 s: it consumed none of its 5 s timeout, which
 //!   is what a `connect()` that fails immediately looks like. So the two facts
 //!   an earlier draft listed as separate bullets — "kills with no Postgres
-//!   error" and "probes that failed without waiting" — are **the same two
-//!   events**.
+//!   error" and "probes that failed without waiting" — are the same two events.
 //!
 //!   ⚠️ **That co-location is all this says. n = 2, and no cause is claimed.**
 //!   An earlier draft called both "consistent with the host having run out of
@@ -257,13 +242,11 @@
 //!   observations, and "consistent with" is how a hypothesis gets quoted back
 //!   as a conclusion. With two events there is no base rate to test it against,
 //!   the direction is untested (the port shortage could as easily be a
-//!   *symptom* of whatever wedged the runtime), and one episode has `P_eaddr`
-//!   lines both before and after its kill. This module exists partly because
-//!   the last confident correlation here (`routines::loader`, below) was noise.
-//!   What it does buy is a prediction: if the ephemeral-port reading is right,
-//!   the next such event renders `stage=connect_failed` with `verdict` at
-//!   `listener_gone` or `undetermined_no_beacon`, never `handler_*`. That is
-//!   falsifiable; the mechanism as stated was not.
+//!   *symptom*), and one episode has `P_eaddr` lines both before and after its
+//!   kill. The last confident correlation here (`routines::loader`, below) was
+//!   noise. What it buys is a prediction: if the ephemeral-port reading is
+//!   right, the next such event renders `stage=connect_failed` with `verdict` at
+//!   `listener_gone` or `undetermined_no_beacon`, never `handler_*`.
 //! * **First failures whose last `P_pg` line was an hour or more earlier:
 //!   11 of 33** — 2.0, 5.2, 5.2, 5.2, 11.2, 18.5, 19.2, 19.9, 23.2, 23.3,
 //!   27.7 h. **Two** of those escalated to a kill (the two above). (An earlier
@@ -288,8 +271,12 @@
 //!   lines, against a control of **p20 = 52, median = 56, p90 = 58** at random
 //!   covered instants: eight sit exactly at the modal density and three sit
 //!   *below* it. There is no burst. Across all 33 first failures the sign
-//!   reverses — 6.1 % have a loader line within 5 s, versus 15.2 % of random
-//!   instants. Two corrections travel with this: the control's p10 is **0**,
+//!   reverses — 6.1 % (2 of 33) have a loader line within 5 s, versus
+//!   **15.0 %** of random covered instants (15.0019 %: analytic union of
+//!   `[event, event+5 s]` over 1 788 762 `routines::loader` lines ÷ 603.462 h).
+//!   An earlier draft said 15.2 %, from sampling the timeline on a 10 s grid
+//!   instead of the analytic union this section mandates. Same predicate, wrong
+//!   method; the section's own rule catches it. Two corrections travel with this: the control's p10 is **0**,
 //!   not 50 (10.4 % of the corpus — 62.7 h — has no loader line in the preceding
 //!   minute at all, in stretches beginning at the kills themselves, e.g. 17.9 h
 //!   from `2026-08-04T16:42Z`), and the loader's mean rate of 0.62 line/s is
@@ -304,13 +291,12 @@
 //!   phrasing hid them: 4 are the 30.1 s instant-fails above, 2 are 60.4 s and
 //!   90.7 s (2× and 3× the interval, with a successful check between).
 //!   ⚠️ The denominator 29 is "diffs between consecutive failure LINES ≤ 100 s".
-//!   Every *within-streak* gap with no cutoff gives 31 instead: the 60.4/90.7 s
-//!   pair drops out (a `health recovered` line sits between them) and four long
-//!   ones come in — 238, 962, 1375, 1865 s. Three are in streaks that recovered;
-//!   **the 962 s one is in a kill streak** (2026-07-14T17:16:04Z, first
-//!   failure→kill 997.6 s against ~70 s for every other kill). The watchdog
-//!   thread's own scheduling is not modelled here, and that outlier is the
-//!   corpus's only evidence that it is not always prompt.
+//!   Every *within-streak* gap with no cutoff gives 31: the 60.4/90.7 s pair
+//!   drops out (a `health recovered` sits between them) and four long ones come
+//!   in — 238, 962, 1375, 1865 s. Three are in recovering streaks; **the 962 s
+//!   one is in a kill streak** (2026-07-14T17:16:04Z, first failure→kill 997.6 s
+//!   against ~70 s for every other kill) — the corpus's only evidence that the
+//!   watchdog thread's own scheduling is not always prompt.
 //!
 //! ## Cost and deadlock-safety
 //!
@@ -464,14 +450,23 @@ pub(crate) async fn observe_db<T>(
     outcome
 }
 
-/// A `PgPool` that can only be awaited through a [`DbProbeGuard`].
+/// A `PgPool` whose only *ordinary* use is an await under a [`DbProbeGuard`].
 ///
 /// #5147: `services::health_diagnostics` wraps its `Option<&PgPool>` parameter
 /// in one of these at the top of every function on the public `GET /api/health`
-/// path, **shadowing the raw pool out of scope**. The inner handle is never
-/// exposed, so inside those functions there is no `&PgPool` to hand to
-/// `.fetch_one`/`.fetch_optional`/`.fetch_all` — an unbracketed health-path
-/// await is a type error rather than something a guard has to notice.
+/// path, **shadowing the raw pool out of scope**. What that buys, exactly: in
+/// those function bodies there is no `&PgPool` binding left to hand to
+/// `.fetch_one`/`.fetch_optional`/`.fetch_all`, so *writing another await the
+/// normal way* stops compiling instead of going unrecorded. That is the
+/// accident this is for.
+///
+/// It is **not a capability boundary**, and an earlier draft said it was ("the
+/// handle never escapes"). [`probe`](ProbedPool::probe) hands the raw
+/// `&'p PgPool` to its closure with no bound on the return type, so
+/// `|p| ready(p)` returns the borrow and `|p| ready(p.clone())` an owned pool;
+/// both compile and either can then be awaited with no guard. True statement:
+/// a future *built* by that closure is awaited under the guard, because the
+/// closure is not `async`.
 ///
 /// This replaces a test that counted `observe_db(` occurrences against
 /// `.fetch_*(` occurrences in the module source. Counting cannot prove
@@ -491,6 +486,11 @@ pub(crate) async fn observe_db<T>(
 ///   convention, not a constraint.
 /// * It covers only *this* module, not the health *path*
 ///   (`server::routes::health_api` is the obvious gap).
+/// * **The handle is extractable** — see above. A sealed bound on `T` was tried
+///   and dropped: every real call site returns `Result<_, _>` and so does
+///   `|p| ready(Ok(p.clone()))`, so it moves the leak without closing it.
+///   Closing it means never handing the closure a pool, which the foreign
+///   `fn(&PgPool)` this path calls in `auto_queue::cleanup_tasks` rules out.
 pub(crate) struct ProbedPool<'p> {
     pool: &'p sqlx::PgPool,
 }
@@ -505,9 +505,10 @@ impl<'p> ProbedPool<'p> {
     /// Runs one query under a [`DbProbeGuard`].
     ///
     /// `build` receives the raw handle so `sqlx`'s builders can bind to it, and
-    /// its future is awaited *inside* the bracket. The handle never escapes:
-    /// `build` returns a future, it is not `async` itself, so it cannot await
-    /// out from under the guard.
+    /// the future it returns is awaited *inside* the bracket — `build` is not
+    /// `async`, so it cannot await out from under the guard. It **can** return
+    /// the handle, though: `T` is unbounded. See [`ProbedPool`] for why that is
+    /// declared debt rather than a hole this closes.
     pub(crate) async fn probe<T, Fut>(
         &self,
         build: impl FnOnce(&'p sqlx::PgPool) -> Fut,
@@ -575,18 +576,25 @@ pub(crate) fn spawn_runtime_liveness_beacon() -> BeaconArmed {
 ///
 /// #5147: this exists so the *order* of the two boot steps is a data
 /// dependency rather than a claim.
-/// `discord::health::self_watchdog::spawn_watchdog_thread` takes one by value,
-/// and the only way to obtain one is to call the arming function — so
-/// "the beacon is armed before the watchdog thread exists" is checked by the
-/// compiler on every build.
+/// `discord::health::self_watchdog::spawn_watchdog_thread` takes one by value
+/// and the only way to obtain one is to call the arming function, so **at that
+/// call site** deleting the arming, or moving it into the spawned closure,
+/// stops compiling.
 ///
-/// It replaces a test that read `self_watchdog.rs` with `include_str!` and
-/// compared byte offsets after blanking comments. Adversarial review broke that
-/// six ways and also made it fail on *correct* code — `self_watchdog`'s module
-/// doc enumerates the seven inputs. None of them is expressible against a type.
+/// Read that scope literally; three nearby readings are false. It is `Copy`, so
+/// "by value" is not linear consumption — one token can start two threads. It
+/// says nothing about other ways to start one: `std::thread::spawn` compiles
+/// anywhere with no token in sight. And it is issued on the failure path too
+/// (`workers: None`), so it records that arming was *attempted*, not that it
+/// succeeded — [`BeaconArmed::boot_report`] is what distinguishes those, logged
+/// at ERROR by `spawn_watchdog_thread`. One edge of one call graph, not a
+/// crate-wide invariant.
 ///
-/// There is deliberately no public constructor and no `Default`: a caller
-/// outside this module cannot fabricate the proof.
+/// It replaces an `include_str!` byte-offset guard on `self_watchdog.rs` that
+/// adversarial review broke six ways and that also failed on correct code; that
+/// file's module doc enumerates the seven inputs, none of which can affect a
+/// name-resolution error. There is deliberately no public constructor and no
+/// `Default`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use = "the watchdog thread takes this by value; dropping it means the beacon was armed for nothing"]
 pub(crate) struct BeaconArmed {
@@ -755,13 +763,12 @@ impl Breadcrumbs {
 /// and the beacon together.
 ///
 /// Neither input is sufficient alone, which is why this is a function and not a
-/// note telling the reader to eyeball `stage=`: `stage=` cannot see a wedged
-/// runtime (the listen backlog answers `connect()` without the acceptor), and
-/// the beacon cannot see a dead listening socket or a stuck handler (it touches
-/// neither). `db_in_flight` then splits the remainder — a handler waiting on
-/// Postgres from one slow for another reason — but that gauge is process-wide
-/// (see [`Breadcrumbs::db_in_flight`]), so `handler_blocked_on_db` names *a*
-/// health request stuck in a query, not necessarily this one.
+/// note to eyeball `stage=`: `stage=` cannot see a wedged runtime (the backlog
+/// answers `connect()` without the acceptor), and the beacon cannot see a dead
+/// listener or a stuck handler. `db_in_flight` splits the remainder — waiting on
+/// Postgres vs slow for another reason — but is process-wide (see
+/// [`Breadcrumbs::db_in_flight`]), so `handler_blocked_on_db` names *a* health
+/// request stuck in a query, not necessarily this one.
 ///
 /// The seven values this returns, and what each is worth:
 ///
@@ -776,15 +783,14 @@ impl Breadcrumbs {
 /// | `undetermined_no_beacon`          | the beacon never ran; nothing may be concluded                 |
 ///
 /// Seven, not the five an earlier draft listed: that count omitted `responsive`
-/// and predates `connection_reset_before_request`. The whole set is pinned as a
-/// table by `tests::every_stage_and_liveness_combination_has_a_pinned_verdict`.
+/// and predates `connection_reset_before_request`. The set is pinned as a table
+/// by `tests::every_stage_and_liveness_combination_has_a_pinned_verdict`.
 ///
-/// Matched **stage-first and exhaustively, with no `_` arm anywhere**. The
-/// previous shape ended in `_ => "handler_slow_db_idle"` under a `Scheduling`
-/// guard, which swept every `request_failed` cell into the two database buckets
-/// — a stage whose connection never reached the handler, reported as "the
-/// handler is blocked on Postgres". Adding a stage is now a compile error here
-/// rather than a silent inheritance of a DB verdict.
+/// Matched **stage-first and exhaustively, no `_` arm**. The previous shape
+/// ended in `_ => "handler_slow_db_idle"` under a `Scheduling` guard, sweeping
+/// every `request_failed` cell into the two database buckets — a connection
+/// that never reached the handler, reported as "blocked on Postgres". Adding a
+/// stage is now a compile error here, not a silent DB verdict.
 pub(crate) fn verdict(outcome: &HealthProbeOutcome, crumbs: &Breadcrumbs) -> &'static str {
     use HealthProbeOutcome as Stage;
     match outcome {
@@ -1871,9 +1877,9 @@ mod tests {
         }
     }
 
-    /// Unlike the two source guards above, this parses rather than searches:
-    /// it splits the section into lines, drops comment lines, splits on the
-    /// first `=` and **truncates the value at a trailing `#`**. That last step
+    /// This parses rather than searches: it splits the section into lines,
+    /// drops comment lines, splits on the first `=` and **truncates the value
+    /// at a trailing `#`**. That last step
     /// is not cosmetic — without it `strip = true # keep symbols` yields the
     /// value `true # keep symbols`, which is `!= "true"`, and
     /// [`release_profile_keeps_the_mach_o_symbol_table`] goes green on a fully

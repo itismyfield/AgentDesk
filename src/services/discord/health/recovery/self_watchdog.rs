@@ -21,15 +21,18 @@
 //!
 //! **Ordering.** [`spawn_watchdog`] arms `hang_forensics`' runtime-liveness
 //! beacon and hands the resulting `BeaconArmed` token to
-//! `spawn_watchdog_thread`. That is the whole ordering guarantee: there is no
-//! way to build the thread without the token and no way to obtain the token
-//! except by arming, so neither step can be deleted nor reordered without a
-//! compile error. Asserting the same thing by `include_str!`-ing this file and
-//! comparing byte offsets was defeated six ways by adversarial review — decoys
-//! in a lifetime-adjacent comment, a plain string, a byte string, a raw string,
-//! a `#[cfg(test)]` item and an unused `macro_rules!` body — and it also failed
-//! on *correct* code that merely mentioned `std::thread::Builder::new()` in a
-//! string earlier in the file.
+//! `spawn_watchdog_thread`, which takes it by value. Stated at the scope it
+//! actually holds: **in this function**, deleting the arming or moving it
+//! inside the spawned closure stops compiling, because `armed` is then not in
+//! scope. It is not a crate-wide invariant — `std::thread::spawn` compiles
+//! anywhere without a token, and `BeaconArmed` is `Copy`, so "by value" does
+//! not mean the token is consumed. What it replaces is a guard that
+//! `include_str!`-ed this file and compared byte offsets: adversarial review
+//! defeated that six ways (decoys in a lifetime-adjacent comment, a plain
+//! string, a byte string, a raw string, a `#[cfg(test)]` item and an unused
+//! `macro_rules!` body) and it also failed on *correct* code that merely
+//! mentioned `std::thread::Builder::new()` in a string earlier in the file.
+//! None of those seven inputs can affect a name-resolution error.
 
 use std::time::Duration;
 

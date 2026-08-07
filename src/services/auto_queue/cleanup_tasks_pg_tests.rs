@@ -1194,9 +1194,12 @@ mod pg_tests {
 
         // Nothing is parked yet, so the gauge must read zero — otherwise a
         // non-zero reading below would prove nothing.
-        let before = crate::services::health_diagnostics::load_auto_queue_cleanup_backlog_pg(&pool)
-            .await
-            .expect("load cleanup backlog"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+        let before = crate::services::health_diagnostics::load_auto_queue_cleanup_backlog_pg(
+            crate::services::hang_forensics::ProbedPool::wrap(Some(&pool))
+                .expect("a Some pool wraps"), // agentdesk-audit: allow-unwrap — test setup
+        )
+        .await
+        .expect("load cleanup backlog"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
         assert_eq!(before.pending, 1);
         assert_eq!(before.dead_lettered, 0);
 
@@ -1243,9 +1246,12 @@ mod pg_tests {
         // Axis 2 — the standing backlog on `/api/health`. The slot token and the
         // provider session id are still on disk and nothing will ever retry
         // them, so the number has to survive past the sweep that produced it.
-        let after = crate::services::health_diagnostics::load_auto_queue_cleanup_backlog_pg(&pool)
-            .await
-            .expect("load cleanup backlog"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
+        let after = crate::services::health_diagnostics::load_auto_queue_cleanup_backlog_pg(
+            crate::services::hang_forensics::ProbedPool::wrap(Some(&pool))
+                .expect("a Some pool wraps"), // agentdesk-audit: allow-unwrap — test setup
+        )
+        .await
+        .expect("load cleanup backlog"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
         assert_eq!(
             after.dead_lettered, 1,
             "a parked cleanup row must be visible to an operator who never saw \
@@ -1274,10 +1280,13 @@ mod pg_tests {
              that was already parked"
         );
         assert_eq!(
-            crate::services::health_diagnostics::load_auto_queue_cleanup_backlog_pg(&pool)
-                .await
-                .expect("load cleanup backlog") // agentdesk-audit: allow-unwrap — production entrypoint assertion
-                .dead_lettered,
+            crate::services::health_diagnostics::load_auto_queue_cleanup_backlog_pg(
+                crate::services::hang_forensics::ProbedPool::wrap(Some(&pool))
+                    .expect("a Some pool wraps"), // agentdesk-audit: allow-unwrap — test setup
+            )
+            .await
+            .expect("load cleanup backlog") // agentdesk-audit: allow-unwrap — production entrypoint assertion
+            .dead_lettered,
             1,
             "the gauge is a standing backlog, so it must survive the sweep that \
              found nothing to do"

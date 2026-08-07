@@ -2,27 +2,60 @@
 //!
 //! #5147: every Postgres await reachable from the public `GET /api/health` — the
 //! endpoint the self-watchdog probes — is bracketed with
-//! [`observe_db`](crate::services::hang_forensics::observe_db). The handler
-//! awaits **seven** of them in sequence unconditionally — an eighth
-//! (`load_dispatch_gate_runtime_overrides`) whenever a `health_registry` is
-//! attached, which is always true for the `dcserver` runtime the watchdog
-//! probes, and a ninth on a cluster standby with no providers. Each can block
-//! for the pool's 10s `acquire_timeout` against a 5s watchdog probe timeout, so
-//! a stall here reads as an unresponsive runtime. The brackets are what let a
-//! kill line say which it was; `hang_forensics`' module docs enumerate the
-//! sites, their conditions and the one deliberate omission.
+//! [`observe_db`](crate::services::hang_forensics::observe_db), so a kill line
+//! can say whether the handler was inside one. A stall here reads to the
+//! watchdog as an unresponsive runtime.
 //!
-//! The bracketing is enforced by type, not by inspection. Every health-path
-//! function here shadows its `Option<&PgPool>` parameter with a
-//! [`ProbedPool`](crate::services::hang_forensics::ProbedPool), and
-//! `load_dispatch_outbox_stats_pg` / `load_active_session_audit_rows` take one
-//! directly, so no raw `&PgPool` is in scope to hand to `.fetch_one` — an
-//! unbracketed await on this path is a compile error. The routes that are
-//! deliberately *not* probes (`load_channel_session_state`,
-//! `mark_channel_sessions_disconnected`, `load_failed_dispatch_outbox_rows`,
-//! `acknowledge_failed_dispatch_outbox_rows`) keep the raw handle, which is
-//! how they stay readable as exemptions. `ProbedPool`'s own docs state what
-//! this construction still does not cover.
+//! **How these are counted**, because an earlier draft of this table was short
+//! by two and nobody could tell from the text: one acquire is **one `sqlx`
+//! executor call that takes the pool** — `.fetch_one` / `.fetch_optional` /
+//! `.fetch_all` / `.execute` on a `&PgPool`. Nothing here shares a connection
+//! or a transaction, so each such call independently waits on the pool's
+//! `acquire_timeout`. Count executor calls, not functions: a helper that issues
+//! two queries contributes two, and a helper in *another module* that the
+//! health path calls (`auto_queue::cleanup_tasks::…`) contributes its own.
+//! Re-derive with `rg '\.(fetch_one|fetch_optional|fetch_all|execute)\(' ` over
+//! the call graph below rather than trusting this table.
+//!
+//! | await site                              | acquires | reached when                                    |
+//! |-----------------------------------------|----------|-------------------------------------------------|
+//! | `probe_server_up`                       | 1        | always                                          |
+//! | `load_dispatch_outbox_stats_pg`         | 4        | always                                          |
+//! | `load_auto_queue_cleanup_backlog_pg`    | 2        | always (one of them in `auto_queue::cleanup_tasks`) |
+//! | `load_config_audit_report_pg`           | 1        | always                                          |
+//! | `load_pipeline_override_report_pg`      | 1        | always                                          |
+//! | `load_dispatch_gate_runtime_overrides`  | 1        | a `health_registry` is attached                 |
+//! | `is_recent_cluster_worker`              | 1        | …and the node is a cluster standby with none    |
+//!
+//! That is **9 unconditional sequential acquires**, a 10th whenever the handler
+//! has a `health_registry` (`server::routes::health_api`'s `if let Some(ref
+//! registry) = state.health_registry` — always true for the `dcserver` runtime
+//! the watchdog probes, false for the standalone server), and an 11th when a
+//! cluster-standby node reports no providers. Each can block for the pool's
+//! `acquire_timeout` (10s), so the worst case is 90s / 100s / 110s against a 5s
+//! probe timeout — which is why a merely slow database, not a deadlock, is the
+//! leading explanation for these kills.
+//!
+//! The `load_auto_queue_cleanup_backlog_pg` row is the correction: #5224 added
+//! that read and #5142 restored its field to `public_health_json`, and an
+//! earlier draft of this table said "seven / eighth / ninth" without them. Two
+//! unconditional raw acquires sat on the probed path with `db_in_flight` blind
+//! to both — the exact misreading this module exists to prevent, reintroduced
+//! by a landing elsewhere. A count that is not re-derived rots.
+//!//!
+//! Every health-path function here shadows its `Option<&PgPool>` parameter with
+//! a [`ProbedPool`](crate::services::hang_forensics::ProbedPool); the three
+//! that take a pool directly (`load_dispatch_outbox_stats_pg`,
+//! `load_auto_queue_cleanup_backlog_pg`, `load_active_session_audit_rows`) take
+//! one in their signature. In those bodies there is no `&PgPool` binding left
+//! to hand to `.fetch_one`, so adding an await the normal way stops compiling.
+//! That is an accident-stopper, not a capability boundary — `ProbedPool`'s own
+//! docs say what it does not cover, including that the handle is extractable
+//! from `probe`'s closure. The routes deliberately *not* probes
+//! (`load_channel_session_state`, `mark_channel_sessions_disconnected`,
+//! `load_failed_dispatch_outbox_rows`,
+//! `acknowledge_failed_dispatch_outbox_rows`) keep the raw handle, which is how
+//! they stay readable as exemptions.
 
 use serde::Serialize;
 use sqlx::{PgPool, Row, postgres::PgRow};
@@ -141,8 +174,12 @@ pub async fn load_auto_queue_cleanup_backlog(
     if let Some(injected) = backlog_probe::injected() {
         return Some(injected);
     }
-    let pool = pg_pool?;
-    match load_auto_queue_cleanup_backlog_pg(pool).await {
+    // #5147 sites 6-7/9: reached unconditionally from `health_api`'s
+    // `health_response`, so these two acquires are on the public probe path
+    // exactly like the four `dispatch_outbox` counts above. The wrap shadows
+    // the raw `&PgPool` out of scope before either of them.
+    let pg_pool = ProbedPool::wrap(pg_pool)?;
+    match load_auto_queue_cleanup_backlog_pg(pg_pool).await {
         Ok(backlog) => Some(backlog),
         Err(error) => {
             tracing::warn!("[health] failed to load auto_queue_run_cleanup_tasks backlog: {error}");
@@ -152,18 +189,31 @@ pub async fn load_auto_queue_cleanup_backlog(
 }
 
 pub(crate) async fn load_auto_queue_cleanup_backlog_pg(
-    pool: &PgPool,
+    probed: ProbedPool<'_>,
 ) -> Result<AutoQueueCleanupBacklog, String> {
-    let dead_lettered =
-        crate::services::auto_queue::cleanup_tasks::dead_lettered_run_cleanup_task_count_pg(pool)
-            .await?;
-    let pending = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::BIGINT FROM auto_queue_run_cleanup_tasks
+    let dead_lettered = probed
+        .probe(
+            |pool| {
+                crate::services::auto_queue::cleanup_tasks::dead_lettered_run_cleanup_task_count_pg(
+                    pool,
+                )
+            },
+            Result::is_ok,
+        )
+        .await?;
+    let pending = probed
+        .probe(
+            |pool| {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*)::BIGINT FROM auto_queue_run_cleanup_tasks
          WHERE dead_lettered_at IS NULL",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|error| format!("count pending auto-queue run cleanup tasks: {error}"))?;
+                )
+                .fetch_one(pool)
+            },
+            Result::is_ok,
+        )
+        .await
+        .map_err(|error| format!("count pending auto-queue run cleanup tasks: {error}"))?;
     Ok(AutoQueueCleanupBacklog {
         pending,
         dead_lettered,
@@ -753,6 +803,15 @@ mod tests {
             1,
             super::load_dispatch_outbox_stats(Some(&pool))
         );
+        // #5224 added this read and #5142 published its field again; both
+        // landed while this test existed and neither was covered by it, so the
+        // two acquires sat unbracketed on the probed path. 1, not 2: the first
+        // `?` short-circuits against an unreachable database.
+        assert_bracketed!(
+            "load_auto_queue_cleanup_backlog",
+            1,
+            super::load_auto_queue_cleanup_backlog(Some(&pool))
+        );
         assert_bracketed!(
             "load_config_audit_report_pg",
             1,
@@ -783,6 +842,33 @@ mod tests {
                 Some("node-1")
             )
         );
+    }
+
+    /// #5142's router tests inject a backlog here and assert on the real HTTP
+    /// body, which only works if the injection short-circuits *before* the
+    /// database. Bracketing those awaits must not move that early return: an
+    /// injected backlog has to cost zero probes and touch no pool.
+    #[tokio::test]
+    async fn an_injected_backlog_short_circuits_before_any_probe() {
+        let _serial = hang_forensics::counter_test_lock();
+        let pool = unreachable_pool();
+        let _injected = super::backlog_probe::inject(AutoQueueCleanupBacklog {
+            pending: 7,
+            dead_lettered: 3,
+        });
+
+        let before = hang_forensics::snapshot();
+        let backlog = super::load_auto_queue_cleanup_backlog(Some(&pool))
+            .await
+            .expect("an injected backlog is returned"); // agentdesk-audit: allow-unwrap — test assertion
+        let after = hang_forensics::snapshot();
+
+        assert_eq!((backlog.pending, backlog.dead_lettered), (7, 3));
+        assert_eq!(
+            after.db_probes_started, before.db_probes_started,
+            "the injected path must not reach the database at all"
+        );
+        assert_eq!(after.db_in_flight, before.db_in_flight);
     }
 
     /// A stuck probe must be *visible while it is stuck* — a bracket that only
