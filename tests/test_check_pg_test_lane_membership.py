@@ -68,6 +68,7 @@ class Fixture:
         *,
         sweep: str | None = None,
         sweep_starts_service: bool = False,
+        sweep_block: str | None = None,
     ) -> None:
         prefix = " " * indent
         rendered = "\n".join(f"{prefix}  - '{pattern}'" for pattern in patterns)
@@ -76,6 +77,8 @@ class Fixture:
             start = "      - run: ./scripts/ci/postgres-service.sh start\n" if sweep_starts_service else ""
             env = "    env:\n      AGENTDESK_REQUIRE_PG: \"1\"\n" if sweep_starts_service else ""
             extra = f"  sweep:\n{env}    steps:\n{start}      - run: {sweep}\n"
+        if sweep_block is not None:
+            extra += sweep_block
         (self.root / ".github/workflows/ci-pr.yml").write_text(
             "jobs:\n  changes:\n    steps:\n      - with:\n          filters: |\n"
             f"{prefix}pg_db:\n{rendered}\n{prefix}rust:\n{prefix}  - 'src/**'\n"
@@ -575,7 +578,12 @@ class RuleMutations(FixtureCase):
             )
         self.assertEqual(verdict, 1)
         self.assertIn("FAIL: [rule5]", stderr.getvalue())
-        self.assertIn("the allowlist does not apply to it", stderr.getvalue())
+        self.assertIn("allowlisting these ids leaves the count where it is", stderr.getvalue())
+        # The message must describe the mechanism, not an execution order:
+        # `active_tests` is built at the top of `analyze` and rule5 is built
+        # below it, so "computed before allowlist filtering" was backwards.
+        self.assertIn("reads the pre-filter inventory", stderr.getvalue())
+        self.assertNotIn("computed before allowlist filtering", stderr.getvalue())
 
     def test_rule4_bad_and_pgless_counterexample(self) -> None:
         workflow = self.root / ".github/workflows/ci-main.yml"
@@ -1111,6 +1119,226 @@ class BaselineAndEnforcement(FixtureCase):
             membership.load_allowlist(path)
         path.write_text("test:service::tests::case # tracked by #999\n", "utf-8")
         self.assertEqual(membership.load_allowlist(path)[0], {"service::tests::case"})
+
+
+class BypassFixtureCase(FixtureCase):
+    """A PG-dependent test plus a PR sweep job that can be reshaped per case."""
+
+    SWEEP = "cargo test --lib -- --skip _pg --skip pg_ --skip postgres"
+    CASE = "db::service::tests::case"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.fx.write_source(
+            "src/db/service.rs",
+            "#[cfg(test)] mod tests { #[test] fn case() { create_test_database(); } }\n",
+            "mod db { pub mod service; }\n",
+        )
+
+    def write_sweep(self, block: str) -> None:
+        self.fx.write_pr(("src/db/**",), sweep_block=block)
+
+
+class BlockScalarMutations(BypassFixtureCase):
+    """R1: a `run:` block scalar must be read under every header YAML allows.
+
+    Measured on the pre-fix function, `run: |` yielded the block's command and
+    `|-`, `|+`, `>`, `>-`, `>+` each yielded nothing: the header fell through
+    to the plain-scalar branch, `block_indent` stayed None, and the body was
+    never scanned. `|-` is the ordinary way to write a block, so this was one
+    routine edit away rather than an adversarial shape.
+    """
+
+    HEADERS = ("|", "|-", "|+", ">", ">-", ">+")
+
+    def test_every_block_scalar_header_exposes_the_body(self) -> None:
+        for header in (*self.HEADERS, "|2", "|2-", "|-2", ">2", "| # trailing"):
+            with self.subTest(header=header):
+                text = f"steps:\n  - run: {header}\n      cargo test --lib -- --skip _pg\n"
+                self.assertEqual(
+                    membership._cargo_commands(text),
+                    ["cargo test --lib -- --skip _pg"],
+                )
+
+    def test_a_quoted_pipe_is_a_command_not_a_block_header(self) -> None:
+        # The counterexample to reading the header too loosely: `run: "|"` is
+        # a one-character command, not the start of a block.
+        self.assertEqual(membership._cargo_commands('steps:\n  - run: "|"\n'), [])
+        self.assertEqual(
+            membership._block_scalar_style('"|"'), None
+        )
+        self.assertEqual(membership._block_scalar_style("|-"), "|")
+        self.assertEqual(membership._block_scalar_style(">-"), ">")
+
+    def test_folded_scalar_joins_lines_that_a_literal_one_keeps_apart(self) -> None:
+        body = "      cargo test --lib\n      -- --skip _pg\n"
+        self.assertEqual(
+            membership._cargo_commands(f"steps:\n  - run: >-\n{body}"),
+            ["cargo test --lib -- --skip _pg"],
+        )
+        # The same two lines under `|` are two shell lines, and the second
+        # carries no `cargo test`, so only the unfiltered first one is a
+        # command. Folding is what makes the extracted selection match the
+        # selection the job actually runs.
+        self.assertEqual(
+            membership._cargo_commands(f"steps:\n  - run: |\n{body}"),
+            ["cargo test --lib"],
+        )
+
+    def test_folded_scalar_keeps_a_more_indented_line_on_its_own(self) -> None:
+        # YAML preserves the line breaks around a more-indented line inside a
+        # folded scalar, so it is its own shell line rather than a fold.
+        # Folding all three would yield one `cargo test --lib --release --
+        # --skip _pg`; the real shell sees three lines, and only the first
+        # carries a cargo invocation.
+        text = (
+            "steps:\n  - run: >\n"
+            "      cargo test --lib\n"
+            "        --release\n"
+            "      -- --skip _pg\n"
+        )
+        self.assertEqual(membership._cargo_commands(text), ["cargo test --lib"])
+
+    def test_a_blank_line_ends_a_folded_command(self) -> None:
+        text = (
+            "steps:\n  - run: >\n"
+            "      cargo test --lib\n"
+            "\n"
+            "      -- --skip _pg\n"
+        )
+        self.assertEqual(membership._cargo_commands(text), ["cargo test --lib"])
+
+    def test_rule5_names_the_test_under_every_block_header(self) -> None:
+        for header in self.HEADERS:
+            with self.subTest(header=header):
+                self.write_sweep(
+                    f"  sweep:\n    steps:\n      - run: {header}\n"
+                    f"          {self.SWEEP}\n"
+                )
+                self.assertEqual(self.fx.analysis().debts["rule5"], {self.CASE})
+
+
+class CommentMarkerMutations(BypassFixtureCase):
+    """R2: a comment that merely mentions the service is not a service start."""
+
+    def test_a_commented_service_marker_does_not_start_the_service(self) -> None:
+        self.write_sweep(
+            "  sweep:\n    steps:\n"
+            "      # ./scripts/ci/postgres-service.sh start\n"
+            f"      - run: {self.SWEEP}\n"
+        )
+        analysis = self.fx.analysis()
+        self.assertEqual(analysis.debts["rule5"], {self.CASE})
+        # And the same comment must not buy the job rule1 coverage either.
+        self.assertEqual(analysis.debts["rule1"], {self.CASE})
+
+    def test_a_real_service_step_still_reads_as_one(self) -> None:
+        self.write_sweep(
+            "  sweep:\n    env:\n      AGENTDESK_REQUIRE_PG: \"1\"\n    steps:\n"
+            "      - run: ./scripts/ci/postgres-service.sh start\n"
+            f"      - run: {self.SWEEP}\n"
+        )
+        analysis = self.fx.analysis()
+        self.assertEqual(analysis.debts["rule5"], set())
+        self.assertEqual(analysis.debts["rule4"], set())
+
+    def test_a_commented_require_pg_env_does_not_satisfy_rule4(self) -> None:
+        self.write_sweep(
+            "  sweep:\n    env:\n      # AGENTDESK_REQUIRE_PG: \"1\"\n    steps:\n"
+            "      - run: ./scripts/ci/postgres-service.sh start\n"
+            f"      - run: {self.SWEEP}\n"
+        )
+        self.assertEqual(
+            self.fx.analysis().debts["rule4"],
+            {".github/workflows/ci-pr.yml:sweep"},
+        )
+
+    def test_a_hash_inside_a_quoted_scalar_is_not_a_comment(self) -> None:
+        for line in (
+            'run: echo "a # b"',
+            "run: echo 'a # b'",
+            'run: echo "it\'s a # b"',
+            'name: "step # one"',
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(membership._strip_comments(line), line)
+        self.assertEqual(membership._strip_comments("  - run: x  # note"), "  - run: x")
+        self.assertEqual(membership._strip_comments("      # note"), "")
+        self.assertEqual(membership._strip_comments("run: echo a#b"), "run: echo a#b")
+
+    def test_a_quoted_hash_on_the_service_line_keeps_the_service(self) -> None:
+        # The counterexample to cutting at every `#`: the service start here
+        # sits after a quoted one, and must survive comment removal.
+        self.write_sweep(
+            "  sweep:\n    env:\n      AGENTDESK_REQUIRE_PG: \"1\"\n    steps:\n"
+            '      - run: echo "lane # 1" && ./scripts/ci/postgres-service.sh start\n'
+            f"      - run: {self.SWEEP}\n"
+        )
+        self.assertEqual(self.fx.analysis().debts["rule5"], set())
+
+
+class ReusableWorkflowMutations(BypassFixtureCase):
+    """R3: a job this gate cannot read is failed by name, not passed."""
+
+    CALL = "  sweep:\n    uses: ./.github/workflows/library-sweep.yml\n    with:\n      lane: lib\n"
+
+    def test_a_reusable_workflow_job_is_named_rather_than_passed(self) -> None:
+        self.write_sweep(self.CALL)
+        analysis = self.fx.analysis()
+        # Nothing else moves: the called file is where the cargo command went,
+        # so every rule reads this job as running nothing at all.
+        self.assertEqual(analysis.debts["rule5"], set())
+        self.assertEqual(
+            [(finding.kind, finding.source) for finding in analysis.findings
+             if finding.kind in membership.UNANALYZABLE_FINDINGS],
+            [("pr-job-delegates-to-reusable-workflow", ".github/workflows/ci-pr.yml:sweep")],
+        )
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            verdict = membership.check_analysis(
+                analysis,
+                analysis.debts,
+                analysis.debts,
+                membership.render_manifest(analysis.inventory),
+                reference_label="fixture base",
+                allowlist_label="fixture allowlist",
+            )
+        self.assertEqual(verdict, 1)
+        self.assertIn("pr-job-delegates-to-reusable-workflow", stderr.getvalue())
+        self.assertIn("library-sweep.yml", stderr.getvalue())
+        self.assertIn("Unanalysable is not clean", stderr.getvalue())
+
+    def test_step_level_uses_is_not_a_reusable_workflow_call(self) -> None:
+        # The shape every real ci-pr.yml job has. `- uses:` is a step, and a
+        # step-level `uses:` sits below the job's own key indent, so neither
+        # may be read as delegation.
+        self.write_sweep(
+            "  sweep:\n    steps:\n      - uses: actions/checkout@v4\n"
+            "      - name: build\n        uses: dtolnay/rust-toolchain@master\n"
+            "      - run: ./scripts/ci/postgres-service.sh start\n"
+            f"      - run: {self.SWEEP}\n"
+        )
+        analysis = self.fx.analysis()
+        self.assertEqual(membership._unanalyzable(analysis.findings), ())
+        self.assertEqual(analysis.debts["rule5"], set())
+
+    def test_write_snapshots_refuses_under_an_unreadable_job(self) -> None:
+        self.write_sweep(self.CALL)
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            verdict = membership.main(["--repo-root", str(self.root), "--write-snapshots"])
+        self.assertEqual(verdict, 1)
+        self.assertIn("refusing to write snapshots", stderr.getvalue())
+
+    def test_the_shipped_pr_workflow_has_no_unreadable_job(self) -> None:
+        # The count this fail-closed was added against: zero today, so it
+        # changes no existing verdict.
+        jobs = [
+            job
+            for path in sorted((REPO_ROOT / ".github/workflows").glob("*.yml"))
+            for job in membership.parse_jobs(path, REPO_ROOT, [])
+        ]
+        self.assertEqual(membership.pr_reusable_workflow_jobs(jobs), ())
 
 
 class MutationProof(FixtureCase):
