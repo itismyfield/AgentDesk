@@ -2530,6 +2530,67 @@ fi
 # to roll back with no .prev, and a hiccup in a non-critical step (lock, manifest)
 # must never tear down a healthy, health-confirmed binary.
 DEPLOY_OK=1
+# #5147: ship the .dSYM next to the promoted binary. `sample` (which the
+# self-watchdog runs to capture hang dumps) and `atos` look for
+# `<binary>.dSYM` in the binary's own directory before falling back to
+# Spotlight, and /Users/…/.adk/release/bin is not somewhere we want to rely on
+# Spotlight indexing. With it in place a hang dump resolves to file:line;
+# without it the dump still resolves to function names from the binary's own
+# symbol table (see `[profile.release] strip = "debuginfo"`), so this whole
+# step is an upgrade, never a dependency.
+#
+# Placed AFTER DEPLOY_OK on purpose: if the deploy rolls back to .prev we must
+# not have replaced the dSYM of the binary that is actually serving. Entirely
+# fail-open — a missing or unwritable dSYM must never fail a health-confirmed
+# deploy. dSYMs are matched by Mach-O UUID, so a stale one is ignored rather
+# than believed.
+#
+# COST, stated because it is the largest thing this change adds and it is not
+# the +18.4 MiB the binary grew: the bundle measures **276 MB**, and this is a
+# full `cp -RL` of it on EVERY deploy (no hardlinking, no rsync delta — the
+# .old/.tmp dance below needs a real directory it can move). Steady state is
+# also 276 MB resident under bin/, plus a second transient copy during the
+# window between `cp` and the `mv` that replaces the incumbent, i.e. ~552 MB
+# peak. Worth it against three stalled investigations, but not free, and not
+# something to add a second copy of without re-reading this.
+_ship_release_dsym() {
+    src_dsym="$SOURCE_BINARY.dSYM"
+    [ -d "$src_dsym" ] || return 0
+    dest_dsym="$REL_BINARY.dSYM"
+    rm -rf "$dest_dsym.tmp" "$dest_dsym.old" 2>/dev/null || true
+    # -L, not plain -R: cargo emits target/release/agentdesk.dSYM as a SYMLINK
+    # into deps/agentdesk-<hash>.dSYM, and BSD cp -R would copy the dangling
+    # link instead of the bundle. Verified on this build:
+    #   agentdesk.dSYM -> deps/agentdesk-c6adbbf07c76db60.dSYM
+    cp -RL "$src_dsym" "$dest_dsym.tmp" || return 0
+    # Move the incumbent aside rather than deleting it, and put it BACK if the
+    # swap-in fails. The previous order (`mv old` then `rm -rf old`
+    # unconditionally) destroyed both copies whenever the second `mv` failed --
+    # leaving a promoted binary with no symbols at all, which is worse than the
+    # stale-but-UUID-mismatched dSYM it replaced.
+    if [ -d "$dest_dsym" ]; then
+        mv -f "$dest_dsym" "$dest_dsym.old" 2>/dev/null || true
+    fi
+    if mv -f "$dest_dsym.tmp" "$dest_dsym" 2>/dev/null; then
+        rm -rf "$dest_dsym.old" 2>/dev/null || true
+    elif [ -d "$dest_dsym.old" ]; then
+        mv -f "$dest_dsym.old" "$dest_dsym" 2>/dev/null || true
+        rm -rf "$dest_dsym.tmp" 2>/dev/null || true
+    fi
+    return 0
+}
+# `|| true` pins the fail-open contract in the code rather than in the caller's
+# shape. The body already ends in `return 0`, so this is currently redundant --
+# that is the point: under `set -e` a future edit that lets a non-zero status
+# escape would otherwise abort the script AFTER DEPLOY_OK, skipping the chflags
+# re-lock and the .prev cleanup below.
+_ship_release_dsym || true
+if [ -d "$REL_BINARY.dSYM" ]; then
+    echo "▸ Shipped debug symbols: $REL_BINARY.dSYM"
+else
+    echo "⚠ No .dSYM alongside $SOURCE_BINARY — hang dumps will show function"
+    echo "  names but no file:line. Check [profile.release] split-debuginfo."
+fi
 # Lock it against unsigned overwrites (deferred from promotion) and drop the
 # now-unneeded rollback backup. chflags is best-effort: failing to re-lock a
 # healthy serving binary must not fail the deploy.

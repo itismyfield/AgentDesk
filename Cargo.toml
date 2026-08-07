@@ -126,7 +126,36 @@ tower = { version = "0.5", features = ["util"] }
 [profile.release]
 opt-level = "z"
 lto = true
-strip = true
+# #5147: hang dumps captured by `health::recovery::spawn_watchdog` rendered
+# every one of our own frames as a bare `load address 0x… + 0x…` offset while
+# libsystem frames stayed symbolicated, and three investigations (#4756, #4770,
+# #5147) stalled on exactly that.
+#
+# `sample`/`atos` have two independent sources for a name: the binary's own
+# Mach-O symbol table (LC_SYMTAB) and a UUID-matched `.dSYM`. Either one alone
+# resolves our frames — measured on a fully stripped binary, the .dSYM by itself
+# recovers both the symbol name and the file:line. What produced the offsets was
+# that BOTH were absent: `strip = true` (== `strip = "symbols"`) deleted the
+# symbol table, and no .dSYM was built or shipped.
+#
+# So restore both layers, deliberately:
+#   * `strip = "debuginfo"` keeps LC_SYMTAB (+18.4 MiB) while still dropping
+#     DWARF from the executable. This is the layer that cannot be separated from
+#     the binary — no deploy step, UUID match or Spotlight index has to succeed
+#     for it to work.
+#   * `debug = 1` (line-tables-only) + `split-debuginfo = "packed"` emit
+#     `target/release/agentdesk.dSYM`, which upgrades dumps from function names
+#     to file:line and recovers inlined frames. It is a build artifact only, so
+#     a missing or UUID-mismatched dSYM degrades to function-name-only
+#     symbolication rather than breaking anything.
+#
+# The two costs are very different sizes and both belong here: +18.4 MiB inside
+# the shipped binary for the symbol table, and a **276 MB** `agentdesk.dSYM`
+# bundle that deploy-release.sh copies in full on every deploy. See the
+# `_ship_release_dsym` comment there.
+debug = 1
+split-debuginfo = "packed"
+strip = "debuginfo"
 
 # #3673: do NOT strip proc-macro / build-script artifacts. Under the current
 # macOS toolchain (rustc 1.94.1, ld-27031, Darwin 27) `strip = true` on a

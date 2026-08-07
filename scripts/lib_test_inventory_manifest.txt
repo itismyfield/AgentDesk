@@ -6254,6 +6254,7 @@ services::hang_forensics::tests::a_peer_that_takes_the_request_and_closes_withou
 services::hang_forensics::tests::a_runtime_that_stopped_ticking_reads_as_stalled_before_the_watchdog_kills
 services::hang_forensics::tests::accepted_but_silent_server_is_classified_as_no_response
 services::hang_forensics::tests::age_sentinel_treats_zero_as_never
+services::hang_forensics::tests::an_inline_comment_cannot_forge_a_release_profile_value
 services::hang_forensics::tests::arming_the_beacon_inside_a_runtime_reports_the_worker_count
 services::hang_forensics::tests::arming_the_beacon_off_a_runtime_is_reported_not_fatal
 services::hang_forensics::tests::dead_port_is_classified_as_connect_failed
@@ -6265,6 +6266,8 @@ services::hang_forensics::tests::guard_records_success_and_releases_in_flight
 services::hang_forensics::tests::liveness_threshold_is_inclusive_and_only_then_stalls
 services::hang_forensics::tests::never_observed_ages_render_as_never
 services::hang_forensics::tests::recording_a_tick_advances_the_beacon
+services::hang_forensics::tests::release_profile_emits_a_dsym_for_line_numbers
+services::hang_forensics::tests::release_profile_keeps_the_mach_o_symbol_table
 services::hang_forensics::tests::responding_server_is_classified_as_responded
 services::hang_forensics::tests::the_beacon_constants_are_pinned_in_absolute_units
 services::hang_forensics::tests::the_beacon_records_the_runtime_worker_count

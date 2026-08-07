@@ -1852,4 +1852,110 @@ mod tests {
             "the failure line has to name the consequence, not just the fact: {report}"
         );
     }
+
+    // ── Build-setting guard ───────────────────────────────────────────────
+    // Every field this module records is useless if the dump it accompanies
+    // still renders our own frames as bare offsets. That depends entirely on
+    // one Cargo setting, so pin it here rather than trusting a comment.
+
+    /// Returns the body of `[profile.release]` from the workspace manifest.
+    fn release_profile_section() -> String {
+        let manifest = include_str!("../../Cargo.toml");
+        let start = manifest
+            .find("\n[profile.release]\n")
+            .expect("Cargo.toml must define [profile.release]");
+        let body = &manifest[start + "\n[profile.release]\n".len()..];
+        match body.find("\n[") {
+            Some(end) => body[..end].to_string(),
+            None => body.to_string(),
+        }
+    }
+
+    /// Unlike the two source guards above, this parses rather than searches:
+    /// it splits the section into lines, drops comment lines, splits on the
+    /// first `=` and **truncates the value at a trailing `#`**. That last step
+    /// is not cosmetic — without it `strip = true # keep symbols` yields the
+    /// value `true # keep symbols`, which is `!= "true"`, and
+    /// [`release_profile_keeps_the_mach_o_symbol_table`] goes green on a fully
+    /// stripped binary. TOML has no `#` inside a bare value, and the two keys
+    /// read here are a bare bool/int and a quoted string with no `#` in it, so
+    /// truncating is exact for this table.
+    fn release_profile_key(key: &str) -> Option<String> {
+        release_profile_section()
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+            .find_map(|line| {
+                let (name, value) = line.split_once('=')?;
+                let value = value.split('#').next().unwrap_or(value);
+                (name.trim() == key).then(|| value.trim().to_string())
+            })
+    }
+
+    #[test]
+    fn an_inline_comment_cannot_forge_a_release_profile_value() {
+        // The regression this closes: `split_once('=')` used to keep the
+        // trailing comment in the value, so `strip = true # …` compared unequal
+        // to `"true"` and the symbol-table guard passed on a stripped binary.
+        let section = "strip = true # keep symbols\ndebug = 1\n";
+        let value = section
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+            .find_map(|line| {
+                let (name, value) = line.split_once('=')?;
+                let value = value.split('#').next().unwrap_or(value);
+                (name.trim() == "strip").then(|| value.trim().to_string())
+            });
+        assert_eq!(value.as_deref(), Some("true"));
+    }
+
+    #[test]
+    fn release_profile_keeps_the_mach_o_symbol_table() {
+        // #5147: `sample`/`atos` have TWO independent name sources — the
+        // binary's own Mach-O symbol table (LC_SYMTAB) and a UUID-matched
+        // .dSYM. Either one alone resolves our frames; measured on a fully
+        // stripped binary, the .dSYM by itself still recovers both the symbol
+        // name and `recovery.rs:1677`.
+        //
+        // `strip = true` (== `strip = "symbols"`) deletes LC_SYMTAB, which
+        // leaves the .dSYM as a single point of failure — and it is a separate
+        // 276 MB directory that deploy ships fail-open, that is ignored when
+        // its UUID does not match, and that no dump carries with it. In
+        // #4756/#4770/#5147 both sources were absent at once, which is why
+        // every one of our frames rendered as `load address 0x… + 0x…`.
+        // Keeping the symbol table is the layer that cannot get separated from
+        // the binary.
+        let strip = release_profile_key("strip")
+            .expect("[profile.release] must state `strip` explicitly, not inherit it");
+        assert!(
+            strip != "true" && strip != "\"symbols\"",
+            "[profile.release] strip = {strip} removes the Mach-O symbol table, leaving \
+             a UUID-matched .dSYM as the only way to symbolicate a hang dump. When that \
+             dSYM is missing or stale the dump again shows only raw offsets for our own \
+             frames. Use `strip = \"debuginfo\"` (drops DWARF from the executable, keeps \
+             LC_SYMTAB)."
+        );
+    }
+
+    #[test]
+    fn release_profile_emits_a_dsym_for_line_numbers() {
+        // Function names come from the symbol table; file:line and inlined
+        // frames need debug info, which on macOS must be collected into a
+        // .dSYM by `split-debuginfo = "packed"`. Without `debug` there is
+        // nothing for dsymutil to collect.
+        let debug = release_profile_key("debug")
+            .expect("[profile.release] must set `debug` so a .dSYM has content");
+        assert!(
+            debug != "0" && debug != "false" && debug != "\"none\"",
+            "[profile.release] debug = {debug} emits no debug info, so the .dSYM \
+             would be empty and hang dumps would carry no file:line"
+        );
+        assert_eq!(
+            release_profile_key("split-debuginfo").as_deref(),
+            Some("\"packed\""),
+            "[profile.release] must set split-debuginfo = \"packed\" so the build \
+             produces target/release/agentdesk.dSYM that deploy-release.sh can ship"
+        );
+    }
 }
