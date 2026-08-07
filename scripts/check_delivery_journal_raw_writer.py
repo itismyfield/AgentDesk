@@ -22,7 +22,7 @@ FAMILY_REGISTRY = (
     ("sink direct family (referenced / edit / split / long-chunk receipt)", "src/services/discord/session_relay_sink.rs", "deliver_response"),
     ("watcher terminal family (무전송 5곳 포함)", "src/services/discord/tmux_watcher.rs", "tmux_output_watcher_with_restore"),
     ("turn_bridge / controller family", "src/services/discord/turn_bridge/terminal_controller_cutover.rs", "deliver_short_replace_via_controller"),
-    ("recovery / fresh-send / orphan family", "src/services/discord/tmux_reaper.rs", "reap_fresh_routine_orphan"),
+    ("recovery / fresh-send / orphan family", "src/services/discord/recovery_engine/terminal_text_idempotency.rs", "record_successful_fresh_send"),
     ("pipe stream epoch", "src/services/discord/tmux_watcher/turn_stream_collector.rs", "collect_turn_stream_until_terminal"),
 )
 # Cheap lexical text match, not Rust parsing: each complete anchor file, including
@@ -93,6 +93,57 @@ FAMILY_REGISTRY = (
 # in tests/test_delivery_journal_raw_writer.py, which owns the door path as the
 # literal `door` it scans for; see also
 # src/services/discord/turn_bridge/terminal_controller_cutover/unix_journal.rs.
+#
+# #5071 T1 S5a. THE RECOVERY FAMILY'S ANCHOR WAS POINTING AT A FILE THAT WRITES NO
+# DELIVERY, and this slice moves it. That is a correction to the family map, not
+# instrumentation: nothing here becomes instrumented, and
+# `UNINSTRUMENTED_FAMILY_BASELINE` stays 2.
+#
+# Measured on de8f3ab51, `src/services/discord/tmux_reaper.rs` contains, in
+# production and in its inline tests alike: zero `delivery_record::` /
+# `completed_turn_ledger::` calls, zero occurrences of the strings `frontier`,
+# `journal` and `delivery_record`, and no Discord transport. It kills orphaned
+# tmux sessions and finalizes stale-busy turns. It matched this family by NAME —
+# `reap_fresh_routine_orphan` carries both "fresh" and "orphan" — and by nothing
+# else, so for as long as it was the anchor this gate was counting the wrong file
+# for this family, whatever the baseline happened to be.
+#
+# The family's durable writers all sit in ONE funnel,
+# `RecoveryDeliveryContext::record_durable_frontier` in
+# `recovery_engine/terminal_text_idempotency.rs`: `write_delivered_frontier` (the
+# reuse-recorded-anchor arm), `write_proven_gone_equal_range_frontier` (the
+# re-anchor taken only after Discord proved the recorded anchor GONE — the actual
+# "orphan" of the family name) and the completed-turn ledger append above them.
+# The anchor now names that file and the funnel's confirmed-delivery entry point.
+#
+# Three tests hold the move, in tests/test_delivery_journal_raw_writer.py:
+# `test_source_contract_reaper_anchor_named_a_file_that_writes_no_delivery` keeps
+# the measurement true, `test_source_contract_recovery_anchor_holds_the_family_durable_writers`
+# keeps the new anchor holding the writers, and
+# `test_every_family_anchor_sits_on_its_family_delivery_path` turns the whole
+# thing into a RULE rather than a snapshot — every anchor must show delivery work
+# in its own file. That rule is what would have caught this in the first place,
+# and it is what fails if the anchor is ever moved back.
+#
+# The audit behind the move covered all six anchors, and it found a SECOND one
+# with the same shape: "pipe stream epoch"
+# (`tmux_watcher/turn_stream_collector.rs`) shows no durable write, no transport
+# and no facade token either. It owns the epoch state the family is named for, so
+# whether it is the wrong anchor or merely a family whose writer lives elsewhere
+# is a real question — and it is not this slice's to answer. It is carried as the
+# single named exemption in that rule test, pinned to stay empty so the exemption
+# cannot be used to admit a different bad anchor. Of the four remaining anchors,
+# three show durable writes or transport in their own file; `tmux_watcher.rs`
+# shows neither and passes on its facade calls alone, its durable writes being
+# delegated to child modules under `tmux_watcher/` through the `dr` alias it
+# imports for them.
+#
+# WHAT THIS MOVE DOES NOT FIX. The gate reads ONE file per family. A durable write
+# added to any other file of this family — `recovery_paths/controller_cutover.rs`,
+# say — is caught by nothing here and by no source contract. That hole is the same
+# one the S2 block declares, it is unchanged by S5a, and it is measured: adding an
+# uninstrumented `write_delivered_frontier` to a non-anchor family file leaves
+# this gate green and every test in the suite green.
 JOURNAL_FACADE_CALL = re.compile(
     r"\bself\.journal\.(?:begin_fresh|finish_fresh)\s*\("
     r"|\bjournal_watcher::(?:begin_watcher_terminal|settle_watcher_terminal|settle_without_transport)\s*\("

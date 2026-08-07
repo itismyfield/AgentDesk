@@ -1,5 +1,24 @@
 # Discord Outbound Migration — Coverage Map (#1006 v3 / #1280 / #1436 / #1457)
 
+> Last refreshed: 2026-08-08 (#5071 T1 S5a — the shadow journal's **family map**
+> was corrected; no family gained instrumentation and the uninstrumented baseline
+> stays 2. The recovery / fresh-send / orphan family was anchored on
+> `tmux_reaper.rs::reap_fresh_routine_orphan`, a file that writes no delivery at
+> all — no durable frontier write, no completed-turn ledger append, no transport,
+> no journal — and matched the family only by the words "fresh" and "orphan" in a
+> symbol name. The anchor now names
+> `recovery_engine/terminal_text_idempotency.rs::record_successful_fresh_send`,
+> the entry point of the one funnel that holds all three of this family's durable
+> writes. A new rule test requires EVERY family anchor to show delivery work in
+> its own file, so the next mis-anchor fails rather than being measured; the audit
+> behind it found one more anchor with no delivery work, `pipe stream epoch`
+> (`tmux_watcher/turn_stream_collector.rs`), which is carried as a single named
+> exemption pinned to stay empty rather than being silently accepted or fixed out
+> of scope. `fresh_send.rs`'s durable write stays out of the map because
+> `OutputPlan::SendFresh` has no production constructor, pinned so the S1r-2~5
+> owner cutovers must answer it. No Rust changes, no delivery behaviour changes,
+> so the coverage rows below are unchanged.)
+
 > Last refreshed: 2026-08-06 (#5071 T1 S3b — the five **no-transport** watcher
 > frontier advances now record themselves. Silent-turn suppression, cancel-tombstone
 > suppression, fresh ready-for-input idle, post-terminal-without-inflight suppression

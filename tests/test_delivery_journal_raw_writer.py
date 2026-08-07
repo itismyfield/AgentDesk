@@ -454,5 +454,184 @@ class RawWriterAllowlistTests(unittest.TestCase):
             source.index("settle_without_transport("),
             "the guard is computed before the settlement it gates",
         )
+    # #5071 T1 S5a additions — the family MAP, not the instrumentation.
+
+    # A file that participates in its family's delivery does at least one of three
+    # observable things: it writes the durable record, it reaches the journal, or
+    # it runs the transport. This vocabulary is the text form of that claim. It is
+    # a token list, so it inherits every lexical limit declared above -- but it is
+    # a RULE about what an anchor must contain, which is what the previous
+    # snapshot-shaped checks could not express.
+    DELIVERY_WORK_TOKENS = (
+        "write_delivered_frontier(",
+        "write_proven_gone_equal_range_frontier(",
+        "shadow_mirror_delivered_frontier(",
+        "record_long_chunk_terminal_delivery(",
+        "commit_ordered_jsonl_range(",
+        "record_delivered_content_fingerprint(",
+        "append_completed_turn(",
+        "finish_sink_delivery(",
+        "settle_without_transport(",
+        "send_long_message",
+        "replace_long_message",
+    )
+    # The one family whose anchor does none of the three, carried by name rather
+    # than by silence. `turn_stream_collector.rs` owns the `pause_epoch` /
+    # `epoch_snapshot` / `turn_delivered` state its family is named for, but it
+    # writes no durable record, runs no transport and holds no facade call, so
+    # either the anchor is wrong or this family's writer lives somewhere else
+    # entirely. Answering that is not #5071 T1 S5a's scope; declaring it is.
+    ANCHORS_WITH_NO_DELIVERY_WORK = ("pipe stream epoch",)
+
+    def test_every_family_anchor_sits_on_its_family_delivery_path(self):
+        """The rule that would have caught the reaper anchor when it was written.
+
+        Every family anchor must show delivery work IN ITS OWN FILE: a durable
+        record write, a journal facade call, or a transport call. An anchor that
+        shows none of the three is a file the gate reads while measuring a family
+        it has no part in -- which is exactly what
+        `tmux_reaper.rs::reap_fresh_routine_orphan` was for the recovery family.
+
+        Exemptions are named, not silent, and an exemption must itself be EMPTY:
+        a family listed in `ANCHORS_WITH_NO_DELIVERY_WORK` whose anchor starts
+        showing delivery work fails here too, so the list cannot be reused to
+        admit a different wrong anchor, and it has to shrink rather than drift
+        when that family's anchor is settled.
+
+        What it does not do: it reads one file per family and cannot say whether
+        the delivery work it finds belongs to THAT family, nor whether the anchor
+        is the best of several candidates. It says only that the anchor is not a
+        bystander."""
+        bystanders = []
+        wrongly_exempt = []
+        for name, rel, _symbol in guard.FAMILY_REGISTRY:
+            code = "\n".join(
+                line.split("//", 1)[0]
+                for line in (ROOT / rel).read_text(encoding="utf-8").splitlines()
+            )
+            does_work = any(token in code for token in self.DELIVERY_WORK_TOKENS) or bool(
+                guard.JOURNAL_FACADE_CALL.search(code)
+            )
+            if name in self.ANCHORS_WITH_NO_DELIVERY_WORK:
+                if does_work:
+                    wrongly_exempt.append(f"{name} ({rel})")
+            elif not does_work:
+                bystanders.append(f"{name} ({rel})")
+        self.assertEqual(
+            bystanders,
+            [],
+            "these family anchors show no durable write, no journal facade call and no "
+            "transport, so the gate is measuring a file that takes no part in the family",
+        )
+        self.assertEqual(
+            wrongly_exempt,
+            [],
+            "an anchor exempted as showing no delivery work now shows some; remove it "
+            "from ANCHORS_WITH_NO_DELIVERY_WORK instead of leaving the exemption to rot",
+        )
+        self.assertEqual(
+            self.ANCHORS_WITH_NO_DELIVERY_WORK,
+            ("pipe stream epoch",),
+            "the exemption list is a measured finding, not a place to park a new anchor",
+        )
+
+    def test_source_contract_reaper_anchor_named_a_file_that_writes_no_delivery(self):
+        """Why the recovery family's anchor moved, kept measurable.
+
+        Until S5a this family was anchored on
+        `tmux_reaper.rs::reap_fresh_routine_orphan`, which matched by NAME
+        ("fresh", "orphan") and not by behaviour: the reaper kills tmux sessions
+        and finalizes stale-busy turns, and writes no delivery of any kind. This
+        pins that measurement, so the move cannot quietly become wrong -- the day
+        the reaper does advance a frontier, append to the ledger or reach the
+        journal, this fails and the family map has to be re-derived rather than
+        left pointing somewhere else.
+
+        `reap_fresh_routine_orphan` is asserted to still exist: the reaper is not
+        claimed to have disappeared, only to have no delivery in it."""
+        source = (ROOT / "src/services/discord/tmux_reaper.rs").read_text(encoding="utf-8")
+        self.assertIn("async fn reap_fresh_routine_orphan(", source)
+        for absent in (
+            "delivery_record",
+            "delivered_frontier",
+            "append_completed_turn",
+            "shadow_mirror",
+            "journal",
+        ):
+            self.assertEqual(
+                source.count(absent),
+                0,
+                f"tmux_reaper.rs now mentions {absent!r}; the family map cannot keep "
+                f"treating it as a file that writes no delivery",
+            )
+
+    def test_source_contract_recovery_anchor_holds_the_family_durable_writers(self):
+        """The other half of the move: the file the anchor now names really does
+        hold this family's durable writes, all three of them, in one funnel --
+        the completed-turn ledger append, the reuse-recorded-anchor frontier
+        write and the proven-GONE equal-range re-anchor. Adding a fourth durable
+        write to that file, or moving one out, fails here.
+
+        Counted over the production prefix only (everything before `#[cfg(test)]
+        mod tests {`), because the file's own fixtures call the same durable
+        writer twice and a whole-file count would move whenever a test is added.
+        It is a text count: it cannot prove any call is reached, and it says
+        nothing about instrumentation -- this family is still uninstrumented and
+        the baseline of 2 still says so."""
+        source = (
+            ROOT / "src/services/discord/recovery_engine/terminal_text_idempotency.rs"
+        ).read_text(encoding="utf-8")
+        production = source[: source.index("#[cfg(test)]\nmod tests {")]
+        self.assertEqual(production.count("completed_turn_ledger::append_completed_turn("), 1)
+        self.assertEqual(production.count("delivery_record::write_delivered_frontier("), 1)
+        self.assertEqual(
+            production.count("delivery_record::write_proven_gone_equal_range_frontier("), 1
+        )
+        self.assertEqual(production.count("fn record_successful_fresh_send("), 1)
+        self.assertLess(
+            production.index("fn record_successful_fresh_send("),
+            production.index("completed_turn_ledger::append_completed_turn("),
+            "the anchor symbol is the entry point of the funnel that holds the writers",
+        )
+
+    def test_source_contract_dormant_fresh_send_writer_is_pinned_uninstrumented(self):
+        """The family's other named durable writer, and why the map does not move
+        to it either.
+
+        `outbound/turn_output_controller/fresh_send.rs` calls
+        `write_delivered_frontier` once, but `OutputPlan::SendFresh` has no
+        production constructor -- every mention below is a pattern or a match arm
+        except the one in `fresh_send_tests.rs`, which is a test fixture. Nothing
+        in production reaches that write today, so it is neither the family's
+        anchor nor a gap in coverage; it is dormant.
+
+        It is pinned rather than argued: this dict is the complete set of
+        `OutputPlan::SendFresh` mentions in `src/`. The S1r-2~5 owner cutovers
+        that make the plan reachable have to add one, which fails here and forces
+        the question -- anchor, instrumentation, or both -- to be answered then."""
+        mentions = {}
+        for path in sorted((ROOT / "src").rglob("*.rs")):
+            count = path.read_text(encoding="utf-8").count("OutputPlan::SendFresh")
+            if count:
+                mentions[path.relative_to(ROOT).as_posix()] = count
+        self.assertEqual(
+            mentions,
+            {
+                "src/services/discord/outbound/turn_output_controller.rs": 3,
+                "src/services/discord/outbound/turn_output_controller/fresh_send.rs": 1,
+                "src/services/discord/outbound/turn_output_controller/fresh_send_tests.rs": 2,
+            },
+            "OutputPlan::SendFresh gained or lost a mention; if a production owner now "
+            "builds it, this family's map and its durable frontier write both need "
+            "re-deriving (#5071 T1)",
+        )
+        fresh_send = (
+            ROOT / "src/services/discord/outbound/turn_output_controller/fresh_send.rs"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(fresh_send.count("delivery_record::write_delivered_frontier("), 1)
+        self.assertIsNone(
+            guard.JOURNAL_FACADE_CALL.search(fresh_send),
+            "fresh_send.rs carries no facade token; it is declared uninstrumented, not covered",
+        )
 if __name__ == "__main__":
     unittest.main()
