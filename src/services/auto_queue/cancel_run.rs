@@ -2,7 +2,6 @@ use super::{AutoQueueLogContext, AutoQueueService};
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::db::auto_queue::run_status::is_live_run_status;
@@ -228,7 +227,7 @@ pub(crate) async fn cancel_live_dispatches_for_runs_pg(
     pool: &PgPool,
     run_ids: &[String],
     reason: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<CancelledDispatchesWithCleanup, String> {
     let mut tx = pool
         .begin()
         .await
@@ -240,22 +239,40 @@ pub(crate) async fn cancel_live_dispatches_for_runs_pg(
         false,
     )
     .await?;
+
+    let dispatch_ids = transitions
+        .iter()
+        .map(|transition| transition.dispatch_id.clone())
+        .collect::<Vec<_>>();
+    // #5142: record the post-commit debt inside the same transaction. Before
+    // this, the emit / wake / session clear / slot release that follow the
+    // commit existed only on this stack, so a crash here left the cancel
+    // durable and the cleanup lost.
+    let cleanup_task_id = super::cleanup_tasks::enqueue_run_cleanup_task_on_tx(
+        &mut tx,
+        run_ids,
+        &dispatch_ids,
+        &[],
+        &transitions,
+    )
+    .await?;
+
     tx.commit()
         .await
         .map_err(|error| format!("commit postgres run-owned dispatch cancel: {error}"))?;
 
-    let mut dispatch_ids = Vec::with_capacity(transitions.len());
-    for transition in transitions {
-        transition.emit();
-        crate::services::dispatches::wait_queue::spawn_cached_constraint_release_wake(
-            pool.clone(),
-            "constraint_release",
-            transition.dispatch_id.clone(),
-            "cancel_dispatch",
-        );
-        dispatch_ids.push(transition.dispatch_id);
-    }
-    Ok(dispatch_ids)
+    Ok(CancelledDispatchesWithCleanup {
+        dispatch_ids,
+        cleanup_task_id,
+    })
+}
+
+/// Dispatches cancelled by a committed transaction plus the durable cleanup row
+/// that still owes the post-commit steps for them (#5142).
+#[derive(Debug)]
+pub(crate) struct CancelledDispatchesWithCleanup {
+    pub(crate) dispatch_ids: Vec<String>,
+    pub(crate) cleanup_task_id: i64,
 }
 
 pub(crate) async fn clear_sessions_for_dispatches_pg(
@@ -368,8 +385,8 @@ pub(crate) async fn cancel_and_release_runs_with_pg(
     reason: &str,
     orphan_trigger_source: Option<&str>,
 ) -> Result<LiveRunCleanupResult, String> {
-    let cancelled_dispatch_ids = cancel_live_dispatches_for_runs_pg(pool, run_ids, reason).await?;
-    let cancelled_dispatches = cancelled_dispatch_ids.len();
+    let cancelled = cancel_live_dispatches_for_runs_pg(pool, run_ids, reason).await?;
+    let cancelled_dispatches = cancelled.dispatch_ids.len();
     let _self_healed_orphan_entries = match orphan_trigger_source {
         Some(trigger_source) => {
             self_heal_orphan_dispatched_entries_without_slot_pg(pool, run_ids, trigger_source)
@@ -377,28 +394,18 @@ pub(crate) async fn cancel_and_release_runs_with_pg(
         }
         None => 0,
     };
-    let mut slot_cleanup =
-        clear_and_release_slots_for_runs_pg(health_registry, pool, run_ids).await;
-    match clear_sessions_for_dispatches_pg(pool, &cancelled_dispatch_ids).await {
-        Ok(cleared) => slot_cleanup.cleared_slot_sessions += cleared,
-        Err(error) => {
-            crate::auto_queue_log!(
-                warn,
-                "run_cleanup_dispatch_session_clear_pg_failed",
-                run_ids
-                    .first()
-                    .map(|run_id| AutoQueueLogContext::new().run(run_id))
-                    .unwrap_or_default(),
-                "[auto-queue] failed to clear postgres sessions for run cleanup dispatches {:?}: {}",
-                cancelled_dispatch_ids,
-                error
-            );
-            slot_cleanup.warnings.push(format!(
-                "failed to clear postgres sessions for run cleanup dispatches {:?}: {}",
-                cancelled_dispatch_ids, error
-            ));
-        }
-    }
+    // #5142: the emit / wake / session clear / slot release below used to run as
+    // three loose transactions whose progress was invisible after a crash. They
+    // now run out of the durable cleanup row committed with the cancel, and a
+    // step that fails leaves that row behind for the replay sweep instead of
+    // degrading into a warning string.
+    let slot_cleanup = super::cleanup_tasks::drain_run_cleanup_task_by_id_pg(
+        health_registry,
+        pool,
+        cancelled.cleanup_task_id,
+    )
+    .await
+    .slot_cleanup;
 
     Ok(LiveRunCleanupResult {
         cancelled_dispatches,
@@ -770,98 +777,6 @@ async fn rollback_cancelled_run_cards_pg(
     rolled_back
 }
 
-pub(crate) async fn clear_and_release_slots_for_runs_pg(
-    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
-    pool: &PgPool,
-    run_ids: &[String],
-) -> SlotCleanupResult {
-    let mut released_slots: HashSet<(String, i64)> = HashSet::new();
-    let mut released_slot_count = 0usize;
-    let mut cleared_sessions = 0usize;
-    let mut warnings = Vec::new();
-    for run_id in run_ids {
-        match sqlx::query(
-            "UPDATE auto_queue_slots
-             SET assigned_run_id = NULL,
-                 assigned_thread_group = NULL,
-                 updated_at = NOW()
-             WHERE assigned_run_id = $1
-             RETURNING agent_id, slot_index",
-        )
-        .bind(run_id)
-        .fetch_all(pool)
-        .await
-        {
-            Ok(rows) => {
-                released_slot_count += rows.len();
-                for row in rows {
-                    let agent_id = match row.try_get::<String, _>("agent_id") {
-                        Ok(value) => value,
-                        Err(error) => {
-                            warnings.push(format!(
-                                "failed to decode released slot agent for run {run_id}: {error}"
-                            ));
-                            continue;
-                        }
-                    };
-                    let slot_index = match row.try_get::<i64, _>("slot_index") {
-                        Ok(value) => value,
-                        Err(error) => {
-                            warnings.push(format!(
-                                "failed to decode released slot index for run {run_id}: {error}"
-                            ));
-                            continue;
-                        }
-                    };
-                    if released_slots.insert((agent_id.clone(), slot_index)) {
-                        match super::runtime::clear_slot_threads_for_slot_pg(
-                            health_registry.clone(),
-                            pool,
-                            &agent_id,
-                            slot_index,
-                        )
-                        .await
-                        {
-                            Ok(cleared) => cleared_sessions += cleared,
-                            Err(error) => {
-                                crate::auto_queue_log!(
-                                    warn,
-                                    "clear_slot_threads_pg_failed",
-                                    AutoQueueLogContext::new().agent(&agent_id),
-                                    "[auto-queue] failed to clear postgres slot thread sessions for {}:{}: {}",
-                                    agent_id,
-                                    slot_index,
-                                    error
-                                );
-                                warnings.push(format!(
-                                    "failed to clear slot thread sessions for {agent_id}:{slot_index}: {error}"
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-            Err(error) => {
-                crate::auto_queue_log!(
-                    warn,
-                    "clear_slot_release_pg_failed",
-                    AutoQueueLogContext::new().run(run_id),
-                    "[auto-queue] failed to release postgres slots while clearing run {}: {}",
-                    run_id,
-                    error
-                );
-                warnings.push(format!("failed to release slots for run {run_id}: {error}"));
-            }
-        }
-    }
-
-    SlotCleanupResult {
-        released_slots: released_slot_count,
-        cleared_slot_sessions: cleared_sessions,
-        warnings,
-    }
-}
-
 async fn terminalize_selected_runs_with_pg(
     health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
     pool: &PgPool,
@@ -1034,7 +949,10 @@ async fn terminalize_selected_runs_with_pg(
             let slot_index = row
                 .try_get::<i64, _>("slot_index")
                 .map_err(|error| format!("decode released slot index: {error}"))?;
-            Ok((agent_id, slot_index))
+            Ok(super::cleanup_tasks::ReleasedSlot {
+                agent_id,
+                slot_index,
+            })
         })
         .collect::<Result<Vec<_>, String>>()?;
 
@@ -1044,49 +962,40 @@ async fn terminalize_selected_runs_with_pg(
         }
     }
 
-    tx.commit()
-        .await
-        .map_err(|error| format!("commit postgres run cancel transaction: {error}"))?;
-
-    for meta in &cancel_metas {
-        meta.emit();
-        crate::services::dispatches::wait_queue::spawn_cached_constraint_release_wake(
-            pool.clone(),
-            "constraint_release",
-            meta.dispatch_id.clone(),
-            "cancel_dispatch",
-        );
-    }
-
     let cancelled_dispatch_ids = cancel_metas
         .iter()
         .map(|meta| meta.dispatch_id.clone())
         .collect::<Vec<_>>();
-    let mut cleared_slot_sessions =
-        clear_sessions_for_dispatches_pg(pool, &cancelled_dispatch_ids).await?;
-    let mut warnings = Vec::new();
-    for (agent_id, slot_index) in released_slot_keys {
-        match super::runtime::clear_slot_threads_for_slot_pg(
-            health_registry.clone(),
-            pool,
-            &agent_id,
-            slot_index,
-        )
+    // #5142: this transaction already released the slot rows, so the cleanup row
+    // carries the slot keys directly; the steps that still have to run outside
+    // the commit (emit, wake, session clear, slot-thread clear) become durable
+    // here rather than living only on this stack.
+    let cleanup_task_id = super::cleanup_tasks::enqueue_run_cleanup_task_on_tx(
+        &mut tx,
+        &locked_run_ids,
+        &cancelled_dispatch_ids,
+        &released_slot_keys,
+        &cancel_metas,
+    )
+    .await?;
+
+    tx.commit()
         .await
-        {
-            Ok(cleared) => cleared_slot_sessions += cleared,
-            Err(error) => warnings.push(format!(
-                "failed to clear slot thread sessions for {agent_id}:{slot_index}: {error}"
-            )),
-        }
-    }
+        .map_err(|error| format!("commit postgres run cancel transaction: {error}"))?;
+
+    let drained = super::cleanup_tasks::drain_run_cleanup_task_by_id_pg(
+        health_registry,
+        pool,
+        cleanup_task_id,
+    )
+    .await;
     let remaining_live_dispatches = count_live_dispatches_for_runs_pg(pool, target_run_ids).await?;
     let cleanup = LiveRunCleanupResult {
         cancelled_dispatches: cancel_metas.len(),
         slot_cleanup: SlotCleanupResult {
             released_slots,
-            cleared_slot_sessions,
-            warnings,
+            cleared_slot_sessions: drained.slot_cleanup.cleared_slot_sessions,
+            warnings: drained.slot_cleanup.warnings,
         },
     };
     if remaining_live_dispatches > 0 {
@@ -1422,7 +1331,7 @@ mod pg_tests {
         )
         .await
         .expect("cancel force-pause dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
-        assert_eq!(cancelled, vec![dispatch_id.clone()]);
+        assert_eq!(cancelled.dispatch_ids, vec![dispatch_id.clone()]);
         let state = sqlx::query_as::<_, (String, Option<String>, String)>(
             "SELECT e.status, e.dispatch_id, d.status
              FROM auto_queue_entries e
@@ -1481,6 +1390,7 @@ mod pg_tests {
             cancel_live_dispatches_for_runs_pg(&pool, &[target_run], "auto_queue_pause")
                 .await
                 .expect("cancel target force-pause dispatches") // agentdesk-audit: allow-unwrap — production entrypoint assertion
+                .dispatch_ids
                 .is_empty()
         );
         let state = sqlx::query_as::<_, (String, String, Option<String>)>(

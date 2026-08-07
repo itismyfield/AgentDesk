@@ -477,6 +477,21 @@ async fn policy_tick_loop(
     pg_pool: Option<Arc<PgPool>>,
     cluster_runtime: Option<cluster::ClusterRuntime>,
     shutdown: Option<Arc<AtomicBool>>,
+    // #5142 D-4: the auto-queue cleanup replay below tears down provider runtime
+    // state (`clear_provider_channel_runtime`) for the slot threads it clears,
+    // and that teardown is reachable only through the health registry. This loop
+    // used to have no registry parameter at all and hard-coded `None`, so the
+    // runtime half of the cleanup was permanently skipped on every replayed task.
+    //
+    // It is still an `Option`, and `None` is still a legitimate value: a process
+    // started without Discord providers has no registry to hand over
+    // (`launch.rs` calls `server::run(.., None, ..)`). What changed is only that
+    // the tick now receives whatever the process actually has instead of
+    // discarding it — see `worker_registry::policy_tick_health_registry`. On a
+    // registry-less node the replay converges every PostgreSQL-visible part of
+    // the cleanup and skips only the in-memory teardown, which is correct there
+    // because there is no provider runtime to tear down.
+    health_registry: Option<Arc<HealthRegistry>>,
 ) {
     tracing::info!("[policy-tick] 3-tier tick started: 30s / 1min / 5min");
 
@@ -586,6 +601,32 @@ async fn policy_tick_loop(
                     Err(error) => {
                         tracing::warn!(
                             "[policy-tick] stale busy session reconcile failed: {error}"
+                        );
+                    }
+                }
+
+                // #5142: resume the post-commit cleanup a previous process left
+                // owed. The rows were committed with the cancel/end state
+                // change, so this is the path by which a restarted process
+                // converges residual provider sessions and slot tokens.
+                match crate::services::auto_queue::cleanup_tasks::replay_pending_run_cleanup_tasks_pg(
+                    health_registry.clone(),
+                    pool,
+                )
+                .await
+                {
+                    Ok(stats) if stats.touched() => {
+                        tracing::warn!(
+                            drained = stats.drained,
+                            completed = stats.completed,
+                            dead_lettered = stats.dead_lettered,
+                            "[policy-tick] replayed auto-queue run cleanup tasks left by an earlier process"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            "[policy-tick] auto-queue run cleanup replay failed: {error}"
                         );
                     }
                 }

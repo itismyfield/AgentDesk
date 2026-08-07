@@ -10,6 +10,13 @@ pub(crate) mod test_support;
 mod types;
 
 pub(crate) use dispatch_cancel::cancel_dispatches_for_runs_on_pg_tx_with_meta;
+// #5142: the auto-queue cleanup outbox persists this metadata so a restarted
+// process can still fire the emit the dead process owed.
+pub(crate) use dispatch_cancel::CancelTransitionMeta;
+// #5142 r5: the emit's test-only footprint, exported from the emit boundary so
+// the cleanup drain's ordering tests observe every emit rather than one wrapper.
+#[cfg(test)]
+pub(crate) use dispatch_cancel::emit_probe;
 pub use dispatch_cancel::{
     cancel_dispatch_and_reset_auto_queue_on_pg, cancel_dispatch_and_reset_auto_queue_on_pg_tx,
 };

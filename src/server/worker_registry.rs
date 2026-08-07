@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use crate::config::Config;
 use crate::engine::PolicyEngine;
@@ -624,6 +624,56 @@ enum WorkerHandle {
     SpawnHelper,
 }
 
+/// #5142 D-4 / r5: test-only record of the `HealthRegistry` the spawned
+/// `policy-tick` thread actually captured.
+///
+/// The tick's auto-queue cleanup replay reaches `clear_provider_channel_runtime`
+/// only through this handle, so starting the tick with `None` while the process
+/// *has* a registry silently drops the runtime half of every replayed cleanup:
+/// nothing fails, the PostgreSQL state still converges, and only the in-memory
+/// provider runtime for the cleared slot threads is left behind.
+///
+/// Rounds 3 and 4 pinned this with a source guard that asserted on the text of
+/// the call site. A single adjacent line defeated it — re-binding
+/// `tick_health_registry` to `None` after the correct assignment left both the
+/// positive and the negative string assertion satisfied while the thread
+/// captured `None` (#5142 r5, mutation S2). This records the pointer identity of
+/// what the thread really closed over, so the assertion is about the value that
+/// reaches the tick rather than about the characters in this file.
+///
+/// The recorded value is a raw address used only for identity comparison; it is
+/// never dereferenced, and the test holds its own `Arc` for the whole
+/// comparison so the address cannot be reused.
+#[cfg(test)]
+fn policy_tick_captured_slot() -> &'static Mutex<Option<Option<usize>>> {
+    static SLOT: OnceLock<Mutex<Option<Option<usize>>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+fn reset_policy_tick_captured_registry() {
+    *policy_tick_captured_slot()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = None;
+}
+
+#[cfg(test)]
+fn record_policy_tick_captured_registry(registry: Option<usize>) {
+    *policy_tick_captured_slot()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = Some(registry);
+}
+
+/// `None` until the spawned tick thread reaches its first statement; then
+/// `Some(None)` for a tick started without a registry, or `Some(Some(addr))` for
+/// the registry it captured.
+#[cfg(test)]
+fn policy_tick_captured_registry() -> Option<Option<usize>> {
+    *policy_tick_captured_slot()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
 struct RunningWorker {
     spec: WorkerSpec,
     _handle: WorkerHandle,
@@ -753,7 +803,22 @@ impl SupervisedWorkerRegistry {
                 let tick_config = self.config.clone();
                 let tick_cluster_runtime = self.cluster_runtime.clone();
                 let shutdown = self.shutdown.clone();
+                // #5142 D-4: hand the tick loop the health registry so the
+                // auto-queue cleanup replay can complete its runtime-side
+                // teardown instead of silently skipping it. Starting the tick
+                // with `None` while the process has a registry is silent: the
+                // DB state still converges and only the in-memory provider
+                // runtime is left behind. `policy_tick_captured_registry` records what the
+                // spawned thread actually captured so that is not a matter of
+                // reading this line.
+                let tick_health_registry = self.health_registry.clone();
                 self.register_thread(spec, "policy-tick", move || {
+                    #[cfg(test)]
+                    record_policy_tick_captured_registry(
+                        tick_health_registry
+                            .as_ref()
+                            .map(|registry| Arc::as_ptr(registry) as usize),
+                    );
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
@@ -783,6 +848,7 @@ impl SupervisedWorkerRegistry {
                                     Some(tick_pg_pool.clone()),
                                     Some(tick_cluster_runtime.clone()),
                                     Some(shutdown.clone()),
+                                    tick_health_registry.clone(),
                                 ));
                             }
                             Err(error) => {
@@ -1250,6 +1316,108 @@ mod leader_takeover_tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
+
+    /// **#5142 D-4 regression, verified on the spawned thread.**
+    ///
+    /// The policy tick must be started with the process `HealthRegistry`. With
+    /// `None` the cleanup replay still converges everything PostgreSQL can see,
+    /// so no test, log line or health check notices — only
+    /// `clear_provider_channel_runtime` is skipped, leaving the in-memory
+    /// provider runtime for the cleared slot threads alive.
+    ///
+    /// Rounds 3 and 4 pinned this by asserting on the *text* of the call site.
+    /// That guard was defeated by one adjacent line: re-binding
+    /// `tick_health_registry` to `None` immediately after the correct assignment
+    /// satisfied both the positive and the negative string assertion while the
+    /// spawned thread captured `None` (mutation S2). A guard that a neighbouring
+    /// line disarms is worse than no guard, because it reads as coverage.
+    ///
+    /// This runs `start_worker` for real and compares the pointer identity of
+    /// what the thread closed over against the registry the process was built
+    /// with. The tick never reaches its loop body: `shutdown` is already set, so
+    /// `wait_until_leader_or_shutdown` returns immediately and the thread exits
+    /// without a PostgreSQL round trip or a `PolicyEngine::new_for_tick`.
+    ///
+    /// What it still does not prove: that `policy_tick_loop` is handed this same
+    /// binding once leadership is granted. That line sits inside the leader-only
+    /// body, which needs a live pool and a leadership grant;
+    /// `drain_with_health_registry_tears_down_provider_runtime_pg` is what proves
+    /// the registry does something once it arrives.
+    /// `#[tokio::test]` only because `PgPool::connect_lazy` installs a pool
+    /// reaper and therefore needs a runtime handle in scope. Nothing here awaits.
+    #[tokio::test]
+    async fn policy_tick_thread_captures_the_process_health_registry() {
+        let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+
+        let captured = spawn_policy_tick_and_capture(Some(registry.clone()));
+        assert_eq!(
+            captured,
+            Some(Some(Arc::as_ptr(&registry) as usize)),
+            "the policy-tick thread must close over the process health registry; \
+             anything else silently disables the runtime half of every replayed \
+             auto-queue cleanup"
+        );
+
+        // Standalone / no-Discord mode (`launch.rs` passes `None` to
+        // `server::run`) legitimately has no registry, and must stay `None`
+        // rather than fabricate one.
+        assert_eq!(
+            spawn_policy_tick_and_capture(None),
+            Some(None),
+            "a process with no registry must not invent one for the tick"
+        );
+    }
+
+    /// Start the real `policy-tick` worker with `health_registry` and return what
+    /// `policy_tick_captured_registry` saw the spawned thread capture.
+    fn spawn_policy_tick_and_capture(
+        health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    ) -> Option<Option<usize>> {
+        super::reset_policy_tick_captured_registry();
+
+        let mut config = crate::config::Config::default();
+        config.policies.hot_reload = false;
+        let engine = crate::engine::PolicyEngine::new(&config).expect("build a policy engine");
+        // `start_worker` only requires the pool to exist. Nothing here issues a
+        // query, and the address is deliberately unroutable so a regression that
+        // did issue one could never reach a real PostgreSQL server.
+        let pg_pool = sqlx::Pool::<sqlx::Postgres>::connect_lazy(
+            "postgres://agentdesk-test@127.0.0.1:1/agentdesk-policy-tick-probe",
+        )
+        .expect("build a lazy pool");
+        let cluster_runtime =
+            ClusterRuntime::for_test_with_leader(Arc::new(AtomicBool::new(false)));
+
+        let mut worker_registry = SupervisedWorkerRegistry::new(
+            config,
+            engine,
+            health_registry,
+            Some(Arc::new(pg_pool)),
+            cluster_runtime,
+        );
+        // Stop the thread at its first leader check, after it has recorded what
+        // it captured but before it touches the pool.
+        worker_registry.shutdown.store(true, Ordering::Release);
+        worker_registry
+            .start_worker(policy_tick_spec(), None)
+            .expect("start the policy-tick worker");
+
+        for _ in 0..200 {
+            if let Some(captured) = super::policy_tick_captured_registry() {
+                return Some(captured);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        None
+    }
+
+    fn policy_tick_spec() -> super::WorkerSpec {
+        WORKER_SPECS
+            .iter()
+            .copied()
+            .find(|spec| spec.name == "policy-tick")
+            .expect("the policy-tick worker spec is registered")
+    }
 
     fn leader_only_spec_for_test() -> super::WorkerSpec {
         WORKER_SPECS

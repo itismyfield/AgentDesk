@@ -31,6 +31,119 @@ pub struct DispatchOutboxStats {
     pub oldest_pending_age: i64,
 }
 
+/// #5142: standing backlog of the auto-queue post-commit cleanup outbox
+/// (`auto_queue_run_cleanup_tasks`).
+///
+/// `dead_lettered` is the number the module exists for. A cleanup row that burns
+/// through `MAX_CLEANUP_ATTEMPTS` (~13–17 minutes of failing retries) is parked
+/// permanently: it leaves both drain queries and nothing retries it again, so
+/// its run's slot token and residual provider session id stay on disk. Until
+/// this gauge existed no counter, query or endpoint read `dead_lettered_at` at
+/// all — the only trace was one `tracing::warn!` in the policy tick, which is
+/// gone the moment the log rotates. A non-zero value here is an operator action
+/// item, not a statistic.
+///
+/// Surfaced on `/api/health/detail` in full and projected count-only onto the
+/// credential-free `/api/health`. It does NOT follow [`DispatchOutboxStats`],
+/// which is detail-only: that block has a row-level list endpoint, an ack
+/// endpoint and an `agentdesk doctor` Core check behind it, and this one has no
+/// reader at all — so hiding it behind the protected router would leave a
+/// permanently stalled cleanup outbox reporting `ok: true` and nothing else.
+/// `public_auto_queue_cleanup_backlog_is_served_on_the_unauthenticated_endpoint`
+/// pins the public half against a real HTTP response.
+///
+/// `pending` is the live half (rows still owed and still retrying) and is
+/// included so the two can be told apart at a glance.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct AutoQueueCleanupBacklog {
+    pub pending: i64,
+    pub dead_lettered: i64,
+}
+
+/// Test-only injection point for [`load_auto_queue_cleanup_backlog`].
+///
+/// The backlog is a PostgreSQL read, so in a unit test the health handler can
+/// only ever produce `None` and every claim about *where the block surfaces*
+/// would have to be a source-text guard. #5142 r5 deleted two such guards —
+/// each defeated by a single adjacent line — and replaced them with
+/// router-level tests that inject a backlog here and then assert on the real
+/// HTTP body of `/health` and `/health/detail`.
+///
+/// [`inject`] holds a process-wide lock for the lifetime of its guard, so the
+/// injecting tests serialize against each other and leave nothing behind for
+/// the rest of the binary.
+#[cfg(test)]
+pub(crate) mod backlog_probe {
+    use super::AutoQueueCleanupBacklog;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    static SERIALIZE: OnceLock<Mutex<()>> = OnceLock::new();
+    static VALUE: Mutex<Option<AutoQueueCleanupBacklog>> = Mutex::new(None);
+
+    /// Clears the injected value and releases the serialization lock on drop.
+    pub(crate) struct InjectedBacklog {
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl Drop for InjectedBacklog {
+        fn drop(&mut self) {
+            *VALUE.lock().unwrap_or_else(|poison| poison.into_inner()) = None;
+        }
+    }
+
+    pub(crate) fn inject(backlog: AutoQueueCleanupBacklog) -> InjectedBacklog {
+        let lock = SERIALIZE
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        *VALUE.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(backlog);
+        InjectedBacklog { _lock: lock }
+    }
+
+    pub(crate) fn injected() -> Option<AutoQueueCleanupBacklog> {
+        *VALUE.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+}
+
+/// Load the auto-queue cleanup backlog. `None` when there is no pool or the
+/// query fails, which keeps a health probe from turning a diagnostics read into
+/// an outage.
+pub async fn load_auto_queue_cleanup_backlog(
+    pg_pool: Option<&PgPool>,
+) -> Option<AutoQueueCleanupBacklog> {
+    #[cfg(test)]
+    if let Some(injected) = backlog_probe::injected() {
+        return Some(injected);
+    }
+    let pool = pg_pool?;
+    match load_auto_queue_cleanup_backlog_pg(pool).await {
+        Ok(backlog) => Some(backlog),
+        Err(error) => {
+            tracing::warn!("[health] failed to load auto_queue_run_cleanup_tasks backlog: {error}");
+            None
+        }
+    }
+}
+
+pub(crate) async fn load_auto_queue_cleanup_backlog_pg(
+    pool: &PgPool,
+) -> Result<AutoQueueCleanupBacklog, String> {
+    let dead_lettered =
+        crate::services::auto_queue::cleanup_tasks::dead_lettered_run_cleanup_task_count_pg(pool)
+            .await?;
+    let pending = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM auto_queue_run_cleanup_tasks
+         WHERE dead_lettered_at IS NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|error| format!("count pending auto-queue run cleanup tasks: {error}"))?;
+    Ok(AutoQueueCleanupBacklog {
+        pending,
+        dead_lettered,
+    })
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ChannelSessionState {
     pub agent_id: Option<String>,
@@ -463,7 +576,7 @@ pub async fn acknowledge_failed_dispatch_outbox_rows(
 
 #[cfg(test)]
 mod tests {
-    use super::{ACTIVE_SESSION_AUDIT_QUERY, DispatchOutboxStats};
+    use super::{ACTIVE_SESSION_AUDIT_QUERY, AutoQueueCleanupBacklog, DispatchOutboxStats};
     use serde_json::json;
 
     #[test]
@@ -490,6 +603,25 @@ mod tests {
                 "retrying": 1,
                 "permanent_failures": 3,
                 "oldest_pending_age": 60,
+            })
+        );
+    }
+
+    /// #5142: the sibling of `dispatch_outbox_stats_json_contract_keeps_field_names`.
+    /// `/api/health/detail` consumers key off these exact names, so a rename is a
+    /// silent contract break rather than a compile error.
+    #[test]
+    fn auto_queue_cleanup_backlog_json_contract_keeps_field_names() {
+        let backlog = AutoQueueCleanupBacklog {
+            pending: 4,
+            dead_lettered: 2,
+        };
+
+        assert_eq!(
+            serde_json::to_value(backlog).unwrap(),
+            json!({
+                "pending": 4,
+                "dead_lettered": 2,
             })
         );
     }

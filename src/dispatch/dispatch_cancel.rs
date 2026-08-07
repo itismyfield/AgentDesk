@@ -96,6 +96,12 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg(
 /// Observability metadata captured while cancelling a dispatch so the
 /// commit-owning caller can fire the canonical writer's emits after the
 /// transaction durably lands (#3039).
+///
+/// #5142: the metadata is serialized into `auto_queue_run_cleanup_tasks` so a
+/// process that dies after the commit but before `emit()` can still fire the
+/// emit on the next drain. Only the auto-queue cancel/end paths persist it; the
+/// other callers keep the in-process handoff.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CancelTransitionMeta {
     pub(crate) dispatch_id: String,
     kanban_card_id: Option<String>,
@@ -105,8 +111,56 @@ pub(crate) struct CancelTransitionMeta {
     payload: Option<serde_json::Value>,
 }
 
+/// Test-only footprint of [`CancelTransitionMeta::emit`].
+///
+/// The emit hands its events to in-process observability channels and discards
+/// the results, so at runtime it leaves nothing a test can look at. That is why
+/// moving the auto-queue cleanup emit loop back in front of its `emitted = TRUE`
+/// mark left the whole suite green in the #5142 r3 review.
+///
+/// The recorder sits on `emit` itself rather than on a caller-side wrapper
+/// (where #5142 r4 put it) so the guarantee matches the name: a direct
+/// `meta.emit()` written anywhere on the drain path is counted, not just the
+/// one that goes through a helper.
+///
+/// Keyed by dispatch id because the tests in this binary run concurrently and
+/// each fixture seeds a unique dispatch id; a bare counter would make every
+/// test race every other one.
+#[cfg(test)]
+pub(crate) mod emit_probe {
+    use std::sync::{Mutex, OnceLock};
+
+    fn log() -> &'static Mutex<Vec<String>> {
+        static LOG: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+        LOG.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    pub(crate) fn record(dispatch_id: &str) {
+        if let Ok(mut entries) = log().lock() {
+            entries.push(dispatch_id.to_string());
+        }
+    }
+
+    /// How many observability events this dispatch id has emitted in this
+    /// process so far.
+    pub(crate) fn emit_count(dispatch_id: &str) -> usize {
+        log()
+            .lock()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|entry| entry.as_str() == dispatch_id)
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+}
+
 impl CancelTransitionMeta {
     pub(crate) fn emit(&self) {
+        // The only observable trace of this call; see [`emit_probe`].
+        #[cfg(test)]
+        emit_probe::record(&self.dispatch_id);
         crate::services::observability::emit_dispatch_result(
             &self.dispatch_id,
             self.kanban_card_id.as_deref(),
