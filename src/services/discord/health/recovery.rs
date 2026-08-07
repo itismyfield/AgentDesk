@@ -18,8 +18,15 @@ use super::snapshot::WatcherStateSnapshot;
 use super::{relay_auto_heal, relay_dead_reattach, stall_liveness, watcher_respawn};
 
 mod leak_recovery_ledger;
+// #5147: the process self-watchdog and its four timing constants, moved out
+// of this file verbatim. `recovery.rs` recovers channels; this force-exits the
+// process, and the two share no state. Public so a later change can assert the
+// constants by importing them.
+pub(crate) mod self_watchdog;
 mod stall_alert;
 mod watchdog_decisions;
+
+pub use self_watchdog::spawn_watchdog;
 
 use leak_recovery_ledger::{
     LeakRecoveryLedgerIdentity, leak_recovery_clear_chunk_ledger,
@@ -1657,108 +1664,6 @@ mod rebind_error_status_tests {
         assert_eq!(status, "400 Bad Request");
         assert!(message.contains("non-zero"));
     }
-}
-
-/// Self-watchdog: runs on a dedicated OS thread (not tokio) to detect
-/// runtime hangs.  Periodically opens a raw TCP connection to the server
-/// port and expects a response within a few seconds.  If the check fails
-/// `max_failures` times in a row the process is force-killed so launchd
-/// (or systemd) can restart it.
-pub fn spawn_watchdog(port: u16) {
-    const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-    const TCP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-    const MAX_FAILURES: u32 = 3;
-    // Grace period: skip checks for the first 30s after startup so the
-    // runtime has time to initialise Discord bots and register providers.
-    const STARTUP_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
-
-    std::thread::Builder::new()
-        .name("health-watchdog".into())
-        .spawn(move || {
-            std::thread::sleep(STARTUP_GRACE);
-
-            let mut consecutive_failures: u32 = 0;
-
-            loop {
-                std::thread::sleep(CHECK_INTERVAL);
-
-                let ok = (|| -> bool {
-                    use std::io::{Read, Write};
-                    let loopback = crate::config::loopback();
-                    let addr = format!("{loopback}:{port}");
-                    let mut stream =
-                        match std::net::TcpStream::connect_timeout(
-                            &addr.parse().unwrap(),
-                            TCP_TIMEOUT,
-                        ) {
-                            Ok(s) => s,
-                            Err(_) => return false,
-                        };
-                    let _ = stream.set_read_timeout(Some(TCP_TIMEOUT));
-                    let _ = stream.set_write_timeout(Some(TCP_TIMEOUT));
-                    let req = format!("GET /api/health HTTP/1.1\r\nHost: {loopback}\r\nConnection: close\r\n\r\n");
-                    if stream.write_all(req.as_bytes()).is_err() {
-                        return false;
-                    }
-                    let mut buf = [0u8; 512];
-                    match stream.read(&mut buf) {
-                        Ok(n) if n > 0 => {
-                            // Any HTTP response means the process is alive and serving.
-                            // Only TCP failure (Err/_) indicates a true hang/deadlock.
-                            // A 503 (degraded/unhealthy state) still means the runtime is
-                            // responsive — killing it would create an infinite crash loop
-                            // when a provider is temporarily disconnected.
-                            true
-                        }
-                        _ => false,
-                    }
-                })();
-
-                if ok {
-                    if consecutive_failures > 0 {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!(
-                            "  [{ts}] 🩺 watchdog: health recovered after {consecutive_failures} failure(s)"
-                        );
-                    }
-                    consecutive_failures = 0;
-                } else {
-                    consecutive_failures += 1;
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!(
-                        "  [{ts}] 🩺 watchdog: health check failed ({consecutive_failures}/{MAX_FAILURES})"
-                    );
-                    if consecutive_failures >= MAX_FAILURES {
-                        tracing::warn!(
-                            "  [{ts}] 🩺 watchdog: runtime unresponsive — capturing diagnostics before exit"
-                        );
-                        // Capture process dump for post-mortem analysis (platform-aware)
-                        // Write to runtime root's logs/ dir so dumps survive /tmp cleanup
-                        let pid = std::process::id();
-                        let dump_dir = crate::agentdesk_runtime_root()
-                            .map(|r| r.join("logs"))
-                            .unwrap_or_else(|| std::env::temp_dir());
-                        let _ = std::fs::create_dir_all(&dump_dir);
-                        let dump_path = format!(
-                            "{}/adk-hang-{}-{}.txt",
-                            dump_dir.display(),
-                            pid,
-                            chrono::Local::now().format("%Y%m%d-%H%M%S")
-                        );
-                        match crate::services::platform::capture_process_dump(pid, &dump_path) {
-                            Ok(()) => tracing::warn!(
-                                "  [{ts}] 🩺 watchdog: dump saved to {dump_path} — forcing exit"
-                            ),
-                            Err(e) => tracing::warn!(
-                                "  [{ts}] 🩺 watchdog: dump capture failed ({e}) — forcing exit without diagnostics"
-                            ),
-                        }
-                        std::process::exit(1);
-                    }
-                }
-            }
-        })
-        .expect("Failed to spawn watchdog thread");
 }
 
 /// Run a single stall-watchdog pass against one provider+SharedData.

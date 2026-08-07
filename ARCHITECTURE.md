@@ -522,6 +522,7 @@ src/
 │   │   ├── health/
 │   │   │   ├── recovery/
 │   │   │   │   ├── leak_recovery_ledger.rs
+│   │   │   │   ├── self_watchdog.rs
 │   │   │   │   ├── stall_alert.rs
 │   │   │   │   └── watchdog_decisions.rs
 │   │   │   ├── stall_liveness/
