@@ -902,7 +902,15 @@ fi
 # assertion claimed to block. Compare the whole command line instead, as a
 # fixed string, with the YAML block indentation normalised away.
 LANE_COMMAND='python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 2 --skip _pg --skip pg_ --skip postgres -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- --skip _pg --skip pg_ --skip postgres'
-if ! sed 's/^[[:space:]]*//' "$WORKFLOW" | grep -qxF "$LANE_COMMAND"; then
+# `grep -q` exits the moment it matches, which closes the pipe while `sed`
+# still has the rest of the file to write. GNU sed reports that as
+# "couldn't flush stdout: Broken pipe" and exits non-zero; under the
+# `set -o pipefail` above, that non-zero becomes the pipeline's status and
+# this assertion fails *because the pin was found*. BSD sed on the
+# development machines finished writing first, so the suite was green
+# locally and red on ubuntu-latest. Dropping `-q` makes grep read to EOF,
+# so sed always completes and the status reflects the match alone.
+if ! sed 's/^[[:space:]]*//' "$WORKFLOW" | grep -xF "$LANE_COMMAND" >/dev/null; then
     fail_test "ci-pr.yml must run the non-pg-sweep lane through the gate with exactly the pinned command"
 else pass_test
 fi
