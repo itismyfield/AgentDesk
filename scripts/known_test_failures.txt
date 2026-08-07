@@ -101,6 +101,44 @@ flaky | services::discord::voice_barge_in::tests::pcm_harness_tests::voice_intak
 flaky | services::discord::voice_barge_in::tests::pcm_harness_tests::voice_intake_chime_fires_even_when_turn_start_fails | lane=non-pg-sweep | #5185 | parallel-only: the harness asserts against process-global voice flight-event and TTS-playback recorders that parallel siblings write to. Passes under --test-threads=1. expires=2026-11-06
 #
 # ---------------------------------------------------------------------------
+# Linux-only, and newly EXPOSED -- not pre-existing. The distinction is the
+# whole reason this section is separate from the base-red one above.
+#
+# These three had never executed on Linux CI at all. Verified at origin/main
+# `31465b184` (CI Main run 31135762037, conclusion SUCCESS) by grepping both
+# ubuntu jobs' full logs for each id: `Full tests (ubuntu-latest)`, 114,843
+# lines, zero occurrences; `PostgreSQL tests`, 3,399 lines, zero occurrences.
+# `Full tests` runs a curated module filter and no lane selected these ids.
+#
+# Nor does this change reach them. `git diff --name-only origin/main...HEAD`
+# contains neither `src/services/discord/jsonl_watcher.rs` nor
+# `src/services/platform/tmux.rs`. It does touch `src/services/tmux_common.rs`,
+# which the tmux test below calls -- but only inside `mod sentinel_tests`, and
+# only to replace one sibling test's hand-rolled env save/restore with guards
+# that also restore on unwind. `session_dead_marker_path` and
+# `cleanup_session_temp_files` are untouched, and the edit strictly reduces
+# cross-test env leakage. The same holds for the other adjacent files in the
+# diff: every change near this call graph is `#[cfg(test)]`.
+#
+# So the honest label is the one the `library_sweep` job was built to produce:
+# widening the lane ran tests that nothing had been running, and three of them
+# fail on Linux. Writing "pre-existing" or "base-red" here would be the same
+# species of overclaim this change exists to close -- there is no prior Linux
+# verdict for them to pre-exist.
+#
+# All three are `flaky` rather than `always`, for the reason the parallel-only
+# section states about itself: `always` asserts a deterministic verdict and its
+# stale check turns a PASSING run into a hard lane failure, and one observation
+# on one runner does not establish determinism. `flaky` absorbs the failure
+# either way; `always` would make the lane red on precisely the runs where
+# nothing is wrong. Tracked in #5217, which already carries the four macOS
+# members of this same class.
+# ---------------------------------------------------------------------------
+flaky | services::discord::jsonl_watcher::tests::notify_fires_when_file_modified | lane=non-pg-sweep | #5217 | Linux-only, newly exposed by the library_sweep job rather than pre-existing: zero occurrences in either ubuntu job log at origin/main 31465b184, so it has no prior Linux verdict. Lost-wakeup shape, and the mechanism half is grounded in the source rather than guessed: the watcher fires with notify_waiters(), which this file documents at jsonl_watcher.rs:110 and which drops the wake-up entirely when no waiter is registered, while the test tokio::spawns its waiter on a current_thread runtime and then performs a blocking std::fs::write before ever awaiting, so the waiter cannot have registered when the event lands. Whether it registers in time is backend latency and that half is PRESUMED, not measured: inotify delivers promptly where the darwin backend coalesces, which would explain why darwin sweeps never saw it. Deliberately not diagnosed further here; this change tracks it rather than fixing it. expires=2026-11-06
+flaky | services::discord::jsonl_watcher::tests::jsonl_watcher_notifies_on_dead_marker_create | lane=non-pg-sweep | #5217 | Linux-only, newly exposed by the library_sweep job rather than pre-existing: zero occurrences in either ubuntu job log at origin/main 31465b184. Same lost-wakeup shape as its sibling above and in the same module, differing only in that the awaited event is the creation of a pane_dead marker rather than a modify of an existing jsonl file. The notify_waiters() drop-when-unregistered behaviour is documented in the source; the platform latency that decides whether the waiter registers first is PRESUMED and not measured. Not diagnosed further in this change. expires=2026-11-06
+flaky | services::platform::tmux::live_pane_tests::dead_marker_hook_writes_marker_on_pane_exit | lane=non-pg-sweep | #5217 | Linux-only, newly exposed by the library_sweep job rather than pre-existing: zero occurrences in either ubuntu job log at origin/main 31465b184. The test creates a real tmux session, kills it, and polls for up to ten seconds for the pane-dead marker the tmux hook should write; on the runner the marker never appeared. Its own is_available() guard returns early when tmux is absent, so tmux was present and the hook itself did not deliver. Cause PRESUMED to be a tmux version or hook-wiring difference between ubuntu-latest and the darwin development machines, and explicitly not measured. Worth recording for whoever picks up #5217: this test hand-rolls the same save-and-restore-after-the-assertions env pattern that this change replaced with unwind-safe guards one module over in tmux_common sentinel_tests, so a failure here leaks AGENTDESK_ROOT_DIR into whatever runs next. That is an observation about the test, not the cause of this failure. expires=2026-11-06
+#
+# ---------------------------------------------------------------------------
 # #[ignore]d tests. These are pinned as a set: the lane fails if a test reports
 # itself ignored without an entry here, and fails if an entry here is no longer
 # reported ignored. `#[ignore]` is otherwise a silent way to keep a lane's

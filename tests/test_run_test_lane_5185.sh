@@ -896,6 +896,101 @@ if [ "$rc" -ne 0 ]; then
 else pass_test
 fi
 
+# --------------------------------------------------------------------------
+# 11b. The three Linux-only failures that the `library_sweep` job exposed must
+#      be absorbed by the shipped ledger, and absorbed as `flaky`. Both
+#      directions matter and both are pinned here. If an id stops matching an
+#      entry, the job goes red with `unexpected` and the lane cannot land. If
+#      one were recorded as `always` instead, the stale check would turn a run
+#      where they PASS into a hard lane failure -- and determinism has not been
+#      established for any of the three, so that run is expected to happen.
+# --------------------------------------------------------------------------
+EXPOSED_IDS='services::discord::jsonl_watcher::tests::notify_fires_when_file_modified
+services::discord::jsonl_watcher::tests::jsonl_watcher_notifies_on_dead_marker_create
+services::platform::tmux::live_pane_tests::dead_marker_hook_writes_marker_on_pane_exit'
+
+rc=0
+"$PYTHON" - "$REPO_ROOT/scripts" "$REAL_LEDGER" "$EXPOSED_IDS" >"$OUT" 2>&1 <<'PY' || rc=$?
+import datetime, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from run_test_lane import parse_ledger
+
+today = datetime.date.today()
+entries, errors = parse_ledger(Path(sys.argv[2]), "non-pg-sweep", today)
+for error in errors:
+    print(f"ledger error: {error}")
+if errors:
+    sys.exit(1)
+failures = []
+for test_id in sys.argv[3].splitlines():
+    matched = [e for e in entries if e.mode != "ignored" and e.matches(test_id)]
+    if len(matched) != 1:
+        failures.append(f"{test_id}: expected exactly one entry, got {len(matched)}")
+        continue
+    entry = matched[0]
+    if entry.mode != "flaky":
+        failures.append(f"{test_id}: expected mode flaky, got {entry.mode}")
+    if entry.pattern != test_id:
+        failures.append(f"{test_id}: entry must name the exact id, got {entry.pattern}")
+    if entry.expires is None or entry.expires <= today:
+        failures.append(f"{test_id}: flaky entry needs a future expiry, got {entry.expires}")
+for failure in failures:
+    print(failure)
+if failures:
+    sys.exit(1)
+print("library_sweep linux exposures absorbed as flaky=3")
+PY
+if [ "$rc" -ne 0 ]; then
+    fail_test "the ledger must absorb the three Linux-only library_sweep exposures as flaky (rc=$rc): $(cat "$OUT")"
+else pass_test
+fi
+
+# --------------------------------------------------------------------------
+# 11c. Those three entries must keep saying WHY they are admissible. They are
+#      the first entries this repository admits on the strength of "the lane
+#      had never run them", and that basis is only checkable if the entry
+#      names the evidence. An entry rewritten to claim they were base-red
+#      would be the overclaim this whole change exists to close: there is no
+#      prior Linux verdict for them to pre-exist, and the ledger would then be
+#      resting on a false one.
+# --------------------------------------------------------------------------
+rc=0
+"$PYTHON" - "$REPO_ROOT/scripts" "$REAL_LEDGER" "$EXPOSED_IDS" >"$OUT" 2>&1 <<'PY' || rc=$?
+import datetime, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from run_test_lane import parse_ledger
+
+entries, errors = parse_ledger(Path(sys.argv[2]), "non-pg-sweep", datetime.date.today())
+if errors:
+    for error in errors:
+        print(f"ledger error: {error}")
+    sys.exit(1)
+by_pattern = {entry.pattern: entry for entry in entries}
+failures = []
+for test_id in sys.argv[3].splitlines():
+    entry = by_pattern.get(test_id)
+    if entry is None:
+        failures.append(f"{test_id}: no entry naming this exact id")
+        continue
+    if "newly exposed" not in entry.reason:
+        failures.append(f"{test_id}: reason must state that it is newly exposed")
+    if "31465b184" not in entry.reason:
+        failures.append(f"{test_id}: reason must cite the main commit that was checked")
+    if entry.issue != "#5217":
+        failures.append(f"{test_id}: expected tracking issue #5217, got {entry.issue}")
+for failure in failures:
+    print(failure)
+if failures:
+    sys.exit(1)
+print("library_sweep linux exposures carry their provenance=3")
+PY
+if [ "$rc" -ne 0 ]; then
+    fail_test "the three exposure entries must cite why they are admissible (rc=$rc): $(cat "$OUT")"
+else pass_test
+fi
+
 # A substring match is not a pin. `--skip postgres --` is a prefix of
 # `--skip postgres --skip turn_bridge`, so the `grep -q` that used to stand
 # here accepted a lane narrowed by an extra skip -- the exact evasion the
