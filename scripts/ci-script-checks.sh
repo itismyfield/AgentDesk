@@ -89,6 +89,17 @@ echo "=== DeliveryJournal raw-writer allowlist ==="
 "$PYTHON" scripts/check_delivery_journal_raw_writer.py
 "$PYTHON" -m unittest tests.test_delivery_journal_raw_writer
 
+echo "=== Durable frontier writer per-file call-site allowlist (#5071) ==="
+# Built for #5071 T1 S7, which changes the recovery path's durable behaviour.
+# Nothing in the repo pinned WHERE these writer symbols are called from, so this
+# fixes an exact per-file count for each of them over all of src/ before that
+# behaviour moves. It changes no production behaviour itself. Lexical scan: it
+# does not see `use .. as` aliases, renamed re-exports, or name-constructing
+# macros -- the script's docstring declares those holes and the unittest module
+# measures each one.
+"$PYTHON" scripts/check_durable_frontier_writer_call_sites.py
+"$PYTHON" -m unittest tests.test_durable_frontier_writer_call_sites
+
 echo "=== Hotfile LOC ratchet guard (#3565) ==="
 "$PYTHON" scripts/check_hotfile_ratchet.py
 "$PYTHON" -m unittest scripts.test_ratchet_admission
