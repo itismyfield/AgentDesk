@@ -957,11 +957,10 @@ mod tests {
         // unwinds, and a hand-rolled cleanup at the bottom of the test would
         // then leak the forced answer into the process-global override map --
         // the same shape this branch removed from `tmux_common.rs`.
-        let _liveness_override =
-            crate::services::tmux_diagnostics::PaneLivenessOverrideGuard::set(
-                tmux,
-                crate::services::platform::tmux::PaneLiveness::DeadOrAbsent,
-            );
+        let _liveness_override = crate::services::tmux_diagnostics::PaneLivenessOverrideGuard::set(
+            tmux,
+            crate::services::platform::tmux::PaneLiveness::DeadOrAbsent,
+        );
 
         sqlx::query(
             "INSERT INTO sessions
