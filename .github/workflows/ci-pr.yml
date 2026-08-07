@@ -850,10 +850,15 @@ jobs:
   #
   # This lane raises that floor to the whole library harness minus the tests
   # `--skip _pg --skip pg_ --skip postgres` removes, run in parallel on the
-  # broad `rust_or_policy` filter: 6,971 tests selected on ubuntu-latest, of
-  # which 8 are `#[ignore]`d, so 6,963 execute. Those three figures are derived
-  # from `scripts/lib_test_inventory_manifest.txt` at THIS commit, and this
-  # lane's own summary reported `expected=6971 ignored=8 executed=6963`. They
+  # broad `rust_or_policy` filter: 6,977 tests selected on ubuntu-latest, of
+  # which 8 are `#[ignore]`d, so 6,969 execute. Those three figures are derived
+  # from `scripts/lib_test_inventory_manifest.txt` at THIS commit. The newest
+  # figures a real run of this lane has REPORTED are one commit older: at
+  # 6c2c43634 its summary read `expected=6971 ignored=8 executed=6963`, and the
+  # difference is the 6 non-PG library tests #5142 added under
+  # `server::routes::health_api::tests` (4),
+  # `server::worker_registry::leader_takeover_tests` (1) and
+  # `services::health_diagnostics::tests` (1). They
   # track the manifest, so a later PR that adds or removes a library test dates
   # them; what enforces the set is `run_test_lane.py`, which recomputes it every
   # run and names the difference. Read these as orientation, not as a gate.
@@ -861,7 +866,7 @@ jobs:
   # across five sweeps (an earlier
   # revision of this comment claimed "~1 min", which was never measured);
   # a two-core `ubuntu-latest` runner is slower still, which is what the
-  # 45-minute step timeout is sized for. darwin derives 6,974 / 6,966 from the
+  # 45-minute step timeout is sized for. darwin derives 6,980 / 6,972 from the
   # same manifest because four macOS-only tests are `#[cfg]`-absent on Linux
   # while one Linux-only test is present; the wrapper resolves that through
   # `--platform`, which defaults to the host, so the runner derives the Linux
@@ -870,13 +875,22 @@ jobs:
   # THIS JOB NEEDS POSTGRESQL, even though its filters are named for excluding
   # it. `--skip _pg --skip pg_ --skip postgres` is a substring filter over test
   # ids, and PostgreSQL dependence is a property of a test *body*. The two do
-  # not coincide: `scripts/pg_test_lane_manifest.txt` classifies 460 library
+  # not coincide: `scripts/pg_test_lane_manifest.txt` classifies 477 library
   # tests as PG-dependent and 55 of them carry none of those three substrings
   # in their id, so this lane selects those 55. That residual was 61 until
   # #5218 renamed `server::multinode_regression::tests` (5 ids) and the
   # Postgres half of `server::issue_specs::tests` (1 id) into `_pg_` modules,
   # which handed those 6 to the id-filtered `test_fast` lane; the count moves
   # again whenever a module gains or loses a lane token.
+  #
+  # The two counts move independently, and #5142 is the worked example: it took
+  # the PG-dependent total from 460 to 477 while leaving the residual at 55 --
+  # the same 55 ids, not merely the same count. Its 17 new PG-dependent tests
+  # all live in `services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests`
+  # and every id ends in `_pg`, so the substring filter removes all of them and
+  # this lane's selection is unchanged by them. Growth in the PG total is
+  # therefore not evidence that this lane's PG obligation grew; only a test
+  # whose id lacks all three tokens can change that.
   #
   # The three measurements below were taken against the 61-id set, before that
   # rename. They are kept rather than rerun because what they establish is
@@ -980,7 +994,7 @@ jobs:
   #     nothing.
   #   * `DATABASE_URL` is deliberately NOT exported here even though `test_fast`
   #     and `high-risk-recovery` export it. Those lanes select hundreds of tests;
-  #     this one selects 6,971 and executes 6,963, and the fixture helpers read
+  #     this one selects 6,977 and executes 6,969, and the fixture helpers read
   #     `POSTGRES_TEST_DATABASE_URL_BASE`/`PG*`, not `DATABASE_URL` -- the 55
   #     pass without it. Exporting a production connection string across the
   #     whole harness is a blast radius that was not measured, so it is not
