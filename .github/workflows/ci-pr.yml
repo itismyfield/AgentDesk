@@ -850,12 +850,18 @@ jobs:
   #
   # This lane raises that floor to the whole library harness minus the tests
   # `--skip _pg --skip pg_ --skip postgres` removes, run in parallel on the
-  # broad `rust_or_policy` filter: 6,934 tests selected on ubuntu-latest, of
-  # which 8 are `#[ignore]`d, so 6,926 execute. Measured wall time for the
-  # libtest run itself on an M4 Pro: 262-274 s across five sweeps (an earlier
+  # broad `rust_or_policy` filter: 6,971 tests selected on ubuntu-latest, of
+  # which 8 are `#[ignore]`d, so 6,963 execute. Those three figures are derived
+  # from `scripts/lib_test_inventory_manifest.txt` at THIS commit, and this
+  # lane's own summary reported `expected=6971 ignored=8 executed=6963`. They
+  # track the manifest, so a later PR that adds or removes a library test dates
+  # them; what enforces the set is `run_test_lane.py`, which recomputes it every
+  # run and names the difference. Read these as orientation, not as a gate.
+  # Measured wall time for the libtest run itself on an M4 Pro: 262-274 s
+  # across five sweeps (an earlier
   # revision of this comment claimed "~1 min", which was never measured);
   # a two-core `ubuntu-latest` runner is slower still, which is what the
-  # 45-minute step timeout is sized for. darwin derives 6,937 / 6,929 from the
+  # 45-minute step timeout is sized for. darwin derives 6,974 / 6,966 from the
   # same manifest because four macOS-only tests are `#[cfg]`-absent on Linux
   # while one Linux-only test is present; the wrapper resolves that through
   # `--platform`, which defaults to the host, so the runner derives the Linux
@@ -865,31 +871,45 @@ jobs:
   # it. `--skip _pg --skip pg_ --skip postgres` is a substring filter over test
   # ids, and PostgreSQL dependence is a property of a test *body*. The two do
   # not coincide: `scripts/pg_test_lane_manifest.txt` classifies 460 library
-  # tests as PG-dependent and exactly 61 of them carry none of those three
-  # substrings in their id, so this lane selects all 61. Measured with the
-  # fixture base pointed at a closed port, those 61 do not degrade to a skip --
-  # `TestPostgresDb::create()` panics through `.expect(...)` and the soft-skip
-  # variants stall on connect retries for minutes each. Against a live server
-  # they were measured `61 passed; 0 failed` in 24.8 s, in parallel, with
+  # tests as PG-dependent and 55 of them carry none of those three substrings
+  # in their id, so this lane selects those 55. That residual was 61 until
+  # #5218 renamed `server::multinode_regression::tests` (5 ids) and the
+  # Postgres half of `server::issue_specs::tests` (1 id) into `_pg_` modules,
+  # which handed those 6 to the id-filtered `test_fast` lane; the count moves
+  # again whenever a module gains or loses a lane token.
+  #
+  # The three measurements below were taken against the 61-id set, before that
+  # rename. They are kept rather than rerun because what they establish is
+  # FIXTURE BEHAVIOUR -- a property of each test body, which the rename did not
+  # touch. Measured with the fixture base pointed at a closed port, those ids
+  # do not degrade to a skip -- `TestPostgresDb::create()` panics through
+  # `.expect(...)` and the soft-skip variants stall on connect retries for
+  # minutes each. Against a live server the 61 were measured
+  # `61 passed; 0 failed` in 24.8 s, in parallel, with
   # `AGENTDESK_REQUIRE_PG=1` -- on ONE development machine, server version
   # unrecorded. Both numbers are conditional on that host, and neither is a
   # property of this lane:
   #   * `0 failed` is not a guarantee. A review on another machine measured
   #     60 passed / 1 failed, the loser being the `multinode_regression`
   #     dispatch/reclaim test that `scripts/known_test_failures.txt` carries as
-  #     `flaky` in this same commit -- an intra-test race that reproduces under
-  #     `--exact` on an idle machine. `60 passed; 1 failed` is an expected
-  #     shape here, held green by the ledger rather than by the test passing.
+  #     `flaky` -- an intra-test race that reproduces under `--exact` on an idle
+  #     machine. That worked example no longer describes THIS lane: #5218 moved
+  #     that id into `test_fast`, and its ledger entry now prints here as
+  #     `ledger-note: ... selected no test in lane non-pg-sweep`. Measured at
+  #     this commit, no `lane=non-pg-sweep` ledger entry matches any of the 55,
+  #     so a failure among them is reported `unexpected` and turns this lane red
+  #     instead of being held green by the ledger.
   #   * 24.8 s is not a budget. `POSTGRES_TEST_LIFECYCLE_LOCK`
   #     (`src/db/postgres.rs`) serialises every fixture database create/drop
   #     process-globally, so the elapsed time is whatever one
   #     create+migrate+drop costs on the host; a two-core `ubuntu-latest`
   #     runner is expected to be far slower, and that is not a regression.
   # What is host-independent is the direction, and that is all this evidence is
-  # asked to carry: with a live server the 61 run and are adjudicated on the
+  # asked to carry: with a live server the 55 run and are adjudicated on the
   # change. With a closed port they still run -- one review measured `57 FAILED
-  # / 4 ok` in 915.72 s. What that red reports can be listed, and the list is
-  # short: which of the two fixture behaviours each id takes -- `create()`
+  # / 4 ok` in 915.72 s, against the 61-id set of the time. What that red
+  # reports can be listed, and the list is short: which of the two fixture
+  # behaviours each id takes -- `create()`
   # panicking through `.expect(...)`, or a soft-skip variant burning its
   # connect-retry budget -- and that the port was closed. Which of the two a
   # given id does is a property of the test, not of the diff. What it does not
@@ -898,11 +918,11 @@ jobs:
   #
   # It does not follow that such a run says nothing about a change, and an
   # earlier revision of this comment claimed exactly that. The lines before the
-  # fixture call are diffable, and this branch diffs them: three of the 61 live
-  # in `src/services/session_resume.rs`, which this branch edits, and
+  # fixture call are diffable, and that branch diffed them: three of the 55 live
+  # in `src/services/session_resume.rs`, which that branch edited, and
   # `resume_production_path_clears_stale_binding_and_rebinds_runtime` there now
   # takes its `TEST_LOCK` with `unwrap_or_else(|poison| poison.into_inner())`
-  # on the line above its own `TestPostgresDb::create()` call. A closed port is
+  # before its own `TestPostgresDb::create()` call. A closed port is
   # what makes that `create()` panic, and that panic is what poisons the lock
   # the edit exists to survive -- so against a closed port the fixture, not the
   # assertion, decides what that edit is worth. State the harm that way: the
@@ -910,10 +930,16 @@ jobs:
   # question than the pull request asked.
   #
   # So the service below is not defensive: without it
-  # this required context can never be green, and with it the 56 of those 61
-  # that no PR lane ran at all (`[rule1]` in
-  # `scripts/pg_test_lane_baseline.txt`, now empty) start running on every Rust
-  # PR against a real database.
+  # this required context can never be green, and with it ids that no PR lane
+  # ran at all start running on every Rust PR against a real database. The
+  # count, measured rather than asserted: `[rule1]` of
+  # `scripts/pg_test_lane_baseline.txt` held 56 such ids at 31465b184, the last
+  # commit before this lane emptied it, and 55 of the 55 residual ids above are
+  # among those 56. The 56th is
+  # `server::issue_specs::tests::upsert_issue_spec_persists_parsed_contract`,
+  # which #5218 renamed into `issue_specs_pg_tests` and thereby handed to
+  # `test_fast`; it is still run by a PR lane, which is why `[rule1]` stays
+  # empty rather than regaining an entry.
   #
   # `scripts/check_pg_test_lane_membership.py` `[rule5]` is what keeps the
   # SELECTION honest -- the selection, and nothing beyond it. What the rule
@@ -949,13 +975,13 @@ jobs:
   #     either a huge isolation ledger or a re-narrowed filter.
   #   * The id-filtered PostgreSQL suite keeps its existing home in `test_fast`
   #     / `just test-postgres`: that lane runs it `--test-threads=1` under its
-  #     own container. This lane provisions its own container for the 61
+  #     own container. This lane provisions its own container for the 55
   #     residual ids only; the two jobs run on separate runners and share
   #     nothing.
   #   * `DATABASE_URL` is deliberately NOT exported here even though `test_fast`
   #     and `high-risk-recovery` export it. Those lanes select hundreds of tests;
-  #     this one selects 6,926, and the fixture helpers read
-  #     `POSTGRES_TEST_DATABASE_URL_BASE`/`PG*`, not `DATABASE_URL` -- the 61
+  #     this one selects 6,971 and executes 6,963, and the fixture helpers read
+  #     `POSTGRES_TEST_DATABASE_URL_BASE`/`PG*`, not `DATABASE_URL` -- the 55
   #     pass without it. Exporting a production connection string across the
   #     whole harness is a blast radius that was not measured, so it is not
   #     claimed.
