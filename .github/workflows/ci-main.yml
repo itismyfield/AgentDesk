@@ -42,6 +42,21 @@ jobs:
           filters: |
             high_risk_recovery:
               - '.github/workflows/**'
+              # #5147: mirrors ci-pr.yml. `[profile.release]` is guarded by a
+              # test in this lane, so the manifest that test reads has to be
+              # able to trigger it here too -- otherwise the guard is absent
+              # from main entirely, which is the #5185 class of defect.
+              #
+              # NO-OP, same as in ci-pr.yml: the
+              # `'!src/services/discord/placeholder_live_events/**'` line below
+              # already makes this filter effectively always true, because
+              # dorny/paths-filter@v3 ORs one picomatch matcher per pattern and
+              # a leading `!` is just a matcher for "anything that is not
+              # this". These patterns run nothing new; they record which files
+              # the lane guards, and become load-bearing once that `!` line is
+              # fixed (a separate change -- narrowing the filter would silently
+              # stop running whatever relies on it being always-true).
+              - 'Cargo.toml'
               - 'policies/auto-queue.js'
               - 'policies/kanban-rules.js'
               - 'policies/timeouts.js'
@@ -64,6 +79,10 @@ jobs:
               - 'src/services/scheduled_messages.rs'
               - 'src/services/discord/**'
               - '!src/services/discord/placeholder_live_events/**'
+              # #5147: see ci-pr.yml. Inert today -- see the `!` note above.
+              - 'src/cli/dcserver.rs'
+              - 'src/services/hang_forensics.rs'
+              - 'src/services/health_diagnostics.rs'
               - 'src/services/message_outbox.rs'
               - 'src/services/platform/tmux.rs'
               - 'src/services/tmux_common.rs'
@@ -253,6 +272,15 @@ jobs:
 
       - name: High-risk recovery lane
         run: "cargo test --lib high_risk_recovery:: -- --test-threads=1"
+
+      # #5147: the self-watchdog forensics guards. Adding them to the path
+      # filter alone would have changed nothing on main -- this job ran exactly
+      # one target, so the filter had no test to select. `just check` does not
+      # reach these either; `test-non-pg` is a curated list, not a lib sweep.
+      - name: Watchdog hang-forensics guards
+        run: |
+          cargo test --lib services::hang_forensics::tests -- --test-threads=1
+          cargo test --lib services::health_diagnostics::tests -- --test-threads=1
 
       - name: Stop PostgreSQL service
         if: always()

@@ -41,6 +41,7 @@ pub mod escalation_settings;
 pub mod gemini;
 pub mod git;
 pub mod github_issue_creation;
+pub(crate) mod hang_forensics;
 pub mod health_active_session_audit;
 pub mod health_diagnostics;
 pub mod issue_announcements;

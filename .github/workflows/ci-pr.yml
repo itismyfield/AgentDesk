@@ -77,6 +77,27 @@ jobs:
               - 'scripts/verify-dashboard.sh'
             high_risk_recovery:
               - '.github/workflows/**'
+              # #5147: this lane owns the self-watchdog's kill-time forensics,
+              # and one of those tests asserts on `[profile.release]` -- it is
+              # what stops `strip = true` (which erased the Mach-O symbol table
+              # and stalled #4756/#4770/#5147) from coming back. A guard whose
+              # own subject cannot trigger it is the #5185 defect, so the files
+              # under guard are listed here alongside the tests.
+              #
+              # NO-OP, stated so nobody reads this filter as narrow: the
+              # `'!src/services/discord/placeholder_live_events/**'` line below
+              # already makes `high_risk_recovery` effectively always true.
+              # dorny/paths-filter@v3 is NOT GitHub's native `paths:` -- it
+              # compiles every pattern into its own picomatch matcher and ORs
+              # them (`matchers.some(...)`), so a leading `!` is just another
+              # positive matcher for "anything that is not this", and it matches
+              # nearly every changed file. The patterns #5147 adds here and
+              # below therefore change nothing about what runs; they are kept
+              # as a statement of which files this lane is meant to guard, and
+              # they become load-bearing the moment that `!` line is fixed.
+              # Fixing it is a separate change: narrowing the filter would
+              # silently stop running whatever has been relying on it.
+              - 'Cargo.toml'
               - 'policies/auto-queue.js'
               - 'policies/kanban-rules.js'
               - 'policies/timeouts.js'
@@ -103,6 +124,13 @@ jobs:
               - 'src/services/discord/outbound/source_registry.rs'
               - 'src/services/discord/**'
               - '!src/services/discord/placeholder_live_events/**'
+              # #5147: the forensics module, the health-path DB awaits it
+              # brackets, and the boot site that starts the self-watchdog (and
+              # with it the runtime beacon). Inert today -- see the `!` note
+              # above.
+              - 'src/cli/dcserver.rs'
+              - 'src/services/hang_forensics.rs'
+              - 'src/services/health_diagnostics.rs'
               - 'src/services/message_outbox.rs'
               - 'src/services/message_outbox_recovery.rs'
               - 'src/services/message_outbox_recovery_support.rs'
@@ -765,6 +793,15 @@ jobs:
           cargo test --lib services::discord::health::relay_dead_reattach::tests -- --test-threads=1
           cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1
           cargo test --lib services::discord::terminal_ui_obligation::tests -- --test-threads=1
+          # #5147: the self-watchdog's kill-time forensics. Belongs in the
+          # high-risk recovery lane because these tests are what stop the
+          # watchdog from silently regressing to a bare pass/fail probe — the
+          # exact blind spot that stalled #4756, #4770 and #5147.
+          cargo test --lib services::hang_forensics::tests -- --test-threads=1
+          # The other half of the same guard: that every Postgres await on the
+          # public /api/health path is still bracketed, so a kill line cannot
+          # report db_in_flight=0 while the handler is stuck inside one.
+          cargo test --lib services::health_diagnostics::tests -- --test-threads=1
 
       # #5034: watchdog/operational alerts are notifications, not queued turns;
       # run the sender-policy, attachment-delivery, catch-up, outbox-delivery,

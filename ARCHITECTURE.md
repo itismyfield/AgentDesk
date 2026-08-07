@@ -522,6 +522,7 @@ src/
 │   │   ├── health/
 │   │   │   ├── recovery/
 │   │   │   │   ├── leak_recovery_ledger.rs
+│   │   │   │   ├── self_watchdog.rs
 │   │   │   │   ├── stall_alert.rs
 │   │   │   │   └── watchdog_decisions.rs
 │   │   │   ├── stall_liveness/
@@ -1390,6 +1391,7 @@ src/
 │   ├── escalation_settings.rs
 │   ├── gemini.rs
 │   ├── github_issue_creation.rs
+│   ├── hang_forensics.rs
 │   ├── health_active_session_audit.rs
 │   ├── health_diagnostics.rs
 │   ├── issue_announcements.rs

@@ -580,7 +580,22 @@
 # `turn_finalizer::cleanup::remove_owned_role_override` guarded remove, so a
 # concurrent same-channel counter-model follow-up's override survives turn
 # cleanup. Decompose remains owned by the existing recovery surgery track.
-"src/services/discord/health/recovery.rs" = 2750
+# #5147: LOWERED 2750 -> 2660. The process self-watchdog (`spawn_watchdog` plus
+# its four timing constants) moved verbatim to
+# `health/recovery/self_watchdog.rs`, taking the file from 2737 to 2642
+# production LoC — 95 lines recovered. (2750 was the old *ceiling*, not the old
+# size; the file was 13 lines under it.) It never belonged here: `recovery.rs`
+# recovers *channels*, the watchdog force-exits the *process*, and the two share
+# no state. The move is also what lets a consumer import `TCP_TIMEOUT` /
+# `CHECK_INTERVAL` / `MAX_FAILURES` instead of `include_str!`-ing this file and
+# `str::contains`-ing their declaration text.
+#
+# The ceiling drops by 90 of those 95 lines, so headroom goes 13 -> 18 rather
+# than back to 0. That is deliberate: a ratchet pinned to a file's exact current
+# size means the next one-line correctness fix on the file this investigation is
+# most likely to touch fails a hard gate before it can be reviewed. Any use of
+# the 18 still shows as a diff on this line.
+"src/services/discord/health/recovery.rs" = 2660
 # inflight.rs was decomposed in #3835: the store-side CAS "save" cluster moved to
 # inflight/save_store.rs, the "clear" cluster to inflight/clear_store/mod.rs, and
 # the shared persist/lock + validate primitives to inflight/store.rs (each sub-1000
