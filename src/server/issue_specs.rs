@@ -403,5 +403,4 @@ mod issue_specs_pg_tests {
             .await
             .expect("drop issue_specs test database");
     }
-
 }

@@ -43,6 +43,53 @@ mod tests {
         format!("{}:{}", "127.0.0.1", "5432")
     }
 
+    /// The shared helper the four fixtures now depend on.
+    const SHARED_HELPER_SOURCE: &str = include_str!("../db/postgres.rs");
+
+    /// The contract has to be read inside the helper's own body. The identical
+    /// `AGENTDESK_REQUIRE_PG` comparison also appears in `require_pg_guard`
+    /// further down the same file, so a whole-file search reports the contract
+    /// as intact even after the helper's copy is gutted — a mutation that
+    /// replaced the helper's condition survived a whole-file assertion here
+    /// before this narrowing was added.
+    fn shared_helper_body() -> &'static str {
+        const SIGNATURE: &str =
+            "pub(crate) fn postgres_test_database_url_base() -> Option<String> {";
+        let start = SHARED_HELPER_SOURCE
+            .find(SIGNATURE)
+            .expect("db::postgres no longer defines postgres_test_database_url_base (#5218)");
+        let rest = &SHARED_HELPER_SOURCE[start..];
+        let end = rest
+            .find("\n}\n")
+            .expect("cannot find the end of postgres_test_database_url_base (#5218)");
+        &rest[..end]
+    }
+
+    /// The fixtures answer "no base configured" with a skip, which is only
+    /// defensible because the required lanes turn that same condition into a
+    /// panic. Nothing else in the tree pins that escalation, so deleting it
+    /// would silently downgrade every one of those lanes to a soft-skip green —
+    /// the exact failure mode this module exists to prevent. Asserted on the
+    /// source because the behaviour needs process-wide environment mutation,
+    /// which this module must not do while other tests run beside it.
+    #[test]
+    fn a_missing_fixture_base_stays_fatal_for_lanes_that_require_a_database() {
+        let body = shared_helper_body();
+        for fragment in [
+            "std::env::var(AGENTDESK_REQUIRE_PG_ENV).ok().as_deref() == Some(\"1\")",
+            "base.is_none()",
+            "panic!(\"PG required but POSTGRES_TEST_DATABASE_URL_BASE unset\")",
+        ] {
+            assert!(
+                body.contains(fragment),
+                "the body of postgres_test_database_url_base no longer contains \
+                 `{fragment}`; without it a missing fixture base stops being \
+                 fatal under AGENTDESK_REQUIRE_PG=1 and the fixtures' skip \
+                 becomes a silent green (#5218, #4979 S2)"
+            );
+        }
+    }
+
     #[test]
     fn cluster_fixtures_never_hardcode_a_database_server_address() {
         let needle = forbidden_address();
@@ -85,9 +132,19 @@ mod tests {
     #[test]
     fn cluster_fixtures_do_not_substitute_a_value_for_a_missing_base() {
         for (module, source) in FIXTURE_SOURCES {
-            for banned in ["postgres_test_database_url_base().unwrap", "PGUSER"] {
+            // Match against whitespace-stripped source: rustfmt puts a method
+            // chain on its own line as soon as it grows, and an assertion that
+            // only sees the single-line spelling would miss the reformatted one.
+            let dense: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+            for banned in [
+                "postgres_test_database_url_base().unwrap",
+                "postgres_test_database_url_base().unwrap_or",
+                "postgres_test_database_url_base().unwrap_or_else",
+                "postgres_test_database_url_base().unwrap_or_default",
+                "PGUSER",
+            ] {
                 assert!(
-                    !source.contains(banned),
+                    !dense.contains(banned),
                     "{module} contains `{banned}`; a missing fixture base must \
                      stay missing, not be substituted for (#5218)"
                 );
