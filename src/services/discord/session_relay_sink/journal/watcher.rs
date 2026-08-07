@@ -15,7 +15,6 @@ use poise::serenity_prelude::ChannelId;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::config::DeliveryJournalMode;
 use crate::services::discord::SharedData;
 use crate::services::discord::outbound::DiscordTransportReceipt;
 // The watcher lives under the `#[cfg(unix)] mod tmux`, so every item naming its
@@ -25,7 +24,7 @@ use crate::services::discord::tmux::tmux_watcher::terminal_long_chunks::GuardedW
 use crate::services::provider::ProviderKind;
 
 use super::{
-    AppendCommand, AttemptObservation, JOURNAL_NAMESPACE, JournalEvent, cohort_bucket, event,
+    AppendCommand, AttemptObservation, JOURNAL_NAMESPACE, JournalEvent, admit, event,
     process_observer, push_field,
 };
 
@@ -105,29 +104,6 @@ pub(super) fn watcher_obligation_id(
 pub(super) fn obligation_payload(coordinates: WatcherObligationCoordinates<'_>, disposition_class: &str) -> Value {
     json!({"source": "watcher", "disposition_class": disposition_class,
         "frontier_start": coordinates.range.0, "frontier_end": coordinates.range.1})
-}
-
-/// Shadow admission — mode, pool, cohort — in the same order and with the same
-/// meaning as the sink's `begin_fresh`.
-pub(super) fn admit(
-    shared: &SharedData,
-    channel_id: ChannelId,
-    obligation_id: Uuid,
-) -> Option<sqlx::PgPool> {
-    let runtime = crate::config_live_reload::current()?.runtime.clone();
-    if runtime.delivery_journal_mode != DeliveryJournalMode::Shadow {
-        return None;
-    }
-    let pool = shared.pg_pool.clone()?;
-    let internal = runtime
-        .delivery_journal_internal_channel_ids
-        .iter()
-        .any(|id| id == &channel_id.get().to_string());
-    if !internal && cohort_bucket(obligation_id) >= runtime.delivery_journal_cohort_percent.min(100)
-    {
-        return None;
-    }
-    Some(pool)
 }
 
 /// The `O`+`S` pair for one no-transport settlement.

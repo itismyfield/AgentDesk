@@ -35,6 +35,35 @@ pub(super) fn process_observer() -> &'static JournalObserver {
     &PROCESS_OBSERVER
 }
 
+/// Shadow admission — mode, pool, cohort — in the same order and with the same
+/// meaning as the sink's `begin_fresh`.
+///
+/// It lived in `journal::watcher` while the watcher was the only family that
+/// could not reach `begin_fresh`; #5071 T1 S4 adds the controller family, which
+/// needs the identical gate, so it moved to the shared parent for the same
+/// reason `PROCESS_OBSERVER` did in S3a. No behaviour change: the watcher call
+/// sites now spell it `super::admit`.
+pub(super) fn admit(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    obligation_id: Uuid,
+) -> Option<sqlx::PgPool> {
+    let runtime = crate::config_live_reload::current()?.runtime.clone();
+    if runtime.delivery_journal_mode != DeliveryJournalMode::Shadow {
+        return None;
+    }
+    let pool = shared.pg_pool.clone()?;
+    let internal = runtime
+        .delivery_journal_internal_channel_ids
+        .iter()
+        .any(|id| id == &channel_id.get().to_string());
+    if !internal && cohort_bucket(obligation_id) >= runtime.delivery_journal_cohort_percent.min(100)
+    {
+        return None;
+    }
+    Some(pool)
+}
+
 /// The type is visible to the whole `discord` module so the watcher facade can
 /// return what it emitted; every field stays private to `journal`, so no caller
 /// outside can read or construct one.
