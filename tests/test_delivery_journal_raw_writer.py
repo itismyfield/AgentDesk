@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 import tempfile
 import unittest
@@ -10,6 +11,16 @@ SCRIPT = ROOT / "scripts/check_delivery_journal_raw_writer.py"
 SPEC = importlib.util.spec_from_file_location("journal_writer_guard", SCRIPT)
 guard = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(guard)
+# #5071 T1 S6. The successor gate, imported READ-ONLY and never modified here.
+# `test_source_contract_no_pipe_gated_production_file_holds_delivery_work` takes
+# its writer vocabulary, its cross-line string/comment stripper and its
+# cfg(test) filter from this module rather than re-declaring them, so the two
+# gates cannot drift apart: a symbol added to S7' `EXPECTED_CALL_SITES` widens
+# the pipe co-existence pin in the same commit, for free.
+FRONTIER_SCRIPT = ROOT / "scripts/check_durable_frontier_writer_call_sites.py"
+FRONTIER_SPEC = importlib.util.spec_from_file_location("frontier_writer_guard", FRONTIER_SCRIPT)
+frontier = importlib.util.module_from_spec(FRONTIER_SPEC)
+FRONTIER_SPEC.loader.exec_module(frontier)
 FACADE_MARKERS = (
     " self.journal.begin_fresh();",
     " self.journal.begin_fresh();",
@@ -38,13 +49,46 @@ class RawWriterAllowlistTests(unittest.TestCase):
         # stay separated by function name. Using the real tokens here means the
         # fixture exercises ALL FOUR alternations of JOURNAL_FACADE_CALL, not
         # just the sink's.
+        #
+        # #5071 T1 S6: one marker per family, asserted rather than padded. Until
+        # S6 the loop fell back to "" for any family past the end of
+        # FACADE_MARKERS, which is how the sixth family was left uninstrumented
+        # in the fixture. With the baseline at 0 that fallback would now make
+        # every fixture-based test fail for an unrelated reason, so a new family
+        # arriving without a marker has to be loud here instead.
+        self.assertEqual(
+            len(FACADE_MARKERS),
+            len(guard.FAMILY_REGISTRY),
+            "every family needs its own fixture facade marker; the fixture baseline is 0",
+        )
         for index, (_, rel, symbol) in enumerate(guard.FAMILY_REGISTRY):
-            call = FACADE_MARKERS[index] if index < len(FACADE_MARKERS) else ""
-            write(root, rel, f"fn {symbol}() {{{call}}}\n")
+            write(root, rel, f"fn {symbol}() {{{FACADE_MARKERS[index]}}}\n")
         if extra:
             write(root, "src/services/discord/rogue.rs", extra)
         subprocess.run(["git", "add", "-A"], cwd=root, check=True)
         return root
+
+    # #5071 T1 S6. Before S6 the sixth family carried no facade marker, so the
+    # lexical-limit tests below could append their probe text to an
+    # already-uninstrumented anchor and watch it flip. Every family in the
+    # fixture is instrumented now, so those tests clear a marker first. The
+    # family they clear is arbitrary; index 4 (recovery) is used throughout so
+    # the diff reads as one substitution rather than five.
+    PROBE_FAMILY = 4
+
+    def uninstrument(self, root: Path, index: int) -> Path:
+        """Strip one family's fixture facade marker and return its anchor path."""
+        path = root / guard.FAMILY_REGISTRY[index][1]
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(FACADE_MARKERS[index], ""),
+            encoding="utf-8",
+        )
+        self.assertFalse(
+            guard.family_status(root)[0][index][1],
+            "clearing the marker must leave the family uninstrumented",
+        )
+        return path
+
     def test_exact_allowlist_passes(self):
         ok, message = guard.check(self.fixture())
         self.assertTrue(ok, message)
@@ -75,73 +119,97 @@ class RawWriterAllowlistTests(unittest.TestCase):
     def test_test_area_and_string_facade_markers_count_as_declared(self):
         """Evidence: whole-file lexical scanning counts test and string text."""
         root = self.fixture()
-        path = root / guard.FAMILY_REGISTRY[5][1]
+        path = self.uninstrument(root, self.PROBE_FAMILY)
         path.write_text(path.read_text(encoding="utf-8") +
                         'const STRING_MARKER: &str = "self.journal.finish_fresh(";\n#[cfg(all(test, unix))]\nmod tests {\n    fn dishonest() { self.journal.begin_fresh(); }\n    const TEST_MARKER: &str = "self.journal.begin_fresh(";\n}\n',
                         encoding="utf-8")
-        self.assertTrue(guard.family_status(root)[0][5][1], "test/string markers are declared lexical matches")
+        self.assertTrue(guard.family_status(root)[0][self.PROBE_FAMILY][1], "test/string markers are declared lexical matches")
 
     def test_cfg_test_fn_facade_marker_counts_as_known_limit(self):
-        """Evidence: a top-level cfg(test) function is counted, not parsed away."""
+        """Evidence: a top-level cfg(test) function is counted, not parsed away.
+
+        Stronger than its pre-S6 form: with the baseline at 0 the cleared family
+        makes the whole gate RED, and appending nothing but a `#[cfg(test)] fn`
+        body turns it green again. The marker is not merely counted, it is on its
+        own sufficient to satisfy the gate."""
         root = self.fixture()
-        path = root / guard.FAMILY_REGISTRY[5][1]
+        path = self.uninstrument(root, self.PROBE_FAMILY)
+        ok, message = guard.check(root)
+        self.assertFalse(ok)
+        self.assertIn("exceeds baseline", message)
         path.write_text(path.read_text(encoding="utf-8") + '#[cfg(test)] fn journal_probe() { self.journal.begin_fresh(); }\n', encoding="utf-8")
-        self.assertTrue(guard.family_status(root)[0][5][1], "cfg(test) fn marker is a declared lexical match")
-        ok, message = guard.check(root); self.assertFalse(ok); self.assertIn("uninstrumented families: 0/6", message)
+        self.assertTrue(guard.family_status(root)[0][self.PROBE_FAMILY][1], "cfg(test) fn marker is a declared lexical match")
+        ok, message = guard.check(root); self.assertTrue(ok, message); self.assertIn("uninstrumented families: 0/5", message)
 
     def test_line_doc_comment_markers_are_known_limit_and_not_counted(self):
         """Known limitation and declared behavior: line doc comments are stripped after // on each line."""
         root = self.fixture()
-        path = root / guard.FAMILY_REGISTRY[5][1]
+        path = self.uninstrument(root, self.PROBE_FAMILY)
         path.write_text(path.read_text(encoding="utf-8") +
                         "//! self.journal.begin_fresh();\n/// self.journal.begin_fresh();\n",
                         encoding="utf-8")
         status, error = guard.family_status(root)
         self.assertEqual(error, "")
-        self.assertFalse(status[5][1], "line doc comment markers are excluded by the declared lexical cut")
+        self.assertFalse(status[self.PROBE_FAMILY][1], "line doc comment markers are excluded by the declared lexical cut")
         ok, message = guard.check(root)
-        self.assertTrue(ok, message)
-        self.assertIn("uninstrumented families: 1/6", message)
+        self.assertFalse(ok)
+        self.assertIn("exceeds baseline", message)
 
     def test_block_marker_strings_do_not_hide_real_facade_calls(self):
         """Evidence: block-marker strings no longer delete calls across lines."""
         root = self.fixture()
-        path = root / guard.FAMILY_REGISTRY[0][1]
+        path = self.uninstrument(root, 0)
         path.write_text(path.read_text(encoding="utf-8") + 'const BLOCK_OPEN: &str = "/*";\nself.journal.begin_fresh();\nconst BLOCK_CLOSE: &str = "*/";\n', encoding="utf-8")
-        ok, message = guard.check(root); self.assertTrue(ok, message); self.assertIn("uninstrumented families: 1/6", message)
+        ok, message = guard.check(root); self.assertTrue(ok, message); self.assertIn("uninstrumented families: 0/5", message)
 
     def test_raw_string_marker_is_known_lexical_false_positive(self):
         """Known limit: raw strings are not parsed and may count as calls."""
         root = self.fixture()
-        path = root / guard.FAMILY_REGISTRY[5][1]
+        path = self.uninstrument(root, self.PROBE_FAMILY)
         path.write_text(path.read_text(encoding="utf-8") +
                         'const RAW: &str = r#"x" self.journal.begin_fresh("#;\n', encoding="utf-8")
         status, error = guard.family_status(root)
         self.assertEqual(error, "")
-        self.assertTrue(status[5][1], "raw-string marker intentionally pierces lexical scan")
+        self.assertTrue(status[self.PROBE_FAMILY][1], "raw-string marker intentionally pierces lexical scan")
 
     def test_macro_facade_marker_is_known_lexical_match(self):
         """Pin the declared behavior: facade-call text in a macro counts."""
         root = self.fixture()
-        path = root / guard.FAMILY_REGISTRY[5][1]
+        path = self.uninstrument(root, self.PROBE_FAMILY)
         path.write_text(path.read_text(encoding="utf-8") +
                         "macro_rules! journal_probe { () => { self.journal.begin_fresh(); } }\n",
                         encoding="utf-8")
         status, error = guard.family_status(root)
         self.assertEqual(error, "")
-        self.assertTrue(status[5][1], "macro facade-call text is a declared lexical match")
+        self.assertTrue(status[self.PROBE_FAMILY][1], "macro facade-call text is a declared lexical match")
 
     def test_family_baseline_is_measured_and_named(self):
+        """#5071 T1 S6: the count is 0/5 now, and the caveat must ride with it.
+
+        `0` is the most misreadable number this gate can print, so the summary
+        that carries it also has to carry what it does not mean and where the
+        question went. Asserted on the message, not on prose in a comment, so the
+        caveat cannot be quietly dropped from the output."""
         ok, message = guard.check(self.fixture())
         self.assertTrue(ok, message)
-        self.assertIn("uninstrumented families: 1/6", message)
+        self.assertIn("uninstrumented families: 0/5", message)
         self.assertIn("whole anchor file including tests", message)
-        self.assertIn("pipe stream epoch", message)
+        self.assertNotIn("pipe stream epoch", message)
+        self.assertIn("ANCHOR-SCOPED", message)
+        self.assertIn("0 does NOT mean no uninstrumented durable write exists", message)
+        self.assertIn("scripts/check_durable_frontier_writer_call_sites.py", message)
+        for outside in (
+            "terminal_delivery.rs",
+            "terminal_outcome_delivery.rs",
+            "cancel_prompt_replace.rs",
+            "tui_prompt_relay/claude_idle_runtime.rs",
+            "outbound/turn_output_controller/fresh_send.rs",
+        ):
+            self.assertIn(outside, message, f"the caveat must name {outside}")
 
     def test_instrumentation_rule_is_mechanical(self):
         root = self.fixture()
-        path = root / guard.FAMILY_REGISTRY[0][1]
-        path.write_text(path.read_text(encoding="utf-8").replace("self.journal.begin_fresh();", ""), encoding="utf-8")
+        self.uninstrument(root, 0)
         ok, message = guard.check(root)
         self.assertFalse(ok)
         self.assertIn("exceeds baseline", message)
@@ -164,29 +232,41 @@ class RawWriterAllowlistTests(unittest.TestCase):
         self.assertIn("family anchor missing", message)
 
     def test_baseline_increase_names_families(self):
+        """#5071 T1 S6: the baseline is 0, so ANY uninstrumented family is an
+        increase and no longer needs the baseline to be moved to provoke one.
+        The assertion is that the message NAMES the offender rather than
+        reporting a bare count."""
         root = self.fixture()
-        old = guard.UNINSTRUMENTED_FAMILY_BASELINE
-        # 0, not 1: S5b re-pinned the live baseline to 1, so 1 is no longer an
-        # increase over what the fixture measures.
-        guard.UNINSTRUMENTED_FAMILY_BASELINE = 0
-        self.addCleanup(setattr, guard, "UNINSTRUMENTED_FAMILY_BASELINE", old)
+        self.uninstrument(root, 0)
         ok, message = guard.check(root)
         self.assertFalse(ok)
-        self.assertIn("pipe stream epoch", message)
+        self.assertIn("fresh sink vertical slice", message)
 
     def test_baseline_decrease_requires_repin_command(self):
+        """The exact failure S6 itself had to clear: 1 pinned, 0 measured.
+
+        Dropping the sixth family without re-pinning the baseline in the same
+        commit produces this, which is why the removal and the re-pin are one
+        commit. The emitted command is the fix, and it is asserted so the ratchet
+        cannot regress into a bare 'below baseline' with no way out."""
         root = self.fixture()
         old = guard.UNINSTRUMENTED_FAMILY_BASELINE
-        guard.UNINSTRUMENTED_FAMILY_BASELINE = 6
+        guard.UNINSTRUMENTED_FAMILY_BASELINE = 1
         self.addCleanup(setattr, guard, "UNINSTRUMENTED_FAMILY_BASELINE", old)
         ok, message = guard.check(root)
         self.assertFalse(ok)
+        self.assertIn("below baseline 1", message)
         self.assertIn("re-pin with: python3", message)
+        self.assertIn("UNINSTRUMENTED_FAMILY_BASELINE = 0", message)
     def test_live_repository_matches_exact_allowlist(self):
         result = subprocess.run(["python3", str(SCRIPT)], cwd=ROOT, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertRegex(result.stdout, r"scanned Rust files: [1-9][0-9]*")
-        self.assertIn("uninstrumented families: 1/6", result.stdout)
+        self.assertIn("uninstrumented families: 0/5", result.stdout)
+        # The caveat has to survive the trip through the real script's stdout,
+        # not just through `check()`: the printed line is what a reader sees.
+        self.assertIn("ANCHOR-SCOPED", result.stdout)
+        self.assertIn("scripts/check_durable_frontier_writer_call_sites.py", result.stdout)
 
     # SOURCE-CONTRACT block (#5071 T1 S2). Everything below matches TEXT in .rs
     # files: call ORDER, call COUNT, symbol PRESENCE. None of it executes Rust,
@@ -485,13 +565,14 @@ class RawWriterAllowlistTests(unittest.TestCase):
         "send_long_message",
         "replace_long_message",
     )
-    # The one family whose anchor does none of the three, carried by name rather
-    # than by silence. `turn_stream_collector.rs` owns the `pause_epoch` /
-    # `epoch_snapshot` / `turn_delivered` state its family is named for, but it
-    # writes no durable record, runs no transport and holds no facade call, so
-    # either the anchor is wrong or this family's writer lives somewhere else
-    # entirely. Answering that is not #5071 T1 S5a's scope; declaring it is.
-    ANCHORS_WITH_NO_DELIVERY_WORK = ("pipe stream epoch",)
+    # #5071 T1 S6 deleted `ANCHORS_WITH_NO_DELIVERY_WORK` and the
+    # `wrongly_exempt` arm that read it. S5a carried exactly one exemption, the
+    # "pipe stream epoch" family, and S6 removed that family from the registry
+    # rather than re-anchoring it, which left the exemption list empty and the
+    # arm unreachable. An empty named-exemption list is not a weaker rule than a
+    # one-entry one: the rule below now applies to EVERY family with no escape
+    # hatch, so a bystander anchor -- including the collector, if a later slice
+    # tries to bring it back -- has nowhere to be parked.
 
     def test_every_family_anchor_sits_on_its_family_delivery_path(self):
         """The rule that would have caught the reaper anchor when it was written.
@@ -500,20 +581,19 @@ class RawWriterAllowlistTests(unittest.TestCase):
         record write, a journal facade call, or a transport call. An anchor that
         shows none of the three is a file the gate reads while measuring a family
         it has no part in -- which is exactly what
-        `tmux_reaper.rs::reap_fresh_routine_orphan` was for the recovery family.
+        `tmux_reaper.rs::reap_fresh_routine_orphan` was for the recovery family,
+        and what `tmux_watcher/turn_stream_collector.rs` was for the deleted
+        "pipe stream epoch" family until #5071 T1 S6.
 
-        Exemptions are named, not silent, and an exemption must itself be EMPTY:
-        a family listed in `ANCHORS_WITH_NO_DELIVERY_WORK` whose anchor starts
-        showing delivery work fails here too, so the list cannot be reused to
-        admit a different wrong anchor, and it has to shrink rather than drift
-        when that family's anchor is settled.
+        There are no exemptions. S5a's single named exemption existed because
+        that family's anchor question was open; S6 answered it by deleting the
+        family, so the rule is now unconditional.
 
         What it does not do: it reads one file per family and cannot say whether
         the delivery work it finds belongs to THAT family, nor whether the anchor
         is the best of several candidates. It says only that the anchor is not a
         bystander."""
         bystanders = []
-        wrongly_exempt = []
         for name, rel, _symbol in guard.FAMILY_REGISTRY:
             code = "\n".join(
                 line.split("//", 1)[0]
@@ -522,27 +602,13 @@ class RawWriterAllowlistTests(unittest.TestCase):
             does_work = any(token in code for token in self.DELIVERY_WORK_TOKENS) or bool(
                 guard.JOURNAL_FACADE_CALL.search(code)
             )
-            if name in self.ANCHORS_WITH_NO_DELIVERY_WORK:
-                if does_work:
-                    wrongly_exempt.append(f"{name} ({rel})")
-            elif not does_work:
+            if not does_work:
                 bystanders.append(f"{name} ({rel})")
         self.assertEqual(
             bystanders,
             [],
             "these family anchors show no durable write, no journal facade call and no "
             "transport, so the gate is measuring a file that takes no part in the family",
-        )
-        self.assertEqual(
-            wrongly_exempt,
-            [],
-            "an anchor exempted as showing no delivery work now shows some; remove it "
-            "from ANCHORS_WITH_NO_DELIVERY_WORK instead of leaving the exemption to rot",
-        )
-        self.assertEqual(
-            self.ANCHORS_WITH_NO_DELIVERY_WORK,
-            ("pipe stream epoch",),
-            "the exemption list is a measured finding, not a place to park a new anchor",
         )
 
     def test_source_contract_reaper_anchor_named_a_file_that_writes_no_delivery(self):
@@ -815,6 +881,227 @@ class RawWriterAllowlistTests(unittest.TestCase):
             'r5_recovery_family_never_classifies_as_delivered',
             facade,
             "the runtime test that proves the ceiling must live beside the ceiling",
+        )
+
+    # #5071 T1 S6 additions -- the two pins that replace the deleted family.
+    #
+    # WHY PINS AT ALL. S5a's N1 measured that the gate SCRIPT does not detect
+    # anchor restoration: put the family and its old anchor back and
+    # `check_delivery_journal_raw_writer.py` still exits 0. Deleting a family
+    # therefore removes signal unless something else takes it over. These two
+    # tests are that something else, and between them they cover both directions
+    # a revert can come from: putting the entry back (pin 1), and building the
+    # thing the entry was originally guessing at (pin 2).
+
+    COLLECTOR = "src/services/discord/tmux_watcher/turn_stream_collector.rs"
+
+    def test_source_contract_stream_collector_is_no_longer_a_family_anchor(self):
+        """Pin 1. Why "pipe stream epoch" was deleted rather than re-anchored.
+
+        Same shape as
+        `test_source_contract_reaper_anchor_named_a_file_that_writes_no_delivery`:
+        a measurement of a file that was an anchor and should not have been, kept
+        alive so the deletion cannot quietly become wrong.
+
+        Three claims, each independently able to fail:
+
+        1. THE REGISTRY. Five families, and none of them is named "pipe stream
+           epoch" or anchored on the collector. Restoring the entry fails here --
+           and this is the only mechanical objection to that restore, because the
+           gate script itself stays green through it.
+        2. THE BYSTANDER MEASUREMENT. The collector writes no durable record,
+           runs no transport and holds no facade token, so re-anchoring it would
+           re-introduce exactly the defect S5a named. The day it does any of
+           those, this fails and the family map has to be re-derived rather than
+           left as it is. (`test_every_family_anchor_sits_on_its_family_delivery_path`
+           now catches the same restore from the other side, since S6 deleted the
+           exemption that used to let this anchor through.)
+        3. THE MISSING COORDINATE SYSTEM. `stream_epoch` appears nowhere in
+           `src/`, and the shipped journal schema carries no `source_kind`,
+           `pipe_stream_epoch` or `pipe_sequence` column, so there is no durable
+           coordinate a pipe obligation could be keyed by; the journal has one
+           key type. The collector also has exactly ONE caller, in
+           `tmux_watcher.rs`, shared by pipe and TUI alike -- pipe is a runtime
+           overlay on a shared path, not a module family. Any of those three
+           facts changing is a signal to reconsider the family, which is why they
+           are asserted here instead of asserted in prose.
+
+        What it is not: a text scan, with every limit the gate script declares.
+        It cannot prove the collector is unreachable from a durable write; it
+        proves only that no durable write is SPELLED in it."""
+        anchors = [rel for _name, rel, _symbol in guard.FAMILY_REGISTRY]
+        names = [name for name, _rel, _symbol in guard.FAMILY_REGISTRY]
+        self.assertEqual(len(guard.FAMILY_REGISTRY), 5, "S6 pinned the registry at five families")
+        self.assertNotIn("pipe stream epoch", names, "the deleted family is back; see the S6 block")
+        self.assertNotIn(
+            self.COLLECTOR,
+            anchors,
+            "turn_stream_collector.rs is a bystander, not a delivery anchor; re-anchoring it "
+            "repeats the defect #5071 T1 S5a named in tmux_reaper.rs",
+        )
+
+        source = (ROOT / self.COLLECTOR).read_text(encoding="utf-8")
+        self.assertIn("async fn collect_turn_stream_until_terminal(", source)
+        for absent in (
+            "delivery_record",
+            "delivered_frontier",
+            "append_completed_turn",
+            "shadow_mirror",
+            "journal",
+            "send_long_message",
+            "replace_long_message",
+            "settle_without_transport",
+            "advance_watcher_confirmed_end",
+        ):
+            self.assertEqual(
+                source.count(absent),
+                0,
+                f"turn_stream_collector.rs now mentions {absent!r}; it is no longer the file "
+                f"that writes no delivery, so the S6 deletion has to be re-argued",
+            )
+
+        callers = {}
+        epoch_mentions = {}
+        for path in sorted((ROOT / "src").rglob("*.rs")):
+            code = "\n".join(
+                line.split("//", 1)[0]
+                for line in path.read_text(encoding="utf-8").splitlines()
+            )
+            rel = path.relative_to(ROOT).as_posix()
+            calls = code.count("collect_turn_stream_until_terminal(") - code.count(
+                "fn collect_turn_stream_until_terminal("
+            )
+            if calls:
+                callers[rel] = calls
+            if "stream_epoch" in code:
+                epoch_mentions[rel] = code.count("stream_epoch")
+        self.assertEqual(
+            callers,
+            {"src/services/discord/tmux_watcher.rs": 1},
+            "the collector gained or lost a caller; the claim that pipe and TUI join on one "
+            "shared watcher, with no pipe-only delivery path, has to be re-measured",
+        )
+        self.assertEqual(
+            epoch_mentions,
+            {},
+            "`stream_epoch` now exists in src/; the coordinate system whose absence is the "
+            "reason the family was deleted may have arrived -- revive the family (S6 block)",
+        )
+        schema = (ROOT / "migrations/postgres/0103_delivery_journal.sql").read_text(encoding="utf-8")
+        for column in ("source_kind", "pipe_stream_epoch", "pipe_sequence"):
+            self.assertNotIn(
+                column,
+                schema,
+                f"the delivery journal schema grew {column!r}; a pipe obligation can now be "
+                f"keyed durably, which is the stated condition for reviving the family",
+            )
+
+    # Pin 2's writer vocabulary. The S7' map's symbols are the durable writes;
+    # `DELIVERY_WORK_TOKENS` adds the transport and settlement spellings that map
+    # does not pin, so the union is "delivery work" in the same sense
+    # `test_every_family_anchor_sits_on_its_family_delivery_path` means it --
+    # deliberately WIDER than "durable write", because a pipe-only path that
+    # transports without recording is the same regression wearing a different
+    # hat. Derived, never hand-copied: S7' owns its own list.
+    PIPE_VARIANTS = ("LegacyTmuxWrapper", "ProcessBackend")
+
+    def delivery_work_vocabulary(self):
+        symbols = set(frontier.EXPECTED_CALL_SITES)
+        symbols.update(token.rstrip("(") for token in self.DELIVERY_WORK_TOKENS)
+        return sorted(symbols)
+
+    def test_source_contract_no_pipe_gated_production_file_holds_delivery_work(self):
+        """Pin 2. The machine's notice that the deleted family should come back.
+
+        THE CONDITION IT WATCHES. "pipe stream epoch" was deleted because pipe
+        (`RuntimeHandoffKind::LegacyTmuxWrapper` / `::ProcessBackend`) has no
+        delivery code of its own: it and TUI merge onto the same watcher, and
+        every durable write on the path is reached identically by both. The
+        moment that stops being true -- a durable write, or a transport, reached
+        on a branch that only pipe takes -- the family is a real family again and
+        the registry has to grow back. Nothing else in the tree says so: the gate
+        script cannot see it, and the S7' gate sees the new call site but reports
+        it as an unlisted call site, which a reviewer fixes by editing a map.
+
+        THE APPROXIMATION, STATED PLAINLY. "A pipe-gated branch reaches a durable
+        write" is a reachability question and this is a text scan, so the
+        computable stand-in is CO-EXISTENCE IN ONE PRODUCTION FILE: a file that
+        both names one of the two pipe variants and calls a delivery-work symbol.
+        That is neither sound nor complete, and both directions are real:
+
+          * FALSE POSITIVES -- two exist today and are listed below with why each
+            is not a pipe-only writer. Listing them by name and by symbol is what
+            makes the pin usable: a third one, or a new symbol in one of the two,
+            fails and gets read.
+          * FALSE NEGATIVES -- a pipe-gated call whose durable write lives one
+            file away is invisible here, exactly as the anchor gate's own
+            one-file-per-family hole is. The pipe branch and the write have to
+            land in the same file to be seen. This is the honest ceiling of the
+            pin and the reason it is a NOTICE, not a proof.
+
+        WHY CO-EXISTENCE ANYWAY. It is the narrowest lexical condition that is
+        actually implied by the thing being watched: a pipe-only writer has to
+        be gated somewhere, and the gate for a delivery write in this tree sits
+        beside the write far more often than not (both of today's two hits are
+        of that shape, and neither is delivery). A stricter form -- same
+        function, or same `match` arm -- needs a Rust parser to be honest, and a
+        looser one -- module or directory -- turns `tmux_watcher/` into one
+        permanent offender and says nothing.
+
+        The vocabulary is IMPORTED from
+        scripts/check_durable_frontier_writer_call_sites.py rather than copied,
+        so a writer symbol added there widens this pin in the same commit. The
+        stripper and cfg(test) filter come from there too, which is why string
+        literals and doc prose naming a variant do not count -- unlike the anchor
+        gate, which strips only `//` suffixes."""
+        vocabulary = self.delivery_work_vocabulary()
+        self.assertIn("write_delivered_frontier", vocabulary)
+        self.assertIn("send_long_message", vocabulary)
+        pipe_re = re.compile(r"\b(?:" + "|".join(self.PIPE_VARIANTS) + r")\b")
+        call_res = {s: re.compile(rf"\b{re.escape(s)}\s*\(") for s in vocabulary}
+        defn_res = {s: re.compile(rf"\bfn\s+{re.escape(s)}\s*\(") for s in vocabulary}
+        found = {}
+        for path in sorted((ROOT / "src").rglob("*.rs")):
+            if not path.is_file() or frontier.is_test_file(path.name):
+                continue
+            code = "\n".join(
+                text for _lineno, text, production in frontier.production_lines(path) if production
+            )
+            if not pipe_re.search(code):
+                continue
+            writes = sorted(
+                symbol
+                for symbol in vocabulary
+                if call_res[symbol].search(code) and not defn_res[symbol].search(code)
+            )
+            if writes:
+                found[path.relative_to(ROOT).as_posix()] = writes
+        self.assertEqual(
+            found,
+            {
+                # `runtime_kind_for_recovery()` CLASSIFIES a binding as legacy or
+                # process-backend, and `from_str` parses the marker back. Neither
+                # gates the durable write in this file:
+                # `record_watcher_owner_channel_context` runs from
+                # `set_watcher_owner_channel_id`, on every runtime kind alike.
+                "src/services/discord/inflight/model.rs": [
+                    "record_watcher_owner_channel_context",
+                ],
+                # The LegacyTmuxWrapper branch here gates
+                # `observe_legacy_wrapper_direct_prompt_from_pane`, a pane-prompt
+                # OBSERVATION with no delivery in it. The two delivery-work calls
+                # sit on the post-terminal suppressed-range path, which every
+                # runtime kind reaches.
+                "src/services/discord/tmux_watcher/loop_poll_prologue.rs": [
+                    "advance_watcher_confirmed_end",
+                    "settle_without_transport",
+                ],
+            },
+            "a production file now gates on LegacyTmuxWrapper/ProcessBackend AND performs "
+            "delivery work. If the write is reached only on the pipe branch, pipe has its own "
+            "delivery path and the 'pipe stream epoch' family deleted in #5071 T1 S6 has to be "
+            "restored to FAMILY_REGISTRY with that file as its anchor. If it is shared with "
+            "ClaudeTui, add it here with the reason, the way the two entries above are",
         )
 if __name__ == "__main__":
     unittest.main()

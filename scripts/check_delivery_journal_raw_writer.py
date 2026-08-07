@@ -23,7 +23,6 @@ FAMILY_REGISTRY = (
     ("watcher terminal family (무전송 5곳 포함)", "src/services/discord/tmux_watcher.rs", "tmux_output_watcher_with_restore"),
     ("turn_bridge / controller family", "src/services/discord/turn_bridge/terminal_controller_cutover.rs", "deliver_short_replace_via_controller"),
     ("recovery / fresh-send / orphan family", "src/services/discord/recovery_engine/terminal_text_idempotency.rs", "record_successful_fresh_send"),
-    ("pipe stream epoch", "src/services/discord/tmux_watcher/turn_stream_collector.rs", "collect_turn_stream_until_terminal"),
 )
 # Cheap lexical text match, not Rust parsing: each complete anchor file, including
 # tests, is scanned with only the suffix after // on that line removed. The scan
@@ -130,9 +129,10 @@ FAMILY_REGISTRY = (
 # (`tmux_watcher/turn_stream_collector.rs`) shows no durable write, no transport
 # and no facade token either. It owns the epoch state the family is named for, so
 # whether it is the wrong anchor or merely a family whose writer lives elsewhere
-# is a real question — and it is not this slice's to answer. It is carried as the
+# is a real question — and it is not this slice's to answer. It was carried as the
 # single named exemption in that rule test, pinned to stay empty so the exemption
-# cannot be used to admit a different bad anchor. Of the four remaining anchors,
+# could not be used to admit a different bad anchor. S6 below answers the question
+# and deletes the family and the exemption together. Of the four remaining anchors,
 # three show durable writes or transport in their own file; `tmux_watcher.rs`
 # shows neither and passes on its facade calls alone, its durable writes being
 # delegated to child modules under `tmux_watcher/` through the `dr` alias it
@@ -180,13 +180,89 @@ FAMILY_REGISTRY = (
 # journal is shadow-only and nothing reads it back, and the recovery path's
 # bypass of the `shadow_mirror_delivered_frontier` funnel is deliberately still
 # there — S5b measures that bypass, #5071 T1 S7 closes it.
+#
+# #5071 T1 S6 DELETES THE SIXTH FAMILY. "pipe stream epoch" is not an
+# uninstrumented family; it is the name of a coordinate system that does not
+# exist yet. The registry goes 6 -> 5 and the baseline 1 -> 0, in ONE commit,
+# because the ratchet is bidirectional and a removal without a re-pin is rc=1.
+#
+# What was measured, and what each measurement rules out:
+#   - `grep -rn stream_epoch src/ scripts/ migrations/` returns nothing. The
+#     name exists only in the design draft.
+#   - the shipped schema `migrations/postgres/0103_delivery_journal.sql` has no
+#     `source_kind`, no `pipe_stream_epoch` and no `pipe_sequence` column, so
+#     there is no durable row a pipe obligation could be keyed by. The journal
+#     facade has exactly one coordinate key, `TuiObligationKey` in journal.rs.
+#   - the anchor `tmux_watcher/turn_stream_collector.rs` performs zero durable
+#     writes, holds zero facade calls and runs no transport. The one thing it
+#     does mutate it mutates through `commit_persistent_state!`, which writes
+#     back into the CALLER's stack frame through `&'a mut` bindings. That is not
+#     durable state, so an anchor move in the S5a style is impossible: there is
+#     no file that could satisfy the two-way contract's "the new anchor holds
+#     this family's writers" half, because the family has no writers.
+#   - pipe (= legacy tmux wrapper) and TUI merge onto the SAME watcher in
+#     `turn_bridge/runtime_handoff_loop.rs`, and `tmux_watcher.rs:480` is the
+#     only call site of `collect_turn_stream_until_terminal` in the tree. Pipe
+#     is a runtime-mode overlay on a shared delivery path, not a module family
+#     with delivery code of its own.
+#
+# HOW TO REVIVE IT. Restore the entry when, and only when, a durable write is
+# reached on a branch that is gated on `RuntimeHandoffKind::LegacyTmuxWrapper`
+# or `::ProcessBackend` and cannot be reached by `ClaudeTui` — concretely, when
+# either the journal grows a second obligation key beside `TuiObligationKey` or
+# the delivery-journal schema grows the pipe columns above. Two tests in
+# tests/test_delivery_journal_raw_writer.py exist to make that moment loud
+# rather than silent, because the SCRIPT CANNOT SEE IT: restoring the family and
+# its old anchor leaves this gate at rc=0 (measured in S5a's N1 — the gate does
+# not detect anchor restoration; only the contract tests do).
+#   `test_source_contract_stream_collector_is_no_longer_a_family_anchor` pins
+#   both halves of the deletion: the registry has five entries and none of them
+#   names the collector, and the collector still writes no delivery.
+#   `test_source_contract_no_pipe_gated_production_file_holds_delivery_work`
+#   pins that no production file gating on those two variants also contains a
+#   delivery-work call, with the two measured co-existences named and explained.
+#   That test's failure message IS the revival trigger.
+#
+# READ `uninstrumented families: 0/5` AS "ZERO INSIDE THIS GATE'S FIVE ANCHORS",
+# NOT AS "NOTHING IS UNINSTRUMENTED". This is the sentence most likely to be
+# misread now that the number is 0, so the summary line carries the caveat in
+# its own output. The gate reads ONE file per family; every hole the S2 and S5a
+# blocks declare is still open, and five uninstrumented production writers are
+# known to sit outside the anchors right now:
+#   src/services/discord/turn_bridge/terminal_delivery.rs
+#   src/services/discord/turn_bridge/terminal_outcome_delivery.rs
+#   src/services/discord/turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs
+#     — three turn_bridge durable frontier writes outside that family's anchor
+#   src/services/discord/tui_prompt_relay/claude_idle_runtime.rs
+#     — a frontier re-anchor that belongs to NO family in this registry. Not an
+#       outside-the-anchor problem: a hole in the map itself.
+#   src/services/discord/outbound/turn_output_controller/fresh_send.rs
+#     — dormant, pinned by
+#       test_source_contract_dormant_fresh_send_writer_is_pinned_uninstrumented
+# SUCCESSION. All five are covered per file and per exact count by
+# scripts/check_durable_frontier_writer_call_sites.py (#5071 T1 S7'), which has
+# no anchors and walks every .rs under src/. Once this gate reads 0, the only
+# discriminating power it has left is "does the anchor symbol still exist and
+# still carry a facade token"; the writer-location question has moved to S7'.
 JOURNAL_FACADE_CALL = re.compile(
     r"\bself\.journal\.(?:begin_fresh|finish_fresh)\s*\("
     r"|\bjournal_watcher::(?:begin_watcher_terminal|settle_watcher_terminal|settle_without_transport)\s*\("
     r"|\bunix_journal::(?:begin_controller_terminal|settle_controller_terminal)\s*\("
     r"|\bunix_journal::(?:begin_recovery_terminal|settle_recovery_terminal)\s*\("
 )
-UNINSTRUMENTED_FAMILY_BASELINE = 1
+UNINSTRUMENTED_FAMILY_BASELINE = 0
+# Printed on every run, pass or fail. It exists because `0/5` reads like "done"
+# and is not: see the S6 block above for the five named production writers this
+# gate structurally cannot see and for the succession to S7'.
+ANCHOR_SCOPE_CAVEAT = (
+    "ANCHOR-SCOPED: N counts anchor files missing the token, one file per family; "
+    "0 does NOT mean no uninstrumented durable write exists — five known production "
+    "writers sit outside these anchors (turn_bridge terminal_delivery.rs, "
+    "terminal_outcome_delivery.rs, terminal_outcome_delivery/cancel_prompt_replace.rs; "
+    "tui_prompt_relay/claude_idle_runtime.rs, which belongs to no family here; and the "
+    "dormant outbound/turn_output_controller/fresh_send.rs), all five pinned per file "
+    "and per count by scripts/check_durable_frontier_writer_call_sites.py"
+)
 
 
 def call_sites(root: Path) -> tuple[Counter[str], int]:
@@ -229,7 +305,11 @@ def check(root: Path) -> tuple[bool, str]:
     if found != ALLOWLIST:
         return False, f"raw writer allowlist mismatch: expected={dict(ALLOWLIST)} actual={dict(found)} (scanned Rust files: {scanned_files})"
     uninstrumented = [name for name, instrumented in families if not instrumented]
-    summary = f"uninstrumented families: {len(uninstrumented)}/{len(families)} (lexical baseline signal; whole anchor file including tests; only // suffix excluded; not proof; {', '.join(uninstrumented) or 'none'})"
+    summary = (
+        f"uninstrumented families: {len(uninstrumented)}/{len(families)} "
+        f"(lexical baseline signal; whole anchor file including tests; only // suffix "
+        f"excluded; not proof; {', '.join(uninstrumented) or 'none'}; {ANCHOR_SCOPE_CAVEAT})"
+    )
     if len(uninstrumented) > UNINSTRUMENTED_FAMILY_BASELINE:
         return False, f"{summary}; exceeds baseline {UNINSTRUMENTED_FAMILY_BASELINE}: {', '.join(uninstrumented)}"
     if len(uninstrumented) < UNINSTRUMENTED_FAMILY_BASELINE:
