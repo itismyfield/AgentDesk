@@ -338,7 +338,11 @@ targets = {
     # #5181 re-pins after widening that lane from the two named #5170 oracles to
     # the whole `services::discord::queue_io::` module, now that the module's
     # pre-existing #4270/#4893 failures are fixed rather than filtered around.
-    "job_sha256" => "6bf1e4fea9bf977a711f462b6992ac27452faf2ffaf5fea36fd964aaa6354936",
+    # #5147 re-pins after adding the hang-forensics and health-diagnostics
+    # test steps to this lane. Steps were only added -- none removed,
+    # reordered or given a relaxed env -- and the value is recomputed from
+    # the workflow with this script's own canonical_yaml, never copied.
+    "job_sha256" => "131ff4835b5b0811ceeb28a2a1b11efbf0d9f1dc6bf7ad87ab62da8d1dcd02bf",
     "require_debug_env" => false,
     "cargo_steps" => {
       "Observe curated lane selections" => {

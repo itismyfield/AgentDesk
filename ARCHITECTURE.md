@@ -1391,6 +1391,7 @@ src/
 │   ├── escalation_settings.rs
 │   ├── gemini.rs
 │   ├── github_issue_creation.rs
+│   ├── hang_forensics.rs
 │   ├── health_active_session_audit.rs
 │   ├── health_diagnostics.rs
 │   ├── issue_announcements.rs

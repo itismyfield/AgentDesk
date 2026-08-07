@@ -36,7 +36,6 @@ services::discord::router::message_handler::voice_announcement_route::voice_rout
 services::discord::turn_bridge::recovery_text::tests
 services::discord::voice_barge_in::tests
 services::dispatches::wait_queue::tests
-services::health_diagnostics::tests
 services::maintenance::jobs::db_retention::tests
 services::maintenance::jobs::worktree_orphan_sweep::managed_root_recursion_tests
 services::observability::cancellation_observability_tests

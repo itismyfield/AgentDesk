@@ -13,6 +13,13 @@
 //! that hangs a runtime-liveness threshold off `TCP_TIMEOUT` needs to assert
 //! against the value; at module scope it can import it instead of grepping this
 //! file's source text for the declaration.
+//!
+//! #5147 also arms `services::hang_forensics`' runtime-liveness beacon here
+//! rather than at the boot site: `spawn_watchdog` arms it and hands the
+//! resulting `BeaconArmed` token to `spawn_watchdog_thread`, so "armed before
+//! the thread exists" is a data dependency the compiler checks rather than a
+//! comment a reviewer has to believe. Its breadcrumbs are printed on every
+//! failure.
 
 /// Self-watchdog: runs on a dedicated OS thread (not tokio) to detect
 /// runtime hangs.  Periodically opens a raw TCP connection to the server
@@ -20,6 +27,30 @@
 /// `max_failures` times in a row the process is force-killed so launchd
 /// (or systemd) can restart it.
 pub fn spawn_watchdog(port: u16) {
+    // #5147: arm the beacon HERE rather than at the boot site, and prove the
+    // order with a value rather than with a comment or a source-text guard.
+    // `spawn_watchdog_thread` takes the `BeaconArmed` token by value and there
+    // is no other way to obtain one, so "armed before the thread exists" is a
+    // data dependency the compiler checks: deleting the arming, or moving it
+    // inside the spawned closure, does not compile. Must be called from inside
+    // the tokio runtime being watched; off a runtime the token says so rather
+    // than panicking.
+    let armed = crate::services::hang_forensics::spawn_runtime_liveness_beacon();
+    spawn_watchdog_thread(port, armed);
+}
+
+/// Creates the watchdog's OS thread. Private, and takes the beacon proof by
+/// value — see [`spawn_watchdog`].
+fn spawn_watchdog_thread(port: u16, armed: crate::services::hang_forensics::BeaconArmed) {
+    // A beacon that did not arm is not fatal -- `verdict` degrades to
+    // `undetermined_no_beacon` -- but it must not be silent either, because
+    // every later kill line then concludes nothing and the next investigation
+    // is back where #4756/#4770/#5147 were.
+    match armed.boot_report() {
+        Ok(line) => tracing::info!("{line}"),
+        Err(line) => tracing::error!("{line}"),
+    }
+
     const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
     const TCP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
     const MAX_FAILURES: u32 = 3;
@@ -80,12 +111,18 @@ pub fn spawn_watchdog(port: u16) {
                 } else {
                     consecutive_failures += 1;
                     let ts = chrono::Local::now().format("%H:%M:%S");
+                    // #5147: what the runtime and the health path's Postgres
+                    // awaits were doing at the moment the probe gave up. The
+                    // `sample` dump this eventually captures cannot carry
+                    // either: a task parked in an `await` is not a running
+                    // thread and does not appear in a thread sample at all.
+                    let crumbs = crate::services::hang_forensics::snapshot().render();
                     tracing::warn!(
-                        "  [{ts}] 🩺 watchdog: health check failed ({consecutive_failures}/{MAX_FAILURES})"
+                        "  [{ts}] 🩺 watchdog: health check failed ({consecutive_failures}/{MAX_FAILURES}) {crumbs}"
                     );
                     if consecutive_failures >= MAX_FAILURES {
                         tracing::warn!(
-                            "  [{ts}] 🩺 watchdog: runtime unresponsive — capturing diagnostics before exit"
+                            "  [{ts}] 🩺 watchdog: runtime unresponsive — capturing diagnostics before exit {crumbs}"
                         );
                         // Capture process dump for post-mortem analysis (platform-aware)
                         // Write to runtime root's logs/ dir so dumps survive /tmp cleanup

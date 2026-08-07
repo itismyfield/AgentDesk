@@ -1511,7 +1511,15 @@ pub fn handle_dcserver(token: Option<String>) {
         // copied into shared UI state at boot; no path reads it yet.
         let two_message_panel_enabled = ad_config.placeholder.two_message_panel_enabled;
 
-        // Self-watchdog: probes the axum server's /api/health endpoint
+        // Self-watchdog: probes the axum server's /api/health endpoint.
+        // #5147: this call also arms `services::hang_forensics`' runtime-
+        // liveness beacon — the machine-readable proof that the runtime is
+        // scheduling tasks, and the only thing that tells a wedged runtime from
+        // a database-blocked handler. It is armed inside `spawn_watchdog` so it
+        // cannot be dropped from here while the watchdog keeps running; must
+        // therefore stay on a thread that is inside the tokio runtime. The
+        // stderr heartbeat below is for humans watching a terminal and ticks
+        // far too slowly (60s) to say anything about a 5s probe.
         services::discord::health::spawn_watchdog(api_port);
 
         // Async heartbeat: proves the tokio runtime is scheduling tasks.
