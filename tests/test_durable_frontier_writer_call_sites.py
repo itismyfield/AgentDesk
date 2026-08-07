@@ -18,6 +18,7 @@ its runtime output. A gate that hides its holes is worse than no gate.
 from __future__ import annotations
 
 import importlib.util
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,8 +30,8 @@ guard = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(guard)
 
 # Measured on 0bde0675b, the base this slice branched from.
-TOTAL_CALL_SITES = 34
-PINNED_SYMBOLS = 20
+TOTAL_CALL_SITES = 42
+PINNED_SYMBOLS = 23
 ZERO_PINNED = {
     "write_confirmed_delivery",
     "upsert_lease",
@@ -38,6 +39,38 @@ ZERO_PINNED = {
     "delete_record",
     "shadow_mirror_same_channel_frontier_with_body",
 }
+
+
+# CLASSIFIER PROBES: `(file, symbol, production_count, count_ignoring_cfg_test)`,
+# each verified BY HAND against the file's `#[cfg(test)]` boundaries rather than
+# taken from the scanner's own output.
+#
+# Why this table exists. The production/test classifier is an ORACLE the counts
+# depend on: if it drifts, `EXPECTED_CALL_SITES` drifts with it and both agree
+# with each other while being wrong. The pairs below break that coupling from
+# both sides -- the first number moves if the classifier starts hiding
+# production code, the second if the stripper or the call regex changes at all.
+#
+# Rows 1-4 are the shape that motivated this table. A `#[cfg(test)]` STRUCT
+# FIELD in session_relay_sink.rs makes the resolver ported from
+# check_inflight_blind_save_ratchet.py swallow the production impl block that
+# follows it, which would report the first three of these as 0. Row 5 is the
+# opposite direction: tmux.rs's only `write_confirmed_delivery(` really is
+# inside `#[cfg(test)]`, so a classifier that stops excluding test regions
+# turns that 0 into a 1. Row 7 pins the widest prod/test gap in the tree
+# (3 of 12), and row 9 pins the file where one spelling covers two functions.
+MANUAL_CLASSIFICATION = [
+    ("src/services/discord/session_relay_sink.rs", "commit_ordered_jsonl_range", 1, 1),
+    ("src/services/discord/session_relay_sink.rs", "record_delivered_content_fingerprint", 1, 3),
+    ("src/services/discord/session_relay_sink.rs", "advance_watcher_confirmed_end", 1, 1),
+    ("src/services/discord/session_relay_sink.rs", "finish_sink_delivery", 3, 4),
+    ("src/services/discord/tmux.rs", "write_confirmed_delivery", 0, 1),
+    ("src/services/discord/tmux.rs", "advance_watcher_confirmed_end", 1, 1),
+    ("src/services/discord/outbound/delivery_record.rs", "shadow_mirror_delivered_frontier", 3, 12),
+    ("src/services/discord/outbound/delivery_record.rs", "append_completed_turn", 2, 2),
+    ("src/services/discord/tmux_watcher/terminal_long_chunks.rs", "record_watcher_terminal_delivery", 2, 2),
+    ("src/services/discord/turn_bridge/terminal_controller_cutover.rs", "record_long_chunk_terminal_delivery", 2, 2),
+]
 
 
 def write(root: Path, rel: str, body: str) -> None:
@@ -77,6 +110,77 @@ class SourceContractTests(unittest.TestCase):
         wiring = (ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
         self.assertIn("scripts/check_durable_frontier_writer_call_sites.py", wiring)
         self.assertIn("tests.test_durable_frontier_writer_call_sites", wiring)
+
+    def test_classifier_matches_hand_verified_cfg_test_boundaries(self):
+        """Breaks the oracle coupling: the classifier is checked, not trusted.
+
+        Both numbers are asserted. The production count catches a classifier
+        that starts hiding production code (the struct-field bug); the
+        ignore-cfg-test count catches a stripper or regex change that would move
+        both numbers together and stay self-consistent.
+        """
+        for rel, symbol, want_prod, want_all in MANUAL_CLASSIFICATION:
+            with self.subTest(file=rel, symbol=symbol):
+                call = re.compile(rf"\b{symbol}\s*\(")
+                defn = re.compile(rf"\bfn\s+{symbol}\s*\(")
+                prod = 0
+                every = 0
+                for _lineno, code, is_production in guard.production_lines(ROOT / rel):
+                    if defn.search(code):
+                        continue
+                    hits = len(call.findall(code))
+                    every += hits
+                    if is_production:
+                        prod += hits
+                self.assertEqual(prod, want_prod, f"production count for {symbol} in {rel}")
+                self.assertEqual(every, want_all, f"cfg(test)-blind count for {symbol} in {rel}")
+
+    def test_the_two_functions_sharing_one_pinned_spelling_both_still_exist(self):
+        """`record_watcher_terminal_delivery` names two functions in this tree.
+
+        The pinned integer for terminal_long_chunks.rs counts one call to each.
+        If either definition disappears the pin silently changes meaning, so the
+        collision is asserted rather than left in a comment.
+        """
+        funnel = (ROOT / "src/services/discord/outbound/delivery_record.rs").read_text(
+            encoding="utf-8"
+        )
+        wrapper = (
+            ROOT / "src/services/discord/tmux_watcher/terminal_long_chunks.rs"
+        ).read_text(encoding="utf-8")
+        self.assertIn("fn record_watcher_terminal_delivery(", funnel)
+        self.assertIn("fn record_watcher_terminal_delivery(", wrapper)
+        self.assertIn("NAME COLLISION", SCRIPT.read_text(encoding="utf-8"))
+
+    def test_the_call_sites_no_family_anchor_covers_are_pinned(self):
+        """The sites that motivated dropping anchors, asserted one by one.
+
+        A parallel census of every production durable write on 0bde0675b found
+        these outside the reach of `check_delivery_journal_raw_writer.py`'s
+        six family anchors. Three sit in the turn_bridge family but not in its
+        anchor file; `claude_idle_runtime.rs` belongs to no family at all, so no
+        anchor could ever reach it; the two `fresh_send.rs` sites are in no
+        family either and are currently dormant (`OutputPlan::SendFresh` has no
+        production constructor), which is exactly the state in which an
+        uninstrumented write is easiest to reintroduce unnoticed.
+        """
+        anchor_blind = [
+            ("record_delivered_frontier_with_body",
+             "src/services/discord/turn_bridge/terminal_delivery.rs", 1),
+            ("record_delivered_frontier_with_body",
+             "src/services/discord/turn_bridge/terminal_outcome_delivery.rs", 1),
+            ("record_delivered_frontier_with_body",
+             "src/services/discord/turn_bridge/terminal_outcome_delivery/cancel_prompt_replace.rs", 1),
+            ("reanchor_current_generation_frontier",
+             "src/services/discord/tui_prompt_relay/claude_idle_runtime.rs", 1),
+            ("write_delivered_frontier",
+             "src/services/discord/outbound/turn_output_controller/fresh_send.rs", 1),
+            ("record_fresh_send_content_fingerprint",
+             "src/services/discord/outbound/turn_output_controller/fresh_send.rs", 1),
+        ]
+        for symbol, rel, count in anchor_blind:
+            with self.subTest(symbol=symbol, file=rel):
+                self.assertEqual(guard.EXPECTED_CALL_SITES[symbol].get(rel), count)
 
     def test_every_pinned_file_exists_and_still_spells_the_symbol(self):
         """Keeps the map from rotting into a list of paths that no longer exist."""

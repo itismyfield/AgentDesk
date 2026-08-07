@@ -54,6 +54,15 @@ test module:
   * INDIRECTION THROUGH VALUES. `let f = write_delivered_frontier;` is not a
     call site (no `(` follows the name) and the later `f(..)` is not one either.
     Trait-object dispatch to a method of the same name is likewise invisible.
+  * NAME COLLISION -- PRESENT IN THIS TREE, NOT HYPOTHETICAL. Two distinct
+    functions are both named `record_watcher_terminal_delivery`: the durable
+    funnel at `outbound/delivery_record.rs:2332` and a local wrapper at
+    `tmux_watcher/terminal_long_chunks.rs:168`. The two production sites this
+    map pins for that file are one call to each (`dr::…` at :124, bare at
+    :222). The integer is therefore a count of the SPELLING, not of calls to
+    one function. It is still the right pin here because the wrapper's only
+    job is to reach the funnel, but a future collision under a pinned name
+    would be counted the same way and the map would not say so.
   * SPELLING COUPLING. Because the completion criterion is a literal grep, the
     whole contract is bound to the spelling. Renaming a symbol does not weaken
     the gate silently -- the count drops to 0 and it fails -- but any route that
@@ -166,6 +175,27 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
     "clear_lease": {},
     "delete_record": {},
     "shadow_mirror_same_channel_frontier_with_body": {},
+    # -- store 1 + store 3: the fresh-sink family's mutation funnel -----------
+    # These three are not writers themselves; they are the fresh-sink family's
+    # only route into `WatcherDeliveryMutation::{advance, persist}`
+    # (tmux_watcher/terminal_long_chunks.rs:97 and :111), whose bodies call
+    # `advance_watcher_confirmed_end_for_generation` and
+    # `dr::record_watcher_terminal_delivery` -- both pinned above. They are
+    # pinned separately because the funnel bottom cannot distinguish a new
+    # fresh-sink entry point from an existing one, and S7's whole subject is
+    # which paths reach the funnel.
+    "begin_sink_delivery_mutation": {
+        "src/services/discord/session_relay_sink/delivery_frontier.rs": 1,
+        "src/services/discord/session_relay_sink/short_controller.rs": 1,
+    },
+    "persist_sink_delivery": {
+        "src/services/discord/session_relay_sink/delivery_frontier.rs": 1,
+        "src/services/discord/session_relay_sink/short_controller.rs": 1,
+    },
+    "finish_sink_delivery": {
+        "src/services/discord/session_relay_sink.rs": 3,
+        "src/services/discord/session_relay_sink/task_notification_context.rs": 1,
+    },
     # -- store 2: completed-turn ledger --------------------------------------
     "append_completed_turn": {
         "src/services/discord/outbound/delivery_record.rs": 2,
