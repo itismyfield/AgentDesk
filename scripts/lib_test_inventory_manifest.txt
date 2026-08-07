@@ -4169,6 +4169,11 @@ services::discord::session_relay_sink::idle_jsonl::tests::idle_jsonl_missing_ded
 services::discord::session_relay_sink::idle_jsonl::tests::idle_jsonl_shared_dedup_sends_range_once_then_skips_committed_retry
 services::discord::session_relay_sink::idle_jsonl::tests::mismatched_inflight_log_prune_drops_unseen_sessions
 services::discord::session_relay_sink::idle_jsonl::tests::temporary_suppression_holds_until_confirmed_commit
+services::discord::session_relay_sink::journal::controller::controller_terminal_semantics_tests::c1_controller_obligation_identity_covers_every_coordinate
+services::discord::session_relay_sink::journal::controller::controller_terminal_semantics_tests::c2_controller_and_watcher_obligations_never_coincide
+services::discord::session_relay_sink::journal::controller::controller_terminal_semantics_tests::c3_only_a_real_range_under_a_known_generation_is_an_obligation
+services::discord::session_relay_sink::journal::controller::controller_terminal_semantics_tests::c4_settle_selects_the_terminal_event_and_is_single_use
+services::discord::session_relay_sink::journal::controller::controller_terminal_semantics_tests::c5_controller_family_never_classifies_as_delivered
 services::discord::session_relay_sink::journal::sink_direct_semantics_tests::t1_new_message_delegation_is_not_a_sink_direct_obligation
 services::discord::session_relay_sink::journal::sink_direct_semantics_tests::t2_cutover_short_replace_is_not_a_sink_direct_obligation
 services::discord::session_relay_sink::journal::sink_direct_semantics_tests::t3_placeholder_edit_without_cutover_is_a_sink_direct_obligation

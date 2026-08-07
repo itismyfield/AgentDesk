@@ -16,6 +16,7 @@ use crate::services::discord::outbound::DiscordTransportReceipt;
 use super::RelaySinkError;
 use super::delivery_frontier::SinkDeliveryProofResult;
 
+pub(in crate::services::discord) mod controller;
 mod pg_store;
 pub(in crate::services::discord) mod watcher;
 
