@@ -607,6 +607,7 @@ mod tests {
         inflight::save_inflight_state(&state).expect("save inflight");
         let shared = make_shared_data_for_tests();
         let context = RecoveryDeliveryContext::from_state(
+            &shared,
             &provider,
             &state,
             Some((128, 256)),

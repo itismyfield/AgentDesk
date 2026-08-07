@@ -244,6 +244,43 @@ FAMILY_REGISTRY = (
 # no anchors and walks every .rs under src/. Once this gate reads 0, the only
 # discriminating power it has left is "does the anchor symbol still exist and
 # still carry a facade token"; the writer-location question has moved to S7'.
+# #5071 T1 S7 FALSIFIED TWO SENTENCES ABOVE. Both are named here rather than
+# edited in place, because the blocks that carry them are anchored to their own
+# slices and are history.
+#
+#   (1) The S5a block says: "The family's durable writers all sit in ONE funnel,
+#       `RecoveryDeliveryContext::record_durable_frontier` in
+#       `recovery_engine/terminal_text_idempotency.rs`:
+#       `write_delivered_frontier` ..., `write_proven_gone_equal_range_frontier`
+#       ... and the completed-turn ledger append above them." As of S7 that
+#       funnel calls NONE of those three. It makes one call to
+#       `delivery_record::record_recovery_terminal_delivery`, which reaches
+#       `shadow_mirror_delivered_frontier_inner`. The anchor and the family map
+#       are unchanged; only which symbols the anchor file spells has changed,
+#       and `test_source_contract_recovery_anchor_holds_the_family_durable_writers`
+#       was rewritten in the same commit to assert those three ABSENT.
+#
+#   (2) The S5b block says: "the recovery path's bypass of the
+#       `shadow_mirror_delivered_frontier` funnel is deliberately still there —
+#       S5b measures that bypass, #5071 T1 S7 closes it." S7 is this slice, and
+#       it closed the bypass for the three writes named in (1). It did NOT close
+#       it for `outbound/turn_output_controller/fresh_send.rs`, which still calls
+#       `write_delivered_frontier` and `record_fresh_send_content_fingerprint`
+#       raw. That file is measured dormant on this tree -- the only
+#       `OutputPlan::SendFresh` CONSTRUCTOR expression in `src/` is in
+#       `fresh_send_tests.rs`; every other mention is a pattern, a match arm or
+#       the variant declaration -- and it is pinned by
+#       `test_source_contract_dormant_fresh_send_writer_is_pinned_uninstrumented`
+#       and per-file by S7'. "The recovery path" in (2) means the three writes,
+#       not every durable write in the tree.
+#
+# THIS GATE DID NOT MOVE FOR S7, AND THAT IS THE POINT WORTH RECORDING. The
+# baseline stays 0/5 and rc=0 across the whole change, because the anchor file
+# still holds `record_successful_fresh_send` and still carries the
+# `unix_journal::` facade tokens. A boolean-per-family gate cannot see a durable
+# write change WHICH WRITER IT CALLS. What saw it was the per-file exact map in
+# scripts/check_durable_frontier_writer_call_sites.py (five counts moved) and
+# the source contract test above (which went red and had to be rewritten).
 JOURNAL_FACADE_CALL = re.compile(
     r"\bself\.journal\.(?:begin_fresh|finish_fresh)\s*\("
     r"|\bjournal_watcher::(?:begin_watcher_terminal|settle_watcher_terminal|settle_without_transport)\s*\("

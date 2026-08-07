@@ -313,6 +313,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 // reflects actual delivery so recovery never advances without
                 // posting. `MessageId::new(0)` would panic.
                 let recovery_context = RecoveryDeliveryContext::from_state(
+                    shared,
                     provider,
                     &state,
                     completed_during_downtime_end
@@ -957,6 +958,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             let final_text =
                 super::formatting::format_for_discord_with_provider(&assistant_response, provider);
             let recovery_context = RecoveryDeliveryContext::from_state(
+                shared,
                 provider,
                 &state,
                 terminal_success_end.map(|confirmed_end| (state.last_offset, confirmed_end)),
@@ -1213,6 +1215,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             };
             // #225 P1-1: Track relay success — only clear inflight if Discord delivery succeeds
             let recovery_context = RecoveryDeliveryContext::from_state(
+                shared,
                 provider,
                 &state,
                 terminal_success_end.map(|confirmed_end| (state.last_offset, confirmed_end)),
@@ -1804,6 +1807,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                             "worktree_missing_main_fallback_blocked",
                         );
                         let recovery_context = RecoveryDeliveryContext::from_state(
+                            shared,
                             provider,
                             &state,
                             None,
@@ -2039,6 +2043,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     "worktree_missing_main_fallback_blocked",
                 );
                 let recovery_context = RecoveryDeliveryContext::from_state(
+                    shared,
                     provider,
                     &state,
                     None,

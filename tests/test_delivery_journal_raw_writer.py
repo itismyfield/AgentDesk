@@ -555,6 +555,10 @@ class RawWriterAllowlistTests(unittest.TestCase):
     DELIVERY_WORK_TOKENS = (
         "write_delivered_frontier(",
         "write_proven_gone_equal_range_frontier(",
+        # #5071 T1 S7: the recovery family's anchor stopped calling raw writers
+        # in that slice. Without this token the rule below would call it a
+        # bystander on its transport calls alone.
+        "record_recovery_terminal_delivery(",
         "shadow_mirror_delivered_frontier(",
         "record_long_chunk_terminal_delivery(",
         "commit_ordered_jsonl_range(",
@@ -642,51 +646,76 @@ class RawWriterAllowlistTests(unittest.TestCase):
             )
 
     def test_source_contract_recovery_anchor_holds_the_family_durable_writers(self):
-        """The other half of the move: the file the anchor now names really does
-        hold this family's durable writes, all three of them, in one funnel --
-        the completed-turn ledger append, the reuse-recorded-anchor frontier
-        write and the proven-GONE equal-range re-anchor. Adding a fourth durable
-        write to that file, or moving one out, fails here.
+        """The other half of the S5a move: the file the anchor now names really
+        does hold this family's durable write.
 
-        #5071 T1 S5b adds the other half: one pre-funnel begin opens the
-        obligation those three writes live under, and three settles close it.
-        Three, not one -- the funnel returns its own verdict, the anchor-bind
-        failure arm closes the obligation itself, and a trailing single-use settle
-        keeps a future early return from leaving one dangling. Eight
-        `Settlement::` mentions is that arithmetic plus the six variants the
-        funnel's exits name.
+        #5071 T1 S7 REWROTE THIS TEST, AND THE ASSERTION IT REPLACES IS NAMED
+        RATHER THAN DELETED. Until S7 this asserted THREE raw calls in that file
+        -- `completed_turn_ledger::append_completed_turn`,
+        `delivery_record::write_delivered_frontier` and
+        `delivery_record::write_proven_gone_equal_range_frontier` -- because the
+        recovery path bypassed the `shadow_mirror_delivered_frontier` funnel and
+        wrote the record itself. S7 joined that path to the funnel, so all three
+        are now asserted ABSENT and the single
+        `delivery_record::record_recovery_terminal_delivery` that replaced them
+        is asserted present. The absences are the load-bearing half: they are
+        what fails if the bypass is reintroduced here.
+
+        #5071 T1 S5b's half is unchanged: one pre-funnel begin opens the
+        obligation the write lives under, and three settles close it. Three, not
+        one -- the funnel returns its own verdict, the anchor-bind failure arm
+        closes the obligation itself, and a trailing single-use settle keeps a
+        future early return from leaving one dangling.
 
         Counted over the production prefix only (everything before `#[cfg(test)]
-        mod tests {`), because the file's own fixtures call the same durable
-        writer twice and a whole-file count would move whenever a test is added.
-        It is a text count: it cannot prove any call is reached."""
+        mod tests {`). It is a text count: it cannot prove any call is reached."""
         source = (
             ROOT / "src/services/discord/recovery_engine/terminal_text_idempotency.rs"
         ).read_text(encoding="utf-8")
         production = source[: source.index("#[cfg(test)]\nmod tests {")]
-        self.assertEqual(production.count("completed_turn_ledger::append_completed_turn("), 1)
-        self.assertEqual(production.count("delivery_record::write_delivered_frontier("), 1)
+        for gone in (
+            "completed_turn_ledger::append_completed_turn(",
+            "delivery_record::write_delivered_frontier(",
+            "delivery_record::write_proven_gone_equal_range_frontier(",
+        ):
+            self.assertEqual(
+                production.count(gone),
+                0,
+                f"{gone} is the pre-S7 funnel bypass; the recovery path must reach "
+                "delivery_record::record_recovery_terminal_delivery instead",
+            )
         self.assertEqual(
-            production.count("delivery_record::write_proven_gone_equal_range_frontier("), 1
+            production.count("delivery_record::record_recovery_terminal_delivery("), 1
+        )
+        # D2: the admission the join added. One call, and it is inside the
+        # durable-write funnel rather than at a constructor, so a second one
+        # would mean a second write path.
+        self.assertEqual(
+            production.count("acquire_relay_frontier_mutation_for_incarnation("), 1
         )
         self.assertEqual(production.count("fn record_successful_fresh_send("), 1)
         self.assertEqual(production.count("unix_journal::begin_recovery_terminal("), 1)
         self.assertEqual(production.count("unix_journal::settle_recovery_terminal("), 3)
-        self.assertEqual(production.count("unix_journal::Settlement::"), 8)
+        self.assertEqual(production.count("unix_journal::Settlement::"), 10)
         self.assertLess(
             production.index("fn record_successful_fresh_send("),
-            production.index("completed_turn_ledger::append_completed_turn("),
-            "the anchor symbol is the entry point of the funnel that holds the writers",
+            production.index("delivery_record::record_recovery_terminal_delivery("),
+            "the anchor symbol is the entry point of the funnel that holds the write",
         )
         self.assertLess(
             production.index("unix_journal::begin_recovery_terminal("),
-            production.index("completed_turn_ledger::append_completed_turn("),
+            production.index("delivery_record::record_recovery_terminal_delivery("),
             "the obligation opens before the funnel it observes",
         )
         self.assertLess(
             production.index("unix_journal::begin_recovery_terminal("),
             production.index("unix_journal::settle_recovery_terminal("),
             "the obligation opens before any settle",
+        )
+        self.assertLess(
+            production.index("acquire_relay_frontier_mutation_for_incarnation("),
+            production.index("delivery_record::record_recovery_terminal_delivery("),
+            "admission is taken before the durable write it admits, and held across it",
         )
 
     def test_source_contract_dormant_fresh_send_writer_is_pinned_uninstrumented(self):

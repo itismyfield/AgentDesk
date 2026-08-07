@@ -478,6 +478,51 @@ pub(in crate::services::discord) struct WatcherDeliveryRecordAuthority {
     pub(in crate::services::discord) ledger_user_msg_id: Option<u64>,
 }
 
+/// #5071 T1 S7: what the RECOVERY caller must bring to the shadow-mirror funnel
+/// that no other caller does, so that joining the funnel is not a behaviour
+/// change dressed as a refactor.
+///
+/// `generation_mtime_ns` is the load-bearing field. Every other funnel caller
+/// leaves the generation to be read from `coord.confirmed_end_generation_mtime_ns`,
+/// the IN-MEMORY watermark's generation — and that value is only ever stored by
+/// `tmux::advance_watcher_confirmed_end_for_generation` on a real in-memory
+/// advance (plus the two watermark resets in `tmux_session_files.rs`). The
+/// recovery path never advances the in-memory watermark at all (#5071 T1 S7b
+/// owns that question), so on a freshly started process the coord's generation
+/// is still its `AtomicI64::new(0)` initial value while the wrapper's generation
+/// marker on disk is not. Reading the coord there would take the funnel's
+/// unknown-generation early return on exactly the deliveries recovery exists to
+/// make. This field therefore carries the FILESYSTEM generation the recovery
+/// path already resolved (`current_generation_mtime_ns`), which
+/// `write_confirmed_frontier_guarded_at_with_lock_authority` re-reads and
+/// re-compares under the record flock regardless.
+///
+/// `attempts` is carried for the same reason in miniature: the funnel otherwise
+/// re-reads `recovery_relay_attempts` from a fresh inflight load, and the
+/// recovery caller's snapshot is the value the pre-S7 raw write recorded.
+///
+/// `expected_gone_anchor` is `Some` only on the re-anchor path that Discord has
+/// proved the recorded anchor GONE for; it selects
+/// [`EqualRangeAnchorPolicy::ReplaceProvenGone`] instead of the monotonic merge.
+///
+/// The remaining three fields are the delivery's own coordinates, carried here
+/// rather than as loose parameters so `record_recovery_terminal_delivery` stays
+/// inside the argument-count lint without an `allow` (the structural clippy
+/// ratchet, #4519, counts those per file).
+#[derive(Clone, Copy, Debug)]
+pub(in crate::services::discord) struct RecoveryDeliveryRecordAuthority {
+    pub(in crate::services::discord) generation_mtime_ns: i64,
+    pub(in crate::services::discord) attempts: u32,
+    pub(in crate::services::discord) expected_gone_anchor: Option<(u64, u64)>,
+    pub(in crate::services::discord) range: (u64, u64),
+    /// `(channel_id, msg_id)` of the Discord message this recovery delivery
+    /// anchored on — same field order as `expected_gone_anchor`.
+    pub(in crate::services::discord) terminal_anchor: (u64, u64),
+    /// The inbound `user_msg_id` this turn answers, already `0`-filtered by the
+    /// caller. Becomes the funnel's `ledger_user_msg_id`.
+    pub(in crate::services::discord) ledger_user_msg_id: Option<u64>,
+}
+
 fn write_confirmed_frontier_guarded_at_with_before_lock(
     path: &Path,
     tmux_session_name: &str,
@@ -657,6 +702,16 @@ pub(in crate::services::discord) fn write_delivered_frontier(
 
 /// Recovery-only equal-range replacement after Discord has proved the recorded
 /// anchor gone. All other range relationships retain the normal monotonic merge.
+///
+/// #5071 T1 S7 TOOK THIS OUT OF PRODUCTION. Its single production caller was the
+/// recovery path's re-anchor arm, which now selects the same
+/// [`EqualRangeAnchorPolicy::ReplaceProvenGone`] through
+/// `shadow_mirror_delivered_frontier_inner` instead. It is kept, and kept
+/// exercised, because its record-shape tests are the direct coverage of that CAS
+/// — but it is `#[cfg(test)]` so that "no production caller" is held by the
+/// compiler and not only by
+/// `scripts/check_durable_frontier_writer_call_sites.py`.
+#[cfg(test)]
 pub(in crate::services::discord) fn write_proven_gone_equal_range_frontier(
     provider: &ProviderKind,
     channel_id: u64,
@@ -673,6 +728,7 @@ pub(in crate::services::discord) fn write_proven_gone_equal_range_frontier(
     )
 }
 
+#[cfg(test)]
 fn write_proven_gone_equal_range_frontier_at_with_before_lock(
     path: &Path,
     tmux_session_name: &str,
@@ -698,13 +754,20 @@ fn write_confirmed_delivery_at(
     frontier: DeliveredCommit,
     receipt: ConfirmedDeliveryReceipt,
 ) -> Result<(), String> {
-    write_confirmed_delivery_at_with_lock_authority(path, frontier, receipt, None)
+    write_confirmed_delivery_at_with_lock_authority(
+        path,
+        frontier,
+        receipt,
+        EqualRangeAnchorPolicy::PreserveExisting,
+        None,
+    )
 }
 
 fn write_confirmed_delivery_at_with_lock_authority(
     path: &Path,
     frontier: DeliveredCommit,
     receipt: ConfirmedDeliveryReceipt,
+    equal_range_anchor_policy: EqualRangeAnchorPolicy,
     lock_authority: Option<WatcherFrontierLockAuthority<'_>>,
 ) -> Result<(), String> {
     if !receipt.is_authoritative()
@@ -721,7 +784,7 @@ fn write_confirmed_delivery_at_with_lock_authority(
         &tmux_session_name,
         frontier,
         Some(receipt),
-        EqualRangeAnchorPolicy::PreserveExisting,
+        equal_range_anchor_policy,
         lock_authority,
         || {},
     )
@@ -1933,6 +1996,7 @@ fn persist_confirmed_frontier_and_receipt(
     tmux_session_name: Option<&str>,
     frontier: DeliveredCommit,
     receipt: Option<ConfirmedDeliveryReceipt>,
+    equal_range_anchor_policy: EqualRangeAnchorPolicy,
     lock_authority: Option<WatcherFrontierLockAuthority<'_>>,
 ) -> Result<(), String> {
     match receipt {
@@ -1947,6 +2011,7 @@ fn persist_confirmed_frontier_and_receipt(
                 &record_path_or_err(provider, offset_authority_channel.get())?,
                 frontier,
                 receipt,
+                equal_range_anchor_policy,
                 lock_authority,
             )
         }
@@ -1962,7 +2027,7 @@ fn persist_confirmed_frontier_and_receipt(
                 tmux_session_name,
                 frontier,
                 None,
-                EqualRangeAnchorPolicy::PreserveExisting,
+                equal_range_anchor_policy,
                 lock_authority,
                 || {},
             )
@@ -2022,6 +2087,7 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
         delivered_body,
         ledger_user_msg_id,
         None,
+        None,
     );
 }
 
@@ -2055,11 +2121,13 @@ fn shadow_mirror_delivered_frontier_inner(
     delivered_body: Option<&str>,
     ledger_user_msg_id: Option<u64>,
     watcher_authority: Option<WatcherDeliveryRecordAuthority>,
+    recovery_authority: Option<RecoveryDeliveryRecordAuthority>,
 ) -> bool {
     let channel_id = channel.get();
     let coord = shared.tmux_relay_coord(channel);
     let generation_mtime_ns = watcher_authority
         .map(|authority| authority.generation_mtime_ns)
+        .or_else(|| recovery_authority.map(|authority| authority.generation_mtime_ns))
         .unwrap_or_else(|| {
             coord
                 .confirmed_end_generation_mtime_ns
@@ -2122,10 +2190,15 @@ fn shadow_mirror_delivered_frontier_inner(
     // the caller's inflight clear and closes the clear-before-seed-consume race.
     let fresh =
         crate::services::discord::inflight::load_inflight_state(provider, delivery_channel_id);
-    let attempts = fresh
-        .as_ref()
-        .map(|f| f.recovery_relay_attempts)
-        .unwrap_or(0);
+    let attempts = recovery_authority.map_or_else(
+        || {
+            fresh
+                .as_ref()
+                .map(|f| f.recovery_relay_attempts)
+                .unwrap_or(0)
+        },
+        |authority| authority.attempts,
+    );
     // The caller already owns the delivery incarnation while committing its
     // lease. Keep that identity independent of the inflight row: the row may be
     // cleared immediately after the confirmed POST. A fresh exact row remains
@@ -2171,12 +2244,28 @@ fn shadow_mirror_delivered_frontier_inner(
         lease_reset_incarnation: authority.lease_reset_incarnation,
         generation_mtime_ns: authority.generation_mtime_ns,
     });
+    // #5071 T1 S7: the ONLY policy that is not `PreserveExisting` is the
+    // recovery re-anchor Discord has proved GONE. It is selected by the caller's
+    // authority rather than by a separate raw writer, so the equal-range CAS and
+    // the monotonic merge now sit on one path through this funnel.
+    let equal_range_anchor_policy = recovery_authority
+        .and_then(|authority| authority.expected_gone_anchor)
+        .map_or(
+            EqualRangeAnchorPolicy::PreserveExisting,
+            |(expected_panel_channel_id, expected_panel_msg_id)| {
+                EqualRangeAnchorPolicy::ReplaceProvenGone {
+                    expected_panel_channel_id,
+                    expected_panel_msg_id,
+                }
+            },
+        );
     if let Err(error) = persist_confirmed_frontier_and_receipt(
         provider,
         channel,
         tmux_session_name,
         frontier,
         receipt,
+        equal_range_anchor_policy,
         lock_authority,
     ) {
         tracing::error!(
@@ -2349,6 +2438,64 @@ pub(in crate::services::discord) fn record_watcher_terminal_delivery(
         last_chunk_anchor_msg_id,
         Some(channel_id.get()),
         Some(delivered_body),
+        None,
+        Some(authority),
+        None,
+    )
+}
+
+/// Recovery-only terminal-delivery funnel (#5071 T1 S7).
+///
+/// WHAT THIS REPLACES, EXACTLY. Until S7 the recovery path did not reach this
+/// funnel at all: `recovery_engine/terminal_text_idempotency.rs` called
+/// `write_delivered_frontier` / `write_proven_gone_equal_range_frontier`
+/// directly and appended the completed-turn ledger ITSELF, BEFORE either write.
+/// Those three call sites are gone; this is the one that took their place. It is
+/// a claim about those three writes, not about "every recovery write" — the
+/// dormant `turn_output_controller/fresh_send.rs` sites are untouched by S7.
+///
+/// WHAT JOINING BUYS, MEASURED RATHER THAN ASSERTED:
+///   * the delivered-content fingerprint (#4081) is now recorded for a recovery
+///     delivery; before S7 nothing on this path wrote one;
+///   * the completed-turn ledger append happens AFTER a successful frontier
+///     persist on the recordable path, and on the unknown-generation path it
+///     still happens — which is the #4564 guarantee the pre-S7 unconditional
+///     leading append existed for, now expressed by the funnel's own rule;
+///   * an exact `confirmed_deliveries` receipt is CONSTRUCTED THROUGH THE SAME
+///     PREDICATE as every other caller (`exact_receipt_from_inflight`). It is
+///     NOT thereby produced: that predicate requires the fresh inflight row's
+///     `turn_start_offset` to equal `range.0`, and the recovery caller builds
+///     its range as `(state.last_offset, confirmed_end)`. Recovery reaching the
+///     receipt-less arm is therefore the expected outcome today, exactly as
+///     before S7. Joining moved the decision into the funnel; it did not create
+///     a receipt.
+///
+/// WHAT IT DOES NOT BUY. No `WatcherFrontierLockAuthority`. That authority
+/// re-validates `coord.confirmed_end_generation_mtime_ns` against the caller's
+/// generation under the record flock, and the recovery path never advances the
+/// in-memory watermark that stores it, so supplying one would REFUSE precisely
+/// the startup-recovery writes this path exists for. That asymmetry is owned by
+/// #5071 T1 S7b together with the in-memory advance itself.
+pub(in crate::services::discord) fn record_recovery_terminal_delivery(
+    shared: &crate::services::discord::SharedData,
+    provider: &ProviderKind,
+    offset_authority_channel: ChannelId,
+    tmux_session_name: Option<&str>,
+    authority: RecoveryDeliveryRecordAuthority,
+    delivered_body: &str,
+) -> bool {
+    let (terminal_anchor_channel_id, terminal_anchor_msg_id) = authority.terminal_anchor;
+    shadow_mirror_delivered_frontier_inner(
+        shared,
+        provider,
+        offset_authority_channel,
+        tmux_session_name,
+        authority.range,
+        true,
+        Some(terminal_anchor_msg_id),
+        Some(terminal_anchor_channel_id),
+        Some(delivered_body),
+        authority.ledger_user_msg_id,
         None,
         Some(authority),
     )

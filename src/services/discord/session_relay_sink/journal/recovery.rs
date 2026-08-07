@@ -1,14 +1,21 @@
 //! #5071 T1 S5 — the recovery / fresh-send / orphan family.
 //!
-//! Two production sites write this family's durable delivered frontier, and both
-//! sit inside one funnel: `RecoveryDeliveryContext::record_durable_frontier` in
-//! `recovery_engine/terminal_text_idempotency.rs` calls either
-//! `delivery_record::write_delivered_frontier` (the reuse-recorded-anchor arm) or
-//! `delivery_record::write_proven_gone_equal_range_frontier` (the one permitted
-//! equal-range re-anchor, taken only after Discord proved the recorded anchor
-//! GONE — the "orphan" in this family's name). The completed-turn ledger append
-//! above them is a third durable write on the same path. This module is the only
-//! way those sites reach the journal.
+//! One production site writes this family's durable delivered frontier:
+//! `RecoveryDeliveryContext::record_durable_frontier` in
+//! `recovery_engine/terminal_text_idempotency.rs`. This module is the only way
+//! that site reaches the journal.
+//!
+//! #5071 T1 S7 REPLACED THE PARAGRAPH THAT WAS HERE. It described TWO raw
+//! writers reached from that funnel — `delivery_record::write_delivered_frontier`
+//! (the reuse-recorded-anchor arm) and
+//! `delivery_record::write_proven_gone_equal_range_frontier` (the equal-range
+//! re-anchor taken only after Discord proved the recorded anchor GONE, the
+//! "orphan" in this family's name) — plus a completed-turn ledger append above
+//! them as a third durable write on the same path. All three calls are gone. The
+//! funnel now makes one call to `delivery_record::record_recovery_terminal_delivery`,
+//! and the two arms above are the presence or absence of
+//! `expected_gone_anchor` inside it; the ledger append is the funnel's, after
+//! the frontier persists.
 //!
 //! Shadow only: nothing here is read back by live delivery, and a row exists only
 //! when a PG pool, `DeliveryJournalMode::Shadow` and the cohort selection all
@@ -33,10 +40,13 @@
 //! delivery Discord already confirmed. The consequence is stated plainly because
 //! it is a real hole: **this family can never observe a recovery delivery lost
 //! mid-POST.** What it does observe is the gap between "recovery delivery
-//! confirmed" and "durable frontier persisted" — which is exactly the bypass
-//! `terminal_text_idempotency.rs` self-declares (it does not go through
-//! `shadow_mirror_delivered_frontier`) and exactly what #5071 T1 S7 has to join.
-//! Closing that bypass is S7's work; S5 only measures it.
+//! confirmed" and "durable frontier persisted". S5 opened that gap as an
+//! observation while `terminal_text_idempotency.rs` still bypassed
+//! `shadow_mirror_delivered_frontier`; #5071 T1 S7 joined the funnel, so the gap
+//! is now measured across the funnel rather than across a bypass. The hole in
+//! the sentence above is unchanged by that join: a recovery delivery lost
+//! mid-POST is still invisible to this family, because the obligation still
+//! opens after transport.
 //!
 //! ## The receipt ceiling: this family can never be `CandidateDelivered` either
 //!
@@ -122,6 +132,12 @@ pub(in crate::services::discord) enum RecoverySettlement {
     NoGenerationMarker,
     /// The durable write itself returned `Err`.
     DurableWriteFailed,
+    /// #5071 T1 S7: the relay frontier's reset incarnation moved between the
+    /// recovery decision snapshot and the durable write, so
+    /// `acquire_relay_frontier_mutation_for_incarnation` refused admission. The
+    /// watcher family's equivalent verdict is `LandedStale`. Distinct from
+    /// `DurableWriteFailed`: nothing was attempted against the record.
+    FrontierResetDuringDelivery,
     /// Backstop for the trailing settle: the obligation reached the end of
     /// `record_successful_fresh_send` without any branch above having closed it.
     /// The exits enumerated above are expected to cover every path today, so this
@@ -143,6 +159,7 @@ impl RecoverySettlement {
             Self::NoTmuxSessionName => "recovery_no_tmux_session_name",
             Self::NoGenerationMarker => "recovery_no_generation_marker",
             Self::DurableWriteFailed => "recovery_durable_write_failed",
+            Self::FrontierResetDuringDelivery => "recovery_frontier_reset_during_delivery",
             Self::DeliveryNotRecorded => "recovery_delivery_not_recorded",
         }
     }
