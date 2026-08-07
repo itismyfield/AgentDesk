@@ -844,6 +844,47 @@ else
   fail "8k: the foreign owner's marker is left untouched"
 fi
 
+# --- 8n: a successful acknowledgement releases the lease nobody consumes ----
+# Before #5245 the acknowledgement never arrived, so every exit from the gate
+# ran through clear_restart_drain_mode and no marker survived. Now that the gate
+# can succeed, the root that no runtime watches keeps its marker unless it is
+# released — and the next deploy's O_EXCL acquisition would fail with
+# "restart drain marker already owned".
+rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
+printf 'nonce=ack-release\n' >"$DUAL_PRIMARY/restart_pending"
+printf 'nonce=ack-release\n' >"$DUAL_MIRROR/restart_pending"
+printf 'nonce=ack-release\n' >"$DUAL_MIRROR/restart_persisted"
+set +e
+AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
+  wait_for_restart_persistence_or_fail "test" "$DUAL_PRIMARY" "ack-release" 2 >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "8n: ack at the runtime root is accepted" "0" "$rc"
+if [ -e "$DUAL_PRIMARY/restart_pending" ]; then
+  fail "8n: the unwatched root's lease is released so the next deploy can acquire"
+else
+  pass "8n: the unwatched root's lease is released so the next deploy can acquire"
+fi
+if [ -e "$DUAL_MIRROR/restart_pending" ]; then
+  pass "8n: the acknowledging runtime's own marker is left for it to remove"
+else
+  fail "8n: the acknowledging runtime's own marker is left for it to remove"
+fi
+
+# The release is nonce-scoped: a marker owned by somebody else is never freed.
+rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
+printf 'nonce=someone-else\n' >"$DUAL_PRIMARY/restart_pending"
+printf 'nonce=ack-release\n' >"$DUAL_MIRROR/restart_persisted"
+set +e
+AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
+  wait_for_restart_persistence_or_fail "test" "$DUAL_PRIMARY" "ack-release" 2 >/dev/null 2>&1
+set -e
+if grep -q '^nonce=someone-else$' "$DUAL_PRIMARY/restart_pending" 2>/dev/null; then
+  pass "8n: a lease held under another nonce is not released"
+else
+  fail "8n: a lease held under another nonce is not released"
+fi
+
 # --- 8l: with no mirror configured, behaviour is byte-for-byte the old one --
 rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
 printf 'nonce=single-root\n' >"$DUAL_MIRROR/restart_persisted"

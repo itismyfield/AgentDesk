@@ -860,6 +860,36 @@ _restart_marker_consumed_root() {
   return 1
 }
 
+_release_unacknowledged_restart_lease() {
+  # Called once the runtime has acknowledged durability. The runtime that
+  # published the acknowledgement removes its own restart_pending and exits
+  # (runtime_bootstrap/spawns.rs). The other root has no consumer at all — no
+  # Rust code reads "$ROOT/runtime/restart_*" — so its marker would outlive
+  # this deploy and make the next request fail O_EXCL acquisition with
+  # "restart drain marker already owned". Before #5245 this leak was
+  # unreachable because the acknowledgement never arrived and every exit from
+  # the gate went through clear_restart_drain_mode.
+  #
+  # The acknowledged root is deliberately left alone: deleting its marker would
+  # race the runtime's post-rename recheck, which reads a missing marker as
+  # "superseded" and withdraws the acknowledgement it just published.
+  local expected_nonce="$1"; shift
+  local ack_root="$1"; shift
+  local root marker
+  for root in "$@"; do
+    if [ "$root" = "$ack_root" ]; then
+      continue
+    fi
+    marker="$root/restart_pending"
+    # Only ever release the lease this request owns.
+    if [ -f "$marker" ] \
+      && grep -Fqx "nonce=${expected_nonce}" "$marker" 2>/dev/null; then
+      rm -f "$marker" 2>/dev/null || true
+    fi
+  done
+  return 0
+}
+
 clear_restart_drain_mode() {
   local runtime_root="$1"
   local roots=()
@@ -977,6 +1007,7 @@ wait_for_restart_persistence_or_fail() {
       if [ -f "$ack" ] \
         && grep -Fqx "nonce=${expected_nonce}" "$ack" 2>/dev/null; then
         echo "✓ [gate] ${scope} restart persistence acknowledged by runtime at ${root}"
+        _release_unacknowledged_restart_lease "$expected_nonce" "$root" "${roots[@]}"
         return 0
       fi
     done
