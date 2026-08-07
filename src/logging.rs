@@ -50,7 +50,7 @@ mod tests {
 
     fn tracing_env_filter_with_rust_log_unset() -> EnvFilter {
         static ENV_LOCK: Mutex<()> = Mutex::new(());
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let saved = std::env::var_os("RUST_LOG");
         remove_rust_log_for_test();
         let filter = tracing_env_filter().expect("default tracing filter");

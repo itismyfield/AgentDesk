@@ -1308,7 +1308,9 @@ mod tests {
 
     #[test]
     fn published_endpoint_remains_stable_until_replaced_guard_drops() {
-        let _guard = ENDPOINT_TEST_LOCK.lock().unwrap();
+        let _guard = ENDPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         *HOOK_ENDPOINT
             .write()
             .unwrap_or_else(|error| error.into_inner()) = None;

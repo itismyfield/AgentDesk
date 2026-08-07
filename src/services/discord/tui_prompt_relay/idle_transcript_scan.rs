@@ -487,7 +487,7 @@ mod tests {
     fn codex_idle_rollout_scan_threads_entry_id_into_replay_dedupe() {
         let _guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
-            .unwrap();
+            .unwrap_or_else(|poison| poison.into_inner());
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
         let dir = tempfile::tempdir().expect("temp dir");
         let rollout = dir.path().join("rollout.jsonl");

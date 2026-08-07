@@ -100,7 +100,7 @@ mod claude_tui_followup_requeue_flag_tests {
     fn with_requeue_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
-            .expect("shared test env lock poisoned");
+            .unwrap_or_else(|poison| poison.into_inner());
         let _restore = EnvRestore {
             previous: std::env::var(CLAUDE_TUI_FOLLOWUP_REQUEUE_ENV).ok(),
         };

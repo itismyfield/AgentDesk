@@ -43,12 +43,104 @@ pub fn tmux_session_pane_liveness(
     crate::services::platform::tmux::pane_liveness(tmux_session_name)
 }
 
+/// Test-only forced answers for [`probe_tmux_session_pane_liveness`], keyed by
+/// session name.
+///
+/// #5185: the probe shells out to `tmux has-session` under a two-second
+/// wall-clock bound and maps every failure -- including "the subprocess did not
+/// finish in time" -- to `ProbeError`, which callers must treat as "not dead".
+/// That is right for production and wrong for a test that wants to exercise the
+/// `DeadOrAbsent` branch, because the answer then depends on machine load: on an
+/// idle machine the probe returns in milliseconds, and inside a ~6.9k-test
+/// parallel sweep it can exceed two seconds and flip the branch. Measured:
+/// `session_resume::tests::resume_production_path_clears_stale_binding_and_rebinds_runtime`
+/// failed in a full parallel sweep with `left: RetainedLive, right: Cleared`
+/// and passed when run alone. A test that means "the pane is gone" must say so
+/// rather than race a subprocess for the answer.
+#[cfg(test)]
+static PANE_LIVENESS_OVERRIDES: std::sync::LazyLock<
+    std::sync::Mutex<
+        std::collections::HashMap<String, crate::services::platform::tmux::PaneLiveness>,
+    >,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Force (or clear, with `None`) the pane-liveness answer for one session name.
+#[cfg(test)]
+pub(crate) fn set_pane_liveness_override_for_tests(
+    tmux_session_name: &str,
+    liveness: Option<crate::services::platform::tmux::PaneLiveness>,
+) {
+    let mut overrides = PANE_LIVENESS_OVERRIDES
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    match liveness {
+        Some(value) => {
+            overrides.insert(tmux_session_name.to_string(), value);
+        }
+        None => {
+            overrides.remove(tmux_session_name);
+        }
+    }
+}
+
+/// RAII form of [`set_pane_liveness_override_for_tests`].
+///
+/// #5185: the first revision of this helper was called by hand at the top of a
+/// test and cleared by hand at the bottom, *after* the assertions. That is the
+/// same hand-rolled shape this branch removed from
+/// `tmux_common::sentinel_tests::dead_marker_path_is_cleaned_with_session_temp_files`:
+/// a failing assertion unwinds past the cleanup, so the forced answer for that
+/// session name outlives the test in a process-global map. Nothing in this
+/// sweep re-uses those session names today, which is why the leak was
+/// invisible -- but "no current collision" is a property of the other tests,
+/// not of this helper. The guard clears on unwind.
+#[cfg(test)]
+#[must_use = "the override is cleared when this guard is dropped"]
+pub(crate) struct PaneLivenessOverrideGuard {
+    tmux_session_name: String,
+}
+
+#[cfg(test)]
+impl PaneLivenessOverrideGuard {
+    pub(crate) fn set(
+        tmux_session_name: &str,
+        liveness: crate::services::platform::tmux::PaneLiveness,
+    ) -> Self {
+        set_pane_liveness_override_for_tests(tmux_session_name, Some(liveness));
+        Self {
+            tmux_session_name: tmux_session_name.to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for PaneLivenessOverrideGuard {
+    fn drop(&mut self) {
+        set_pane_liveness_override_for_tests(&self.tmux_session_name, None);
+    }
+}
+
+#[cfg(test)]
+fn pane_liveness_override_for_tests(
+    tmux_session_name: &str,
+) -> Option<crate::services::platform::tmux::PaneLiveness> {
+    PANE_LIVENESS_OVERRIDES
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .get(tmux_session_name)
+        .copied()
+}
+
 /// Async adapter for the pre-existing #4489 pane probe. #4794 adopts the
 /// three-state answer off the Tokio worker and maps a blocking-task JoinError to
 /// `ProbeError`; it does not introduce the liveness states or two-second bound.
 pub async fn probe_tmux_session_pane_liveness(
     tmux_session_name: &str,
 ) -> crate::services::platform::tmux::PaneLiveness {
+    #[cfg(test)]
+    if let Some(forced) = pane_liveness_override_for_tests(tmux_session_name) {
+        return forced;
+    }
     let name = tmux_session_name.to_string();
     tokio::task::spawn_blocking(move || tmux_session_pane_liveness(&name))
         .await

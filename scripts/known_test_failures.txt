@@ -1,0 +1,162 @@
+# Known test failures -- visible, tracked debt for `scripts/run_test_lane.py`.
+#
+# Widening a CI lane surfaces failures that the old narrow filters hid. The one
+# response this ledger exists to forbid is narrowing the filter again: a lane
+# that stops selecting a test reports nothing, while an entry here is counted,
+# printed on every run, and attached to an issue.
+#
+# Format (five '|'-separated fields, all required):
+#
+#   <mode> | <test id or module prefix> | lane=<lane> | #<issue> | <reason>
+#
+#   mode   always  -- fails deterministically. If every selected test under the
+#                     pattern PASSES, the lane fails with "stale ledger entry",
+#                     so the debt cannot silently outlive the defect. This is
+#                     the only mode that accepts a module prefix, because its
+#                     stale check makes over-broad patterns self-correcting.
+#          flaky   -- fails only under some interleavings. Passing is reported
+#                     as a ::warning instead of an error, because failing the
+#                     lane on a lucky run would make the gate itself
+#                     nondeterministic. Since nothing else can ever make such an
+#                     entry expire, a flaky entry MUST name one exact test id
+#                     and MUST carry `expires=YYYY-MM-DD`; the lane fails once
+#                     that date passes. Module prefixes are rejected: a
+#                     module-wide flaky entry was measured swallowing an
+#                     injected, unrelated regression in a sibling test (rc=0).
+#          ignored -- the test reports `... ignored`, i.e. it is `#[ignore]`d.
+#                     The lane compares the set of ids reported ignored against
+#                     these entries, both directions. Without that pin, marking
+#                     N tests `#[ignore]` would keep the lane's *selection*
+#                     intact while silently removing N tests from what it runs.
+#   pattern  exact test id; `always` may also name a module prefix, matching
+#            the id itself or anything under `<pattern>::`.
+#   lane     the --lane value this entry applies to; other lanes ignore it.
+#   issue    tracking issue, written `#<number>`. This is a FORMAT check and
+#            nothing more: the wrapper cannot ask GitHub whether the issue
+#            exists, so `#1` is accepted here exactly as `#5185` is. What
+#            actually makes an entry admissible is the reason prose below,
+#            plus the stale check on `always` and the expiry on `flaky`.
+#   reason   what is broken and why it is isolated rather than fixed here. Must
+#            be prose: length alone is not admissibility, so a filler string
+#            such as `aaaaaaaaaaaa` is rejected on word and character variety.
+#
+# A failure that is NOT listed here fails the lane. That is the point.
+#
+# ---------------------------------------------------------------------------
+# base-red: these fail on origin/main, serially and in parallel, with no
+# AGENTDESK_ROOT_DIR in the environment. They are not caused by widening the
+# lane -- widening is only what made them visible. #5185 isolates them so the
+# widened lane can land; each needs its own fix.
+# ---------------------------------------------------------------------------
+always | cli::args::tests::top_level_command_name_snapshot_preserves_public_cli_surface | lane=non-pg-sweep | #5185 | base-red on main: the public CLI top-level command snapshot has drifted from the real clap surface, so the oracle rejects a command list that production actually ships.
+always | services::claude_command::chokepoint_guard_tests::gateway_primitives_are_confined_to_the_chokepoint | lane=non-pg-sweep | #5169 | base-red on main: claude_compact_trigger.rs references ClaudeGatewayProxyEnv and claude_gateway_proxy:: outside the chokepoint. Same surface as the OCX gateway removal, so the verdict belongs to that branch, not to this CI-coverage change.
+always | services::discord::placeholder_sweeper::panel_shape::tests::renderer_activity_variants_and_panel_shape_classifier_stay_in_sync | lane=non-pg-sweep | #5185 | base-red on main: the rendered activity line for the empty last-tool state is classified into a different panel shape than the renderer produces, so classifier and renderer are out of sync.
+#
+# ---------------------------------------------------------------------------
+# parallel-only: pass under --test-threads=1, fail in the full parallel sweep.
+# Serialising the whole lane would hide them, so they stay listed and the lane
+# stays parallel.
+#
+# Two of the three parallel-only entries the first round of #5185 carried are
+# gone because the defect was fixed rather than ledgered: the promotion-flag
+# race in gateway_lease_recovery_tests and the static-slice cache race in
+# memento::static_slice_cache_tests are now serialised against their own
+# siblings at the source.
+#
+# Every entry in this section is `flaky`, not `always`, and the mode follows
+# from the section's own definition rather than from how often a given machine
+# reproduces it. `always` means "fails deterministically", and its stale check
+# turns a PASSING run into a hard lane failure. A test that fails only when a
+# sibling wins a race has no deterministic verdict to assert: it reproduces on
+# this repository's darwin development machines and would be scheduled
+# differently on a `ubuntu-latest` runner with a different core count. Pinning
+# such a test as `always` would make the lane red on exactly the runs where
+# nothing is wrong, so the isolation carries expiry pressure instead.
+# ---------------------------------------------------------------------------
+flaky | services::discord::runtime_store::runtime_root_tests::concurrent_provider_allocations_share_one_epoch | lane=non-pg-sweep | #5185 | parallel-only, CAUSE NOT IDENTIFIED. Observed failure is runtime_store.rs:659 assert_eq!(load_generation(), 1) with left 0, i.e. the generation file under AGENTDESK_ROOT_DIR was not where the eight allocator threads had just written it, so the root env var pointed elsewhere by the time of the read. An earlier version of this entry blamed sibling runtime_root_tests for publishing the epoch through set_process_generation_for_tests without the shared env lock; that was checked against the code and is FALSE, because every caller of that helper holds the lock (TestEnvVarGuard::set_path acquires it, and the flake_isolation_4361 and tui_direct_pending_start call sites acquire it too). The remaining suspect is a test elsewhere that replaces AGENTDESK_ROOT_DIR without taking the lock at all. An earlier revision of this entry quoted 139 of 269 such sites across 46 files; that figure is WITHDRAWN because the scan definition behind it was never recorded and no natural definition reproduces it -- three independent attempts produced 189 of 286 across 54 files, 287 of 532 across 80 files, and 432 of 700 across 114 files. The definition now stated is: every line under src that mentions AGENTDESK_ROOT_DIR is a site, and a site counts as unlocked when none of shared_test_env_lock, acquire_shared_test_env_lock or TestEnvVarGuard appears in the 25 preceding lines; on that definition the current tree has 432 unlocked of 700 sites in 114 of 147 files. The number is context, not evidence: this entry is CAUSE NOT IDENTIFIED and the specific writer has not been found. Passes under --test-threads=1. expires=2026-11-06
+#
+# The entry below is NOT parallel-only: it races against itself and reproduces
+# with `--exact` on an otherwise idle machine. It is listed here because the
+# mode that fits it is `flaky` -- it passed in every archived sweep of this
+# lane and in the review's own five-run sweep, and started losing consistently
+# on one development machine afterwards.
+flaky | server::multinode_regression::tests::multinode_dispatch_claims_exactly_once_then_reclaims_expired_lease | lane=non-pg-sweep | #5185 | intra-test race, mechanism measured. The test issues two claim_task_dispatches calls under tokio::join! for the same pending dispatch and asserts the two claim exactly one between them. The select uses FOR UPDATE SKIP LOCKED, and capability routing picks ONE preferred owner. Instrumented run: mac-mini-release took the row lock first, was told claim owner is not preferred route owner selected mac-book-release and skipped, and mac-book-release then found nothing because the row was still locked, so the pair claimed zero. Whether the total is one or zero therefore depends on which of the two concurrent claims wins the row lock, not on the fixture. Pre-existing and not introduced by this change: reproduced at HEAD with this branch stashed, and it is absent from every archived sweep transcript. expires=2026-11-06
+#
+# The five members of managed_root_recursion_tests are listed individually
+# rather than as a module prefix. The window is real for every member (each
+# shells out to a real `git worktree add` while platform/tmux.rs:1230 and
+# binary_resolver.rs:1921 replace and restore the process-global PATH), but an
+# id list means a NEW test added to that module is gated rather than inheriting
+# the isolation.
+flaky | services::maintenance::jobs::worktree_orphan_sweep::managed_root_recursion_tests::dirty_managed_worktree_is_preserved | lane=non-pg-sweep | #5185 | parallel-only Spawn ENOENT on the git binary, which a stable PATH cannot produce intermittently: two call sites replace the process-global PATH and restore it, and a git spawn landing inside that window cannot find the executable. expires=2026-11-06
+flaky | services::maintenance::jobs::worktree_orphan_sweep::managed_root_recursion_tests::managed_root_child_is_classified_and_worktree_is_not | lane=non-pg-sweep | #5185 | parallel-only Spawn ENOENT on the git binary while a sibling test has the process-global PATH replaced; the same window as the other members of this module. expires=2026-11-06
+flaky | services::maintenance::jobs::worktree_orphan_sweep::managed_root_recursion_tests::manual_worktree_in_flat_root_is_protected_by_naming | lane=non-pg-sweep | #5185 | parallel-only Spawn ENOENT on the git binary while a sibling test has the process-global PATH replaced; the same window as the other members of this module. expires=2026-11-06
+flaky | services::maintenance::jobs::worktree_orphan_sweep::managed_root_recursion_tests::terminal_managed_worktree_is_swept_via_recursion | lane=non-pg-sweep | #5185 | parallel-only Spawn ENOENT on the git binary while a sibling test has the process-global PATH replaced; the same window as the other members of this module. expires=2026-11-06
+#
+# The voice PCM harness was isolated as a whole 8-test module in the first
+# round. Only three members have ever been observed failing, so only those
+# three are listed; the other five are now gated like any other test.
+flaky | services::discord::voice_barge_in::tests::pcm_harness_tests::voice_pcm_harness_unattended_e2e | lane=non-pg-sweep | #5185 | parallel-only: the harness asserts against process-global voice flight-event and TTS-playback recorders that parallel siblings write to. Passes under --test-threads=1. expires=2026-11-06
+flaky | services::discord::voice_barge_in::tests::pcm_harness_tests::voice_intake_chime_fires_before_turn_start | lane=non-pg-sweep | #5185 | parallel-only: the harness asserts against process-global voice flight-event and TTS-playback recorders that parallel siblings write to. Passes under --test-threads=1. expires=2026-11-06
+flaky | services::discord::voice_barge_in::tests::pcm_harness_tests::voice_intake_chime_fires_even_when_turn_start_fails | lane=non-pg-sweep | #5185 | parallel-only: the harness asserts against process-global voice flight-event and TTS-playback recorders that parallel siblings write to. Passes under --test-threads=1. expires=2026-11-06
+#
+# ---------------------------------------------------------------------------
+# Linux-only, and newly EXPOSED -- not pre-existing. The distinction is the
+# whole reason this section is separate from the base-red one above.
+#
+# These three had never executed on Linux CI at all. Verified at origin/main
+# `31465b184` (CI Main run 31135762037, conclusion SUCCESS) by grepping both
+# ubuntu jobs' full logs for each id: `Full tests (ubuntu-latest)`, 114,843
+# lines, zero occurrences; `PostgreSQL tests`, 3,399 lines, zero occurrences.
+# `Full tests` runs a curated module filter and no lane selected these ids.
+#
+# Nor does this change reach them. `git diff --name-only origin/main...HEAD`
+# contains neither `src/services/discord/jsonl_watcher.rs` nor
+# `src/services/platform/tmux.rs`. It does touch `src/services/tmux_common.rs`,
+# which the tmux test below calls -- but only inside `mod sentinel_tests`, and
+# only to replace one sibling test's hand-rolled env save/restore with guards
+# that also restore on unwind. `session_dead_marker_path` and
+# `cleanup_session_temp_files` are untouched, and the edit strictly reduces
+# cross-test env leakage. The same holds for the other adjacent files in the
+# diff: every change near this call graph is `#[cfg(test)]`.
+#
+# So the honest label is the one the `library_sweep` job was built to produce:
+# widening the lane ran tests that nothing had been running, and three of them
+# fail on Linux. Writing "pre-existing" or "base-red" here would be the same
+# species of overclaim this change exists to close -- there is no prior Linux
+# verdict for them to pre-exist.
+#
+# All three are `flaky` rather than `always`, and that is now measured rather
+# than argued. `always` asserts a deterministic verdict, and its stale check
+# turns a PASSING run into a hard lane failure. In CI Main 31138399249 the
+# second member below, jsonl_watcher_notifies_on_dead_marker_create, PASSED
+# while the other two failed again: the lane reported it as flaky-passed and
+# the run stayed on its expected shape. Held as `always`, that green would
+# have failed the lane for a stale entry instead.
+#
+# The two that have now failed twice keep `flaky` all the same, and the reason
+# is cost asymmetry rather than evidence of flakiness: two observations do not
+# establish determinism, understating with `flaky` loses nothing, and
+# overstating with `always` kills runs where nothing is wrong. What each entry
+# may NOT do is dress a guess as a cause -- see the third entry, whose
+# ubuntu-tmux-version explanation is withdrawn for exactly that. Tracked in
+# #5217, which already carries the four macOS members of this same class.
+# ---------------------------------------------------------------------------
+flaky | services::discord::jsonl_watcher::tests::notify_fires_when_file_modified | lane=non-pg-sweep | #5217 | Linux-only, newly exposed by the library_sweep job rather than pre-existing: zero occurrences in either ubuntu job log at origin/main 31465b184, so it has no prior Linux verdict. Lost-wakeup shape, and the mechanism half is grounded in the source rather than guessed: the watcher fires with notify_waiters(), which this file documents at jsonl_watcher.rs:110 and which drops the wake-up entirely when no waiter is registered, while the test tokio::spawns its waiter on a current_thread runtime and then performs a blocking std::fs::write before ever awaiting, so the waiter cannot have registered when the event lands. Whether it registers in time is backend latency and that half is PRESUMED, not measured: inotify delivers promptly where the darwin backend coalesces, which would explain why darwin sweeps never saw it. Deliberately not diagnosed further here; this change tracks it rather than fixing it. expires=2026-11-06
+flaky | services::discord::jsonl_watcher::tests::jsonl_watcher_notifies_on_dead_marker_create | lane=non-pg-sweep | #5217 | Linux-only, newly exposed by the library_sweep job rather than pre-existing: zero occurrences in either ubuntu job log at origin/main 31465b184. Same lost-wakeup shape as its sibling above and in the same module, differing only in that the awaited event is the creation of a pane_dead marker rather than a modify of an existing jsonl file. The notify_waiters() drop-when-unregistered behaviour is documented in the source; the platform latency that decides whether the waiter registers first is PRESUMED and not measured. Not diagnosed further in this change. expires=2026-11-06
+flaky | services::platform::tmux::live_pane_tests::dead_marker_hook_writes_marker_on_pane_exit | lane=non-pg-sweep | #5217 | Linux-only, newly exposed by the library_sweep job rather than pre-existing: zero occurrences in either ubuntu job log at origin/main 31465b184. The test creates a real tmux session, kills it, and polls for up to ten seconds for the pane-dead marker the tmux hook should write; on the runner the marker never appeared. Its own is_available() guard returns early when tmux is absent, so tmux was present and the hook itself did not deliver. CAUSE NOT IDENTIFIED, and observed 2 of 2 on ubuntu-latest (CI Main 31135762037 and 31138399249), so flakiness has not been observed either. An earlier revision of this entry named a tmux version or hook-wiring difference between ubuntu-latest and the darwin machines as the presumed cause; that is WITHDRAWN as a cause claim, because it was never measured and because a runner-wide version difference would be deterministic on that runner, which is the opposite of the mode this entry carries. What IS in the source is an interleaving window, offered as a candidate and not as a measurement: the marker path is resolved twice from process-global environment at two different moments, once by the test at tmux.rs:1117 and again inside create_session at tmux.rs:161, which calls dead_marker_shell_command (tmux.rs:175) to bake a literal path into the tmux hook. Both resolutions read AGENTDESK_ROOT_DIR through config::runtime_root (config.rs:2427) and HOSTNAME through host_temp_namespace (tmux_common.rs:1031). The test holds config::shared_test_env_lock, but that lock only excludes the sites that take it, and the first entry in this ledger records 432 of 700 AGENTDESK_ROOT_DIR sites under src taking no lock at all; a sibling replacing either variable between the two resolutions would send the hook to a path the poll loop never checks. Nobody has instrumented that, so it stays a candidate. The mode stays flaky on cost asymmetry rather than on evidence of flakiness: two observations do not establish determinism, and always would hard-fail any run where the test passes. This lane has already paid that price once, in the sibling jsonl_watcher_notifies_on_dead_marker_create, which failed in the first run and PASSED in 31138399249. Worth recording for whoever picks up #5217: this test hand-rolls the same save-and-restore-after-the-assertions env pattern that this change replaced with unwind-safe guards one module over in tmux_common sentinel_tests, so a failure here leaks AGENTDESK_ROOT_DIR into whatever runs next. That is an observation about the test, not the cause of this failure. expires=2026-11-06
+#
+# ---------------------------------------------------------------------------
+# #[ignore]d tests. These are pinned as a set: the lane fails if a test reports
+# itself ignored without an entry here, and fails if an entry here is no longer
+# reported ignored. `#[ignore]` is otherwise a silent way to keep a lane's
+# selection intact while shrinking what it actually executes.
+# ---------------------------------------------------------------------------
+ignored | cli::discord_thread_create::tests::thread_create_lock_child_process | lane=non-pg-sweep | #5185 | child-process entry point: the parent test re-executes the test binary to run this body, so running it in-process would take the very lock it exists to hold.
+ignored | server::routes::auto_queue_preflight_harness_tests::auto_queue_preflight_fixture_sandbox_roundtrip | lane=non-pg-sweep | #5185 | opt-in sandbox roundtrip: requires a preflight fixture sandbox that the library lane does not provision, so it is run deliberately rather than on every sweep.
+ignored | services::claude_compact_context::tests::live_probe_tui_launch_window | lane=non-pg-sweep | #5185 | live probe: launches a real provider TUI window and measures it, so it needs an attended machine rather than a CI runner.
+ignored | services::claude_tui::hook_relay::ordered_queue::tests::producer_lock_holder_subprocess_entry | lane=non-pg-sweep | #5185 | child-process entry point: the parent test re-executes the test binary to run this body while holding the producer lock, which cannot be modelled in-process.
+ignored | services::claude_tui::hook_relay::tests::failure_marker_parent_subprocess_entry | lane=non-pg-sweep | #5185 | child-process entry point: the parent test re-executes the test binary to run this body so the relay failure marker is written by a genuinely separate process.
+ignored | services::claude_tui::hook_relay::tests::failure_marker_worker_subprocess_entry | lane=non-pg-sweep | #5185 | child-process entry point: the worker half of the failure-marker pair, executed only by the parent test through a fresh test-binary process.
+ignored | services::claude_tui::hook_relay::tests::non_wait_relay_parent_subprocess_entry | lane=non-pg-sweep | #5185 | child-process entry point: the parent test re-executes the test binary to run this body, and the nested libtest summary it prints is why this lane declares more than one summary line.
+ignored | services::claude_tui::hook_relay::tests::non_wait_relay_worker_subprocess_entry | lane=non-pg-sweep | #5185 | child-process entry point: the worker half of the non-wait relay pair, executed only by the parent test through a fresh test-binary process.

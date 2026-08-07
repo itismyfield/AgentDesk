@@ -537,7 +537,7 @@ fn drift_triggered_restore_makes_routine_session_route_again() {
 fn dead_orphaned_session_mirror_is_evicted_and_stops_drift_spam() {
     let _guard = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
-        .unwrap();
+        .unwrap_or_else(|poison| poison.into_inner());
     let shared = super::super::make_shared_data_for_tests();
     // A session that does not exist on this host (pane gone / orphaned).
     let tmux = "AgentDesk-claude-adk-cc-t1504468805772902471-DEAD-ORPHAN-fix3105";
@@ -2438,7 +2438,7 @@ async fn claude_inflight_drain_wait_times_out_when_previous_turn_stays_active() 
 fn bridge_adapter_tail_guard_clears_only_current_external_lease() {
     let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
-        .unwrap();
+        .unwrap_or_else(|poison| poison.into_inner());
     let tmux = "AgentDesk-codex-bridge-guard";
     let channel_id = ChannelId::new(940_000_000_000_003);
     let original = ExternalInputRelayLease {
@@ -2522,7 +2522,7 @@ fn bridge_adapter_tail_guard_clears_only_current_external_lease() {
 fn claude_bridge_lease_clears_when_tail_dedup_skips_spawn() {
     let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
-        .unwrap();
+        .unwrap_or_else(|poison| poison.into_inner());
     let tmux = "AgentDesk-claude-bridge-dedup-skip";
     let channel_id = ChannelId::new(940_000_000_000_004);
     let lease = ExternalInputRelayLease {
@@ -2592,7 +2592,7 @@ async fn claude_bridge_lease_guard_cleans_no_binding_precondition_skip() {
     let _env = crate::config::set_agentdesk_root_for_test(temp.path());
     let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
-        .unwrap();
+        .unwrap_or_else(|poison| poison.into_inner());
     let tmux = "AgentDesk-claude-bridge-no-binding";
     let channel_id = ChannelId::new(940_000_000_000_005);
     let prompt = ObservedTuiPrompt {
@@ -2664,7 +2664,7 @@ async fn claude_bridge_lease_guard_cleans_no_binding_precondition_skip() {
 fn task_notification_repeat_clears_its_recorded_external_lease() {
     let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
-        .unwrap();
+        .unwrap_or_else(|poison| poison.into_inner());
     let tmux = "AgentDesk-task-card-repeat-lease";
     let channel_id = ChannelId::new(950_000_000_000_001);
     let prompt = ObservedTuiPrompt {
@@ -2725,7 +2725,7 @@ fn task_notification_repeat_clears_its_recorded_external_lease() {
 fn task_notification_repeat_lease_clear_preserves_newer_turn() {
     let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
-        .unwrap();
+        .unwrap_or_else(|poison| poison.into_inner());
     let tmux = "AgentDesk-task-card-repeat-newer";
     let channel_id = ChannelId::new(950_000_000_000_002);
     let prompt = ObservedTuiPrompt {
@@ -3196,7 +3196,7 @@ fn codex_external_input_binding_refreshes_from_live_rollout_marker() {
     let _env = crate::config::set_agentdesk_root_for_test(temp.path());
     let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
-        .unwrap();
+        .unwrap_or_else(|poison| poison.into_inner());
     crate::services::tui_prompt_dedupe::reset_state_for_tests();
     let tmux_session_name = "AgentDesk-codex-marker-refresh";
     let rollout_path = temp.path().join("rollout.jsonl");
@@ -3689,7 +3689,7 @@ async fn genuine_tui_direct_typed_prompt_still_creates_synthetic_inflight() {
     let _env = crate::config::set_agentdesk_root_for_test(temp.path());
     let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
-        .unwrap();
+        .unwrap_or_else(|poison| poison.into_inner());
     crate::services::tui_prompt_dedupe::reset_state_for_tests();
     let shared = super::super::make_shared_data_for_tests();
     let provider = ProviderKind::Claude;
@@ -4594,7 +4594,7 @@ fn claude_idle_transcript_scan_for_last_prompt_returns_complete_then_catches_nex
 fn watermark_reset_rescan_of_relayed_entry_does_not_resynthesize_turn() {
     let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
-        .unwrap();
+        .unwrap_or_else(|poison| poison.into_inner());
     crate::services::tui_prompt_dedupe::reset_state_for_tests();
 
     let dir = tempfile::tempdir().expect("temp dir");
@@ -4808,7 +4808,7 @@ fn idle_response_tail_discord_send_failure_does_not_advance_runtime_binding_offs
 fn observed_lease_early_return_guard_clears_recorded_lease_on_drop() {
     let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
-        .unwrap();
+        .unwrap_or_else(|poison| poison.into_inner());
     let tmux = "AgentDesk-early-return-guard-clear";
     let channel_id = ChannelId::new(960_000_000_000_001);
     let lease = ExternalInputRelayLease {
@@ -4863,7 +4863,7 @@ fn observed_lease_early_return_guard_clears_recorded_lease_on_drop() {
 fn observed_lease_early_return_guard_disarm_preserves_lease() {
     let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
-        .unwrap();
+        .unwrap_or_else(|poison| poison.into_inner());
     let tmux = "AgentDesk-early-return-guard-disarm";
     let channel_id = ChannelId::new(960_000_000_000_002);
     let lease = ExternalInputRelayLease {
@@ -4910,7 +4910,7 @@ fn observed_lease_early_return_guard_disarm_preserves_lease() {
 fn observed_lease_early_return_guard_does_not_clobber_newer_lease() {
     let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
-        .unwrap();
+        .unwrap_or_else(|poison| poison.into_inner());
     let tmux = "AgentDesk-early-return-guard-noclobber";
     let channel_id = ChannelId::new(960_000_000_000_003);
     let base = ExternalInputRelayLease {

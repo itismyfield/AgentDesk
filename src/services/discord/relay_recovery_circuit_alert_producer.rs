@@ -209,7 +209,9 @@ mod tests {
             return;
         };
         active_owner(&pool, "46151").await;
-        let _env_lock = crate::config::shared_test_env_lock().lock().unwrap();
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let previous = std::env::var_os(CIRCUIT_STAMP_ENV);
         unsafe { std::env::remove_var(CIRCUIT_STAMP_ENV) };
         let result = enqueue(Some(&pool), &request(46_151, "default-off"), 300).await;

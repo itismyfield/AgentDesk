@@ -834,6 +834,247 @@ jobs:
           UPSTREAM_RESULT: ${{ needs.high-risk-recovery.result }}
         run: ./scripts/required-check-mirror.sh
 
+  # #5185: measured on b6b551627, the curated PR lanes select 971 of 7538
+  # library tests (12.9%), and every curated lane is path-filtered. The one
+  # job that EXECUTES library tests unconditionally is
+  # `relay-authority-contract`: it carries no `if:` and no `needs:`, and this
+  # workflow has no `paths:` trigger filter, so it runs on every PR. (The
+  # `scripts` job is unconditional too, but its Rust step is
+  # `cargo test --lib -- --list`, which compiles and enumerates without
+  # running anything.) That is the real floor a PR missing `pg_db`,
+  # `high_risk_recovery` and the relay-authority path filters used to land on:
+  # 171 library tests -- 123 under `services::discord::session_relay_sink`,
+  # 43 under `services::discord::relay_recovery::tests`, 5 under
+  # `services::discord::tui_prompt_relay::local_model_queue_wake_e2e` -- i.e.
+  # 2.3% of the harness, all of it relay-authority surface.
+  #
+  # This lane raises that floor to the whole library harness minus the tests
+  # `--skip _pg --skip pg_ --skip postgres` removes, run in parallel on the
+  # broad `rust_or_policy` filter: 6,934 tests selected on ubuntu-latest, of
+  # which 8 are `#[ignore]`d, so 6,926 execute. Measured wall time for the
+  # libtest run itself on an M4 Pro: 262-274 s across five sweeps (an earlier
+  # revision of this comment claimed "~1 min", which was never measured);
+  # a two-core `ubuntu-latest` runner is slower still, which is what the
+  # 45-minute step timeout is sized for. darwin derives 6,937 / 6,929 from the
+  # same manifest because four macOS-only tests are `#[cfg]`-absent on Linux
+  # while one Linux-only test is present; the wrapper resolves that through
+  # `--platform`, which defaults to the host, so the runner derives the Linux
+  # figures and a local reproduction on a Mac derives the darwin ones.
+  #
+  # THIS JOB NEEDS POSTGRESQL, even though its filters are named for excluding
+  # it. `--skip _pg --skip pg_ --skip postgres` is a substring filter over test
+  # ids, and PostgreSQL dependence is a property of a test *body*. The two do
+  # not coincide: `scripts/pg_test_lane_manifest.txt` classifies 460 library
+  # tests as PG-dependent and exactly 61 of them carry none of those three
+  # substrings in their id, so this lane selects all 61. Measured with the
+  # fixture base pointed at a closed port, those 61 do not degrade to a skip --
+  # `TestPostgresDb::create()` panics through `.expect(...)` and the soft-skip
+  # variants stall on connect retries for minutes each. Against a live server
+  # they were measured `61 passed; 0 failed` in 24.8 s, in parallel, with
+  # `AGENTDESK_REQUIRE_PG=1` -- on ONE development machine, server version
+  # unrecorded. Both numbers are conditional on that host, and neither is a
+  # property of this lane:
+  #   * `0 failed` is not a guarantee. A review on another machine measured
+  #     60 passed / 1 failed, the loser being the `multinode_regression`
+  #     dispatch/reclaim test that `scripts/known_test_failures.txt` carries as
+  #     `flaky` in this same commit -- an intra-test race that reproduces under
+  #     `--exact` on an idle machine. `60 passed; 1 failed` is an expected
+  #     shape here, held green by the ledger rather than by the test passing.
+  #   * 24.8 s is not a budget. `POSTGRES_TEST_LIFECYCLE_LOCK`
+  #     (`src/db/postgres.rs`) serialises every fixture database create/drop
+  #     process-globally, so the elapsed time is whatever one
+  #     create+migrate+drop costs on the host; a two-core `ubuntu-latest`
+  #     runner is expected to be far slower, and that is not a regression.
+  # What is host-independent is the direction, and that is all this evidence is
+  # asked to carry: with a live server the 61 run and are adjudicated on the
+  # change. With a closed port they still run -- one review measured `57 FAILED
+  # / 4 ok` in 915.72 s. What that red reports can be listed, and the list is
+  # short: which of the two fixture behaviours each id takes -- `create()`
+  # panicking through `.expect(...)`, or a soft-skip variant burning its
+  # connect-retry budget -- and that the port was closed. Which of the two a
+  # given id does is a property of the test, not of the diff. What it does not
+  # report is whether the assertions past the fixture call hold, and those are
+  # where a change is normally adjudicated.
+  #
+  # It does not follow that such a run says nothing about a change, and an
+  # earlier revision of this comment claimed exactly that. The lines before the
+  # fixture call are diffable, and this branch diffs them: three of the 61 live
+  # in `src/services/session_resume.rs`, which this branch edits, and
+  # `resume_production_path_clears_stale_binding_and_rebinds_runtime` there now
+  # takes its `TEST_LOCK` with `unwrap_or_else(|poison| poison.into_inner())`
+  # on the line above its own `TestPostgresDb::create()` call. A closed port is
+  # what makes that `create()` panic, and that panic is what poisons the lock
+  # the edit exists to survive -- so against a closed port the fixture, not the
+  # assertion, decides what that edit is worth. State the harm that way: the
+  # lane does not go unrun, it goes red slowly, and it answers a narrower
+  # question than the pull request asked.
+  #
+  # So the service below is not defensive: without it
+  # this required context can never be green, and with it the 56 of those 61
+  # that no PR lane ran at all (`[rule1]` in
+  # `scripts/pg_test_lane_baseline.txt`, now empty) start running on every Rust
+  # PR against a real database.
+  #
+  # `scripts/check_pg_test_lane_membership.py` `[rule5]` is what keeps the
+  # SELECTION honest -- the selection, and nothing beyond it. What the rule
+  # actually decides is whether a job's YAML text references the PostgreSQL
+  # service start script at all; a `cargo test` job whose text does not
+  # reference it fails rule5, naming every PG-dependent id that job selects.
+  # Being a substring test over job text, it does not evaluate `if:`
+  # conditions, does not tell a live step from a commented-out one, and cannot
+  # know whether the container came up. `docs/ci/release-gates.md` records the
+  # same limit in its required-context procedure -- rule5 inspects the
+  # selection set, not whether the service really started -- which is why that
+  # procedure ALSO makes you confirm, in a real main run, that this job's
+  # service step exists and succeeded. Within those limits the rule carries no
+  # baseline tolerance, so deleting the service step below turns this into a
+  # red script check rather than a red sweep discovered by every PR author at
+  # once.
+  #
+  # Residual risk, recorded rather than closed because it is low-probability
+  # and has no cheap guard: a container that FAILS TO START is already safe --
+  # the start step polls `pg_isready` for its budget and fast-fails the job. A
+  # container that starts and then DIES mid-sweep is not. Every PG-dependent
+  # test still to run then burns its connect-retry budget (a review measured
+  # ~45 s per test against a closed port) before failing, which on a two-core
+  # runner adds far more than the 45-minute step timeout has left. That
+  # surfaces as a TIMEOUT red with no named failure -- not as the clean,
+  # id-naming red this lane is built to produce -- so read a timeout here as
+  # "check the service", not as "the sweep got slower".
+  #
+  # Boundaries and why they are here rather than wider:
+  #   * `--lib` only. `full_non_pg` in ci-main.yml documents that an
+  #     `--all-targets` non-PG sweep panics in ~169 SQLite-fixture tests that
+  #     still await the #1238 PostgreSQL migration; pulling them in would force
+  #     either a huge isolation ledger or a re-narrowed filter.
+  #   * The id-filtered PostgreSQL suite keeps its existing home in `test_fast`
+  #     / `just test-postgres`: that lane runs it `--test-threads=1` under its
+  #     own container. This lane provisions its own container for the 61
+  #     residual ids only; the two jobs run on separate runners and share
+  #     nothing.
+  #   * `DATABASE_URL` is deliberately NOT exported here even though `test_fast`
+  #     and `high-risk-recovery` export it. Those lanes select hundreds of tests;
+  #     this one selects 6,926, and the fixture helpers read
+  #     `POSTGRES_TEST_DATABASE_URL_BASE`/`PG*`, not `DATABASE_URL` -- the 61
+  #     pass without it. Exporting a production connection string across the
+  #     whole harness is a blast radius that was not measured, so it is not
+  #     claimed.
+  #   * Parallel, NOT `--test-threads=1`: serialising would hide the shared
+  #     process-global state this sweep exposes instead of recording it.
+  #
+  # `scripts/run_test_lane.py` is what makes the green meaningful. It derives
+  # the exact id set this lane must run and fails -- naming every id on either
+  # side of the difference -- when the run reports a different one, and it
+  # fails on any failure that is not carried in
+  # `scripts/known_test_failures.txt` with a tracking issue and a reason.
+  # There is deliberately no execution-count floor; the step comment below
+  # records the two measured evasions that cleared one.
+  library_sweep:
+    name: Library test sweep
+    needs: changes
+    if: needs.changes.outputs.rust_or_policy == 'true'
+    runs-on: ubuntu-latest
+    env:
+      RUST_BACKTRACE: 1
+      # Fixture-side PostgreSQL wiring, matching `test_fast` /
+      # `high-risk-recovery` minus `DATABASE_URL` (see the job comment).
+      POSTGRES_TEST_DATABASE_URL_BASE: postgresql://postgres:postgres@127.0.0.1:5432
+      POSTGRES_TEST_ADMIN_DB: postgres
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      # #4979 S2 contract, and rule4 of check_pg_test_lane_membership.py: any
+      # job that starts the service must also hard-fail on an unreachable
+      # database instead of soft-skipping to green. rule4 does not ENFORCE
+      # that. A newly appearing rule4 debt entry prints as `WARN` and the check
+      # still exits 0 -- only a *stale* baseline entry is `FAIL` -- so deleting
+      # this line turns no gate red; it quietly returns the PG-dependent tests
+      # this lane selects to soft-skip green. Treat rule4 as a ledger, and this
+      # line as load-bearing on its own.
+      AGENTDESK_REQUIRE_PG: "1"
+      # Match the other test lanes: assertions and panic text are preserved,
+      # only native debug symbols are dropped to cut link memory (#4245).
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start PostgreSQL service
+        run: ./scripts/ci/postgres-service.sh start
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      # See `check_fast` for rationale: `target/` excluded to protect the
+      # sccache GHA cache quota.
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # There is no execution-count floor here, deliberately. A floor is a
+      # scalar summary of a set, and both measured evasions cleared one: a
+      # 402-test narrowing of a single module and a 213-test module disable
+      # each stayed above a floor of 6500 and reported a green lane. The
+      # adjudicator instead derives the exact id set this lane must run from
+      # scripts/lib_test_inventory_manifest.txt minus the --skip patterns
+      # declared below, and names every id on either side of the difference --
+      # the same set-comparison convention #5144 moved the inventory pin onto.
+      #
+      # --skip is declared to the adjudicator as well as to libtest, and the
+      # two must match: a lane that told the adjudicator about a narrower
+      # selection than it executed would shrink its own expectation to fit.
+      #
+      # --max-summaries 2 because `non_wait_relay_parent_subprocess_entry`
+      # re-executes the test binary and its child libtest writes a second
+      # "test result:" line to the inherited stdout. Any further nesting is an
+      # error: child output is otherwise counted as if this run had produced it.
+      - name: Library sweep (selection-set gated)
+        timeout-minutes: 45
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: |
+          python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 2 --skip _pg --skip pg_ --skip postgres -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- --skip _pg --skip pg_ --skip postgres
+
+      - name: Stop PostgreSQL service
+        if: always()
+        run: ./scripts/ci/postgres-service.sh stop
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
+
+  library_sweep_required_context:
+    name: Library test sweep (ubuntu-latest)
+    needs:
+      - changes
+      - library_sweep
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mirror library sweep result across path-filter skips
+        env:
+          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
+          FILTER_NAME: rust_or_policy
+          FILTER_OUTPUT: ${{ needs.changes.outputs.rust_or_policy }}
+          UPSTREAM_JOB_NAME: library_sweep
+          UPSTREAM_RESULT: ${{ needs.library_sweep.result }}
+        run: ./scripts/required-check-mirror.sh
+
   lint:
     name: Lint
     needs: changes

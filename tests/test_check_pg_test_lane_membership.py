@@ -61,12 +61,28 @@ class Fixture:
         start_step = "      - run: ./scripts/ci/postgres-service.sh start\n" if (start or require) else ""
         return "on:\n  push:\njobs:\n  lane:\n" + env + "    steps:\n" + start_step + f"      - run: {command}\n"
 
-    def write_pr(self, patterns: tuple[str, ...], indent: int = 12) -> None:
+    def write_pr(
+        self,
+        patterns: tuple[str, ...],
+        indent: int = 12,
+        *,
+        sweep: str | None = None,
+        sweep_starts_service: bool = False,
+        sweep_block: str | None = None,
+    ) -> None:
         prefix = " " * indent
         rendered = "\n".join(f"{prefix}  - '{pattern}'" for pattern in patterns)
+        extra = ""
+        if sweep is not None:
+            start = "      - run: ./scripts/ci/postgres-service.sh start\n" if sweep_starts_service else ""
+            env = "    env:\n      AGENTDESK_REQUIRE_PG: \"1\"\n" if sweep_starts_service else ""
+            extra = f"  sweep:\n{env}    steps:\n{start}      - run: {sweep}\n"
+        if sweep_block is not None:
+            extra += sweep_block
         (self.root / ".github/workflows/ci-pr.yml").write_text(
             "jobs:\n  changes:\n    steps:\n      - with:\n          filters: |\n"
-            f"{prefix}pg_db:\n{rendered}\n{prefix}rust:\n{prefix}  - 'src/**'\n",
+            f"{prefix}pg_db:\n{rendered}\n{prefix}rust:\n{prefix}  - 'src/**'\n"
+            + extra,
             "utf-8",
         )
 
@@ -384,6 +400,191 @@ class RuleMutations(FixtureCase):
                 fx.write_source(path, "#[cfg(test)] mod postgres_tests { #[test] fn case() { create_test_database(); } }\n", "#[path = \"%s\"] mod service;\n" % path.removeprefix("src/"))
                 self.assertEqual(bool(fx.analysis().debts["rule3"]), bad)
 
+    # ------------------------------------------------------------------
+    # rule5 (#5185): a ci-pr.yml job that runs cargo test without starting the
+    # PostgreSQL service must select no PG-dependent test. The tests below pin
+    # the three properties that make it discriminating rather than decorative:
+    # it sees `--lib` lanes (rule2 cannot), it is scoped to the PR workflow,
+    # and it fails with no baseline to ratchet against.
+    # ------------------------------------------------------------------
+    SWEEP = "cargo test --lib -- --skip _pg --skip pg_ --skip postgres"
+
+    def write_pg_test(self, module: str = "tests") -> None:
+        """A PG-dependent test whose id carries none of the skip substrings."""
+        self.fx.write_source(
+            "src/db/service.rs",
+            f"#[cfg(test)] mod {module} {{ #[test] fn case() {{ create_test_database(); }} }}\n",
+            "mod db { pub mod service; }\n",
+        )
+
+    def test_rule5_pr_lib_lane_without_service_is_debt_and_service_clears_it(self) -> None:
+        self.write_pg_test()
+        self.fx.write_pr(("src/db/**",), sweep=self.SWEEP)
+        self.assertEqual(self.fx.analysis().debts["rule5"], {"db::service::tests::case"})
+        self.fx.write_pr(("src/db/**",), sweep=self.SWEEP, sweep_starts_service=True)
+        analysis = self.fx.analysis()
+        self.assertEqual(analysis.debts["rule5"], set())
+        # Starting the service also makes the sweep a PG lane, so the same test
+        # stops being rule1 debt -- the coverage half of the same fix.
+        self.assertEqual(analysis.debts["rule1"], set())
+        self.assertEqual(analysis.debts["rule4"], set())
+
+    def test_rule5_sees_lib_lanes_that_pgless_lane_filters_cannot(self) -> None:
+        """The blind spot that let the defect ship: rule2 only reads --all-targets."""
+        self.write_pg_test()
+        self.fx.write_pr(("src/db/**",), sweep=self.SWEEP)
+        jobs = [
+            job
+            for path in sorted((self.root / ".github/workflows").glob("*.yml"))
+            for job in membership.parse_jobs(path, self.root, [])
+        ]
+        coverage = membership._load_coverage_module(self.root)
+        sweep_lane = coverage.cargo_test_filter(self.SWEEP)
+        self.assertNotIn(sweep_lane, membership.pgless_lane_filters(jobs, coverage))
+        self.assertEqual(membership.pr_pgless_lane_filters(jobs, coverage), (sweep_lane,))
+        # And this is why rule2 could not have caught it even by counting: the
+        # nightly `--all-targets` lane already carries the same id, so ADDING
+        # the PR sweep moves rule2 by nothing at all while rule5 goes 0 -> 1.
+        with_sweep = self.fx.analysis()
+        self.fx.write_pr(("src/db/**",))
+        without_sweep = self.fx.analysis()
+        self.assertEqual(with_sweep.debts["rule2"], without_sweep.debts["rule2"])
+        self.assertEqual(without_sweep.debts["rule5"], set())
+        self.assertEqual(with_sweep.debts["rule5"], {"db::service::tests::case"})
+
+    def test_rule5_is_scoped_to_the_pr_workflow(self) -> None:
+        self.write_pg_test()
+        self.fx.write_pr(("src/db/**",))
+        (self.root / ".github/workflows/ci-nightly.yml").write_text(
+            self.fx.workflow(self.SWEEP), "utf-8"
+        )
+        self.assertEqual(self.fx.analysis().debts["rule5"], set())
+
+    def test_rule5_fails_without_any_baseline_to_ratchet(self) -> None:
+        inventory = membership.PgInventory({"db::service::tests::case": "src/db/service.rs"})
+        debts = empty_debts()
+        debts["rule5"] = {"db::service::tests::case"}
+        empty = empty_debts()
+        stderr, stdout = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(stdout):
+            rc = membership.check_analysis(
+                membership.Analysis(inventory, debts, 0),
+                {section: set() for section in membership.SECTIONS},
+                {section: set() for section in membership.SECTIONS},
+                membership.render_manifest(inventory),
+                reference_label="fixture base",
+                allowlist_label="scripts/pg_test_lane_allowlist.txt",
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("FAIL: [rule5]", stderr.getvalue())
+        self.assertIn("db::service::tests::case", stderr.getvalue())
+        # rule5 is not a baseline section, so a regenerated snapshot cannot
+        # absorb it the way rule1-rule4 debt can.
+        self.assertNotIn("rule5", membership.render_baseline(debts))
+
+    # ------------------------------------------------------------------
+    # The allowlist bypass. `analyze` subtracts allowlisted ids before any rule
+    # runs, which is the right scope for rule1-rule4 -- they are budgets, and a
+    # proven classifier false positive should not spend budget -- and was the
+    # wrong scope for rule5, which is not a budget. The three tests below pin
+    # the fix from both sides: rule5 stops reading the allowlist, and rule1-
+    # rule4 keep reading it exactly as they did.
+    # ------------------------------------------------------------------
+    def test_rule5_ignores_the_allowlist_that_still_clears_rule1_and_rule2(self) -> None:
+        self.write_pg_test()
+        self.fx.write_pr(("src/db/**",), sweep=self.SWEEP)
+        before = self.fx.analysis()
+        self.assertEqual(before.allowlist_count, 0)
+        self.assertEqual(before.debts["rule5"], {"db::service::tests::case"})
+        self.assertEqual(before.debts["rule1"], {"db::service::tests::case"})
+        self.assertEqual(before.debts["rule2"], {"db::service::tests::case"})
+
+        (self.root / "scripts/pg_test_lane_allowlist.txt").write_text(
+            "test:db::service::tests::case  # false positive, tracked in #9999\n", "utf-8"
+        )
+        after = self.fx.analysis()
+        self.assertEqual(after.allowlist_count, 1)
+        # rule1-rule4 keep the allowance they were designed with. Changing this
+        # would be a separate decision about a separate rule; the entry above is
+        # accepted by `load_allowlist` on the strength of an unverified issue
+        # number, which is precisely why rule5 must not be reachable this way.
+        self.assertEqual(after.debts["rule1"], set())
+        self.assertEqual(after.debts["rule2"], set())
+        # rule5 does not. It is computed over the unfiltered inventory.
+        self.assertEqual(after.debts["rule5"], {"db::service::tests::case"})
+
+    def test_write_snapshots_refuses_to_regenerate_over_a_live_rule5(self) -> None:
+        self.write_pg_test()
+        self.fx.write_pr(("src/db/**",), sweep=self.SWEEP)
+        manifest = self.root / membership.MANIFEST_REL
+        baseline = self.root / membership.BASELINE_REL
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            rc = membership.main(["--repo-root", str(self.root), "--write-snapshots"])
+        self.assertEqual(rc, 1)
+        self.assertIn("refusing to write snapshots", stderr.getvalue())
+        self.assertFalse(manifest.exists())
+        self.assertFalse(baseline.exists())
+
+        # Fixing the workflow, not the snapshot, is what unblocks regeneration.
+        self.fx.write_pr(("src/db/**",), sweep=self.SWEEP, sweep_starts_service=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = membership.main(["--repo-root", str(self.root), "--write-snapshots"])
+        self.assertEqual(rc, 0)
+        self.assertTrue(manifest.exists())
+        self.assertTrue(baseline.exists())
+
+    def test_four_step_allowlist_bypass_of_rule5_is_refused(self) -> None:
+        """The reviewed attack in order: mutate, allowlist, regenerate, recheck."""
+        # 1. a tree whose PR sweep starts the service owes nothing.
+        self.write_pg_test()
+        self.fx.write_pr(("src/db/**",), sweep=self.SWEEP, sweep_starts_service=True)
+        self.assertEqual(self.fx.analysis().debts["rule5"], set())
+
+        # 2. delete the service step. rule5 names the test it now strands.
+        self.fx.write_pr(("src/db/**",), sweep=self.SWEEP)
+        named = self.fx.analysis().debts["rule5"]
+        self.assertEqual(named, {"db::service::tests::case"})
+
+        # 3. feed every id rule5 just printed back to the allowlist, in the form
+        #    `load_allowlist` accepts: any non-empty text after the `#`.
+        (self.root / "scripts/pg_test_lane_allowlist.txt").write_text(
+            "".join(f"test:{name}  # false positive, tracked in #9999\n" for name in sorted(named)),
+            "utf-8",
+        )
+        analysis = self.fx.analysis()
+        self.assertEqual(analysis.allowlist_count, len(named))
+        self.assertEqual(analysis.debts["rule5"], named)
+
+        # 4. regenerate the snapshots -- the step that used to clear the leftover
+        #    rule2/rule3 stale entries and take the whole run to rc=0.
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(membership.main(["--repo-root", str(self.root), "--write-snapshots"]), 1)
+
+        # The allowlist has emptied `active_tests`, so rule1-rule4 are clean and
+        # the manifest matches: rule5 is the only thing left holding this red.
+        self.assertEqual(analysis.debts["rule1"], set())
+        self.assertEqual(analysis.debts["rule2"], set())
+        self.assertEqual(analysis.debts["rule3"], set())
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            verdict = membership.check_analysis(
+                analysis,
+                {section: set() for section in membership.SECTIONS},
+                {section: set() for section in membership.SECTIONS},
+                membership.render_manifest(analysis.inventory),
+                reference_label="fixture base",
+                allowlist_label="fixture allowlist",
+            )
+        self.assertEqual(verdict, 1)
+        self.assertIn("FAIL: [rule5]", stderr.getvalue())
+        self.assertIn("allowlisting these ids leaves the count where it is", stderr.getvalue())
+        # The message must describe the mechanism, not an execution order:
+        # `active_tests` is built at the top of `analyze` and rule5 is built
+        # below it, so "computed before allowlist filtering" was backwards.
+        self.assertIn("reads the pre-filter inventory", stderr.getvalue())
+        self.assertNotIn("computed before allowlist filtering", stderr.getvalue())
+
     def test_rule4_bad_and_pgless_counterexample(self) -> None:
         workflow = self.root / ".github/workflows/ci-main.yml"
         workflow.write_text(self.fx.workflow("cargo test postgres_", start=True), "utf-8")
@@ -507,7 +708,7 @@ class ParserMutations(FixtureCase):
             "tab": "jobs:\n\t# tab-indented comment, but no job key\n",
         }
         workflow = self.root / ".github/workflows/empty.yml"
-        empty = {section: set() for section in membership.SECTIONS}
+        empty = empty_debts()
         for shape, text in cases.items():
             with self.subTest(shape=shape):
                 workflow.write_text(text, "utf-8")
@@ -546,7 +747,7 @@ class ParserMutations(FixtureCase):
             "space-before-colon": "jobs :\n  bypass:\n" + payload,
         }
         workflow = self.root / ".github/workflows/unsupported.yml"
-        empty = {section: set() for section in membership.SECTIONS}
+        empty = empty_debts()
         for shape, text in cases.items():
             with self.subTest(shape=shape):
                 workflow.write_text(text, "utf-8")
@@ -588,7 +789,7 @@ class ParserMutations(FixtureCase):
             ),
         }
         workflow = self.root / ".github/workflows/extended-job-headers.yml"
-        empty = {section: set() for section in membership.SECTIONS}
+        empty = empty_debts()
         for shape, (text, expected_jobs) in cases.items():
             with self.subTest(shape=shape):
                 loaded = yaml.safe_load(text)
@@ -642,7 +843,7 @@ class ParserMutations(FixtureCase):
             finding.source == ".github/workflows/anchored-jobs-map.yml"
             for finding in analysis.findings
         ))
-        empty = {section: set() for section in membership.SECTIONS}
+        empty = empty_debts()
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             rc = membership.check_analysis(
@@ -661,7 +862,7 @@ class ParserMutations(FixtureCase):
         workflow.write_text("on:\n  push:\n", "utf-8")
         analysis = self.fx.analysis()
         self.assertFalse(any(finding.kind == "jobs-empty" for finding in analysis.findings))
-        empty = {section: set() for section in membership.SECTIONS}
+        empty = empty_debts()
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             rc = membership.check_analysis(
@@ -695,7 +896,7 @@ class ParserMutations(FixtureCase):
             ),
         }
         workflow = self.root / ".github/workflows/non-top-level.yml"
-        empty = {section: set() for section in membership.SECTIONS}
+        empty = empty_debts()
         for shape, (text, expected_jobs) in cases.items():
             with self.subTest(shape=shape):
                 workflow.write_text(text, "utf-8")
@@ -730,7 +931,7 @@ class ParserMutations(FixtureCase):
             analysis.debts["rule4"],
             {".github/workflows/ci-main.yml:comment_job"},
         )
-        empty = {section: set() for section in membership.SECTIONS}
+        empty = empty_debts()
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             rc = membership.check_analysis(
@@ -759,7 +960,7 @@ class ParserMutations(FixtureCase):
             {section: len(analysis.debts[section]) for section in ("rule1", "rule2", "rule3")},
             {"rule1": 1, "rule2": 1, "rule3": 1},
         )
-        empty = {section: set() for section in membership.SECTIONS}
+        empty = empty_debts()
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             rc = membership.check_analysis(
@@ -788,7 +989,7 @@ class ParserMutations(FixtureCase):
         counters = [finding for finding in analysis.findings if finding.kind == "operation-counter"]
         self.assertEqual(len(counters), 1)
         self.assertRegex(counters[0].detail, r"_matching_brace calls=\d+ cache_hits=\d+ cache_misses=\d+")
-        empty = {section: set() for section in membership.SECTIONS}
+        empty = empty_debts()
         synthetic = membership.Analysis(
             membership.PgInventory({}), empty, 0, tuple(counters)
         )
@@ -840,11 +1041,19 @@ class ParserMutations(FixtureCase):
         self.assertIsNone(membership._load_coverage_module(self.root).cargo_test_filter(command))
 
 
+def empty_debts() -> dict[str, set[str]]:
+    """Every debt key `check_analysis` reads, baselined or not."""
+    return {
+        section: set()
+        for section in membership.SECTIONS + membership.UNBASELINED_SECTIONS
+    }
+
+
 class BaselineAndEnforcement(FixtureCase):
     def analysis(self, debts: dict[str, set[str]] | None = None):
         return membership.Analysis(
             membership.PgInventory({"service::postgres_tests::case": "src/db/service.rs"}),
-            debts or {section: set() for section in membership.SECTIONS},
+            debts or empty_debts(),
             0,
         )
 
@@ -863,17 +1072,17 @@ class BaselineAndEnforcement(FixtureCase):
         return rc, stdout.getvalue(), stderr.getvalue()
 
     def test_repair_passes_and_stale_baseline_fails(self) -> None:
-        old = {section: set() for section in membership.SECTIONS}
+        old = empty_debts()
         old["rule3"] = {"src/db/service.rs"}
-        rc, _, _ = self.run_check(self.analysis(), {section: set() for section in membership.SECTIONS}, old)
+        rc, _, _ = self.run_check(self.analysis(), empty_debts(), old)
         self.assertEqual(rc, 0)
         rc, _, error = self.run_check(self.analysis(), old, old)
         self.assertEqual(rc, 1)
         self.assertIn("Remove '-' entries", error)
 
     def test_new_violation_warns_and_baseline_coverup_fails(self) -> None:
-        empty = {section: set() for section in membership.SECTIONS}
-        current = {section: set() for section in membership.SECTIONS}
+        empty = empty_debts()
+        current = empty_debts()
         current["rule1"] = {"service::tests::case"}
         rc, _, error = self.run_check(self.analysis(current), empty, empty)
         self.assertEqual(rc, 0)
@@ -884,7 +1093,7 @@ class BaselineAndEnforcement(FixtureCase):
         self.assertIn("baseline growth forbidden", error)
 
     def test_manifest_drift_fails_with_complete_recovery_command(self) -> None:
-        empty = {section: set() for section in membership.SECTIONS}
+        empty = empty_debts()
         rc, _, error = self.run_check(self.analysis(), empty, empty, "")
         self.assertEqual(rc, 1)
         self.assertIn("python3 scripts/check_pg_test_lane_membership.py --write-snapshots", error)
@@ -892,7 +1101,7 @@ class BaselineAndEnforcement(FixtureCase):
         self.assertIn("will not excuse", error)
 
     def test_inventory_change_passes_when_manifest_matches(self) -> None:
-        empty = {section: set() for section in membership.SECTIONS}
+        empty = empty_debts()
         analysis = membership.Analysis(
             membership.PgInventory({
                 "service::postgres_tests::case": "src/db/service.rs",
@@ -910,6 +1119,226 @@ class BaselineAndEnforcement(FixtureCase):
             membership.load_allowlist(path)
         path.write_text("test:service::tests::case # tracked by #999\n", "utf-8")
         self.assertEqual(membership.load_allowlist(path)[0], {"service::tests::case"})
+
+
+class BypassFixtureCase(FixtureCase):
+    """A PG-dependent test plus a PR sweep job that can be reshaped per case."""
+
+    SWEEP = "cargo test --lib -- --skip _pg --skip pg_ --skip postgres"
+    CASE = "db::service::tests::case"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.fx.write_source(
+            "src/db/service.rs",
+            "#[cfg(test)] mod tests { #[test] fn case() { create_test_database(); } }\n",
+            "mod db { pub mod service; }\n",
+        )
+
+    def write_sweep(self, block: str) -> None:
+        self.fx.write_pr(("src/db/**",), sweep_block=block)
+
+
+class BlockScalarMutations(BypassFixtureCase):
+    """R1: a `run:` block scalar must be read under every header YAML allows.
+
+    Measured on the pre-fix function, `run: |` yielded the block's command and
+    `|-`, `|+`, `>`, `>-`, `>+` each yielded nothing: the header fell through
+    to the plain-scalar branch, `block_indent` stayed None, and the body was
+    never scanned. `|-` is the ordinary way to write a block, so this was one
+    routine edit away rather than an adversarial shape.
+    """
+
+    HEADERS = ("|", "|-", "|+", ">", ">-", ">+")
+
+    def test_every_block_scalar_header_exposes_the_body(self) -> None:
+        for header in (*self.HEADERS, "|2", "|2-", "|-2", ">2", "| # trailing"):
+            with self.subTest(header=header):
+                text = f"steps:\n  - run: {header}\n      cargo test --lib -- --skip _pg\n"
+                self.assertEqual(
+                    membership._cargo_commands(text),
+                    ["cargo test --lib -- --skip _pg"],
+                )
+
+    def test_a_quoted_pipe_is_a_command_not_a_block_header(self) -> None:
+        # The counterexample to reading the header too loosely: `run: "|"` is
+        # a one-character command, not the start of a block.
+        self.assertEqual(membership._cargo_commands('steps:\n  - run: "|"\n'), [])
+        self.assertEqual(
+            membership._block_scalar_style('"|"'), None
+        )
+        self.assertEqual(membership._block_scalar_style("|-"), "|")
+        self.assertEqual(membership._block_scalar_style(">-"), ">")
+
+    def test_folded_scalar_joins_lines_that_a_literal_one_keeps_apart(self) -> None:
+        body = "      cargo test --lib\n      -- --skip _pg\n"
+        self.assertEqual(
+            membership._cargo_commands(f"steps:\n  - run: >-\n{body}"),
+            ["cargo test --lib -- --skip _pg"],
+        )
+        # The same two lines under `|` are two shell lines, and the second
+        # carries no `cargo test`, so only the unfiltered first one is a
+        # command. Folding is what makes the extracted selection match the
+        # selection the job actually runs.
+        self.assertEqual(
+            membership._cargo_commands(f"steps:\n  - run: |\n{body}"),
+            ["cargo test --lib"],
+        )
+
+    def test_folded_scalar_keeps_a_more_indented_line_on_its_own(self) -> None:
+        # YAML preserves the line breaks around a more-indented line inside a
+        # folded scalar, so it is its own shell line rather than a fold.
+        # Folding all three would yield one `cargo test --lib --release --
+        # --skip _pg`; the real shell sees three lines, and only the first
+        # carries a cargo invocation.
+        text = (
+            "steps:\n  - run: >\n"
+            "      cargo test --lib\n"
+            "        --release\n"
+            "      -- --skip _pg\n"
+        )
+        self.assertEqual(membership._cargo_commands(text), ["cargo test --lib"])
+
+    def test_a_blank_line_ends_a_folded_command(self) -> None:
+        text = (
+            "steps:\n  - run: >\n"
+            "      cargo test --lib\n"
+            "\n"
+            "      -- --skip _pg\n"
+        )
+        self.assertEqual(membership._cargo_commands(text), ["cargo test --lib"])
+
+    def test_rule5_names_the_test_under_every_block_header(self) -> None:
+        for header in self.HEADERS:
+            with self.subTest(header=header):
+                self.write_sweep(
+                    f"  sweep:\n    steps:\n      - run: {header}\n"
+                    f"          {self.SWEEP}\n"
+                )
+                self.assertEqual(self.fx.analysis().debts["rule5"], {self.CASE})
+
+
+class CommentMarkerMutations(BypassFixtureCase):
+    """R2: a comment that merely mentions the service is not a service start."""
+
+    def test_a_commented_service_marker_does_not_start_the_service(self) -> None:
+        self.write_sweep(
+            "  sweep:\n    steps:\n"
+            "      # ./scripts/ci/postgres-service.sh start\n"
+            f"      - run: {self.SWEEP}\n"
+        )
+        analysis = self.fx.analysis()
+        self.assertEqual(analysis.debts["rule5"], {self.CASE})
+        # And the same comment must not buy the job rule1 coverage either.
+        self.assertEqual(analysis.debts["rule1"], {self.CASE})
+
+    def test_a_real_service_step_still_reads_as_one(self) -> None:
+        self.write_sweep(
+            "  sweep:\n    env:\n      AGENTDESK_REQUIRE_PG: \"1\"\n    steps:\n"
+            "      - run: ./scripts/ci/postgres-service.sh start\n"
+            f"      - run: {self.SWEEP}\n"
+        )
+        analysis = self.fx.analysis()
+        self.assertEqual(analysis.debts["rule5"], set())
+        self.assertEqual(analysis.debts["rule4"], set())
+
+    def test_a_commented_require_pg_env_does_not_satisfy_rule4(self) -> None:
+        self.write_sweep(
+            "  sweep:\n    env:\n      # AGENTDESK_REQUIRE_PG: \"1\"\n    steps:\n"
+            "      - run: ./scripts/ci/postgres-service.sh start\n"
+            f"      - run: {self.SWEEP}\n"
+        )
+        self.assertEqual(
+            self.fx.analysis().debts["rule4"],
+            {".github/workflows/ci-pr.yml:sweep"},
+        )
+
+    def test_a_hash_inside_a_quoted_scalar_is_not_a_comment(self) -> None:
+        for line in (
+            'run: echo "a # b"',
+            "run: echo 'a # b'",
+            'run: echo "it\'s a # b"',
+            'name: "step # one"',
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(membership._strip_comments(line), line)
+        self.assertEqual(membership._strip_comments("  - run: x  # note"), "  - run: x")
+        self.assertEqual(membership._strip_comments("      # note"), "")
+        self.assertEqual(membership._strip_comments("run: echo a#b"), "run: echo a#b")
+
+    def test_a_quoted_hash_on_the_service_line_keeps_the_service(self) -> None:
+        # The counterexample to cutting at every `#`: the service start here
+        # sits after a quoted one, and must survive comment removal.
+        self.write_sweep(
+            "  sweep:\n    env:\n      AGENTDESK_REQUIRE_PG: \"1\"\n    steps:\n"
+            '      - run: echo "lane # 1" && ./scripts/ci/postgres-service.sh start\n'
+            f"      - run: {self.SWEEP}\n"
+        )
+        self.assertEqual(self.fx.analysis().debts["rule5"], set())
+
+
+class ReusableWorkflowMutations(BypassFixtureCase):
+    """R3: a job this gate cannot read is failed by name, not passed."""
+
+    CALL = "  sweep:\n    uses: ./.github/workflows/library-sweep.yml\n    with:\n      lane: lib\n"
+
+    def test_a_reusable_workflow_job_is_named_rather_than_passed(self) -> None:
+        self.write_sweep(self.CALL)
+        analysis = self.fx.analysis()
+        # Nothing else moves: the called file is where the cargo command went,
+        # so every rule reads this job as running nothing at all.
+        self.assertEqual(analysis.debts["rule5"], set())
+        self.assertEqual(
+            [(finding.kind, finding.source) for finding in analysis.findings
+             if finding.kind in membership.UNANALYZABLE_FINDINGS],
+            [("pr-job-delegates-to-reusable-workflow", ".github/workflows/ci-pr.yml:sweep")],
+        )
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            verdict = membership.check_analysis(
+                analysis,
+                analysis.debts,
+                analysis.debts,
+                membership.render_manifest(analysis.inventory),
+                reference_label="fixture base",
+                allowlist_label="fixture allowlist",
+            )
+        self.assertEqual(verdict, 1)
+        self.assertIn("pr-job-delegates-to-reusable-workflow", stderr.getvalue())
+        self.assertIn("library-sweep.yml", stderr.getvalue())
+        self.assertIn("Unanalysable is not clean", stderr.getvalue())
+
+    def test_step_level_uses_is_not_a_reusable_workflow_call(self) -> None:
+        # The shape every real ci-pr.yml job has. `- uses:` is a step, and a
+        # step-level `uses:` sits below the job's own key indent, so neither
+        # may be read as delegation.
+        self.write_sweep(
+            "  sweep:\n    steps:\n      - uses: actions/checkout@v4\n"
+            "      - name: build\n        uses: dtolnay/rust-toolchain@master\n"
+            "      - run: ./scripts/ci/postgres-service.sh start\n"
+            f"      - run: {self.SWEEP}\n"
+        )
+        analysis = self.fx.analysis()
+        self.assertEqual(membership._unanalyzable(analysis.findings), ())
+        self.assertEqual(analysis.debts["rule5"], set())
+
+    def test_write_snapshots_refuses_under_an_unreadable_job(self) -> None:
+        self.write_sweep(self.CALL)
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            verdict = membership.main(["--repo-root", str(self.root), "--write-snapshots"])
+        self.assertEqual(verdict, 1)
+        self.assertIn("refusing to write snapshots", stderr.getvalue())
+
+    def test_the_shipped_pr_workflow_has_no_unreadable_job(self) -> None:
+        # The count this fail-closed was added against: zero today, so it
+        # changes no existing verdict.
+        jobs = [
+            job
+            for path in sorted((REPO_ROOT / ".github/workflows").glob("*.yml"))
+            for job in membership.parse_jobs(path, REPO_ROOT, [])
+        ]
+        self.assertEqual(membership.pr_reusable_workflow_jobs(jobs), ())
 
 
 class MutationProof(FixtureCase):

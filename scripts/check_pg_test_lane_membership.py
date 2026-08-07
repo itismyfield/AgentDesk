@@ -48,7 +48,31 @@ def _seed_pattern(seed: str) -> re.Pattern[str]:
 SEED_PATTERNS = tuple(_seed_pattern(seed) for seed in SEEDS)
 CONNECT_SEED_PATTERNS = tuple(_seed_pattern(seed) for seed in CONNECT_SEEDS)
 SECTIONS = ("rule1", "rule2", "rule3", "rule4")
+# rule5 is deliberately NOT a baseline section. Every section in SECTIONS is
+# ratcheted: existing entries are tolerated and only growth is refused, which
+# makes a rule warn-only for a tree that already carries the debt. rule5 admits
+# no debt at all, so it has nothing to ratchet and is enforced directly in
+# `check_analysis`. Adding it to SECTIONS would also make the checked-in
+# baseline unparseable against `origin/main`, which has no `[rule5]` section.
+#
+# The baseline is only one of the two ways a gate gets talked down, and rule5
+# is closed against both. The other is the allowlist, and it used to be wide
+# open here: `analyze` subtracts allowlisted ids before any rule runs, so
+# appending the ids rule5 had just named -- with any non-empty text after the
+# `#`, since nothing validates the reason -- deleted the finding, and a
+# follow-up `--write-snapshots` cleared the rule2/rule3 stale entries that were
+# the only thing still failing. Four steps, one file, and the required context
+# this whole check exists to protect was green again. rule5 now reads the
+# unfiltered inventory (see `analyze`) and `--write-snapshots` refuses to run
+# while rule5 is dirty (see `main`), so neither lever reaches it.
+UNBASELINED_SECTIONS = ("rule5",)
+PR_WORKFLOW_REL = ".github/workflows/ci-pr.yml"
 CONFIGURATION_ERROR_FINDINGS = frozenset({"jobs-empty"})
+# Findings that mean "this gate could not analyse a PR job at all". They fail
+# the check rather than warning, because the alternative -- reporting nothing
+# about a job whose body was never read -- is indistinguishable from a clean
+# result, and rule5 is now the only enforcing layer.
+UNANALYZABLE_FINDINGS = frozenset({"pr-job-delegates-to-reusable-workflow"})
 
 
 def _load_coverage_module(repo_root: Path):
@@ -108,6 +132,20 @@ class Job:
     def key(self) -> str:
         return f"{self.workflow}:{self.name}"
 
+    @property
+    def code(self) -> str:
+        """``text`` with comments removed; see :func:`_strip_comments`.
+
+        Every service-presence test below reads this rather than ``text``. The
+        raw-substring form was a fail-open, and one an ordinary edit reaches:
+        deleting the service step while leaving
+        ``# ./scripts/ci/postgres-service.sh start`` behind as a YAML comment
+        kept rule1/rule2/rule4/rule5 reading the job as one that starts
+        PostgreSQL, and was measured rc=0 with rule5=0. Dropping a step and
+        leaving a note about it is a normal thing to do to a workflow.
+        """
+        return _strip_comments(self.text)
+
 
 _ATTR_MOD = re.compile(
     r"(?P<attrs>(?:#\s*\[[^\]]*\]\s*)+)"
@@ -163,6 +201,72 @@ _TOP_LEVEL_KEY = re.compile(
 _BLOCK_SCALAR_HEADER = re.compile(
     r":\s*[|>](?:[1-9][+-]?|[+-][1-9]?)?\s*(?:#.*)?$"
 )
+_BLOCK_SCALAR_VALUE = re.compile(
+    r"^(?P<style>[|>])(?:[1-9][+-]?|[+-][1-9]?)?[^\S\n]*(?:#.*)?$"
+)
+_USES_KEY = re.compile(r"^uses[^\S\n]*:[^\S\n]*(?P<target>\S+)")
+
+
+def _block_scalar_style(value: str) -> str | None:
+    """Return ``|`` or ``>`` for a YAML block scalar header, else ``None``.
+
+    Accepts every header the slot admits: both chomping indicators (``|-``,
+    ``|+``, ``>-``, ``>+``) and an explicit indentation indicator in either
+    order (``|2``, ``|2-``, ``|-2``). Recognising only the bare ``|``, as
+    :func:`_cargo_commands` used to, left the block body unscanned for the
+    other five spellings -- measured directly on the deployed function, ``run:
+    |`` yielded the command and ``|-``, ``|+``, ``>``, ``>-`` and ``>+`` each
+    yielded none -- so a job could select PG-dependent tests and rule5 would
+    see no cargo command at all. ``|-`` is the common idiom rather than an
+    adversarial spelling, which puts that fail-open one ordinary edit away.
+
+    An empty value is the plain multi-line scalar. YAML folds it exactly like
+    ``>``, so it is reported as folded.
+    """
+    if value == "":
+        return ">"
+    match = _BLOCK_SCALAR_VALUE.match(value)
+    return match.group("style") if match else None
+
+
+def _strip_line_comment(line: str) -> str:
+    """Cut one line at its first real comment, honouring quoted ``#``.
+
+    A ``#`` opens a comment only at the start of a line or after whitespace,
+    and never inside a quoted scalar. That rule holds in YAML and in the POSIX
+    shell that runs a ``run:`` body alike, which is why one scanner serves
+    both: ``run: echo "a # b"`` keeps its ``#``, and a ``#`` line inside a
+    ``run: |`` block is dropped because the shell would drop it too.
+
+    Quote state is per line, so a scalar quoted across a line break -- or an
+    apostrophe used as punctuation -- leaves the rest of that line uncut. That
+    direction keeps text rather than removing it, so it can only preserve a
+    service reference, never invent one.
+    """
+    quote: str | None = None
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if quote is None:
+            if char in "'\"":
+                quote = char
+            elif char == "#" and (index == 0 or line[index - 1] in " \t"):
+                return line[:index].rstrip()
+        elif char == quote:
+            if quote == "'" and line[index + 1:index + 2] == "'":
+                index += 1
+            else:
+                quote = None
+        elif quote == '"' and char == "\\":
+            index += 1
+        index += 1
+    return line
+
+
+@lru_cache(maxsize=256)
+def _strip_comments(text: str) -> str:
+    """``text`` with comments removed and every line's indentation preserved."""
+    return "\n".join(_strip_line_comment(line) for line in text.splitlines())
 
 
 @lru_cache(maxsize=128)
@@ -729,33 +833,78 @@ def parse_jobs(
 
 
 def _cargo_commands(text: str) -> list[str]:
-    """Extract only YAML ``run:`` scalar command lines, never step names."""
+    """Extract only YAML ``run:`` scalar command lines, never step names.
+
+    Block scalar bodies are read for every header :func:`_block_scalar_style`
+    admits, and folded styles are folded before matching. That last part is
+    not cosmetic: ``>`` joins same-indent lines into ONE shell line, so
+    reading them separately would turn ``cargo test --lib`` / ``-- --skip
+    _pg`` into a command carrying no skip -- a different selection from the
+    one the job runs. Literal (``|``) bodies keep one command per line, which
+    is what the shell sees there.
+
+    Inside a folded body a more-indented line keeps its own surrounding line
+    breaks, per the YAML folding rules, so it is emitted as its own command
+    rather than folded into its neighbours.
+
+    Two forms are deliberately not modelled, both of which make the extracted
+    command WIDER than the real one -- a wider filter selects more tests, so
+    rule5 over-reports rather than under-reports on them. An explicit
+    indentation indicator that declares a content indent smaller than the
+    first content line's own indent is read at the first line's indent. And a
+    shell line continuation (a trailing ``\\``) inside a literal body is left
+    split, so ``cargo test --lib -- \\`` reads as a command with no skips.
+    """
     commands: list[str] = []
-    block_indent: int | None = None
+    header_indent: int | None = None
+    content_indent: int | None = None
+    folded = False
+    pending: list[str] = []
+
+    def collect(value: str) -> None:
+        start = value.find("cargo test")
+        if start >= 0:
+            commands.append(value[start:])
+
+    def flush() -> None:
+        if pending:
+            collect(" ".join(pending))
+            pending.clear()
+
     for line in text.splitlines():
         indent = len(line) - len(line.lstrip())
         stripped = line.strip()
         run = re.match(r"^(?:-\s+)?run:\s*(.*)$", stripped)
         if run:
-            value = run.group(1).strip().strip('"\'')
-            if value in ("", "|"):
-                block_indent = indent
+            flush()
+            value = run.group(1).strip()
+            style = _block_scalar_style(value)
+            if style is None:
+                header_indent = None
+                collect(value.strip('"\''))
             else:
-                block_indent = None
-                start = value.find("cargo test")
-                if start >= 0:
-                    commands.append(value[start:])
+                header_indent = indent
+                content_indent = None
+                folded = style == ">"
             continue
-        if block_indent is not None:
-            if not stripped or stripped.startswith("#"):
-                continue
-            if indent <= block_indent:
-                block_indent = None
-                continue
-            value = stripped.strip('"\'')
-            start = value.find("cargo test")
-            if start >= 0:
-                commands.append(value[start:])
+        if header_indent is None:
+            continue
+        if not stripped or stripped.startswith("#"):
+            flush()
+            continue
+        if indent <= header_indent:
+            flush()
+            header_indent = None
+            continue
+        if content_indent is None:
+            content_indent = indent
+        value = stripped.strip('"\'')
+        if folded and indent <= content_indent:
+            pending.append(value)
+            continue
+        flush()
+        collect(value)
+    flush()
     return commands
 
 
@@ -763,10 +912,10 @@ def pg_lane_filters(repo_root: Path, jobs: Iterable[Job], coverage) -> tuple:
     just_text = (repo_root / "justfile").read_text("utf-8")
     commands = list(coverage.just_recipe_commands(just_text, "test-postgres"))
     for job in jobs:
-        if "postgres-service.sh start" not in job.text:
+        if "postgres-service.sh start" not in job.code:
             continue
-        commands.extend(_cargo_commands(job.text))
-        for recipe in re.findall(r"\bjust\s+([A-Za-z0-9_-]+)", job.text):
+        commands.extend(_cargo_commands(job.code))
+        for recipe in re.findall(r"\bjust\s+([A-Za-z0-9_-]+)", job.code):
             try:
                 commands.extend(coverage.just_recipe_commands(just_text, recipe))
             except ValueError:
@@ -778,15 +927,91 @@ def pg_lane_filters(repo_root: Path, jobs: Iterable[Job], coverage) -> tuple:
 def pgless_lane_filters(jobs: Iterable[Job], coverage) -> tuple:
     lanes = []
     for job in jobs:
-        if "postgres-service.sh start" in job.text:
+        if "postgres-service.sh start" in job.code:
             continue
-        for command in _cargo_commands(job.text):
+        for command in _cargo_commands(job.code):
             if "--all-targets" not in command or "--skip" not in command:
                 continue
             lane = coverage.cargo_test_filter(command)
             if lane is not None:
                 lanes.append(lane)
     return tuple(dict.fromkeys(lanes))
+
+
+def pr_pgless_lane_filters(jobs: Iterable[Job], coverage) -> tuple:
+    """Every ``ci-pr.yml`` cargo-test lane that runs without the PG service.
+
+    Deliberately WIDER than :func:`pgless_lane_filters`, which only looks at
+    ``--all-targets`` commands and therefore cannot see a ``--lib`` lane at all.
+    That blind spot is what let #5185's own library sweep ship selecting 61
+    PG-dependent tests into a job with no database: rule2 recorded those 61 as
+    debt against the *nightly* macOS/Windows lanes, so adding a required PR
+    context that selected the very same ids moved no number anywhere.
+
+    Scope is the PR workflow because that is where the consequence is
+    categorical rather than budgeted: a PR job that cannot reach a database it
+    needs is red on every pull request that trips its filter, and its
+    required-context mirror is fail-closed.
+    """
+    lanes = []
+    for job in jobs:
+        if job.workflow != PR_WORKFLOW_REL:
+            continue
+        if "postgres-service.sh start" in job.code:
+            continue
+        for command in _cargo_commands(job.code):
+            lane = coverage.cargo_test_filter(command)
+            if lane is not None:
+                lanes.append(lane)
+    return tuple(dict.fromkeys(lanes))
+
+
+def _job_body_indent(code: str) -> int | None:
+    """Indent of a job's own mapping keys: the shallowest non-sequence line.
+
+    A job's direct keys all sit at one indent, and everything below them --
+    nested mappings and block scalar bodies alike -- must be deeper. Sequence
+    entries are excluded because YAML lets ``- uses:`` sit at the same column
+    as the ``steps:`` key that owns it, and a step is not a job key.
+    """
+    widths = [
+        _indent_width(line[: len(line) - len(line.lstrip())])
+        for line in code.splitlines()
+        if line.strip() and not line.lstrip().startswith("-")
+    ]
+    return min(widths) if widths else None
+
+
+def pr_reusable_workflow_jobs(jobs: Iterable[Job]) -> tuple[tuple[str, str], ...]:
+    """PR-workflow jobs whose body lives in a called workflow, so is unread.
+
+    A job that calls a reusable workflow has no ``steps:`` here: both its
+    ``cargo test`` commands and its service start live in the called file,
+    which this parser never opens. Every rule then reads such a job as one
+    that runs no cargo test and starts no PostgreSQL, and says nothing about
+    it -- measured rc=0 with the library sweep's own command moved verbatim
+    into a called workflow.
+
+    Following the call is out of scope (tracked on umbrella #5071). Refusing
+    to call an unreadable job green is not: these are reported by name and
+    fail the check, so the analysis gap shows up as a red script check on the
+    PR that introduces it rather than as a silently unguarded lane.
+    """
+    named: list[tuple[str, str]] = []
+    for job in jobs:
+        if job.workflow != PR_WORKFLOW_REL:
+            continue
+        code = job.code
+        body_indent = _job_body_indent(code)
+        if body_indent is None:
+            continue
+        for line in code.splitlines():
+            indent = _indent_width(line[: len(line) - len(line.lstrip())])
+            match = _USES_KEY.match(line.strip())
+            if match and indent == body_indent:
+                named.append((job.key, match.group("target")))
+                break
+    return tuple(named)
 
 
 def parse_pg_db_patterns(path: Path) -> tuple[str, ...]:
@@ -858,17 +1083,34 @@ def analyze(repo_root: Path, allowlist_path: Path | None = None) -> Analysis:
         | set((repo_root / ".github/workflows").glob("*.yaml"))
     )
     jobs = [job for path in workflows for job in parse_jobs(path, repo_root, findings)]
+    for key, target in pr_reusable_workflow_jobs(jobs):
+        findings.append(Finding(
+            "pr-job-delegates-to-reusable-workflow",
+            key,
+            f"calls {target}, so its steps are not in {PR_WORKFLOW_REL} and no "
+            "rule below can read them; this gate does not follow the call",
+        ))
     inventory = discover_pg_inventory(repo_root, findings)
     allowed_tests, allowed_files = load_allowlist(allowlist_path or repo_root / ALLOWLIST_REL)
     active_tests = {name: path for name, path in inventory.tests.items() if name not in allowed_tests and path not in allowed_files}
     pg_lanes = pg_lane_filters(repo_root, jobs, coverage)
     pgless_lanes = pgless_lane_filters(jobs, coverage)
-    patterns = parse_pg_db_patterns(repo_root / ".github/workflows/ci-pr.yml")
+    pr_pgless_lanes = pr_pgless_lane_filters(jobs, coverage)
+    patterns = parse_pg_db_patterns(repo_root / PR_WORKFLOW_REL)
     debts = {
         "rule1": {name for name in active_tests if not any(lane.selects_test(name) for lane in pg_lanes)},
         "rule2": {name for name in active_tests if any(lane.selects_test(name) for lane in pgless_lanes)},
         "rule3": {path for path in set(active_tests.values()) if not path_selected(path, patterns)},
-        "rule4": {job.key for job in jobs if "postgres-service.sh start" in job.text and not re.search(r"^\s+AGENTDESK_REQUIRE_PG:\s*['\"]?1['\"]?\s*$", job.text, re.MULTILINE)},
+        "rule4": {job.key for job in jobs if "postgres-service.sh start" in job.code and not re.search(r"^\s+AGENTDESK_REQUIRE_PG:\s*['\"]?1['\"]?\s*$", job.code, re.MULTILINE)},
+        # rule5 reads `inventory.tests`, deliberately NOT `active_tests`. Every
+        # other rule is scoped to the allowlist-filtered set, which is right for
+        # them: they are budgets, and a proven classifier false positive should
+        # not spend budget. rule5 is not a budget -- it names a job that can
+        # never go green -- so an exemption there does not buy accuracy, it just
+        # switches the gate off. Reading the unfiltered inventory is what makes
+        # the "no allowance" claim in the SECTIONS comment true rather than
+        # aspirational: no line anyone can add to the allowlist reaches rule5.
+        "rule5": {name for name in inventory.tests if any(lane.selects_test(name) for lane in pr_pgless_lanes)},
     }
     return Analysis(
         PgInventory(active_tests),
@@ -937,6 +1179,13 @@ def _configuration_errors(findings: Iterable[Finding]) -> tuple[Finding, ...]:
     )
 
 
+def _unanalyzable(findings: Iterable[Finding]) -> tuple[Finding, ...]:
+    return tuple(
+        finding for finding in findings
+        if finding.kind in UNANALYZABLE_FINDINGS
+    )
+
+
 def check_analysis(
     analysis: Analysis,
     baseline: dict[str, set[str]],
@@ -948,14 +1197,26 @@ def check_analysis(
 ) -> int:
     """Apply manifest and one-way baseline contracts to a supplied analysis."""
     configuration_errors = _configuration_errors(analysis.findings)
+    unanalyzable = _unanalyzable(analysis.findings)
     failed = False
     for finding in analysis.findings:
-        if finding.kind in CONFIGURATION_ERROR_FINDINGS:
+        if finding.kind in CONFIGURATION_ERROR_FINDINGS or finding.kind in UNANALYZABLE_FINDINGS:
             print(f"FAIL: [{finding.kind}] {finding.source}: {finding.detail}", file=sys.stderr)
         else:
             print(f"WARN: [{finding.kind}] {finding.source}: {finding.detail}", file=sys.stderr)
     if configuration_errors:
         return 2
+    if unanalyzable:
+        print(
+            f"FAIL: {len(unanalyzable)} {PR_WORKFLOW_REL} job(s) named above "
+            "delegate to a workflow this gate does not read, so no rule can "
+            "say anything about what they run. Unanalysable is not clean: "
+            "either move the cargo-test steps back into "
+            f"{PR_WORKFLOW_REL} where the rules can see them, or teach this "
+            "gate to follow the call.",
+            file=sys.stderr,
+        )
+        failed = True
     expected_manifest = render_manifest(analysis.inventory)
     if actual_manifest != expected_manifest:
         print("FAIL: PG test-lane manifest drift.", file=sys.stderr)
@@ -1014,7 +1275,41 @@ def check_analysis(
             if stale:
                 failed = True
     counts = analysis.debts
-    print(f"pg-lane debt: rule1={len(counts['rule1'])} rule2={len(counts['rule2'])} rule3={len(counts['rule3'])} (allowlist={analysis.allowlist_count})")
+    # rule5: no ratchet, and the allowlist cannot reach it. Both halves are
+    # properties of the code above rather than intentions -- `analyze` computes
+    # this set from the unfiltered inventory, and rule5 is absent from SECTIONS
+    # so nothing baselines it. A PR-workflow job that runs cargo test
+    # without starting the PostgreSQL service must select no PG-dependent test.
+    # Unlike rule1-rule4 this is not a budget: the failure mode it names is not
+    # "debt that should shrink" but "this required context can never be green",
+    # and it lands on every PR at once rather than on the author of the change.
+    if counts["rule5"]:
+        print(
+            f"FAIL: [rule5] {len(counts['rule5'])} PostgreSQL-dependent test(s) are "
+            f"selected by a {PR_WORKFLOW_REL} job that never starts the service:",
+            file=sys.stderr,
+        )
+        for entry in sorted(counts["rule5"]):
+            print(f"  ! {entry}", file=sys.stderr)
+        print(
+            "Give that job `./scripts/ci/postgres-service.sh start` plus the "
+            "`AGENTDESK_REQUIRE_PG: \"1\"` env rule4 tracks (rule4 only WARNs "
+            "on a missing one -- it is a ledger, not a guard), or narrow its "
+            "selection so it stops choosing these ids. Those two are the "
+            "fixes this rule accepts; the two levers that talk other rules "
+            "down do not reach it. It has no baseline section, and it reads "
+            "the pre-filter inventory (`inventory.tests` in `analyze`, not "
+            "the allowlist-filtered `active_tests`), so allowlisting these "
+            "ids leaves the count where it is. What it still does not decide "
+            "is what it never claimed to: it reads the job's "
+            "comment-stripped text, so it does not evaluate `if:` "
+            "conditions and cannot know whether the container that step "
+            "starts came up. A job whose steps live in a called workflow is "
+            "unreadable rather than clean, and is failed by name above.",
+            file=sys.stderr,
+        )
+        failed = True
+    print(f"pg-lane debt: rule1={len(counts['rule1'])} rule2={len(counts['rule2'])} rule3={len(counts['rule3'])} rule5={len(counts['rule5'])} (allowlist={analysis.allowlist_count})")
     if failed:
         return 1
     print(f"PG test-lane membership check passed: {len(analysis.inventory.tests)} tests, {len(analysis.inventory.files)} files; rule4={len(counts['rule4'])}")
@@ -1064,6 +1359,38 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"FAIL: [{finding.kind}] {finding.source}: {finding.detail}", file=sys.stderr)
             if configuration_errors:
                 return 2
+            unanalyzable = _unanalyzable(analysis.findings)
+            for finding in unanalyzable:
+                print(f"FAIL: [{finding.kind}] {finding.source}: {finding.detail}", file=sys.stderr)
+            if unanalyzable:
+                # Same reason as the rule5 refusal below, one step earlier: a
+                # job whose body was never read has no state to snapshot, so
+                # regenerating under one would record silence as agreement.
+                print(
+                    f"FAIL: refusing to write snapshots while "
+                    f"{len(unanalyzable)} {PR_WORKFLOW_REL} job(s) cannot be "
+                    f"analysed. Move their steps back into that file, or "
+                    f"teach this gate to follow the call, then rerun.",
+                    file=sys.stderr,
+                )
+                return 1
+            # Refuse to regenerate while rule5 is dirty. Snapshot regeneration
+            # is how the other rules absorb a tree's current state, and that is
+            # exactly the wrong move here: rule5 admits no debt, so there is no
+            # state to absorb, and a rewrite performed under a live rule5
+            # violation only clears the rule2/rule3 stale entries that were
+            # still holding the gate red. Regenerating is a maintenance step,
+            # not an escape hatch -- fix the workflow first, then rewrite.
+            if analysis.debts["rule5"]:
+                print(
+                    f"FAIL: refusing to write snapshots while [rule5] names "
+                    f"{len(analysis.debts['rule5'])} test(s). Snapshots record "
+                    f"ratcheted debt, and rule5 carries none. Fix the "
+                    f"{PR_WORKFLOW_REL} job first, then rerun with "
+                    f"--write-snapshots.",
+                    file=sys.stderr,
+                )
+                return 1
             manifest.write_text(render_manifest(analysis.inventory), "utf-8")
             baseline.write_text(render_baseline(analysis.debts), "utf-8")
             print(f"wrote {manifest} and {baseline}")

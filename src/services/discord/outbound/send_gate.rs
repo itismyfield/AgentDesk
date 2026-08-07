@@ -417,7 +417,9 @@ mod send_source_tests {
             SendCallerClass::Dashboard
         ));
 
-        let _lock = crate::config::shared_test_env_lock().lock().unwrap(); // agentdesk-audit: allow-unwrap — test setup in #[cfg(test)] mod
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let temp = tempfile::tempdir().unwrap(); // agentdesk-audit: allow-unwrap — test setup in #[cfg(test)] mod
         std::fs::create_dir_all(temp.path().join("config")).unwrap(); // agentdesk-audit: allow-unwrap — test setup in #[cfg(test)] mod
         std::fs::write(
@@ -487,7 +489,9 @@ agents:
 
     #[test]
     fn dm_default_agent_allows_headless_private_channel_when_provider_bound() {
-        let _lock = crate::config::shared_test_env_lock().lock().unwrap(); // agentdesk-audit: allow-unwrap — test setup in #[cfg(test)] mod
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let temp = tempfile::tempdir().unwrap(); // agentdesk-audit: allow-unwrap — test setup in #[cfg(test)] mod
         std::fs::create_dir_all(temp.path().join("config")).unwrap(); // agentdesk-audit: allow-unwrap — test setup in #[cfg(test)] mod
         std::fs::write(

@@ -2615,7 +2615,7 @@ mod followup_retry_requeue_tests {
     fn pre_submit_requeue_preserves_context_and_returns_enqueue_outcome() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
-            .expect("shared env lock poisoned");
+            .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let _guard = EnvGuard {
             previous: std::env::var(AGENTDESK_ROOT_DIR_ENV).ok(),
@@ -2677,7 +2677,7 @@ mod followup_retry_requeue_tests {
     fn pre_submit_requeue_of_marked_followup_reconstructs_marked_intervention() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
-            .expect("shared env lock poisoned");
+            .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let _guard = EnvGuard {
             previous: std::env::var(AGENTDESK_ROOT_DIR_ENV).ok(),
@@ -2718,7 +2718,7 @@ mod followup_retry_requeue_tests {
     fn inflight_retry_restores_earlier_message_without_reversing_fifo_4797() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
-            .expect("shared env lock poisoned");
+            .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let _guard = EnvGuard {
             previous: std::env::var(AGENTDESK_ROOT_DIR_ENV).ok(),

@@ -651,7 +651,7 @@ mod pre_submission_tui_prompt_error_tests {
         };
         let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
-            .unwrap();
+            .unwrap_or_else(|poison| poison.into_inner());
         reset_state_for_tests();
 
         let tmux = "AgentDesk-claude-followup-requeue-corr";
@@ -701,7 +701,7 @@ mod pre_submission_tui_prompt_error_tests {
         };
         let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
-            .unwrap();
+            .unwrap_or_else(|poison| poison.into_inner());
         reset_state_for_tests();
 
         let tmux = "AgentDesk-claude-longstream-corr";

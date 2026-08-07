@@ -269,6 +269,34 @@ targets = {
       },
     },
   },
+  # #5185: the PR-side whole-library sweep. Registering it here pins its step
+  # inventory, so removing the adjudicator and leaving a bare `cargo test --lib`
+  # -- which exits 0 on a zero-match filter -- is a diff that fails this script
+  # rather than one that quietly restores the false green the job exists to
+  # close. Read the two-layer caveat above before treating the hash as a
+  # guarantee: it detects change, it does not prevent it.
+  "library_sweep" => {
+    "label" => "PR library sweep job",
+    "name" => "Library test sweep",
+    "needs" => "changes",
+    "if" => "needs.changes.outputs.rust_or_policy == 'true'",
+    "runs_on" => "ubuntu-latest",
+    # #5185 re-pins after giving this lane the PostgreSQL service its own
+    # selection requires: the `--skip _pg --skip pg_ --skip postgres` filters
+    # are substring matches over ids, and 61 PG-dependent tests carry none of
+    # those substrings, so the job selected a database it never provisioned.
+    # The re-pin is a review trigger only; the property is enforced without a
+    # hash by `[rule5]` in scripts/check_pg_test_lane_membership.py.
+    "job_sha256" => "965109bf40156315b9b5a029052aa3a01cc3516b19d4a4915f41250deed6610d",
+    "cargo_steps" => {
+      "Library sweep (selection-set gated)" => {
+        "commands" => [
+          "python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 2 --skip _pg --skip pg_ --skip postgres -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- --skip _pg --skip pg_ --skip postgres",
+        ],
+        "timeout_minutes" => 45,
+      },
+    },
+  },
   "relay-authority-contract" => {
     "label" => "relay-authority contract job",
     "name" => "relay-authority-contract",

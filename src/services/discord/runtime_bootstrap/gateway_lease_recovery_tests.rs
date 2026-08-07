@@ -11,8 +11,27 @@ use super::gateway_lease_recovery::{
 };
 use crate::services::discord::ProviderKind;
 
+/// #5185: `STANDBY_PROMOTION_IN_PROGRESS` is one process-global `AtomicBool`,
+/// and the tests below both publish to it and assert on it. libtest runs them
+/// on parallel threads, so a sibling's opening `store(true)` lands between this
+/// test's clearing call and its closing assertion, and the assertion observes
+/// `true` for a reason that has nothing to do with the code under test. That is
+/// the failure the widened sweep hit as a non-reproducing flake.
+///
+/// Serialise only the tests that touch the flag, against each other. The rest
+/// of the library suite still runs in parallel, so this costs no wall-clock
+/// time and does not hide anything: a real regression in promotion recovery
+/// still fails, deterministically.
+///
+/// A `tokio::sync::Mutex` rather than `std::sync::Mutex` because the guard is
+/// held across `.await`, which the crate-wide `clippy::await_holding_lock` deny
+/// forbids for std guards. It also cannot be poisoned, so a panicking holder
+/// leaves no cascade behind it.
+static PROMOTION_FLAG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn promotion_owner_recovers_all_runtimes_when_cancel_precedes_first_poll_tick() {
+    let _flag = PROMOTION_FLAG_LOCK.lock().await;
     STANDBY_PROMOTION_IN_PROGRESS.store(true, std::sync::atomic::Ordering::SeqCst);
     let runtime_a = crate::services::discord::make_shared_data_for_tests();
     let runtime_b = crate::services::discord::make_shared_data_for_tests();
@@ -66,6 +85,7 @@ async fn promotion_owner_recovers_all_runtimes_when_cancel_precedes_first_poll_t
 
 #[tokio::test]
 async fn superseded_promotion_preserves_new_owner_fence_and_flags() {
+    let _flag = PROMOTION_FLAG_LOCK.lock().await;
     STANDBY_PROMOTION_IN_PROGRESS.store(true, std::sync::atomic::Ordering::SeqCst);
     let runtime_a = crate::services::discord::make_shared_data_for_tests();
     let runtime_b = crate::services::discord::make_shared_data_for_tests();
@@ -109,6 +129,7 @@ async fn superseded_promotion_preserves_new_owner_fence_and_flags() {
 
 #[tokio::test]
 async fn supersession_chain_keeps_owner_until_final_cancel_and_recovers_all_runtimes() {
+    let _flag = PROMOTION_FLAG_LOCK.lock().await;
     STANDBY_PROMOTION_IN_PROGRESS.store(true, std::sync::atomic::Ordering::SeqCst);
     let runtime_a = crate::services::discord::make_shared_data_for_tests();
     let runtime_b = crate::services::discord::make_shared_data_for_tests();
@@ -162,6 +183,7 @@ async fn supersession_chain_keeps_owner_until_final_cancel_and_recovers_all_runt
 
 #[tokio::test]
 async fn existing_marker_cancel_restores_promotion_fence_for_retry() {
+    let _flag = PROMOTION_FLAG_LOCK.lock().await;
     STANDBY_PROMOTION_IN_PROGRESS.store(true, std::sync::atomic::Ordering::SeqCst);
     let runtime_a = crate::services::discord::make_shared_data_for_tests();
     let runtime_b = crate::services::discord::make_shared_data_for_tests();
@@ -212,6 +234,7 @@ async fn existing_marker_cancel_restores_promotion_fence_for_retry() {
 
 #[tokio::test]
 async fn stale_prior_lifetime_persisted_does_not_mask_current_cancel() {
+    let _flag = PROMOTION_FLAG_LOCK.lock().await;
     STANDBY_PROMOTION_IN_PROGRESS.store(true, std::sync::atomic::Ordering::SeqCst);
     let runtime_a = crate::services::discord::make_shared_data_for_tests();
     let runtime_b = crate::services::discord::make_shared_data_for_tests();
@@ -298,6 +321,7 @@ fn fresh_current_lifetime_persisted_is_commit_evidence_and_survives_boot() {
 
 #[test]
 fn committed_existing_marker_gap_preserves_promotion_fence() {
+    let _flag = PROMOTION_FLAG_LOCK.blocking_lock();
     STANDBY_PROMOTION_IN_PROGRESS.store(true, std::sync::atomic::Ordering::SeqCst);
     let runtime_a = crate::services::discord::make_shared_data_for_tests();
     let runtime_b = crate::services::discord::make_shared_data_for_tests();

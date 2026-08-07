@@ -926,7 +926,7 @@ mod tests {
     async fn resume_production_path_clears_stale_binding_and_rebinds_runtime() {
         let _guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
-            .unwrap();
+            .unwrap_or_else(|poison| poison.into_inner());
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
@@ -945,6 +945,22 @@ mod tests {
         let target_cwd = tempfile::tempdir().expect("target cwd");
         let old_cwd = old_cwd.path().to_str().expect("utf8 old cwd");
         let target_cwd = target_cwd.path().to_str().expect("utf8 target cwd");
+        // #5185: this test asserts the `DeadOrAbsent` branch. Left to the real
+        // probe, that answer comes from a `tmux has-session` subprocess under a
+        // two-second wall-clock bound, and a bound that is generous on an idle
+        // machine is not generous inside a ~6.9k-test parallel sweep: the probe
+        // times out, maps to `ProbeError`, and the assertion below sees
+        // `RetainedLive`. Measured exactly that way in a full sweep, passing
+        // when run alone. State the pane's liveness instead of racing for it.
+        //
+        // Held as a guard, not cleared after the assertions: a failing assert
+        // unwinds, and a hand-rolled cleanup at the bottom of the test would
+        // then leak the forced answer into the process-global override map --
+        // the same shape this branch removed from `tmux_common.rs`.
+        let _liveness_override = crate::services::tmux_diagnostics::PaneLivenessOverrideGuard::set(
+            tmux,
+            crate::services::platform::tmux::PaneLiveness::DeadOrAbsent,
+        );
 
         sqlx::query(
             "INSERT INTO sessions
@@ -1150,7 +1166,7 @@ mod tests {
     fn resume_runtime_binding_clear_absence_is_success() {
         let _guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
-            .unwrap();
+            .unwrap_or_else(|poison| poison.into_inner());
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
 
         assert_eq!(

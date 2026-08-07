@@ -287,7 +287,7 @@ mod tests {
 
     #[test]
     fn env_api_base_url_fallback_is_published_when_config_is_empty() {
-        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let _restore = EnvRestore::new();
         unsafe {
             std::env::set_var(

@@ -709,7 +709,7 @@ Write-Error "unexpected gh args: $Rest"; exit 2
     async fn create_issue_non_dry_run_maps_shared_service_success_response() {
         let _env_lock = crate::config::shared_test_env_lock()
             .lock()
-            .expect("shared env lock");
+            .unwrap_or_else(|poison| poison.into_inner());
         let temp = tempfile::TempDir::new().expect("tempdir");
         let fake_gh = install_fake_gh(temp.path(), false);
         let _gh_guard = EnvVarGuard::set("AGENTDESK_GH_PATH", &fake_gh);
@@ -757,7 +757,7 @@ Write-Error "unexpected gh args: $Rest"; exit 2
     async fn create_issue_non_dry_run_maps_shared_service_github_failure() {
         let _env_lock = crate::config::shared_test_env_lock()
             .lock()
-            .expect("shared env lock");
+            .unwrap_or_else(|poison| poison.into_inner());
         let temp = tempfile::TempDir::new().expect("tempdir");
         let fake_gh = install_fake_gh(temp.path(), true);
         let _gh_guard = EnvVarGuard::set("AGENTDESK_GH_PATH", &fake_gh);

@@ -991,6 +991,18 @@ mod tests {
                     }
                     Err(error) => panic!("accept test relay: {error}"),
                 };
+                // #5185: the listener is non-blocking so `accept` can poll, and
+                // on BSD-derived platforms the accepted socket inherits
+                // O_NONBLOCK from it. A non-blocking socket ignores
+                // `set_read_timeout` and returns `WouldBlock` the moment the
+                // client has not yet written, which the `expect` below turned
+                // into a panic on this thread; the test then observed
+                // `Disconnected` on `request_tx` rather than its own assertion.
+                // Restore blocking mode explicitly so the read timeout is the
+                // thing that bounds the wait.
+                socket
+                    .set_nonblocking(false)
+                    .expect("restore blocking mode on accepted socket");
                 socket
                     .set_read_timeout(Some(Duration::from_secs(1)))
                     .expect("set receiver read timeout");

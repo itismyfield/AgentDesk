@@ -387,7 +387,9 @@ mod bucket_cadence_tests {
 
     #[test]
     fn day_bucket_increments_at_utc_midnight_only() {
-        let _guard = BUCKET_TEST_LOCK.lock().unwrap();
+        let _guard = BUCKET_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         // 86_400 = seconds in a day. Two timestamps in the same UTC day
         // must collapse to the same bucket; two in adjacent days must not.
         let same_day_a = 86_400i64 * 100;
@@ -399,7 +401,9 @@ mod bucket_cadence_tests {
 
     #[test]
     fn hour_bucket_alias_returns_day_bucket() {
-        let _guard = BUCKET_TEST_LOCK.lock().unwrap();
+        let _guard = BUCKET_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         // The legacy name is retained for source-compat, but it now
         // returns the daily value too. We assert by sampling both at
         // (approximately) the same instant; on a slow machine the second
@@ -416,7 +420,9 @@ mod bucket_cadence_tests {
 
     #[test]
     fn invalidate_drops_cached_entry() {
-        let _guard = BUCKET_TEST_LOCK.lock().unwrap();
+        let _guard = BUCKET_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         reset_agent_performance_cache_for_layer_rendering_tests();
         // Hand-craft an entry without going through a RoleBinding so we
         // don't need the Discord settings types in this layer's tests.
@@ -435,7 +441,9 @@ mod bucket_cadence_tests {
 
     #[test]
     fn invalidate_for_role_only_touches_that_role() {
-        let _guard = BUCKET_TEST_LOCK.lock().unwrap();
+        let _guard = BUCKET_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         reset_agent_performance_cache_for_layer_rendering_tests();
         store_agent_performance_section("role-A".into(), 7, Some("a".into()));
         store_agent_performance_section("role-B".into(), 7, Some("b".into()));
@@ -454,7 +462,9 @@ mod bucket_cadence_tests {
 
     #[test]
     fn metrics_counters_track_hits_and_misses() {
-        let _guard = BUCKET_TEST_LOCK.lock().unwrap();
+        let _guard = BUCKET_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         reset_agent_performance_cache_for_layer_rendering_tests();
         // First lookup = miss path (cache empty -> store -> miss count
         // ++). We exercise store directly because the helper increments
@@ -480,7 +490,9 @@ mod bucket_cadence_tests {
 
     #[test]
     fn bucket_rollover_causes_miss_then_refill() {
-        let _guard = BUCKET_TEST_LOCK.lock().unwrap();
+        let _guard = BUCKET_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         reset_agent_performance_cache_for_layer_rendering_tests();
         store_agent_performance_section("role-r".into(), 1, Some("day1".into()));
         // Day +1: stale entry -> lookup returns None.

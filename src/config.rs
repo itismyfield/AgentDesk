@@ -3133,6 +3133,81 @@ pub fn load_graceful() -> Config {
     config
 }
 
+/// The process-global mutex serialising tests that mutate process environment
+/// variables.
+///
+/// # Poison
+///
+/// A panicking holder poisons this mutex, and a site that propagates the
+/// `PoisonError` dies with it instead of reaching its own assertion. In the
+/// widened #5185 sweep one real failure (`voice_pcm_harness_unattended_e2e`)
+/// reported itself as eleven, burying the primary under ten cascade victims.
+///
+/// The convention below is **not specific to this mutex**, and treating it as
+/// specific to this mutex is what left the amplification in place after the
+/// first attempt: a later sweep turned one real failure
+/// (`session_resume::tests::resume_production_path_clears_stale_binding_and_rebinds_runtime`)
+/// into 68, because that test and 66 `tui_prompt_dedupe` tests serialise on
+/// `tui_prompt_dedupe::TEST_LOCK` -- a *different* process-global `Mutex<()>`
+/// -- and every one of them still spelled the acquisition `.lock().unwrap()`.
+/// Of 73 panics in that run, 67 were `PoisonError`. So the rule is: any
+/// process-global `Mutex<()>` used to serialise tests recovers the guard at
+/// every acquisition site. The unit payload is what makes that unconditionally
+/// safe -- there is no data invariant a panicking holder could have torn --
+/// and it is why the rule stops at `Mutex<()>` and does not extend to the
+/// state mutexes (`Mutex<HashMap<..>>` and friends) that tests also touch.
+///
+/// **The rule is machine-checked, not merely written here.**
+/// `scripts/check_test_mutex_poison_recovery.py` derives the inventory of
+/// process-global `Mutex<()>` singletons from the tree and fails on any
+/// acquisition spelled `.unwrap()`, `.expect(..)`, `?`, or an
+/// `unwrap_or_else` whose handler never reaches `into_inner`.
+/// `scripts/ci-script-checks.sh` runs it. It had to become a script because
+/// this class recurred *after* being fixed once and *after* being documented
+/// here; `grep` over the tree found nothing else asserting it.
+///
+/// The inventory it covers is **26 distinct names across 42 declaration
+/// sites** at the time of writing, and the count is printed on every run
+/// rather than pinned here, because a stale figure in prose is the failure
+/// mode this paragraph is trying to avoid. Names are reused across modules --
+/// `LOCK` is declared in nine files, `ENV_LOCK` and `STORE_WRITE_LOCK` in
+/// four each, `TEST_LOCK` and `STATE_TEST_LOCK` in two each -- so counting
+/// names and counting mutexes give different answers, and only the second is
+/// the number of independent cascades that are possible.
+///
+/// The convention here is that every acquisition site recovers the guard
+/// rather than propagating the `PoisonError`. Of the 290 direct
+/// `shared_test_env_lock().lock()` sites, 288 spell it
+/// `unwrap_or_else(|poison| poison.into_inner())` literally; the remaining two
+/// recover identically in a different syntax -- `placeholder_live_events`
+/// matches on `Err(poisoned) => poisoned.into_inner()`, and
+/// `turn_orchestrator::SharedEnvLock::lock` is a forwarding shim whose single
+/// caller `lock_test_env()` applies the `unwrap_or_else`. The canonical
+/// `test_env_lock::acquire_shared_test_env_lock` path recovers too.
+/// `into_inner` is deliberate and is **not** interchangeable with
+/// `Mutex::clear_poison`: `into_inner` recovers this one acquisition and leaves
+/// the poison flag set as a durable record that some test panicked while
+/// holding the environment, whereas `clear_poison` destroys that record for
+/// every subsequent observer in the process.
+///
+/// Clearing is also the wrong shape for the race. Any accessor-side clear
+/// happens *before* `lock()`, so it cannot help a thread already blocked in
+/// `lock()` when the holder panics -- that waiter still receives
+/// `Err(PoisonError)`. Recovery has to be at the acquisition site, which is
+/// where `into_inner` puts it.
+///
+/// What this mutex guards is mutual exclusion over process env vars, not an
+/// invariant over data, so a panic mid-critical-section leaves no torn value
+/// for poison to warn about. It can leave an env var unrestored: restoration
+/// is RAII-driven at the `TestEnvVarGuard`/`RuntimeRootGuard` sites but *not*
+/// everywhere. #5185 converted the two hand-rolled sites it found --
+/// `services::tmux_common`'s `dead_marker_path_is_cleaned_with_session_temp_files`
+/// (env vars) and `session_resume`'s
+/// `resume_production_path_clears_stale_binding_and_rebinds_runtime`
+/// (a pane-liveness override) -- to guards that restore on unwind. Nothing
+/// mechanically forbids the next one: the poison gate above checks lock
+/// acquisition, not restoration shape, so "no hand-rolled sites remain" is a
+/// statement about a review, not about a check.
 #[cfg(test)]
 pub(crate) fn shared_test_env_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -3197,6 +3272,18 @@ impl TestEnvVarGuard {
     pub(crate) fn set_path_after_shared_test_env_lock(
         key: &'static str,
         value: &std::path::Path,
+    ) -> Self {
+        Self::set_value_after_shared_test_env_lock(key, value.as_os_str())
+    }
+
+    /// Same contract as `set_path_after_shared_test_env_lock` for env vars whose
+    /// value is not a path (`HOSTNAME`, feature flags). #5185 added it because
+    /// the hand-rolled save/`set_var`/restore shape it replaces leaks the
+    /// override to every later test in the process when an `assert!` between
+    /// the two halves unwinds past the restore.
+    pub(crate) fn set_value_after_shared_test_env_lock(
+        key: &'static str,
+        value: &std::ffi::OsStr,
     ) -> Self {
         let previous = std::env::var_os(key);
         unsafe { std::env::set_var(key, value) };
