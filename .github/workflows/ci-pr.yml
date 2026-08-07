@@ -869,20 +869,58 @@ jobs:
   # substrings in their id, so this lane selects all 61. Measured with the
   # fixture base pointed at a closed port, those 61 do not degrade to a skip --
   # `TestPostgresDb::create()` panics through `.expect(...)` and the soft-skip
-  # variants stall on connect retries for minutes each. Measured against a live
-  # server they are `61 passed; 0 failed` in 24.8 s, in parallel, with
-  # `AGENTDESK_REQUIRE_PG=1`. So the service below is not defensive: without it
+  # variants stall on connect retries for minutes each. Against a live server
+  # they were measured `61 passed; 0 failed` in 24.8 s, in parallel, with
+  # `AGENTDESK_REQUIRE_PG=1` -- on ONE development machine, server version
+  # unrecorded. Both numbers are conditional on that host, and neither is a
+  # property of this lane:
+  #   * `0 failed` is not a guarantee. A review on another machine measured
+  #     60 passed / 1 failed, the loser being the `multinode_regression`
+  #     dispatch/reclaim test that `scripts/known_test_failures.txt` carries as
+  #     `flaky` in this same commit -- an intra-test race that reproduces under
+  #     `--exact` on an idle machine. `60 passed; 1 failed` is an expected
+  #     shape here, held green by the ledger rather than by the test passing.
+  #   * 24.8 s is not a budget. `POSTGRES_TEST_LIFECYCLE_LOCK`
+  #     (`src/db/postgres.rs`) serialises every fixture database create/drop
+  #     process-globally, so the elapsed time is whatever one
+  #     create+migrate+drop costs on the host; a two-core `ubuntu-latest`
+  #     runner is expected to be far slower, and that is not a regression.
+  # What is host-independent is the direction, and that is all this evidence is
+  # asked to carry: with a live server the 61 run and are adjudicated; with a
+  # closed port they cannot run at all.
+  #
+  # So the service below is not defensive: without it
   # this required context can never be green, and with it the 56 of those 61
   # that no PR lane ran at all (`[rule1]` in
   # `scripts/pg_test_lane_baseline.txt`, now empty) start running on every Rust
   # PR against a real database.
   #
-  # `scripts/check_pg_test_lane_membership.py` `[rule5]` is what keeps this
-  # true: it fails, naming every id, if any `ci-pr.yml` job that runs
-  # `cargo test` without starting the service selects a PG-dependent test. That
-  # rule carries no baseline tolerance, so deleting the service step below
-  # turns this into a red script check rather than a red sweep discovered by
-  # every PR author at once.
+  # `scripts/check_pg_test_lane_membership.py` `[rule5]` is what keeps the
+  # SELECTION honest -- the selection, and nothing beyond it. What the rule
+  # actually decides is whether a job's YAML text references the PostgreSQL
+  # service start script at all; a `cargo test` job whose text does not
+  # reference it fails rule5, naming every PG-dependent id that job selects.
+  # Being a substring test over job text, it does not evaluate `if:`
+  # conditions, does not tell a live step from a commented-out one, and cannot
+  # know whether the container came up. `docs/ci/release-gates.md` records the
+  # same limit in its required-context procedure -- rule5 inspects the
+  # selection set, not whether the service really started -- which is why that
+  # procedure ALSO makes you confirm, in a real main run, that this job's
+  # service step exists and succeeded. Within those limits the rule carries no
+  # baseline tolerance, so deleting the service step below turns this into a
+  # red script check rather than a red sweep discovered by every PR author at
+  # once.
+  #
+  # Residual risk, recorded rather than closed because it is low-probability
+  # and has no cheap guard: a container that FAILS TO START is already safe --
+  # the start step polls `pg_isready` for its budget and fast-fails the job. A
+  # container that starts and then DIES mid-sweep is not. Every PG-dependent
+  # test still to run then burns its connect-retry budget (a review measured
+  # ~45 s per test against a closed port) before failing, which on a two-core
+  # runner adds far more than the 45-minute step timeout has left. That
+  # surfaces as a TIMEOUT red with no named failure -- not as the clean,
+  # id-naming red this lane is built to produce -- so read a timeout here as
+  # "check the service", not as "the sweep got slower".
   #
   # Boundaries and why they are here rather than wider:
   #   * `--lib` only. `full_non_pg` in ci-main.yml documents that an
@@ -928,7 +966,12 @@ jobs:
       PGPASSWORD: postgres
       # #4979 S2 contract, and rule4 of check_pg_test_lane_membership.py: any
       # job that starts the service must also hard-fail on an unreachable
-      # database instead of soft-skipping to green.
+      # database instead of soft-skipping to green. rule4 does not ENFORCE
+      # that. A newly appearing rule4 debt entry prints as `WARN` and the check
+      # still exits 0 -- only a *stale* baseline entry is `FAIL` -- so deleting
+      # this line turns no gate red; it quietly returns the PG-dependent tests
+      # this lane selects to soft-skip green. Treat rule4 as a ledger, and this
+      # line as load-bearing on its own.
       AGENTDESK_REQUIRE_PG: "1"
       # Match the other test lanes: assertions and panic text are preserved,
       # only native debug symbols are dropped to cut link memory (#4245).

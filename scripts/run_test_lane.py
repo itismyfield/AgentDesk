@@ -169,16 +169,29 @@ from check_test_target_integrity import (  # noqa: E402
 #   5. `VERDICT_AT_START` carries no word boundary, so the residual is NOT only
 #      foreign text that *ends* in a verdict word: foreign text that *begins*
 #      with one steals a verdict too (`okhttp: connect` at the start of a
-#      segment reads as `ok`). The boundary CANNOT simply be added. `\b` after
-#      `ok` requires a non-word character next, and the merged-write case this
-#      parser exists to handle -- `okok`, two verdicts written back to back with
-#      the newline lost -- has a word character next, so the second verdict
+#      segment reads as `ok`). A `\b` boundary CANNOT simply be added: `\b`
+#      after `ok` requires a non-word character next, and the merged-write case
+#      this parser exists to handle -- `okok`, two verdicts written back to back
+#      with the newline lost -- has a word character next, so the second verdict
 #      would be dropped and its id would fail the lane as `lane-missing`. That
 #      is a false RED on a required context, which is strictly worse than the
 #      false green it would prevent, and the false-green direction is already
-#      narrowed by the `failures:` set comparison. Reviewed and rejected, not
-#      overlooked. The same reasoning applies in reverse to `VERDICT_AT_END`:
-#      a boundary there would drop the measured `/var/….plist: OKok` shape.
+#      narrowed by the `failures:` set comparison.
+#
+#      What is rejected above is `\b`, and ONLY `\b` -- do not read it as
+#      "no boundary is possible here". A lookahead that admits the next verdict
+#      word as its own boundary, `(?=ok|FAILED|ignored|\W|$)`, is not answered
+#      by that argument: it keeps `okok` while still refusing `okhttp:`. A
+#      review measured exactly that. It is left as a follow-up rather than
+#      applied here, and it is not claimed to be closed.
+#
+#      `VERDICT_AT_END` and the measured `/var/….plist: OKok` shape need the
+#      same care, because the loss depends on WHERE the boundary goes and the
+#      earlier revision of this comment did not say. A boundary placed BEFORE
+#      the verdict word drops it: the `ok` in `OKok` is preceded by `K`, a word
+#      character. A boundary placed AFTER it does not: the match already ends
+#      at end-of-segment, where `\b` is satisfied. Only the leading-boundary
+#      reading loses `OKok`.
 #
 # The closure argument in (2) rests on a premise worth stating, because it is
 # not self-evident: block corruption is assumed to be INSERTION-only. An

@@ -48,6 +48,18 @@ It is a text scan, not a borrow-checked analysis of receiver types.
   to a caller which recovers, and `unwrap_or_else(PoisonError::into_inner)`
   written as a path rather than a closure. A gate that cries wolf 32 times is
   a gate that gets deleted, so this one asserts less and means it.
+* An acquisition that DISCARDS the poison rather than propagating it is not
+  flagged, because none of those four spellings appear in it. The reachable
+  shape is `if let Ok(_g) = SOME_LOCK.lock() { .. }` (and its `while let` /
+  `.ok()` relatives). This is not a milder failure than `.unwrap()`, it is a
+  worse one: once the mutex is poisoned the `Ok` arm never matches again, so
+  the critical section is silently SKIPPED and mutual exclusion is lost for
+  every later acquirer -- with no panic, no `PoisonError` in the transcript,
+  and nothing for a cascade to point at. It is also exactly the refactor that
+  clippy and review pressure produce when an author is told to stop writing
+  `.unwrap()`, so it is arrived at by ordinary means rather than contrived.
+  Widening the patterns to cover it is tracked separately; today it is a known
+  hole, not a covered case.
 * A `.lock()` reached through an alias (`let m = &SOME_LOCK; m.lock()`) or
   through a helper that takes `&'static Mutex<()>` as a parameter is not
   attributed to the static, so it is neither checked nor reported. The

@@ -1067,7 +1067,8 @@ def check_analysis(
             print(f"  ! {entry}", file=sys.stderr)
         print(
             "Give that job `./scripts/ci/postgres-service.sh start` plus the "
-            "`AGENTDESK_REQUIRE_PG: \"1\"` env rule4 requires, or narrow its "
+            "`AGENTDESK_REQUIRE_PG: \"1\"` env rule4 tracks (rule4 only WARNs "
+            "on a missing one -- it is a ledger, not a guard), or narrow its "
             "selection so it stops choosing these ids. There is no baseline "
             "for this rule and the allowlist only exempts classifier false "
             "positives.",
