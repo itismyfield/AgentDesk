@@ -1133,6 +1133,149 @@ mod tests {
         );
     }
 
+    // ── The beacon's two numbers, pinned absolutely ───────────────────────
+    //
+    // #5147. Every threshold assertion in this file was originally
+    // phrased relative to the constant it was checking — `RUNTIME_TICK_STALE_MS
+    // + 1`, `RUNTIME_TICK_PERIOD * 3` — so the expectation moved with the
+    // constant and the constant had no coverage at all. Two independent
+    // mutations survived a 23/23 green run:
+    //
+    //   * `RUNTIME_TICK_STALE_MS: 5_000 -> 86_400_000` makes `runtime_stalled`
+    //     unreachable in production. The watchdog exits three 30s intervals
+    //     after the last successful check — 90s, and the failure streak itself
+    //     is only the last two of those — so a threshold of 24 hours can never
+    //     be crossed before the process is dead.
+    //   * `RUNTIME_TICK_PERIOD: 1s -> 3600s` makes the beacon stale at every
+    //     check, so *every* failure renders as `runtime_stalled` and the
+    //     discriminator discriminates nothing.
+    //
+    // That is the #5177 defect class: an oracle computed from the
+    // implementation. Nothing below may name a constant on the expectation
+    // side.
+
+    /// The literals themselves, plus the one relation the doc comment claims
+    /// ("Five periods"). The relation alone would still be satisfiable by any
+    /// pair in a 1:5 ratio, which is why both absolutes are pinned first.
+    #[test]
+    fn the_beacon_constants_are_pinned_in_absolute_units() {
+        assert_eq!(
+            RUNTIME_TICK_PERIOD,
+            Duration::from_millis(1_000),
+            "the beacon must tick once a second. Longer and a single tick \
+             cannot resolve the runtime's state inside the probe's 5s window; \
+             this is not free to drift with whatever the constant happens to say"
+        );
+        assert_eq!(
+            RUNTIME_TICK_STALE_MS, 5_000,
+            "the stale threshold must be 5000ms. Raising it silently makes \
+             `runtime_stalled` unreachable: the watchdog exits three 30s \
+             intervals after the last successful check, so a threshold above \
+             90000ms can never be crossed while the process is still alive"
+        );
+        assert_eq!(
+            RUNTIME_TICK_STALE_MS,
+            5 * RUNTIME_TICK_PERIOD.as_millis() as u64,
+            "the docs call the threshold `Five periods`; if that stops being \
+             true, one of the two literals above moved and the comment lies"
+        );
+    }
+
+    /// The threshold's *other* documented relation: it equals the watchdog's
+    /// own read timeout, so crossing it means the runtime failed to run one
+    /// trivial task for at least as long as the probe waited for a byte.
+    ///
+    /// **Every expectation here is a literal on both sides.** The watchdog's
+    /// constants are *read* (so a change to either side is caught) but never
+    /// used to compute an expectation — `assert_eq!(A, B)` between two
+    /// constants that move together is the #5177 defect class and cannot fail.
+    ///
+    /// While these were function-local `const`s the only available technique
+    /// was `include_str!("discord/health/recovery.rs")` plus
+    /// `str::contains("… from_secs(5);")`, and that was measured to break both
+    /// ways: `str::contains` sees a file as one flat string and cannot tell
+    /// code from a comment, so commenting the real declaration out, leaving the
+    /// same literal behind in the comment and setting the live value to 60s
+    /// stays green, while rewriting it as the identical
+    /// `Duration::from_millis(5_000)` turns red. `self_watchdog` exists so
+    /// these can simply be imported.
+    #[test]
+    fn the_stale_threshold_matches_the_watchdogs_own_probe_timeout() {
+        use crate::services::discord::health::self_watchdog;
+
+        assert_eq!(
+            self_watchdog::TCP_TIMEOUT,
+            Duration::from_secs(5),
+            "the watchdog waits 5s for a byte. `RUNTIME_TICK_STALE_MS` is that \
+             same 5s in milliseconds, so the two must be changed together"
+        );
+        assert_eq!(
+            self_watchdog::CHECK_INTERVAL,
+            Duration::from_secs(30),
+            "the watchdog probes every 30s; `AGE_AT_KILL_MS` is derived from it"
+        );
+        assert_eq!(
+            self_watchdog::MAX_FAILURES,
+            3,
+            "three consecutive failures is what force-exits the process"
+        );
+        assert_eq!(
+            RUNTIME_TICK_STALE_MS, 5_000,
+            "the threshold is the probe's 5s read timeout expressed in ms"
+        );
+        assert_eq!(
+            AGE_AT_KILL_MS, 90_000,
+            "three CHECK_INTERVALs from the last successful check to the exit. \
+             NOT the failure-streak length: three failures 30s apart span two \
+             intervals, measured at 60.3s / 70.3s in production"
+        );
+    }
+
+    /// The behavioural consequence, stated in absolute milliseconds: by the
+    /// time the watchdog gives up, a runtime that stopped ticking must already
+    /// read as stalled. A threshold that production cannot reach before the
+    /// process dies is a threshold that classifies nothing.
+    #[test]
+    fn a_runtime_that_stopped_ticking_reads_as_stalled_before_the_watchdog_kills() {
+        for age_ms in [5_001_u64, 10_000, 35_000, 60_000, AGE_AT_KILL_MS] {
+            let crumbs = Breadcrumbs {
+                runtime_tick_age_ms: Some(age_ms),
+                ..crumbs()
+            };
+            assert_eq!(
+                crumbs.runtime_liveness(),
+                RuntimeLiveness::Stalled { age_ms },
+                "a beacon {age_ms}ms stale is a stalled runtime; the watchdog \
+                 kills at {AGE_AT_KILL_MS}ms, so anything the threshold cannot \
+                 catch by then it never catches"
+            );
+            assert_eq!(
+                verdict(&no_response(), &crumbs),
+                "runtime_stalled",
+                "at {age_ms}ms stale"
+            );
+        }
+        // The other side, so a threshold mutated *down* is caught too: a beacon
+        // that is ticking must never be reported as a stalled runtime.
+        for age_ms in [0_u64, 1, 999, 1_000, 4_999, 5_000] {
+            let crumbs = Breadcrumbs {
+                runtime_tick_age_ms: Some(age_ms),
+                ..crumbs()
+            };
+            assert_eq!(
+                crumbs.runtime_liveness(),
+                RuntimeLiveness::Scheduling { age_ms },
+                "a beacon {age_ms}ms old is inside the 5000ms window and the \
+                 runtime is demonstrably scheduling"
+            );
+            assert_ne!(
+                verdict(&no_response(), &crumbs),
+                "runtime_stalled",
+                "at {age_ms}ms stale"
+            );
+        }
+    }
+
     #[test]
     fn verdict_reports_a_live_runtime_with_a_dead_listener_as_listener_gone() {
         let connect_failed = HealthProbeOutcome::ConnectFailed {
@@ -1300,6 +1443,31 @@ mod tests {
         assert_eq!(verdict(&responded, &ugly), "responsive");
     }
 
+    /// Absolute on both sides. Writing this as `RUNTIME_TICK_STALE_MS` and
+    /// `RUNTIME_TICK_STALE_MS + 1` is what let the constant be mutated to
+    /// 86_400_000 with the whole file still green.
+    #[test]
+    fn liveness_threshold_is_inclusive_and_only_then_stalls() {
+        let at = Breadcrumbs {
+            runtime_tick_age_ms: Some(5_000),
+            ..crumbs()
+        };
+        let past = Breadcrumbs {
+            runtime_tick_age_ms: Some(5_001),
+            ..crumbs()
+        };
+        assert_eq!(
+            at.runtime_liveness(),
+            RuntimeLiveness::Scheduling { age_ms: 5_000 },
+            "5000ms is the threshold and the threshold is inclusive"
+        );
+        assert_eq!(
+            past.runtime_liveness(),
+            RuntimeLiveness::Stalled { age_ms: 5_001 },
+            "one millisecond past 5000ms must stall"
+        );
+    }
+
     #[test]
     fn recording_a_tick_advances_the_beacon() {
         let _serial = exclusive();
@@ -1322,6 +1490,41 @@ mod tests {
             after.runtime_liveness(),
             RuntimeLiveness::Scheduling { .. }
         ));
+    }
+
+    /// The beacon has to survive being spawned on a real runtime, not just be
+    /// callable. Time is paused, so tokio auto-advances once the test task
+    /// idles and this costs no wall-clock.
+    ///
+    /// The window is **5 000 ms as a literal**, not `RUNTIME_TICK_PERIOD * n`.
+    /// The point of the beacon is to resolve the runtime's state *within one
+    /// probe timeout*, so the property worth pinning is "several ticks fit
+    /// inside 5s" — a property a period of 3600s fails. Phrased relative to the
+    /// period it would pass at any period whatsoever, which is exactly how
+    /// `RUNTIME_TICK_PERIOD: 1s -> 3600s` survived a 23/23 green run.
+    #[tokio::test(start_paused = true)]
+    async fn the_spawned_beacon_keeps_ticking() {
+        let _serial = exclusive();
+        let before = snapshot();
+        spawn_runtime_liveness_beacon();
+        tokio::time::sleep(Duration::from_millis(5_100)).await;
+        let after = snapshot();
+        assert!(
+            after.runtime_ticks >= before.runtime_ticks + 5,
+            "the beacon must tick at least 5 times in the 5s the watchdog's \
+             probe is willing to wait, otherwise a single missed tick is \
+             indistinguishable from a stall: {} -> {}",
+            before.runtime_ticks,
+            after.runtime_ticks
+        );
+        // No age assertion here: `PROCESS_START` is a real `Instant`, so under
+        // `start_paused` every tick lands within a millisecond of real "now"
+        // and any age bound would pass vacuously. The age/threshold behaviour
+        // is pinned on constructed `Breadcrumbs` instead, by
+        // `a_runtime_that_stopped_ticking_reads_as_stalled_before_the_watchdog_kills`.
+        after
+            .runtime_tick_age_ms
+            .expect("a running beacon must leave a timestamp");
     }
 
     /// The beacon is only a discriminator if something starts it, and nothing

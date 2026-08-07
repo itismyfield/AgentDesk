@@ -6251,6 +6251,7 @@ services::hang_forensics::tests::a_healthy_probe_is_responsive_whatever_the_brea
 services::hang_forensics::tests::a_live_beacon_renders_its_age_and_label
 services::hang_forensics::tests::a_never_accepted_connection_is_no_response_not_connect_failed
 services::hang_forensics::tests::a_peer_that_takes_the_request_and_closes_without_answering_is_a_failure
+services::hang_forensics::tests::a_runtime_that_stopped_ticking_reads_as_stalled_before_the_watchdog_kills
 services::hang_forensics::tests::accepted_but_silent_server_is_classified_as_no_response
 services::hang_forensics::tests::age_sentinel_treats_zero_as_never
 services::hang_forensics::tests::arming_the_beacon_inside_a_runtime_reports_the_worker_count
@@ -6261,11 +6262,15 @@ services::hang_forensics::tests::every_stage_and_liveness_combination_has_a_pinn
 services::hang_forensics::tests::every_stage_reports_its_own_label_elapsed_error_and_verdict_input
 services::hang_forensics::tests::guard_records_failure
 services::hang_forensics::tests::guard_records_success_and_releases_in_flight
+services::hang_forensics::tests::liveness_threshold_is_inclusive_and_only_then_stalls
 services::hang_forensics::tests::never_observed_ages_render_as_never
 services::hang_forensics::tests::recording_a_tick_advances_the_beacon
 services::hang_forensics::tests::responding_server_is_classified_as_responded
+services::hang_forensics::tests::the_beacon_constants_are_pinned_in_absolute_units
 services::hang_forensics::tests::the_beacon_records_the_runtime_worker_count
 services::hang_forensics::tests::the_beacon_splits_a_wedged_runtime_from_a_blocked_handler
+services::hang_forensics::tests::the_spawned_beacon_keeps_ticking
+services::hang_forensics::tests::the_stale_threshold_matches_the_watchdogs_own_probe_timeout
 services::hang_forensics::tests::unparseable_address_is_connect_failed_not_a_panic
 services::hang_forensics::tests::verdict_reports_a_live_runtime_with_a_dead_listener_as_listener_gone
 services::hang_forensics::tests::verdict_without_a_beacon_concludes_nothing

@@ -1,25 +1,57 @@
 //! Process self-watchdog: the thread that force-exits `dcserver` when the HTTP
 //! runtime stops answering.
 //!
-//! #5147 moved this out of `health/recovery.rs` unchanged, for two reasons.
+//! #5147 moved this out of `health/recovery.rs` for two reasons.
 //!
 //! **Cohesion.** `recovery.rs` is about recovering *channels* — watchers,
 //! mailboxes, stalled turns. This is about the *process*, it shares no state
 //! with anything else in that file, and it runs on its own OS thread precisely
 //! so it depends on nothing the rest of the module touches.
 //!
-//! **Reach.** `CHECK_INTERVAL`, `TCP_TIMEOUT` and `MAX_FAILURES` are
-//! function-local `const`s, so no other module can name them. The follow-up
-//! that hangs a runtime-liveness threshold off `TCP_TIMEOUT` needs to assert
-//! against the value; at module scope it can import it instead of grepping this
-//! file's source text for the declaration.
+//! **Testability of the constants.** [`CHECK_INTERVAL`], [`TCP_TIMEOUT`] and
+//! [`MAX_FAILURES`] are at module scope so `services::hang_forensics` can
+//! *import* them: it derives its stale threshold from `TCP_TIMEOUT` and its
+//! kill deadline from `CHECK_INTERVAL * MAX_FAILURES`, and it has to be able to
+//! check that derivation. Against a function-local `const` the only available
+//! technique is `include_str!` plus `str::contains` on the declaration text,
+//! which was measured to fail in both directions — commenting the real
+//! declaration out while leaving the same literal in a comment stays green with
+//! the live value at 60s, and an equivalent rewrite to
+//! `Duration::from_millis(5_000)` turns red.
 //!
-//! #5147 also arms `services::hang_forensics`' runtime-liveness beacon here
-//! rather than at the boot site: `spawn_watchdog` arms it and hands the
-//! resulting `BeaconArmed` token to `spawn_watchdog_thread`, so "armed before
-//! the thread exists" is a data dependency the compiler checks rather than a
-//! comment a reviewer has to believe. Its breadcrumbs are printed on every
-//! failure.
+//! **Ordering.** [`spawn_watchdog`] arms `hang_forensics`' runtime-liveness
+//! beacon and hands the resulting `BeaconArmed` token to
+//! `spawn_watchdog_thread`. That is the whole ordering guarantee: there is no
+//! way to build the thread without the token and no way to obtain the token
+//! except by arming, so neither step can be deleted nor reordered without a
+//! compile error. Asserting the same thing by `include_str!`-ing this file and
+//! comparing byte offsets was defeated six ways by adversarial review — decoys
+//! in a lifetime-adjacent comment, a plain string, a byte string, a raw string,
+//! a `#[cfg(test)]` item and an unused `macro_rules!` body — and it also failed
+//! on *correct* code that merely mentioned `std::thread::Builder::new()` in a
+//! string earlier in the file.
+
+use std::time::Duration;
+
+/// How long the watchdog sleeps between probes.
+pub(crate) const CHECK_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Connect / write / read timeout for one probe.
+///
+/// Deliberately shorter than the Postgres pool's `acquire_timeout`
+/// (10s, `db::postgres::DEFAULT_PG_ACQUIRE_TIMEOUT_SECS`), which is why a slow
+/// database alone can fail this probe while the runtime is perfectly
+/// responsive. `hang_forensics::RUNTIME_TICK_STALE_MS` is the same 5s expressed
+/// in milliseconds, so "the beacon is stale" means "the runtime failed to run
+/// one trivial task for at least as long as the probe waited for a byte".
+pub(crate) const TCP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Consecutive failed probes before the process force-exits.
+pub(crate) const MAX_FAILURES: u32 = 3;
+
+/// Skip checks for the first 30s after startup so the runtime has time to
+/// initialise Discord bots and register providers.
+pub(crate) const STARTUP_GRACE: Duration = Duration::from_secs(30);
 
 /// Self-watchdog: runs on a dedicated OS thread (not tokio) to detect runtime
 /// hangs. Periodically opens a raw TCP connection to the server port and
@@ -71,13 +103,6 @@ fn spawn_watchdog_thread(port: u16, armed: crate::services::hang_forensics::Beac
         Ok(line) => tracing::info!("{line}"),
         Err(line) => tracing::error!("{line}"),
     }
-
-    const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-    const TCP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-    const MAX_FAILURES: u32 = 3;
-    // Grace period: skip checks for the first 30s after startup so the
-    // runtime has time to initialise Discord bots and register providers.
-    const STARTUP_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
     std::thread::Builder::new()
         .name("health-watchdog".into())
