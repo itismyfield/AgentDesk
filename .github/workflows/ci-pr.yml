@@ -886,8 +886,14 @@ jobs:
   #     create+migrate+drop costs on the host; a two-core `ubuntu-latest`
   #     runner is expected to be far slower, and that is not a regression.
   # What is host-independent is the direction, and that is all this evidence is
-  # asked to carry: with a live server the 61 run and are adjudicated; with a
-  # closed port they cannot run at all.
+  # asked to carry: with a live server the 61 run and are adjudicated on the
+  # change. With a closed port they still run -- one review measured `57 FAILED
+  # / 4 ok` in 915.72 s -- but nothing about that result is about the change.
+  # The failure is the fixture's, per the paragraph above: `create()` panics
+  # through `.expect(...)`, the soft-skip variants burn the wall-clock on
+  # connect retries, and which of the two a given test does is a property of
+  # the test, not of the diff. So the harm is not that the lane goes unrun; it
+  # is that the lane goes red, slowly, with a verdict it did not earn.
   #
   # So the service below is not defensive: without it
   # this required context can never be green, and with it the 56 of those 61
