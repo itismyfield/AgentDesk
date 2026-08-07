@@ -21,11 +21,32 @@
 //! comment a reviewer has to believe. Its breadcrumbs are printed on every
 //! failure.
 
-/// Self-watchdog: runs on a dedicated OS thread (not tokio) to detect
-/// runtime hangs.  Periodically opens a raw TCP connection to the server
-/// port and expects a response within a few seconds.  If the check fails
-/// `max_failures` times in a row the process is force-killed so launchd
-/// (or systemd) can restart it.
+/// Self-watchdog: runs on a dedicated OS thread (not tokio) to detect runtime
+/// hangs. Periodically opens a raw TCP connection to the server port and
+/// expects a response within [`TCP_TIMEOUT`]. If the check fails
+/// [`MAX_FAILURES`] times in a row the process is force-killed so launchd (or
+/// systemd) can restart it.
+///
+/// #5147: every failure carries [`crate::services::hang_forensics`] fields —
+/// which stage of the probe failed, how long it took, whether the tokio runtime
+/// was still scheduling tasks, and what the Postgres health probes were doing.
+///
+/// Read `verdict=` first. Do **not** read `stage=` on its own: the kernel
+/// completes the TCP handshake from the listen backlog without the accept loop
+/// running, so a wedged runtime and a database-blocked handler both surface as
+/// `no_response`. `verdict=` is the field that separates them, by combining
+/// `stage=` with the runtime beacon (`runtime=`) and `db_in_flight=`. The
+/// accompanying `sample` dump cannot settle it either — a task parked in an
+/// `await` is not a running thread and does not appear in a thread sample.
+///
+/// [`crate::services::hang_forensics::verdict`] tabulates all seven values and
+/// the two caveats they cannot carry: `runtime=scheduling` means **one** of
+/// `runtime_workers=` was free, and `db_in_flight=` is process-wide, so
+/// `handler_blocked_on_db` names *a* stuck health request, not this one.
+///
+/// Must be called from inside the tokio runtime it is meant to watch: the first
+/// thing it does is arm the runtime-liveness beacon, which needs a runtime
+/// handle.
 pub fn spawn_watchdog(port: u16) {
     // #5147: arm the beacon HERE rather than at the boot site, and prove the
     // order with a value rather than with a comment or a source-text guard.
@@ -68,39 +89,20 @@ fn spawn_watchdog_thread(port: u16, armed: crate::services::hang_forensics::Beac
             loop {
                 std::thread::sleep(CHECK_INTERVAL);
 
-                let ok = (|| -> bool {
-                    use std::io::{Read, Write};
-                    let loopback = crate::config::loopback();
-                    let addr = format!("{loopback}:{port}");
-                    let mut stream =
-                        match std::net::TcpStream::connect_timeout(
-                            &addr.parse().unwrap(),
-                            TCP_TIMEOUT,
-                        ) {
-                            Ok(s) => s,
-                            Err(_) => return false,
-                        };
-                    let _ = stream.set_read_timeout(Some(TCP_TIMEOUT));
-                    let _ = stream.set_write_timeout(Some(TCP_TIMEOUT));
-                    let req = format!("GET /api/health HTTP/1.1\r\nHost: {loopback}\r\nConnection: close\r\n\r\n");
-                    if stream.write_all(req.as_bytes()).is_err() {
-                        return false;
-                    }
-                    let mut buf = [0u8; 512];
-                    match stream.read(&mut buf) {
-                        Ok(n) if n > 0 => {
-                            // Any HTTP response means the process is alive and serving.
-                            // Only TCP failure (Err/_) indicates a true hang/deadlock.
-                            // A 503 (degraded/unhealthy state) still means the runtime is
-                            // responsive — killing it would create an infinite crash loop
-                            // when a provider is temporarily disconnected.
-                            true
-                        }
-                        _ => false,
-                    }
-                })();
+                // #5147: classify *where* the probe stopped instead of
+                // collapsing it to a bool. `connect_failed` (nothing accepted
+                // the socket) and `no_response` (accepted, but the handler
+                // never answered) have opposite root causes, and the bool lost
+                // that distinction — which is why three investigations could
+                // not explain these kills from the dump alone.
+                let loopback = crate::config::loopback();
+                let outcome = crate::services::hang_forensics::probe_health_once(
+                    &format!("{loopback}:{port}"),
+                    &loopback,
+                    TCP_TIMEOUT,
+                );
 
-                if ok {
+                if outcome.is_ok() {
                     if consecutive_failures > 0 {
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::info!(
@@ -116,13 +118,22 @@ fn spawn_watchdog_thread(port: u16, armed: crate::services::hang_forensics::Beac
                     // `sample` dump this eventually captures cannot carry
                     // either: a task parked in an `await` is not a running
                     // thread and does not appear in a thread sample at all.
-                    let crumbs = crate::services::hang_forensics::snapshot().render();
+                    let probe = outcome.render();
+                    // Snapshot once and derive the verdict from that same
+                    // snapshot: re-reading would let the beacon tick in between
+                    // and describe a runtime state the probe never saw.
+                    let snapshot = crate::services::hang_forensics::snapshot();
+                    let probe = format!(
+                        "verdict={} {probe}",
+                        crate::services::hang_forensics::verdict(&outcome, &snapshot)
+                    );
+                    let crumbs = snapshot.render();
                     tracing::warn!(
-                        "  [{ts}] 🩺 watchdog: health check failed ({consecutive_failures}/{MAX_FAILURES}) {crumbs}"
+                        "  [{ts}] 🩺 watchdog: health check failed ({consecutive_failures}/{MAX_FAILURES}) {probe} {crumbs}"
                     );
                     if consecutive_failures >= MAX_FAILURES {
                         tracing::warn!(
-                            "  [{ts}] 🩺 watchdog: runtime unresponsive — capturing diagnostics before exit {crumbs}"
+                            "  [{ts}] 🩺 watchdog: runtime unresponsive — capturing diagnostics before exit {probe} {crumbs}"
                         );
                         // Capture process dump for post-mortem analysis (platform-aware)
                         // Write to runtime root's logs/ dir so dumps survive /tmp cleanup

@@ -18,17 +18,60 @@
 //! blocked in an `await` is not a running thread — it does not appear in a
 //! thread sample at all.
 //!
-//! So this module records the facts the dump structurally cannot carry. Two
-//! of them land here; which stage of the probe failed follows.
+//! So this module records the three facts the dump structurally cannot carry.
 //!
-//! ### 1. Whether the runtime is scheduling tasks — [`RuntimeLiveness`]
+//! ### 1. Which stage of the probe failed — [`HealthProbeOutcome`]
+//!
+//! `ConnectFailed` means the TCP handshake never completed; `NoResponse` means
+//! the connection was established and the request written, but no bytes came
+//! back before the read timeout.
+//!
+//! **This field on its own does not separate a wedged runtime from a slow
+//! handler, and it must not be read that way.** The listen backlog completes
+//! the handshake *in the kernel*, with no participation from the accept loop, so
+//! a runtime that never polls its acceptor still lets `connect()` succeed —
+//! measured at 0.1 ms — and then times out on read, classifying as `NoResponse`
+//! exactly like a healthy runtime waiting on a slow query. The backlog depth is
+//! a kernel limit, not a tokio one (`mio` asks for `-1` and the kernel caps it:
+//! `kern.ipc.somaxconn`, measured at **128** on the release host). The exact
+//! depth does not matter; one free slot completes a handshake the acceptor
+//! never sees. So:
+//!
+//! * `ConnectFailed` means the handshake did not complete: the listening socket
+//!   is gone — **or its backlog is full**. The second case matters, and an
+//!   earlier draft of this file denied it ("not that the runtime is wedged").
+//!   A runtime that never polls its acceptor holds every slot it is given, so
+//!   with enough clients it eventually fills all 128 and the next `connect()`
+//!   fails. `ConnectFailed` therefore does not acquit the runtime; it only says
+//!   the handshake failed. That is why [`verdict`] still consults the beacon
+//!   for this stage, and why `undetermined_no_beacon` — not `listener_gone` —
+//!   is the honest answer when no beacon ran.
+//! * `NoResponse` covers **both** "the runtime is wedged" and "the handler is
+//!   waiting on Postgres".
+//! * `RequestFailed` means the connection was established and then the request
+//!   could not be written. The kernel keeps an accepted socket writable with no
+//!   help from the executor, so a *refused* write is a peer-side reset and not
+//!   a scheduling symptom — which is why this is the one failure stage
+//!   [`verdict`] settles without the beacon.
+//!
+//!   State the limit of that, because the stage is a fold and the conclusion is
+//!   not: [`probe_health_once`] sets a write timeout of the same `TCP_TIMEOUT`
+//!   and maps **every** `write_all` error here, so a write that merely timed out
+//!   (`ErrorKind::TimedOut`) lands here too and is *not* a peer reset. The
+//!   request is 70 bytes to loopback against a far larger socket buffer, so that
+//!   is not a realistic outcome and has never been observed — but if it happens,
+//!   `verdict` prints `connection_reset_before_request` with no evidence behind
+//!   it, in the one place that does not consult the beacon. `err=` on the same
+//!   line distinguishes them; read it before believing this stage.
+//!
+//! ### 2. Whether the runtime is scheduling tasks — [`RuntimeLiveness`]
 //!
 //! This is the discriminator `stage=` cannot be, and why the two are always
 //! reported together. [`spawn_runtime_liveness_beacon`] runs one tokio task
 //! storing a monotonic timestamp every [`RUNTIME_TICK_PERIOD`]. It depends on
 //! the timer driver and a worker thread and nothing else — not the acceptor,
 //! not the HTTP stack, not Postgres. A stale tick is positive evidence the
-//! runtime stopped polling; a fresh one, that it did not. `verdict` (next commit) combines
+//! runtime stopped polling; a fresh one, that it did not. [`verdict`] combines
 //! the two into the single conclusion the watchdog is entitled to draw.
 //!
 //! Read both labels literally; the asymmetry between them is the whole subtlety.
@@ -47,7 +90,7 @@
 //!   name the wrong component. `runtime_workers=` is logged beside it so the
 //!   next investigator can weigh how much slack that leaves.
 //!
-//! ### 2. What the database was doing — [`Breadcrumbs`]
+//! ### 3. What the database was doing — [`Breadcrumbs`]
 //!
 //! [`observe_db`] brackets one Postgres await with a [`DbProbeGuard`], so
 //! `db_in_flight` says how many are outstanding right now and
@@ -438,6 +481,228 @@ impl Breadcrumbs {
     }
 }
 
+/// The one conclusion the watchdog is entitled to draw, from the probe stage
+/// and the beacon together.
+///
+/// Neither input is sufficient alone, which is why this is a function and not a
+/// note telling the reader to eyeball `stage=`: `stage=` cannot see a wedged
+/// runtime (the listen backlog answers `connect()` without the acceptor), and
+/// the beacon cannot see a dead listening socket or a stuck handler (it touches
+/// neither). `db_in_flight` then splits the remainder — a handler waiting on
+/// Postgres from one slow for another reason — but that gauge is process-wide
+/// (see [`Breadcrumbs::db_in_flight`]), so `handler_blocked_on_db` names *a*
+/// health request stuck in a query, not necessarily this one.
+///
+/// The seven values this returns, and what each is worth:
+///
+/// | verdict                           | means                                                         |
+/// |-----------------------------------|---------------------------------------------------------------|
+/// | `responsive`                      | the probe got bytes back; the watchdog prints no failure line  |
+/// | `runtime_stalled`                 | no worker ran a timer task for 5s — a wedged runtime           |
+/// | `listener_gone`                   | runtime scheduling, yet the handshake did not complete         |
+/// | `handler_blocked_on_db`           | runtime scheduling, *a* health request is inside a query       |
+/// | `handler_slow_db_idle`            | runtime scheduling, no health query outstanding                |
+/// | `connection_reset_before_request` | connected, then the write failed — handler never reached; read `err=`, this arm also absorbs a write timeout |
+/// | `undetermined_no_beacon`          | the beacon never ran; nothing may be concluded                 |
+///
+/// Seven, not the five an earlier draft listed: that count omitted `responsive`
+/// and predates `connection_reset_before_request`. The whole set is pinned as a
+/// table by `tests::every_stage_and_liveness_combination_has_a_pinned_verdict`.
+///
+/// Matched **stage-first and exhaustively, with no `_` arm anywhere**. The
+/// previous shape ended in `_ => "handler_slow_db_idle"` under a `Scheduling`
+/// guard, which swept every `request_failed` cell into the two database buckets
+/// — a stage whose connection never reached the handler, reported as "the
+/// handler is blocked on Postgres". Adding a stage is now a compile error here
+/// rather than a silent inheritance of a DB verdict.
+pub(crate) fn verdict(outcome: &HealthProbeOutcome, crumbs: &Breadcrumbs) -> &'static str {
+    use HealthProbeOutcome as Stage;
+    match outcome {
+        Stage::Responded { .. } => "responsive",
+        // Beacon-independent by construction. The connection was established,
+        // so the listener existed and the backlog had room; the write was then
+        // refused, which means the peer reset it. A wedged runtime does not do
+        // that — the kernel keeps an accepted socket writable with no help from
+        // the executor — so this conclusion neither needs the beacon nor may be
+        // downgraded to `undetermined_no_beacon` when there is none.
+        //
+        // The narrow case where that reasoning does not hold: `RequestFailed`
+        // also absorbs a write *timeout*, which is not a peer reset. See the
+        // variant's docs — unreachable in practice for a 70-byte loopback
+        // write, but this is the one arm that would print a conclusion with no
+        // evidence behind it, so `err=` has to be read before believing it.
+        Stage::RequestFailed { .. } => "connection_reset_before_request",
+        // `ConnectFailed` does NOT settle this on its own: a runtime that never
+        // polls its acceptor eventually fills the 128-slot backlog, and the
+        // next `connect()` then fails exactly like a closed socket. So the
+        // beacon still decides, and with no beacon the honest answer is that we
+        // do not know — a wrong `runtime_stalled` (or a wrong `listener_gone`)
+        // here would send the next investigation down the same dead end the
+        // last three took.
+        Stage::ConnectFailed { .. } => match crumbs.runtime_liveness() {
+            RuntimeLiveness::Unknown => "undetermined_no_beacon",
+            RuntimeLiveness::Stalled { .. } => "runtime_stalled",
+            RuntimeLiveness::Scheduling { .. } => "listener_gone",
+        },
+        Stage::NoResponse { .. } => match crumbs.runtime_liveness() {
+            RuntimeLiveness::Unknown => "undetermined_no_beacon",
+            RuntimeLiveness::Stalled { .. } => "runtime_stalled",
+            RuntimeLiveness::Scheduling { .. } if crumbs.db_in_flight > 0 => {
+                "handler_blocked_on_db"
+            }
+            RuntimeLiveness::Scheduling { .. } => "handler_slow_db_idle",
+        },
+    }
+}
+
+/// Which stage of the watchdog's loopback probe the check reached.
+///
+/// This records *how far the probe got* and nothing more. It is a necessary
+/// input to a conclusion, not a conclusion — pair it with [`RuntimeLiveness`]
+/// via [`verdict`] before deciding anything about the runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HealthProbeOutcome {
+    /// The server answered. Any HTTP status counts — a 503 still proves the
+    /// runtime is scheduling tasks, and killing on 503 would crash-loop the
+    /// process whenever a provider is briefly disconnected.
+    Responded { elapsed_ms: u64 },
+    /// The TCP handshake never completed: the listening socket is gone, the
+    /// backlog is full, or the address is unroutable.
+    ///
+    /// This is not the *first* place a wedged runtime shows up. The kernel
+    /// completes the handshake from the listen backlog without the accept loop
+    /// running at all, so a runtime that never polls its acceptor lands in
+    /// `NoResponse` while the backlog still has room. It only reaches here once
+    /// the backlog is exhausted — so this stage cannot acquit the runtime
+    /// either, and [`verdict`] reads the beacon before concluding. See the
+    /// module docs for the backlog depth.
+    ConnectFailed { elapsed_ms: u64, error: String },
+    /// The connection was established but the request could not be written.
+    ///
+    /// The handler was never reached, so this must never be classified as a
+    /// database or handler problem. It is also the only failure stage that
+    /// concludes without the beacon: an accepted socket stays writable in the
+    /// kernel whatever the executor is doing, so a **refused** write (RST /
+    /// `EPIPE`) is evidence about the peer, not about scheduling.
+    ///
+    /// Every `write_all` error folds into this variant, including the write
+    /// timeout [`probe_health_once`] also arms — and a timeout is *not* a peer
+    /// reset, so the beacon-free conclusion would not be earned. A 70-byte
+    /// loopback write into a socket buffer orders of magnitude larger has never
+    /// produced one, but `err=` is the field that tells them apart if it ever
+    /// does.
+    RequestFailed { elapsed_ms: u64, error: String },
+    /// The connection was established and the request written, but no bytes
+    /// came back before the read timeout.
+    ///
+    /// This bucket holds **two different failures** and cannot separate them on
+    /// its own: a wedged runtime (accepted by the backlog, never polled) and a
+    /// live runtime whose `/api/health` handler is waiting on Postgres.
+    /// [`RuntimeLiveness`] is what tells them apart.
+    NoResponse { elapsed_ms: u64, error: String },
+}
+
+impl HealthProbeOutcome {
+    pub(crate) fn is_ok(&self) -> bool {
+        matches!(self, Self::Responded { .. })
+    }
+
+    pub(crate) fn stage(&self) -> &'static str {
+        match self {
+            Self::Responded { .. } => "responded",
+            Self::ConnectFailed { .. } => "connect_failed",
+            Self::RequestFailed { .. } => "request_failed",
+            Self::NoResponse { .. } => "no_response",
+        }
+    }
+
+    pub(crate) fn elapsed_ms(&self) -> u64 {
+        match self {
+            Self::Responded { elapsed_ms }
+            | Self::ConnectFailed { elapsed_ms, .. }
+            | Self::RequestFailed { elapsed_ms, .. }
+            | Self::NoResponse { elapsed_ms, .. } => *elapsed_ms,
+        }
+    }
+
+    fn error(&self) -> &str {
+        match self {
+            Self::Responded { .. } => "-",
+            Self::ConnectFailed { error, .. }
+            | Self::RequestFailed { error, .. }
+            | Self::NoResponse { error, .. } => error.as_str(),
+        }
+    }
+
+    pub(crate) fn render(&self) -> String {
+        format!(
+            "stage={} elapsed_ms={} err={}",
+            self.stage(),
+            self.elapsed_ms(),
+            self.error()
+        )
+    }
+}
+
+/// Runs one loopback `GET /api/health` and classifies where it got to.
+///
+/// Deliberately synchronous and dependency-free: it runs on the watchdog's own
+/// OS thread so that it keeps working when every tokio worker is blocked.
+pub(crate) fn probe_health_once(
+    addr: &str,
+    host: &str,
+    timeout: std::time::Duration,
+) -> HealthProbeOutcome {
+    use std::io::{Read, Write};
+
+    let started = Instant::now();
+    let elapsed_ms = |started: &Instant| started.elapsed().as_millis() as u64;
+
+    let socket_addr = match addr.parse() {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            return HealthProbeOutcome::ConnectFailed {
+                elapsed_ms: elapsed_ms(&started),
+                error: format!("bad addr {addr}: {e}"),
+            };
+        }
+    };
+    let mut stream = match std::net::TcpStream::connect_timeout(&socket_addr, timeout) {
+        Ok(stream) => stream,
+        Err(e) => {
+            return HealthProbeOutcome::ConnectFailed {
+                elapsed_ms: elapsed_ms(&started),
+                error: e.to_string(),
+            };
+        }
+    };
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+
+    let request = format!("GET /api/health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    if let Err(e) = stream.write_all(request.as_bytes()) {
+        return HealthProbeOutcome::RequestFailed {
+            elapsed_ms: elapsed_ms(&started),
+            error: e.to_string(),
+        };
+    }
+
+    let mut buf = [0u8; 512];
+    match stream.read(&mut buf) {
+        Ok(n) if n > 0 => HealthProbeOutcome::Responded {
+            elapsed_ms: elapsed_ms(&started),
+        },
+        Ok(_) => HealthProbeOutcome::NoResponse {
+            elapsed_ms: elapsed_ms(&started),
+            error: "peer closed without responding".to_string(),
+        },
+        Err(e) => HealthProbeOutcome::NoResponse {
+            elapsed_ms: elapsed_ms(&started),
+            error: e.to_string(),
+        },
+    }
+}
+
 /// The breadcrumb counters are process-global — that is the whole point of the
 /// design, since the watchdog thread has to read them without holding anything
 /// the runtime could be blocked on. `cargo test` runs tests in parallel, so
@@ -542,6 +807,31 @@ mod tests {
         }
     }
 
+    /// A failed probe that reached the read timeout. Shared so the verdict
+    /// tests below vary only the field under test.
+    fn no_response() -> HealthProbeOutcome {
+        HealthProbeOutcome::NoResponse {
+            elapsed_ms: 5_000,
+            error: "timed out".to_string(),
+        }
+    }
+
+    /// How stale the beacon can be by the time the watchdog kills, measured
+    /// **from the last check that succeeded** — three `CHECK_INTERVAL`s (30s):
+    /// success, then failures at +30s, +60s and +90s, the last of which exits.
+    ///
+    /// Read it that way and only that way. It is *not* the length of the
+    /// failure streak: three failures 30s apart span **two** intervals, not
+    /// three. Measured over the preserved corpus, first-failure→kill is
+    /// 60.26–60.28 s when the probes fail instantly and 70.14–70.45 s when each
+    /// consumes its full 5s read timeout — never 90 s. The beacon's real age at
+    /// kill is therefore somewhere in [60s, 90s] depending on when the runtime
+    /// stopped ticking, and 90s is the upper bound this constant names.
+    ///
+    /// A literal, deliberately — see
+    /// [`the_beacon_constants_are_pinned_in_absolute_units`].
+    const AGE_AT_KILL_MS: u64 = 90_000;
+
     #[test]
     fn never_observed_ages_render_as_never() {
         let crumbs = Breadcrumbs {
@@ -604,6 +894,410 @@ mod tests {
         assert_eq!(age_since(0, 500), None, "0 is the never-happened sentinel");
         // Stored values are `mono_ms() + 1`, so a probe at t=0 stores 1.
         assert_eq!(age_since(1, 500), Some(500));
+    }
+
+    // ── The discriminating test ────────────────────────────────────────────
+    // These reproduce the two failure modes the production watchdog cannot
+    // currently tell apart.
+
+    #[test]
+    fn accepted_but_silent_server_is_classified_as_no_response() {
+        // Production shape: the runtime accepts the connection but the
+        // `/api/health` handler is blocked awaiting Postgres, so nothing is
+        // written back before the read timeout. The old `-> bool` probe
+        // reported this identically to a dead port.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let accepted = std::thread::spawn(move || {
+            // Accept and then hold the connection open, answering nothing.
+            let (stream, _) = listener.accept().expect("accept");
+            std::thread::sleep(Duration::from_millis(600));
+            drop(stream);
+        });
+
+        let outcome = probe_health_once(&addr, "127.0.0.1", Duration::from_millis(150));
+        accepted.join().expect("listener thread");
+
+        assert_eq!(outcome.stage(), "no_response", "got {outcome:?}");
+        assert!(!outcome.is_ok());
+        assert!(
+            !outcome.render().contains("err=-"),
+            "a failure must carry the underlying error: {}",
+            outcome.render()
+        );
+    }
+
+    #[test]
+    fn dead_port_is_classified_as_connect_failed() {
+        // Bind then drop, so the port is almost certainly unused.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        drop(listener);
+
+        let outcome = probe_health_once(&addr, "127.0.0.1", Duration::from_millis(150));
+
+        assert_eq!(outcome.stage(), "connect_failed", "got {outcome:?}");
+        assert!(!outcome.is_ok());
+    }
+
+    #[test]
+    fn responding_server_is_classified_as_responded() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let responder = std::thread::spawn(move || {
+            use std::io::Write;
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _ = stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n");
+            let _ = stream.flush();
+        });
+
+        let outcome = probe_health_once(&addr, "127.0.0.1", Duration::from_secs(2));
+        responder.join().expect("responder thread");
+
+        assert_eq!(outcome.stage(), "responded", "got {outcome:?}");
+        assert!(
+            outcome.is_ok(),
+            "a 503 still proves the runtime is scheduling tasks"
+        );
+    }
+
+    #[test]
+    fn unparseable_address_is_connect_failed_not_a_panic() {
+        let outcome = probe_health_once("not-an-addr", "h", Duration::from_millis(50));
+        assert_eq!(outcome.stage(), "connect_failed", "got {outcome:?}");
+    }
+
+    /// MY-1: nothing exercised the `RequestFailed` arm of `stage`, `elapsed_ms`,
+    /// `error` or `is_ok`, so any of them could be swapped without a test
+    /// noticing. A live `RequestFailed` needs the peer to vanish between
+    /// `connect` and `write`, which is a race, so pin the whole table by
+    /// construction instead — that is where the mutable behaviour lives.
+    #[test]
+    fn every_stage_reports_its_own_label_elapsed_error_and_verdict_input() {
+        let cases = [
+            (
+                HealthProbeOutcome::Responded { elapsed_ms: 7 },
+                "responded",
+                7u64,
+                "-",
+                true,
+            ),
+            (
+                HealthProbeOutcome::ConnectFailed {
+                    elapsed_ms: 11,
+                    error: "connection refused".to_string(),
+                },
+                "connect_failed",
+                11,
+                "connection refused",
+                false,
+            ),
+            (
+                HealthProbeOutcome::RequestFailed {
+                    elapsed_ms: 13,
+                    error: "broken pipe".to_string(),
+                },
+                "request_failed",
+                13,
+                "broken pipe",
+                false,
+            ),
+            (
+                HealthProbeOutcome::NoResponse {
+                    elapsed_ms: 17,
+                    error: "timed out".to_string(),
+                },
+                "no_response",
+                17,
+                "timed out",
+                false,
+            ),
+        ];
+
+        for (outcome, stage, elapsed_ms, error, is_ok) in cases {
+            assert_eq!(outcome.stage(), stage, "{outcome:?}");
+            assert_eq!(outcome.elapsed_ms(), elapsed_ms, "{outcome:?}");
+            assert_eq!(outcome.error(), error, "{outcome:?}");
+            assert_eq!(
+                outcome.is_ok(),
+                is_ok,
+                "only a response may count as healthy: {outcome:?}"
+            );
+            assert_eq!(
+                outcome.render(),
+                format!("stage={stage} elapsed_ms={elapsed_ms} err={error}"),
+                "{outcome:?}"
+            );
+        }
+    }
+
+    /// MY-2: `read` returning `Ok(0)` means the peer completed the handshake,
+    /// took the request and then closed without answering. That is a failure,
+    /// and it must not be mistaken for the healthy `Ok(n > 0)` path.
+    ///
+    /// The server drains the request before shutting down on purpose: closing
+    /// with unread bytes still buffered makes the kernel send RST, and the
+    /// client would take the `Err` arm instead of the `Ok(0)` one this pins.
+    #[test]
+    fn a_peer_that_takes_the_request_and_closes_without_answering_is_a_failure() {
+        use std::io::Read;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let closer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+            std::thread::sleep(Duration::from_millis(200));
+        });
+
+        let outcome = probe_health_once(&addr, "127.0.0.1", Duration::from_secs(2));
+        closer.join().expect("closer thread");
+
+        assert!(
+            !outcome.is_ok(),
+            "a peer that answered nothing is not healthy: {outcome:?}"
+        );
+        assert_eq!(outcome.stage(), "no_response", "got {outcome:?}");
+        assert!(
+            outcome.render().contains("peer closed without responding"),
+            "the clean-EOF case must be distinguishable from a read timeout: {}",
+            outcome.render()
+        );
+    }
+
+    // ── The discriminating test ────────────────────────────────────────────
+    // `stage=` alone cannot tell a wedged runtime from a slow handler. These
+    // reproduce why, and pin the field that can.
+
+    /// The reviewer's finding, pinned as an executable fact: a listener whose
+    /// `accept` is NEVER called still completes the TCP handshake, because the
+    /// kernel does it from the listen backlog. This
+    /// is the shape of a runtime that has stopped polling its acceptor, and it
+    /// classifies as `no_response` — identical to a healthy runtime waiting on
+    /// Postgres, and nothing like `connect_failed`.
+    ///
+    /// If this ever starts returning `connect_failed`, the module docs and
+    /// [`verdict`] are both wrong and must be revisited.
+    #[test]
+    fn a_never_accepted_connection_is_no_response_not_connect_failed() {
+        // Bound but never accepted. Held for the whole probe so the socket
+        // stays open and the backlog stays available.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+
+        let outcome = probe_health_once(&addr, "127.0.0.1", Duration::from_millis(200));
+        drop(listener);
+
+        assert_eq!(
+            outcome.stage(),
+            "no_response",
+            "the kernel completes the handshake from the backlog with no accept, \
+             so a wedged acceptor cannot surface as connect_failed: {outcome:?}"
+        );
+        assert!(!outcome.is_ok());
+    }
+
+    /// The pair above is exactly why `stage=` is not read on its own. Same
+    /// stage, same elapsed, opposite root cause — split only by the beacon.
+    #[test]
+    fn the_beacon_splits_a_wedged_runtime_from_a_blocked_handler() {
+        let no_response = no_response();
+
+        let wedged = Breadcrumbs {
+            // A wedged runtime cannot poll the beacon either. Absolute, not
+            // `RUNTIME_TICK_STALE_MS + 1`: this is the age the beacon actually
+            // has when the watchdog kills, and an expectation written in terms
+            // of the constant it is testing moves with it and proves nothing.
+            runtime_tick_age_ms: Some(AGE_AT_KILL_MS),
+            db_in_flight: 0,
+            ..crumbs()
+        };
+        let blocked_on_db = Breadcrumbs {
+            runtime_tick_age_ms: Some(200),
+            db_in_flight: 1,
+            ..crumbs()
+        };
+
+        assert_eq!(verdict(&no_response, &wedged), "runtime_stalled");
+        assert_eq!(
+            verdict(&no_response, &blocked_on_db),
+            "handler_blocked_on_db"
+        );
+        assert_ne!(
+            verdict(&no_response, &wedged),
+            verdict(&no_response, &blocked_on_db),
+            "the two failures share a stage, so the verdict is the only thing \
+             that can tell an investigator which one happened"
+        );
+    }
+
+    #[test]
+    fn verdict_reports_a_live_runtime_with_a_dead_listener_as_listener_gone() {
+        let connect_failed = HealthProbeOutcome::ConnectFailed {
+            elapsed_ms: 1,
+            error: "connection refused".to_string(),
+        };
+        assert_eq!(verdict(&connect_failed, &crumbs()), "listener_gone");
+    }
+
+    #[test]
+    fn verdict_without_a_beacon_concludes_nothing() {
+        let failed = HealthProbeOutcome::NoResponse {
+            elapsed_ms: 5_000,
+            error: "timed out".to_string(),
+        };
+        let no_beacon = Breadcrumbs {
+            runtime_ticks: 0,
+            runtime_tick_age_ms: None,
+            ..crumbs()
+        };
+        assert_eq!(
+            verdict(&failed, &no_beacon),
+            "undetermined_no_beacon",
+            "a missing beacon is missing evidence, not evidence of a stall"
+        );
+    }
+
+    /// #5147: the whole verdict table, every cell.
+    ///
+    /// Two defects hid in the cells nothing exercised. `verdict` used to test
+    /// the beacon first and end in `_ =>`, so **all six `request_failed`
+    /// cells** — a stage whose connection was reset before the handler was ever
+    /// reached — fell into `handler_blocked_on_db` / `handler_slow_db_idle`,
+    /// and there was not one `request_failed` × verdict test to notice. And a
+    /// `connect_failed` with no beacon has to stay `undetermined_no_beacon`,
+    /// because a wedged acceptor fills the backlog and then *also* fails
+    /// `connect()` — the module docs used to assert the opposite.
+    ///
+    /// Enumerated as a table so a new stage or a new liveness state cannot be
+    /// added without a row here, and so the two claims above are readable as
+    /// data rather than reconstructed from control flow.
+    #[test]
+    fn every_stage_and_liveness_combination_has_a_pinned_verdict() {
+        // (label, breadcrumbs)
+        let liveness = [
+            (
+                "no beacon",
+                Breadcrumbs {
+                    runtime_ticks: 0,
+                    runtime_tick_age_ms: None,
+                    db_in_flight: 0,
+                    ..crumbs()
+                },
+            ),
+            (
+                "beacon stale",
+                Breadcrumbs {
+                    runtime_tick_age_ms: Some(AGE_AT_KILL_MS),
+                    db_in_flight: 0,
+                    ..crumbs()
+                },
+            ),
+            (
+                "beacon live, db idle",
+                Breadcrumbs {
+                    runtime_tick_age_ms: Some(120),
+                    db_in_flight: 0,
+                    ..crumbs()
+                },
+            ),
+            (
+                "beacon live, db busy",
+                Breadcrumbs {
+                    runtime_tick_age_ms: Some(120),
+                    db_in_flight: 1,
+                    ..crumbs()
+                },
+            ),
+        ];
+        let stages = [
+            HealthProbeOutcome::Responded { elapsed_ms: 3 },
+            HealthProbeOutcome::ConnectFailed {
+                elapsed_ms: 1,
+                error: "connection refused".to_string(),
+            },
+            HealthProbeOutcome::RequestFailed {
+                elapsed_ms: 2,
+                error: "broken pipe".to_string(),
+            },
+            no_response(),
+        ];
+        // Rows are stages in the order above; columns are liveness states.
+        let expected = [
+            ["responsive", "responsive", "responsive", "responsive"],
+            [
+                "undetermined_no_beacon",
+                "runtime_stalled",
+                "listener_gone",
+                "listener_gone",
+            ],
+            [
+                "connection_reset_before_request",
+                "connection_reset_before_request",
+                "connection_reset_before_request",
+                "connection_reset_before_request",
+            ],
+            [
+                "undetermined_no_beacon",
+                "runtime_stalled",
+                "handler_slow_db_idle",
+                "handler_blocked_on_db",
+            ],
+        ];
+
+        for (stage, row) in stages.iter().zip(expected) {
+            for ((label, crumbs), want) in liveness.iter().zip(row) {
+                let got = verdict(stage, crumbs);
+                assert_eq!(
+                    got,
+                    want,
+                    "stage={} with {label} must render verdict={want}, got {got}",
+                    stage.stage()
+                );
+                if stage.stage() == "request_failed" {
+                    assert!(
+                        !got.starts_with("handler_"),
+                        "request_failed means the write was refused, so the \
+                         handler was never reached — it must never be blamed \
+                         on the handler or the database ({label} -> {got})"
+                    );
+                }
+            }
+        }
+
+        // Every verdict the watchdog can print, in one place. Six is the
+        // count an earlier draft gave; it omitted `responsive` and predates
+        // `connection_reset_before_request`.
+        let mut rendered: Vec<&str> = expected.iter().flatten().copied().collect();
+        rendered.sort_unstable();
+        rendered.dedup();
+        assert_eq!(
+            rendered,
+            [
+                "connection_reset_before_request",
+                "handler_blocked_on_db",
+                "handler_slow_db_idle",
+                "listener_gone",
+                "responsive",
+                "runtime_stalled",
+                "undetermined_no_beacon",
+            ],
+            "the verdict vocabulary is 7 values; anything added must be \
+             documented in the module docs and in `spawn_watchdog`"
+        );
+    }
+
+    #[test]
+    fn a_healthy_probe_is_responsive_whatever_the_breadcrumbs_say() {
+        let responded = HealthProbeOutcome::Responded { elapsed_ms: 3 };
+        let ugly = Breadcrumbs {
+            db_in_flight: 8,
+            runtime_tick_age_ms: Some(AGE_AT_KILL_MS),
+            ..crumbs()
+        };
+        assert_eq!(verdict(&responded, &ugly), "responsive");
     }
 
     #[test]
