@@ -66,19 +66,36 @@ FAMILY_REGISTRY = (
 # including a string literal or a test module, flips the family.
 #
 # #5071 T1 S4 adds the third alternative on the same terms. The turn_bridge
-# cutover family reaches the journal through `journal::controller`, aliased
-# `journal_ctl` at its anchor, so the alternative names that module path and its
-# two exact functions — a bare `journal_ctl`, a bare `controller`, or any other
-# method on either does NOT match. The baseline moves 3 -> 2 because that anchor
-# file now contains the token, and for no other reason: the two remaining
-# uninstrumented families (recovery/fresh-send/orphan, pipe stream epoch) are
-# unchanged by S4. That the drop is caused by the instrumentation rather than by
-# the widened pattern is proven in tests/test_delivery_journal_raw_writer.py by
-# the reverse mutation `test_controller_family_regresses_to_uninstrumented`.
+# cutover family reaches the journal through
+# `turn_bridge::terminal_controller_cutover::unix_journal`, which re-exports
+# `session_relay_sink::journal::controller`, so the alternative names
+# that module path and its two exact functions — a bare `unix_journal`, a bare
+# `controller`, or any other method on either does NOT match. The baseline moves
+# 3 -> 2 because that anchor file now contains the token, and for no other
+# reason: the two remaining uninstrumented families (recovery/fresh-send/orphan,
+# pipe stream epoch) are unchanged by S4. That the drop is caused by the
+# instrumentation rather than by the widened pattern is proven in
+# tests/test_delivery_journal_raw_writer.py by the reverse mutation
+# `test_controller_family_regresses_to_uninstrumented`.
+#
+# PLATFORM BLINDNESS (#5071 T1 S4, the windows regression). This whole file is a
+# TEXT SCAN. It does not parse Rust, does not evaluate `cfg`, and has no notion
+# of a compilation target, so a family it calls instrumented is instrumented on
+# SOME target, never provably on all of them. That is not hypothetical here:
+# `session_relay_sink` — and with it the entire journal — is `#[cfg(unix)]`
+# (src/services/discord/mod.rs), while `turn_bridge` compiles on every target
+# and its three durable delivered-frontier writes are NOT gated. So on
+# windows/non-unix the cutover family advances the frontier UNINSTRUMENTED, and
+# this gate reports it as instrumented anyway, byte for byte the same as on
+# unix. Read `uninstrumented families: N/6` as "N families carry no facade token
+# on unix". The one thing that actually holds the boundary the regression broke
+# is `test_source_contract_turn_bridge_reaches_the_journal_through_one_cfg_gated_door`
+# in tests/test_delivery_journal_raw_writer.py; see also
+# src/services/discord/turn_bridge/unix_journal.rs.
 JOURNAL_FACADE_CALL = re.compile(
     r"\bself\.journal\.(?:begin_fresh|finish_fresh)\s*\("
     r"|\bjournal_watcher::(?:begin_watcher_terminal|settle_watcher_terminal|settle_without_transport)\s*\("
-    r"|\bjournal_ctl::(?:begin_controller_terminal|settle_controller_terminal)\s*\("
+    r"|\bunix_journal::(?:begin_controller_terminal|settle_controller_terminal)\s*\("
 )
 UNINSTRUMENTED_FAMILY_BASELINE = 2
 

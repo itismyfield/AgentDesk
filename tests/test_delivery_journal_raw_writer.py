@@ -14,7 +14,7 @@ FACADE_MARKERS = (
     " self.journal.begin_fresh();",
     " self.journal.begin_fresh();",
     " journal_watcher::begin_watcher_terminal();",
-    " journal_ctl::begin_controller_terminal();",
+    " unix_journal::begin_controller_terminal();",
 )
 def write(root: Path, rel: str, body: str) -> None:
     path = root / rel
@@ -31,7 +31,7 @@ class RawWriterAllowlistTests(unittest.TestCase):
         # #5071 T1 S3a: the third instrumented family is the watcher, which spells
         # the facade through `journal_watcher::` because its anchor is a free
         # function with no `self`. #5071 T1 S4 adds the fourth, the turn_bridge
-        # cutover, spelling it through `journal_ctl::`. Using the real tokens here
+        # cutover, spelling it through `unix_journal::`. Using the real tokens here
         # means the fixture exercises ALL THREE alternations of
         # JOURNAL_FACADE_CALL, not just the sink's.
         for index, (_, rel, symbol) in enumerate(guard.FAMILY_REGISTRY):
@@ -316,19 +316,19 @@ class RawWriterAllowlistTests(unittest.TestCase):
         """The S4 alternation must not be a loosening either. Near misses stay
         uninstrumented; only the two declared call shapes match."""
         for near_miss in (
-            " journal_ctl::begin_controller();",
-            " journal_ctl.begin_controller_terminal();",
+            " unix_journal::begin_controller();",
+            " unix_journal.begin_controller_terminal();",
             " ctl::begin_controller_terminal();",
-            " journal_ctl::controller_obligation_id();",
-            " journal_ctl::settle_controller();",
+            " unix_journal::controller_obligation_id();",
+            " unix_journal::settle_controller();",
         ):
             self.assertIsNone(
                 guard.JOURNAL_FACADE_CALL.search(near_miss),
                 f"{near_miss!r} must not count as a facade call",
             )
         for exact in (
-            " journal_ctl::begin_controller_terminal(",
-            " journal_ctl::settle_controller_terminal(",
+            " unix_journal::begin_controller_terminal(",
+            " unix_journal::settle_controller_terminal(",
         ):
             self.assertIsNotNone(
                 guard.JOURNAL_FACADE_CALL.search(exact),
@@ -364,18 +364,68 @@ class RawWriterAllowlistTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertEqual(source.count("dr::shadow_mirror_delivered_frontier("), 1)
         self.assertEqual(source.count("dr::record_long_chunk_terminal_delivery("), 2)
-        self.assertEqual(source.count("journal_ctl::begin_controller_terminal("), 3)
-        self.assertEqual(source.count("journal_ctl::settle_controller_terminal("), 5)
+        self.assertEqual(source.count("unix_journal::begin_controller_terminal("), 3)
+        self.assertEqual(source.count("unix_journal::settle_controller_terminal("), 5)
         self.assertLess(
-            source.index("journal_ctl::begin_controller_terminal("),
-            source.index("journal_ctl::settle_controller_terminal("),
+            source.index("unix_journal::begin_controller_terminal("),
+            source.index("unix_journal::settle_controller_terminal("),
             "the first obligation opens before any settle",
         )
         self.assertLess(
-            source.rindex("journal_ctl::begin_controller_terminal("),
-            source.rindex("journal_ctl::settle_controller_terminal("),
+            source.rindex("unix_journal::begin_controller_terminal("),
+            source.rindex("unix_journal::settle_controller_terminal("),
             "the last obligation opens before its settle",
         )
+
+    def test_source_contract_turn_bridge_reaches_the_journal_through_one_cfg_gated_door(self):
+        """Source text only, and the one check that would have caught the S4
+        windows regression. `mod session_relay_sink` is `#[cfg(unix)]` while `mod
+        turn_bridge` is not, so ANY reference from turn_bridge into that module
+        which is not itself behind `#[cfg(unix)]` breaks windows-latest with
+        E0433 -- which is exactly how S4 first landed. This pins both halves of
+        the fix: the reference lives in exactly ONE turn_bridge file
+        (`unix_journal.rs`, the single door), and every occurrence there is
+        immediately preceded by `#[cfg(unix)]`.
+
+        What it is not: it does not compile anything, least of all for windows.
+        It is a line scan that strips only `//` suffixes, it looks only inside
+        `turn_bridge/`, and it says nothing about cross-`cfg` references
+        elsewhere in the tree. It substitutes a text rule for a target this
+        repository cannot build locally (the msvc target needs a Windows C
+        toolchain), so CI's `Fast check + non-PG tests (windows-latest)` stays
+        the authority."""
+        mod_rs = (ROOT / "src/services/discord/mod.rs").read_text(encoding="utf-8")
+        self.assertIn(
+            "#[cfg(unix)]\nmod session_relay_sink;",
+            mod_rs,
+            "the gate this contract protects moved; re-derive the rule instead of relaxing it",
+        )
+        door = "src/services/discord/turn_bridge/terminal_controller_cutover/unix_journal.rs"
+        offenders = []
+        gated = 0
+        for path in sorted((ROOT / "src/services/discord/turn_bridge").rglob("*.rs")):
+            rel = path.relative_to(ROOT).as_posix()
+            lines = path.read_text(encoding="utf-8").splitlines()
+            for index, line in enumerate(lines):
+                if "session_relay_sink" not in line.split("//", 1)[0]:
+                    continue
+                previous = ""
+                for candidate in reversed(lines[:index]):
+                    stripped = candidate.strip()
+                    if stripped and not stripped.startswith("//"):
+                        previous = stripped
+                        break
+                if rel == door and previous == "#[cfg(unix)]":
+                    gated += 1
+                else:
+                    offenders.append(f"{rel}:{index + 1}: {line.strip()}")
+        self.assertEqual(
+            offenders,
+            [],
+            "turn_bridge may reach session_relay_sink only from unix_journal.rs, "
+            "and only directly behind #[cfg(unix)]",
+        )
+        self.assertEqual(gated, 1, "the door is a single re-export, not a scattered set")
 
     def test_source_contract_repeated_suppression_arm_gates_its_observation(self):
         """Source text only: the post-terminal suppression arm is the one site
