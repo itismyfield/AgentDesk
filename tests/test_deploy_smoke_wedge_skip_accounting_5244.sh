@@ -76,6 +76,9 @@ do
     eval "$body"
 done
 
+# NOTE: production _post_deploy_smoke_fail prints lines beginning "FAIL:" as
+# ordinary fixture output. Assertion failures here are marked ASSERT-FAIL.
+
 # The three sibling checks are out of scope; stub them so the end-to-end
 # propagation assertion isolates the wedge check's return value.
 _post_deploy_smoke_probe_apis() { return 0; }
@@ -134,7 +137,7 @@ UNRECOVERED_BODY='{"fully_recovered": false, "mailboxes": []}'
 
 failures=0
 fail_test() {
-    echo "FAIL: $1" >&2
+    echo "ASSERT-FAIL: $1" >&2
     failures=$((failures + 1))
 }
 pass_test() { echo "ok: $1"; }
@@ -356,6 +359,29 @@ printf '%s\n' "$WEDGED_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
 printf 'body\n' > "$STUB_STATE/curl.mode"
 printf '%s\n' '{"fully_recovered": true, "mailboxes": "none"}' > "$STUB_STATE/curl.body"
 run_check; check_rc 1 "$RUN_CHECK_RC" "schema-broken settle resample is unevaluable, not cleared"
+
+# A gate that trips DURING the recovery wait is the case only the exit
+# assertion can catch: the wait gives up, the caller records a skip, and the
+# body of the check therefore returns 0. Nothing but the assertion in
+# _post_deploy_smoke_check_wedges turns that back into a failure.
+setup_case
+POST_DEPLOY_SMOKE_WEDGE_RECOVERY_WAIT_SECS=4
+POST_DEPLOY_SMOKE_WEDGE_RECOVERY_POLL_SECS=1
+printf '%s\n' "$UNRECOVERED_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+printf 'body\n' > "$STUB_STATE/curl.mode"
+printf '%s\n' '{"fully_recovered": true, "mailboxes": 7}' > "$STUB_STATE/curl.body"
+run_check; check_rc 1 "$RUN_CHECK_RC" "a gate tripped inside the recovery wait cannot end as a skip"
+
+# The sole jq reader refuses a body the gate has not just cleared. This is the
+# coupling that makes every gate call site load-bearing: a future site that
+# fetches a body and forgets to gate it degrades to a visible refusal instead
+# of silently parsing an unvalidated body.
+setup_case
+printf '%s\n' "$WEDGED_BODY" > "$TMP_ROOT/ungated.json"
+POST_DEPLOY_SMOKE_WEDGE_GATED_BODY="$TMP_ROOT/some-other-body.json"
+ungated_rc=0
+_post_deploy_smoke_wedge_markers_from_file "$TMP_ROOT/ungated.json" > /dev/null 2>&1 || ungated_rc=$?
+check_rc 1 "$ungated_rc" "an ungated body is refused by the sole jq reader"
 
 # ── The single gate: skip-state I/O ─────────────────────────────────────────
 setup_case
