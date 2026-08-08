@@ -13,6 +13,15 @@
 //! something a lane can schedule. Reading the fixture sources costs nothing,
 //! needs no server, and fails loudly the moment the fallback comes back.
 //!
+//! The database-creation chokepoint scan covers checked-in Rust files below
+//! `src/` and `tests/`. It removes Rust comments, then matches the two SQL
+//! keywords at the start of a string literal, case-insensitively and with
+//! arbitrary source whitespace between them.
+//! It cannot see SQL supplied at runtime, emitted from non-Rust files or
+//! generated code, or assembled so the two keywords are never adjacent in the
+//! source (for example separate `format!`/`concat!` arguments or escaped
+//! whitespace). Those forms remain review and code-search responsibilities.
+//!
 //! This module is intentionally named without a lane token so it runs in every
 //! lane, including the PG-less ones the fallback used to endanger. It must stay
 //! free of the fixture seed identifiers that
@@ -22,6 +31,7 @@
 
 #[cfg(test)]
 mod tests {
+    use regex::Regex;
     use std::path::Path;
 
     /// The fixture sources under contract, paired with the module path a
@@ -63,7 +73,7 @@ mod tests {
         "src/voice/turn_link.rs",
     ];
 
-    fn rust_sources() -> Vec<(String, String)> {
+    fn rust_sources(directories: &[&str]) -> Vec<(String, String)> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         fn visit(root: &Path, directory: &Path, sources: &mut Vec<(String, String)>) {
             for entry in std::fs::read_dir(directory).expect("read Rust source directory") {
@@ -82,9 +92,91 @@ mod tests {
             }
         }
         let mut sources = Vec::new();
-        visit(root, &root.join("src"), &mut sources);
+        for directory in directories {
+            visit(root, &root.join(directory), &mut sources);
+        }
         sources.sort();
         sources
+    }
+
+    fn source_without_rust_comments(source: &str) -> String {
+        let bytes = source.as_bytes();
+        let mut output = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'/') {
+                output.extend_from_slice(b"  ");
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    output.push(b' ');
+                    index += 1;
+                }
+                continue;
+            }
+            if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+                output.extend_from_slice(b"  ");
+                index += 2;
+                let mut depth = 1_u32;
+                while index < bytes.len() && depth > 0 {
+                    if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+                        output.extend_from_slice(b"  ");
+                        index += 2;
+                        depth += 1;
+                    } else if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                        output.extend_from_slice(b"  ");
+                        index += 2;
+                        depth -= 1;
+                    } else {
+                        output.push(if bytes[index] == b'\n' { b'\n' } else { b' ' });
+                        index += 1;
+                    }
+                }
+                continue;
+            }
+            if bytes[index] == b'"' {
+                let start = index;
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == b'\\' {
+                        index = (index + 2).min(bytes.len());
+                    } else {
+                        let end = bytes[index] == b'"';
+                        index += 1;
+                        if end {
+                            break;
+                        }
+                    }
+                }
+                output.extend_from_slice(&bytes[start..index]);
+                continue;
+            }
+            if bytes[index] == b'r' {
+                let mut quote = index + 1;
+                while bytes.get(quote) == Some(&b'#') {
+                    quote += 1;
+                }
+                if bytes.get(quote) == Some(&b'"') {
+                    let hashes = quote - index - 1;
+                    let start = index;
+                    index = quote + 1;
+                    while index < bytes.len() {
+                        if bytes[index] == b'"' && index + 1 + hashes <= bytes.len() {
+                            let suffix = &bytes[index + 1..index + 1 + hashes];
+                            if suffix.iter().all(|byte| *byte == b'#') {
+                                index += 1 + hashes;
+                                break;
+                            }
+                        }
+                        index += 1;
+                    }
+                    output.extend_from_slice(&bytes[start..index]);
+                    continue;
+                }
+            }
+            output.push(bytes[index]);
+            index += 1;
+        }
+        String::from_utf8(output).expect("comment stripping preserves UTF-8")
     }
 
     /// Assembled at runtime so this file does not itself contain the literal it
@@ -93,8 +185,15 @@ mod tests {
         format!("{}:{}", "127.0.0.1", "5432")
     }
 
-    /// The shared helper the four fixtures now depend on.
-    const SHARED_HELPER_SOURCE: &str = include_str!("../db/postgres.rs");
+    fn shared_helper_source() -> &'static str {
+        static SOURCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        SOURCE.get_or_init(|| {
+            std::fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("src/db/postgres.rs"),
+            )
+            .expect("read db::postgres source")
+        })
+    }
 
     /// The contract has to be read inside the helper's own body. The identical
     /// `AGENTDESK_REQUIRE_PG` comparison also appears in `require_pg_guard`
@@ -105,13 +204,27 @@ mod tests {
     fn shared_helper_body() -> &'static str {
         const SIGNATURE: &str =
             "pub(crate) fn postgres_test_database_url_base() -> Option<String> {";
-        let start = SHARED_HELPER_SOURCE
+        let source = shared_helper_source();
+        let start = source
             .find(SIGNATURE)
             .expect("db::postgres no longer defines postgres_test_database_url_base (#5218)");
-        let rest = &SHARED_HELPER_SOURCE[start..];
+        let rest = &source[start..];
         let end = rest
             .find("\n}\n")
             .expect("cannot find the end of postgres_test_database_url_base (#5218)");
+        &rest[..end]
+    }
+
+    fn shared_entrypoint_body(function_name: &str) -> &'static str {
+        let signature = format!("pub(crate) async fn {function_name}(");
+        let source = shared_helper_source();
+        let start = source
+            .find(&signature)
+            .unwrap_or_else(|| panic!("db::postgres no longer defines {function_name} (#5229)"));
+        let rest = &source[start..];
+        let end = rest
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("cannot find the end of {function_name} (#5229)"));
         &rest[..end]
     }
 
@@ -142,21 +255,41 @@ mod tests {
 
     #[test]
     fn fixture_url_gate_is_wired_to_every_shared_database_entrypoint() {
-        for (fragment, expected) in [
-            ("test_database_url_is_configured(", 8),
-            ("test_database_config_is_configured(", 2),
-            ("let base = postgres_test_database_url_base();", 1),
+        for (function_name, guard_call) in [
             (
-                "test_database_url_matches_configured_base(base.as_deref(),",
-                1,
+                "connect_test_pool_with_max_connections",
+                "test_database_url_is_configured(database_url);",
             ),
-            ("let Some(base) = base else {", 1),
-            ("if !database_url.starts_with(base) {", 1),
+            (
+                "connect_test_pool",
+                "test_database_url_is_configured(database_url);",
+            ),
+            (
+                "create_test_database",
+                "test_database_url_is_configured(admin_url);",
+            ),
+            (
+                "connect_test_pool_and_migrate",
+                "test_database_url_is_configured(database_url);",
+            ),
+            (
+                "connect_test_pool_with_max_connections_and_migrate",
+                "test_database_url_is_configured(database_url);",
+            ),
+            (
+                "connect_test_pool_and_migrate_config",
+                "test_database_config_is_configured(config);",
+            ),
+            (
+                "drop_test_database",
+                "test_database_url_is_configured(admin_url);",
+            ),
         ] {
+            let body = shared_entrypoint_body(function_name);
             assert_eq!(
-                SHARED_HELPER_SOURCE.matches(fragment).count(),
-                expected,
-                "shared fixture gate wiring changed at `{fragment}` (#5229)"
+                body.matches(guard_call).count(),
+                1,
+                "{function_name} must invoke its fixture target guard exactly once (#5229)"
             );
         }
     }
@@ -164,7 +297,7 @@ mod tests {
     #[test]
     fn every_pg_host_seed_source_is_registered_with_its_current_count() {
         let seed = ["PG", "HOST"].concat();
-        let discovered: Vec<_> = rust_sources()
+        let discovered: Vec<_> = rust_sources(&["src"])
             .into_iter()
             .flat_map(|(path, source)| std::iter::repeat_n(path, source.matches(&seed).count()))
             .collect();
@@ -176,13 +309,14 @@ mod tests {
 
     #[test]
     fn create_database_sql_has_one_chokepoint_under_db_postgres() {
-        let needle = ["CREATE", " DATABASE"].concat();
-        let emissions: Vec<_> = rust_sources()
+        let needle = Regex::new(&[r#"(?i)(?:br#*|r#*|b)?"\s*CREATE"#, r"\s+DATABASE"].concat())
+            .expect("database creation regex");
+        let emissions: Vec<_> = rust_sources(&["src", "tests"])
             .into_iter()
             .flat_map(|(path, source)| {
-                source
-                    .lines()
-                    .filter(|line| line.contains(&needle) && !line.trim_start().starts_with("//"))
+                let source = source_without_rust_comments(&source);
+                needle
+                    .find_iter(&source)
                     .map(move |_| path.clone())
                     .collect::<Vec<_>>()
             })

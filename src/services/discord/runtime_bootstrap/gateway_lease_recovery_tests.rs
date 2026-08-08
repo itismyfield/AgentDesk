@@ -402,7 +402,7 @@ fn pg_test_base_database_url() -> String {
     std::env::var("POSTGRES_TEST_DATABASE_URL_BASE")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .map(|value| value.trim_end_matches('/').to_string())
+        .map(|value| value.trim().trim_end_matches('/').to_string())
         .unwrap_or_else(|| {
             let user = std::env::var("PGUSER")
                 .ok()
