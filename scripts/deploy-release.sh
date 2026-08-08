@@ -103,6 +103,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/_defaults.sh"
 
 ADK_REL="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"
+# #5244: the EXIT trap can run before post-deploy smoke initialization. Keep a
+# truthful default so early exits report that the wedge check did not execute.
+POST_DEPLOY_SMOKE_WEDGE_COVERAGE="not run: wedge check did not execute"
 # The Rust dcserver reads AGENTDESK_DCSERVER_LABEL for the plist Label; honor it first
 # so launchd Label and plist filename never diverge when the operator overrides one side.
 PLIST_REL="${AGENTDESK_DCSERVER_LABEL:-${AGENTDESK_PLIST_REL:-com.agentdesk.release}}"
@@ -764,7 +767,8 @@ _finalize_detached_helper() {
 
     local content
     if [ "$status" -eq 0 ]; then
-        content="✅ release deploy complete"
+        content="✅ release deploy complete
+relay wedge: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE:-not run: wedge check did not execute}"
     else
         content="❌ release deploy failed (exit ${status})
 log: ${DEPLOY_LOG_PATH:-n/a}"
@@ -2637,10 +2641,11 @@ POST_DEPLOY_SMOKE_CORE_API_ENDPOINTS=(
 )
 POST_DEPLOY_SMOKE_LOG_LINES="${AGENTDESK_POST_DEPLOY_SMOKE_LOG_LINES:-500}"
 POST_DEPLOY_SMOKE_WARN_LIMIT="${AGENTDESK_POST_DEPLOY_SMOKE_WARN_LIMIT:-5}"
-POST_DEPLOY_SMOKE_WEDGE_SETTLE_SECS=4
 POST_DEPLOY_SMOKE_RELAY_CELL="${AGENTDESK_POST_DEPLOY_SMOKE_RELAY_CELL:-claude-tui}"
 POST_DEPLOY_SMOKE_CREATE_ISSUE="${AGENTDESK_POST_DEPLOY_SMOKE_CREATE_ISSUE:-off}"
-POST_DEPLOY_SMOKE_STAMP="$(date -u '+%Y%m%dT%H%M%SZ' 2>/dev/null || printf 'unknown-%s' "$$")"
+# Keep the PID suffix after both date success/failure paths so artifacts from
+# concurrently live deploy shells use distinct smoke paths.
+POST_DEPLOY_SMOKE_STAMP="$(date -u '+%Y%m%dT%H%M%SZ' 2>/dev/null || printf 'unknown')-$$"
 POST_DEPLOY_SMOKE_EVIDENCE="$ADK_REL/logs/post-deploy-smoke-${POST_DEPLOY_SMOKE_STAMP}.log"
 POST_DEPLOY_SMOKE_TMP_DIR=""
 POST_DEPLOY_SMOKE_HEALTH_BODY=""
@@ -2648,6 +2653,8 @@ POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY=""
 POST_DEPLOY_SMOKE_SESSIONS_BODY=""
 POST_DEPLOY_SMOKE_FAILURES=()
 
+# >>> BEGIN wedge-check region (#5244) — coverage is report-only and point-in-time
+POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE="evaluated: 0 stall-state marker(s) observed (point-in-time)"
 _post_deploy_smoke_note() {
     local message="$1"
     printf '%s\n' "$message"
@@ -2696,141 +2703,132 @@ _post_deploy_smoke_probe_apis() {
     [ "$failed" -eq 0 ]
 }
 
-_post_deploy_smoke_wedge_markers_from_file() {
+_post_deploy_smoke_wedge_scan_from_file() {
     local health_detail_path="$1"
-    # Reuse the health/detail markers consumed by the relay E2E validator:
-    # explicit non-healthy relay_stall_state, ownerless/detached inflight,
-    # desync, stale thread proof, or stale watcher attachment. Ordinary active
-    # turns and queues are deliberately not classified as wedges.
+    # This is the only health/detail parser that feeds wedge coverage. The E-1
+    # busy gate at :3024 parses the same body independently. The caller
+    # deliberately reports a broad scan failure because schema, I/O,
+    # filter/tool, and signal failures cannot be distinguished safely at this
+    # shell boundary (jq absence alone has separate vocabulary).
+    # The three marker states below are point-in-time Rust-classifier
+    # observations. Watchdog auto-recovery may change the next snapshot; this
+    # function does not infer persistence or an unresolvable wedge from one.
     jq -r '
-        [
-          .degraded_reasons[]?
-          | strings
-          | select(test("relay.*(wedge|dead|stall|stuck)|(?:wedge|dead|stall|stuck).*relay"; "i"))
-          | "degraded_reason=" + .
-        ] + [
-          .mailboxes[]?
-          | . as $mailbox
-          | (($mailbox.relay_stall_state // "healthy") | ascii_downcase) as $stall
-          | select(
-              ($stall != "" and $stall != "healthy")
-              or ($mailbox.relay_health.desynced == true)
-              or ($mailbox.relay_health.stale_thread_proof == true)
-              or ($mailbox.relay_health.watcher_attached_stale == true)
-              or (
-                $mailbox.inflight_state_present == true
-                and (($mailbox.relay_owner_kind // "none") | ascii_downcase) as $owner
-                | ($owner == "" or $owner == "none" or $owner == "unknown")
-              )
-              or (
-                $mailbox.inflight_state_present == true
-                and $mailbox.watcher_attached == false
-              )
-            )
-          | "mailbox provider=\($mailbox.provider // "unknown") channel=\($mailbox.channel_id // "unknown") stall=\($stall)"
-        ]
-        | .[]
+        def die($message): error("wedge-schema: " + $message);
+        if (type != "object") then die("root is not an object")
+        elif ((.fully_recovered | type) != "boolean") then die("fully_recovered is not boolean")
+        elif ((.mailboxes | type) != "array") then die(".mailboxes is not an array")
+        else
+          ([ .mailboxes[]
+             | if (type != "object") then die("mailbox entry is not an object")
+               elif ((.relay_stall_state | type) != "string") then die("mailbox relay_stall_state is not a string")
+               else { ch: ((.channel_id // "?") | tostring),
+                      pv: ((.provider // "?") | tostring),
+                      s: (.relay_stall_state | ascii_downcase) }
+               end ]) as $mailboxes
+          | ([ $mailboxes[]
+               | select(.s == "tmux_alive_relay_dead"
+                       or .s == "stale_thread_proof"
+                       or .s == "orphan_pending_token")
+               | "marker=stall-state provider=\(.pv) channel=\(.ch) state=\(.s)" ]) as $markers
+          | ([ $mailboxes[] | select(.s == "queue_blocked")
+               | "obs=queue_blocked provider=\(.pv) channel=\(.ch)" ]) as $queue_observations
+          | ([ $mailboxes[]
+               | select(.s | IN("healthy", "active_foreground_stream", "explicit_background_work",
+                               "queue_blocked", "tmux_alive_relay_dead", "stale_thread_proof",
+                               "orphan_pending_token") | not)
+               | "obs=unknown_stall_state provider=\(.pv) channel=\(.ch) stall=\(.s)" ]) as $unknown_observations
+          | ([ "recovered=\(.fully_recovered)",
+               "count=\($markers | length)" ] + $markers
+             + $queue_observations + $unknown_observations)
+          | .[]
+        end
     ' "$health_detail_path" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"
 }
 
-_post_deploy_smoke_fully_recovered_from_file() {
-    local health_path="$1"
-    jq -r '
-        if (.fully_recovered | type) == "boolean" then
-            .fully_recovered
-        else
-            error("fully_recovered is not boolean")
-        end
-    ' "$health_path" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"
+_post_deploy_smoke_wedge_unevaluable() {
+    POST_DEPLOY_SMOKE_WEDGE_COVERAGE="unevaluable: $1"
+    _post_deploy_smoke_fail "relay wedge check ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}" || true
+    return 1
 }
 
 _post_deploy_smoke_check_wedges() {
-    local fully_recovered wedge_markers wedge_markers_resampled persistent_markers wedge_summary
-    local resample_path="$POST_DEPLOY_SMOKE_TMP_DIR/api_health_detail_resample.json"
+    # There is intentionally no wait, persistent tally, or second marker
+    # sample here. Transient suppression was not retained: the report says what
+    # this snapshot evaluated and does not claim a persistent-wedge proof.
+    local scan_out recovered marker_count markers observations line
     if [ -z "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" ] \
       || [ ! -s "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" ]; then
-        _post_deploy_smoke_fail "relay wedge check: /api/health/detail body unavailable" || true
+        _post_deploy_smoke_wedge_unevaluable "/api/health/detail body unavailable"
         return 1
     fi
-
-    if ! fully_recovered=$(
-        _post_deploy_smoke_fully_recovered_from_file "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
-    ); then
-        _post_deploy_smoke_note \
-            "relay wedge=skipped: startup recovery state unavailable" || return 1
-        return 0
-    fi
-    if [ "$fully_recovered" = "false" ]; then
-        _post_deploy_smoke_note \
-            "relay wedge=skipped: startup recovery in progress" || return 1
-        return 0
-    fi
-
-    if ! wedge_markers=$(
-        _post_deploy_smoke_wedge_markers_from_file "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
-    ); then
-        _post_deploy_smoke_fail "relay wedge check: health/detail JSON could not be parsed" || true
+    if ! command -v jq >/dev/null 2>&1; then
+        _post_deploy_smoke_wedge_unevaluable "jq unavailable"
         return 1
     fi
-    if [ -z "$wedge_markers" ]; then
-        _post_deploy_smoke_note "relay wedge markers=absent" || return 1
+    if ! scan_out=$(_post_deploy_smoke_wedge_scan_from_file \
+        "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"); then
+        _post_deploy_smoke_wedge_unevaluable "health/detail scan failed"
+        return 1
+    fi
+    while IFS= read -r line; do
+        case "$line" in
+            recovered=*|count=*|marker=*|obs=*) : ;;
+            '') : ;;
+            *)
+                _post_deploy_smoke_wedge_unevaluable "wedge scan output contract violated"
+                return 1
+                ;;
+        esac
+    done <<< "$scan_out"
+    recovered=$(printf '%s\n' "$scan_out" | sed -n 's/^recovered=//p')
+    marker_count=$(printf '%s\n' "$scan_out" | sed -n 's/^count=//p')
+    markers=$(printf '%s\n' "$scan_out" | grep '^marker=' || true)
+    observations=$(printf '%s\n' "$scan_out" | grep '^obs=' || true)
+    case "$recovered" in
+        true|false) : ;;
+        *)
+            _post_deploy_smoke_wedge_unevaluable "wedge scan output contract violated"
+            return 1
+            ;;
+    esac
+    # jq length is the canonical producer. This shell guard admits only
+    # decimal digits with no leading zero and never performs arithmetic.
+    case "$marker_count" in
+        0) : ;;
+        ''|*[!0-9]*|0*)
+            _post_deploy_smoke_wedge_unevaluable "wedge scan output contract violated"
+            return 1
+            ;;
+        *) : ;;
+    esac
+    if { [ "$marker_count" = "0" ] && [ -n "$markers" ]; } \
+      || { [ "$marker_count" != "0" ] && [ -z "$markers" ]; }; then
+        _post_deploy_smoke_wedge_unevaluable "wedge scan output contract violated"
+        return 1
+    fi
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        _post_deploy_smoke_note "relay wedge observation: ${line#obs=}" || return 1
+    done <<< "$observations"
+    if [ "$recovered" = "false" ]; then
+        POST_DEPLOY_SMOKE_WEDGE_COVERAGE="not evaluated: startup recovery in progress"
+        _post_deploy_smoke_note "relay wedge=${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}" || return 1
         return 0
     fi
-
-    _post_deploy_smoke_note \
-        "relay wedge marker observed; settling ${POST_DEPLOY_SMOKE_WEDGE_SETTLE_SECS}s before resample" \
-        || return 1
-    sleep "$POST_DEPLOY_SMOKE_WEDGE_SETTLE_SECS"
-    if ! curl -fsS --connect-timeout 2 --max-time 15 \
-        -H "Origin: http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}" \
-        -o "$resample_path" \
-        "http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}/api/health/detail"; then
-        _post_deploy_smoke_note \
-            "relay wedge=skipped: settle resample unavailable" || return 1
+    if [ "$marker_count" = "0" ]; then
+        POST_DEPLOY_SMOKE_WEDGE_COVERAGE="$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE"
+        _post_deploy_smoke_note "relay wedge=${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}" || return 1
         return 0
     fi
-    if [ ! -s "$resample_path" ]; then
-        _post_deploy_smoke_note \
-            "relay wedge=skipped: settle resample body empty" || return 1
-        return 0
-    fi
-    if ! fully_recovered=$(_post_deploy_smoke_fully_recovered_from_file "$resample_path"); then
-        _post_deploy_smoke_note \
-            "relay wedge=skipped: settle recovery state unavailable" || return 1
-        return 0
-    fi
-    if [ "$fully_recovered" = "false" ]; then
-        _post_deploy_smoke_note \
-            "relay wedge=skipped: startup recovery in progress" || return 1
-        return 0
-    fi
-    if ! wedge_markers_resampled=$(
-        _post_deploy_smoke_wedge_markers_from_file "$resample_path"
-    ); then
-        _post_deploy_smoke_note \
-            "relay wedge=skipped: settle resample JSON could not be parsed" || return 1
-        return 0
-    fi
-    if ! persistent_markers=$(comm -12 \
-        <(printf '%s\n' "$wedge_markers" | LC_ALL=C sort -u) \
-        <(printf '%s\n' "$wedge_markers_resampled" | LC_ALL=C sort -u)); then
-        _post_deploy_smoke_note \
-            "relay wedge=skipped: settle resample comparison failed" || return 1
-        return 0
-    fi
-    if [ -z "$persistent_markers" ]; then
-        _post_deploy_smoke_note \
-            "relay wedge markers=cleared after ${POST_DEPLOY_SMOKE_WEDGE_SETTLE_SECS}s settle" \
-            || return 1
-        return 0
-    fi
-
-    wedge_summary="${persistent_markers//$'\n'/; }"
+    POST_DEPLOY_SMOKE_WEDGE_COVERAGE="evaluated: ${marker_count} stall-state marker(s) observed (point-in-time)"
     _post_deploy_smoke_fail \
-        "relay wedge marker persisted after ${POST_DEPLOY_SMOKE_WEDGE_SETTLE_SECS}s settle: ${wedge_summary}" \
+        "relay stall-state marker(s) observed (point-in-time): ${markers//$'\n'/; }" \
         || true
     return 1
 }
+
+# <<< END wedge-check region (#5244)
 
 _post_deploy_smoke_check_fail_closed_warn_rate() {
     local log_path="$POST_DEPLOY_SMOKE_LOG_PATH"
@@ -3170,6 +3168,7 @@ _report_post_deploy_smoke_failure() {
         printf -- '- Commit: `%s`\n' "$commit_sha"
         printf -- '- Port: `%s`\n' "$REL_PORT"
         printf -- '- Evidence: `%s`\n\n' "$POST_DEPLOY_SMOKE_EVIDENCE"
+        printf -- '- Relay wedge coverage: `%s`\n\n' "${POST_DEPLOY_SMOKE_WEDGE_COVERAGE:-not run: wedge check did not execute}"
         printf '## Findings\n\n'
         for finding in "${POST_DEPLOY_SMOKE_FAILURES[@]}"; do
             printf -- '- %s\n' "$finding"
@@ -3186,6 +3185,8 @@ node: ${node_name}
 commit: ${commit_sha}
 draft: ${draft_path}
 evidence: ${POST_DEPLOY_SMOKE_EVIDENCE}"
+    alert_text="${alert_text}
+relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE:-not run: wedge check did not execute}"
     for finding in "${POST_DEPLOY_SMOKE_FAILURES[@]}"; do
         alert_text="${alert_text}
 - ${finding}"
@@ -3213,6 +3214,7 @@ evidence: ${POST_DEPLOY_SMOKE_EVIDENCE}"
     return 0
 }
 
+# >>> BEGIN smoke-disposition region (#5244)
 echo "▸ Running post-deploy functional smoke (#4262)..."
 # INVARIANT: the ENTIRE smoke block is fail-open. We are past DEPLOY_OK, so a
 # functional failure must degrade to a loud warning + channel alert + local
@@ -3223,9 +3225,17 @@ echo "▸ Running post-deploy functional smoke (#4262)..."
 # The smoke function runs from an `if` guard, suspending `set -e` within it;
 # each fallible step is nevertheless explicitly guarded or carries `|| return`.
 if _run_post_deploy_functional_smoke; then
-    echo "✓ Post-deploy functional smoke passed (evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
+    case "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE" in
+        "$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE")
+            echo "✓ Post-deploy functional smoke passed (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
+            ;;
+        *)
+            echo "△ Post-deploy functional smoke completed with coverage gap (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
+            ;;
+    esac
 else
     echo "⚠ POST-DEPLOY FUNCTIONAL SMOKE FAILED — deploy remains healthy (fail-open)"
+    echo "  relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}"
     echo "  evidence: $POST_DEPLOY_SMOKE_EVIDENCE"
     if [ -n "$POST_DEPLOY_SMOKE_TMP_DIR" ]; then
         rm -rf "$POST_DEPLOY_SMOKE_TMP_DIR" 2>/dev/null || true
@@ -3236,6 +3246,7 @@ else
     fi
     _report_post_deploy_smoke_failure || true
 fi
+# <<< END smoke-disposition region (#5244)
 
 # ── Out-of-band relay watchdog (#4381) ────────────────────────────────────────
 # Deliberately OUTSIDE dcserver's launchd job: the watchdog must survive exactly
