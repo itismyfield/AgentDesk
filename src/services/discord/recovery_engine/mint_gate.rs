@@ -8,10 +8,16 @@
 //! - that a `WillSpawn` or `Unknown` classification ultimately installs a watcher;
 //!   the later path resolver and claim can still decline it;
 //! - atomicity between the probes and the later watcher claim;
-//! - path identity across the ordinary restore site: its probe runs before
-//!   `restore_codex_rollout_output_path`, so a changed Codex rollout path can
-//!   conservatively produce a false-positive `IncumbentReuse`. That only removes
-//!   a mailbox mint from the legacy behavior.
+//! - that a refusal removes recovery-adoption residue. It can leave a durable
+//!   `readopted_from_inflight` row with an empty mailbox. If a successor claims
+//!   that mailbox before replacing the row, the pair is a new input to #4370
+//!   stale reclaim's `OwnerInflightReplaced` arm; its `>= 120s` age gate is the
+//!   load-bearing defense for that shape;
+//! - production wiring from either `restore_inflight_turns` loop site or from the
+//!   incumbent watcher registry probe. Measured on 2026-08-08, both
+//!   `cargo test --lib recovery_engine` and `cargo test --lib mint_gate` passed
+//!   after independently replacing each loop's gated reregistration with the
+//!   legacy entry point, and after forcing the incumbent probe to `None`.
 
 use super::*;
 

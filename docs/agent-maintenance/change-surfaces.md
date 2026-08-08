@@ -314,7 +314,11 @@ time for diagnostics; neither is a stored approval value.
     output policy, recovery marker, and test clusters moved verbatim into
     sub-1000-LoC `watchers/lifecycle/*.rs` modules. The root remains the
     canonical facade and preserves all prior call paths through re-exports.
-  - `src/services/discord/tmux.rs` (frozen giant surface; current generated inventory: 1677 production LoC; #4895 removes untyped auth/overload terminal variants and authority-bearing outcome fields; parser diagnostics now use a fixed redacted category while generic error results remain `HardResult`; test-only #4277 re-exports
+  - `src/services/discord/tmux.rs` (frozen giant surface; current generated inventory: 1691 production LoC; #5242 re-exports the read-only
+    `find_watcher_by_tmux_session` and
+    `restore_scan_should_skip_existing_watcher` lifecycle queries so recovery's
+    mailbox-mint outlook can inspect incumbent reuse; their implementations and
+    watcher claim behavior remain unchanged; #4895 removes untyped auth/overload terminal variants and authority-bearing outcome fields; parser diagnostics now use a fixed redacted category while generic error results remain `HardResult`; test-only #4277 re-exports
     the watcher delivery-lease key helper so session-sink production-entry tests
     prove bidirectional contention on the same idle JSONL range; -9 from the #4804
     Windows-compile hotfix moving `footer_background_marker_session_key` into
