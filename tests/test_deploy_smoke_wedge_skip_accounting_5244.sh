@@ -18,8 +18,9 @@
 
 set -euo pipefail
 
-# This is diagnostic only: all verdicts below run through the hermetic jq
-# fixture, not this host binary. Keep it before PATH is replaced by the fixture.
+# This is diagnostic only. The fixture spoofs selected --version and fault
+# cases, but delegates normal production filters to this binary. Record it
+# before PATH is replaced by the fixture.
 HOST_JQ_RAW="<absent>"
 HOST_JQ_MAJOR="<unparsed>"
 HOST_JQ_MINOR="<unparsed>"
@@ -111,6 +112,7 @@ _post_deploy_smoke_check_relay_round_trip() { return 0; }
 REL_PORT=65535
 ADK_DEFAULT_LOOPBACK="127.0.0.1"
 STUB_STATE="$TMP_ROOT/stub"
+REAL_JQ="$(command -v jq)"
 mkdir -p "$STUB_STATE"
 export STUB_STATE REL_PORT ADK_DEFAULT_LOOPBACK
 
@@ -144,141 +146,45 @@ case "$(cat "$STUB_STATE/curl.mode" 2>/dev/null || printf 'fail')" in
     *)     exit 22 ;;
 esac
 STUB
-# Hermetic jq fixture. It implements exactly the five filters extracted above,
-# including lossless JSON integers, instead of claiming 1.7 and delegating the
-# actual verdict to the host jq. A real deploy on a node with jq older than 1.7
-# trips the wedge gate and makes this smoke red; deploy-release remains
-# fail-open, so the release continues while the smoke produces alert noise.
-cat > "$STUB_BIN/jq" <<'STUB'
-#!/usr/bin/env python3
-import json
-import os
-import re
-import sys
-
-state_dir = os.environ["STUB_STATE"]
-args = sys.argv[1:]
-
-if args == ["--version"]:
-    with open(os.path.join(state_dir, "jq.version.calls"), "a", encoding="utf-8") as stream:
-        stream.write("x\n")
-    with open(os.path.join(state_dir, "jq.version"), encoding="utf-8") as stream:
-        sys.stdout.write(stream.read())
-    raise SystemExit(0)
-
-if os.path.exists(os.path.join(state_dir, "jq.garbage")):
-    print("garbage-but-rc-zero")
-    raise SystemExit(0)
-
-if len(args) < 2 or args[0] not in ("-e", "-r"):
-    print("fixture jq: unsupported arguments", file=sys.stderr)
-    raise SystemExit(2)
-
-mode, jq_filter = args[0], args[1]
-if os.path.exists(os.path.join(state_dir, "jq.markersuppress")) \
-        and "degraded_reason=" in jq_filter:
-    raise SystemExit(0)
-
-if "is not boolean" in jq_filter:
-    calls_path = os.path.join(state_dir, "jq.boolgarble.calls")
-    try:
-        with open(calls_path, encoding="utf-8") as stream:
-            calls = int(stream.read())
-    except (FileNotFoundError, ValueError):
-        calls = 0
-    calls += 1
-    with open(calls_path, "w", encoding="utf-8") as stream:
-        stream.write(f"{calls}\n")
-    if os.path.exists(os.path.join(state_dir, "jq.boolgarble")) and calls >= 2:
-        print("garbage-but-rc-zero")
-        raise SystemExit(0)
-
-try:
-    if len(args) == 3:
-        with open(args[2], encoding="utf-8") as stream:
-            value = json.load(stream)
-    elif len(args) == 2:
-        value = json.load(sys.stdin)
-    else:
-        raise ValueError("unsupported input arguments")
-except (OSError, ValueError, json.JSONDecodeError) as error:
-    print(f"fixture jq: {error}", file=sys.stderr)
-    raise SystemExit(4)
-
-def emit(item):
-    if item is True:
-        print("true")
-    elif item is False:
-        print("false")
-    elif item is None:
-        print("null")
-    else:
-        print(item)
-
-def default(item, fallback):
-    return fallback if item is None or item is False else item
-
-try:
-    if "join(\"|\")" in jq_filter:
-        mailboxes = value["mailboxes"]
-        reasons = value["degraded_reasons"]
-        recovered = value["fully_recovered"]
-        stall = mailboxes[0]["relay_stall_state"].lower()
-        matched = [reason for reason in reasons if isinstance(reason, str)
-                   and re.search(r"relay.*wedge", reason, re.IGNORECASE)]
-        fields = [str(recovered).lower(), "array", stall]
-        fields.extend(matched)
-        fields.append(default(mailboxes[0].get("absent_field"), "dflt"))
-        emit("|".join(fields))
-    elif "((.mailboxes | type) == \"array\")" in jq_filter:
-        valid = (isinstance(value, dict)
-                 and isinstance(value.get("mailboxes"), list)
-                 and isinstance(value.get("degraded_reasons"), list)
-                 and isinstance(value.get("fully_recovered"), bool))
-        emit(valid)
-        if mode == "-e" and not valid:
-            raise SystemExit(1)
-    elif "consecutive_skips missing or not a number" in jq_filter:
-        count = value.get("consecutive_skips") if isinstance(value, dict) else None
-        if isinstance(count, bool) or not isinstance(count, (int, float)):
-            raise ValueError("consecutive_skips missing or not a number")
-        emit(count)
-    elif jq_filter.strip() == ".consecutive_skips":
-        emit(value["consecutive_skips"])
-    elif "degraded_reason=" in jq_filter:
-        marker_pattern = re.compile(
-            r"relay.*(wedge|dead|stall|stuck)|(wedge|dead|stall|stuck).*relay",
-            re.IGNORECASE,
-        )
-        for reason in value["degraded_reasons"]:
-            if isinstance(reason, str) and marker_pattern.search(reason):
-                emit("degraded_reason=" + reason)
-        for mailbox in value["mailboxes"]:
-            stall = default(mailbox.get("relay_stall_state"), "healthy")
-            if not isinstance(stall, str):
-                raise ValueError("relay_stall_state is not a string")
-            stall = stall.lower()
-            relay_health = mailbox.get("relay_health") or {}
-            marked = (stall in ("orphan_pending_token", "queue_blocked", "tmux_alive_relay_dead")
-                      or relay_health.get("desynced") is True
-                      or relay_health.get("stale_thread_proof") is True
-                      or relay_health.get("watcher_attached_stale") is True
-                      or (mailbox.get("inflight_state_present") is True
-                          and mailbox.get("watcher_attached") is False))
-            if marked:
-                provider = default(mailbox.get("provider"), "unknown")
-                channel = default(mailbox.get("channel_id"), "unknown")
-                emit(f"mailbox provider={provider} channel={channel} stall={stall}")
-    elif "fully_recovered is not boolean" in jq_filter:
-        recovered = value.get("fully_recovered") if isinstance(value, dict) else None
-        if not isinstance(recovered, bool):
-            raise ValueError("fully_recovered is not boolean")
-        emit(recovered)
-    else:
-        raise ValueError("unsupported filter")
-except (KeyError, TypeError, ValueError) as error:
-    print(f"fixture jq: {error}", file=sys.stderr)
-    raise SystemExit(5)
+# jq stub: reports whatever version the test asks for and logs that the gate
+# actually consulted it, then delegates every real filter to the real jq —
+# unless jq.garbage is set, in which case every filter exits 0 with output that
+# has nothing to do with the input. That is the shape a version check cannot
+# see: an honest --version in front of a parser that answers nonsense.
+cat > "$STUB_BIN/jq" <<STUB
+#!/usr/bin/env bash
+if [ "\$1" = "--version" ]; then
+    printf 'x\n' >> "\$STUB_STATE/jq.version.calls"
+    cat "\$STUB_STATE/jq.version"
+    exit 0
+fi
+if [ -f "\$STUB_STATE/jq.garbage" ]; then
+    printf 'garbage-but-rc-zero\n'
+    exit 0
+fi
+if [ -f "\$STUB_STATE/jq.markersuppress" ]; then
+    for arg in "\$@"; do
+        case "\$arg" in *degraded_reason=*) exit 0 ;; esac
+    done
+fi
+# jq.boolgarble: honest everywhere including the gate's self-test, then garbage
+# from the SECOND fully_recovered read onwards. That filter is the only one
+# carrying this error message, so this reaches _post_deploy_smoke_fully_
+# recovered_from_file and nothing else.
+for arg in "\$@"; do
+    case "\$arg" in
+        *"is not boolean"*)
+            n=\$(cat "\$STUB_STATE/jq.boolgarble.calls" 2>/dev/null || printf 0)
+            n=\$((n + 1))
+            printf '%s\n' "\$n" > "\$STUB_STATE/jq.boolgarble.calls"
+            if [ -f "\$STUB_STATE/jq.boolgarble" ] && [ "\$n" -ge 2 ]; then
+                printf 'garbage-but-rc-zero\n'
+                exit 0
+            fi
+            ;;
+    esac
+done
+exec "$REAL_JQ" "\$@"
 STUB
 
 # Production targets BSD mv's `-h` destination-symlink protection. Python's
@@ -502,6 +408,19 @@ watcher_attached_stale|{"fully_recovered":true,"degraded_reasons":[],"mailboxes"
 inflight_without_watcher|{"fully_recovered":true,"degraded_reasons":[],"mailboxes":[{"provider":"claude","channel_id":"c1","relay_stall_state":"healthy","inflight_state_present":true,"watcher_attached":false,"relay_health":{"desynced":false,"stale_thread_proof":false,"watcher_attached_stale":false}}]}
 BOOLEAN_MARKERS
 
+# Pin the degraded-reason regex with no mailbox that could supply a marker.
+setup_case
+DEGRADED_REASON_BODY='{"fully_recovered":true,"degraded_reasons":["relay stuck"],"mailboxes":[]}'
+printf '%s\n' "$DEGRADED_REASON_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+printf 'body\n' > "$STUB_STATE/curl.mode"
+printf '%s\n' "$DEGRADED_REASON_BODY" > "$STUB_STATE/curl.body"
+run_check; check_rc 1 "$RUN_CHECK_RC" "degraded relay reason marker verdict"
+if grep -q 'relay wedge marker persisted.*degraded_reason=relay stuck' "$POST_DEPLOY_SMOKE_EVIDENCE"; then
+    pass_test "degraded relay reason emits its own marker"
+else
+    fail_test "degraded relay reason did not persist its own marker"
+fi
+
 setup_case
 printf '%s\n' "$OWNERLESS_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
 run_check; check_rc 0 "$RUN_CHECK_RC" "missing relay_owner_kind is not ownerless wedge evidence"
@@ -617,18 +536,18 @@ for good_version in jq-1.7 jq-1.7.1 jq-1.7.1-apple jq-2.0; do
 done
 
 # jq 1.7's numeric representation is load-bearing for unquoted u64 channel_id
-# values interpolated into marker strings. The hermetic fixture must prove the
-# exact decimal survives, not merely print a qualifying version string.
+# values interpolated into marker strings. Run the production marker filter and
+# require the exact decimal, not merely a qualifying version string.
 setup_case
 SNOWFLAKE_WEDGED_BODY='{"fully_recovered":true,"degraded_reasons":[],"mailboxes":[{"provider":"claude","channel_id":1234567890123456789,"relay_stall_state":"tmux_alive_relay_dead","relay_health":{"desynced":true}}]}'
 printf '%s\n' "$SNOWFLAKE_WEDGED_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
 printf 'body\n' > "$STUB_STATE/curl.mode"
 printf '%s\n' "$SNOWFLAKE_WEDGED_BODY" > "$STUB_STATE/curl.body"
-run_check; check_rc 1 "$RUN_CHECK_RC" "jq 1.7 fixture keeps a persistent u64-channel marker red"
+run_check; check_rc 1 "$RUN_CHECK_RC" "production jq filter keeps a persistent u64-channel marker red"
 if grep -q 'channel=1234567890123456789' "$POST_DEPLOY_SMOKE_EVIDENCE"; then
-    pass_test "jq 1.7 fixture preserves the u64 channel_id exactly"
+    pass_test "production jq filter preserves the u64 channel_id exactly"
 else
-    fail_test "jq 1.7 fixture changed the u64 channel_id marker"
+    fail_test "production jq filter changed the u64 channel_id marker"
 fi
 
 # ── The single gate: health/detail schema ───────────────────────────────────

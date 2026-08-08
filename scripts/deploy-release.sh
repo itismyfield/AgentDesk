@@ -3017,6 +3017,7 @@ _post_deploy_smoke_wedge_state_write() {
         rm -f "$tmp" 2>/dev/null || true
         return 1
     fi
+    # GNU mv rejects -h; BSD mv -h supplies the destination-symlink defense above.
     if ! mv -fh "$tmp" "$dest" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"; then
         rm -f "$tmp" 2>/dev/null || true
         return 1
