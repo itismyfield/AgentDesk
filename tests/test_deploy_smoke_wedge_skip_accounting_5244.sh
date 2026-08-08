@@ -48,6 +48,7 @@ extract_function() {
 for fn in \
     _post_deploy_smoke_note \
     _post_deploy_smoke_fail \
+    _post_deploy_smoke_wedge_usable_int \
     _post_deploy_smoke_wedge_gate_jq \
     _post_deploy_smoke_wedge_gate_config \
     _post_deploy_smoke_wedge_gate_state \
@@ -110,7 +111,10 @@ case "$(cat "$STUB_STATE/curl.mode" 2>/dev/null || printf 'fail')" in
 esac
 STUB
 # jq stub: reports whatever version the test asks for and logs that the gate
-# actually consulted it, then delegates every real filter to the real jq.
+# actually consulted it, then delegates every real filter to the real jq —
+# unless jq.garbage is set, in which case every filter exits 0 with output that
+# has nothing to do with the input. That is the shape a version check cannot
+# see: an honest --version in front of a parser that answers nonsense.
 cat > "$STUB_BIN/jq" <<STUB
 #!/usr/bin/env bash
 if [ "\$1" = "--version" ]; then
@@ -118,6 +122,27 @@ if [ "\$1" = "--version" ]; then
     cat "\$STUB_STATE/jq.version"
     exit 0
 fi
+if [ -f "\$STUB_STATE/jq.garbage" ]; then
+    printf 'garbage-but-rc-zero\n'
+    exit 0
+fi
+# jq.boolgarble: honest everywhere including the gate's self-test, then garbage
+# from the SECOND fully_recovered read onwards. That filter is the only one
+# carrying this error message, so this reaches _post_deploy_smoke_fully_
+# recovered_from_file and nothing else.
+for arg in "\$@"; do
+    case "\$arg" in
+        *"is not boolean"*)
+            n=\$(cat "\$STUB_STATE/jq.boolgarble.calls" 2>/dev/null || printf 0)
+            n=\$((n + 1))
+            printf '%s\n' "\$n" > "\$STUB_STATE/jq.boolgarble.calls"
+            if [ -f "\$STUB_STATE/jq.boolgarble" ] && [ "\$n" -ge 2 ]; then
+                printf 'garbage-but-rc-zero\n'
+                exit 0
+            fi
+            ;;
+    esac
+done
 exec "$REAL_JQ" "\$@"
 STUB
 chmod +x "$STUB_BIN/curl" "$STUB_BIN/jq"
@@ -131,9 +156,12 @@ for tool in cat mv rm mkdir dirname sleep comm sort mktemp hostname date; do
 done
 ln -sf "$STUB_BIN/curl" "$NOJQ_BIN/curl"
 
-CLEAN_BODY='{"fully_recovered": true, "mailboxes": []}'
-WEDGED_BODY='{"fully_recovered": true, "mailboxes": [{"provider":"claude","channel_id":"c1","relay_stall_state":"stalled"}]}'
-UNRECOVERED_BODY='{"fully_recovered": false, "mailboxes": []}'
+# Fixtures carry the whole gated contract — mailboxes array, degraded_reasons
+# array, boolean fully_recovered — because that is what the server emits and
+# what the gate now demands.
+CLEAN_BODY='{"fully_recovered": true, "mailboxes": [], "degraded_reasons": []}'
+WEDGED_BODY='{"fully_recovered": true, "degraded_reasons": [], "mailboxes": [{"provider":"claude","channel_id":"c1","relay_stall_state":"stalled"}]}'
+UNRECOVERED_BODY='{"fully_recovered": false, "mailboxes": [], "degraded_reasons": []}'
 
 failures=0
 fail_test() {
@@ -171,6 +199,8 @@ setup_case() {
     POST_DEPLOY_SMOKE_WEDGE_RECOVERY_REASON=""
     printf 'jq-1.7.1-apple\n' > "$STUB_STATE/jq.version"
     : > "$STUB_STATE/jq.version.calls"
+    rm -f "$STUB_STATE/jq.garbage" "$STUB_STATE/jq.boolgarble"
+    printf '0\n' > "$STUB_STATE/jq.boolgarble.calls"
     printf 'fail\n' > "$STUB_STATE/curl.mode"
     # The production functions arrive through eval, so the linter cannot see
     # that they consume these globals; exporting them states the contract.
@@ -334,31 +364,118 @@ for good_version in jq-1.7 jq-1.7.1 jq-1.7.1-apple jq-2.0; do
 done
 
 # ── The single gate: health/detail schema ───────────────────────────────────
-# Every one of these shapes makes `.mailboxes[]?` emit nothing, which reads as
-# "no wedge markers" — a clean verdict for a body that was never understood.
+# The gate must assert the WHOLE contract its consumers read, not one field of
+# it. A gate narrower than its consumers is the same defect one field over, so
+# the shapes below are organised as a 1:1 contrast with the consumption sites:
+# each row breaks exactly one consumed field and nothing else, and every row
+# must be unevaluable.
+#
+#   consumer : field                              broken by rows tagged
+#   -------------------------------------------   ---------------------
+#   all consumers : the body is an object          [object]
+#   _markers_from_file : .mailboxes[]?             [mailboxes]
+#   _markers_from_file : .degraded_reasons[]?      [degraded_reasons]
+#   _fully_recovered_from_file : .fully_recovered  [fully_recovered]
+#
+# If a consumer is added that reads a fifth thing, this table gains a row and
+# the gate gains a clause. Drift between the two columns IS the defect.
 while IFS= read -r shape; do
     setup_case
     printf '%s\n' "$shape" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
     run_check; check_rc 1 "$RUN_CHECK_RC" "top-level shape $shape is unevaluable"
 done <<'SHAPES'
-{"fully_recovered": true}
-{"fully_recovered": true, "mailboxes": null}
-{"fully_recovered": true, "mailboxes": "none"}
-{"fully_recovered": true, "mailboxes": 0}
-{"fully_recovered": true, "mailboxes": {}}
+{"fully_recovered": true, "degraded_reasons": []}
+{"fully_recovered": true, "degraded_reasons": [], "mailboxes": null}
+{"fully_recovered": true, "degraded_reasons": [], "mailboxes": "none"}
+{"fully_recovered": true, "degraded_reasons": [], "mailboxes": 0}
+{"fully_recovered": true, "degraded_reasons": [], "mailboxes": {}}
+{"fully_recovered": true, "mailboxes": []}
+{"fully_recovered": true, "mailboxes": [], "degraded_reasons": null}
+{"fully_recovered": true, "mailboxes": [], "degraded_reasons": "relay wedge"}
+{"fully_recovered": true, "mailboxes": [], "degraded_reasons": {}}
+{"mailboxes": [], "degraded_reasons": []}
+{"fully_recovered": null, "mailboxes": [], "degraded_reasons": []}
+{"fully_recovered": "true", "mailboxes": [], "degraded_reasons": []}
+{"fully_recovered": 1, "mailboxes": [], "degraded_reasons": []}
 [null]
 ["mailboxes"]
 "a string body"
 17
 SHAPES
 
-# The resample body is gated too. Before this PR a schema-broken resample
-# produced zero markers, which `comm -12` read as "markers cleared".
+# The resample body is gated too, on every clause. Before this PR a
+# schema-broken resample produced zero markers, which `comm -12` read as
+# "markers cleared".
+for broken_resample in \
+    '{"fully_recovered": true, "degraded_reasons": [], "mailboxes": "none"}' \
+    '{"fully_recovered": true, "mailboxes": [], "degraded_reasons": "none"}' \
+    '{"fully_recovered": "yes", "mailboxes": [], "degraded_reasons": []}'
+do
+    setup_case
+    printf '%s\n' "$WEDGED_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+    printf 'body\n' > "$STUB_STATE/curl.mode"
+    printf '%s\n' "$broken_resample" > "$STUB_STATE/curl.body"
+    run_check
+    check_rc 1 "$RUN_CHECK_RC" "schema-broken settle resample $broken_resample is unevaluable, not cleared"
+done
+
+# A recovery POLL body that breaks the contract is the case leg B reproduced as
+# a green skip: the wait could not read fully_recovered, gave up at the
+# deadline, and called that "recovery state unavailable". It is a gate trip.
+for broken_poll in \
+    '{"mailboxes": [], "degraded_reasons": []}' \
+    '{"fully_recovered": "yes", "mailboxes": [], "degraded_reasons": []}' \
+    '{"fully_recovered": true, "mailboxes": [], "degraded_reasons": "wedge"}'
+do
+    setup_case
+    POST_DEPLOY_SMOKE_WEDGE_RECOVERY_WAIT_SECS=2
+    POST_DEPLOY_SMOKE_WEDGE_RECOVERY_POLL_SECS=1
+    printf '%s\n' "$UNRECOVERED_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+    printf 'body\n' > "$STUB_STATE/curl.mode"
+    printf '%s\n' "$broken_poll" > "$STUB_STATE/curl.body"
+    run_check
+    check_rc 1 "$RUN_CHECK_RC" "schema-broken recovery poll $broken_poll is a gate trip, not a skip"
+done
+
+# ── The single gate: jq that exits 0 and lies ───────────────────────────────
+# The version gate proves a claim about jq, not a behaviour. Only the gate's
+# semantic self-test separates a working parser from one that returns success
+# with unrelated output — and that output otherwise reads as "not recovered",
+# i.e. a skip for a body nobody parsed.
+setup_case
+printf '%s\n' "$CLEAN_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+: > "$STUB_STATE/jq.garbage"
+run_check; garbage_rc="$RUN_CHECK_RC"
+rm -f "$STUB_STATE/jq.garbage"
+check_rc 1 "$garbage_rc" "a jq that exits 0 with garbage output is unevaluable"
+if [ "$(stored_count)" = "absent" ]; then
+    pass_test "a lying jq is an accounting failure, not a skip"
+else
+    fail_test "a lying jq recorded consecutive_skips=$(stored_count), want no skip"
+fi
+
+# The self-test cannot cover a jq that answers honestly once and then garbles a
+# real body, so the reader checks its own output too. Isolating that guard takes
+# the settle path: the recovery read is honest (so the wait completes and the
+# markers are real), the settle read is garbage. Without the reader's true/false
+# check that garbage merely fails `= "false"`, the check walks on to compare
+# markers, finds them cleared, and RESETS the streak — a clean verdict derived
+# from a recovery state nobody read. With it, the deploy skips, and from a
+# streak of 2 that skip is the third, which is red.
 setup_case
 printf '%s\n' "$WEDGED_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
 printf 'body\n' > "$STUB_STATE/curl.mode"
-printf '%s\n' '{"fully_recovered": true, "mailboxes": "none"}' > "$STUB_STATE/curl.body"
-run_check; check_rc 1 "$RUN_CHECK_RC" "schema-broken settle resample is unevaluable, not cleared"
+printf '%s\n' "$CLEAN_BODY" > "$STUB_STATE/curl.body"
+_post_deploy_smoke_wedge_state_write '{"consecutive_skips": 2}' "$POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE"
+: > "$STUB_STATE/jq.boolgarble"
+run_check; boolgarble_rc="$RUN_CHECK_RC"
+rm -f "$STUB_STATE/jq.boolgarble"
+check_rc 1 "$boolgarble_rc" "a garbled settle recovery state cannot become a cleared verdict"
+if [ "$(stored_count)" = "3" ]; then
+    pass_test "a garbled settle recovery state is skipped, not reset"
+else
+    fail_test "a garbled settle recovery state left consecutive_skips=$(stored_count), want 3"
+fi
 
 # A gate that trips DURING the recovery wait is the case only the exit
 # assertion can catch: the wait gives up, the caller records a skip, and the
@@ -383,11 +500,104 @@ ungated_rc=0
 _post_deploy_smoke_wedge_markers_from_file "$TMP_ROOT/ungated.json" > /dev/null 2>&1 || ungated_rc=$?
 check_rc 1 "$ungated_rc" "an ungated body is refused by the sole jq reader"
 
+# ── The single gate: knobs bash can actually compare ────────────────────────
+# A digit-only wait outside bash's integer range passes a shape check and then
+# makes every `-ge` in the wait loop error out. The loop reads that error as
+# "deadline not reached", so the bounded wait stops being bounded. The stub
+# curl counter proves the gate stops it BEFORE the first poll rather than
+# merely surviving it.
+for huge_knob in 9223372036854775808 99999999999999999999 999999999999999999999999999999999999; do
+    setup_case
+    POST_DEPLOY_SMOKE_WEDGE_RECOVERY_WAIT_SECS="$huge_knob"
+    POST_DEPLOY_SMOKE_WEDGE_RECOVERY_POLL_SECS=1
+    printf '%s\n' "$UNRECOVERED_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+    printf 'body\n' > "$STUB_STATE/curl.mode"
+    printf '%s\n' "$CLEAN_BODY" > "$STUB_STATE/curl.body"
+    printf '0\n' > "$STUB_STATE/curl.calls"
+    run_check
+    check_rc 1 "$RUN_CHECK_RC" "out-of-range recovery wait '$huge_knob' is unevaluable"
+    if [ "$(cat "$STUB_STATE/curl.calls")" = "0" ]; then
+        pass_test "out-of-range wait '$huge_knob' never entered the poll loop"
+    else
+        fail_test "out-of-range wait '$huge_knob' polled $(cat "$STUB_STATE/curl.calls") time(s)"
+    fi
+done
+# 2^63-1 is comparable but wraps to a negative on the +1 the counter performs,
+# so the gate rejects it too; 2^63-2 is the largest knob that survives both.
+setup_case
+POST_DEPLOY_SMOKE_WEDGE_MAX_CONSECUTIVE_SKIPS=9223372036854775807
+printf '%s\n' "$CLEAN_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+run_check; check_rc 1 "$RUN_CHECK_RC" "a skip limit that wraps when incremented is unevaluable"
+setup_case
+POST_DEPLOY_SMOKE_WEDGE_MAX_CONSECUTIVE_SKIPS=9223372036854775806
+printf '%s\n' "$CLEAN_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+run_check; check_rc 0 "$RUN_CHECK_RC" "the largest non-wrapping skip limit is accepted"
+
+# ── A stored count outside bash's range is corruption, not zero ─────────────
+# Schema-valid and believable-looking, but `count + 1` wraps to a negative that
+# compares below every threshold — a state that had blown past the limit would
+# come back reading as brand new. It must land in the corrupt tally instead, so
+# a second consecutive occurrence turns the smoke red.
+setup_case
+printf '%s\n' "$WEDGED_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+printf '{"consecutive_skips": 9223372036854775807}\n' > "$POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE"
+run_check; check_rc 0 "$RUN_CHECK_RC" "an out-of-range stored count recovers from 0 once"
+if [ "$(cat "${POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE}.corrupt" 2>/dev/null || printf 'absent')" = "1" ]; then
+    pass_test "an out-of-range stored count is tallied as corruption"
+else
+    fail_test "an out-of-range stored count was not tallied as corruption"
+fi
+if [ "$(stored_count)" = "1" ]; then
+    pass_test "an out-of-range stored count does not wrap into the counter"
+else
+    fail_test "an out-of-range stored count left consecutive_skips=$(stored_count), want 1"
+fi
+printf '{"consecutive_skips": 99999999999999999999}\n' > "$POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE"
+run_check; check_rc 1 "$RUN_CHECK_RC" "a second out-of-range stored count fails the smoke"
+
 # ── The single gate: skip-state I/O ─────────────────────────────────────────
 setup_case
 printf '%s\n' "$CLEAN_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
 ln -sf /dev/null "$POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE"
 run_check; check_rc 1 "$RUN_CHECK_RC" "symlinked skip state is unevaluable"
+
+# ── Predictable scratch paths are not writable handles ──────────────────────
+# `.probe.$$` and `.tmp.$$` are guessable. A symlink planted at either is
+# written THROUGH by a plain redirection: the whole checker returns 0 while an
+# unrelated file is truncated, and in the `.tmp` case the atomic replace then
+# renames the symlink onto the state path, quietly undoing the gate's own
+# regular-file verdict. Exclusive creation is what makes the gate's claim true.
+setup_case
+printf '%s\n' "$CLEAN_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+printf 'victim-contents-must-survive\n' > "$ADK_REL/runtime/victim"
+ln -sf "$ADK_REL/runtime/victim" "${POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE}.probe.$$"
+run_check
+if [ "$(cat "$ADK_REL/runtime/victim")" = "victim-contents-must-survive" ]; then
+    pass_test "the gate's writability probe does not truncate a planted symlink target"
+else
+    fail_test "the gate's writability probe truncated the planted symlink target"
+fi
+
+setup_case
+printf '%s\n' "$WEDGED_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+printf 'victim-contents-must-survive\n' > "$ADK_REL/runtime/victim"
+ln -sf "$ADK_REL/runtime/victim" "${POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE}.tmp.$$"
+run_check
+if [ "$(cat "$ADK_REL/runtime/victim")" = "victim-contents-must-survive" ]; then
+    pass_test "the atomic replace does not write through a planted temp symlink"
+else
+    fail_test "the atomic replace wrote the skip state through a planted temp symlink"
+fi
+if [ ! -L "$POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE" ]; then
+    pass_test "the skip state is still a regular file after the atomic replace"
+else
+    fail_test "the atomic replace turned the skip state into a symlink"
+fi
+if [ "$(stored_count)" = "1" ]; then
+    pass_test "the skip was still recorded while refusing the planted temp symlink"
+else
+    fail_test "the planted temp symlink cost the skip increment (count=$(stored_count))"
+fi
 
 setup_case
 printf '%s\n' "$CLEAN_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
@@ -435,9 +645,12 @@ printf 'not json at all\n' > "$POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE"
 run_check; check_rc 1 "$RUN_CHECK_RC" "a second consecutive unreadable skip state fails the smoke"
 
 # ── Migration ratchet, not an eternal invariant ─────────────────────────────
-# 7 = the 8 wedge skip branches on main minus the two first-sample recovery
-# branches, which S2 merged into one bounded wait, plus nothing new. A genuine
-# refactor may change this number; change it deliberately and say why.
+# 7 = 8 - 2 + 1. main had 8 wedge skip branches; S2 replaced the two
+# first-sample recovery branches with one bounded wait (-2) and that merged
+# wait still ends in a skip of its own when the deadline expires (+1). Counting
+# call sites proves every skip goes through the accounting helper, not that
+# every branch that ought to skip does. A genuine refactor may change this
+# number; change it deliberately and say why.
 skip_sites=$(grep -c '_post_deploy_smoke_wedge_skip "' "$DEPLOY_SH" || true)
 if [ "$skip_sites" -eq 7 ]; then
     pass_test "all wedge skip branches go through the accounting helper (7 sites)"
