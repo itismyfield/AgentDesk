@@ -143,9 +143,19 @@ time for diagnostics; neither is a stored approval value.
   | `watchers/lifecycle/restore.rs` startup restore | excluded from this gate | excluded | excluded | excluded |
 
   The gate suppresses mailbox-token mint only. Refusal still runs finalizer
-  reseeding and the identity-guarded readoption write, including consumption of
-  an outgoing `restart_mode`. This PR does not promote refusal to a DLQ fact;
-  the existing #4380 DLQ remains limited to durable marker-write failure.
+  reseeding and attempts the identity-guarded readoption write. When that write
+  succeeds, the store sets `readopted_from_inflight` and clears `restart_mode`;
+  those writes do not prove that a watcher, mailbox token, or pending consumer
+  was installed.
+
+  Residual on the successful-write path: if no consumer is actually installed,
+  undelivered output remains without a durable DLQ copy. The #4380 predicate
+  requires `!readopted_from_inflight`, so the successful marker write makes it
+  false and the DLQ does not fire. The refusal WARN cannot distinguish a safe
+  refusal (another consumer exists or will be installed) from real no-consumer
+  loss, is not a loss-confirmation signal, and does not preserve the undelivered
+  body. This residual is limited to successful marker writes; marker-write
+  failure remains covered by the existing #4380 DLQ backstop.
 
   Refusal is not proof that this process has no consumer. In the ordinary path,
   only the generic branch inserts `recovering_channels`; the ordinary branch
@@ -155,11 +165,12 @@ time for diagnostics; neither is a stored approval value.
   excluded from the gate. Episode handoff preserves its guarded direct entry
   outside these three loop rows.
 
-  Review-coordinate corrections against the r1 snapshot: unconditional
-  `pending.push` is `watchers/lifecycle/restore.rs:516`; the
-  `find_watcher_by_tmux_session` call is `claims.rs:345`, while the actual
-  `ReuseExisting` return is `claims.rs:417`; the W1c marker block spans
-  `restore_inflight.rs:2207-2211`.
+  Review coordinates use symbols, not mutable line numbers: startup restore's
+  unconditional enqueue is `pending.push(PendingWatcher { .. })` in
+  `restore_tmux_watchers`; incumbent lookup and reuse are the
+  `find_watcher_by_tmux_session` call and `WatcherClaimAction::ReuseExisting`
+  return in `claim_watcher`; the W1c marker site is the
+  `readopt_marker_eligible_real_user` guard block in `restore_inflight_turns`.
 
   G2 also reseeds the recovered finalizer ledger when mint returns false. This
   is inert for queue admission by itself because `claim_queue_eligible()` still

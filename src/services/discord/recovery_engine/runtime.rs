@@ -177,8 +177,10 @@ pub(in crate::services::discord) fn readopt_marker_eligible_real_user(
 ///     `mark_readopted_from_inflight_if_identity_unchanged` (NOT a blind whole-row
 ///     save): a concurrently-cleared row is NOT resurrected (`Missing`), and a row
 ///     a newer turn re-owns is NOT clobbered (`IdentityMismatch`). Under the same
-///     canonical lock it also consumes any planned-restart marker, transferring
-///     durable authority to the replacement process before runtime handoff.
+///     canonical lock it also clears any planned-restart marker while setting
+///     `readopted_from_inflight`. A successful write records only that durable
+///     state transition; it does not prove that a watcher, mailbox token, or
+///     pending consumer was installed.
 ///
 /// This does NOT touch the completion lifecycle: the re-adopted turn's own
 /// `✅`/footer + analytics still fire (see the `readopted_from_inflight` field doc
@@ -379,16 +381,17 @@ async fn reregister_active_turn_from_inflight_inner(
         false
     };
 
-    // #5242 G2: adoption is the fact recorded here, not successful mailbox mint.
-    // `started == false` can mean an outlook refusal, queue-persistence failure,
-    // or a real token race. Both finalizer reseeding and marker/ledger recording
-    // therefore run unconditionally. The reseeded entry cannot make a queue claim
-    // eligible by itself because completion admission still requires
-    // `mailbox_released`; unconditional marking is safe ONLY while G1's raw
-    // exact-id confinement remains in `classify_reclaimable_mailbox_owner`: an X
-    // marker must never qualify a different live mailbox turn Y for reclaim. The
-    // durable marker write also consumes an outgoing planned-restart marker,
-    // transferring authority even when the outlook suppresses token mint.
+    // #5242 G2: `started` reports only whether this call minted the mailbox token.
+    // A false value can mean an outlook refusal, queue-persistence failure, or a
+    // real token race. Finalizer reseeding and the readoption write therefore run
+    // unconditionally. The reseeded entry cannot make a queue claim eligible by
+    // itself because completion admission still requires `mailbox_released`;
+    // unconditional marking is safe ONLY while G1's raw exact-id confinement
+    // remains in `classify_reclaimable_mailbox_owner`: an X marker must never
+    // qualify a different live mailbox turn Y for reclaim. On a successful
+    // durable write, the store sets `readopted_from_inflight` and clears
+    // `restart_mode`; neither operation establishes a watcher, mailbox token, or
+    // pending consumer.
     reseed_recovered_finalizer_ledger(
         shared,
         channel_id,

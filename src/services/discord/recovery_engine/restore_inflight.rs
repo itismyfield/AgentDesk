@@ -28,55 +28,6 @@ fn recovery_output_path_with_tmux_fallback(
         .or_else(|| (!fallback_output.is_empty()).then_some(fallback_output))
 }
 
-async fn reregister_active_turn_for_output_path(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    state: &inflight::InflightTurnState,
-    tmux_session_name: &str,
-    output_path: &str,
-) -> (bool, mint_gate::WatcherInstallOutlook) {
-    let path_exists = std::fs::metadata(output_path).is_ok();
-    let outlook = recovery_mint_outlook(
-        shared,
-        state,
-        Some(tmux_session_name),
-        output_path,
-        path_exists,
-    );
-    // Keep the refusal as an outer production guard. It suppresses token mint
-    // only; the runtime entry still transfers marker/restart authority below.
-    let started = if !outlook.allows_mint() {
-        reregister_active_turn_from_inflight_with_outlook(shared, state, outlook).await
-    } else {
-        reregister_active_turn_from_inflight(shared, state).await
-    };
-    #[cfg(unix)]
-    super::guard_readopt_relay_resume_or_dead_letter(shared, provider, channel_id);
-    (started, outlook)
-}
-
-async fn reregister_active_turn_for_restart_report(
-    shared: &Arc<SharedData>,
-    state: &inflight::InflightTurnState,
-    tmux_session_name: Option<&str>,
-    watcher_start: Option<&(String, u64, u64, bool)>,
-) -> (bool, mint_gate::WatcherInstallOutlook) {
-    let outlook = watcher_start.map_or(
-        mint_gate::WatcherInstallOutlook::NoOutputPath,
-        |(output_path, ..)| {
-            recovery_mint_outlook(shared, state, tmux_session_name, output_path, true)
-        },
-    );
-    // Site-specific outer guard; `&& false` is a required mutation target.
-    let started = if !outlook.allows_mint() {
-        reregister_active_turn_from_inflight_with_outlook(shared, state, outlook).await
-    } else {
-        reregister_active_turn_from_inflight(shared, state).await
-    };
-    (started, outlook)
-}
-
 pub(in crate::services::discord) async fn finish_recovered_turn_mailbox(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -759,15 +710,12 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     http, shared, provider, &mut state,
                 )
                 .await;
-                // Restart-report policy: `Some(start)` is WillSpawn or
-                // IncumbentReuse. `None` is NoOutputPath for every runtime;
-                // Unknown is unreachable because this site has no later Codex
-                // rollout fallback.
+                // Classify restart-report watcher installation before token mint.
                 let watcher_start = tmux_name.as_deref().and_then(|tmux_session_name| {
                     restart_report_watcher_start(tmux_session_name, &state)
                 });
                 let (finish_mailbox_on_completion, _outlook) =
-                    reregister_active_turn_for_restart_report(
+                    mint_gate::reregister_active_turn_for_restart_report(
                         shared,
                         &state,
                         tmux_name.as_deref(),
@@ -1938,21 +1886,18 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 http, shared, provider, &mut state,
             )
             .await;
-            // Ordinary restore policy: missing non-Codex is NoOutputPath;
-            // missing CodexTui is Unknown because the resolver below may find the
-            // rollout; a healthy same-path incumbent is IncumbentReuse; every
-            // other present-path shape is WillSpawn. The outlook suppresses only
-            // mailbox token mint; marker/restart-authority transfer and the
-            // existing marker-write-failure DLQ backstop still run.
-            let (finish_mailbox_on_completion, _outlook) = reregister_active_turn_for_output_path(
-                shared,
-                provider,
-                channel_id,
-                &state,
-                &tmux_session_name,
-                &output_path,
-            )
-            .await;
+            // Classify watcher installation before token mint; the marker-write
+            // failure DLQ backstop still runs after the recovery call.
+            let (finish_mailbox_on_completion, _outlook) =
+                mint_gate::reregister_active_turn_for_output_path(
+                    shared,
+                    provider,
+                    channel_id,
+                    &state,
+                    &tmux_session_name,
+                    &output_path,
+                )
+                .await;
 
             let output_path = match restore_codex_rollout_output_path(provider, &state, output_path)
             {
@@ -2197,8 +2142,8 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         )
         .await;
 
-        // Consume outgoing planned-restart authority (identity-guarded readoption)
-        // before the reader publishes RuntimeReady; failed adoption stays fail-closed.
+        // Write readoption state (including clearing `restart_mode`) before the
+        // reader publishes RuntimeReady; a failed write stays fail-closed.
         if super::runtime::readopt_marker_eligible_real_user(&state) {
             let _ = super::runtime::mark_readopted_from_inflight(
                 shared, provider, channel_id, &state, true,
@@ -2444,7 +2389,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn restart_report_refusal_consumes_restart_authority_without_minting() {
+    async fn restart_report_refusal_writes_readoption_marker_without_minting() {
         let root = tempfile::tempdir().expect("runtime root");
         let _env = crate::config::set_agentdesk_root_for_test(root.path());
         let shared = super::super::make_shared_data_for_tests();
@@ -2459,9 +2404,10 @@ mod tests {
                 .into_owned(),
         );
         state.set_restart_mode(InflightRestartMode::DrainRestart);
+        state.set_relay_owner_kind(RelayOwnerKind::Watcher);
         inflight::save_inflight_state(&state).expect("seed planned-restart row");
 
-        let (started, outlook) = super::reregister_active_turn_for_restart_report(
+        let (started, outlook) = super::mint_gate::reregister_active_turn_for_restart_report(
             &shared,
             &state,
             state.tmux_session_name.as_deref(),
@@ -2477,6 +2423,13 @@ mod tests {
             "MUTATION GUARD: restart-report NoOutputPath outer guard must refuse mailbox mint"
         );
         assert!(
+            shared
+                .turn_finalizer
+                .has_live_watcher_pending(channel_id, shared.restart.current_generation)
+                .await,
+            "M3b: started=false must still enqueue the recovered finalizer Start entry"
+        );
+        assert!(
             super::super::mailbox_snapshot(&shared, channel_id)
                 .await
                 .cancel_token
@@ -2490,7 +2443,7 @@ mod tests {
         );
         assert_eq!(
             persisted.restart_mode, None,
-            "mint refusal must not cancel planned-restart authority transfer"
+            "a successful readoption write must clear the planned-restart marker"
         );
         assert!(persisted.readopted_from_inflight);
     }
@@ -2521,7 +2474,7 @@ mod tests {
             inflight::save_inflight_state(&state).expect("seed crash row");
             install_live_watcher(&shared, owner, &tmux, output.to_str().expect("UTF-8 path"));
 
-            let (started, outlook) = super::reregister_active_turn_for_output_path(
+            let (started, outlook) = super::mint_gate::reregister_active_turn_for_output_path(
                 &shared,
                 &provider,
                 channel_id,
@@ -2574,13 +2527,13 @@ mod tests {
                 .expect("readopted durable row")
                 .restart_mode
                 .is_none(),
-            "the generic recovery handoff must observe consumed restart authority"
+            "the generic recovery handoff must observe cleared restart_mode"
         );
         outcome
     }
 
     #[test]
-    fn generic_recovery_consumes_restart_before_runtime_ready_and_persists_runtime_stamp() {
+    fn generic_recovery_clears_restart_mode_before_runtime_ready_and_persists_runtime_stamp() {
         let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let root = tempfile::tempdir().expect("runtime root");
         let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -2631,7 +2584,7 @@ mod tests {
                 "test::generic_recovery_runtime_ready",
             ),
             GuardedSaveOutcome::Saved,
-            "runtime stamp must succeed only after generic recovery consumes restart authority"
+            "runtime stamp must succeed only after generic recovery clears restart_mode"
         );
 
         let persisted = inflight::load_inflight_state(&provider, channel_id)

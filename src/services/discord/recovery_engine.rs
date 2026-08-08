@@ -434,6 +434,7 @@ fn recovery_mint_outlook(
     output_path: &str,
     path_exists: bool,
 ) -> mint_gate::WatcherInstallOutlook {
+    #[cfg(unix)]
     let incumbent = path_exists
         .then(|| {
             tmux_session_name.and_then(|name| {
@@ -441,6 +442,10 @@ fn recovery_mint_outlook(
             })
         })
         .flatten();
+    #[cfg(not(unix))]
+    let incumbent: Option<(ChannelId, bool, bool, String)> = None;
+    #[cfg(not(unix))]
+    let _ = (shared, tmux_session_name);
     mint_gate::watcher_install_outlook(
         path_exists,
         state.runtime_kind,

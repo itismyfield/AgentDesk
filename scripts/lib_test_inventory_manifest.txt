@@ -3660,6 +3660,7 @@ services::discord::recovery_engine::manual_rebind_override::tests::health_rebind
 services::discord::recovery_engine::manual_rebind_override::tests::health_rebind_override_rejects_missing_and_non_regular_paths
 services::discord::recovery_engine::manual_rebind_override::tests::health_rebind_override_rejects_non_uuid_session_id
 services::discord::recovery_engine::manual_rebind_override::tests::health_rebind_override_rejects_symlink_escape_from_allowed_root
+services::discord::recovery_engine::mint_gate::tests::four_value_watcher_install_policy_is_exact
 services::discord::recovery_engine::phase_policy::tests::orphaned_synthetic_watcher_row_adoption_quadrants
 services::discord::recovery_engine::phase_policy::tests::ownerless_live_inflight_with_partial_response_can_reattach_watcher
 services::discord::recovery_engine::phase_policy::tests::planned_restart_ownerless_live_inflight_with_restore_anchor_can_reattach_watcher
@@ -3703,9 +3704,9 @@ services::discord::recovery_engine::recovery_two_message_panel::tests::replaceme
 services::discord::recovery_engine::recovery_two_message_panel::tests::replacement_owner_survives_recovery_send_race
 services::discord::recovery_engine::recovery_two_message_panel::tests::restart_reanchors_stranded_panel_and_persists_new_epoch
 services::discord::recovery_engine::recovery_two_message_panel::tests::restart_recreates_missing_panel_without_duplicate_old_delete
-services::discord::recovery_engine::restore_inflight::tests::generic_recovery_consumes_restart_before_runtime_ready_and_persists_runtime_stamp
+services::discord::recovery_engine::restore_inflight::tests::generic_recovery_clears_restart_mode_before_runtime_ready_and_persists_runtime_stamp
 services::discord::recovery_engine::restore_inflight::tests::ordinary_restore_same_and_cross_channel_incumbents_refuse_mint
-services::discord::recovery_engine::restore_inflight::tests::restart_report_refusal_consumes_restart_authority_without_minting
+services::discord::recovery_engine::restore_inflight::tests::restart_report_refusal_writes_readoption_marker_without_minting
 services::discord::recovery_engine::restore_inflight::tests::restore_claude_tui_without_runtime_output_uses_tmux_fallback_path
 services::discord::recovery_engine::restore_inflight::tests::restore_rollout_output_path_patch_preserves_concurrent_relay_fields
 services::discord::recovery_engine::routing_orphan::tests::orphan_with_probe_error_is_preserved_while_dead_pane_is_cleaned
