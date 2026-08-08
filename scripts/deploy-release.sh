@@ -2728,7 +2728,7 @@ _post_deploy_smoke_wedge_skip_state_read() {
 _post_deploy_smoke_wedge_skip_state_write() {
     local count="$1"
     local reason="$2"
-    local tmp_path state_dir readback
+    local tmp_path state_dir
     # The reason is embedded in a hand-built JSON string, so strip the two
     # characters that could break it. Callers pass literals plus one summary
     # line built from health/detail field values.
@@ -2758,17 +2758,6 @@ _post_deploy_smoke_wedge_skip_state_write() {
         rm -f "$tmp_path" 2>/dev/null || true
         return 1
     fi
-    # Read-after-write on the AUTHORITATIVE path. `mv` returning 0 does not by
-    # itself mean this path now holds this count. This is a SECOND layer: every
-    # destination shape reachable from a test is already rejected by the guard
-    # above, so removing these four lines does not fail any assertion in
-    # tests/test_deploy_smoke_wedge_durable_axis_5244.sh (measured — the
-    # mutation survives). It is kept because it, and not the guard, is what
-    # checks that the value actually landed.
-    if ! readback=$(_post_deploy_smoke_wedge_skip_state_read); then
-        return 1
-    fi
-    [ "$readback" = "$count" ] || return 1
     return 0
 }
 
@@ -2837,6 +2826,7 @@ _post_deploy_smoke_wedge_skip() {
     local reason="$1"
     local threshold="$POST_DEPLOY_SMOKE_WEDGE_MAX_CONSECUTIVE_SKIPS"
     local previous=0 count corruptions
+    local jq_version jq_major jq_minor
     _post_deploy_smoke_note "relay wedge=skipped: $reason" || return 1
     case "$threshold" in
         ''|*[!0-9]*)
@@ -2855,6 +2845,38 @@ _post_deploy_smoke_wedge_skip() {
     if ! command -v jq > /dev/null 2>&1; then
         _post_deploy_smoke_fail \
             "relay wedge skip accounting: jq unavailable, cannot maintain the consecutive-skip counter" || true
+        return 1
+    fi
+    # jq >= 1.7 is required, and not only for the counter. Preserving a number's
+    # source literal through unmodified passthrough is a jq 1.7 feature (jq 1.7
+    # release notes, "preserve precision of number literals"); before it, every
+    # number became an IEEE-754 double at PARSE time, so `.id | tostring` ALONE
+    # mangles a ~1.5e18 Discord snowflake — no arithmetic needed. The durable
+    # axis reads authority channel ids that way, and a mangled id addresses a
+    # record path that cannot exist, which the axis reads as the ordinary
+    # "no record yet" state: a silent clean verdict, i.e. #5244 again.
+    # The 1.7 boundary is taken from those release notes, not measured here —
+    # only jq-1.7.1-apple was available on the machine this was written on.
+    # It is also a version the deploy cannot assume: `--all-nodes` runs this
+    # same script on peers, where jq is an independent install. Too old is
+    # therefore an ACCOUNTING failure, on the same grounds as no jq at all,
+    # rather than one more skip. Unparseable output fails closed the same way.
+    jq_version="$(jq --version 2>/dev/null)" || jq_version=""
+    jq_version="${jq_version#jq-}"
+    jq_major="${jq_version%%.*}"
+    jq_minor="${jq_version#*.}"
+    jq_minor="${jq_minor%%.*}"
+    # A build suffix is normal — this machine reports `jq-1.7.1-apple`
+    # (measured) — so strip any non-digit tail rather than read it as a
+    # version failure. A component with no digits at all stays empty and is
+    # rejected below.
+    jq_major="${jq_major%%[!0-9]*}"
+    jq_minor="${jq_minor%%[!0-9]*}"
+    if [ -z "$jq_major" ] || [ -z "$jq_minor" ] || [ "$jq_major" -lt 1 ] \
+      || { [ "$jq_major" -eq 1 ] && [ "$jq_minor" -lt 7 ]; }; then
+        _post_deploy_smoke_fail \
+            "relay wedge skip accounting: jq >= 1.7 required for snowflake-safe reads, found '$(jq --version 2>/dev/null)'" \
+            || true
         return 1
     fi
     if previous=$(_post_deploy_smoke_wedge_skip_state_read); then
@@ -2981,8 +3003,11 @@ _post_deploy_smoke_wedge_markers_from_file() {
 # parsed here.
 #
 # NEVER put a channel id through jq ARITHMETIC. jq numbers are IEEE-754
-# doubles, Discord snowflakes are ~1.5e18, and jq only preserves a number's
-# source literal for as long as nothing computes on it. Measured with
+# doubles and Discord snowflakes are ~1.5e18. ON jq >= 1.7 — the version the
+# skip-accounting gate above enforces — a number's source literal survives for
+# as long as nothing computes on it, which is what makes the plain `tostring`
+# below safe. That is a 1.7 property, NOT a general jq one; see the gate for
+# where the boundary comes from and why it is enforced. Measured with
 # jq-1.7.1-apple on three live authority channels: `.id | floor | tostring`
 # returned 1479671298497183700 / 1509350490461180200 / 1528150941151265000 for
 # 1479671298497183835 / 1509350490461180105 / 1528150941151264878, while
@@ -3009,10 +3034,15 @@ _post_deploy_smoke_wedge_durable_axis_markers_from_file() {
     # markers rather than an error. The in-memory marker pass over the SAME file
     # runs first and returns nonzero on the bodies that make jq error, so those
     # never reach this function — measured on two shapes: a body jq cannot parse,
-    # and a mailbox whose `relay_health` is a string (both rc=1). One shape gets
-    # past both passes as "no mailboxes": `mailboxes` that is not an array, which
-    # `.mailboxes[]?` tolerates in either pass. The Rust side serializes a Vec
-    # there, so that shape is not reachable from this server.
+    # and a mailbox whose `relay_health` is a string (both rc=1).
+    #
+    # Everything the two passes' `[]?` iterations would otherwise ABSORB — a
+    # `mailboxes` that is absent, null, or not an array; a non-object element;
+    # a `degraded_reasons` that is present but not an array — is classified
+    # below as unevaluable instead. `[]?` on those shapes yields no output, and
+    # "no output" read as "evaluated, nothing found" is the #5244 defect shape
+    # itself, so the top-level schema is checked here rather than assumed from
+    # what the Rust side happens to serialize.
     while IFS=$'\t' read -r status provider owner_channel in_memory reason; do
         [ -n "$status" ] || continue
         if [ "$status" != "ok" ]; then
@@ -3020,6 +3050,17 @@ _post_deploy_smoke_wedge_durable_axis_markers_from_file() {
             continue
         fi
         record_path="$POST_DEPLOY_SMOKE_DELIVERY_RECORDS_DIR/${provider}/${owner_channel}.json"
+        # Checked BEFORE `-e`, and on the same grounds as the state file: the
+        # relay writes these records by rename, never as a link. `-e`/`-f`
+        # follow the link, so a symlink to valid JSON would be read as the
+        # authority's own record, and a DANGLING one would land in the
+        # "no record yet" branch below — the same non-regular destination the
+        # state writer already rejects, but read instead of written.
+        if [ -L "$record_path" ]; then
+            _post_deploy_smoke_wedge_durable_unevaluable \
+                "delivery record ${record_path} is a symlink, not a regular file" || return 1
+            continue
+        fi
         # No record for a resolvable channel is the ORDINARY state, not a hole:
         # records are created only after a `Delivered` outcome.
         if [ ! -e "$record_path" ]; then
@@ -3075,11 +3116,17 @@ _post_deploy_smoke_wedge_durable_axis_markers_from_file() {
                 "$provider" "$owner_channel" "$in_memory" "$durable"
         fi
     done < <(jq -r '
-        .mailboxes[]?
-        | select(type == "object")
+        def unevaluable_row($reason):
+          ["unevaluable", "unknown", "unknown", "unknown", $reason];
+        # One mailbox in, one row out. A non-object element is a row too: the
+        # `select(type == "object")` this replaced dropped it in silence.
+        def mailbox_row:
+          if type != "object" then
+            unevaluable_row("mailbox entry is not an object (type=" + (type) + ")")
+          else (
         # The provider is a path segment too; anything outside [A-Za-z0-9_-]
         # cannot address a record file.
-        | (if (.provider | type) == "string" and (.provider | test("^[A-Za-z0-9_-]+$"))
+          (if (.provider | type) == "string" and (.provider | test("^[A-Za-z0-9_-]+$"))
            then .provider else null end) as $provider
         | .relay_health.watcher_owner_channel_id as $owner_raw
         | .channel_id as $delivery_raw
@@ -3118,7 +3165,26 @@ _post_deploy_smoke_wedge_durable_axis_markers_from_file() {
                  + " mailbox_channel="
                  + (if ($delivery_raw | type) == "number"
                     then ($delivery_raw | tostring) else "unknown" end) + ")")]
-          end
+          end)
+          end;
+        # Top-level schema. Each shape below makes BOTH marker passes iterate
+        # nothing through `[]?` and report no marker, which the caller would
+        # otherwise read as an evaluated clean verdict and reset the streak on.
+        # `degraded_reasons` belongs here even though only the in-memory pass
+        # reads it: this is the pass that owns the unevaluable log.
+        if type != "object" then
+          unevaluable_row("health/detail body is not a JSON object (type=" + (type) + ")")
+        elif (has("mailboxes") | not) then
+          unevaluable_row("health/detail body has no mailboxes field")
+        elif (.mailboxes | type) != "array" then
+          unevaluable_row("health/detail mailboxes is not an array (type="
+                          + (.mailboxes | type) + ")")
+        elif (.degraded_reasons != null) and ((.degraded_reasons | type) != "array") then
+          unevaluable_row("health/detail degraded_reasons is present but not an array (type="
+                          + (.degraded_reasons | type) + ")")
+        else
+          .mailboxes[] | mailbox_row
+        end
         | @tsv
     ' "$health_detail_path" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE")
 }

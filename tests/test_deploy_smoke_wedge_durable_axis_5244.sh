@@ -683,6 +683,161 @@ if [ "$marker_a" = "$marker_c" ]; then
     fail_test "T14: changing the durable offset must change the marker string"
 fi
 
+# --- T20. the TOP-LEVEL health/detail schema is checked, not assumed --------
+# T16 covers a malformed delivery RECORD. These are one level up: on every body
+# below both marker passes iterate nothing through their `[]?` and report no
+# marker, which the caller used to read as an evaluated clean verdict and reset
+# the streak on. "No output" is not "evaluated, nothing found" — that IS #5244.
+top_level_case() {
+    local label="$1" body="$2"
+    reset_state
+    printf '%s\n' "$body" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+    # A record that WOULD prove a wedge if any mailbox were readable, so a pass
+    # here cannot be explained by "there was nothing to find".
+    write_delivery_record "$OWNER_SNOWFLAKE" '{"range":[0,100],"generation_mtime_ns":1,"attempts":1}'
+    markers=$(_post_deploy_smoke_wedge_all_markers_from_file "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY")
+    if [ -n "$markers" ]; then
+        fail_test "T20/$label: a malformed top-level body must not emit a wedge marker, got: '$markers'"
+    fi
+    if [ ! -s "$POST_DEPLOY_SMOKE_WEDGE_UNEVALUABLE" ]; then
+        fail_test "T20/$label: a malformed top-level body must be recorded as unevaluable"
+    fi
+}
+top_level_case "mailboxes-absent" '{"fully_recovered":true,"degraded_reasons":[]}'
+top_level_case "mailboxes-null" '{"fully_recovered":true,"mailboxes":null}'
+top_level_case "mailboxes-string" '{"fully_recovered":true,"mailboxes":"none"}'
+top_level_case "mailboxes-number" '{"fully_recovered":true,"mailboxes":0}'
+top_level_case "mailboxes-object" '{"fully_recovered":true,"mailboxes":{"a":null}}'
+top_level_case "mailbox-entry-null" '{"fully_recovered":true,"mailboxes":[null]}'
+top_level_case "degraded-reasons-string" \
+    '{"fully_recovered":true,"degraded_reasons":"relay wedge","mailboxes":[]}'
+# A non-null, non-object mailbox ENTRY (string/number/array) is not in the list
+# above because it does not reach this classification: the in-memory pass
+# indexes it first and jq errors, so the whole extraction returns nonzero and
+# the caller raises a hard FAIL. Only `null` is absorbed silently, hence the
+# entry case above. Measured: `"mailboxes":["claude"]` gives extraction rc=1.
+reset_state
+printf '%s\n' '{"fully_recovered":true,"mailboxes":["claude"]}' \
+    > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+rc=0
+_post_deploy_smoke_wedge_all_markers_from_file "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" \
+    > /dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 0 ]; then
+    fail_test "T20/entry-string: an unindexable mailbox entry must not extract cleanly"
+fi
+
+# An EMPTY mailbox list in a well-formed body is not a schema violation: a node
+# with no active relay channel is ordinary, and classifying it unevaluable
+# would drive every such deploy to the skip threshold.
+reset_state
+printf '%s\n' '{"fully_recovered":true,"degraded_reasons":[],"mailboxes":[]}' \
+    > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+markers=$(_post_deploy_smoke_wedge_all_markers_from_file "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY")
+if [ -n "$markers" ]; then
+    fail_test "T20/empty-ok: an empty mailbox list must not emit a marker, got: '$markers'"
+fi
+if [ -s "$POST_DEPLOY_SMOKE_WEDGE_UNEVALUABLE" ]; then
+    fail_test "T20/empty-ok: an empty mailbox list must stay EVALUABLE, log: '$(cat "$POST_DEPLOY_SMOKE_WEDGE_UNEVALUABLE")'"
+fi
+
+# ... and end-to-end it blocks the clean verdict, exactly like T17.
+reset_state
+seed_counter 1
+printf '%s\n' '{"fully_recovered":true,"mailboxes":null}' \
+    > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+rc=0
+_post_deploy_smoke_check_wedges > /dev/null 2>&1 || rc=$?
+if [ "$rc" -ne 0 ]; then
+    fail_test "T20: one unevaluable top-level body is advisory on its own, got rc=$rc"
+fi
+if [ "$(read_counter)" != "2" ]; then
+    fail_test "T20: a malformed top-level body must count as a skip, not reset, got '$(read_counter)'"
+fi
+
+# --- T21. a SYMLINKED delivery record is unevaluable, never authority -------
+# The relay writes records by rename, never as a link. `-e`/`-f` follow links,
+# so this is the read-side twin of the state writer's destination guard (T18).
+reset_state
+health_detail_with_mailbox "$OWNER_SNOWFLAKE" 500
+mkdir -p "$POST_DEPLOY_SMOKE_DELIVERY_RECORDS_DIR/claude"
+printf '{"delivered_frontier":{"range":[0,100],"generation_mtime_ns":1,"attempts":1}}\n' \
+    > "$TMP_ROOT/planted-record.json"
+ln -s "$TMP_ROOT/planted-record.json" \
+    "$POST_DEPLOY_SMOKE_DELIVERY_RECORDS_DIR/claude/${OWNER_SNOWFLAKE}.json"
+markers=$(_post_deploy_smoke_wedge_all_markers_from_file "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY")
+if [ -n "$markers" ]; then
+    fail_test "T21: a symlinked record must not be read as the authority's own, got: '$markers'"
+fi
+if ! grep -q 'symlink' "$POST_DEPLOY_SMOKE_WEDGE_UNEVALUABLE"; then
+    fail_test "T21: a symlinked record path must be recorded as unevaluable"
+fi
+
+# A DANGLING link is the worse half: `-e` is false, so without the check it
+# lands in the ordinary "no record yet" branch and reads as clean.
+reset_state
+health_detail_with_mailbox "$OWNER_SNOWFLAKE" 500
+mkdir -p "$POST_DEPLOY_SMOKE_DELIVERY_RECORDS_DIR/claude"
+ln -s "$TMP_ROOT/there-is-no-such-record.json" \
+    "$POST_DEPLOY_SMOKE_DELIVERY_RECORDS_DIR/claude/${OWNER_SNOWFLAKE}.json"
+markers=$(_post_deploy_smoke_wedge_all_markers_from_file "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY")
+if [ -n "$markers" ]; then
+    fail_test "T21/dangling: a dangling record symlink must not emit a marker, got: '$markers'"
+fi
+if ! grep -q 'symlink' "$POST_DEPLOY_SMOKE_WEDGE_UNEVALUABLE"; then
+    fail_test "T21/dangling: a dangling record symlink must be unevaluable, not 'no record yet'"
+fi
+
+# --- T22. jq older than 1.7 is an ACCOUNTING failure, not a silent read -----
+# Preserving a number's source literal is a jq 1.7 feature. Up to 1.6 the
+# IEEE-754 conversion happens at parse time, so `.id | tostring` ALONE mangles
+# a snowflake, the mangled id addresses a record path that cannot exist, and
+# the durable axis takes the ordinary "no record yet" branch — a clean verdict
+# on a relay it never read. `--all-nodes` runs this script on peers whose jq is
+# an independent install, so the version is not knowable from the deploy node.
+REAL_JQ="$(command -v jq)"
+stub_jq_version() {
+    local dir="$1" reported="$2"
+    mkdir -p "$dir"
+    cat > "$dir/jq" <<EOF
+#!/bin/sh
+if [ "\$1" = "--version" ]; then
+    printf '%s\n' "$reported"
+    exit 0
+fi
+exec "$REAL_JQ" "\$@"
+EOF
+    chmod +x "$dir/jq"
+}
+
+for reported in "jq-1.6" "jq-1.5" "jq-0.9" "jq-1" "jq-" "not-a-version" ""; do
+    reset_state
+    stub_jq_version "$TMP_ROOT/jqstub" "$reported"
+    rc=0
+    (
+        PATH="$TMP_ROOT/jqstub:$PATH"
+        _post_deploy_smoke_wedge_skip "startup recovery state unavailable"
+    ) > /dev/null 2>&1 || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        fail_test "T22: jq version '$reported' must fail the check, not degrade to a silent skip"
+    fi
+done
+
+# The gate must not reject the versions that ARE safe, or it fails every
+# deploy instead — a fail-closed gate still has to let the good case through.
+for reported in "jq-1.7" "jq-1.7.1" "jq-1.7.1-apple" "jq-1.8.0" "jq-2.0"; do
+    reset_state
+    stub_jq_version "$TMP_ROOT/jqstub" "$reported"
+    rc=0
+    (
+        PATH="$TMP_ROOT/jqstub:$PATH"
+        _post_deploy_smoke_wedge_skip "startup recovery state unavailable"
+    ) > /dev/null 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        fail_test "T22: jq version '$reported' must be accepted, got rc=$rc"
+    fi
+done
+rm -rf "$TMP_ROOT/jqstub"
+
 if [ "$failures" -ne 0 ]; then
     printf '%s\n' "test_deploy_smoke_wedge_durable_axis_5244: $failures assertion(s) failed" >&2
     exit 1
