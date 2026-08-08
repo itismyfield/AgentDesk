@@ -2892,7 +2892,6 @@ _post_deploy_smoke_wedge_gate_state() {
 #
 #   consumer (function : field touched)          required shape  gate clause
 #   ------------------------------------------   --------------  -----------------
-#   all consumers : the body itself              object          type == "object"
 #   _markers_from_file : .degraded_reasons[]?    array           (.degraded_reasons|type)
 #   _markers_from_file : .mailboxes[]? and the mailbox fields below
 #                                                    array        (.mailboxes|type)
@@ -2934,8 +2933,7 @@ _post_deploy_smoke_wedge_gate_body() {
         return 1
     fi
     printf '%s' "$POST_DEPLOY_SMOKE_WEDGE_GATED_BODY" | jq -e '
-        (type == "object")
-        and ((.mailboxes | type) == "array")
+        ((.mailboxes | type) == "array")
         and ((.degraded_reasons | type) == "array")
         and ((.fully_recovered | type) == "boolean")
     ' >/dev/null 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"
@@ -2954,7 +2952,7 @@ _post_deploy_smoke_wedge_gate() {
     elif ! _post_deploy_smoke_wedge_gate_state; then
         reason="skip state ${POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE} is not a readable/writable regular file"
     elif ! _post_deploy_smoke_wedge_gate_body "$body_path"; then
-        reason="/api/health/detail body unavailable, or not an object carrying a mailboxes array, a degraded_reasons array, and a boolean fully_recovered"
+        reason="/api/health/detail body unavailable, or not carrying a mailboxes array, a degraded_reasons array, and a boolean fully_recovered"
     else
         return 0
     fi

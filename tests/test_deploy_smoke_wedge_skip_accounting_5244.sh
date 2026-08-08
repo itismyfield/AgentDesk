@@ -179,7 +179,7 @@ ln -sf "$STUB_BIN/curl" "$NOJQ_BIN/curl"
 # what the gate now demands.
 CLEAN_BODY='{"fully_recovered": true, "mailboxes": [], "degraded_reasons": []}'
 WEDGED_BODY='{"fully_recovered": true, "degraded_reasons": [], "mailboxes": [{"provider":"claude","channel_id":"c1","relay_stall_state":"tmux_alive_relay_dead","relay_health":{"desynced":true}}]}'
-ACTIVE_BODY='{"fully_recovered": true, "degraded_reasons": [], "mailboxes": [{"provider":"claude","channel_id":"c1","relay_stall_state":"active_foreground_stream","inflight_state_present":true,"watcher_attached":true,"relay_health":{"desynced":false,"stale_thread_proof":false,"watcher_attached_stale":false}}]}'
+ACTIVE_BODY='{"fully_recovered": true, "degraded_reasons": [], "mailboxes": [{"provider":"claude","channel_id":"c1","relay_stall_state":"active_foreground_stream","inflight_state_present":false,"watcher_attached":true,"relay_health":{"desynced":false,"stale_thread_proof":false,"watcher_attached_stale":false}}]}'
 OWNERLESS_BODY='{"fully_recovered": true, "degraded_reasons": [], "mailboxes": [{"provider":"claude","channel_id":"c1","relay_stall_state":"healthy","inflight_state_present":true,"watcher_attached":true,"relay_health":{"desynced":false,"stale_thread_proof":false,"watcher_attached_stale":false}}]}'
 UNRECOVERED_BODY='{"fully_recovered": false, "mailboxes": [], "degraded_reasons": []}'
 
@@ -432,7 +432,6 @@ done
 #
 #   consumer : field                              broken by rows tagged
 #   -------------------------------------------   ---------------------
-#   all consumers : the body is an object          [object]
 #   _markers_from_file : .mailboxes[]?             [mailboxes]
 #   _markers_from_file : .degraded_reasons[]?      [degraded_reasons]
 #   _fully_recovered_from_file : .fully_recovered  [fully_recovered]
