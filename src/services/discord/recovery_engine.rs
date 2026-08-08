@@ -85,7 +85,7 @@ mod unix_journal;
 // (`watchers::lifecycle`, `manual_rebind`, the restart-path reattach calls) stay
 // byte-identical.
 #[path = "recovery_engine/mint_gate.rs"]
-mod mint_gate;
+pub(in crate::services::discord) mod mint_gate;
 #[path = "recovery_engine/runtime.rs"]
 mod runtime;
 // #3834 r2: behavior-preserving extraction of the terminal recovery delivery /
@@ -196,7 +196,7 @@ pub(in crate::services::discord) use self::restore_inflight::{
 };
 use self::restore_persist_outcome::{RestorePersistOutcome, restore_codex_rollout_output_path};
 pub(super) use self::runtime::reregister_active_turn_from_inflight;
-use self::runtime::reregister_active_turn_from_inflight_with_outlook;
+pub(in crate::services::discord) use self::runtime::reregister_active_turn_from_inflight_with_outlook;
 pub(in crate::services::discord) use self::terminal_text_idempotency::RecoveryDeliveryContext;
 use self::tmux_probe::tmux_session_alive_with_retry;
 // #3479: re-import the analytics + transcript helpers so root call sites stay

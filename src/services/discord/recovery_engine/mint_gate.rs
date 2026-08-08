@@ -1,18 +1,20 @@
 //! Read-only recovery mailbox-mint outlook.
 //!
 //! The caller supplies the results of its one filesystem probe and one watcher
-//! registry probe. This module only classifies those values; it does not claim a
-//! watcher, mint a mailbox token, or acquire a lock.
+//! registry probe. The registry probe briefly acquires DashMap shard read guards;
+//! this path adds no global guard and holds no lock across an `.await`. This module
+//! only classifies the supplied values; it does not claim a watcher or mint a
+//! mailbox token.
+//!
+//! A refusal returns from runtime re-registration after its WARN + structured
+//! event and before finalizer-ledger reseed or `readopted_from_inflight` recording.
+//! The original durable row may remain, but a newly refused adoption does not make
+//! it an eligible #4370 stale-reclaim owner.
 //!
 //! This gate does not guarantee:
 //! - that a `WillSpawn` or `Unknown` classification ultimately installs a watcher;
 //!   the later path resolver and claim can still decline it;
 //! - atomicity between the probes and the later watcher claim;
-//! - that a refusal removes recovery-adoption residue. It can leave a durable
-//!   `readopted_from_inflight` row with an empty mailbox. If a successor claims
-//!   that mailbox before replacing the row, the pair is a new input to #4370
-//!   stale reclaim's `OwnerInflightReplaced` arm; its `>= 120s` age gate is the
-//!   load-bearing defense for that shape;
 //! - production wiring from either `restore_inflight_turns` loop site or from the
 //!   incumbent watcher registry probe. Measured on 2026-08-08, both
 //!   `cargo test --lib recovery_engine` and `cargo test --lib mint_gate` passed
@@ -22,7 +24,7 @@
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum WatcherInstallOutlook {
+pub(in crate::services::discord) enum WatcherInstallOutlook {
     WillSpawn,
     NoOutputPath,
     IncumbentReuse { owner: ChannelId },

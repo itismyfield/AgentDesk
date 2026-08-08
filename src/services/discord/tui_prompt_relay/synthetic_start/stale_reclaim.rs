@@ -9,9 +9,6 @@ use super::*;
 ///     freed at once.
 ///   - ABSENT row + ledger `finished` (#4370 R3-1) → `OwnerInflightAbsent`,
 ///     reclaimed only after `>= 120s`.
-///   - PRESENT re-adopted row X + successor mailbox owner Y before Y replaces
-///     the row (#5242 refusal residue) → `OwnerInflightReplaced`, reclaimed only
-///     after `>= 120s`.
 ///
 /// Note a re-adopted turn's `turn_started_at` is RESET to the re-adopt time
 /// (`turn_orchestrator.rs`), so this gate measures age-since-re-adopt, not the
@@ -237,30 +234,18 @@ fn stale_synthetic_mailbox_owner_reclaim_reason(
 ///     defeat the fix — the observed task-notification loss occurred ~79s after
 ///     restart (this present-row `Finalized` shape is what covers the sub-120s
 ///     follow-up loss; see R3-4).
-///   - `OwnerInflightReplaced`  — age `>= 120s` REQUIRED. This arm is reachable
-///     for a re-adopted real owner after #5242: a mint refusal can leave marked
-///     row X while the mailbox is empty, and a successor Y can claim the mailbox
-///     before replacing X. The classifier accepts X's marker/owner, then the
-///     reason observes `X.user_msg_id != Y.active_user_message_id`.
+///   - `OwnerInflightReplaced`  — age `>= 120s` REQUIRED. The #4018 synthetic
+///     owner can still reach this arm. For a real owner, #5242 mint refusal is no
+///     longer a producer: runtime returns after refusal observability but before
+///     the finalizer-ledger and `readopted_from_inflight` records, so its remaining
+///     X row is rejected by `classify_reclaimable_mailbox_owner` even when a
+///     same-owner successor Y has held the mailbox for more than 120s.
 ///
-///     Two observations that previously made this arm look unreachable remain
-///     true only after the durable row and mailbox have converged:
-///       (a) once Y writes its FRESH row (marker `false`, absent from the ledger
-///           under this id), `classify_reclaimable_mailbox_owner` returns `None`
-///           before this reason is consulted; and
-///       (b) when the present row and mailbox describe the SAME nonzero turn,
-///           `active_user_message_id` is that turn's
-///           `effective_finalizer_turn_id()` and equals its `user_msg_id`, so the
-///           mismatch is false. Id-0 rows are still refused at BOTH ends:
-///           recovery never records them (`readopted_ledger_record_allowed`) and
-///           `classify_reclaimable_mailbox_owner` never classifies them.
-///
-///     Neither observation applies during the marked-X / successor-Y window. In
-///     that shape the `>= 120s` check is the only load-bearing defense in this
-///     reclaim path against releasing fresh Y. The R3-4 note about later dropping
-///     the defense-in-depth gate applies ONLY to a `finished` absent row, never to
-///     this arm unless another load-bearing guard first replaces the age check.
-///     The arm also remains reachable for the #4018 synthetic owner.
+///     This safety does not assume X and Y's durable state converges. Intake's
+///     create-new write can leave X in place while Y runs. The enforced fact is
+///     narrower: gate refusal did not mark X as re-adopted, so the mismatch reason
+///     is never consulted for that residue. The age check remains for every other
+///     eligible `OwnerInflightReplaced` shape.
 #[derive(Clone, Copy)]
 enum ReclaimableMailboxOwner {
     /// #4018 — the TUI-direct synthetic relay owner.

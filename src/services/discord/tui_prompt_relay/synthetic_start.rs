@@ -1584,13 +1584,12 @@ mod tests {
         );
     }
 
-    /// #5242 P2-4: a mint refusal leaves the marked X row on disk and the mailbox
-    /// empty. If a new real-user turn Y claims that slot before replacing X's row,
-    /// stale-reclaim classifies the transient mismatch as OwnerInflightReplaced.
-    /// The positive-age gate is the concrete defense during that handoff window:
-    /// a freshly-started Y (<120s) must remain live and keep its exact token.
+    /// Defense-in-depth for an eligible marked-X / successor-Y mismatch from any
+    /// source other than the now-ineligible mint-refusal path. The positive-age
+    /// gate remains part of `OwnerInflightReplaced`: a freshly-started Y (<120s)
+    /// must remain live and keep its exact token.
     #[tokio::test(flavor = "current_thread")]
-    async fn readopted_x_row_does_not_reclaim_fresh_successor_y_before_age_gate() {
+    async fn marked_x_row_does_not_reclaim_fresh_successor_y_before_age_gate() {
         let root = tempfile::tempdir().expect("runtime root");
         let _env = crate::config::set_agentdesk_root_for_test(root.path());
         let provider = ProviderKind::Claude;
@@ -1601,12 +1600,12 @@ mod tests {
         let y_id = MessageId::new(5_242_302);
         let synthetic_id = MessageId::new(5_242_303);
 
-        // Exact state left by the refusal path: durable marked X, no mailbox
-        // token. The runtime mint-gate test separately proves production creates
-        // this combination rather than merely constructing it as a fixture.
+        // Construct the eligible marked-X row directly. Production mint refusal
+        // no longer creates this shape; the fixture pins the age gate for other
+        // callers or historical rows that do qualify for the replaced arm.
         let mut x_state = real_user_inflight_state(channel_id, x_id, tmux, false);
         x_state.readopted_from_inflight = true;
-        inflight::save_inflight_state(&x_state).expect("save refused marked X row");
+        inflight::save_inflight_state(&x_state).expect("save eligible marked X row");
         let empty = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
         assert!(empty.cancel_token.is_none());
 
@@ -1633,6 +1632,71 @@ mod tests {
         assert!(
             !y_token.cancelled.load(Ordering::Relaxed),
             "the age gate is a live-turn-theft defense, not only a timing delay"
+        );
+        let after = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
+        assert_eq!(after.active_request_owner, Some(real_owner()));
+        assert_eq!(after.active_user_message_id, Some(y_id));
+        assert!(Arc::ptr_eq(
+            after.cancel_token.as_ref().expect("Y token remains"),
+            &y_token
+        ));
+    }
+
+    /// #5242 P1: production mint refusal leaves durable X only as an ordinary,
+    /// unmarked row. A same-owner successor Y can claim the mailbox and remain
+    /// live beyond the positive-age threshold while X blocks Y's create-new
+    /// durable write; X must not qualify Y for a stale-reclaim `Cancel`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn mint_refusal_x_row_does_not_cancel_aged_live_successor_y() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(5_242_310);
+        let tmux = "AgentDesk-claude-5242-aged-successor";
+        let x_id = MessageId::new(5_242_311);
+        let y_id = MessageId::new(5_242_312);
+        let synthetic_id = MessageId::new(5_242_313);
+
+        let x_state = real_user_inflight_state(channel_id, x_id, tmux, false);
+        inflight::save_inflight_state(&x_state).expect("seed recovery X row");
+        assert!(
+            !crate::services::discord::recovery::reregister_active_turn_from_inflight_with_outlook(
+                &shared,
+                &x_state,
+                crate::services::discord::recovery::mint_gate::WatcherInstallOutlook::NoOutputPath,
+            )
+            .await,
+            "precondition: production NoOutputPath outlook refuses X's mailbox mint"
+        );
+        let refused_x = inflight::load_inflight_state(&provider, channel_id.get())
+            .expect("refusal leaves the original X row");
+        assert_eq!(refused_x.user_msg_id, x_id.get());
+
+        // Y wins the mailbox but cannot replace X durably because intake uses
+        // create_new(O_EXCL). Model the observed long-turn window directly: Y is
+        // still live after the reclaim threshold while the unmarked X row remains.
+        let y_token = seed_real_owner_mailbox(&shared, channel_id, y_id).await;
+        let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+            &shared,
+            &provider,
+            channel_id,
+            tmux,
+            y_id,
+            Some(real_owner()),
+            ActiveTurnKind::UserOrAgent,
+            old_owner_started_at(),
+            synthetic_id,
+        )
+        .await;
+
+        assert!(
+            !reclaimed,
+            "P1: an aged live successor Y must not receive Cancel from refusal residue"
+        );
+        assert!(
+            !y_token.cancelled.load(Ordering::Relaxed),
+            "P1: Y's exact live cancel token must remain untouched"
         );
         let after = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
         assert_eq!(after.active_request_owner, Some(real_owner()));

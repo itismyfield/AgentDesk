@@ -333,14 +333,15 @@ async fn reregister_active_turn_from_inflight_inner(
                 }),
             },
         );
-        false
+        return false;
     };
 
-    // Recovery adoption, not mailbox mint success, is the premise for these two
-    // records. This deliberately also covers a legacy `started == false` result
-    // caused by a token race, background yields, or queue-persistence failure:
-    // before #5242 those corners skipped both records, but retaining the durable
-    // marker is the intended #4380 crash-resume protection.
+    // An explicit watcher-outlook refusal returned above. Once watcher installation
+    // remains possible, recovery adoption, not mailbox mint success, is the premise
+    // for these two records. This deliberately also covers a legacy
+    // `started == false` result caused by a token race, background yields, or
+    // queue-persistence failure: before #5242 those corners skipped both records,
+    // but retaining the durable marker is the intended #4380 crash-resume protection.
     reseed_recovered_finalizer_ledger(
         shared,
         channel_id,
@@ -367,7 +368,7 @@ pub(in crate::services::discord) async fn reregister_active_turn_from_inflight(
     .await
 }
 
-pub(super) async fn reregister_active_turn_from_inflight_with_outlook(
+pub(in crate::services::discord) async fn reregister_active_turn_from_inflight_with_outlook(
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
     outlook: mint_gate::WatcherInstallOutlook,
@@ -792,7 +793,7 @@ mod mint_gate_runtime_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mint_gate_refusal_leaves_mailbox_empty_but_preserves_c1_records() {
+    async fn mint_gate_refusal_leaves_no_reclaim_adoption_records() {
         let root = tempfile::tempdir().expect("runtime root");
         let _env = crate::config::set_agentdesk_root_for_test(root.path());
         let shared = super::super::make_shared_data_for_tests();
@@ -818,17 +819,32 @@ mod mint_gate_runtime_tests {
             "MUTATION GUARD: refusal must leave the mailbox empty, not mint an orphan token"
         );
         assert!(
-            shared
+            !shared
                 .turn_finalizer
                 .has_live_watcher_pending(channel_id, shared.restart.current_generation)
                 .await,
-            "C1: mint refusal still re-seeds the recovered finalizer ledger"
+            "MUTATION GUARD: a refusal must not seed finalizer authority for a watcher that will not exist"
         );
         let persisted = inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get())
             .expect("refused recovery keeps its durable row");
         assert!(
-            persisted.readopted_from_inflight,
-            "C1: mint refusal must retain the #4380 crash-resume marker"
+            !persisted.readopted_from_inflight,
+            "MUTATION GUARD: a refused recovery row must not become a #4370 stale-reclaim input"
+        );
+        shared.mark_readopted_mailbox_owner_finished(
+            &ProviderKind::Claude,
+            channel_id.get(),
+            state.request_owner_user_id,
+            user_msg_id.get(),
+        );
+        assert!(
+            !shared.is_readopted_mailbox_owner(
+                &ProviderKind::Claude,
+                channel_id.get(),
+                state.request_owner_user_id,
+                user_msg_id.get(),
+            ),
+            "MUTATION GUARD: a refusal must not leave an in-memory #4370 owner record"
         );
 
         let event = crate::services::observability::events::recent(100)

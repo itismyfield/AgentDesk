@@ -318,7 +318,9 @@ time for diagnostics; neither is a stored approval value.
     `find_watcher_by_tmux_session` and
     `restore_scan_should_skip_existing_watcher` lifecycle queries so recovery's
     mailbox-mint outlook can inspect incumbent reuse; their implementations and
-    watcher claim behavior remain unchanged; #4895 removes untyped auth/overload terminal variants and authority-bearing outcome fields; parser diagnostics now use a fixed redacted category while generic error results remain `HardResult`; test-only #4277 re-exports
+    watcher claim behavior remain unchanged; the new registry query briefly holds
+    DashMap shard read guards, with no new global guard and no lock held across an
+    await; #4895 removes untyped auth/overload terminal variants and authority-bearing outcome fields; parser diagnostics now use a fixed redacted category while generic error results remain `HardResult`; test-only #4277 re-exports
     the watcher delivery-lease key helper so session-sink production-entry tests
     prove bidirectional contention on the same idle JSONL range; -9 from the #4804
     Windows-compile hotfix moving `footer_background_marker_session_key` into
