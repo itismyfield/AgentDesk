@@ -118,7 +118,11 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: cargo test (non-PG)
-        run: cargo test --all-targets -- --skip _pg_ --skip postgres_
+        shell: bash
+        run: |
+          source scripts/ci/non-pg-test-filter.sh
+          cargo test --all-targets -- "${NON_PG_SKIP_ARGS[@]}"
+          run_non_pg_filter_false_positives
         env:
           RUST_BACKTRACE: 1
 
@@ -160,7 +164,11 @@ jobs:
         run: cargo test --lib discord_thread_create -- --test-threads=1
 
       - name: cargo test (non-PG)
-        run: cargo test --all-targets -- --skip _pg_ --skip postgres_
+        shell: bash
+        run: |
+          source scripts/ci/non-pg-test-filter.sh
+          cargo test --all-targets -- "${NON_PG_SKIP_ARGS[@]}"
+          run_non_pg_filter_false_positives
         env:
           RUST_BACKTRACE: 1
 
@@ -205,13 +213,13 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: cargo test (postgres bootstrap)
-        timeout-minutes: 15
-        run: cargo test postgres_ -- --nocapture --test-threads=1
-
-      - name: cargo test (PG routes)
-        timeout-minutes: 15
-        run: cargo test _pg_ -- --nocapture --test-threads=1
+      # 30 minutes is the old 15 + 15 arithmetic budget, not measured runtime: selected lib tests grow 385 -> 636 and PG-connected tests 276 -> 422 under `--test-threads=1`.
+      - name: cargo test (PostgreSQL bootstrap and routes)
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          source scripts/ci/non-pg-test-filter.sh
+          cargo test --all-targets -- "${PG_INCLUDE_ARGS[@]}" --nocapture --test-threads=1
 
       - name: Stop PostgreSQL service
         if: always()

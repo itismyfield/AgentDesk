@@ -27,6 +27,20 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_REL = Path("scripts/pg_test_lane_baseline.txt")
 MANIFEST_REL = Path("scripts/pg_test_lane_manifest.txt")
 ALLOWLIST_REL = Path("scripts/pg_test_lane_allowlist.txt")
+NON_PG_FILTER_REL = Path("scripts/ci/non-pg-test-filter.sh")
+LIB_TEST_INVENTORY_REL = Path("scripts/lib_test_inventory_manifest.txt")
+NON_PG_FILTER_WORKFLOWS = (
+    Path(".github/workflows/ci-pr.yml"),
+    Path(".github/workflows/ci-nightly.yml"),
+)
+NON_PG_FILTER_REQUIRED_JOBS = frozenset({
+    ".github/workflows/ci-pr.yml:library_sweep",
+    ".github/workflows/ci-nightly.yml:full_macos",
+    ".github/workflows/ci-nightly.yml:full_windows",
+})
+PG_INCLUDE_REQUIRED_JOBS = frozenset({
+    ".github/workflows/ci-nightly.yml:postgres_full",
+})
 SEEDS = (
     "TestPostgresDb", "DispatchPostgresTestDb", "PgRecoveryTestDatabase",
     "PgPool", "connect_and_migrate", "create_test_database",
@@ -832,7 +846,9 @@ def parse_jobs(
     ]
 
 
-def _cargo_commands(text: str) -> list[str]:
+def _cargo_commands(
+    text: str, non_pg_skip_args: tuple[str, ...] = ()
+) -> list[str]:
     """Extract only YAML ``run:`` scalar command lines, never step names.
 
     Block scalar bodies are read for every header :func:`_block_scalar_style`
@@ -862,6 +878,15 @@ def _cargo_commands(text: str) -> list[str]:
     pending: list[str] = []
 
     def collect(value: str) -> None:
+        if non_pg_skip_args:
+            expanded = shlex.join(non_pg_skip_args)
+            value = re.sub(
+                r"[\"']?\$\{NON_PG_SKIP_ARGS\[@\]\}[\"']?", expanded, value
+            )
+            included = shlex.join(non_pg_skip_args[1::2])
+            value = re.sub(
+                r"[\"']?\$\{PG_INCLUDE_ARGS\[@\]\}[\"']?", included, value
+            )
         start = value.find("cargo test")
         if start >= 0:
             commands.append(value[start:])
@@ -908,13 +933,18 @@ def _cargo_commands(text: str) -> list[str]:
     return commands
 
 
-def pg_lane_filters(repo_root: Path, jobs: Iterable[Job], coverage) -> tuple:
+def pg_lane_filters(
+    repo_root: Path,
+    jobs: Iterable[Job],
+    coverage,
+    non_pg_skip_args: tuple[str, ...] = (),
+) -> tuple:
     just_text = (repo_root / "justfile").read_text("utf-8")
     commands = list(coverage.just_recipe_commands(just_text, "test-postgres"))
     for job in jobs:
         if "postgres-service.sh start" not in job.code:
             continue
-        commands.extend(_cargo_commands(job.code))
+        commands.extend(_cargo_commands(job.code, non_pg_skip_args))
         for recipe in re.findall(r"\bjust\s+([A-Za-z0-9_-]+)", job.code):
             try:
                 commands.extend(coverage.just_recipe_commands(just_text, recipe))
@@ -924,12 +954,14 @@ def pg_lane_filters(repo_root: Path, jobs: Iterable[Job], coverage) -> tuple:
     return tuple(dict.fromkeys(lane for lane in lanes if lane is not None))
 
 
-def pgless_lane_filters(jobs: Iterable[Job], coverage) -> tuple:
+def pgless_lane_filters(
+    jobs: Iterable[Job], coverage, non_pg_skip_args: tuple[str, ...] = ()
+) -> tuple:
     lanes = []
     for job in jobs:
         if "postgres-service.sh start" in job.code:
             continue
-        for command in _cargo_commands(job.code):
+        for command in _cargo_commands(job.code, non_pg_skip_args):
             if "--all-targets" not in command or "--skip" not in command:
                 continue
             lane = coverage.cargo_test_filter(command)
@@ -938,7 +970,9 @@ def pgless_lane_filters(jobs: Iterable[Job], coverage) -> tuple:
     return tuple(dict.fromkeys(lanes))
 
 
-def pr_pgless_lane_filters(jobs: Iterable[Job], coverage) -> tuple:
+def pr_pgless_lane_filters(
+    jobs: Iterable[Job], coverage, non_pg_skip_args: tuple[str, ...] = ()
+) -> tuple:
     """Every ``ci-pr.yml`` cargo-test lane that runs without the PG service.
 
     Deliberately WIDER than :func:`pgless_lane_filters`, which only looks at
@@ -959,7 +993,7 @@ def pr_pgless_lane_filters(jobs: Iterable[Job], coverage) -> tuple:
             continue
         if "postgres-service.sh start" in job.code:
             continue
-        for command in _cargo_commands(job.code):
+        for command in _cargo_commands(job.code, non_pg_skip_args):
             lane = coverage.cargo_test_filter(command)
             if lane is not None:
                 lanes.append(lane)
@@ -1075,6 +1109,188 @@ def load_allowlist(path: Path) -> tuple[set[str], set[str]]:
     return tests, files
 
 
+def load_non_pg_skip_args(repo_root: Path) -> tuple[str, ...]:
+    """Read the one executable definition shared by PR and nightly lanes."""
+    path = repo_root / NON_PG_FILTER_REL
+    try:
+        text = path.read_text("utf-8")
+    except FileNotFoundError as error:
+        raise ValueError(f"missing canonical non-PG filter: {path}") from error
+    match = re.search(r"^NON_PG_SKIP_ARGS=\(([^\n()]*)\)\s*$", text, re.MULTILINE)
+    if match is None:
+        raise ValueError(
+            f"{path}: NON_PG_SKIP_ARGS must be one single-line shell array"
+        )
+    args = tuple(shlex.split(match.group(1)))
+    if not args or len(args) % 2 or any(
+        args[index] != "--skip" or not args[index + 1]
+        for index in range(0, len(args), 2)
+    ):
+        raise ValueError(
+            f"{path}: NON_PG_SKIP_ARGS must contain non-empty --skip/value pairs"
+        )
+    return args
+
+
+def load_non_pg_false_positives(repo_root: Path) -> tuple[str, ...]:
+    """Read the replay ids and require a stable, reviewable shell-array form."""
+    path = repo_root / NON_PG_FILTER_REL
+    text = path.read_text("utf-8")
+    match = re.search(
+        r"^NON_PG_FILTER_FALSE_POSITIVES=\(\n(?P<body>(?:[ \t]+[^\n()]+\n)+)\)$",
+        text,
+        re.MULTILINE,
+    )
+    if match is None:
+        raise ValueError(
+            f"{path}: NON_PG_FILTER_FALSE_POSITIVES must be one multiline shell array"
+        )
+    entries = tuple(line.strip() for line in match.group("body").splitlines())
+    if (
+        not entries
+        or list(entries) != sorted(entries)
+        or len(entries) != len(set(entries))
+    ):
+        raise ValueError(
+            f"{path}: NON_PG_FILTER_FALSE_POSITIVES must be non-empty, sorted, and unique"
+        )
+    return entries
+
+
+def load_lib_test_inventory(repo_root: Path) -> set[str]:
+    """Read the checked-in libtest ids used to reject stale replay filters."""
+    path = repo_root / LIB_TEST_INVENTORY_REL
+    tests: set[str] = set()
+    section: str | None = None
+    for lineno, raw in enumerate(path.read_text("utf-8").splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+            continue
+        if section != "tests":
+            raise ValueError(f"unexpected libtest inventory entry: {path}:{lineno}")
+        if line in tests:
+            raise ValueError(f"duplicate libtest inventory entry: {path}:{lineno}")
+        tests.add(line)
+    if not tests:
+        raise ValueError(f"missing [tests] entries: {path}")
+    return tests
+
+
+def non_pg_filter_contract_errors(
+    repo_root: Path, jobs: Iterable[Job]
+) -> tuple[str, ...]:
+    """Require both workflows to consume one filter in the same run scalar.
+
+    This is a wiring contract, not a classifier-quality claim. It proves that
+    the named PR/nightly jobs source and use the canonical arrays, that replay
+    ids still exist, and that no second literal ``--skip`` definition has
+    appeared in either workflow. The literal duplicate scan only understands
+    ``--skip`` spellings; the source/use and assignment checks separately pin
+    the two array expansions but do not interpret arbitrary shell transforms.
+    The PG membership rules remain responsible for what the resulting
+    selection contains.
+    """
+    load_non_pg_skip_args(repo_root)
+    false_positives = load_non_pg_false_positives(repo_root)
+    errors: list[str] = []
+    relevant = {
+        job.key: job
+        for job in jobs
+        if Path(job.workflow) in NON_PG_FILTER_WORKFLOWS
+    }
+    source_command = f"source {NON_PG_FILTER_REL.as_posix()}"
+    variables = ("${NON_PG_SKIP_ARGS[@]}", "${PG_INCLUDE_ARGS[@]}")
+
+    missing_replays = sorted(set(false_positives) - load_lib_test_inventory(repo_root))
+    for test_id in missing_replays:
+        errors.append(
+            f"{NON_PG_FILTER_REL}: replay id is absent from "
+            f"{LIB_TEST_INVENTORY_REL}: {test_id}"
+        )
+
+    for workflow in NON_PG_FILTER_WORKFLOWS:
+        path = repo_root / workflow
+        code = _strip_comments(path.read_text("utf-8"))
+        if re.search(r"(?:^|\s)--skip(?:=|\s)", code):
+            errors.append(
+                f"{workflow}: literal --skip arguments duplicate the canonical "
+                f"definition in {NON_PG_FILTER_REL}"
+            )
+        for array_name in ("NON_PG_SKIP_ARGS", "PG_INCLUDE_ARGS"):
+            if re.search(rf"(?m)^\s*{array_name}\s*(?:\+?=)", code):
+                errors.append(
+                    f"{workflow}: redefines canonical {array_name} after sourcing "
+                    f"{NON_PG_FILTER_REL}"
+                )
+
+    for job in relevant.values():
+        run_headers = [
+            match.start()
+            for match in re.finditer(r"(?m)^\s*(?:-\s+)?run\s*:", job.code)
+        ]
+        for variable in variables:
+            for match in re.finditer(re.escape(variable), job.code):
+                header = max((offset for offset in run_headers if offset < match.start()), default=-1)
+                if header < 0 or source_command not in job.code[header:match.start()]:
+                    errors.append(
+                        f"{job.key}: {variable} is used without sourcing "
+                        f"{NON_PG_FILTER_REL} in the same run scalar"
+                    )
+
+    for key in sorted(NON_PG_FILTER_REQUIRED_JOBS):
+        job = relevant.get(key)
+        if job is None:
+            errors.append(f"{key}: required non-PG filter consumer job is missing")
+            continue
+        variable = "${NON_PG_SKIP_ARGS[@]}"
+        if variable not in job.code:
+            errors.append(f"{key}: does not use the canonical {variable} array")
+        if source_command not in job.code:
+            errors.append(f"{key}: does not source {NON_PG_FILTER_REL}")
+        if "run_non_pg_filter_false_positives" not in job.code:
+            errors.append(
+                f"{key}: does not restore the source-verified non-PG false positives"
+            )
+    for key in sorted(PG_INCLUDE_REQUIRED_JOBS):
+        job = relevant.get(key)
+        if job is None:
+            errors.append(f"{key}: required PG include-filter consumer job is missing")
+            continue
+        variable = "${PG_INCLUDE_ARGS[@]}"
+        if variable not in job.code:
+            errors.append(f"{key}: does not use the derived {variable} array")
+        if source_command not in job.code:
+            errors.append(f"{key}: does not source {NON_PG_FILTER_REL}")
+    return tuple(errors)
+
+
+def check_non_pg_filter_contract(repo_root: Path) -> int:
+    findings: list[Finding] = []
+    jobs = [
+        job
+        for workflow in NON_PG_FILTER_WORKFLOWS
+        for job in parse_jobs(repo_root / workflow, repo_root, findings)
+    ]
+    errors = non_pg_filter_contract_errors(repo_root, jobs)
+    for error in errors:
+        print(f"FAIL: [non-pg-filter-contract] {error}", file=sys.stderr)
+    if errors:
+        print(
+            "FAIL: PR and nightly filter lanes must source one canonical filter; "
+            "a literal or missing consumer would recreate divergent definitions.",
+            file=sys.stderr,
+        )
+        return 2
+    print(
+        "PG/non-PG filter contract passed: PR/nightly required consumers share "
+        f"{NON_PG_FILTER_REL}"
+    )
+    return 0
+
+
 def analyze(repo_root: Path, allowlist_path: Path | None = None) -> Analysis:
     coverage = _load_coverage_module(repo_root)
     findings: list[Finding] = []
@@ -1083,6 +1299,11 @@ def analyze(repo_root: Path, allowlist_path: Path | None = None) -> Analysis:
         | set((repo_root / ".github/workflows").glob("*.yaml"))
     )
     jobs = [job for path in workflows for job in parse_jobs(path, repo_root, findings)]
+    non_pg_skip_args = (
+        load_non_pg_skip_args(repo_root)
+        if (repo_root / NON_PG_FILTER_REL).is_file()
+        else ()
+    )
     for key, target in pr_reusable_workflow_jobs(jobs):
         findings.append(Finding(
             "pr-job-delegates-to-reusable-workflow",
@@ -1093,9 +1314,9 @@ def analyze(repo_root: Path, allowlist_path: Path | None = None) -> Analysis:
     inventory = discover_pg_inventory(repo_root, findings)
     allowed_tests, allowed_files = load_allowlist(allowlist_path or repo_root / ALLOWLIST_REL)
     active_tests = {name: path for name, path in inventory.tests.items() if name not in allowed_tests and path not in allowed_files}
-    pg_lanes = pg_lane_filters(repo_root, jobs, coverage)
-    pgless_lanes = pgless_lane_filters(jobs, coverage)
-    pr_pgless_lanes = pr_pgless_lane_filters(jobs, coverage)
+    pg_lanes = pg_lane_filters(repo_root, jobs, coverage, non_pg_skip_args)
+    pgless_lanes = pgless_lane_filters(jobs, coverage, non_pg_skip_args)
+    pr_pgless_lanes = pr_pgless_lane_filters(jobs, coverage, non_pg_skip_args)
     patterns = parse_pg_db_patterns(repo_root / PR_WORKFLOW_REL)
     debts = {
         "rule1": {name for name in active_tests if not any(lane.selects_test(name) for lane in pg_lanes)},
@@ -1317,6 +1538,9 @@ def check_analysis(
 
 
 def check(repo_root: Path, baseline_path: Path, manifest_path: Path, baseline_ref: str, allowlist_path: Path | None = None) -> int:
+    contract_rc = check_non_pg_filter_contract(repo_root)
+    if contract_rc:
+        return contract_rc
     analysis = analyze(repo_root, allowlist_path)
     baseline = parse_baseline(baseline_path.read_text("utf-8"), str(baseline_path))
     sha, reference = reference_baseline(repo_root, baseline_ref)
@@ -1391,6 +1615,15 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 1
+            # Legacy hermetic fixtures exercise snapshot semantics without a
+            # workflow filter source. A real repository check always calls
+            # `check_non_pg_filter_contract` from `check`, where a missing
+            # source is fatal; when the source exists, regeneration also
+            # refuses divergent workflow consumers.
+            if (root / NON_PG_FILTER_REL).is_file():
+                contract_rc = check_non_pg_filter_contract(root)
+                if contract_rc:
+                    return contract_rc
             manifest.write_text(render_manifest(analysis.inventory), "utf-8")
             baseline.write_text(render_baseline(analysis.debts), "utf-8")
             print(f"wrote {manifest} and {baseline}")

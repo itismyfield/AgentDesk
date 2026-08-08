@@ -996,7 +996,7 @@ fi
 # here accepted a lane narrowed by an extra skip -- the exact evasion the
 # assertion claimed to block. Compare the whole command line instead, as a
 # fixed string, with the YAML block indentation normalised away.
-LANE_COMMAND='python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 2 --skip _pg --skip pg_ --skip postgres -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- --skip _pg --skip pg_ --skip postgres'
+LANE_COMMAND='python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 2 "${NON_PG_SKIP_ARGS[@]}" -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- "${NON_PG_SKIP_ARGS[@]}"'
 # `grep -q` exits the moment it matches, which closes the pipe while `sed`
 # still has the rest of the file to write. GNU sed reports that as
 # "couldn't flush stdout: Broken pipe" and exits non-zero; under the
