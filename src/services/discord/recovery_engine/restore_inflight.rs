@@ -710,15 +710,34 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     http, shared, provider, &mut state,
                 )
                 .await;
+                // Restart-report four-value rule: Some(start) yields WillSpawn or
+                // IncumbentReuse; None is NoOutputPath for every runtime. Unknown
+                // is unreachable because this site has no Codex rollout fallback.
+                let watcher_start = tmux_name.as_deref().and_then(|tmux_session_name| {
+                    restart_report_watcher_start(tmux_session_name, &state)
+                });
+                let mint_outlook = watcher_start.as_ref().map_or(
+                    mint_gate::WatcherInstallOutlook::NoOutputPath,
+                    |(output_path, ..)| {
+                        recovery_mint_outlook(
+                            shared,
+                            &state,
+                            tmux_name.as_deref(),
+                            output_path,
+                            true,
+                        )
+                    },
+                );
                 let finish_mailbox_on_completion =
-                    reregister_active_turn_from_inflight(shared, &state).await;
+                    reregister_active_turn_from_inflight_with_outlook(shared, &state, mint_outlook)
+                        .await;
 
                 // Spawn the tmux watcher immediately rather than deferring to
                 // restore_tmux_watchers(): the "watcher will adopt" approach raced
                 // — the session could die in the ~50s gap and lose the response.
                 if let Some(ref tmux_session_name) = tmux_name {
                     if let Some((output_path, initial_offset, current_len, truncated)) =
-                        restart_report_watcher_start(tmux_session_name, &state)
+                        watcher_start
                     {
                         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                         let paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1876,8 +1895,21 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 http, shared, provider, &mut state,
             )
             .await;
+            // Ordinary four-value rule: missing non-Codex is NoOutputPath;
+            // missing CodexTui is Unknown because the rollout resolver below may
+            // find the real path; same-path live incumbent is IncumbentReuse;
+            // every other present-path shape is WillSpawn.
+            let path_exists = std::fs::metadata(&output_path).is_ok();
+            let mint_outlook = recovery_mint_outlook(
+                shared,
+                &state,
+                Some(&tmux_session_name),
+                &output_path,
+                path_exists,
+            );
             let finish_mailbox_on_completion =
-                reregister_active_turn_from_inflight(shared, &state).await;
+                reregister_active_turn_from_inflight_with_outlook(shared, &state, mint_outlook)
+                    .await;
 
             // #4380 backstop: `reregister_active_turn_from_inflight` stamps
             // `readopted_from_inflight`, which the watcher-yield escape hatch honours

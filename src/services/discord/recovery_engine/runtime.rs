@@ -186,6 +186,7 @@ async fn reregister_active_turn_from_inflight_inner(
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
     persist_durable_marker: bool,
+    outlook: mint_gate::WatcherInstallOutlook,
 ) -> bool {
     let Some(finalizer_msg_id) =
         super::inflight::opt_message_id(state.effective_finalizer_turn_id())
@@ -280,45 +281,73 @@ async fn reregister_active_turn_from_inflight_inner(
         return false;
     }
 
-    let cancel_token = Arc::new(CancelToken::new());
-    super::ensure_cancel_token_bound_from_inflight_state(
-        &provider,
-        state,
-        &cancel_token,
-        "inflight reregister active turn",
-    );
-
-    let started = super::mailbox_try_start_turn(
-        shared,
-        channel_id,
-        cancel_token,
-        UserId::new(state.request_owner_user_id),
-        finalizer_msg_id,
-    )
-    .await;
-    if started {
-        reseed_recovered_finalizer_ledger(
+    let started = if outlook.allows_mint() {
+        let cancel_token = Arc::new(CancelToken::new());
+        super::ensure_cancel_token_bound_from_inflight_state(
+            &provider,
+            state,
+            &cancel_token,
+            "inflight reregister active turn",
+        );
+        super::mailbox_try_start_turn(
             shared,
             channel_id,
+            cancel_token,
+            UserId::new(state.request_owner_user_id),
+            finalizer_msg_id,
+        )
+        .await
+    } else {
+        let (reason, owner) = outlook
+            .refusal()
+            .expect("a non-minting watcher outlook has a refusal reason");
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = channel_id.get(),
+            reason,
+            owner_channel_id = owner.map(ChannelId::get),
             finalizer_turn_id,
-            &provider,
-            state.effective_relay_owner_kind(),
+            tmux_session = state.tmux_session_name.as_deref().unwrap_or_default(),
+            "recovery mailbox token mint refused because no watcher will carry its completion authority"
         );
-        // #4370: the mailbox now carries a re-adopted-from-inflight REAL user turn
-        // (owner == request_owner_user_id). Record it in the ledger + on-disk
-        // marker so a later starved injection / task-notification synthetic turn
-        // can reclaim this mailbox once the re-adopted turn is stale — without
-        // this, #4018's synthetic-owner-only reclaim can never free it and the
-        // follow-up relay text is silently dropped.
-        if readopted_ledger_record_allowed(state) {
-            mark_readopted_from_inflight(
-                shared,
-                &provider,
-                channel_id,
-                state,
-                persist_durable_marker,
-            );
-        }
+        crate::services::observability::emit_agent_quality_event(
+            crate::services::observability::AgentQualityEvent {
+                source_event_id: Some(finalizer_turn_id.to_string()),
+                correlation_id: state
+                    .dispatch_id
+                    .clone()
+                    .or_else(|| state.session_key.clone()),
+                agent_id: None,
+                provider: Some(provider.as_str().to_string()),
+                channel_id: Some(channel_id.get().to_string()),
+                card_id: None,
+                dispatch_id: state.dispatch_id.clone(),
+                event_type: "recovery_fired".to_string(),
+                payload: serde_json::json!({
+                    "reason": reason,
+                    "owner_channel_id": owner.map(ChannelId::get),
+                    "finalizer_turn_id": finalizer_turn_id,
+                    "tmux_session": state.tmux_session_name,
+                }),
+            },
+        );
+        false
+    };
+
+    // Recovery adoption, not mailbox mint success, is the premise for these two
+    // records. This deliberately also covers a legacy `started == false` result
+    // caused by a token race, background yields, or queue-persistence failure:
+    // before #5242 those corners skipped both records, but retaining the durable
+    // marker is the intended #4380 crash-resume protection.
+    reseed_recovered_finalizer_ledger(
+        shared,
+        channel_id,
+        finalizer_turn_id,
+        &provider,
+        state.effective_relay_owner_kind(),
+    );
+    if readopted_ledger_record_allowed(state) {
+        mark_readopted_from_inflight(shared, &provider, channel_id, state, persist_durable_marker);
     }
     started
 }
@@ -327,7 +356,21 @@ pub(in crate::services::discord) async fn reregister_active_turn_from_inflight(
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
 ) -> bool {
-    reregister_active_turn_from_inflight_inner(shared, state, true).await
+    reregister_active_turn_from_inflight_inner(
+        shared,
+        state,
+        true,
+        mint_gate::WatcherInstallOutlook::WillSpawn,
+    )
+    .await
+}
+
+pub(super) async fn reregister_active_turn_from_inflight_with_outlook(
+    shared: &Arc<SharedData>,
+    state: &inflight::InflightTurnState,
+    outlook: mint_gate::WatcherInstallOutlook,
+) -> bool {
+    reregister_active_turn_from_inflight_inner(shared, state, true, outlook).await
 }
 
 /// Automatic reattach holds the canonical episode flock across mailbox and
@@ -339,7 +382,13 @@ pub(in crate::services::discord) async fn reregister_active_turn_from_inflight_u
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
 ) -> bool {
-    reregister_active_turn_from_inflight_inner(shared, state, false).await
+    reregister_active_turn_from_inflight_inner(
+        shared,
+        state,
+        false,
+        mint_gate::WatcherInstallOutlook::WillSpawn,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -712,5 +761,92 @@ mod readopted_ledger_record_gate_tests {
             !readopted_ledger_record_allowed(&row(343_742_347_365_974_026, 0)),
             "an id-0 (injected / task-notification) row would misfire OwnerInflightReplaced on a live turn"
         );
+    }
+}
+
+#[cfg(test)]
+mod mint_gate_runtime_tests {
+    use super::{inflight, mint_gate, reregister_active_turn_from_inflight_with_outlook};
+    use crate::services::provider::ProviderKind;
+    use serenity::model::id::{ChannelId, MessageId};
+
+    fn state(channel_id: ChannelId, user_msg_id: MessageId) -> inflight::InflightTurnState {
+        let mut state = inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            channel_id.get(),
+            Some("adk-cc".to_string()),
+            5_242_007,
+            user_msg_id.get(),
+            user_msg_id.get() + 1,
+            "live recovery turn".to_string(),
+            Some("session-5242".to_string()),
+            Some("AgentDesk-claude-5242".to_string()),
+            Some("/missing/agentdesk-5242.jsonl".to_string()),
+            None,
+            0,
+        );
+        state.set_relay_owner_kind(inflight::RelayOwnerKind::Watcher);
+        state
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mint_gate_refusal_leaves_mailbox_empty_but_preserves_c1_records() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let shared = super::super::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(5_242_100);
+        let user_msg_id = MessageId::new(5_242_200);
+        let state = state(channel_id, user_msg_id);
+        inflight::save_inflight_state(&state).expect("seed recovery row");
+
+        let started = reregister_active_turn_from_inflight_with_outlook(
+            &shared,
+            &state,
+            mint_gate::WatcherInstallOutlook::NoOutputPath,
+        )
+        .await;
+
+        assert!(
+            !started,
+            "MUTATION GUARD: NoOutputPath must refuse the recovery token mint"
+        );
+        let snapshot = super::super::mailbox_snapshot(&shared, channel_id).await;
+        assert!(
+            snapshot.cancel_token.is_none() && snapshot.active_user_message_id.is_none(),
+            "MUTATION GUARD: refusal must leave the mailbox empty, not mint an orphan token"
+        );
+        assert!(
+            shared
+                .turn_finalizer
+                .has_live_watcher_pending(channel_id, shared.restart.current_generation)
+                .await,
+            "C1: mint refusal still re-seeds the recovered finalizer ledger"
+        );
+        let persisted = inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get())
+            .expect("refused recovery keeps its durable row");
+        assert!(
+            persisted.readopted_from_inflight,
+            "C1: mint refusal must retain the #4380 crash-resume marker"
+        );
+
+        let event = crate::services::observability::events::recent(100)
+            .into_iter()
+            .rev()
+            .find(|event| {
+                event.event_type == "agent_quality_event"
+                    && event.channel_id == Some(channel_id.get())
+                    && event.payload["payload"]["finalizer_turn_id"] == user_msg_id.get()
+            })
+            .expect("mint refusal emits one structured observability event");
+        assert_eq!(event.payload["payload"]["reason"], "no_output_path");
+        assert_eq!(
+            event.payload["payload"]["finalizer_turn_id"],
+            user_msg_id.get()
+        );
+        assert_eq!(
+            event.payload["payload"]["tmux_session"],
+            "AgentDesk-claude-5242"
+        );
+        assert!(event.payload["payload"]["owner_channel_id"].is_null());
     }
 }

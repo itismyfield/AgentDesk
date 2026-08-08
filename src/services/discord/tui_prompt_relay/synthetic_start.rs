@@ -1584,6 +1584,65 @@ mod tests {
         );
     }
 
+    /// #5242 P2-4: a mint refusal leaves the marked X row on disk and the mailbox
+    /// empty. If a new real-user turn Y claims that slot before replacing X's row,
+    /// stale-reclaim classifies the transient mismatch as OwnerInflightReplaced.
+    /// The positive-age gate is the concrete defense during that handoff window:
+    /// a freshly-started Y (<120s) must remain live and keep its exact token.
+    #[tokio::test(flavor = "current_thread")]
+    async fn readopted_x_row_does_not_reclaim_fresh_successor_y_before_age_gate() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(5_242_300);
+        let tmux = "AgentDesk-claude-5242-successor-window";
+        let x_id = MessageId::new(5_242_301);
+        let y_id = MessageId::new(5_242_302);
+        let synthetic_id = MessageId::new(5_242_303);
+
+        // Exact state left by the refusal path: durable marked X, no mailbox
+        // token. The runtime mint-gate test separately proves production creates
+        // this combination rather than merely constructing it as a fixture.
+        let mut x_state = real_user_inflight_state(channel_id, x_id, tmux, false);
+        x_state.readopted_from_inflight = true;
+        inflight::save_inflight_state(&x_state).expect("save refused marked X row");
+        let empty = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
+        assert!(empty.cancel_token.is_none());
+
+        // New turn Y arrives and owns the mailbox. Until its durable row replaces
+        // X, the same-owner/different-id pair selects OwnerInflightReplaced.
+        let y_token = seed_real_owner_mailbox(&shared, channel_id, y_id).await;
+        let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+            &shared,
+            &provider,
+            channel_id,
+            tmux,
+            y_id,
+            Some(real_owner()),
+            ActiveTurnKind::UserOrAgent,
+            young_owner_started_at(),
+            synthetic_id,
+        )
+        .await;
+
+        assert!(
+            !reclaimed,
+            "OwnerInflightReplaced must not reclaim successor Y before the 120s positive-age gate"
+        );
+        assert!(
+            !y_token.cancelled.load(Ordering::Relaxed),
+            "the age gate is a live-turn-theft defense, not only a timing delay"
+        );
+        let after = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
+        assert_eq!(after.active_request_owner, Some(real_owner()));
+        assert_eq!(after.active_user_message_id, Some(y_id));
+        assert!(Arc::ptr_eq(
+            after.cancel_token.as_ref().expect("Y token remains"),
+            &y_token
+        ));
+    }
+
     /// #4370 F3(b): a `Finalized` reclaim of a re-adopted REAL-user owner does NOT
     /// suppress that turn's completion footer / ✅ reaction / analytics.
     ///

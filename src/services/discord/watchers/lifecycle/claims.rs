@@ -171,6 +171,26 @@ pub(crate) fn restore_scan_should_skip_existing_watcher(
     !cancelled && !paused && existing_output_path == restored_output_path
 }
 
+impl TmuxWatcherRegistry {
+    // Visibility bridge only: recovery reuses the claim path's predicates.
+    pub(in crate::services::discord) const FIND_WATCHER_BY_TMUX_SESSION: fn(
+        &TmuxWatcherRegistry,
+        &str,
+    ) -> Option<(
+        ChannelId,
+        bool,
+        bool,
+        String,
+    )> = find_watcher_by_tmux_session;
+    pub(in crate::services::discord) const RESTORE_SCAN_SHOULD_SKIP_EXISTING_WATCHER: fn(
+        bool,
+        bool,
+        &str,
+        &str,
+    )
+        -> bool = restore_scan_should_skip_existing_watcher;
+}
+
 /// #226/#1170: Atomically claim a tmux session for watcher creation.
 /// Returns true if the claim succeeded (caller should spawn the watcher).
 /// Returns false if a watcher already exists (caller should skip).
