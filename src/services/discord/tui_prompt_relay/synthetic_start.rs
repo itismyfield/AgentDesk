@@ -1119,6 +1119,8 @@ mod tests {
         let resume = Arc::new(tokio::sync::Barrier::new(2));
         let _barrier = crate::services::discord::recovery::install_before_mailbox_claim_barrier(
             crate::services::discord::recovery::BeforeMailboxClaimBarrier {
+                channel_id: channel_id.get(),
+                user_msg_id: x_id.get(),
                 reached: reached.clone(),
                 resume: resume.clone(),
             },

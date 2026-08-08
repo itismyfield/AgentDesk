@@ -20,53 +20,68 @@
 use super::*;
 
 #[cfg(test)]
-#[derive(Clone)]
-pub(crate) struct BeforeMailboxClaimBarrier {
-    pub(crate) reached: Arc<tokio::sync::Barrier>,
-    pub(crate) resume: Arc<tokio::sync::Barrier>,
-}
+mod mailbox_claim_barrier {
+    use super::*;
 
-#[cfg(test)]
-fn before_mailbox_claim_barrier_slot()
--> &'static std::sync::Mutex<Option<BeforeMailboxClaimBarrier>> {
-    static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<BeforeMailboxClaimBarrier>>> =
-        std::sync::OnceLock::new();
-    SLOT.get_or_init(|| std::sync::Mutex::new(None))
-}
+    type BarrierKey = (u64, u64);
 
-#[cfg(test)]
-pub(crate) struct BeforeMailboxClaimBarrierGuard;
+    #[derive(Clone)]
+    pub(crate) struct BeforeMailboxClaimBarrier {
+        pub(crate) channel_id: u64,
+        pub(crate) user_msg_id: u64,
+        pub(crate) reached: Arc<tokio::sync::Barrier>,
+        pub(crate) resume: Arc<tokio::sync::Barrier>,
+    }
 
-#[cfg(test)]
-impl Drop for BeforeMailboxClaimBarrierGuard {
-    fn drop(&mut self) {
-        *before_mailbox_claim_barrier_slot()
+    fn barriers()
+    -> &'static std::sync::Mutex<std::collections::HashMap<BarrierKey, BeforeMailboxClaimBarrier>>
+    {
+        static BARRIERS: std::sync::OnceLock<
+            std::sync::Mutex<std::collections::HashMap<BarrierKey, BeforeMailboxClaimBarrier>>,
+        > = std::sync::OnceLock::new();
+        BARRIERS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+    }
+
+    pub(crate) struct BeforeMailboxClaimBarrierGuard(BarrierKey);
+
+    impl Drop for BeforeMailboxClaimBarrierGuard {
+        fn drop(&mut self) {
+            barriers()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .remove(&self.0);
+        }
+    }
+
+    pub(crate) fn install_before_mailbox_claim_barrier(
+        barrier: BeforeMailboxClaimBarrier,
+    ) -> BeforeMailboxClaimBarrierGuard {
+        let key = (barrier.channel_id, barrier.user_msg_id);
+        let previous = barriers()
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = None;
+            .unwrap_or_else(|poison| poison.into_inner())
+            .insert(key, barrier);
+        assert!(previous.is_none(), "duplicate mailbox-claim test barrier");
+        BeforeMailboxClaimBarrierGuard(key)
+    }
+
+    pub(super) async fn await_before_mailbox_claim_barrier(state: &InflightTurnState) {
+        let barrier = barriers()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(&(state.channel_id, state.user_msg_id))
+            .cloned();
+        if let Some(barrier) = barrier {
+            barrier.reached.wait().await;
+            barrier.resume.wait().await;
+        }
     }
 }
 
 #[cfg(test)]
-pub(crate) fn install_before_mailbox_claim_barrier(
-    barrier: BeforeMailboxClaimBarrier,
-) -> BeforeMailboxClaimBarrierGuard {
-    *before_mailbox_claim_barrier_slot()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner()) = Some(barrier);
-    BeforeMailboxClaimBarrierGuard
-}
-
-#[cfg(test)]
-async fn await_before_mailbox_claim_barrier() {
-    let barrier = before_mailbox_claim_barrier_slot()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .clone();
-    if let Some(barrier) = barrier {
-        barrier.reached.wait().await;
-        barrier.resume.wait().await;
-    }
-}
+pub(crate) use mailbox_claim_barrier::{
+    BeforeMailboxClaimBarrier, install_before_mailbox_claim_barrier,
+};
 
 /// Recovery re-seeds the persisted terminal owner instead of fabricating a
 /// watcher owner. Ownerless/non-watcher terminal paths do not emit a watcher
@@ -339,7 +354,7 @@ async fn reregister_active_turn_from_inflight_inner(
             "inflight reregister active turn",
         );
         #[cfg(test)]
-        await_before_mailbox_claim_barrier().await;
+        mailbox_claim_barrier::await_before_mailbox_claim_barrier(state).await;
         super::mailbox_try_start_turn(
             shared,
             channel_id,
@@ -361,16 +376,19 @@ async fn reregister_active_turn_from_inflight_inner(
             tmux_session = state.tmux_session_name.as_deref().unwrap_or_default(),
             "recovery mailbox token mint refused by watcher-install outlook"
         );
-        return false;
+        false
     };
 
     // #5242 G2: adoption is the fact recorded here, not successful mailbox mint.
-    // `started == false` can mean queue-persistence failure or a real token race.
-    // Unconditional marking is safe ONLY while G1's raw exact-id confinement
-    // remains in `classify_reclaimable_mailbox_owner`: an X marker must never
-    // qualify a different live mailbox turn Y for reclaim. The unconditional
-    // write preserves #4380's marker/ledger defense when persistence rejects the
-    // mailbox claim.
+    // `started == false` can mean an outlook refusal, queue-persistence failure,
+    // or a real token race. Both finalizer reseeding and marker/ledger recording
+    // therefore run unconditionally. The reseeded entry cannot make a queue claim
+    // eligible by itself because completion admission still requires
+    // `mailbox_released`; unconditional marking is safe ONLY while G1's raw
+    // exact-id confinement remains in `classify_reclaimable_mailbox_owner`: an X
+    // marker must never qualify a different live mailbox turn Y for reclaim. The
+    // durable marker write also consumes an outgoing planned-restart marker,
+    // transferring authority even when the outlook suppresses token mint.
     reseed_recovered_finalizer_ledger(
         shared,
         channel_id,

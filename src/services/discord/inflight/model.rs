@@ -393,8 +393,8 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// no-op check. Mailbox disposition has two evidence paths: the present-row
     /// classifier enforces raw owner+id equality, while the absent-row in-memory
     /// ledger already enforces owner+id+finished. Crash resume is self-referential
-    /// to this row; DLQ authority is additionally restricted by the typed watcher
-    /// outlook. The marker alone never authorizes reclaim.
+    /// to this row; the crash DLQ backstop fires only when this durable marker
+    /// write failed. Mint refusal is not DLQ authority; the marker alone never authorizes reclaim.
     ///
     /// NOTE (#4370/#4810): this marker is written through the NARROW adoption patch
     /// `mark_readopted_from_inflight_if_identity_unchanged`

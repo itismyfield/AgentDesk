@@ -437,15 +437,7 @@ fn recovery_mint_outlook(
     let incumbent = path_exists
         .then(|| {
             tmux_session_name.and_then(|name| {
-                let owner = shared.tmux_watchers.owner_channel_for_tmux_session(name)?;
-                let entry = shared.tmux_watchers.by_tmux_session.get(name)?;
-                Some((
-                    owner,
-                    entry.heartbeat_stale()
-                        || entry.cancel.load(std::sync::atomic::Ordering::Relaxed),
-                    entry.paused.load(std::sync::atomic::Ordering::Relaxed),
-                    entry.output_path.clone(),
-                ))
+                super::tmux::find_watcher_by_tmux_session(&shared.tmux_watchers, name)
             })
         })
         .flatten();

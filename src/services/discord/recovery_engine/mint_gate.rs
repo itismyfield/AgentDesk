@@ -27,12 +27,6 @@ impl WatcherInstallOutlook {
             Self::WillSpawn | Self::Unknown => None,
         }
     }
-
-    /// Only a missing output path proves that this recovery has no relay
-    /// consumer. Reusing a live incumbent is a mint refusal, but not relay loss.
-    pub(super) fn requires_marker_independent_dead_letter(self) -> bool {
-        matches!(self, Self::NoOutputPath)
-    }
 }
 
 pub(super) fn watcher_install_outlook(
