@@ -1153,10 +1153,9 @@ fn database_url_override() -> Option<String> {
 
 #[cfg(test)]
 /// Read the shared PG fixture base; required PG lanes must not silently turn
-/// a missing base into a soft-skip. This is intentionally wired only through
-/// the settings, prompt-manifest, and canonical-identity fixtures; the other
-/// PG fixture constructors still read environment variables directly and are
-/// deferred to the S3 follow-up.
+/// a missing base into a soft-skip. Shared test-database entrypoints also use
+/// it as a value gate, so constructors that still assemble URLs independently
+/// cannot use those entrypoints unless their runtime value derives from here.
 pub(crate) fn postgres_test_database_url_base() -> Option<String> {
     let base = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE")
         .ok()
@@ -1166,6 +1165,48 @@ pub(crate) fn postgres_test_database_url_base() -> Option<String> {
         panic!("PG required but POSTGRES_TEST_DATABASE_URL_BASE unset"); // agentdesk-audit: allow-unwrap — AGENTDESK_REQUIRE_PG=1 CI 계약: PG fixture base 누락을 soft-skip green으로 붕괴시키지 않는 의도적 hard-fail (#4979 S2)
     }
     base
+}
+
+#[cfg(test)]
+fn test_database_url_matches_configured_base(
+    base: Option<&str>,
+    database_url: &str,
+) -> Result<(), String> {
+    let Some(base) = base else {
+        return Err("fixture base unconfigured (POSTGRES_TEST_DATABASE_URL_BASE)".to_string());
+    };
+    if !database_url.starts_with(base) {
+        return Err("fixture URL is not derived from the configured fixture base".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+/// This value gate does not make a configured fixture base safe: an operator
+/// can still point it at an operational server. It also cannot intercept
+/// arbitrary SQLx calls or DDL/migrations against an existing database. The
+/// direct-SQL limitation is safe for database creation only while the source
+/// invariant keeps every `CREATE DATABASE` emission in this module.
+fn test_database_url_is_configured(database_url: &str) -> Result<(), String> {
+    let base = postgres_test_database_url_base();
+    test_database_url_matches_configured_base(base.as_deref(), database_url)
+}
+
+#[cfg(test)]
+fn test_database_config_is_configured(config: &Config) -> Result<(), String> {
+    if !database_enabled(config) {
+        return Ok(());
+    }
+    let password = config
+        .database
+        .password
+        .as_deref()
+        .map_or_else(String::new, |value| format!(":{value}"));
+    let database_url = format!(
+        "postgresql://{}{password}@{}:{}/{}",
+        config.database.user, config.database.host, config.database.port, config.database.dbname
+    );
+    test_database_url_is_configured(&database_url)
 }
 
 #[cfg(test)]
@@ -1415,6 +1456,7 @@ pub(crate) async fn connect_test_pool_with_max_connections(
     label: &str,
     max_connections: u32,
 ) -> Result<PgPool, String> {
+    test_database_url_is_configured(database_url)?;
     require_pg_guard(
         connect_test_pool_with_max_connections_inner(database_url, label, max_connections).await,
     )
@@ -1422,6 +1464,7 @@ pub(crate) async fn connect_test_pool_with_max_connections(
 
 #[cfg(test)]
 pub(crate) async fn connect_test_pool(database_url: &str, label: &str) -> Result<PgPool, String> {
+    test_database_url_is_configured(database_url)?;
     // Test helpers frequently create many isolated pools in parallel on CI.
     // Keep the default test pool lean so PG-backed route tests do not exhaust
     // the shared runner database just by setting up fixtures.
@@ -1450,6 +1493,7 @@ pub(crate) async fn create_test_database(
     database_name: &str,
     label: &str,
 ) -> Result<(), String> {
+    test_database_url_is_configured(admin_url)?;
     // CI failures were caused by many PG-backed tests racing to create/drop
     // isolated databases at the same time. Serialize setup/teardown at the
     // shared helper boundary so every test module benefits from the guard.
@@ -1687,6 +1731,7 @@ pub(crate) async fn connect_test_pool_and_migrate(
     database_url: &str,
     label: &str,
 ) -> Result<PgPool, String> {
+    test_database_url_is_configured(database_url)?;
     require_pg_guard(connect_test_pool_and_migrate_inner(database_url, label).await)
 }
 
@@ -1712,6 +1757,7 @@ pub(crate) async fn connect_test_pool_with_max_connections_and_migrate(
     label: &str,
     max_connections: u32,
 ) -> Result<PgPool, String> {
+    test_database_url_is_configured(database_url)?;
     require_pg_guard(
         connect_test_pool_with_max_connections_and_migrate_inner(
             database_url,
@@ -1757,6 +1803,7 @@ pub(crate) async fn connect_test_pool_and_migrate_config(
     config: &Config,
     label: &str,
 ) -> Result<Option<PgPool>, String> {
+    test_database_config_is_configured(config)?;
     require_pg_guard(connect_test_pool_and_migrate_config_inner(config, label).await)
 }
 
@@ -1849,6 +1896,7 @@ pub(crate) async fn drop_test_database(
     database_name: &str,
     label: &str,
 ) -> Result<(), String> {
+    test_database_url_is_configured(admin_url)?;
     let _guard = lock_test_setup();
     let admin_options = parse_test_postgres_options(admin_url, &format!("{label} admin"))?;
     // The token's admin URL remains authoritative inside the owned helper:
@@ -1879,7 +1927,8 @@ mod tests {
         connect_test_pool_with_max_connections_and_migrate, create_test_database, database_enabled,
         database_summary, health_check, require_pg_guard, run_test_postgres_sqlx_op_with_timeout,
         runtime_pool_settings, should_yield_for_counters, startup_pool_settings, startup_reseed,
-        sync_agents_from_config_pg, test_database_server_identity, with_startup_advisory_lock,
+        sync_agents_from_config_pg, test_database_server_identity,
+        test_database_url_matches_configured_base, with_startup_advisory_lock,
     };
     use sqlx::postgres::PgConnectOptions;
     use sqlx::{Executor as _, PgPool, Row};
@@ -2021,6 +2070,27 @@ mod tests {
         config.database.user = "postgres".to_string();
         config.database.dbname = "postgres".to_string();
         config
+    }
+
+    #[test]
+    fn fixture_url_gate_fails_closed_and_accepts_only_derived_urls() {
+        let error =
+            test_database_url_matches_configured_base(None, "postgresql://fixture.invalid/example")
+                .expect_err("an absent base must fail before any connection attempt");
+        assert!(
+            error.contains("POSTGRES_TEST_DATABASE_URL_BASE"),
+            "the failure must identify the missing fixture contract: {error}"
+        );
+        const BASE: &str = "postgresql://fixture.invalid:15432";
+        assert_eq!(
+            test_database_url_matches_configured_base(Some(BASE), &format!("{BASE}/example")),
+            Ok(())
+        );
+        assert!(
+            test_database_url_matches_configured_base(Some(BASE), "postgresql://elsewhere/example")
+                .is_err(),
+            "a URL outside the configured fixture base must fail before connecting"
+        );
     }
 
     #[test]

@@ -22,6 +22,8 @@
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     /// The fixture sources under contract, paired with the module path a
     /// reviewer would grep for.
     const FIXTURE_SOURCES: &[(&str, &str)] = &[
@@ -36,6 +38,54 @@ mod tests {
             include_str!("task_dispatch_claims.rs"),
         ),
     ];
+
+    /// Every source currently carrying the legacy PG host seed. The membership
+    /// test below discovers this set from `src/**/*.rs`, so a new file or an
+    /// additional seed in an existing file fails until it is reviewed here.
+    const PG_HOST_SEED_SOURCES: &[&str] = &[
+        "src/db/auto_queue/test_support.rs",
+        "src/db/dispatched_sessions.rs",
+        "src/db/dispatches/delivery_events.rs",
+        "src/db/postgres.rs",
+        "src/dispatch/test_support.rs",
+        "src/engine/ops/db_ops.rs",
+        "src/high_risk_recovery.rs",
+        "src/reconcile.rs",
+        "src/server/routes/dispatches/crud.rs",
+        "src/server/routes/escalation.rs",
+        "src/services/discord/mod.rs",
+        "src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs",
+        "src/services/dispatches/outbox_claiming.rs",
+        "src/services/dispatches/wait_queue.rs",
+        "src/services/observability/recovery_audit.rs",
+        "src/services/observability/turn_lifecycle.rs",
+        "src/services/pipeline_override.rs",
+        "src/voice/turn_link.rs",
+    ];
+
+    fn rust_sources() -> Vec<(String, String)> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        fn visit(root: &Path, directory: &Path, sources: &mut Vec<(String, String)>) {
+            for entry in std::fs::read_dir(directory).expect("read Rust source directory") {
+                let path = entry.expect("read Rust source entry").path();
+                if path.is_dir() {
+                    visit(root, &path, sources);
+                } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
+                    let source = std::fs::read_to_string(&path).expect("read Rust source");
+                    let relative = path
+                        .strip_prefix(root)
+                        .expect("Rust source must stay below the repository root")
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    sources.push((relative, source));
+                }
+            }
+        }
+        let mut sources = Vec::new();
+        visit(root, &root.join("src"), &mut sources);
+        sources.sort();
+        sources
+    }
 
     /// Assembled at runtime so this file does not itself contain the literal it
     /// forbids; a plain grep for the address stays a reliable audit.
@@ -88,6 +138,60 @@ mod tests {
                  becomes a silent green (#5218, #4979 S2)"
             );
         }
+    }
+
+    #[test]
+    fn fixture_url_gate_is_wired_to_every_shared_database_entrypoint() {
+        for (fragment, expected) in [
+            ("test_database_url_is_configured(", 8),
+            ("test_database_config_is_configured(", 2),
+            ("let base = postgres_test_database_url_base();", 1),
+            (
+                "test_database_url_matches_configured_base(base.as_deref(),",
+                1,
+            ),
+            ("let Some(base) = base else {", 1),
+            ("if !database_url.starts_with(base) {", 1),
+        ] {
+            assert_eq!(
+                SHARED_HELPER_SOURCE.matches(fragment).count(),
+                expected,
+                "shared fixture gate wiring changed at `{fragment}` (#5229)"
+            );
+        }
+    }
+
+    #[test]
+    fn every_pg_host_seed_source_is_registered_with_its_current_count() {
+        let seed = ["PG", "HOST"].concat();
+        let discovered: Vec<_> = rust_sources()
+            .into_iter()
+            .flat_map(|(path, source)| std::iter::repeat_n(path, source.matches(&seed).count()))
+            .collect();
+        assert_eq!(
+            discovered, PG_HOST_SEED_SOURCES,
+            "legacy PG host seed membership changed; source grep is only an auxiliary alarm, but every occurrence must be reviewed (#5229)"
+        );
+    }
+
+    #[test]
+    fn create_database_sql_has_one_chokepoint_under_db_postgres() {
+        let needle = ["CREATE", " DATABASE"].concat();
+        let emissions: Vec<_> = rust_sources()
+            .into_iter()
+            .flat_map(|(path, source)| {
+                source
+                    .lines()
+                    .filter(|line| line.contains(&needle) && !line.trim_start().starts_with("//"))
+                    .map(move |_| path.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(
+            emissions,
+            ["src/db/postgres.rs"],
+            "database creation must have one guarded source emission; found {emissions:?} (#5229)"
+        );
     }
 
     #[test]
