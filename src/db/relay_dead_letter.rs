@@ -29,9 +29,10 @@ pub(crate) const KIND_QUEUE_OVERFLOW: &str = "queue_overflow";
 /// #4380: a crash restart re-adopted a still-live real-user bridge turn, but the
 /// `readopted_from_inflight` relay-resume marker did not durably persist, so the
 /// recovered watcher will yield to the dead bridge and silently drop the turn's
-/// remaining output. Recording the undelivered body here ends the 30-minute silent
-/// wedge (the recurring `.stuck-manual-*` hand-recovery) with an observable,
-/// recoverable row. The root fix (watcher-yield escape hatch) resumes relay on the
+/// remaining output. The body is only the best-effort tail through the durable
+/// frontier; output never persisted before bridge death is unavailable. Recording
+/// it ends the silent wedge with observable loss evidence, not loss restoration.
+/// The root fix (watcher-yield escape hatch) resumes relay on the
 /// normal path; this KIND only fires on the marker-write-failure residual.
 ///
 /// Declared unconditionally like the sibling `KIND_*` discriminators (a DB `kind`

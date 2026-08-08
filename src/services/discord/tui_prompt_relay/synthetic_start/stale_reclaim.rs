@@ -234,22 +234,12 @@ fn stale_synthetic_mailbox_owner_reclaim_reason(
 ///     defeat the fix — the observed task-notification loss occurred ~79s after
 ///     restart (this present-row `Finalized` shape is what covers the sub-120s
 ///     follow-up loss; see R3-4).
-///   - `OwnerInflightReplaced`  — age `>= 120s` REQUIRED. UNREACHABLE for a
-///     re-adopted real owner, for TWO independent reasons — state both, because an
-///     earlier revision of this note cited only the first and it is NOT the
-///     load-bearing one (fresh-Claude r3 #1):
-///       (a) a superseding turn writes a FRESH row (marker `false`, absent from the
-///           ledger under this id), so `classify_reclaimable_mailbox_owner` returns
-///           `None` before this reason is consulted; and
-///       (b) — the one that actually matters — this reason fires on
-///           `state.user_msg_id != active_user_message_id`, and
-///           `active_user_message_id` IS `effective_finalizer_turn_id()`, which
-///           equals `user_msg_id` whenever that id is non-zero. An id-0 row would
-///           make the two diverge and misfire this reason on a LIVE turn, so id-0
-///           rows are refused at BOTH ends: recovery never records them
-///           (`readopted_ledger_record_allowed`) and `classify_reclaimable_mailbox_owner`
-///           never classifies them.
-///     It stays reachable only for the #4018 synthetic owner.
+///   - `OwnerInflightReplaced` — age `>= 120s` REQUIRED. It remains reachable for
+///     the #4018 synthetic owner. It is structurally unreachable for a real
+///     readopted owner because classification now requires raw
+///     `state.user_msg_id == active_user_message_id`; this reason requires the
+///     exact raw inequality, and the release function passes the same loaded
+///     `state` and the same active id to both checks without re-reading either.
 #[derive(Clone, Copy)]
 enum ReclaimableMailboxOwner {
     /// #4018 — the TUI-direct synthetic relay owner.
@@ -272,8 +262,8 @@ impl ReclaimableMailboxOwner {
 ///   - the synthetic relay owner (#4018), or
 ///   - a real-user turn this process re-adopted from persisted inflight (#4370),
 ///     proven per row shape:
-///       * PRESENT row → the on-disk `readopted_from_inflight` marker AND a request
-///         owner matching the live mailbox owner.
+///       * PRESENT row → the on-disk `readopted_from_inflight` marker, request
+///         owner, and raw user-message id all match the live mailbox owner/id.
 ///       * ABSENT row (Path B) → the in-memory `readopted_mailbox_ledger` records
 ///         THIS `(provider, channel_id)` as re-adopted with the SAME owner, the
 ///         SAME `active_user_message_id`, AND `finished == true` (its terminal
@@ -302,19 +292,18 @@ fn classify_reclaimable_mailbox_owner(
     }
     // A real-user owner: eligibility depends on the row shape.
     //
-    // `user_msg_id != 0` is load-bearing, not cosmetic (fresh-Claude r3 #1). The
-    // mailbox's `active_user_message_id` is the turn's `effective_finalizer_turn_id()`,
-    // which equals `user_msg_id` ONLY when that id is non-zero. For an id-0 row the
-    // two diverge, so `stale_synthetic_mailbox_owner_reclaim_reason` would read
-    // `state.user_msg_id != active_user_message_id` and misfire `OwnerInflightReplaced`
-    // on a turn that is still LIVE — reclaiming it once it aged past 120s. Recovery
-    // already refuses to record such rows (`readopted_ledger_record_allowed`); this is
-    // the matching refusal at the consumption site, so the invariant is enforced at
-    // both ends instead of being assumed.
+    // INV: re-adoption evidence states a fact about the turn T=(owner, effective
+    // finalizer id) that recorded it. A mailbox disposition may consume that
+    // evidence only when the evidence itself proves the disposition target is
+    // exactly T. For PRESENT rows, the raw equality below is the authority gate.
+    // It intentionally complements the reason function's raw `!=`; do not replace
+    // it with `effective_finalizer_turn_id()`. The separate id-0 refusal is also
+    // retained to mirror the write-side eligibility gate.
     match state {
         Some(state) => (state.readopted_from_inflight
             && state.user_msg_id != 0
-            && state.request_owner_user_id == owner.get())
+            && state.request_owner_user_id == owner.get()
+            && state.user_msg_id == active_user_message_id.get())
         .then_some(ReclaimableMailboxOwner::ReadoptedFromInflight),
         None => shared
             .is_readopted_mailbox_owner(

@@ -127,6 +127,44 @@ time for diagnostics; neither is a stored approval value.
 
 ## Surface Map (by feature)
 
+### `recovery_marker_authority`
+
+- invariant: re-adoption evidence describes only its recorded turn
+  `T=(owner, effective finalizer id)`. Mailbox disposition may consume it only
+  when the evidence proves the disposition target is exactly T. The present-row
+  path enforces raw `user_msg_id == active_user_message_id`; the absent-row
+  ledger independently requires exact owner+id+finished.
+- restore-site four-value policy:
+
+  | production site | `WillSpawn` | `NoOutputPath` | `IncumbentReuse` | `Unknown` |
+  |---|---|---|---|---|
+  | `restore_inflight.rs` restart-report loop | watcher start exists, no reusable incumbent | `restart_report_watcher_start == None` for every runtime; refuse mint only | healthy same-path incumbent; refuse mint only | unreachable; no later rollout resolver |
+  | `restore_inflight.rs` ordinary loop | path exists, no reusable incumbent | missing non-Codex path; refuse mint only | healthy same-path incumbent; refuse mint only | missing Codex path; later rollout resolver may install watcher |
+  | `watchers/lifecycle/restore.rs` startup restore | excluded from this gate | excluded | excluded | excluded |
+
+  The gate suppresses mailbox-token mint only. Refusal still runs finalizer
+  reseeding and the identity-guarded readoption write, including consumption of
+  an outgoing `restart_mode`. This PR does not promote refusal to a DLQ fact;
+  the existing #4380 DLQ remains limited to durable marker-write failure.
+
+  Refusal is not proof that this process has no consumer. In the ordinary path,
+  only the generic branch inserts `recovering_channels`; the ordinary branch
+  continues before that insert. Startup then runs `restore_tmux_watchers`, whose
+  scan re-registers the row and unconditionally enqueues `PendingWatcher` before
+  its later `recovery_handled` check. The startup-restore site is therefore also
+  excluded from the gate. Episode handoff preserves its guarded direct entry
+  outside these three loop rows.
+
+  Review-coordinate corrections against the r1 snapshot: unconditional
+  `pending.push` is `watchers/lifecycle/restore.rs:516`; the
+  `find_watcher_by_tmux_session` call is `claims.rs:345`, while the actual
+  `ReuseExisting` return is `claims.rs:417`; the W1c marker block spans
+  `restore_inflight.rs:2207-2211`.
+
+  G2 also reseeds the recovered finalizer ledger when mint returns false. This
+  is inert for queue admission by itself because `claim_queue_eligible()` still
+  requires `mailbox_released`.
+
 ### `provider_output_guard`
 
 - canonical_modules:

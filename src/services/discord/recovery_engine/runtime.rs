@@ -19,6 +19,70 @@
 
 use super::*;
 
+#[cfg(test)]
+mod mailbox_claim_barrier {
+    use super::*;
+
+    type BarrierKey = (u64, u64);
+
+    #[derive(Clone)]
+    pub(crate) struct BeforeMailboxClaimBarrier {
+        pub(crate) channel_id: u64,
+        pub(crate) user_msg_id: u64,
+        pub(crate) reached: Arc<tokio::sync::Barrier>,
+        pub(crate) resume: Arc<tokio::sync::Barrier>,
+    }
+
+    fn barriers()
+    -> &'static std::sync::Mutex<std::collections::HashMap<BarrierKey, BeforeMailboxClaimBarrier>>
+    {
+        static BARRIERS: std::sync::OnceLock<
+            std::sync::Mutex<std::collections::HashMap<BarrierKey, BeforeMailboxClaimBarrier>>,
+        > = std::sync::OnceLock::new();
+        BARRIERS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+    }
+
+    pub(crate) struct BeforeMailboxClaimBarrierGuard(BarrierKey);
+
+    impl Drop for BeforeMailboxClaimBarrierGuard {
+        fn drop(&mut self) {
+            barriers()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .remove(&self.0);
+        }
+    }
+
+    pub(crate) fn install_before_mailbox_claim_barrier(
+        barrier: BeforeMailboxClaimBarrier,
+    ) -> BeforeMailboxClaimBarrierGuard {
+        let key = (barrier.channel_id, barrier.user_msg_id);
+        let previous = barriers()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .insert(key, barrier);
+        assert!(previous.is_none(), "duplicate mailbox-claim test barrier");
+        BeforeMailboxClaimBarrierGuard(key)
+    }
+
+    pub(super) async fn await_before_mailbox_claim_barrier(state: &InflightTurnState) {
+        let barrier = barriers()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(&(state.channel_id, state.user_msg_id))
+            .cloned();
+        if let Some(barrier) = barrier {
+            barrier.reached.wait().await;
+            barrier.resume.wait().await;
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) use mailbox_claim_barrier::{
+    BeforeMailboxClaimBarrier, install_before_mailbox_claim_barrier,
+};
+
 /// Recovery re-seeds the persisted terminal owner instead of fabricating a
 /// watcher owner. Ownerless/non-watcher terminal paths do not emit a watcher
 /// projection edge, so they use immediate admission; watcher-owned rows retain
@@ -186,6 +250,7 @@ async fn reregister_active_turn_from_inflight_inner(
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
     persist_durable_marker: bool,
+    outlook: mint_gate::WatcherInstallOutlook,
 ) -> bool {
     let Some(finalizer_msg_id) =
         super::inflight::opt_message_id(state.effective_finalizer_turn_id())
@@ -280,45 +345,59 @@ async fn reregister_active_turn_from_inflight_inner(
         return false;
     }
 
-    let cancel_token = Arc::new(CancelToken::new());
-    super::ensure_cancel_token_bound_from_inflight_state(
-        &provider,
-        state,
-        &cancel_token,
-        "inflight reregister active turn",
-    );
-
-    let started = super::mailbox_try_start_turn(
-        shared,
-        channel_id,
-        cancel_token,
-        UserId::new(state.request_owner_user_id),
-        finalizer_msg_id,
-    )
-    .await;
-    if started {
-        reseed_recovered_finalizer_ledger(
+    let started = if outlook.allows_mint() {
+        let cancel_token = Arc::new(CancelToken::new());
+        super::ensure_cancel_token_bound_from_inflight_state(
+            &provider,
+            state,
+            &cancel_token,
+            "inflight reregister active turn",
+        );
+        #[cfg(test)]
+        mailbox_claim_barrier::await_before_mailbox_claim_barrier(state).await;
+        super::mailbox_try_start_turn(
             shared,
             channel_id,
+            cancel_token,
+            UserId::new(state.request_owner_user_id),
+            finalizer_msg_id,
+        )
+        .await
+    } else {
+        let (reason, owner) = outlook
+            .refusal()
+            .expect("non-minting outlook must carry a refusal reason");
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = channel_id.get(),
+            reason,
+            owner_channel_id = ?owner.map(ChannelId::get),
             finalizer_turn_id,
-            &provider,
-            state.effective_relay_owner_kind(),
+            tmux_session = state.tmux_session_name.as_deref().unwrap_or_default(),
+            "recovery mailbox token mint refused by watcher-install outlook"
         );
-        // #4370: the mailbox now carries a re-adopted-from-inflight REAL user turn
-        // (owner == request_owner_user_id). Record it in the ledger + on-disk
-        // marker so a later starved injection / task-notification synthetic turn
-        // can reclaim this mailbox once the re-adopted turn is stale — without
-        // this, #4018's synthetic-owner-only reclaim can never free it and the
-        // follow-up relay text is silently dropped.
-        if readopted_ledger_record_allowed(state) {
-            mark_readopted_from_inflight(
-                shared,
-                &provider,
-                channel_id,
-                state,
-                persist_durable_marker,
-            );
-        }
+        false
+    };
+
+    // #5242 G2: adoption is the fact recorded here, not successful mailbox mint.
+    // `started == false` can mean an outlook refusal, queue-persistence failure,
+    // or a real token race. Both finalizer reseeding and marker/ledger recording
+    // therefore run unconditionally. The reseeded entry cannot make a queue claim
+    // eligible by itself because completion admission still requires
+    // `mailbox_released`; unconditional marking is safe ONLY while G1's raw
+    // exact-id confinement remains in `classify_reclaimable_mailbox_owner`: an X
+    // marker must never qualify a different live mailbox turn Y for reclaim. The
+    // durable marker write also consumes an outgoing planned-restart marker,
+    // transferring authority even when the outlook suppresses token mint.
+    reseed_recovered_finalizer_ledger(
+        shared,
+        channel_id,
+        finalizer_turn_id,
+        &provider,
+        state.effective_relay_owner_kind(),
+    );
+    if readopted_ledger_record_allowed(state) {
+        mark_readopted_from_inflight(shared, &provider, channel_id, state, persist_durable_marker);
     }
     started
 }
@@ -327,7 +406,21 @@ pub(in crate::services::discord) async fn reregister_active_turn_from_inflight(
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
 ) -> bool {
-    reregister_active_turn_from_inflight_inner(shared, state, true).await
+    reregister_active_turn_from_inflight_inner(
+        shared,
+        state,
+        true,
+        mint_gate::WatcherInstallOutlook::WillSpawn,
+    )
+    .await
+}
+
+pub(in crate::services::discord) async fn reregister_active_turn_from_inflight_with_outlook(
+    shared: &Arc<SharedData>,
+    state: &inflight::InflightTurnState,
+    outlook: mint_gate::WatcherInstallOutlook,
+) -> bool {
+    reregister_active_turn_from_inflight_inner(shared, state, true, outlook).await
 }
 
 /// Automatic reattach holds the canonical episode flock across mailbox and
@@ -339,7 +432,13 @@ pub(in crate::services::discord) async fn reregister_active_turn_from_inflight_u
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
 ) -> bool {
-    reregister_active_turn_from_inflight_inner(shared, state, false).await
+    reregister_active_turn_from_inflight_inner(
+        shared,
+        state,
+        false,
+        mint_gate::WatcherInstallOutlook::WillSpawn,
+    )
+    .await
 }
 
 #[cfg(test)]

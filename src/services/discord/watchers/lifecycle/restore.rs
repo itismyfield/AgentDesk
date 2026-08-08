@@ -481,6 +481,10 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                     );
                     continue;
                 }
+                // #5242: intentionally excluded from the mint gate. This restore
+                // path enqueues `PendingWatcher` below regardless of the mailbox
+                // reregister result, so refusal cannot prove that no relay
+                // consumer will be installed. Preserve legacy mint semantics.
                 let finish_mailbox_on_completion =
                     super::super::super::recovery::reregister_active_turn_from_inflight(
                         &shared, &state,

@@ -3704,6 +3704,8 @@ services::discord::recovery_engine::recovery_two_message_panel::tests::replaceme
 services::discord::recovery_engine::recovery_two_message_panel::tests::restart_reanchors_stranded_panel_and_persists_new_epoch
 services::discord::recovery_engine::recovery_two_message_panel::tests::restart_recreates_missing_panel_without_duplicate_old_delete
 services::discord::recovery_engine::restore_inflight::tests::generic_recovery_consumes_restart_before_runtime_ready_and_persists_runtime_stamp
+services::discord::recovery_engine::restore_inflight::tests::ordinary_restore_same_and_cross_channel_incumbents_refuse_mint
+services::discord::recovery_engine::restore_inflight::tests::restart_report_refusal_consumes_restart_authority_without_minting
 services::discord::recovery_engine::restore_inflight::tests::restore_claude_tui_without_runtime_output_uses_tmux_fallback_path
 services::discord::recovery_engine::restore_inflight::tests::restore_rollout_output_path_patch_preserves_concurrent_relay_fields
 services::discord::recovery_engine::routing_orphan::tests::orphan_with_probe_error_is_preserved_while_dead_pane_is_cleaned
@@ -5227,6 +5229,8 @@ services::discord::tui_prompt_relay::synthetic_start::tests::path_b_absent_row_i
 services::discord::tui_prompt_relay::synthetic_start::tests::path_b_absent_row_ledger_different_user_msg_id_is_never_stolen
 services::discord::tui_prompt_relay::synthetic_start::tests::path_b_absent_row_ledger_live_not_finished_is_never_stolen
 services::discord::tui_prompt_relay::synthetic_start::tests::path_b_absent_row_not_in_ledger_is_never_reclaimed
+services::discord::tui_prompt_relay::synthetic_start::tests::premarked_x_after_refusal_does_not_cancel_aged_live_successor_y
+services::discord::tui_prompt_relay::synthetic_start::tests::queue_persistence_refusal_still_records_readoption
 services::discord::tui_prompt_relay::synthetic_start::tests::readopted_from_inflight_id0_row_is_never_reclaimed
 services::discord::tui_prompt_relay::synthetic_start::tests::readopted_from_inflight_real_owner_committed_row_reclaims_for_starved_synthetic
 services::discord::tui_prompt_relay::synthetic_start::tests::readopted_from_inflight_real_owner_live_turn_is_never_stolen
@@ -5237,6 +5241,7 @@ services::discord::tui_prompt_relay::synthetic_start::tests::stale_synthetic_own
 services::discord::tui_prompt_relay::synthetic_start::tests::stale_synthetic_owner_replaced_requires_same_tmux_session
 services::discord::tui_prompt_relay::synthetic_start::tests::synthetic_finish_routes_release_through_finalizer
 services::discord::tui_prompt_relay::synthetic_start::tests::synthetic_finish_session_key_mismatch_preserves_newer_turn
+services::discord::tui_prompt_relay::synthetic_start::tests::token_race_marks_x_but_preserves_aged_live_y
 services::discord::tui_prompt_relay::synthetic_start::tests::young_rowless_synthetic_owner_is_not_reclaimed
 services::discord::tui_prompt_relay::tests::abort_cleanup_records_marker_and_keeps_hourglass
 services::discord::tui_prompt_relay::tests::bridge_adapter_inflight_marks_external_input_as_bridge_owned
