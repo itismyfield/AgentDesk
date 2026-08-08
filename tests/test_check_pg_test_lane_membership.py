@@ -6,6 +6,7 @@ import contextlib
 import importlib.util
 import io
 import re
+import shlex
 import sys
 import tempfile
 import unittest
@@ -103,6 +104,64 @@ class FixtureCase(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.fx = Fixture(self.root)
+
+
+class NonPgFilterContract(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        (self.root / "scripts/ci").mkdir(parents=True)
+        (self.root / ".github/workflows").mkdir(parents=True)
+        (self.root / membership.NON_PG_FILTER_REL).write_text(
+            (REPO_ROOT / membership.NON_PG_FILTER_REL).read_text("utf-8"), "utf-8"
+        )
+        consumer = (
+            "    steps:\n"
+            "      - run: |\n"
+            "          source scripts/ci/non-pg-test-filter.sh\n"
+            "          cargo test --all-targets -- \"${NON_PG_SKIP_ARGS[@]}\"\n"
+            "          run_non_pg_filter_false_positives\n"
+        )
+        (self.root / ".github/workflows/ci-pr.yml").write_text(
+            "jobs:\n  library_sweep:\n" + consumer, "utf-8"
+        )
+        (self.root / ".github/workflows/ci-nightly.yml").write_text(
+            "jobs:\n  full_macos:\n" + consumer + "  full_windows:\n" + consumer,
+            "utf-8",
+        )
+
+    def jobs(self):
+        findings = []
+        return [
+            job
+            for workflow in membership.NON_PG_FILTER_WORKFLOWS
+            for job in membership.parse_jobs(self.root / workflow, self.root, findings)
+        ]
+
+    def test_shared_filter_consumers_and_parser_expansion(self) -> None:
+        self.assertEqual(
+            membership.non_pg_filter_contract_errors(self.root, self.jobs()), ()
+        )
+        args = membership.load_non_pg_skip_args(self.root)
+        self.assertEqual(
+            membership._cargo_commands(
+                'run: cargo test --all-targets -- "${NON_PG_SKIP_ARGS[@]}"',
+                args,
+            ),
+            ["cargo test --all-targets -- " + shlex.join(args)],
+        )
+
+    def test_mutating_only_nightly_to_a_literal_filter_is_rejected(self) -> None:
+        path = self.root / ".github/workflows/ci-nightly.yml"
+        path.write_text(
+            path.read_text("utf-8").replace(
+                '"${NON_PG_SKIP_ARGS[@]}"', "--skip mutated", 1
+            ),
+            "utf-8",
+        )
+        errors = membership.non_pg_filter_contract_errors(self.root, self.jobs())
+        self.assertTrue(any("literal --skip" in error for error in errors))
 
 
 class DetectionMutation(FixtureCase):

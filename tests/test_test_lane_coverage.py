@@ -211,6 +211,32 @@ class LaneFilterTests(unittest.TestCase):
                 (coverage.LaneFilter(("retained_tests",), ()),),
             )
 
+    def test_discovers_shared_non_pg_filter_without_treating_variable_as_positive(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".github/workflows").mkdir(parents=True)
+            (root / "scripts/ci").mkdir(parents=True)
+            (root / coverage.NON_PG_FILTER_REL).write_text(
+                (REPO_ROOT / coverage.NON_PG_FILTER_REL).read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            (root / "justfile").write_text(
+                "test-non-pg:\n    cargo test --lib retained_tests\n",
+                encoding="utf-8",
+            )
+            (root / ".github/workflows/ci-pr.yml").write_text(
+                'run: cargo test --lib -- "${NON_PG_SKIP_ARGS[@]}"\n',
+                encoding="utf-8",
+            )
+
+            args = coverage.load_non_pg_skip_args(root)
+            lanes = coverage.discover_lane_filters(root)
+
+            self.assertIn(
+                coverage.LaneFilter((), tuple(args[1::2])),
+                lanes,
+            )
+
     def test_module_filter_covers_nested_module(self) -> None:
         modules = {"service::tests", "other::tests"}
         lanes = (coverage.LaneFilter(("service",), ()),)

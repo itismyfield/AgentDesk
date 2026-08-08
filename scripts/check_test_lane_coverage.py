@@ -26,6 +26,7 @@ from typing import Iterable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASELINE_REL = Path("scripts/test_lane_coverage_baseline.txt")
+NON_PG_FILTER_REL = Path("scripts/ci/non-pg-test-filter.sh")
 
 # Attributes do not contain a closing square bracket in the forms used by this
 # repository. Strings and comments are blanked without changing offsets, so the
@@ -477,6 +478,36 @@ def cargo_test_filter(command: str) -> LaneFilter | None:
     return LaneFilter(tuple(positives), tuple(skips), exact)
 
 
+def load_non_pg_skip_args(repo_root: Path) -> tuple[str, ...]:
+    """Read the shared workflow filter without duplicating its values here."""
+    path = repo_root / NON_PG_FILTER_REL
+    text = path.read_text(encoding="utf-8")
+    match = re.search(r"^NON_PG_SKIP_ARGS=\(([^\n()]*)\)\s*$", text, re.MULTILINE)
+    if match is None:
+        raise ValueError(
+            f"{path}: NON_PG_SKIP_ARGS must be one single-line shell array"
+        )
+    args = tuple(shlex.split(match.group(1)))
+    if not args or len(args) % 2 or any(
+        args[index] != "--skip" or not args[index + 1]
+        for index in range(0, len(args), 2)
+    ):
+        raise ValueError(
+            f"{path}: NON_PG_SKIP_ARGS must contain non-empty --skip/value pairs"
+        )
+    return args
+
+
+def expand_non_pg_skip_args(command: str, args: tuple[str, ...]) -> str:
+    if not args:
+        return command
+    return re.sub(
+        r"[\"']?\$\{NON_PG_SKIP_ARGS\[@\]\}[\"']?",
+        shlex.join(args),
+        command,
+    )
+
+
 def discover_lane_filters(repo_root: Path) -> tuple[LaneFilter, ...]:
     """Parse selection contracts from positive main-push and PR test lanes."""
     just_text = (repo_root / "justfile").read_text(encoding="utf-8")
@@ -487,6 +518,11 @@ def discover_lane_filters(repo_root: Path) -> tuple[LaneFilter, ...]:
     )
     workflows = tuple(
         path.read_text(encoding="utf-8") for path in workflow_paths if path.is_file()
+    )
+    non_pg_skip_args = (
+        load_non_pg_skip_args(repo_root)
+        if (repo_root / NON_PG_FILTER_REL).is_file()
+        else ()
     )
 
     commands = list(just_recipe_commands(just_text, "test-non-pg"))
@@ -503,7 +539,7 @@ def discover_lane_filters(repo_root: Path) -> tuple[LaneFilter, ...]:
                     and command[0] in "\"'"
                 ):
                     command = command[1:-1]
-            commands.append(command)
+            commands.append(expand_non_pg_skip_args(command, non_pg_skip_args))
 
         for recipe in sorted(
             set(re.findall(r"\bjust\s+([A-Za-z0-9_-]+)", workflow))

@@ -665,8 +665,9 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: |
-          cargo test --lib task_notification -- --skip _pg --skip pg_ --skip postgres
-          cargo test --lib services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests -- --skip _pg --skip pg_ --skip postgres
+          source scripts/ci/non-pg-test-filter.sh
+          cargo test --lib task_notification -- "${NON_PG_SKIP_ARGS[@]}"
+          cargo test --lib services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests -- "${NON_PG_SKIP_ARGS[@]}"
 
       - name: Trusted session forwarding tests
         timeout-minutes: 10
@@ -675,7 +676,9 @@ jobs:
           BASH_ENV: /dev/null
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
-        run: env -u AGENTDESK_ROOT_DIR cargo test --lib services::session_forwarding -- --skip _pg --skip pg_ --skip postgres
+        run: |
+          source scripts/ci/non-pg-test-filter.sh
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::session_forwarding -- "${NON_PG_SKIP_ARGS[@]}"
 
       # #5040: `intake_dispatch::tests` predates the lane-coverage ratchet and is
       # baselined debt. Select the telemetry-only admission regressions explicitly
@@ -687,7 +690,9 @@ jobs:
           BASH_ENV: /dev/null
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
-        run: env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::intake_dispatch::tests::telemetry_only_unopted -- --skip _pg --skip pg_ --skip postgres
+        run: |
+          source scripts/ci/non-pg-test-filter.sh
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::intake_dispatch::tests::telemetry_only_unopted -- "${NON_PG_SKIP_ARGS[@]}"
 
       # #5025: this job is mirrored by the branch-protected
       # `Fast targeted tests (ubuntu-latest)` context above. Keep the router test
@@ -886,7 +891,7 @@ jobs:
   # 2.3% of the harness, all of it relay-authority surface.
   #
   # This lane raises that floor to the whole library harness minus the tests
-  # `--skip _pg --skip pg_ --skip postgres` removes, run in parallel on the
+  # canonical non-PG filter removes, run in parallel on the
   # broad `rust_or_policy` filter: 6,977 tests selected on ubuntu-latest, of
   # which 8 are `#[ignore]`d, so 6,969 execute. Those three figures are derived
   # from `scripts/lib_test_inventory_manifest.txt` at THIS commit. The newest
@@ -910,7 +915,7 @@ jobs:
   # figures and a local reproduction on a Mac derives the darwin ones.
   #
   # THIS JOB NEEDS POSTGRESQL, even though its filters are named for excluding
-  # it. `--skip _pg --skip pg_ --skip postgres` is a substring filter over test
+  # it. The canonical non-PG filter is a substring filter over test
   # ids, and PostgreSQL dependence is a property of a test *body*. The two do
   # not coincide: `scripts/pg_test_lane_manifest.txt` classifies 477 library
   # tests as PG-dependent and 55 of them carry none of those three substrings
@@ -1123,7 +1128,9 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: |
-          python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 2 --skip _pg --skip pg_ --skip postgres -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- --skip _pg --skip pg_ --skip postgres
+          source scripts/ci/non-pg-test-filter.sh
+          python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 2 "${NON_PG_SKIP_ARGS[@]}" -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- "${NON_PG_SKIP_ARGS[@]}"
+          run_non_pg_filter_false_positives
 
       - name: Stop PostgreSQL service
         if: always()

@@ -118,7 +118,11 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: cargo test (non-PG)
-        run: cargo test --all-targets -- --skip _pg_ --skip postgres_
+        shell: bash
+        run: |
+          source scripts/ci/non-pg-test-filter.sh
+          cargo test --all-targets -- "${NON_PG_SKIP_ARGS[@]}"
+          run_non_pg_filter_false_positives
         env:
           RUST_BACKTRACE: 1
 
@@ -160,7 +164,11 @@ jobs:
         run: cargo test --lib discord_thread_create -- --test-threads=1
 
       - name: cargo test (non-PG)
-        run: cargo test --all-targets -- --skip _pg_ --skip postgres_
+        shell: bash
+        run: |
+          source scripts/ci/non-pg-test-filter.sh
+          cargo test --all-targets -- "${NON_PG_SKIP_ARGS[@]}"
+          run_non_pg_filter_false_positives
         env:
           RUST_BACKTRACE: 1
 
