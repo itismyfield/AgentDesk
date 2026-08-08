@@ -890,18 +890,18 @@ jobs:
   # `services::discord::tui_prompt_relay::local_model_queue_wake_e2e` -- i.e.
   # 2.3% of the harness, all of it relay-authority surface.
   #
-  # This lane raises that floor to the whole library harness minus the tests
-  # the canonical non-PG filter removes, then replays its 15 source-verified
-  # non-PG false positives. The gated sweep runs in parallel on the broad
-  # `rust_or_policy` filter: 7,025 tests are selected on ubuntu-latest, of which
+  # Whole-harness-minus-filter plus 15 replays: `rust_or_policy` selects 7,025 tests, of which
   # 8 are `#[ignore]`d, so 7,017 execute. Those three figures are derived
   # from `scripts/lib_test_inventory_manifest.txt` at THIS commit. The newest
-  # figures a real run of this lane has REPORTED are one commit older: at
-  # 6c2c43634 its summary read `expected=6971 ignored=8 executed=6963`, and the
-  # difference is the 6 non-PG library tests #5142 added under
+  # figures a real run of this lane has REPORTED are at `6c2c43634`, 14 commits
+  # before `fb2357a66`: `expected=6971 ignored=8 executed=6963`. The Linux
+  # `derive_expected_selection` difference between those SHAs with skips `_pg`, `pg_` and `postgres` is 54 added and none removed, under
   # `server::routes::health_api::tests` (4),
   # `server::worker_registry::leader_takeover_tests` (1) and
-  # `services::health_diagnostics::tests` (1). They
+  # `services::health_diagnostics::tests` (4), `services::hang_forensics::tests` (30),
+  # `services::discord::recovery_engine::terminal_text_idempotency::tests` (5),
+  # `services::discord::session_relay_sink::journal::controller::controller_terminal_semantics_tests` (5) and
+  # `services::discord::session_relay_sink::journal::recovery::recovery_terminal_semantics_tests` (5). They
   # track the manifest, so a later PR that adds or removes a library test dates
   # them; what enforces the set is `run_test_lane.py`, which recomputes it every
   # run and names the difference. Read these as orientation, not as a gate.
