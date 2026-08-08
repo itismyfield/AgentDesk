@@ -97,6 +97,18 @@ fi
 #                                          accepts live issue creation for a
 #                                          confirmed regression. Failures always
 #                                          write a local draft regardless.
+#   AGENTDESK_POST_DEPLOY_SMOKE_WEDGE_MAX_CONSECUTIVE_SKIPS
+#                                          #5244: how many CONSECUTIVE deploys the
+#                                          relay wedge check may give up without
+#                                          reaching a verdict before the streak is
+#                                          itself a smoke failure (default: 3). A
+#                                          single skip stays advisory.
+#   AGENTDESK_POST_DEPLOY_SMOKE_WEDGE_RECOVERY_WAIT_SECS
+#                                          #5244: bounded wait for
+#                                          fully_recovered=true before the wedge
+#                                          check gives up on a node that is still
+#                                          in startup recovery (default: 90,
+#                                          polled every 5s).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=_defaults.sh
@@ -1178,6 +1190,8 @@ _deploy_peer_env_prelude() {
         AGENTDESK_BUNDLE_ID \
         AGENTDESK_DCSERVER_LABEL \
         AGENTDESK_PLIST_REL \
+        AGENTDESK_POST_DEPLOY_SMOKE_WEDGE_MAX_CONSECUTIVE_SKIPS \
+        AGENTDESK_POST_DEPLOY_SMOKE_WEDGE_RECOVERY_WAIT_SECS \
         AGENTDESK_ROOT_DIR \
         AGENTDESK_REPO_DIR \
         OBSIDIAN_VAULT_ROOT \
@@ -2638,6 +2652,23 @@ POST_DEPLOY_SMOKE_CORE_API_ENDPOINTS=(
 POST_DEPLOY_SMOKE_LOG_LINES="${AGENTDESK_POST_DEPLOY_SMOKE_LOG_LINES:-500}"
 POST_DEPLOY_SMOKE_WARN_LIMIT="${AGENTDESK_POST_DEPLOY_SMOKE_WARN_LIMIT:-5}"
 POST_DEPLOY_SMOKE_WEDGE_SETTLE_SECS=4
+# #5244 ③: startup recovery is transient, so wait it out instead of skipping.
+POST_DEPLOY_SMOKE_WEDGE_RECOVERY_WAIT_SECS="${AGENTDESK_POST_DEPLOY_SMOKE_WEDGE_RECOVERY_WAIT_SECS:-90}"
+POST_DEPLOY_SMOKE_WEDGE_RECOVERY_POLL_SECS=5
+# #5244 ①: a skip is NOT a pass. Persisted so the streak survives across deploys.
+POST_DEPLOY_SMOKE_WEDGE_MAX_CONSECUTIVE_SKIPS="${AGENTDESK_POST_DEPLOY_SMOKE_WEDGE_MAX_CONSECUTIVE_SKIPS:-3}"
+POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE="$ADK_REL/runtime/post_deploy_smoke_wedge_skips.json"
+# A corrupt counter file cannot record how many times it has been corrupt, so
+# the corruption streak lives in a sibling plain-integer file. Without it a
+# permanently broken state file restarts at 0 every deploy and never reaches the
+# threshold — the same "a skip is silently a pass" shape #5244 is about.
+POST_DEPLOY_SMOKE_WEDGE_SKIP_CORRUPT_TALLY="$ADK_REL/runtime/post_deploy_smoke_wedge_skips.corrupt"
+POST_DEPLOY_SMOKE_WEDGE_SKIP_MAX_CORRUPTIONS=2
+# #5244 ②: durable axis. `$ADK_REL` and the Rust runtime store root resolve to
+# the same directory (this script's ADK_REL default vs config.rs's
+# AGENTDESK_ROOT_DIR resolution + runtime_store.rs's `runtime/` join), so the
+# shell can read the delivery records the relay writes.
+POST_DEPLOY_SMOKE_DELIVERY_RECORDS_DIR="$ADK_REL/runtime/discord_delivery_records"
 POST_DEPLOY_SMOKE_RELAY_CELL="${AGENTDESK_POST_DEPLOY_SMOKE_RELAY_CELL:-claude-tui}"
 POST_DEPLOY_SMOKE_CREATE_ISSUE="${AGENTDESK_POST_DEPLOY_SMOKE_CREATE_ISSUE:-off}"
 POST_DEPLOY_SMOKE_STAMP="$(date -u '+%Y%m%dT%H%M%SZ' 2>/dev/null || printf 'unknown-%s' "$$")"
@@ -2659,6 +2690,163 @@ _post_deploy_smoke_fail() {
     POST_DEPLOY_SMOKE_FAILURES+=("$finding")
     _post_deploy_smoke_note "FAIL: $finding" || return 1
     return 1
+}
+
+# ── Relay wedge skip accounting (#5244 ①) ────────────────────────────────────
+# The wedge check has eight branches that give up before reaching a verdict.
+# Each one used to `return 0`, so a relay surface that was permanently
+# unreadable was reported as a PASS on every deploy, forever. The counter below
+# turns a STREAK of those skips into a real smoke failure; one skip stays
+# advisory.
+#
+# The state lives under `$ADK_REL/runtime/`, which the deploy's cleanup does not
+# remove (cleanup targets specific files/dirs), and the deploy lock serializes
+# deploys on a node, so this read-modify-write has no concurrent peer here.
+
+_post_deploy_smoke_wedge_skip_state_read() {
+    local raw
+    if [ ! -f "$POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE" ]; then
+        printf '0\n'
+        return 0
+    fi
+    raw=$(jq -r '
+        if ((.consecutive_skips | type) == "number") and (.consecutive_skips >= 0)
+        then (.consecutive_skips | floor | tostring)
+        else error("consecutive_skips is not a non-negative number")
+        end
+    ' "$POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE") || return 1
+    case "$raw" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    printf '%s\n' "$raw"
+}
+
+_post_deploy_smoke_wedge_skip_state_write() {
+    local count="$1"
+    local reason="$2"
+    local tmp_path state_dir
+    # The reason is embedded in a hand-built JSON string, so strip the two
+    # characters that could break it. Every current caller passes a literal.
+    reason="${reason//\\/}"
+    reason="${reason//\"/}"
+    state_dir="$(dirname "$POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE")"
+    mkdir -p "$state_dir" || return 1
+    tmp_path="${POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE}.tmp.$$"
+    if ! printf '{"consecutive_skips":%s,"last_reason":"%s","updated":"%s"}\n' \
+        "$count" "$reason" "$POST_DEPLOY_SMOKE_STAMP" > "$tmp_path"; then
+        rm -f "$tmp_path" 2>/dev/null || true
+        return 1
+    fi
+    # Atomic replace: a half-written direct overwrite would read back as the
+    # corruption case below on the next deploy.
+    if ! mv -f "$tmp_path" "$POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE"; then
+        rm -f "$tmp_path" 2>/dev/null || true
+        return 1
+    fi
+    return 0
+}
+
+_post_deploy_smoke_wedge_skip_corrupt_tally() {
+    local action="$1"
+    local current="" tmp_path tally_dir
+    if [ -r "$POST_DEPLOY_SMOKE_WEDGE_SKIP_CORRUPT_TALLY" ]; then
+        read -r current < "$POST_DEPLOY_SMOKE_WEDGE_SKIP_CORRUPT_TALLY" 2>/dev/null || true
+    fi
+    case "$current" in
+        ''|*[!0-9]*) current=0 ;;
+    esac
+    if [ "$action" = "reset" ]; then
+        rm -f "$POST_DEPLOY_SMOKE_WEDGE_SKIP_CORRUPT_TALLY" 2>/dev/null || true
+        printf '0\n'
+        return 0
+    fi
+    current=$((current + 1))
+    # Best-effort persistence: this tally only ESCALATES a corruption that is
+    # already being reported, so failing to store it must not add a second
+    # failure on top of the one the caller is about to raise.
+    tally_dir="$(dirname "$POST_DEPLOY_SMOKE_WEDGE_SKIP_CORRUPT_TALLY")"
+    mkdir -p "$tally_dir" 2>/dev/null || true
+    tmp_path="${POST_DEPLOY_SMOKE_WEDGE_SKIP_CORRUPT_TALLY}.tmp.$$"
+    if printf '%s\n' "$current" > "$tmp_path" 2>/dev/null; then
+        mv -f "$tmp_path" "$POST_DEPLOY_SMOKE_WEDGE_SKIP_CORRUPT_TALLY" 2>/dev/null \
+            || rm -f "$tmp_path" 2>/dev/null || true
+    fi
+    printf '%s\n' "$current"
+    return 0
+}
+
+_post_deploy_smoke_wedge_skip_state_reset() {
+    _post_deploy_smoke_wedge_skip_corrupt_tally reset > /dev/null
+    if ! _post_deploy_smoke_wedge_skip_state_write 0 "evidence-based wedge verdict reached"; then
+        _post_deploy_smoke_fail \
+            "relay wedge skip accounting: could not reset the consecutive-skip counter at ${POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE}" \
+            || true
+        return 1
+    fi
+    return 0
+}
+
+# Records one wedge-check skip. Returns 0 when the skip was accounted for (the
+# caller stops checking but the smoke continues) and 1 when the consecutive-skip
+# threshold was reached or the accounting itself failed — the caller MUST
+# propagate that with `|| return 1` so the runner's `failed=1` fires.
+_post_deploy_smoke_wedge_skip() {
+    local reason="$1"
+    local threshold="$POST_DEPLOY_SMOKE_WEDGE_MAX_CONSECUTIVE_SKIPS"
+    local previous=0 count corruptions
+    _post_deploy_smoke_note "relay wedge=skipped: $reason" || return 1
+    case "$threshold" in
+        ''|*[!0-9]*)
+            _post_deploy_smoke_fail \
+                "relay wedge skip accounting: invalid consecutive-skip threshold ${threshold}" || true
+            return 1
+            ;;
+    esac
+    if [ "$threshold" -lt 1 ]; then
+        _post_deploy_smoke_fail \
+            "relay wedge skip accounting: consecutive-skip threshold must be >= 1, got ${threshold}" || true
+        return 1
+    fi
+    # A missing jq is an ACCOUNTING failure, not one more skip: without it the
+    # streak cannot be read at all, so every deploy would silently restart at 0.
+    if ! command -v jq > /dev/null 2>&1; then
+        _post_deploy_smoke_fail \
+            "relay wedge skip accounting: jq unavailable, cannot maintain the consecutive-skip counter" || true
+        return 1
+    fi
+    if previous=$(_post_deploy_smoke_wedge_skip_state_read); then
+        _post_deploy_smoke_wedge_skip_corrupt_tally reset > /dev/null
+    else
+        corruptions=$(_post_deploy_smoke_wedge_skip_corrupt_tally bump)
+        if [ "$corruptions" -ge "$POST_DEPLOY_SMOKE_WEDGE_SKIP_MAX_CORRUPTIONS" ]; then
+            _post_deploy_smoke_fail \
+                "relay wedge skip accounting: state file ${POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE} unreadable on ${corruptions} consecutive deploys" \
+                || true
+            return 1
+        fi
+        _post_deploy_smoke_note \
+            "relay wedge skip accounting: state unreadable, recovering the counter to 0 (corruption streak=${corruptions})" \
+            || return 1
+        previous=0
+    fi
+    count=$((previous + 1))
+    # Losing the increment IS the defect (#5244): the streak would restart at 0
+    # on the next deploy and never reach the threshold. A write failure
+    # therefore fails the smoke immediately instead of degrading to a note.
+    if ! _post_deploy_smoke_wedge_skip_state_write "$count" "$reason"; then
+        _post_deploy_smoke_fail \
+            "relay wedge skip accounting: could not record the skip at ${POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE}" \
+            || true
+        return 1
+    fi
+    if [ "$count" -ge "$threshold" ]; then
+        _post_deploy_smoke_fail \
+            "relay wedge check skipped on ${count} consecutive deploys (threshold ${threshold}); latest reason: ${reason}" \
+            || true
+        return 1
+    fi
+    _post_deploy_smoke_note "relay wedge skip streak=${count}/${threshold}" || return 1
+    return 0
 }
 
 _post_deploy_smoke_probe_apis() {
@@ -2733,6 +2921,76 @@ _post_deploy_smoke_wedge_markers_from_file() {
     ' "$health_detail_path" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"
 }
 
+# ── Durable axis marker (#5244 ②) ────────────────────────────────────────────
+# Predicate (b′), the ONLY durable-axis predicate: the in-memory relay offset is
+# AHEAD of the durable delivered frontier, i.e. a delivery Discord confirmed was
+# not persisted. Durable is the dedup authority (#5262), so a restart in that
+# state risks RE-DELIVERY.
+#
+# The companion predicate "inflight present and no delivery record exists" was
+# considered and REJECTED — do not reinstate it. Delivery records are created
+# only after a `Delivered` outcome, so an ordinary first turn on a channel sits
+# in exactly that state for minutes and would be flagged as a wedge.
+#
+# Records are keyed by the OFFSET-AUTHORITY channel, not the panel/delivery
+# channel; those can differ. health/detail already publishes the authority as
+# `relay_health.watcher_owner_channel_id`, so no owner-context file has to be
+# parsed here. A mailbox whose owner channel is null is left UNEVALUATED.
+_post_deploy_smoke_wedge_durable_axis_markers_from_file() {
+    local health_detail_path="$1"
+    local provider owner_channel in_memory durable record_path
+    # A jq failure on the health body yields an empty stream here, i.e. no
+    # markers rather than an error. That is not a hole in the check: the
+    # in-memory marker pass over the SAME file runs first and fails loudly on an
+    # unparseable body before this function is reached.
+    while IFS=$'\t' read -r provider owner_channel in_memory; do
+        [ -n "$provider" ] || continue
+        record_path="$POST_DEPLOY_SMOKE_DELIVERY_RECORDS_DIR/${provider}/${owner_channel}.json"
+        [ -f "$record_path" ] || continue
+        durable=$(jq -r '
+            if ((.delivered_frontier.range[1]? // null) | type) == "number"
+            then (.delivered_frontier.range[1] | floor | tostring)
+            else "" end
+        ' "$record_path" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE") || continue
+        # jq orders null BELOW every number, so a naive comparison makes both
+        # `500 > null` and `0 > null` true. `delivered_frontier` is an
+        # `Option` with `#[serde(default)]` and `{}` is a valid record, so a
+        # missing/null frontier is UNKNOWN — never numeric zero.
+        case "$durable" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        case "$in_memory" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        if [ "$in_memory" -gt "$durable" ]; then
+            # BOTH offsets belong in the marker string. The settle resample
+            # intersects marker strings with `comm -12`, so a marker that
+            # omitted the values would stay byte-identical while the relay was
+            # in fact advancing, and a transient in-flight delivery would be
+            # reported as a persistent wedge.
+            printf 'mailbox provider=%s owner_channel=%s durable-axis in_memory=%s durable=%s\n' \
+                "$provider" "$owner_channel" "$in_memory" "$durable"
+        fi
+    done < <(jq -r '
+        .mailboxes[]?
+        | select(type == "object")
+        | select((.provider | type) == "string")
+        | select((.relay_health.watcher_owner_channel_id | type) == "number")
+        | select((.relay_health.last_relay_offset | type) == "number")
+        | [ .provider,
+            (.relay_health.watcher_owner_channel_id | floor | tostring),
+            (.relay_health.last_relay_offset | floor | tostring) ]
+        | @tsv
+    ' "$health_detail_path" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE")
+}
+
+_post_deploy_smoke_wedge_all_markers_from_file() {
+    local health_detail_path="$1"
+    _post_deploy_smoke_wedge_markers_from_file "$health_detail_path" || return 1
+    _post_deploy_smoke_wedge_durable_axis_markers_from_file "$health_detail_path" || return 1
+    return 0
+}
+
 _post_deploy_smoke_fully_recovered_from_file() {
     local health_path="$1"
     jq -r '
@@ -2744,34 +3002,114 @@ _post_deploy_smoke_fully_recovered_from_file() {
     ' "$health_path" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"
 }
 
+# Bounded wait for `fully_recovered=true` (#5244 ③). Writes the recovered
+# /api/health/detail sample to $1 and returns 0; returns 1 when the deadline
+# expires, which is the ONLY path back to a skip.
+_post_deploy_smoke_wedge_await_recovery() {
+    local sample_path="$1"
+    local waited=0 recovered
+    case "$POST_DEPLOY_SMOKE_WEDGE_RECOVERY_WAIT_SECS" in
+        ''|*[!0-9]*)
+            _post_deploy_smoke_note \
+                "relay wedge recovery wait: invalid budget ${POST_DEPLOY_SMOKE_WEDGE_RECOVERY_WAIT_SECS}" \
+                || return 1
+            return 1
+            ;;
+    esac
+    _post_deploy_smoke_note \
+        "relay wedge: startup recovery in progress, waiting up to ${POST_DEPLOY_SMOKE_WEDGE_RECOVERY_WAIT_SECS}s for fully_recovered=true" \
+        || return 1
+    while [ "$waited" -lt "$POST_DEPLOY_SMOKE_WEDGE_RECOVERY_WAIT_SECS" ]; do
+        sleep "$POST_DEPLOY_SMOKE_WEDGE_RECOVERY_POLL_SECS"
+        waited=$((waited + POST_DEPLOY_SMOKE_WEDGE_RECOVERY_POLL_SECS))
+        if ! curl -fsS --connect-timeout 2 --max-time 15 \
+            -H "Origin: http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}" \
+            -o "$sample_path" \
+            "http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}/api/health/detail"; then
+            continue
+        fi
+        [ -s "$sample_path" ] || continue
+        recovered=$(_post_deploy_smoke_fully_recovered_from_file "$sample_path") || continue
+        if [ "$recovered" = "true" ]; then
+            _post_deploy_smoke_note "relay wedge: startup recovery completed after ${waited}s" || return 1
+            return 0
+        fi
+    done
+    _post_deploy_smoke_note \
+        "relay wedge: startup recovery still incomplete after ${POST_DEPLOY_SMOKE_WEDGE_RECOVERY_WAIT_SECS}s" \
+        || return 1
+    return 1
+}
+
+# ── What this wedge check does NOT guarantee (#5244) ─────────────────────────
+# This list is an asset. Do not delete it; narrow it if it turns out to claim
+# too much, and widen it if the code guarantees less than it says.
+#
+# 1. A raw "durable is AHEAD of in-memory" reading is NOT by itself evidence of
+#    a defect — a restart makes that shape common. (It is not universally
+#    benign either: the Rust side treats a current-generation durable frontier
+#    beyond the current EOF as a regression/correction signal. The shell does
+#    not distinguish those, which is why only the one direction is flagged.)
+# 2. Generations are NOT compared. No struct serialized by health/detail
+#    exposes the in-memory generation, so unpersisted-within-a-generation and
+#    stale-durable-after-a-generation-rotation are indistinguishable here.
+# 3. Durable REGRESSION (a monotonicity violation) is not detected in either
+#    direction: no previous durable value is retained, within or across
+#    deploys.
+# 4. The consecutive-skip counter is NODE-LOCAL. This does NOT mean peers are
+#    uncovered — `--all-nodes` runs this same script on each peer — only that
+#    each node keeps its own streak.
+# 5. A mailbox whose `relay_health.watcher_owner_channel_id` is null is left
+#    UNEVALUATED on the durable axis (no marker either way), because the record
+#    to read cannot be resolved without it.
+# 6. The settle window is 4s and has NO source-grounded upper bound: the record
+#    lock is a blocking `flock` and persistence is a synchronous `sync_all`.
+#    Because in-memory advance precedes durable persist on the live watcher and
+#    bridge paths, predicate (b′) is TRANSIENTLY TRUE during every healthy
+#    terminal delivery; the offsets in the marker string make an advancing
+#    relay resolve itself across the resample. If the filesystem stalls for
+#    longer than the settle window it will not, and the consequence is not
+#    merely one alert: the reporter always writes a draft and notifies the
+#    channel, and with POST_DEPLOY_SMOKE_CREATE_ISSUE=confirmed it can file a
+#    GitHub issue.
 _post_deploy_smoke_check_wedges() {
     local fully_recovered wedge_markers wedge_markers_resampled persistent_markers wedge_summary
+    local wedge_source_path
     local resample_path="$POST_DEPLOY_SMOKE_TMP_DIR/api_health_detail_resample.json"
+    local recovery_path="$POST_DEPLOY_SMOKE_TMP_DIR/api_health_detail_recovered.json"
     if [ -z "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" ] \
       || [ ! -s "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" ]; then
         _post_deploy_smoke_fail "relay wedge check: /api/health/detail body unavailable" || true
         return 1
     fi
+    wedge_source_path="$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
 
     if ! fully_recovered=$(
-        _post_deploy_smoke_fully_recovered_from_file "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+        _post_deploy_smoke_fully_recovered_from_file "$wedge_source_path"
     ); then
-        _post_deploy_smoke_note \
-            "relay wedge=skipped: startup recovery state unavailable" || return 1
+        _post_deploy_smoke_wedge_skip "startup recovery state unavailable" || return 1
         return 0
     fi
     if [ "$fully_recovered" = "false" ]; then
-        _post_deploy_smoke_note \
-            "relay wedge=skipped: startup recovery in progress" || return 1
-        return 0
+        # On success the markers come from the sample that PROVED recovery, not
+        # from the stale pre-recovery body this function was handed.
+        if _post_deploy_smoke_wedge_await_recovery "$recovery_path"; then
+            wedge_source_path="$recovery_path"
+        else
+            _post_deploy_smoke_wedge_skip "startup recovery in progress" || return 1
+            return 0
+        fi
     fi
 
     if ! wedge_markers=$(
-        _post_deploy_smoke_wedge_markers_from_file "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+        _post_deploy_smoke_wedge_all_markers_from_file "$wedge_source_path"
     ); then
         _post_deploy_smoke_fail "relay wedge check: health/detail JSON could not be parsed" || true
         return 1
     fi
+    # Evidence was reached on this deploy, whatever the verdict turns out to be.
+    # The streak counts only CONSECUTIVE deploys that never got this far.
+    _post_deploy_smoke_wedge_skip_state_reset || return 1
     if [ -z "$wedge_markers" ]; then
         _post_deploy_smoke_note "relay wedge markers=absent" || return 1
         return 0
@@ -2785,37 +3123,35 @@ _post_deploy_smoke_check_wedges() {
         -H "Origin: http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}" \
         -o "$resample_path" \
         "http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}/api/health/detail"; then
-        _post_deploy_smoke_note \
-            "relay wedge=skipped: settle resample unavailable" || return 1
+        _post_deploy_smoke_wedge_skip "settle resample unavailable" || return 1
         return 0
     fi
     if [ ! -s "$resample_path" ]; then
-        _post_deploy_smoke_note \
-            "relay wedge=skipped: settle resample body empty" || return 1
+        _post_deploy_smoke_wedge_skip "settle resample body empty" || return 1
         return 0
     fi
     if ! fully_recovered=$(_post_deploy_smoke_fully_recovered_from_file "$resample_path"); then
-        _post_deploy_smoke_note \
-            "relay wedge=skipped: settle recovery state unavailable" || return 1
+        _post_deploy_smoke_wedge_skip "settle recovery state unavailable" || return 1
         return 0
     fi
     if [ "$fully_recovered" = "false" ]; then
-        _post_deploy_smoke_note \
-            "relay wedge=skipped: startup recovery in progress" || return 1
+        # No second bounded wait here: the node was fully recovered moments ago,
+        # so recovery reappearing mid-settle is a restart, not the transient
+        # startup window ③ is about. Re-sampling for another 90s would compare
+        # markers across a process boundary.
+        _post_deploy_smoke_wedge_skip "startup recovery in progress" || return 1
         return 0
     fi
     if ! wedge_markers_resampled=$(
-        _post_deploy_smoke_wedge_markers_from_file "$resample_path"
+        _post_deploy_smoke_wedge_all_markers_from_file "$resample_path"
     ); then
-        _post_deploy_smoke_note \
-            "relay wedge=skipped: settle resample JSON could not be parsed" || return 1
+        _post_deploy_smoke_wedge_skip "settle resample JSON could not be parsed" || return 1
         return 0
     fi
     if ! persistent_markers=$(comm -12 \
         <(printf '%s\n' "$wedge_markers" | LC_ALL=C sort -u) \
         <(printf '%s\n' "$wedge_markers_resampled" | LC_ALL=C sort -u)); then
-        _post_deploy_smoke_note \
-            "relay wedge=skipped: settle resample comparison failed" || return 1
+        _post_deploy_smoke_wedge_skip "settle resample comparison failed" || return 1
         return 0
     fi
     if [ -z "$persistent_markers" ]; then
