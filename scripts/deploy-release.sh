@@ -2643,6 +2643,8 @@ POST_DEPLOY_SMOKE_LOG_LINES="${AGENTDESK_POST_DEPLOY_SMOKE_LOG_LINES:-500}"
 POST_DEPLOY_SMOKE_WARN_LIMIT="${AGENTDESK_POST_DEPLOY_SMOKE_WARN_LIMIT:-5}"
 POST_DEPLOY_SMOKE_RELAY_CELL="${AGENTDESK_POST_DEPLOY_SMOKE_RELAY_CELL:-claude-tui}"
 POST_DEPLOY_SMOKE_CREATE_ISSUE="${AGENTDESK_POST_DEPLOY_SMOKE_CREATE_ISSUE:-off}"
+# Keep the PID suffix after both date success/failure paths so artifacts from
+# concurrently live deploy shells use distinct smoke paths.
 POST_DEPLOY_SMOKE_STAMP="$(date -u '+%Y%m%dT%H%M%SZ' 2>/dev/null || printf 'unknown')-$$"
 POST_DEPLOY_SMOKE_EVIDENCE="$ADK_REL/logs/post-deploy-smoke-${POST_DEPLOY_SMOKE_STAMP}.log"
 POST_DEPLOY_SMOKE_TMP_DIR=""
@@ -2652,6 +2654,7 @@ POST_DEPLOY_SMOKE_SESSIONS_BODY=""
 POST_DEPLOY_SMOKE_FAILURES=()
 
 # >>> BEGIN wedge-check region (#5244) — coverage is report-only and point-in-time
+POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE="evaluated: 0 stall-state marker(s) observed (point-in-time)"
 _post_deploy_smoke_note() {
     local message="$1"
     printf '%s\n' "$message"
@@ -2702,9 +2705,11 @@ _post_deploy_smoke_probe_apis() {
 
 _post_deploy_smoke_wedge_scan_from_file() {
     local health_detail_path="$1"
-    # This is the only health/detail parser. The caller deliberately reports a
-    # broad scan failure because schema, I/O, filter/tool, and signal failures
-    # cannot be distinguished safely at this shell boundary.
+    # This is the only health/detail parser that feeds wedge coverage. The E-1
+    # busy gate at :3024 parses the same body independently. The caller
+    # deliberately reports a broad scan failure because schema, I/O,
+    # filter/tool, and signal failures cannot be distinguished safely at this
+    # shell boundary (jq absence alone has separate vocabulary).
     # The three marker states below are point-in-time Rust-classifier
     # observations. Watchdog auto-recovery may change the next snapshot; this
     # function does not infer persistence or an unresolvable wedge from one.
@@ -2802,20 +2807,21 @@ _post_deploy_smoke_check_wedges() {
         _post_deploy_smoke_wedge_unevaluable "wedge scan output contract violated"
         return 1
     fi
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        _post_deploy_smoke_note "relay wedge observation: ${line#obs=}" || return 1
+    done <<< "$observations"
     if [ "$recovered" = "false" ]; then
         POST_DEPLOY_SMOKE_WEDGE_COVERAGE="not evaluated: startup recovery in progress"
         _post_deploy_smoke_note "relay wedge=${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}" || return 1
         return 0
     fi
-    while IFS= read -r line; do
-        [ -n "$line" ] || continue
-        _post_deploy_smoke_note "relay wedge observation: ${line#obs=}" || return 1
-    done <<< "$observations"
-    POST_DEPLOY_SMOKE_WEDGE_COVERAGE="evaluated: ${marker_count} stall-state marker(s) observed (point-in-time)"
     if [ "$marker_count" = "0" ]; then
+        POST_DEPLOY_SMOKE_WEDGE_COVERAGE="$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE"
         _post_deploy_smoke_note "relay wedge=${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}" || return 1
         return 0
     fi
+    POST_DEPLOY_SMOKE_WEDGE_COVERAGE="evaluated: ${marker_count} stall-state marker(s) observed (point-in-time)"
     _post_deploy_smoke_fail \
         "relay stall-state marker(s) observed (point-in-time): ${markers//$'\n'/; }" \
         || true
@@ -3220,7 +3226,7 @@ echo "▸ Running post-deploy functional smoke (#4262)..."
 # each fallible step is nevertheless explicitly guarded or carries `|| return`.
 if _run_post_deploy_functional_smoke; then
     case "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE" in
-        "evaluated: 0 stall-state marker(s) observed (point-in-time)")
+        "$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE")
             echo "✓ Post-deploy functional smoke passed (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
             ;;
         *)

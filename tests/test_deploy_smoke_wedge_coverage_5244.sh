@@ -27,8 +27,17 @@ if [ -n "$begin_line" ] && [ -n "$end_line" ]; then
     sed -n "$((begin_line + 1)),$((end_line - 1))p" "$DEPLOY_SH" > "$REGION"
 fi
 
+# The wedge region is evaluated in child shells, so an unreviewed source hook
+# could replace its parser without changing the visible coverage assignment.
+if grep -qE '^[[:space:]]*(\.|source)[[:space:]]+' "$REGION"; then
+    fail 'wedge region sources an override'
+    exit 1
+fi
+
 # H2/H7: derive the evaluated function set from the region, then check actual
-# definitions and the whole file's exact-one rule.
+# shell function definitions (canonical `name() {` and `function name {` forms)
+# and the whole file's exact-one rule. CASE_DONE below is only a child-shell
+# completion token; it is not an authenticated function-return witness.
 expected_functions=$(grep -E '^_post_deploy_smoke[a-z_]*\(\)' "$REGION" | sed 's/().*$//' | sort -u)
 if [ -z "$expected_functions" ]; then
     fail 'wedge region yielded no functions'
@@ -38,9 +47,13 @@ else
     [ "$actual_functions" = "$expected_functions" ] || fail "region/function mismatch"
     while IFS= read -r fn; do
         [ -n "$fn" ] || continue
-        definition_count=$(grep -cE "^${fn}\(\)" "$DEPLOY_SH")
-        [ "$definition_count" -eq 1 ] || fail "definition count for $fn is $definition_count"
-        definition_line=$(grep -nE "^${fn}\(\)" "$DEPLOY_SH" | cut -d: -f1)
+        definition_pattern="^[[:space:]]*(function[[:space:]]+)?${fn}[[:space:]]*(\\(\\))?[[:space:]]*\\{"
+        definition_count=$(grep -cE "$definition_pattern" "$DEPLOY_SH")
+        if [ "$definition_count" -ne 1 ]; then
+            fail "definition count for $fn is $definition_count"
+            continue
+        fi
+        definition_line=$(grep -nE "$definition_pattern" "$DEPLOY_SH" | cut -d: -f1)
         [ "$definition_line" -ge "$begin_line" ] && [ "$definition_line" -le "$end_line" ] || fail "$fn is outside the wedge region"
     done <<< "$expected_functions"
 fi
@@ -50,10 +63,13 @@ fi
 smoke_to_report=$(sed -n '/^_run_post_deploy_functional_smoke()/,/^_report_post_deploy_smoke_failure()/p' "$DEPLOY_SH")
 cleanup_to_signal=$(sed -n '/^_cleanup_on_exit()/,/^_handle_cleanup_signal()/p' "$DEPLOY_SH")
 grep -q '_post_deploy_smoke_check_wedges' <<< "$smoke_to_report" || fail 'smoke runner text does not contain check_wedges'
+grep -qE '^[[:space:]]*if ! _post_deploy_smoke_check_wedges; then$' <<< "$smoke_to_report" || fail 'runner wedge check is wrapped in a subshell or pipeline'
 grep -q '_finalize_detached_helper' <<< "$cleanup_to_signal" || fail 'cleanup text does not contain finalizer'
 coverage_decl_line=$(grep -nE '^POST_DEPLOY_SMOKE_WEDGE_COVERAGE=' "$DEPLOY_SH" | head -1 | cut -d: -f1)
 trap_line=$(grep -nF 'trap _cleanup_on_exit EXIT' "$DEPLOY_SH" | head -1 | cut -d: -f1)
 [ -n "$coverage_decl_line" ] && [ -n "$trap_line" ] && [ "$coverage_decl_line" -lt "$trap_line" ] || fail 'coverage declaration is not before EXIT trap'
+exit_trap_count=$(grep -cE '^[[:space:]]*trap[[:space:]]+[^-][^[:space:]]*[[:space:]]+EXIT$' "$DEPLOY_SH" || true)
+[ "$exit_trap_count" -eq 1 ] || fail "expected one installed EXIT trap, got $exit_trap_count"
 while IFS=: read -r assignment_line _; do
     [ -n "$assignment_line" ] || continue
     if [ "$assignment_line" != "$coverage_decl_line" ]; then
@@ -93,9 +109,11 @@ fixture tmux_dead '{"fully_recovered":true,"mailboxes":[{"provider":"claude","ch
 fixture stale_thread '{"fully_recovered":true,"mailboxes":[{"provider":"claude","channel_id":1,"relay_stall_state":"stale_thread_proof"}]}'
 fixture orphan_token '{"fully_recovered":true,"mailboxes":[{"provider":"claude","channel_id":1,"relay_stall_state":"orphan_pending_token"}]}'
 fixture observations '{"fully_recovered":true,"mailboxes":[{"provider":"claude","channel_id":1,"relay_stall_state":"queue_blocked"},{"provider":"claude","channel_id":2,"relay_stall_state":"future_state"}]}'
+fixture recovering_observations '{"fully_recovered":false,"mailboxes":[{"provider":"claude","channel_id":1,"relay_stall_state":"queue_blocked"},{"provider":"claude","channel_id":2,"relay_stall_state":"future_state"}]}'
 fixture malformed '{"fully_recovered":true,"mailboxes":[{"provider":"claude","channel_id":1,"relay_stall_state":42}]}'
 fixture malformed_json '{broken'
 fixture empty_mailboxes '{"fully_recovered":true,"mailboxes":null}'
+fixture empty_mailboxes_valid '{"fully_recovered":true,"mailboxes":[]}'
 fixture root_scalar '[]'
 fixture recovery_missing '{"mailboxes":[]}'
 fixture mailbox_scalar '{"fully_recovered":true,"mailboxes":["mailbox"]}'
@@ -139,9 +157,11 @@ run_case tmux_alive_relay_dead 1 "$TMP_ROOT/tmux_dead.json" 'evaluated: 1 stall-
 run_case stale_thread_proof 1 "$TMP_ROOT/stale_thread.json" 'evaluated: 1 stall-state marker(s) observed (point-in-time)'
 run_case orphan_pending_token 1 "$TMP_ROOT/orphan_token.json" 'evaluated: 1 stall-state marker(s) observed (point-in-time)'
 run_case observations 0 "$TMP_ROOT/observations.json" 'evaluated: 0 stall-state marker(s) observed (point-in-time)'
+run_case recovering_observations 0 "$TMP_ROOT/recovering_observations.json" 'not evaluated: startup recovery in progress'
 run_case malformed 1 "$TMP_ROOT/malformed.json" 'unevaluable: health/detail scan failed'
 run_case malformed_json 1 "$TMP_ROOT/malformed_json.json" 'unevaluable: health/detail scan failed'
 run_case empty_mailboxes 1 "$TMP_ROOT/empty_mailboxes.json" 'unevaluable: health/detail scan failed'
+run_case empty_mailboxes_valid 0 "$TMP_ROOT/empty_mailboxes_valid.json" 'evaluated: 0 stall-state marker(s) observed (point-in-time)'
 run_case root_scalar 1 "$TMP_ROOT/root_scalar.json" 'unevaluable: health/detail scan failed'
 run_case recovery_missing 1 "$TMP_ROOT/recovery_missing.json" 'unevaluable: health/detail scan failed'
 run_case mailbox_scalar 1 "$TMP_ROOT/mailbox_scalar.json" 'unevaluable: health/detail scan failed'
@@ -225,6 +245,21 @@ CHILD
 grep -q 'relay wedge observation: queue_blocked' <<< "$observation_output" || fail 'queue_blocked was not reported as an observation'
 grep -q 'relay wedge observation: unknown_stall_state' <<< "$observation_output" || fail 'unknown stall was not reported as an observation'
 
+recovery_observation_output=$(bash -s -- "$REGION" "$TMP_ROOT/recovering_observations.json" <<'CHILD'
+set -euo pipefail
+eval "$(<"$1")"
+POST_DEPLOY_SMOKE_EVIDENCE="${TMPDIR:-/tmp}/5244-recovery-observation.evidence"
+POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY="$2"
+POST_DEPLOY_SMOKE_FAILURES=()
+POST_DEPLOY_SMOKE_WEDGE_COVERAGE="not run: wedge check did not execute"
+: > "$POST_DEPLOY_SMOKE_EVIDENCE"
+if _post_deploy_smoke_check_wedges; then rc=0; else rc=$?; fi
+printf 'CASE_DONE rc=%s coverage=%s\n' "$rc" "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE"
+CHILD
+)
+grep -q 'relay wedge observation: queue_blocked' <<< "$recovery_observation_output" || fail 'recovery queue observation was discarded'
+grep -q 'relay wedge observation: unknown_stall_state' <<< "$recovery_observation_output" || fail 'recovery unknown observation was discarded'
+
 # H3: disposition wording is driven by coverage, while FAIL remains fail-open.
 DISPOSITION="$TMP_ROOT/disposition.sh"
 disposition_begin=$(grep -nF '# >>> BEGIN smoke-disposition region (#5244)' "$DEPLOY_SH" | cut -d: -f1)
@@ -236,6 +271,7 @@ disposition_case() {
     output=$(SMOKE_RC="$smoke_rc" COVERAGE="$coverage" bash -s -- "$DISPOSITION" <<'CHILD'
 set -euo pipefail
 POST_DEPLOY_SMOKE_WEDGE_COVERAGE="$COVERAGE"
+POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE='evaluated: 0 stall-state marker(s) observed (point-in-time)'
 POST_DEPLOY_SMOKE_EVIDENCE=/tmp/5244-disposition.evidence
 POST_DEPLOY_SMOKE_TMP_DIR=""
 POST_DEPLOY_SMOKE_FAILURES=()
