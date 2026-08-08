@@ -1,21 +1,22 @@
 # Discord Outbound Migration — Coverage Map (#1006 v3 / #1280 / #1436 / #1457)
 
-> Last refreshed: 2026-08-08 (#5071 T1 S5b — **on unix**, the recovery /
-> fresh-send / orphan family joined the shadow journal, at the anchor S5a
-> corrected. Its three confirmed-delivery entry points (the leased no-anchor fresh
-> send, the anchored-replace edit-failure fallback, and the same fallback through
-> the turn-output controller) open one obligation immediately before
-> `RecoveryDeliveryContext::record_durable_frontier`, and that funnel returns its
-> own verdict so the obligation settles `C` only when the durable write returned
-> `Ok`; every refusal it already had — no tmux session name, no current
-> generation marker, write error, anchor bind not persisted — settles `U` naming
-> itself. Two ceilings are declared rather than papered over: the obligation opens
-> AFTER transport, because two of the three entry points only learn that they
-> advance the frontier from the edit transport's own answer, so a recovery
-> delivery lost mid-POST leaves no trace; and it emits no `T`, because no receipt
-> is observable on this path and synthesising one from the anchor message id would
-> make `requested == returned` structurally true. The journal stays shadow-only
-> with nothing reading it back, and the recovery path's bypass of the
+> Last refreshed: 2026-08-08 (against #5071 T1 S5b).
+>
+> — **on unix**, the recovery / fresh-send / orphan family joined the shadow
+> journal, at the anchor S5a corrected. Its three confirmed-delivery entry points
+> (the leased no-anchor fresh send, the anchored-replace edit-failure fallback,
+> and the same fallback through the turn-output controller) open one obligation
+> immediately before `RecoveryDeliveryContext::record_durable_frontier`, and that
+> funnel returns its own verdict so the obligation settles `C` only when the
+> durable write returned `Ok`; every refusal it already had — no tmux session
+> name, no current generation marker, write error, anchor bind not persisted —
+> settles `U` naming itself. Two ceilings are declared rather than papered over:
+> the obligation opens AFTER transport, because two of the three entry points only
+> learn that they advance the frontier from the edit transport's own answer, so a
+> recovery delivery lost mid-POST leaves no trace; and it emits no `T`, because no
+> receipt is observable on this path and synthesising one from the anchor message
+> id would make `requested == returned` structurally true. The journal stays
+> shadow-only with nothing reading it back, and the recovery path's bypass of the
 > `shadow_mirror_delivered_frontier` funnel is deliberately still there — S5b
 > measures that bypass, T1 S7 closes it. Off unix this family is uninstrumented:
 > the journal is `#[cfg(unix)]` while `recovery_engine` / `recovery_paths` /
@@ -23,7 +24,7 @@
 > non-unix half is an uninhabited enum. The uninstrumented baseline moves 2 -> 1;
 > the one family still uninstrumented is `pipe stream epoch`, whose own anchor is
 > the open question S5a raised. No delivery behaviour changes, so the coverage
-> rows below are unchanged.)
+> rows below are unchanged.
 
 > Last refreshed: 2026-08-08 (#5071 T1 S5a — the shadow journal's **family map**
 > was corrected; no family gained instrumentation and the uninstrumented baseline
