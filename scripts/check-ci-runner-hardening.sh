@@ -293,11 +293,11 @@ targets = {
     "runs_on" => "ubuntu-latest",
     # #5185 re-pins after giving this lane the PostgreSQL service its own
     # selection requires: the canonical filters are substring matches over
-    # ids, and some PG-dependent tests carry none of those substrings, so the
+    # ids, and 55 PG-dependent tests carry none of those substrings, so the
     # job selected a database it never provisioned.
     # The re-pin is a review trigger only; the property is enforced without a
     # hash by `[rule5]` in scripts/check_pg_test_lane_membership.py.
-    # #5230 re-pins after sourcing the shared filter and replaying its three
+    # #5230 re-pins after sourcing the shared filter and replaying its 15
     # source-verified non-PG false positives after the adjudicated sweep.
     "job_sha256" => "1e8147f0eb1a23e3b49336953e8c0cd5d1214e94dd3d517444d4e35f1ef98ed8",
     "cargo_steps" => {

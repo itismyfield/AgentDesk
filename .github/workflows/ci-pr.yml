@@ -892,8 +892,8 @@ jobs:
   #
   # This lane raises that floor to the whole library harness minus the tests
   # canonical non-PG filter removes, run in parallel on the
-  # broad `rust_or_policy` filter: 6,977 tests selected on ubuntu-latest, of
-  # which 8 are `#[ignore]`d, so 6,969 execute. Those three figures are derived
+  # broad `rust_or_policy` filter: 7,028 tests selected on ubuntu-latest, of
+  # which 8 are `#[ignore]`d, so 7,020 execute. Those three figures are derived
   # from `scripts/lib_test_inventory_manifest.txt` at THIS commit. The newest
   # figures a real run of this lane has REPORTED are one commit older: at
   # 6c2c43634 its summary read `expected=6971 ignored=8 executed=6963`, and the
@@ -1036,7 +1036,7 @@ jobs:
   #     nothing.
   #   * `DATABASE_URL` is deliberately NOT exported here even though `test_fast`
   #     and `high-risk-recovery` export it. Those lanes select hundreds of tests;
-  #     this one selects 6,977 and executes 6,969, and the fixture helpers read
+  #     this one selects 7,028 and executes 7,020, and the fixture helpers read
   #     `POSTGRES_TEST_DATABASE_URL_BASE`/`PG*`, not `DATABASE_URL` -- the 55
   #     pass without it. Exporting a production connection string across the
   #     whole harness is a blast radius that was not measured, so it is not

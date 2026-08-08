@@ -116,6 +116,10 @@ class NonPgFilterContract(unittest.TestCase):
         (self.root / membership.NON_PG_FILTER_REL).write_text(
             (REPO_ROOT / membership.NON_PG_FILTER_REL).read_text("utf-8"), "utf-8"
         )
+        (self.root / membership.LIB_TEST_INVENTORY_REL).write_text(
+            (REPO_ROOT / membership.LIB_TEST_INVENTORY_REL).read_text("utf-8"),
+            "utf-8",
+        )
         consumer = (
             "    steps:\n"
             "      - run: |\n"
@@ -127,7 +131,15 @@ class NonPgFilterContract(unittest.TestCase):
             "jobs:\n  library_sweep:\n" + consumer, "utf-8"
         )
         (self.root / ".github/workflows/ci-nightly.yml").write_text(
-            "jobs:\n  full_macos:\n" + consumer + "  full_windows:\n" + consumer,
+            "jobs:\n  full_macos:\n"
+            + consumer
+            + "  full_windows:\n"
+            + consumer
+            + "  postgres_full:\n"
+            + "    steps:\n"
+            + "      - run: |\n"
+            + "          source scripts/ci/non-pg-test-filter.sh\n"
+            + "          cargo test --all-targets -- \"${PG_INCLUDE_ARGS[@]}\"\n",
             "utf-8",
         )
 
@@ -151,6 +163,13 @@ class NonPgFilterContract(unittest.TestCase):
             ),
             ["cargo test --all-targets -- " + shlex.join(args)],
         )
+        self.assertEqual(
+            membership._cargo_commands(
+                'run: cargo test --all-targets -- "${PG_INCLUDE_ARGS[@]}"',
+                args,
+            ),
+            ["cargo test --all-targets -- " + shlex.join(args[1::2])],
+        )
 
     def test_mutating_only_nightly_to_a_literal_filter_is_rejected(self) -> None:
         path = self.root / ".github/workflows/ci-nightly.yml"
@@ -162,6 +181,36 @@ class NonPgFilterContract(unittest.TestCase):
         )
         errors = membership.non_pg_filter_contract_errors(self.root, self.jobs())
         self.assertTrue(any("literal --skip" in error for error in errors))
+
+    def test_redefining_sourced_array_is_rejected(self) -> None:
+        path = self.root / ".github/workflows/ci-nightly.yml"
+        path.write_text(
+            path.read_text("utf-8").replace(
+                "          cargo test --all-targets -- \"${NON_PG_SKIP_ARGS[@]}\"\n",
+                "          NON_PG_SKIP_ARGS=(\"${NON_PG_SKIP_ARGS[@]:0:4}\")\n"
+                "          cargo test --all-targets -- \"${NON_PG_SKIP_ARGS[@]}\"\n",
+                1,
+            ),
+            "utf-8",
+        )
+        errors = membership.non_pg_filter_contract_errors(self.root, self.jobs())
+        self.assertTrue(
+            any("redefines canonical NON_PG_SKIP_ARGS" in error for error in errors)
+        )
+
+    def test_replay_id_must_exist_in_libtest_inventory(self) -> None:
+        path = self.root / membership.NON_PG_FILTER_REL
+        first = membership.load_non_pg_false_positives(self.root)[0]
+        path.write_text(
+            path.read_text("utf-8").replace(first, first + "_renamed"), "utf-8"
+        )
+        errors = membership.non_pg_filter_contract_errors(self.root, self.jobs())
+        self.assertTrue(
+            any(
+                "replay id is absent" in error and "_renamed" in error
+                for error in errors
+            )
+        )
 
 
 class DetectionMutation(FixtureCase):

@@ -215,11 +215,10 @@ jobs:
 
       - name: cargo test (postgres bootstrap)
         timeout-minutes: 15
-        run: cargo test postgres_ -- --nocapture --test-threads=1
-
-      - name: cargo test (PG routes)
-        timeout-minutes: 15
-        run: cargo test _pg_ -- --nocapture --test-threads=1
+        shell: bash
+        run: |
+          source scripts/ci/non-pg-test-filter.sh
+          cargo test --all-targets -- "${PG_INCLUDE_ARGS[@]}" --nocapture --test-threads=1
 
       - name: Stop PostgreSQL service
         if: always()

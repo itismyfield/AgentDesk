@@ -355,6 +355,13 @@ class FastCheckCiWiringTests(unittest.TestCase):
             "cargo test --lib discord_thread_create -- --test-threads=1",
             job_block(nightly, "full_windows"),
         )
+        postgres = job_block(nightly, "postgres_full")
+        self.assertIn("source scripts/ci/non-pg-test-filter.sh", postgres)
+        self.assertIn(
+            'cargo test --all-targets -- "${PG_INCLUDE_ARGS[@]}" '
+            "--nocapture --test-threads=1",
+            postgres,
+        )
 
     def test_relay_authority_contract_job_uses_pinned_recipe(self) -> None:
         job = job_block(
