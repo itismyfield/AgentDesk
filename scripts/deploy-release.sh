@@ -3166,6 +3166,7 @@ _run_post_deploy_functional_smoke() {
 _report_post_deploy_smoke_failure() {
     local draft_path="$ADK_REL/logs/post-deploy-smoke-issue-draft-${POST_DEPLOY_SMOKE_STAMP}.md"
     local commit_sha node_name issue_url finding alert_text tmp_issue_out rc
+    local issue_capture_limit=4096
     commit_sha=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || printf 'unknown')
     node_name=$(hostname 2>/dev/null || printf 'unknown')
 
@@ -3207,6 +3208,9 @@ evidence: ${POST_DEPLOY_SMOKE_EVIDENCE}"
             # (10s command + 10s diagnostics + 5s TERM grace + 10s KILL wait).
             # Capture into a file: a command-substitution pipe would wait for
             # stdout EOF from grandchildren that outlive gh itself.
+            # Read at most 4096 bytes: a 2 KiB URL plus 2 KiB gh banner/diagnostic slack.
+            # This bounds the caller's read/return work only; an escaped grandchild
+            # retaining the unlinked inode can still grow disk use without bound.
             if tmp_issue_out=$(mktemp "${TMPDIR:-/tmp}/agentdesk-issue-create.XXXXXX"); then
                 if python3 "$SCRIPT_DIR/ci-timeout.py" 10 gh issue create \
                     --repo itismyfield/AgentDesk \
@@ -3217,10 +3221,15 @@ evidence: ${POST_DEPLOY_SMOKE_EVIDENCE}"
                     rc=$?
                 fi
                 if [ "$rc" -eq 0 ]; then
-                    issue_url=$(<"$tmp_issue_out")
+                    issue_url=$(head -c "$issue_capture_limit" "$tmp_issue_out" | awk '
+                        match($0, /https:\/\/[^[:space:]]+/) {
+                            print substr($0, RSTART, RLENGTH)
+                            exit
+                        }
+                    ')
                     echo "⚠ Post-deploy smoke issue created (confirmed mode): $issue_url"
                 else
-                    cat "$tmp_issue_out" >> "$POST_DEPLOY_SMOKE_EVIDENCE" 2>/dev/null || true
+                    head -c "$issue_capture_limit" "$tmp_issue_out" >> "$POST_DEPLOY_SMOKE_EVIDENCE" 2>/dev/null || true
                     echo "⚠ Post-deploy smoke issue creation FAILED; draft retained: $draft_path"
                 fi
                 rm -f "$tmp_issue_out"

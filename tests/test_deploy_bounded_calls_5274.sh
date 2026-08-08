@@ -13,6 +13,7 @@ TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-bounded-calls-5274.XXXXXX")
 LISTENER_PIDS=()
 FAILURES=0
 SKIPPED_CASES=0
+ISSUE_CAPTURE_LIMIT=4096
 
 cleanup() {
     local listener_pid
@@ -188,37 +189,82 @@ EOF
     chmod +x "$case_path"
 }
 
-write_issue_leader_exit_case() {
+write_issue_writer_case() {
     local source_path="$1"
-    local case_path="$2"
-    mkdir -p "$TMP_ROOT/release/logs" "$TMP_ROOT/leader-bin"
-    cat > "$TMP_ROOT/leader-bin/gh" <<'EOF'
+    local mode="$2"
+    local linger_s="$3"
+    local label="$4"
+    local case_path="$5"
+    local observation_path="$6"
+    local install_capture_wrappers="$7"
+    local bin="$TMP_ROOT/${label}-bin"
+    local ready_path="$TMP_ROOT/${label}.ready"
+    local real_awk real_cat real_wc
+    real_awk="$(command -v awk)"
+    real_cat="$(command -v cat)"
+    real_wc="$(command -v wc)"
+    mkdir -p "$TMP_ROOT/release/logs" "$bin"
+    cat > "$bin/gh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-# The gh leader exits now, while this child keeps gh's stdout descriptor open.
-# It self-expires; no signal-based cleanup is needed for this fixture.
+# The gh leader exits after its child has written the initial payload. The child
+# therefore keeps gh's stdout descriptor open after the leader is gone.
 (
-    sleep 18
+    python3 - "$ready_path" "$mode" "$linger_s" <<'PY'
+import sys
+import time
+from pathlib import Path
+
+ready_path = Path(sys.argv[1])
+mode = sys.argv[2]
+linger_s = float(sys.argv[3])
+payload = b"https://example.invalid/issues/5274\\n" + (b"f" * 8192)
+sys.stdout.buffer.write(payload)
+sys.stdout.buffer.flush()
+ready_path.write_text("ready", encoding="ascii")
+if mode == "finite":
+    time.sleep(linger_s)
+else:
+    deadline = time.monotonic() + linger_s
+    while time.monotonic() < deadline:
+        sys.stdout.buffer.write(b"p" * 1024)
+        sys.stdout.buffer.flush()
+        time.sleep(0.01)
+PY
 ) &
-printf '%s\n' 'https://example.invalid/issues/5274'
+for _ in {1..200}; do
+    [ -f "$ready_path" ] && break
+    sleep 0.01
+done
+[ -f "$ready_path" ]
 exit 0
 EOF
-    chmod +x "$TMP_ROOT/leader-bin/gh"
+    chmod +x "$bin/gh"
+    if [ "$install_capture_wrappers" -eq 1 ]; then
+        cat > "$bin/awk" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+"$real_cat" > "$TMP_ROOT/${label}.capture"
+"$real_wc" -c < "$TMP_ROOT/${label}.capture" > "$observation_path"
+"$real_awk" "\$@" "$TMP_ROOT/${label}.capture"
+EOF
+        chmod +x "$bin/awk"
+    fi
     {
         printf '%s\n' 'set -euo pipefail'
         extract_function "$source_path" _notify_channel
         extract_function "$source_path" _report_post_deploy_smoke_failure
         printf '%s\n' \
-            "PATH=$TMP_ROOT/leader-bin:\$PATH" \
+            "PATH=$bin:\$PATH" \
             "SCRIPT_DIR=$REPO_ROOT/scripts" \
             "REPO=$REPO_ROOT" \
             "ADK_REL=$TMP_ROOT/release" \
             'REL_PORT=0' \
             'REPORT_CHANNEL_ID=' \
             'POST_DEPLOY_SMOKE_CREATE_ISSUE=confirmed' \
-            'POST_DEPLOY_SMOKE_STAMP=bounded-5274-leader-exit' \
-            "POST_DEPLOY_SMOKE_EVIDENCE=$TMP_ROOT/leader-evidence.log" \
-            'POST_DEPLOY_SMOKE_FAILURES=("leader exited before child stdout closed")' \
+            "POST_DEPLOY_SMOKE_STAMP=bounded-5274-$label" \
+            "POST_DEPLOY_SMOKE_EVIDENCE=$TMP_ROOT/$label-evidence.log" \
+            "POST_DEPLOY_SMOKE_FAILURES=(\"$mode writer kept stdout open after leader exit\")" \
             '_report_post_deploy_smoke_failure'
     } > "$case_path"
     chmod +x "$case_path"
@@ -285,7 +331,8 @@ run_issue_leader_exit_variant() {
     local source_path="$2"
     local expected="$3"
     local case_path="$TMP_ROOT/${label}.sh"
-    write_issue_leader_exit_case "$source_path" "$case_path"
+    write_issue_writer_case "$source_path" persistent 18 "$label" "$case_path" \
+        "$TMP_ROOT/${label}.captured-bytes" 0
     local rc=0
     measure_case "$case_path" "$label" || rc=$?
     if [ "$expected" = "ok" ]; then
@@ -303,9 +350,43 @@ run_issue_leader_exit_variant() {
     fi
 }
 
+run_issue_writer_variant() {
+    local label="$1"
+    local source_path="$2"
+    local mode="$3"
+    local expected="$4"
+    local case_path="$TMP_ROOT/${label}.sh"
+    local observation_path="$TMP_ROOT/${label}.captured-bytes"
+    local rc=0 assertion_rc=0 observed=""
+    write_issue_writer_case "$source_path" "$mode" 2 "$label" "$case_path" \
+        "$observation_path" 1
+    measure_case "$case_path" "$label" || rc=$?
+    if [ -s "$observation_path" ]; then
+        observed="$(tr -d '[:space:]' < "$observation_path")"
+    fi
+    if [ -z "$observed" ] || ! [[ "$observed" =~ ^[0-9]+$ ]] \
+        || [ "$observed" -gt "$ISSUE_CAPTURE_LIMIT" ]; then
+        assertion_rc=1
+    fi
+    if [ "$expected" = "ok" ]; then
+        if [ "$rc" -ne 0 ] || [ "$assertion_rc" -ne 0 ]; then
+            echo "FAIL: $mode writer exceeded the ${ISSUE_CAPTURE_LIMIT}-byte capture bound" >&2
+            FAILURES=$((FAILURES + 1))
+        else
+            echo "$mode writer restored: ok (read_bytes=$observed <= $ISSUE_CAPTURE_LIMIT)"
+        fi
+    elif [ "$assertion_rc" -eq 0 ]; then
+        echo "FAIL: removing the capture bound did not fail the $mode writer assertion" >&2
+        FAILURES=$((FAILURES + 1))
+    else
+        echo "$mode writer cap removed: FAILED (self-assertion: read_bytes=$observed > $ISSUE_CAPTURE_LIMIT)"
+    fi
+}
+
 MUTATED_NOTIFY="$TMP_ROOT/deploy-no-notify-timeout.sh"
 MUTATED_ISSUE="$TMP_ROOT/deploy-no-gh-timeout.sh"
 MUTATED_ISSUE_PIPE="$TMP_ROOT/deploy-gh-stdout-pipe.sh"
+MUTATED_ISSUE_READ="$TMP_ROOT/deploy-unbounded-issue-read.sh"
 python3 - "$DEPLOY_SH" "$MUTATED_NOTIFY" "$MUTATED_ISSUE" <<'PY'
 import sys
 from pathlib import Path
@@ -339,6 +420,17 @@ mutated = source.replace(
 assert mutated != source
 Path(sys.argv[2]).write_text(mutated)
 PY
+python3 - "$DEPLOY_SH" "$MUTATED_ISSUE_READ" <<'PY'
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text()
+needle = 'head -c "$issue_capture_limit"'
+assert source.count(needle) == 2
+mutated = source.replace(needle, "cat")
+assert mutated != source
+Path(sys.argv[2]).write_text(mutated)
+PY
 
 TCP_LISTENER_AVAILABLE=1
 TCP_PROBE_READY="$TMP_ROOT/tcp-probe.port"
@@ -357,6 +449,10 @@ if [ "$TCP_LISTENER_AVAILABLE" -eq 1 ]; then
 fi
 run_issue_leader_exit_variant restored_leader_exit "$DEPLOY_SH" ok
 run_issue_leader_exit_variant removed_leader_exit "$MUTATED_ISSUE_PIPE" failed
+run_issue_writer_variant restored_finite "$DEPLOY_SH" finite ok
+run_issue_writer_variant removed_finite "$MUTATED_ISSUE_READ" finite failed
+run_issue_writer_variant restored_persistent "$DEPLOY_SH" persistent ok
+run_issue_writer_variant removed_persistent "$MUTATED_ISSUE_READ" persistent failed
 
 python3 - "$RELAY_PY" "$MATRIX_PY" <<'PY'
 import ast
