@@ -23,10 +23,11 @@
 //! text-chars) — the seed always clamps the offset, so it never zeroes the delta.
 //!
 //! Backstop (NOT a substitute for the fix): if the marker write did not durably
-//! persist (`IoError`) the recovered watcher still yields, so
+//! persist (`IoError`), or the typed watcher outlook proves there is no output
+//! path, the recovered watcher cannot relay, so
 //! [`guard_readopt_relay_resume_or_dead_letter`] dead-letters the undelivered body
 //! (`KIND_READOPT_RELAY_STUCK`) with a WARN, turning a silent 30-minute wedge into
-//! an observable, recoverable row.
+//! an observable loss record; it cannot reconstruct output never persisted.
 //!
 //! Lives under `recovery_engine` (a non-giant) so declaring it never re-inflates
 //! the `discord/mod.rs` giant; the yield-gate predicate is re-exported at
@@ -96,33 +97,35 @@ pub(in crate::services::discord) fn crash_readopt_live_relay_resume_required(
 }
 
 /// Pure DLQ-fire decision for the #4380 backstop, extracted so it is unit-testable
-/// WITHOUT Postgres (the sink `record_detached` needs a live pool). Fires iff the
-/// reloaded row is still the crash black-hole shape
-/// ([`crash_readopt_real_user_live_turn`]) AND lacks the `readopted_from_inflight`
-/// marker — i.e. the resume guard could not be armed (the marker WRITE failed with
-/// IoError), so the recovered watcher WILL yield to the dead bridge. The shape
-/// already excludes planned restarts and id-0 rows, so a marker that is absent
-/// BY DESIGN (never eligible) can never trip this.
+/// WITHOUT Postgres. Within the crash black-hole shape, `NoOutputPath` fires
+/// regardless of marker, `IncumbentReuse` never fires, and spawn-capable outlooks
+/// fire only when the marker write failed. Planned restarts and id-0 rows remain
+/// excluded before outlook is considered.
 pub(in crate::services::discord) fn readopt_relay_black_hole_dead_letter_required(
     state: &InflightTurnState,
+    outlook: super::mint_gate::WatcherInstallOutlook,
 ) -> bool {
-    crash_readopt_real_user_live_turn(state) && !state.readopted_from_inflight
+    crash_readopt_real_user_live_turn(state)
+        && match outlook {
+            super::mint_gate::WatcherInstallOutlook::NoOutputPath => true,
+            super::mint_gate::WatcherInstallOutlook::IncumbentReuse { .. } => false,
+            super::mint_gate::WatcherInstallOutlook::WillSpawn
+            | super::mint_gate::WatcherInstallOutlook::Unknown => !state.readopted_from_inflight,
+        }
 }
 
-/// #4380 backstop: WARN + durable dead-letter for a re-adopted real-user live turn
-/// whose relay-resume guard could NOT be armed (the `readopted_from_inflight`
-/// marker did not durably persist), so the recovered watcher will yield to the dead
-/// bridge and silently drop the remaining output. Fire-and-forget: the DLQ insert
-/// rides a detached task (`record_detached`), never blocking recovery.
+/// #4380/#5242 backstop: WARN + durable dead-letter for a re-adopted real-user
+/// turn whose typed outlook proves relay cannot resume. Fire-and-forget: the DLQ
+/// insert rides a detached task (`record_detached`), never blocking recovery.
 pub(in crate::services::discord) fn record_readopt_relay_black_hole_dead_letter(
     pool: Option<&PgPool>,
     channel_id: ChannelId,
     state: &InflightTurnState,
     reason: &str,
 ) {
-    // The undelivered body is `full_response[response_sent_offset..]`; fall back to
-    // the whole body if the (clamped) offset is somehow out of bounds so the DLQ
-    // never loses content to a slice panic.
+    // This is only the best-effort tail through the last durably persisted
+    // frontier. Bytes produced immediately before bridge death but never persisted
+    // cannot be reconstructed here; DLQ makes loss observable, not recoverable.
     let undelivered = state
         .full_response
         .get(state.response_sent_offset..)
@@ -150,32 +153,45 @@ pub(in crate::services::discord) fn record_readopt_relay_black_hole_dead_letter(
 }
 
 /// #4380 backstop entry point, called from the crash-recovery re-adopt path right
-/// after `reregister_active_turn_from_inflight` (which stamps the marker). Reloads
-/// the durable row and, iff it is still an at-risk re-adopted real-user live turn
-/// that LACKS the `readopted_from_inflight` marker (marker write failed), records a
-/// dead letter. On the normal path the marker is present, so this is a no-op.
+/// after typed re-registration. Reloads the durable row and applies the pure
+/// marker+outlook decision above, returning whether a record was requested.
 pub(in crate::services::discord) fn guard_readopt_relay_resume_or_dead_letter(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
-) {
+    outlook: super::mint_gate::WatcherInstallOutlook,
+) -> bool {
     let Some(reloaded) =
         crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())
     else {
-        return;
+        return false;
     };
-    if readopt_relay_black_hole_dead_letter_required(&reloaded) {
+    if readopt_relay_black_hole_dead_letter_required(&reloaded, outlook) {
+        let episode = reloaded
+            .turn_nonce
+            .as_deref()
+            .unwrap_or("legacy-no-turn-nonce");
+        let reason = if outlook.requires_marker_independent_dead_letter() {
+            format!("watcher outlook has no output path; recovery_episode={episode} (#5242)")
+        } else {
+            format!(
+                "readopted_from_inflight marker did not persist; recovery_episode={episode} (#4380)"
+            )
+        };
         record_readopt_relay_black_hole_dead_letter(
             shared.pg_pool.as_ref(),
             channel_id,
             &reloaded,
-            "readopted_from_inflight marker did not persist; recovered watcher will yield to the dead bridge (#4380)",
+            &reason,
         );
+        return true;
     }
+    false
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::mint_gate::WatcherInstallOutlook;
     use super::*;
     use crate::services::agent_protocol::RuntimeHandoffKind;
 
@@ -317,7 +333,10 @@ mod tests {
             state.readopted_from_inflight = false;
             state.set_restart_mode(crate::services::discord::InflightRestartMode::DrainRestart);
             assert!(
-                !readopt_relay_black_hole_dead_letter_required(&state),
+                !readopt_relay_black_hole_dead_letter_required(
+                    &state,
+                    WatcherInstallOutlook::WillSpawn,
+                ),
                 "a planned-restart row is resumed by the restart_mode escape hatch, not black-holed"
             );
         });
@@ -334,7 +353,10 @@ mod tests {
             state.readopted_from_inflight = false;
             state.user_msg_id = 0;
             assert!(
-                !readopt_relay_black_hole_dead_letter_required(&state),
+                !readopt_relay_black_hole_dead_letter_required(
+                    &state,
+                    WatcherInstallOutlook::WillSpawn,
+                ),
                 "id-0 rows are never marker-eligible; an absent marker is by-design, not a failed write"
             );
         });
@@ -348,7 +370,10 @@ mod tests {
         with_readopted_crash_turn(|mut state| {
             state.readopted_from_inflight = false;
             assert!(
-                readopt_relay_black_hole_dead_letter_required(&state),
+                readopt_relay_black_hole_dead_letter_required(
+                    &state,
+                    WatcherInstallOutlook::WillSpawn,
+                ),
                 "a crash re-adopt whose marker failed to persist is the real black-hole → must DLQ"
             );
         });
@@ -360,9 +385,23 @@ mod tests {
     fn marker_present_is_a_no_op() {
         with_readopted_crash_turn(|state| {
             assert!(
-                !readopt_relay_black_hole_dead_letter_required(&state),
+                !readopt_relay_black_hole_dead_letter_required(
+                    &state,
+                    WatcherInstallOutlook::WillSpawn,
+                ),
                 "when the marker persisted the resume guard is armed → no dead-letter"
             );
+        });
+    }
+
+    #[test]
+    fn no_output_path_dead_letters_even_with_a_premarked_row() {
+        with_readopted_crash_turn(|state| {
+            assert!(state.readopted_from_inflight);
+            assert!(readopt_relay_black_hole_dead_letter_required(
+                &state,
+                WatcherInstallOutlook::NoOutputPath,
+            ));
         });
     }
 }

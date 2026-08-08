@@ -382,15 +382,19 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// `✅`/footer + analytics/transcript must STILL fire — reusing
     /// `relay_ownership_only` would wrongly mute the very prose this fix protects.
     ///
-    /// This marker therefore feeds EXACTLY ONE guard: TUI-direct synthetic
-    /// `stale_reclaim` eligibility for a PRESENT row. It lets a later starved
-    /// injection / task-notification synthetic turn reclaim the mailbox of a
-    /// re-adopted real-user owner once that owner is stale
-    /// (`terminal_delivery_committed`) — closing the #4018 regression on the
-    /// restart-resume path, where the synthetic-owner-only reclaim could never
-    /// free a real-user mailbox (#4370). It NEVER by itself triggers a reclaim; a
-    /// live, progressing re-adopted turn (matching `user_msg_id`, not committed)
-    /// still yields reclaim-reason `None`.
+    /// INV: re-adoption evidence is a statement about the turn
+    /// T=(owner, effective finalizer id) that recorded it. A mailbox disposition
+    /// may consume that evidence only when the evidence itself proves that the
+    /// disposition target is exactly T. Evidence residue is harmless; allowing it
+    /// to authorize disposition of another turn is the defect.
+    ///
+    /// There are four direct consumers: present-row stale-reclaim eligibility,
+    /// crash relay-resume, crash DLQ/backstop policy, and the lock-held persist
+    /// no-op check. Mailbox disposition has two evidence paths: the present-row
+    /// classifier enforces raw owner+id equality, while the absent-row in-memory
+    /// ledger already enforces owner+id+finished. Crash resume is self-referential
+    /// to this row; DLQ authority is additionally restricted by the typed watcher
+    /// outlook. The marker alone never authorizes reclaim.
     ///
     /// NOTE (#4370/#4810): this marker is written through the NARROW adoption patch
     /// `mark_readopted_from_inflight_if_identity_unchanged`

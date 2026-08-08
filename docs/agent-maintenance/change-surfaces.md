@@ -127,6 +127,25 @@ time for diagnostics; neither is a stored approval value.
 
 ## Surface Map (by feature)
 
+### `recovery_marker_authority`
+
+- invariant: re-adoption evidence describes only its recorded turn
+  `T=(owner, effective finalizer id)`. Mailbox disposition may consume it only
+  when the evidence proves the disposition target is exactly T. The present-row
+  path enforces raw `user_msg_id == active_user_message_id`; the absent-row
+  ledger independently requires exact owner+id+finished.
+- restore-site four-value policy:
+
+  | production site | `WillSpawn` | `NoOutputPath` | `IncumbentReuse` | `Unknown` |
+  |---|---|---|---|---|
+  | `restore_inflight.rs` restart-report loop | watcher start exists, no reusable incumbent | `restart_report_watcher_start == None` for every runtime | healthy same-path incumbent | unreachable; no later rollout resolver |
+  | `restore_inflight.rs` ordinary loop | path exists, no reusable incumbent | missing non-Codex path; refuse mint and DLQ loss observation | refuse mint, never DLQ; incumbent remains the consumer | missing Codex path; later rollout resolver may install watcher |
+  | `watchers/lifecycle/restore.rs` startup restore | excluded from this gate | excluded | excluded | excluded |
+
+  Startup restore is excluded because it enqueues `PendingWatcher` regardless
+  of reregister result, so refusal cannot prove consumer absence. Episode
+  handoff preserves its guarded direct entry outside these three loop rows.
+
 ### `provider_output_guard`
 
 - canonical_modules:

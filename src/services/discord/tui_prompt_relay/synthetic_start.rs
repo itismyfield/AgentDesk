@@ -1055,6 +1055,186 @@ mod tests {
         );
     }
 
+    /// #5242 T1: a marker recorded for X cannot authorize disposition of an
+    /// aged live successor Y, even when a later NoOutputPath recovery leaves the
+    /// pre-existing X row and marker intact.
+    #[tokio::test(flavor = "current_thread")]
+    async fn premarked_x_after_refusal_does_not_cancel_aged_live_successor_y() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(5_242_320);
+        let tmux = "AgentDesk-claude-5242-premarked";
+        let x_id = MessageId::new(5_242_321);
+        let y_id = MessageId::new(5_242_322);
+
+        let mut x_state = real_user_inflight_state(channel_id, x_id, tmux, false);
+        x_state.readopted_from_inflight = true;
+        inflight::save_inflight_state(&x_state).expect("seed marked X row");
+        assert!(
+            !crate::services::discord::recovery::reregister_active_turn_from_inflight_with_outlook(
+                &shared,
+                &x_state,
+                crate::services::discord::recovery::mint_gate::WatcherInstallOutlook::NoOutputPath,
+            )
+            .await
+        );
+
+        let y_token = seed_real_owner_mailbox(&shared, channel_id, y_id).await;
+        let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+            &shared,
+            &provider,
+            channel_id,
+            tmux,
+            y_id,
+            Some(real_owner()),
+            ActiveTurnKind::UserOrAgent,
+            old_owner_started_at(),
+            MessageId::new(5_242_323),
+        )
+        .await;
+        assert!(!reclaimed, "X evidence must not qualify Y for reclaim");
+        assert!(!y_token.cancelled.load(Ordering::Relaxed));
+    }
+
+    /// #5242 G2: create a real snapshot-to-claim race. Y wins the mailbox while
+    /// X's recovery is paused after its empty snapshot; X then receives
+    /// `started=false` and is still marked for #4380. G1 must confine that X
+    /// marker so the aged Y token survives stale-reclaim inspection.
+    #[tokio::test(flavor = "current_thread")]
+    async fn token_race_marks_x_but_preserves_aged_live_y() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(5_242_330);
+        let tmux = "AgentDesk-claude-5242-token-race";
+        let x_id = MessageId::new(5_242_331);
+        let y_id = MessageId::new(5_242_332);
+        let x_state = real_user_inflight_state(channel_id, x_id, tmux, false);
+        inflight::save_inflight_state(&x_state).expect("seed X row");
+
+        let reached = Arc::new(tokio::sync::Barrier::new(2));
+        let resume = Arc::new(tokio::sync::Barrier::new(2));
+        let _barrier = crate::services::discord::recovery::install_before_mailbox_claim_barrier(
+            crate::services::discord::recovery::BeforeMailboxClaimBarrier {
+                reached: reached.clone(),
+                resume: resume.clone(),
+            },
+        );
+        let recovery_shared = shared.clone();
+        let recovery_state = x_state.clone();
+        let recovery = tokio::spawn(async move {
+            crate::services::discord::recovery::reregister_active_turn_from_inflight_with_outlook(
+                &recovery_shared,
+                &recovery_state,
+                crate::services::discord::recovery::mint_gate::WatcherInstallOutlook::WillSpawn,
+            )
+            .await
+        });
+
+        reached.wait().await;
+        let y_token = seed_real_owner_mailbox(&shared, channel_id, y_id).await;
+        resume.wait().await;
+        assert!(
+            !recovery.await.expect("recovery task"),
+            "Y must win the token race"
+        );
+        assert!(
+            inflight::load_inflight_state(&provider, channel_id.get())
+                .expect("X row remains")
+                .readopted_from_inflight,
+            "G2 must record adoption even when the real token race returns started=false"
+        );
+
+        let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+            &shared,
+            &provider,
+            channel_id,
+            tmux,
+            y_id,
+            Some(real_owner()),
+            ActiveTurnKind::UserOrAgent,
+            old_owner_started_at(),
+            MessageId::new(5_242_333),
+        )
+        .await;
+        assert!(!reclaimed, "the X marker must not authorize Y disposition");
+        assert!(!y_token.cancelled.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn queue_persistence_refusal_still_records_readoption() {
+        use crate::services::turn_orchestrator::{Intervention, InterventionMode};
+
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(5_242_340);
+        let x_id = MessageId::new(5_242_341);
+        let state = real_user_inflight_state(
+            channel_id,
+            x_id,
+            "AgentDesk-claude-5242-queue-failure",
+            false,
+        );
+        inflight::save_inflight_state(&state).expect("seed X row");
+        shared
+            .mailbox(channel_id)
+            .replace_queue(
+                vec![Intervention {
+                    author_id: real_owner(),
+                    author_is_bot: false,
+                    message_id: x_id,
+                    queued_generation: crate::services::discord::runtime_store::process_generation(
+                    ),
+                    source_message_ids: vec![x_id],
+                    source_message_queued_generations: Vec::new(),
+                    source_text_segments: Vec::new(),
+                    text: "queued X".to_string(),
+                    mode: InterventionMode::Soft,
+                    created_at: std::time::Instant::now(),
+                    reply_context: None,
+                    has_reply_boundary: false,
+                    merge_consecutive: false,
+                    pending_uploads: Vec::new(),
+                    voice_announcement: None,
+                }],
+                crate::services::discord::queue_persistence_context(&shared, &provider, channel_id),
+            )
+            .await;
+
+        // Replace the queue directory with a regular file. The real mailbox
+        // actor can purge X in memory but its atomic queue persist must fail.
+        let queue_dir = root
+            .path()
+            .join("runtime/discord_pending_queue")
+            .join(provider.as_str())
+            .join(&shared.token_hash);
+        let backup = queue_dir.with_extension("backup");
+        std::fs::rename(&queue_dir, &backup).expect("move queue dir");
+        std::fs::write(&queue_dir, b"not a directory").expect("block queue dir");
+        let started = crate::services::discord::recovery::reregister_active_turn_from_inflight(
+            &shared, &state,
+        )
+        .await;
+        std::fs::remove_file(&queue_dir).expect("remove blocker");
+        std::fs::rename(&backup, &queue_dir).expect("restore queue dir");
+
+        assert!(
+            !started,
+            "queue persistence failure must refuse the mailbox claim"
+        );
+        assert!(
+            inflight::load_inflight_state(&provider, channel_id.get())
+                .expect("X row")
+                .readopted_from_inflight,
+            "MUTATION GUARD: #4380 requires marking even when started=false"
+        );
+    }
+
     // #4370 (fresh-Claude r3 #1). The mailbox's `active_user_message_id` is the turn's
     // `effective_finalizer_turn_id()`, which equals `user_msg_id` only when that id is
     // NON-zero. An id-0 marked row makes the two diverge, so the reason function would

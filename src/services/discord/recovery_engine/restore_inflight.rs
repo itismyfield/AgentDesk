@@ -28,6 +28,59 @@ fn recovery_output_path_with_tmux_fallback(
         .or_else(|| (!fallback_output.is_empty()).then_some(fallback_output))
 }
 
+async fn reregister_active_turn_for_output_path(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    state: &inflight::InflightTurnState,
+    tmux_session_name: &str,
+    output_path: &str,
+) -> (bool, mint_gate::WatcherInstallOutlook, bool) {
+    let path_exists = std::fs::metadata(output_path).is_ok();
+    let outlook = recovery_mint_outlook(
+        shared,
+        state,
+        Some(tmux_session_name),
+        output_path,
+        path_exists,
+    );
+    // Keep the refusal as an outer production guard. Mutation tests replace this
+    // condition with `&& false`; the missing-path integration test must then see
+    // the legacy entry mint a token and fail on its own assertion.
+    let started = if !outlook.allows_mint() {
+        reregister_active_turn_from_inflight_with_outlook(shared, state, outlook).await
+    } else {
+        reregister_active_turn_from_inflight(shared, state).await
+    };
+    #[cfg(unix)]
+    let dead_lettered =
+        super::guard_readopt_relay_resume_or_dead_letter(shared, provider, channel_id, outlook);
+    #[cfg(not(unix))]
+    let dead_lettered = false;
+    (started, outlook, dead_lettered)
+}
+
+async fn reregister_active_turn_for_restart_report(
+    shared: &Arc<SharedData>,
+    state: &inflight::InflightTurnState,
+    tmux_session_name: Option<&str>,
+    watcher_start: Option<&(String, u64, u64, bool)>,
+) -> (bool, mint_gate::WatcherInstallOutlook) {
+    let outlook = watcher_start.map_or(
+        mint_gate::WatcherInstallOutlook::NoOutputPath,
+        |(output_path, ..)| {
+            recovery_mint_outlook(shared, state, tmux_session_name, output_path, true)
+        },
+    );
+    // Site-specific outer guard; `&& false` is a required mutation target.
+    let started = if !outlook.allows_mint() {
+        reregister_active_turn_from_inflight_with_outlook(shared, state, outlook).await
+    } else {
+        reregister_active_turn_from_inflight(shared, state).await
+    };
+    (started, outlook)
+}
+
 pub(in crate::services::discord) async fn finish_recovered_turn_mailbox(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -710,15 +763,28 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     http, shared, provider, &mut state,
                 )
                 .await;
-                let finish_mailbox_on_completion =
-                    reregister_active_turn_from_inflight(shared, &state).await;
+                // Restart-report policy: `Some(start)` is WillSpawn or
+                // IncumbentReuse. `None` is NoOutputPath for every runtime;
+                // Unknown is unreachable because this site has no later Codex
+                // rollout fallback.
+                let watcher_start = tmux_name.as_deref().and_then(|tmux_session_name| {
+                    restart_report_watcher_start(tmux_session_name, &state)
+                });
+                let (finish_mailbox_on_completion, _outlook) =
+                    reregister_active_turn_for_restart_report(
+                        shared,
+                        &state,
+                        tmux_name.as_deref(),
+                        watcher_start.as_ref(),
+                    )
+                    .await;
 
                 // Spawn the tmux watcher immediately rather than deferring to
                 // restore_tmux_watchers(): the "watcher will adopt" approach raced
                 // — the session could die in the ~50s gap and lose the response.
                 if let Some(ref tmux_session_name) = tmux_name {
                     if let Some((output_path, initial_offset, current_len, truncated)) =
-                        restart_report_watcher_start(tmux_session_name, &state)
+                        watcher_start
                     {
                         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                         let paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1876,18 +1942,22 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 http, shared, provider, &mut state,
             )
             .await;
-            let finish_mailbox_on_completion =
-                reregister_active_turn_from_inflight(shared, &state).await;
-
-            // #4380 backstop: `reregister_active_turn_from_inflight` stamps
-            // `readopted_from_inflight`, which the watcher-yield escape hatch honours
-            // to resume relay for this re-adopted live turn. If that marker did NOT
-            // durably persist (IoError), the recovered watcher will still yield to
-            // the dead bridge and drop the remaining output silently — dead-letter it
-            // so the loss is observable/recoverable instead of a silent wedge. No-op
-            // on the normal path (marker present).
-            #[cfg(unix)]
-            super::guard_readopt_relay_resume_or_dead_letter(shared, provider, channel_id);
+            // Ordinary restore policy: missing non-Codex is NoOutputPath;
+            // missing CodexTui is Unknown because the resolver below may find the
+            // rollout; a healthy same-path incumbent is IncumbentReuse; every
+            // other present-path shape is WillSpawn. The helper also applies the
+            // typed DLQ backstop: NoOutputPath is marker-independent, while
+            // IncumbentReuse is not evidence of relay loss.
+            let (finish_mailbox_on_completion, _outlook, _dead_lettered) =
+                reregister_active_turn_for_output_path(
+                    shared,
+                    provider,
+                    channel_id,
+                    &state,
+                    &tmux_session_name,
+                    &output_path,
+                )
+                .await;
 
             let output_path = match restore_codex_rollout_output_path(provider, &state, output_path)
             {
@@ -2329,6 +2399,181 @@ mod tests {
         self, GuardedSaveOutcome, InflightTurnIdentity, InflightTurnState, RelayOwnerKind,
     };
     use crate::services::provider::ProviderKind;
+
+    fn mint_gate_crash_state(
+        channel_id: serenity::model::id::ChannelId,
+        user_msg_id: u64,
+        tmux_session: &str,
+        output_path: String,
+    ) -> InflightTurnState {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            channel_id.get(),
+            Some("adk-cc".to_string()),
+            5_242_900,
+            user_msg_id,
+            user_msg_id + 1,
+            "recovery mint outlook".to_string(),
+            Some("session-5242".to_string()),
+            Some(tmux_session.to_string()),
+            Some(output_path),
+            None,
+            0,
+        );
+        state.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+        state.set_relay_owner_kind(RelayOwnerKind::None);
+        state
+    }
+
+    fn install_live_watcher(
+        shared: &super::SharedData,
+        owner: serenity::model::id::ChannelId,
+        tmux_session: &str,
+        output_path: &str,
+    ) {
+        shared.tmux_watchers.insert(
+            owner,
+            crate::services::discord::TmuxWatcherHandle {
+                tmux_session_name: tmux_session.to_string(),
+                output_path: output_path.to_string(),
+                paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                resume_offset: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                pause_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                turn_delivered: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                last_heartbeat_ts_ms: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(
+                    crate::services::discord::tmux_watcher_now_ms(),
+                )),
+            },
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ordinary_restore_no_output_outer_guard_dead_letters_premarked_row() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let shared = super::super::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = serenity::model::id::ChannelId::new(5_242_901);
+        let missing = root.path().join("missing.jsonl");
+        let mut state = mint_gate_crash_state(
+            channel_id,
+            5_242_902,
+            "AgentDesk-claude-5242-no-output",
+            missing.to_string_lossy().into_owned(),
+        );
+        state.readopted_from_inflight = true;
+        inflight::save_inflight_state(&state).expect("seed premarked crash row");
+
+        let (started, outlook, dead_lettered) = super::reregister_active_turn_for_output_path(
+            &shared,
+            &provider,
+            channel_id,
+            &state,
+            state.tmux_session_name.as_deref().expect("tmux"),
+            missing.to_str().expect("UTF-8 path"),
+        )
+        .await;
+        assert!(!started);
+        assert_eq!(
+            outlook,
+            super::mint_gate::WatcherInstallOutlook::NoOutputPath
+        );
+        assert!(
+            dead_lettered,
+            "MUTATION GUARD: the production ordinary-restore outer guard must execute NoOutputPath DLQ"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn restart_report_missing_start_outer_guard_refuses_mailbox_mint() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let shared = super::super::make_shared_data_for_tests();
+        let channel_id = serenity::model::id::ChannelId::new(5_242_905);
+        let state = mint_gate_crash_state(
+            channel_id,
+            5_242_906,
+            "AgentDesk-claude-5242-restart-report",
+            root.path()
+                .join("missing-restart-report.jsonl")
+                .to_string_lossy()
+                .into_owned(),
+        );
+
+        let (started, outlook) = super::reregister_active_turn_for_restart_report(
+            &shared,
+            &state,
+            state.tmux_session_name.as_deref(),
+            None,
+        )
+        .await;
+        assert_eq!(
+            outlook,
+            super::mint_gate::WatcherInstallOutlook::NoOutputPath
+        );
+        assert!(
+            !started,
+            "MUTATION GUARD: restart-report NoOutputPath outer guard must refuse mailbox mint"
+        );
+        assert!(
+            super::super::mailbox_snapshot(&shared, channel_id)
+                .await
+                .cancel_token
+                .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ordinary_restore_incumbents_same_and_intended_cross_channel_never_dead_letter() {
+        for cross_channel in [false, true] {
+            let root = tempfile::tempdir().expect("runtime root");
+            let _env = crate::config::set_agentdesk_root_for_test(root.path());
+            let shared = super::super::make_shared_data_for_tests();
+            let provider = ProviderKind::Claude;
+            let channel_id = serenity::model::id::ChannelId::new(5_242_910 + cross_channel as u64);
+            let owner = if cross_channel {
+                serenity::model::id::ChannelId::new(5_242_919)
+            } else {
+                channel_id
+            };
+            let output = root.path().join(format!("incumbent-{cross_channel}.jsonl"));
+            std::fs::write(&output, b"live").expect("output path");
+            let tmux = format!("AgentDesk-claude-5242-incumbent-{cross_channel}");
+            let mut state = mint_gate_crash_state(
+                channel_id,
+                5_242_920 + cross_channel as u64,
+                &tmux,
+                output.to_string_lossy().into_owned(),
+            );
+            state.readopted_from_inflight = false;
+            if cross_channel {
+                state.logical_channel_id = Some(owner.get());
+                state.thread_id = Some(channel_id.get());
+            }
+            inflight::save_inflight_state(&state).expect("seed crash row");
+            install_live_watcher(&shared, owner, &tmux, output.to_str().expect("UTF-8 path"));
+
+            let (started, outlook, dead_lettered) = super::reregister_active_turn_for_output_path(
+                &shared,
+                &provider,
+                channel_id,
+                &state,
+                &tmux,
+                output.to_str().expect("UTF-8 path"),
+            )
+            .await;
+            assert!(!started);
+            assert_eq!(
+                outlook,
+                super::mint_gate::WatcherInstallOutlook::IncumbentReuse { owner }
+            );
+            assert!(
+                !dead_lettered,
+                "MUTATION GUARD: incumbent reuse is not NoOutputPath, including intended thread follow-up reuse"
+            );
+        }
+    }
 
     fn generic_recovery_runtime_ready(
         shared: &std::sync::Arc<super::SharedData>,

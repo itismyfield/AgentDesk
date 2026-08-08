@@ -84,6 +84,8 @@ mod unix_journal;
 // module. The entry point is re-exported below so external call sites
 // (`watchers::lifecycle`, `manual_rebind`, the restart-path reattach calls) stay
 // byte-identical.
+#[path = "recovery_engine/mint_gate.rs"]
+pub(in crate::services::discord) mod mint_gate;
 #[path = "recovery_engine/runtime.rs"]
 mod runtime;
 // #3834 r2: behavior-preserving extraction of the terminal recovery delivery /
@@ -194,6 +196,9 @@ pub(in crate::services::discord) use self::restore_inflight::{
 };
 use self::restore_persist_outcome::{RestorePersistOutcome, restore_codex_rollout_output_path};
 pub(super) use self::runtime::reregister_active_turn_from_inflight;
+pub(in crate::services::discord) use self::runtime::reregister_active_turn_from_inflight_with_outlook;
+#[cfg(test)]
+pub(crate) use self::runtime::{BeforeMailboxClaimBarrier, install_before_mailbox_claim_barrier};
 pub(in crate::services::discord) use self::terminal_text_idempotency::RecoveryDeliveryContext;
 use self::tmux_probe::tmux_session_alive_with_retry;
 // #3479: re-import the analytics + transcript helpers so root call sites stay
@@ -420,6 +425,38 @@ fn emit_recovery_quality_event(
             }),
         },
     );
+}
+
+fn recovery_mint_outlook(
+    shared: &Arc<SharedData>,
+    state: &inflight::InflightTurnState,
+    tmux_session_name: Option<&str>,
+    output_path: &str,
+    path_exists: bool,
+) -> mint_gate::WatcherInstallOutlook {
+    let incumbent = path_exists
+        .then(|| {
+            tmux_session_name.and_then(|name| {
+                let owner = shared.tmux_watchers.owner_channel_for_tmux_session(name)?;
+                let entry = shared.tmux_watchers.by_tmux_session.get(name)?;
+                Some((
+                    owner,
+                    entry.heartbeat_stale()
+                        || entry.cancel.load(std::sync::atomic::Ordering::Relaxed),
+                    entry.paused.load(std::sync::atomic::Ordering::Relaxed),
+                    entry.output_path.clone(),
+                ))
+            })
+        })
+        .flatten();
+    mint_gate::watcher_install_outlook(
+        path_exists,
+        state.runtime_kind,
+        incumbent
+            .as_ref()
+            .map(|(owner, cancelled, paused, path)| (*owner, *cancelled, *paused, path.as_str())),
+        output_path,
+    )
 }
 
 /// #896: Outcome of a successful [`rebind_inflight_for_channel`] call.
