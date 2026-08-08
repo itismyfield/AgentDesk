@@ -32,6 +32,14 @@ DEFAULT_CELLS = cell_driver.SUPPORTED_CELLS
 
 
 def parse_args() -> argparse.Namespace:
+    turn_start_timeout_default = cell_driver._bounded_value(  # noqa: SLF001
+        os.environ.get("AGENTDESK_E2E_TURN_START_TIMEOUT_S", "180"),
+        source="AGENTDESK_E2E_TURN_START_TIMEOUT_S",
+        default=180.0,
+        minimum=1.0,
+        maximum=cell_driver.E2E_TURN_START_TIMEOUT_MAX_S,
+    )
+    final_refetch_defaults = cell_driver._final_refetch_settings()  # noqa: SLF001
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://127.0.0.1:8791")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
@@ -76,8 +84,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--turn-start-timeout-s",
-        type=float,
-        default=float(os.environ.get("AGENTDESK_E2E_TURN_START_TIMEOUT_S", "180")),
+        default=turn_start_timeout_default,
     )
     parser.add_argument(
         "--required-agent-mode",
@@ -91,7 +98,16 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("AGENTDESK_E2E_REQUIRED_COVERAGE_CLASS"),
         help="Fail selected scenarios whose declared coverage_class is below this gate.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.turn_start_timeout_s = cell_driver._bounded_value(  # noqa: SLF001
+        args.turn_start_timeout_s,
+        source="--turn-start-timeout-s",
+        default=180.0,
+        minimum=1.0,
+        maximum=cell_driver.E2E_TURN_START_TIMEOUT_MAX_S,
+    )
+    args.final_refetches, args.final_refetch_interval_s = final_refetch_defaults
+    return args
 
 
 def load_channel_ids(config_path: Path) -> dict[str, str]:
@@ -902,11 +918,9 @@ def run_cross_channel_scenario(
                         f"{participant['marker']!r} in cell={participant['cell']}"
                     )
 
-        final_refetches = max(
-            1, int(os.environ.get("AGENTDESK_E2E_FINAL_REFETCHES", "2"))
-        )
+        final_refetches = int(getattr(args, "final_refetches", 2))
         final_refetch_interval_s = float(
-            os.environ.get("AGENTDESK_E2E_FINAL_REFETCH_INTERVAL_S", "1")
+            getattr(args, "final_refetch_interval_s", 1.0)
         )
         for attempt in range(final_refetches):
             if attempt > 0:
