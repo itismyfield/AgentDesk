@@ -30,6 +30,7 @@ import argparse
 import concurrent.futures
 import datetime as dt
 import json
+import math
 import os
 import subprocess
 import sys
@@ -94,6 +95,14 @@ IDLE_RELAY_STALL_STATES = {"", "healthy"}
 RESTART_GUARD_FINALIZING_DRAIN_TIMEOUT_S = 30.0
 RESTART_GUARD_POLL_INTERVAL_S = 1.0
 DEFAULT_PROVIDER_HOLD_SECONDS = 60
+# E-1's scenario wait/assertion is 240s while each Discord request uses the driver's
+# turn-start timeout (180s by default). Keeping that existing 180/240 envelope
+# means an environment override cannot turn one fetch into an unbounded wait.
+E2E_TURN_START_TIMEOUT_MAX_S = 180.0
+# A final refetch may settle for only the residual 240-180=60s of the E-1
+# scenario budget; the default two observations remain the hard count ceiling.
+E2E_FINAL_REFETCH_INTERVAL_MAX_S = 60.0
+E2E_FINAL_REFETCHES_MAX = 2
 RUNTIME_QUEUE_DIRS: tuple[tuple[str, str], ...] = (
     ("pending_queue", "discord_pending_queue"),
     ("queued_placeholders", "discord_queued_placeholders"),
@@ -160,6 +169,13 @@ class ConcurrentPromptSendError(assertions.AssertionError):
 
 
 def parse_args() -> argparse.Namespace:
+    turn_start_timeout_default = _bounded_value(
+        os.environ.get("AGENTDESK_E2E_TURN_START_TIMEOUT_S", "180"),
+        source="AGENTDESK_E2E_TURN_START_TIMEOUT_S",
+        default=180.0,
+        minimum=1.0,
+        maximum=E2E_TURN_START_TIMEOUT_MAX_S,
+    )
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -245,8 +261,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--turn-start-timeout-s",
-        type=float,
-        default=float(os.environ.get("AGENTDESK_E2E_TURN_START_TIMEOUT_S", "180")),
+        default=turn_start_timeout_default,
         help="How long send_prompt retries transient mailbox-busy turn/start responses.",
     )
     parser.add_argument(
@@ -267,7 +282,73 @@ def parse_args() -> argparse.Namespace:
             "this required gate, e.g. live."
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.turn_start_timeout_s = _bounded_value(
+        args.turn_start_timeout_s,
+        source="--turn-start-timeout-s",
+        default=180.0,
+        minimum=1.0,
+        maximum=E2E_TURN_START_TIMEOUT_MAX_S,
+    )
+    return args
+
+
+def _bounded_value(
+    raw: object,
+    *,
+    source: str,
+    default: float | int,
+    minimum: float,
+    maximum: float,
+    integer: bool = False,
+) -> float | int:
+    """Parse one operator value and warn whenever validation changes it."""
+
+    try:
+        parsed_float = float(raw)
+        if not math.isfinite(parsed_float):
+            raise ValueError("non-finite")
+        if integer and not parsed_float.is_integer():
+            raise ValueError("not an integer")
+    except (TypeError, ValueError):
+        print(
+            f"[e2e] WARNING: {source}={raw!r} is invalid; clamped to {default}",
+            file=sys.stderr,
+        )
+        return int(default) if integer else float(default)
+
+    parsed: float | int = int(parsed_float) if integer else parsed_float
+    clamped = min(max(parsed_float, minimum), maximum)
+    if clamped != parsed_float:
+        displayed = int(clamped) if integer else clamped
+        print(
+            f"[e2e] WARNING: {source}={raw!r} outside [{minimum:g}, {maximum:g}]; "
+            f"clamped to {displayed}",
+            file=sys.stderr,
+        )
+        parsed = displayed
+    return parsed
+
+
+def _final_refetch_settings() -> tuple[int, float]:
+    """Return bounded final-read count and inter-read settle interval."""
+
+    final_refetches = _bounded_value(
+        os.environ.get("AGENTDESK_E2E_FINAL_REFETCHES", "2"),
+        source="AGENTDESK_E2E_FINAL_REFETCHES",
+        default=2,
+        minimum=1.0,
+        maximum=float(E2E_FINAL_REFETCHES_MAX),
+        integer=True,
+    )
+    final_refetch_interval_s = _bounded_value(
+        os.environ.get("AGENTDESK_E2E_FINAL_REFETCH_INTERVAL_S", "1"),
+        source="AGENTDESK_E2E_FINAL_REFETCH_INTERVAL_S",
+        default=1.0,
+        minimum=0.0,
+        maximum=E2E_FINAL_REFETCH_INTERVAL_MAX_S,
+    )
+    return int(final_refetches), float(final_refetch_interval_s)
 
 
 def cell_provider(cell: str) -> str:
@@ -3395,10 +3476,7 @@ def run_one_cell(
         else:
             raise assertions.AssertionError(f"unknown step shape: {step!r}")
 
-    final_refetches = max(1, int(os.environ.get("AGENTDESK_E2E_FINAL_REFETCHES", "2")))
-    final_refetch_interval_s = float(
-        os.environ.get("AGENTDESK_E2E_FINAL_REFETCH_INTERVAL_S", "1")
-    )
+    final_refetches, final_refetch_interval_s = _final_refetch_settings()
     for attempt in range(final_refetches):
         if attempt > 0:
             time.sleep(final_refetch_interval_s)

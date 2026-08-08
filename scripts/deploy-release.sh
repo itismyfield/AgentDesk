@@ -443,7 +443,9 @@ _notify_channel() {
 
     local rel_port
     rel_port="${REL_PORT:-$(_resolve_release_server_port)}"
-    curl -sf -X POST "http://${ADK_DEFAULT_LOOPBACK}:${rel_port}/api/discord/send" \
+    # This payload-bearing POST follows the existing bounded POST probes below:
+    # a 2s connect cap and 15s total cap keep fail-open notification from blocking.
+    curl -sf --connect-timeout 2 --max-time 15 -X POST "http://${ADK_DEFAULT_LOOPBACK}:${rel_port}/api/discord/send" \
         -H "Origin: http://${ADK_DEFAULT_LOOPBACK}:${rel_port}" \
         -H 'Content-Type: application/json' \
         --data-binary "$payload" >/dev/null 2>&1 \
@@ -3196,7 +3198,9 @@ evidence: ${POST_DEPLOY_SMOKE_EVIDENCE}"
     # is a real regression, not a relay/API flake; only then may automation file.
     if [ "$POST_DEPLOY_SMOKE_CREATE_ISSUE" = "confirmed" ] && [ -f "$draft_path" ]; then
         if command -v gh >/dev/null 2>&1; then
-            if issue_url=$(gh issue create \
+            # ci-timeout.py is the repository's existing bounded subprocess runner;
+            # its fixed 10s issue-create budget matches src/github/mod.rs's adapter.
+            if issue_url=$(python3 "$SCRIPT_DIR/ci-timeout.py" 10 gh issue create \
                 --repo itismyfield/AgentDesk \
                 --title "ops: post-deploy functional smoke regression (${node_name})" \
                 --body-file "$draft_path" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"); then
