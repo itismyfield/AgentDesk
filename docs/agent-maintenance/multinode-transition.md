@@ -14,7 +14,7 @@
 > moving any AgentDesk runtime, worker, dispatch, provider, MCP, merge, or test
 > execution path from one dcserver node to multiple nodes.
 >
-> Last refreshed: 2026-07-31 (PR #5048 stale-route recovery changes).
+> Last refreshed: 2026-07-31 (against PR #5048 stale-route recovery changes).
 >
 > Last refreshed: 2026-07-05 (#4089 — `worker_registry.rs` exposes the local RateLimitSync leader-worker active flag (`rate_limit_sync_active`) so the claude-accounts switch endpoint can report whether the receiving node performs usage collection. Read-only exposure: leader election, lease, and singleton ownership assumptions are unchanged; the Keychain auth switch itself is node-local by design (MVP), so non-leader switches surface `rate_limit_sync_not_active_on_this_node` instead of racing the leader loop.)
 >

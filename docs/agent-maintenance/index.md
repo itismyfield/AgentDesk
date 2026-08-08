@@ -89,7 +89,11 @@ refresh is intentionally anchored to review context instead of a commit, use
 `Last refreshed: <date> (against #<issue> <reason>)`,
 `Last refreshed: <date> (against PR #<num> <reason>)`, or
 `Last refreshed: <date> (manual: <reason>)`; those forms still get date
-freshness checks but skip commit ancestry validation. The gate warns when
+freshness checks but skip commit ancestry validation. The header must occupy one
+physical line; put longer refresh notes in prose below it. Within the first 80
+lines, the first matching header is authoritative: non-matching
+`Last refreshed:` candidates are skipped, and the gate reports any such
+candidate above the authoritative match. The gate warns when
 copied line counts in `change-surfaces.md` drift from
 `docs/generated/module-inventory.md`, and requires the matching maintenance
 page to be touched when guarded code globs change. That touch rule is a

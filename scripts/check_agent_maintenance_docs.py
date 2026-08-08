@@ -45,6 +45,7 @@ LAST_REFRESHED_RE = re.compile(
     r")"
     r"\)\.?\s*$"
 )
+LAST_REFRESHED_PREFIX_RE = re.compile(r"^>\s*Last refreshed:\s*")
 # Module inventory row: | `module` | `path` | <total> | <prod> | <test> | flags |
 MODULE_INVENTORY_ROW_RE = re.compile(
     r"^\|\s*`[^`]+`\s*\|\s*`(?P<path>[^`]+\.rs)`\s*\|"
@@ -179,6 +180,26 @@ def parse_last_refreshed(text: str) -> LastRefreshed | None:
     return None
 
 
+def find_skipped_last_refreshed_lines(
+    text: str, authoritative_line: int
+) -> list[int]:
+    """Return malformed header candidates skipped before the first valid header.
+
+    This deliberately shares the parser's bounded top-matter window and only
+    diagnoses blockquote lines that start with ``Last refreshed:``. Candidates
+    after the authoritative match remain historical prose, and a document with
+    no valid match is handled by the existing missing-header finding.
+    """
+
+    lines = text.splitlines()[:HEADER_SCAN_LINE_LIMIT]
+    return [
+        line_no
+        for line_no, line in enumerate(lines[: authoritative_line - 1], start=1)
+        if LAST_REFRESHED_PREFIX_RE.match(line.strip()) is not None
+        and LAST_REFRESHED_RE.match(line.strip()) is None
+    ]
+
+
 def check_doc_headers(
     repo_root: Path, today: dt.date, freshness_days: int
 ) -> list[Finding]:
@@ -191,7 +212,8 @@ def check_doc_headers(
             )
             continue
 
-        parsed = parse_last_refreshed(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+        parsed = parse_last_refreshed(text)
         if parsed is None:
             findings.append(
                 Finding(
@@ -205,6 +227,20 @@ def check_doc_headers(
                 )
             )
             continue
+
+        for line_no in find_skipped_last_refreshed_lines(text, parsed.line):
+            findings.append(
+                Finding(
+                    "error",
+                    rel_path,
+                    (
+                        "unrecognized Last refreshed header was skipped before "
+                        f"the authoritative header on line {parsed.line}; keep the "
+                        "header on one physical line and use a documented anchor shape."
+                    ),
+                    line_no,
+                )
+            )
 
         if parsed.refreshed_on > today:
             findings.append(
