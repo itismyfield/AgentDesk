@@ -2674,6 +2674,10 @@ POST_DEPLOY_SMOKE_CREATE_ISSUE="${AGENTDESK_POST_DEPLOY_SMOKE_CREATE_ISSUE:-off}
 POST_DEPLOY_SMOKE_STAMP="$(date -u '+%Y%m%dT%H%M%SZ' 2>/dev/null || printf 'unknown-%s' "$$")"
 POST_DEPLOY_SMOKE_EVIDENCE="$ADK_REL/logs/post-deploy-smoke-${POST_DEPLOY_SMOKE_STAMP}.log"
 POST_DEPLOY_SMOKE_TMP_DIR=""
+# Set (and truncated) by _post_deploy_smoke_check_wedges once the tmp dir
+# exists. Non-empty means the durable axis could not evaluate some mailbox this
+# run, which blocks a CLEAN verdict — see the accounting note below.
+POST_DEPLOY_SMOKE_WEDGE_UNEVALUABLE=""
 POST_DEPLOY_SMOKE_HEALTH_BODY=""
 POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY=""
 POST_DEPLOY_SMOKE_SESSIONS_BODY=""
@@ -2724,11 +2728,22 @@ _post_deploy_smoke_wedge_skip_state_read() {
 _post_deploy_smoke_wedge_skip_state_write() {
     local count="$1"
     local reason="$2"
-    local tmp_path state_dir
+    local tmp_path state_dir readback
     # The reason is embedded in a hand-built JSON string, so strip the two
-    # characters that could break it. Every current caller passes a literal.
+    # characters that could break it. Callers pass literals plus one summary
+    # line built from health/detail field values.
     reason="${reason//\\/}"
     reason="${reason//\"/}"
+    # A non-regular destination makes the rename below LIE: `mv f d/` where `d`
+    # is a directory succeeds with rc=0 and moves the file INSIDE it, leaving
+    # the authoritative path untouched. Reject those destinations up front —
+    # measured: four writes through a directory destination all returned rc=0
+    # with the counter never advancing past 1.
+    if [ -e "$POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE" ] || [ -L "$POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE" ]; then
+        if [ ! -f "$POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE" ] || [ -L "$POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE" ]; then
+            return 1
+        fi
+    fi
     state_dir="$(dirname "$POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE")"
     mkdir -p "$state_dir" || return 1
     tmp_path="${POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE}.tmp.$$"
@@ -2743,12 +2758,40 @@ _post_deploy_smoke_wedge_skip_state_write() {
         rm -f "$tmp_path" 2>/dev/null || true
         return 1
     fi
+    # Read-after-write on the AUTHORITATIVE path. `mv` returning 0 does not by
+    # itself mean this path now holds this count. This is a SECOND layer: every
+    # destination shape reachable from a test is already rejected by the guard
+    # above, so removing these four lines does not fail any assertion in
+    # tests/test_deploy_smoke_wedge_durable_axis_5244.sh (measured — the
+    # mutation survives). It is kept because it, and not the guard, is what
+    # checks that the value actually landed.
+    if ! readback=$(_post_deploy_smoke_wedge_skip_state_read); then
+        return 1
+    fi
+    [ "$readback" = "$count" ] || return 1
     return 0
 }
 
 _post_deploy_smoke_wedge_skip_corrupt_tally() {
     local action="$1"
     local current="" tmp_path tally_dir
+    # Same non-regular-destination trap as the state file. Here the tally cannot
+    # report its own failure (bumping only ESCALATES a corruption the caller is
+    # already reporting), so an unusable destination reports the threshold
+    # directly: a corruption streak that cannot be counted must escalate now
+    # rather than restart at 0 on every deploy.
+    if [ -e "$POST_DEPLOY_SMOKE_WEDGE_SKIP_CORRUPT_TALLY" ] \
+      || [ -L "$POST_DEPLOY_SMOKE_WEDGE_SKIP_CORRUPT_TALLY" ]; then
+        if [ ! -f "$POST_DEPLOY_SMOKE_WEDGE_SKIP_CORRUPT_TALLY" ] \
+          || [ -L "$POST_DEPLOY_SMOKE_WEDGE_SKIP_CORRUPT_TALLY" ]; then
+            if [ "$action" = "reset" ]; then
+                printf '0\n'
+                return 0
+            fi
+            printf '%s\n' "$POST_DEPLOY_SMOKE_WEDGE_SKIP_MAX_CORRUPTIONS"
+            return 0
+        fi
+    fi
     if [ -r "$POST_DEPLOY_SMOKE_WEDGE_SKIP_CORRUPT_TALLY" ]; then
         read -r current < "$POST_DEPLOY_SMOKE_WEDGE_SKIP_CORRUPT_TALLY" 2>/dev/null || true
     fi
@@ -2935,32 +2978,92 @@ _post_deploy_smoke_wedge_markers_from_file() {
 # Records are keyed by the OFFSET-AUTHORITY channel, not the panel/delivery
 # channel; those can differ. health/detail already publishes the authority as
 # `relay_health.watcher_owner_channel_id`, so no owner-context file has to be
-# parsed here. A mailbox whose owner channel is null is left UNEVALUATED.
+# parsed here.
+#
+# NEVER put a channel id through jq ARITHMETIC. jq numbers are IEEE-754
+# doubles, Discord snowflakes are ~1.5e18, and jq only preserves a number's
+# source literal for as long as nothing computes on it. Measured with
+# jq-1.7.1-apple on three live authority channels: `.id | floor | tostring`
+# returned 1479671298497183700 / 1509350490461180200 / 1528150941151265000 for
+# 1479671298497183835 / 1509350490461180105 / 1528150941151264878, while
+# `.id | tostring` returned all three unchanged. A mangled id resolves to a
+# record path that does not exist, which is why the "no record here" branch
+# below must NOT be able to absorb an id that was never valid.
+#
+# A mailbox this function cannot evaluate is recorded in
+# $POST_DEPLOY_SMOKE_WEDGE_UNEVALUABLE rather than skipped in silence; the
+# caller turns a non-empty log into skip accounting instead of a clean verdict.
+# Files only, never stdout: the caller's stdout IS the marker stream, and it is
+# read through a command substitution. A note here would be parsed as a marker.
+# The reason reaches the operator through the skip note the caller raises.
+_post_deploy_smoke_wedge_durable_unevaluable() {
+    printf 'relay wedge durable axis unevaluable: %s\n' "$1" >> "$POST_DEPLOY_SMOKE_EVIDENCE" || return 1
+    printf '%s\n' "$1" >> "$POST_DEPLOY_SMOKE_WEDGE_UNEVALUABLE" || return 1
+    return 0
+}
+
 _post_deploy_smoke_wedge_durable_axis_markers_from_file() {
     local health_detail_path="$1"
-    local provider owner_channel in_memory durable record_path
+    local status provider owner_channel in_memory reason durable record_path
     # A jq failure on the health body yields an empty stream here, i.e. no
-    # markers rather than an error. That is not a hole in the check: the
-    # in-memory marker pass over the SAME file runs first and fails loudly on an
-    # unparseable body before this function is reached.
-    while IFS=$'\t' read -r provider owner_channel in_memory; do
-        [ -n "$provider" ] || continue
+    # markers rather than an error. The in-memory marker pass over the SAME file
+    # runs first and returns nonzero on the bodies that make jq error, so those
+    # never reach this function — measured on two shapes: a body jq cannot parse,
+    # and a mailbox whose `relay_health` is a string (both rc=1). One shape gets
+    # past both passes as "no mailboxes": `mailboxes` that is not an array, which
+    # `.mailboxes[]?` tolerates in either pass. The Rust side serializes a Vec
+    # there, so that shape is not reachable from this server.
+    while IFS=$'\t' read -r status provider owner_channel in_memory reason; do
+        [ -n "$status" ] || continue
+        if [ "$status" != "ok" ]; then
+            _post_deploy_smoke_wedge_durable_unevaluable "$reason" || return 1
+            continue
+        fi
         record_path="$POST_DEPLOY_SMOKE_DELIVERY_RECORDS_DIR/${provider}/${owner_channel}.json"
-        [ -f "$record_path" ] || continue
-        durable=$(jq -r '
-            if ((.delivered_frontier.range[1]? // null) | type) == "number"
-            then (.delivered_frontier.range[1] | floor | tostring)
-            else "" end
-        ' "$record_path" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE") || continue
+        # No record for a resolvable channel is the ORDINARY state, not a hole:
+        # records are created only after a `Delivered` outcome.
+        if [ ! -e "$record_path" ]; then
+            continue
+        fi
+        if [ ! -f "$record_path" ]; then
+            _post_deploy_smoke_wedge_durable_unevaluable \
+                "delivery record ${record_path} is not a regular file" || return 1
+            continue
+        fi
         # jq orders null BELOW every number, so a naive comparison makes both
         # `500 > null` and `0 > null` true. `delivered_frontier` is an
         # `Option` with `#[serde(default)]` and `{}` is a valid record, so a
-        # missing/null frontier is UNKNOWN — never numeric zero.
+        # missing/null frontier is UNKNOWN — never numeric zero. Anything else
+        # that does not match the persisted shape is a SCHEMA VIOLATION and is
+        # reported, not treated as a clean read.
+        if ! durable=$(jq -r '
+            if (.delivered_frontier? // null) == null then "unknown"
+            elif (.delivered_frontier | type) != "object" then "invalid"
+            elif (.delivered_frontier.range? // null) == null then "invalid"
+            elif (.delivered_frontier.range | type) != "array" then "invalid"
+            elif (.delivered_frontier.range | length) < 2 then "invalid"
+            elif (.delivered_frontier.range[1] | type) != "number" then "invalid"
+            else (.delivered_frontier.range[1] | tostring)
+            end
+        ' "$record_path" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"); then
+            _post_deploy_smoke_wedge_durable_unevaluable \
+                "delivery record ${record_path} is not readable JSON" || return 1
+            continue
+        fi
         case "$durable" in
-            ''|*[!0-9]*) continue ;;
+            unknown) continue ;;
+            invalid)
+                _post_deploy_smoke_wedge_durable_unevaluable \
+                    "delivery record ${record_path} has a malformed delivered_frontier" || return 1
+                continue
+                ;;
         esac
-        case "$in_memory" in
-            ''|*[!0-9]*) continue ;;
+        case "$durable" in
+            ''|*[!0-9]*)
+                _post_deploy_smoke_wedge_durable_unevaluable \
+                    "delivery record ${record_path} frontier end is not a whole number" || return 1
+                continue
+                ;;
         esac
         if [ "$in_memory" -gt "$durable" ]; then
             # BOTH offsets belong in the marker string. The settle resample
@@ -2974,12 +3077,48 @@ _post_deploy_smoke_wedge_durable_axis_markers_from_file() {
     done < <(jq -r '
         .mailboxes[]?
         | select(type == "object")
-        | select((.provider | type) == "string")
-        | select((.relay_health.watcher_owner_channel_id | type) == "number")
-        | select((.relay_health.last_relay_offset | type) == "number")
-        | [ .provider,
-            (.relay_health.watcher_owner_channel_id | floor | tostring),
-            (.relay_health.last_relay_offset | floor | tostring) ]
+        # The provider is a path segment too; anything outside [A-Za-z0-9_-]
+        # cannot address a record file.
+        | (if (.provider | type) == "string" and (.provider | test("^[A-Za-z0-9_-]+$"))
+           then .provider else null end) as $provider
+        | .relay_health.watcher_owner_channel_id as $owner_raw
+        | .channel_id as $delivery_raw
+        # Mirrors the production resolution of the offset authority:
+        #   tmux.rs:250-253  Some(raw) => opt_channel_id(raw), None => delivery
+        #   idle_recap.rs:391  watcher_owner_channel_id.unwrap_or(channel_id)
+        # `opt_channel_id` (inflight/model.rs:28-36) maps a ZERO id to None, so
+        # Some(0) resolves to no authority at all on the tmux path — it is NOT
+        # a fallback to the delivery channel on either path. Zero is therefore
+        # left unevaluable here rather than silently retargeted.
+        # No `floor`, no arithmetic: see the snowflake note above.
+        # `$owner` and `$in_memory` are also the record PATH segments, so both
+        # are required to render as plain digits — an exponent form or a sign
+        # would address a file that cannot exist.
+        | (if ($owner_raw | type) == "number" then
+               (if $owner_raw == 0 then null else ($owner_raw | tostring) end)
+           elif $owner_raw == null then
+               (if ($delivery_raw | type) == "number" and $delivery_raw != 0
+                then ($delivery_raw | tostring) else null end)
+           else null end
+           | if . != null and test("^[0-9]+$") then . else null end) as $owner
+        | (if (.relay_health.last_relay_offset | type) == "number"
+           then (.relay_health.last_relay_offset | tostring) else null end
+           | if . != null and test("^[0-9]+$") then . else null end) as $in_memory
+        | (if $provider == null then "provider is missing, not a string, or not a path segment"
+           elif ($owner_raw != null) and (($owner_raw | type) != "number")
+               then "watcher_owner_channel_id is present but not a number"
+           elif ($owner == null) and ($owner_raw == null)
+               then "no offset-authority channel and no usable delivery channel_id"
+           elif $owner == null then "offset-authority channel id is zero or not a whole number"
+           elif $in_memory == null then "last_relay_offset is missing or not a whole number"
+           else "" end) as $reason
+        | if $reason == "" then ["ok", $provider, $owner, $in_memory, ""]
+          else ["unevaluable", ($provider // "unknown"), ($owner // "unknown"), "unknown",
+                ($reason + " (provider=" + ($provider // "unknown")
+                 + " mailbox_channel="
+                 + (if ($delivery_raw | type) == "number"
+                    then ($delivery_raw | tostring) else "unknown" end) + ")")]
+          end
         | @tsv
     ' "$health_detail_path" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE")
 }
@@ -3041,6 +3180,29 @@ _post_deploy_smoke_wedge_await_recovery() {
     return 1
 }
 
+# Condenses the durable-axis unevaluable log into one skip reason line.
+_post_deploy_smoke_wedge_unevaluable_summary() {
+    local count first
+    count=$(wc -l < "$POST_DEPLOY_SMOKE_WEDGE_UNEVALUABLE" 2>/dev/null | tr -d ' ')
+    case "$count" in
+        ''|*[!0-9]*) count="an unknown number of" ;;
+    esac
+    first=$(head -n 1 "$POST_DEPLOY_SMOKE_WEDGE_UNEVALUABLE" 2>/dev/null)
+    printf 'durable axis unevaluable on %s mailbox reading(s); first: %s\n' "$count" "$first"
+}
+
+# ── Where the consecutive-skip counter may be RESET (#5244 ①) ────────────────
+# ONLY at the three points where this check reaches an evidence-based verdict:
+#   1. the first sample yielded no marker at all,
+#   2. the marker cleared across the settle resample,
+#   3. a marker persisted (the failure verdict).
+# Resetting anywhere earlier — e.g. right after the first sample is read, before
+# settle/resample can decide — makes every LATER skip branch reset the streak and
+# then set it back to 1, so the threshold is never reached. Measured on the
+# pre-fix code: four consecutive deploys through a late skip branch all reported
+# rc=0 with consecutive_skips=1 and zero threshold failures. That is #5244 ①
+# reproduced inside its own fix; do not move the reset back up.
+#
 # ── What this wedge check does NOT guarantee (#5244) ─────────────────────────
 # This list is an asset. Do not delete it; narrow it if it turns out to claim
 # too much, and widen it if the code guarantees less than it says.
@@ -3059,9 +3221,24 @@ _post_deploy_smoke_wedge_await_recovery() {
 # 4. The consecutive-skip counter is NODE-LOCAL. This does NOT mean peers are
 #    uncovered — `--all-nodes` runs this same script on each peer — only that
 #    each node keeps its own streak.
-# 5. A mailbox whose `relay_health.watcher_owner_channel_id` is null is left
-#    UNEVALUATED on the durable axis (no marker either way), because the record
-#    to read cannot be resolved without it.
+# 5. Some mailboxes are left UNEVALUATED on the durable axis (no marker either
+#    way). A NULL `relay_health.watcher_owner_channel_id` is NOT one of them:
+#    production falls back to the delivery channel in that case
+#    (`tmux.rs:250-253`, `idle_recap.rs:391`) and this check mirrors it, so a
+#    null owner is evaluated against `<provider>/<channel_id>.json`. Measured on
+#    the live node: 3 of 6 mailboxes have a null owner, i.e. half the surface.
+#    What IS unevaluated: a ZERO owner id (`opt_channel_id`,
+#    `inflight/model.rs:28-36`, maps 0 to None instead of to the delivery
+#    channel — the two production paths disagree on Some(0), so the shell
+#    evaluates neither), a non-numeric owner or offset, a provider or id that
+#    cannot be a path segment, and a delivery record whose `delivered_frontier`
+#    does not match the persisted shape. None of those are silent: each is
+#    logged and BLOCKS a clean verdict, so the run goes to skip accounting
+#    instead of reporting a pass it did not earn.
+#    A record that is simply ABSENT, or one whose `delivered_frontier` is
+#    absent/null, is not in this list — those are ordinary states of a valid
+#    record (`DeliveredCommit` is an `Option` with `#[serde(default)]`), and
+#    they carry no durable value to compare.
 # 6. The settle window is 4s and has NO source-grounded upper bound: the record
 #    lock is a blocking `flock` and persistence is a synchronous `sync_all`.
 #    Because in-memory advance precedes durable persist on the live watcher and
@@ -3083,6 +3260,14 @@ _post_deploy_smoke_check_wedges() {
         return 1
     fi
     wedge_source_path="$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+    # Accumulates across BOTH samples: a mailbox the durable axis could not
+    # evaluate in either one must not be reported as clean.
+    POST_DEPLOY_SMOKE_WEDGE_UNEVALUABLE="$POST_DEPLOY_SMOKE_TMP_DIR/wedge_durable_unevaluable.log"
+    if ! : > "$POST_DEPLOY_SMOKE_WEDGE_UNEVALUABLE"; then
+        _post_deploy_smoke_fail \
+            "relay wedge check: cannot open ${POST_DEPLOY_SMOKE_WEDGE_UNEVALUABLE}" || true
+        return 1
+    fi
 
     if ! fully_recovered=$(
         _post_deploy_smoke_fully_recovered_from_file "$wedge_source_path"
@@ -3104,13 +3289,18 @@ _post_deploy_smoke_check_wedges() {
     if ! wedge_markers=$(
         _post_deploy_smoke_wedge_all_markers_from_file "$wedge_source_path"
     ); then
-        _post_deploy_smoke_fail "relay wedge check: health/detail JSON could not be parsed" || true
+        _post_deploy_smoke_fail "relay wedge check: wedge markers could not be extracted" || true
         return 1
     fi
-    # Evidence was reached on this deploy, whatever the verdict turns out to be.
-    # The streak counts only CONSECUTIVE deploys that never got this far.
-    _post_deploy_smoke_wedge_skip_state_reset || return 1
     if [ -z "$wedge_markers" ]; then
+        if [ -s "$POST_DEPLOY_SMOKE_WEDGE_UNEVALUABLE" ]; then
+            _post_deploy_smoke_wedge_skip \
+                "$(_post_deploy_smoke_wedge_unevaluable_summary)" || return 1
+            return 0
+        fi
+        # VERDICT 1 of 3: evidence read, no marker anywhere. Only a verdict
+        # resets the streak — see the reset placement note above.
+        _post_deploy_smoke_wedge_skip_state_reset || return 1
         _post_deploy_smoke_note "relay wedge markers=absent" || return 1
         return 0
     fi
@@ -3155,12 +3345,23 @@ _post_deploy_smoke_check_wedges() {
         return 0
     fi
     if [ -z "$persistent_markers" ]; then
+        if [ -s "$POST_DEPLOY_SMOKE_WEDGE_UNEVALUABLE" ]; then
+            _post_deploy_smoke_wedge_skip \
+                "$(_post_deploy_smoke_wedge_unevaluable_summary)" || return 1
+            return 0
+        fi
+        # VERDICT 2 of 3: the marker resolved itself across the settle window.
+        _post_deploy_smoke_wedge_skip_state_reset || return 1
         _post_deploy_smoke_note \
             "relay wedge markers=cleared after ${POST_DEPLOY_SMOKE_WEDGE_SETTLE_SECS}s settle" \
             || return 1
         return 0
     fi
 
+    # VERDICT 3 of 3: a persistent marker. A confirmed wedge is evidence too, so
+    # the streak resets here as well; a reset failure raises its own finding and
+    # must not displace the wedge finding itself.
+    _post_deploy_smoke_wedge_skip_state_reset || true
     wedge_summary="${persistent_markers//$'\n'/; }"
     _post_deploy_smoke_fail \
         "relay wedge marker persisted after ${POST_DEPLOY_SMOKE_WEDGE_SETTLE_SECS}s settle: ${wedge_summary}" \
