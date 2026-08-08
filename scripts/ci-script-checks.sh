@@ -48,6 +48,10 @@ echo "=== PG audit guard ==="
 echo "=== Postgres migration checksum guard ==="
 "$PYTHON" scripts/check_postgres_migration_checksums.py
 
+echo "=== PostgreSQL fixture DDL chokepoint guard (#5229) ==="
+"$PYTHON" scripts/check_database_fixture_ddl.py
+"$PYTHON" -m unittest tests.test_database_fixture_ddl
+
 echo "=== message_outbox validated-insert guard (#4424) ==="
 "$PYTHON" scripts/check_message_outbox_inserts.py
 "$PYTHON" -m unittest tests.test_message_outbox_inserts
