@@ -1359,7 +1359,7 @@ async fn connect_test_pool_with_options(
     super::fixture_target::enforce_configured_target(
         postgres_test_database_url_base().as_deref(),
         &options,
-    );
+    )?;
     let acquire_timeout = std::env::var(TEST_POSTGRES_ACQUIRE_TIMEOUT_ENV)
         .ok()
         .and_then(|value| value.parse::<u64>().ok())

@@ -177,7 +177,11 @@ pub(super) fn options_match(
 ) -> Result<(), String> {
     let base = fixture_identity(base_options);
     let candidate = fixture_identity(candidate_options);
-    if candidate == base {
+    if candidate.transport == base.transport
+        && candidate.port == base.port
+        && candidate.routing_host == base.routing_host
+        && candidate.tls_mode == base.tls_mode
+    {
         return Ok(());
     }
     Err(format!(
@@ -198,15 +202,11 @@ pub(super) fn config_base_is_representable(parsed_base: &ParsedFixtureUrl) -> Re
 pub(super) fn enforce_configured_target(
     configured_base: Option<&str>,
     candidate_options: &PgConnectOptions,
-) {
-    let result = (|| {
-        let base = configured_base.ok_or_else(|| {
-            "fixture base unconfigured (POSTGRES_TEST_DATABASE_URL_BASE)".to_string()
-        })?;
-        let parsed_base = parse_fixture_url(base, "configured PostgreSQL fixture base")?;
-        options_match(&parsed_base.options, candidate_options)
-    })();
-    result.unwrap_or_else(|error| panic!("unsafe PostgreSQL fixture target: {error}"));
+) -> Result<(), String> {
+    let base = configured_base
+        .ok_or_else(|| "fixture base unconfigured (POSTGRES_TEST_DATABASE_URL_BASE)".to_string())?;
+    let parsed_base = parse_fixture_url(base, "configured PostgreSQL fixture base")?;
+    options_match(&parsed_base.options, candidate_options)
 }
 
 #[cfg(test)]
@@ -384,14 +384,29 @@ mod tests {
     }
 
     #[test]
-    fn mismatch_is_always_a_hard_failure() {
+    fn configured_target_rejects_changed_host() {
         let candidate = parsed("postgresql://user@other.example:15432/db?sslmode=disable");
-        let panic = std::panic::catch_unwind(|| {
-            enforce_configured_target(
-                Some("postgresql://user@db.example:15432/root?sslmode=disable"),
-                &candidate.options,
-            );
-        });
-        assert!(panic.is_err(), "a target mismatch must panic");
+        let result = enforce_configured_target(
+            Some("postgresql://user@db.example:15432/root?sslmode=disable"),
+            &candidate.options,
+        );
+        assert!(result.is_err(), "a changed host must be rejected");
+    }
+
+    #[test]
+    fn configured_target_rejects_changed_port() {
+        let candidate = parsed("postgresql://user@db.example:15433/db?sslmode=disable");
+        let result = enforce_configured_target(
+            Some("postgresql://user@db.example:15432/root?sslmode=disable"),
+            &candidate.options,
+        );
+        assert!(result.is_err(), "a changed port must be rejected");
+    }
+
+    #[test]
+    fn unconfigured_target_is_rejected_without_panicking() {
+        let candidate = parsed("postgresql://user@127.0.0.1:5432/db?sslmode=disable");
+        let result = enforce_configured_target(None, &candidate.options);
+        assert!(result.is_err(), "an ambient target must be rejected");
     }
 }
