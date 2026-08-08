@@ -2663,7 +2663,7 @@ POST_DEPLOY_SMOKE_WEDGE_RECOVERY_POLL_SECS=5
 # in $ADK_REL/runtime and fail the smoke once they reach this limit.
 POST_DEPLOY_SMOKE_WEDGE_MAX_CONSECUTIVE_SKIPS="${AGENTDESK_POST_DEPLOY_SMOKE_WEDGE_MAX_CONSECUTIVE_SKIPS:-3}"
 POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE="$ADK_REL/runtime/post_deploy_smoke_wedge_skips.json"
-# Set by the single gate; consumed by _post_deploy_smoke_check_wedges.
+# Set to the cleared body contents by the gate; consumed by the wedge readers.
 POST_DEPLOY_SMOKE_WEDGE_GATE_FAILED=""
 POST_DEPLOY_SMOKE_WEDGE_GATED_BODY=""
 POST_DEPLOY_SMOKE_WEDGE_GATE_JQ_OK=""
@@ -2729,52 +2729,34 @@ _post_deploy_smoke_probe_apis() {
 }
 
 # ── #5244: the single gate ───────────────────────────────────────────────────
-# Three review rounds produced the same class of defect: some site could not
-# evaluate the relay state, treated that as evaluated, and returned a clean
-# verdict. Patching site by site only exposed the next site. So "cannot
-# evaluate" is decided in ONE function, _post_deploy_smoke_wedge_gate, and its
-# verdict is enforced in ONE place, the exit assertion of
-# _post_deploy_smoke_check_wedges. A tripped gate is an accounting FAILURE, not
-# a skip.
+# "Cannot evaluate" is decided by _post_deploy_smoke_wedge_gate and enforced by
+# the exit assertion of _post_deploy_smoke_check_wedges. A trip is an accounting
+# FAILURE, not a skip.
 #
-# Cross-shell note that shapes this structure: the gate must run in the parent
-# shell. Called from inside a command substitution it could not publish
-# POST_DEPLOY_SMOKE_WEDGE_GATE_FAILED or append to POST_DEPLOY_SMOKE_FAILURES.
-# So it runs where a body ARRIVES (entry + _post_deploy_smoke_wedge_fetch_
-# health_detail), and _post_deploy_smoke_wedge_jq — the sole jq reader of
-# /api/health/detail BODIES — refuses to parse any body the gate has not just
-# cleared. That refusal is what makes a removed gate call observable rather
-# than silent.
+# The gate runs in the parent shell so its flag and failures survive command
+# substitutions. It runs when a body arrives; the sole body reader refuses
+# content the gate did not clear.
 #
-# "Sole reader" is scoped to bodies deliberately: counted 2026-08-08, this
-# subsystem invokes jq five times across four functions, and three of those
-# functions are intentionally NOT routed through _post_deploy_smoke_wedge_jq.
+# "Sole reader" is scoped to health bodies, not every jq invocation:
 #   _post_deploy_smoke_wedge_gate_jq     two invocations, `jq --version` and the
-#       semantic self-test. The gate's own bootstrap; it necessarily runs before
-#       any body has been cleared.
+#       semantic self-test, before a body can be cleared.
 #   _post_deploy_smoke_wedge_gate_body   the gate's own schema assertion. It is
 #       what clears a body, so it cannot require a cleared body.
 #   _post_deploy_smoke_wedge_jq          every read of a cleared health body.
 #   _post_deploy_smoke_wedge_state_read  parses the local skip-state file, not
-#       a health body — a different trust domain with its own range checks.
+#       a health body.
 #
-# One more literal correction: the entry point does judge one thing before the
-# gate runs. An absent or empty POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY is failed
-# outright in _post_deploy_smoke_check_wedges. That is the only pre-gate
-# judgement, and it is unconditionally a FAILURE, never a skip.
+# Before the gate, an absent or empty primary body is a FAILURE, never a skip.
 
 # jq floor plus a semantic self-test.
 #
-# Floor. Below 1.7 the wedge filters have never been exercised here, and the
-# floor covers a dependency measured on this box 2026-08-08: the official
+# Floor. A dependency measured on this box 2026-08-08: the official
 # jq-1.6 darwin binary read {"channel_id":1234567890123456789} back as
 # 1234567890123456800, while jq-1.7.1-apple preserved the literal. channel_id
 # is a Rust u64 (src/services/discord/health/snapshot.rs:340) that the marker
 # strings interpolate verbatim, so on 1.6 a wedge marker would name the wrong
-# channel. A missing jq, a nonzero `jq --version`, and version strings whose
-# major/minor are not plain integers (jq-1.8pre, jq-1.7rc1) all fail closed. A
-# suffixed PATCH field is accepted: the release box measured 2026-08-08 reports
-# `jq-1.7.1-apple`, which is 1.7 with a vendor tag.
+# channel. Missing/old/unparseable jq versions fail closed; a patch suffix such
+# as the measured `jq-1.7.1-apple` is accepted.
 #
 # Self-test. A version string is a claim, not behaviour. A jq that exits 0
 # while printing garbage passes every version check, and downstream that garbage
@@ -2783,8 +2765,8 @@ _post_deploy_smoke_probe_apis() {
 # filters use — object indexing, array typing, ascii_downcase, test(...;"i"),
 # `//` defaulting, string interpolation via join — and demands the exact
 # expected output. What this does NOT do: it does not prove the filters below
-# are correct, only that this jq evaluates their building blocks the way the
-# filters assume.
+# are correct or that jq behaves consistently across calls. A later invocation
+# can still suppress marker output with rc=0 and manufacture a clean verdict.
 _post_deploy_smoke_wedge_gate_jq() {
     local raw version rest major minor probe
     if [ "$POST_DEPLOY_SMOKE_WEDGE_GATE_JQ_OK" = "1" ]; then
@@ -2832,30 +2814,13 @@ _post_deploy_smoke_wedge_gate_jq() {
     return 0
 }
 
-# Shape AND range. `case` proves a value is digits; it does not prove this shell
-# can compare or increment it, and every defect that reached this gate was a
-# range defect, not a shape defect.
-#
-# The bound is not a chosen constant — it is this shell's own, asked rather than
-# hardcoded, so it belongs to whichever bash actually runs the deploy. The one
-# comparison below does both jobs at once, and each half is load-bearing.
-# Measured on bash 3.2.57(1)-release (arm64-apple-darwin26) 2026-08-08:
-#
-#   value                                  $((value + 1))          [ … -gt value ]
-#   9223372036854775806 (2^63-2)           9223372036854775807     rc=0  accepted
-#   9223372036854775807 (2^63-1)           -9223372036854775808    rc=1  rejected
-#   9223372036854775808 (2^63)             -9223372036854775807    rc=2  rejected
-#   999…999 (36 digits)                    -5527149226598858752    rc=2  rejected
-#
-# Note the middle column: `$(( ))` never errors, it wraps silently, so the
-# increment alone proves nothing. It is feeding the RAW value back to `[` as the
-# right-hand operand that rejects the out-of-range ones — `[` refuses to parse
-# them ("integer expression expected", rc=2) — while the `-gt` itself rejects
-# 2^63-1, the one in-range value that wraps when the skip counter increments it.
+# Shape and range: arithmetic wraps silently, so the incremented decimal value
+# must compare greater than the raw digits. `10#` keeps leading zeroes decimal;
+# the raw `[` operand rejects values outside this shell's integer range.
 _post_deploy_smoke_wedge_usable_int() {
     local value="$1"
     case "$value" in ''|*[!0-9]*) return 1 ;; esac
-    [ "$((value + 1))" -gt "$value" ] 2>/dev/null || return 1
+    [ "$((10#$value + 1))" -gt "$value" ] 2>/dev/null || return 1
     return 0
 }
 
@@ -2870,14 +2835,16 @@ _post_deploy_smoke_wedge_usable_int() {
 _post_deploy_smoke_wedge_gate_config() {
     _post_deploy_smoke_wedge_usable_int "$POST_DEPLOY_SMOKE_WEDGE_RECOVERY_WAIT_SECS" || return 1
     _post_deploy_smoke_wedge_usable_int "$POST_DEPLOY_SMOKE_WEDGE_MAX_CONSECUTIVE_SKIPS" || return 1
+    POST_DEPLOY_SMOKE_WEDGE_RECOVERY_WAIT_SECS=$((10#$POST_DEPLOY_SMOKE_WEDGE_RECOVERY_WAIT_SECS))
+    POST_DEPLOY_SMOKE_WEDGE_MAX_CONSECUTIVE_SKIPS=$((10#$POST_DEPLOY_SMOKE_WEDGE_MAX_CONSECUTIVE_SKIPS))
     [ "$POST_DEPLOY_SMOKE_WEDGE_MAX_CONSECUTIVE_SKIPS" -ge 1 ]
 }
 
 # Losing a skip increment is itself a failure, so writability is a
 # precondition, not something discovered at write time. This is the only place
-# the destination's OWN shape is judged: a symlink or non-regular destination
-# is rejected here, and _post_deploy_smoke_wedge_state_write's `mv -f` replaces
-# that path by rename, which cannot follow a symlink into somewhere else.
+# the destination's OWN shape is judged. A symlink or non-regular destination
+# is rejected here; the later BSD `mv -h` also refuses to follow a directory
+# symlink substituted after this check.
 #
 # The probe path is predictable (`.probe.$$`), so writing it is not enough:
 # a pre-planted symlink there would truncate whatever it points at while
@@ -2927,23 +2894,25 @@ _post_deploy_smoke_wedge_gate_state() {
 #   ------------------------------------------   --------------  -----------------
 #   all consumers : the body itself              object          type == "object"
 #   _markers_from_file : .degraded_reasons[]?    array           (.degraded_reasons|type)
-#   _markers_from_file : .mailboxes[]?           array           (.mailboxes|type)
+#   _markers_from_file : .mailboxes[]? and the mailbox fields below
+#                                                    array        (.mailboxes|type)
 #   _fully_recovered_from_file : .fully_recovered boolean        (.fully_recovered|type)
 #
 # That is the whole set: _post_deploy_smoke_wedge_markers_from_file and
 # _post_deploy_smoke_fully_recovered_from_file are the only two callers of
-# _post_deploy_smoke_wedge_jq, and _post_deploy_smoke_wedge_jq is the only
-# reader of a cleared body.
+# _post_deploy_smoke_wedge_jq. It is the only reader of a body cleared for the
+# wedge check; the later E-1 Python guard separately reads the same primary file.
 #
-# What this gate does NOT assert, and why that is still fail-closed: the shapes
-# INSIDE .mailboxes[] (.relay_stall_state, .relay_health.*, .inflight_state_
-# present, .relay_owner_kind). Measured with jq-1.7.1-apple 2026-08-08, every
-# drift there aborts the filter with rc=5 rather than emitting nothing —
-# `{"relay_stall_state":5}` gives "explode input must be a string", a bare
-# string element gives "Cannot index string with string". A nonzero jq is a
-# parse failure at the call site, never a clean verdict, so those fields do not
-# need a top-level clause. Elements of .degraded_reasons are filtered by
-# `strings` on purpose: non-string reasons carry no marker text.
+# What this gate does NOT assert: the shapes inside `.mailboxes[]` consumed by
+# the marker filter — relay_stall_state; relay_health.desynced,
+# stale_thread_proof, and watcher_attached_stale; inflight_state_present;
+# watcher_attached; provider; and channel_id. With jq-1.7.1-apple, some present
+# type drift aborts the filter (`{"relay_stall_state":5}` returns rc=5), but
+# absent, null, false, and stringified booleans can be absorbed by defaults or
+# comparisons and emit nothing. The shell therefore cannot call those shapes
+# fail-closed. `relay_owner_kind` is deliberately not consumed: the server's
+# MailboxHealthSnapshot does not serialize it. Elements of .degraded_reasons
+# are filtered by `strings` on purpose: non-string reasons carry no marker text.
 #
 # Schema provenance, and its one assumption: measured in
 # src/server/routes/health_api.rs, the registry branch always writes
@@ -2961,12 +2930,15 @@ _post_deploy_smoke_wedge_gate_body() {
     if [ -z "$body_path" ] || [ ! -s "$body_path" ]; then
         return 1
     fi
-    jq -e '
+    if ! POST_DEPLOY_SMOKE_WEDGE_GATED_BODY=$(cat "$body_path" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"); then
+        return 1
+    fi
+    printf '%s' "$POST_DEPLOY_SMOKE_WEDGE_GATED_BODY" | jq -e '
         (type == "object")
         and ((.mailboxes | type) == "array")
         and ((.degraded_reasons | type) == "array")
         and ((.fully_recovered | type) == "boolean")
-    ' "$body_path" >/dev/null 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"
+    ' >/dev/null 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"
 }
 
 _post_deploy_smoke_wedge_gate() {
@@ -2984,7 +2956,6 @@ _post_deploy_smoke_wedge_gate() {
     elif ! _post_deploy_smoke_wedge_gate_body "$body_path"; then
         reason="/api/health/detail body unavailable, or not an object carrying a mailboxes array, a degraded_reasons array, and a boolean fully_recovered"
     else
-        POST_DEPLOY_SMOKE_WEDGE_GATED_BODY="$body_path"
         return 0
     fi
     POST_DEPLOY_SMOKE_WEDGE_GATE_FAILED="$reason"
@@ -2996,14 +2967,18 @@ _post_deploy_smoke_wedge_gate() {
 # four-site table at the top of this section for the gate's own bootstrap and
 # the skip-state parser, which are deliberate exceptions. It asserts rather
 # than re-derives: the gate already ran in the parent shell, so all this can do
-# is refuse a body that is not the one just cleared.
+# is refuse content that is not the body instance just cleared.
 _post_deploy_smoke_wedge_jq() {
     local body_path="$1"
     local filter="$2"
-    if [ "$body_path" != "$POST_DEPLOY_SMOKE_WEDGE_GATED_BODY" ]; then
+    local body
+    if ! body=$(cat "$body_path" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"); then
         return 1
     fi
-    jq -r "$filter" "$body_path" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"
+    if [ "$body" != "$POST_DEPLOY_SMOKE_WEDGE_GATED_BODY" ]; then
+        return 1
+    fi
+    printf '%s' "$body" | jq -r "$filter" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"
 }
 
 # Fetch /api/health/detail into $1 and gate it. Distinct return codes so each
@@ -3045,7 +3020,7 @@ _post_deploy_smoke_wedge_state_write() {
         rm -f "$tmp" 2>/dev/null || true
         return 1
     fi
-    if ! mv -f "$tmp" "$dest" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"; then
+    if ! mv -fh "$tmp" "$dest" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"; then
         rm -f "$tmp" 2>/dev/null || true
         return 1
     fi
@@ -3111,7 +3086,9 @@ _post_deploy_smoke_wedge_corrupt_tally_read() {
 }
 
 # Returns 0 when the skip was recorded below the limit, 1 when the smoke must
-# fail (limit reached, unwritable state, or a repeated unreadable state).
+# fail (limit reached, unwritable state, or a repeated unreadable state). The
+# normal deploy path is serialized by the release deploy lock; this read/modify/
+# write has no separate lock if callers bypass it or choose different lock files.
 _post_deploy_smoke_wedge_skip_state_bump() {
     local reason="$1"
     local count corrupt
@@ -3135,7 +3112,9 @@ _post_deploy_smoke_wedge_skip_state_bump() {
             "relay wedge skip accounting: skip state unreadable, recovering from 0" || return 1
         count=0
     fi
-    count=$((count + 1))
+    if [ "$count" -lt "$POST_DEPLOY_SMOKE_WEDGE_MAX_CONSECUTIVE_SKIPS" ]; then
+        count=$((count + 1))
+    fi
     # A lost increment is a lost skip, and a skip that is never counted can
     # never reach the limit. One write failure fails the smoke.
     if ! _post_deploy_smoke_wedge_state_write \
@@ -3183,10 +3162,10 @@ _post_deploy_smoke_wedge_skip() {
 
 _post_deploy_smoke_wedge_markers_from_file() {
     local health_detail_path="$1"
-    # Reuse the health/detail markers consumed by the relay E2E validator:
-    # explicit non-healthy relay_stall_state, ownerless/detached inflight,
-    # desync, stale thread proof, or stale watcher attachment. Ordinary active
-    # turns and queues are deliberately not classified as wedges.
+    # A non-healthy relay_stall_state alone is not a wedge: foreground streams
+    # and explicit background work are normal busy states. relay_owner_kind is
+    # not on this wire surface, so ownerless inflight is also out of scope here.
+    # Keep only evidence the serialized mailbox actually supplies.
     _post_deploy_smoke_wedge_jq "$health_detail_path" '
         [
           .degraded_reasons[]?
@@ -3198,15 +3177,9 @@ _post_deploy_smoke_wedge_markers_from_file() {
           | . as $mailbox
           | (($mailbox.relay_stall_state // "healthy") | ascii_downcase) as $stall
           | select(
-              ($stall != "" and $stall != "healthy")
-              or ($mailbox.relay_health.desynced == true)
+              ($mailbox.relay_health.desynced == true)
               or ($mailbox.relay_health.stale_thread_proof == true)
               or ($mailbox.relay_health.watcher_attached_stale == true)
-              or (
-                $mailbox.inflight_state_present == true
-                and (($mailbox.relay_owner_kind // "none") | ascii_downcase) as $owner
-                | ($owner == "" or $owner == "none" or $owner == "unknown")
-              )
               or (
                 $mailbox.inflight_state_present == true
                 and $mailbox.watcher_attached == false
@@ -3224,9 +3197,9 @@ _post_deploy_smoke_wedge_markers_from_file() {
 # and prints something that is not what it evaluated. Without it, any such
 # output is simply != "true" and the caller silently reads "not recovered",
 # which decays into a skip for a body nobody parsed. Scope: this runs inside
-# `$( )`, so it cannot publish a gate trip; the gate's own self-test is what
-# catches an inconsistent jq up front, and this is the residual guard for a jq
-# that passes the self-test and still garbles a real body.
+# `$( )`, so it cannot publish a gate trip. This narrows per-call jq risk for
+# fully_recovered only. A jq that passes the fixed self-test and later suppresses
+# marker output with rc=0 can still manufacture a clean marker verdict.
 _post_deploy_smoke_fully_recovered_from_file() {
     local health_path="$1"
     local state

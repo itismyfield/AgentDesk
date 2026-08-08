@@ -20,7 +20,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DEPLOY_SH="$REPO_ROOT/scripts/deploy-release.sh"
+DEPLOY_SH="${DEPLOY_SH_OVERRIDE:-$REPO_ROOT/scripts/deploy-release.sh}"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-wedge-skip-test.XXXXXX")
 # `set -u` aborts mid-suite report rc=0 through some `|| rc=$?` contexts, which
 # would read as a pass. Only the completion flag can make this exit 0.
@@ -107,6 +107,19 @@ done
 case "$(cat "$STUB_STATE/curl.mode" 2>/dev/null || printf 'fail')" in
     empty) : > "$dest" ;;
     body)  cat "$STUB_STATE/curl.body" > "$dest" ;;
+    sequence_partial_fail)
+        calls=$(cat "$STUB_STATE/curl.calls" 2>/dev/null || printf 0)
+        calls=$((calls + 1))
+        printf '%s\n' "$calls" > "$STUB_STATE/curl.calls"
+        [ -f "$STUB_STATE/curl.body.$calls" ] || exit 22
+        cat "$STUB_STATE/curl.body.$calls" > "$dest"
+        [ "$calls" -ne 2 ] || exit 22
+        ;;
+    swap_state_dir)
+        cat "$STUB_STATE/curl.body" > "$dest"
+        rm -f "$POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE"
+        ln -s "$SYMLINK_TARGET_DIR" "$POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE"
+        ;;
     *)     exit 22 ;;
 esac
 STUB
@@ -125,6 +138,11 @@ fi
 if [ -f "\$STUB_STATE/jq.garbage" ]; then
     printf 'garbage-but-rc-zero\n'
     exit 0
+fi
+if [ -f "\$STUB_STATE/jq.markersuppress" ]; then
+    for arg in "\$@"; do
+        case "\$arg" in *degraded_reason=*) exit 0 ;; esac
+    done
 fi
 # jq.boolgarble: honest everywhere including the gate's self-test, then garbage
 # from the SECOND fully_recovered read onwards. That filter is the only one
@@ -160,7 +178,9 @@ ln -sf "$STUB_BIN/curl" "$NOJQ_BIN/curl"
 # array, boolean fully_recovered — because that is what the server emits and
 # what the gate now demands.
 CLEAN_BODY='{"fully_recovered": true, "mailboxes": [], "degraded_reasons": []}'
-WEDGED_BODY='{"fully_recovered": true, "degraded_reasons": [], "mailboxes": [{"provider":"claude","channel_id":"c1","relay_stall_state":"stalled"}]}'
+WEDGED_BODY='{"fully_recovered": true, "degraded_reasons": [], "mailboxes": [{"provider":"claude","channel_id":"c1","relay_stall_state":"tmux_alive_relay_dead","relay_health":{"desynced":true}}]}'
+ACTIVE_BODY='{"fully_recovered": true, "degraded_reasons": [], "mailboxes": [{"provider":"claude","channel_id":"c1","relay_stall_state":"active_foreground_stream","inflight_state_present":true,"watcher_attached":true,"relay_health":{"desynced":false,"stale_thread_proof":false,"watcher_attached_stale":false}}]}'
+OWNERLESS_BODY='{"fully_recovered": true, "degraded_reasons": [], "mailboxes": [{"provider":"claude","channel_id":"c1","relay_stall_state":"healthy","inflight_state_present":true,"watcher_attached":true,"relay_health":{"desynced":false,"stale_thread_proof":false,"watcher_attached_stale":false}}]}'
 UNRECOVERED_BODY='{"fully_recovered": false, "mailboxes": [], "degraded_reasons": []}'
 
 failures=0
@@ -199,8 +219,9 @@ setup_case() {
     POST_DEPLOY_SMOKE_WEDGE_RECOVERY_REASON=""
     printf 'jq-1.7.1-apple\n' > "$STUB_STATE/jq.version"
     : > "$STUB_STATE/jq.version.calls"
-    rm -f "$STUB_STATE/jq.garbage" "$STUB_STATE/jq.boolgarble"
+    rm -f "$STUB_STATE/jq.garbage" "$STUB_STATE/jq.boolgarble" "$STUB_STATE/jq.markersuppress"
     printf '0\n' > "$STUB_STATE/jq.boolgarble.calls"
+    printf '0\n' > "$STUB_STATE/curl.calls"
     printf 'fail\n' > "$STUB_STATE/curl.mode"
     # The production functions arrive through eval, so the linter cannot see
     # that they consume these globals; exporting them states the contract.
@@ -212,6 +233,7 @@ setup_case() {
     export POST_DEPLOY_SMOKE_WEDGE_RECOVERY_BODY POST_DEPLOY_SMOKE_WEDGE_RECOVERY_REASON
     export POST_DEPLOY_SMOKE_EVIDENCE POST_DEPLOY_SMOKE_TMP_DIR
     export POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY ADK_REL
+    export STUB_STATE
 }
 stored_count() {
     if [ -f "$POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE" ]; then
@@ -285,6 +307,27 @@ else
     fail_test "clean verdict recorded consecutive_skips=$(stored_count), want no state file"
 fi
 
+# Normal busy states are not wedge evidence. active_foreground_stream is a
+# healthy live turn, and relay_owner_kind is absent from the mailbox wire type,
+# so neither condition may manufacture a marker by itself.
+setup_case
+printf '%s\n' "$ACTIVE_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+run_check; check_rc 0 "$RUN_CHECK_RC" "an active foreground stream is not a relay wedge"
+if [ "$(stored_count)" = "absent" ]; then
+    pass_test "an active foreground stream reaches a clean marker verdict"
+else
+    fail_test "an active foreground stream changed skip accounting"
+fi
+
+setup_case
+printf '%s\n' "$OWNERLESS_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+run_check; check_rc 0 "$RUN_CHECK_RC" "missing relay_owner_kind is not ownerless wedge evidence"
+if [ "$(stored_count)" = "absent" ]; then
+    pass_test "wire-level owner absence reaches a clean marker verdict"
+else
+    fail_test "wire-level owner absence changed skip accounting"
+fi
+
 # Markers that clear during settle are also an evidence-based verdict.
 setup_case
 printf '%s\n' "$WEDGED_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
@@ -330,6 +373,23 @@ if [ "$(stored_count)" = "1" ]; then
     pass_test "recovery deadline expiry is counted as a skip"
 else
     fail_test "recovery deadline expiry recorded consecutive_skips=$(stored_count), want 1"
+fi
+
+# A failed curl may still replace its -o file. The same recovery path is reused,
+# so path identity would bless those new bytes with the previous poll's gate.
+# Content identity must refuse them and account the unevaluable wait as a skip.
+setup_case
+POST_DEPLOY_SMOKE_WEDGE_RECOVERY_WAIT_SECS=2
+POST_DEPLOY_SMOKE_WEDGE_RECOVERY_POLL_SECS=1
+printf '%s\n' "$UNRECOVERED_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+printf 'sequence_partial_fail\n' > "$STUB_STATE/curl.mode"
+printf '%s\n' "$UNRECOVERED_BODY" > "$STUB_STATE/curl.body.1"
+printf '%s\n' "$CLEAN_BODY" > "$STUB_STATE/curl.body.2"
+run_check; check_rc 0 "$RUN_CHECK_RC" "an un-gated replacement body cannot become a clean verdict"
+if [ "$(stored_count)" = "1" ]; then
+    pass_test "a failed fetch that replaced a gated path is accounted as a skip"
+else
+    fail_test "a failed fetch that replaced a gated path left consecutive_skips=$(stored_count), want 1"
 fi
 
 # ── The single gate: jq ─────────────────────────────────────────────────────
@@ -533,6 +593,19 @@ POST_DEPLOY_SMOKE_WEDGE_MAX_CONSECUTIVE_SKIPS=9223372036854775806
 printf '%s\n' "$CLEAN_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
 run_check; check_rc 0 "$RUN_CHECK_RC" "the largest non-wrapping skip limit is accepted"
 
+# Leading zeroes are decimal operator spelling, not an octal knob.
+setup_case
+POST_DEPLOY_SMOKE_WEDGE_RECOVERY_WAIT_SECS=010
+POST_DEPLOY_SMOKE_WEDGE_MAX_CONSECUTIVE_SKIPS=010
+printf '%s\n' "$CLEAN_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+run_check; check_rc 0 "$RUN_CHECK_RC" "leading-zero integer knobs are normalized as decimal"
+if [ "$POST_DEPLOY_SMOKE_WEDGE_RECOVERY_WAIT_SECS" = 10 ] \
+  && [ "$POST_DEPLOY_SMOKE_WEDGE_MAX_CONSECUTIVE_SKIPS" = 10 ]; then
+    pass_test "leading-zero wedge knobs are stored in decimal form"
+else
+    fail_test "leading-zero wedge knobs were not normalized"
+fi
+
 # ── A stored count outside bash's range is corruption, not zero ─────────────
 # Schema-valid and believable-looking, but `count + 1` wraps to a negative that
 # compares below every threshold — a state that had blown past the limit would
@@ -554,6 +627,23 @@ else
 fi
 printf '{"consecutive_skips": 99999999999999999999}\n' > "$POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE"
 run_check; check_rc 1 "$RUN_CHECK_RC" "a second out-of-range stored count fails the smoke"
+
+# Once the configured limit has been reached, later skips remain red. Saturate
+# at the limit instead of writing the next integer and reclassifying it as
+# corruption on the following deploy.
+setup_case
+POST_DEPLOY_SMOKE_WEDGE_MAX_CONSECUTIVE_SKIPS=9223372036854775806
+printf '%s\n' "$WEDGED_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+_post_deploy_smoke_wedge_state_write \
+    '{"consecutive_skips": 9223372036854775806}' "$POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE"
+run_check; check_rc 1 "$RUN_CHECK_RC" "a skip at the maximum limit remains red"
+run_check; check_rc 1 "$RUN_CHECK_RC" "the next skip after the maximum limit remains red"
+if [ "$(stored_count)" = 9223372036854775806 ] \
+  && [ ! -e "${POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE}.corrupt" ]; then
+    pass_test "the reached limit stays monotonic without corruption recovery"
+else
+    fail_test "the reached limit escaped through corruption recovery"
+fi
 
 # ── The single gate: skip-state I/O ─────────────────────────────────────────
 setup_case
@@ -597,6 +687,26 @@ if [ "$(stored_count)" = "1" ]; then
     pass_test "the skip was still recorded while refusing the planted temp symlink"
 else
     fail_test "the planted temp symlink cost the skip increment (count=$(stored_count))"
+fi
+
+# BSD mv follows a destination symlink to a directory unless -h is used. Swap
+# that symlink after the gate and verify the atomic replacement neither follows
+# it nor overwrites the attacker's same-basename sibling.
+setup_case
+printf '%s\n' "$WEDGED_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+SYMLINK_TARGET_DIR="$ADK_REL/runtime/attacker-dir"
+mkdir -p "$SYMLINK_TARGET_DIR"
+victim="$SYMLINK_TARGET_DIR/$(basename "${POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE}.tmp.$$")"
+printf 'victim-contents-must-survive\n' > "$victim"
+export SYMLINK_TARGET_DIR
+printf 'swap_state_dir\n' > "$STUB_STATE/curl.mode"
+printf '%s\n' "$WEDGED_BODY" > "$STUB_STATE/curl.body"
+run_check; check_rc 1 "$RUN_CHECK_RC" "a persistent marker still fails after a destination symlink swap"
+if [ ! -L "$POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE" ] \
+  && [ "$(cat "$victim")" = "victim-contents-must-survive" ]; then
+    pass_test "the atomic replace does not follow a directory symlink destination"
+else
+    fail_test "the atomic replace followed a directory symlink destination"
 fi
 
 setup_case
