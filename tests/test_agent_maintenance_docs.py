@@ -104,6 +104,63 @@ class LastRefreshedHeaderTest(unittest.TestCase):
 
 
 class HeaderValidationTest(unittest.TestCase):
+    def _write_guarded_docs(self, root: Path, target_body: str) -> None:
+        valid_body = """
+            # Doc
+
+            > Last refreshed: 2026-04-30 (manual: test fixture).
+        """
+        for rel_path in CHECKER.MIGRATION_SENSITIVE_DOCS:
+            body = (
+                target_body
+                if rel_path.endswith("change-surfaces.md")
+                else valid_body
+            )
+            _write(root, rel_path, body)
+
+    def test_errors_on_unrecognized_header_before_authoritative_match(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_guarded_docs(
+                root,
+                """
+                # Doc
+
+                > Last refreshed: 2026-05-01 (against #5270 multiline audit
+                > details continue here).
+
+                > Last refreshed: 2026-04-30 (manual: older valid anchor).
+                """,
+            )
+            findings = CHECKER.check_doc_headers(
+                root, CHECKER.dt.date(2026, 5, 1), CHECKER.DEFAULT_FRESHNESS_DAYS
+            )
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, "error")
+        self.assertEqual(findings[0].line, 3)
+        self.assertIn("was skipped", findings[0].message)
+        self.assertIn("authoritative header on line 6", findings[0].message)
+
+    def test_ignores_unrecognized_header_after_authoritative_match(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_guarded_docs(
+                root,
+                """
+                # Doc
+
+                > Last refreshed: 2026-05-01 (against #5270 valid anchor).
+
+                > Last refreshed: 2026-04-30 (undocumented historical shape).
+                """,
+            )
+            findings = CHECKER.check_doc_headers(
+                root, CHECKER.dt.date(2026, 5, 1), CHECKER.DEFAULT_FRESHNESS_DAYS
+            )
+
+        self.assertEqual(findings, [])
+
     def test_unresolvable_commit_is_warning_in_shallow_checkout(self) -> None:
         commit = "1d165cd3844e94015ab30cda8e4b1bba717f934d"
 
