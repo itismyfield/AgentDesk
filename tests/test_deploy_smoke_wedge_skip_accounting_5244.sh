@@ -179,7 +179,6 @@ ln -sf "$STUB_BIN/curl" "$NOJQ_BIN/curl"
 # what the gate now demands.
 CLEAN_BODY='{"fully_recovered": true, "mailboxes": [], "degraded_reasons": []}'
 WEDGED_BODY='{"fully_recovered": true, "degraded_reasons": [], "mailboxes": [{"provider":"claude","channel_id":"c1","relay_stall_state":"tmux_alive_relay_dead","relay_health":{"desynced":true}}]}'
-ACTIVE_BODY='{"fully_recovered": true, "degraded_reasons": [], "mailboxes": [{"provider":"claude","channel_id":"c1","relay_stall_state":"active_foreground_stream","inflight_state_present":false,"watcher_attached":true,"relay_health":{"desynced":false,"stale_thread_proof":false,"watcher_attached_stale":false}}]}'
 OWNERLESS_BODY='{"fully_recovered": true, "degraded_reasons": [], "mailboxes": [{"provider":"claude","channel_id":"c1","relay_stall_state":"healthy","inflight_state_present":true,"watcher_attached":true,"relay_health":{"desynced":false,"stale_thread_proof":false,"watcher_attached_stale":false}}]}'
 UNRECOVERED_BODY='{"fully_recovered": false, "mailboxes": [], "degraded_reasons": []}'
 
@@ -307,17 +306,37 @@ else
     fail_test "clean verdict recorded consecutive_skips=$(stored_count), want no state file"
 fi
 
-# Normal busy states are not wedge evidence. active_foreground_stream is a
-# healthy live turn, and relay_owner_kind is absent from the mailbox wire type,
-# so neither condition may manufacture a marker by itself.
-setup_case
-printf '%s\n' "$ACTIVE_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
-run_check; check_rc 0 "$RUN_CHECK_RC" "an active foreground stream is not a relay wedge"
-if [ "$(stored_count)" = "absent" ]; then
-    pass_test "an active foreground stream reaches a clean marker verdict"
-else
-    fail_test "an active foreground stream changed skip accounting"
-fi
+# relay_stall_state is classified by an explicit allowlist. Drive the complete
+# check so each normal state must reach markers=absent and each abnormal state
+# must persist its own marker after resampling. Other marker fields are false,
+# which prevents those clauses from hiding a missing stall-state comparison.
+while read -r stall expected_rc; do
+    setup_case
+    body=$(printf '%s\n' \
+        "{\"fully_recovered\":true,\"degraded_reasons\":[],\"mailboxes\":[{\"provider\":\"claude\",\"channel_id\":\"c1\",\"relay_stall_state\":\"$stall\",\"inflight_state_present\":false,\"watcher_attached\":true,\"relay_health\":{\"desynced\":false,\"stale_thread_proof\":false,\"watcher_attached_stale\":false}}]}")
+    printf '%s\n' "$body" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+    printf 'body\n' > "$STUB_STATE/curl.mode"
+    printf '%s\n' "$body" > "$STUB_STATE/curl.body"
+    run_check; check_rc "$expected_rc" "$RUN_CHECK_RC" "relay stall state $stall marker verdict"
+    if [ "$expected_rc" -eq 0 ]; then
+        if grep -q 'relay wedge markers=absent' "$POST_DEPLOY_SMOKE_EVIDENCE"; then
+            pass_test "relay stall state $stall emits no marker"
+        else
+            fail_test "relay stall state $stall did not reach markers=absent"
+        fi
+    elif grep -q "relay wedge marker persisted.*stall=$stall" "$POST_DEPLOY_SMOKE_EVIDENCE"; then
+        pass_test "relay stall state $stall emits a marker"
+    else
+        fail_test "relay stall state $stall did not persist its marker"
+    fi
+done <<'STALL_STATES'
+healthy 0
+active_foreground_stream 0
+explicit_background_work 0
+orphan_pending_token 1
+queue_blocked 1
+tmux_alive_relay_dead 1
+STALL_STATES
 
 setup_case
 printf '%s\n' "$OWNERLESS_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
@@ -647,7 +666,8 @@ fi
 # ── The single gate: skip-state I/O ─────────────────────────────────────────
 setup_case
 printf '%s\n' "$CLEAN_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
-ln -sf /dev/null "$POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE"
+printf '{"consecutive_skips": 0}\n' > "$ADK_REL/runtime/symlink-target.json"
+ln -sf "$ADK_REL/runtime/symlink-target.json" "$POST_DEPLOY_SMOKE_WEDGE_SKIP_STATE"
 run_check; check_rc 1 "$RUN_CHECK_RC" "symlinked skip state is unevaluable"
 
 # ── Predictable scratch paths are not writable handles ──────────────────────

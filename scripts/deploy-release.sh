@@ -2750,13 +2750,12 @@ _post_deploy_smoke_probe_apis() {
 
 # jq floor plus a semantic self-test.
 #
-# Floor. A dependency measured on this box 2026-08-08: the official
-# jq-1.6 darwin binary read {"channel_id":1234567890123456789} back as
-# 1234567890123456800, while jq-1.7.1-apple preserved the literal. channel_id
-# is a Rust u64 (src/services/discord/health/snapshot.rs:340) that the marker
-# strings interpolate verbatim, so on 1.6 a wedge marker would name the wrong
-# channel. Missing/old/unparseable jq versions fail closed; a patch suffix such
-# as the measured `jq-1.7.1-apple` is accepted.
+# Floor. jq versions that store JSON numbers as doubles lose integer precision
+# above 2^53. channel_id is a Rust u64
+# (src/services/discord/health/snapshot.rs:340) that the marker strings
+# interpolate verbatim, so an imprecise parser can name the wrong channel.
+# Missing/old/unparseable jq versions fail closed; a patch suffix such as
+# `jq-1.7.1-apple` is accepted.
 #
 # Self-test. A version string is a claim, not behaviour. A jq that exits 0
 # while printing garbage passes every version check, and downstream that garbage
@@ -3160,10 +3159,11 @@ _post_deploy_smoke_wedge_skip() {
 
 _post_deploy_smoke_wedge_markers_from_file() {
     local health_detail_path="$1"
-    # A non-healthy relay_stall_state alone is not a wedge: foreground streams
-    # and explicit background work are normal busy states. relay_owner_kind is
-    # not on this wire surface, so ownerless inflight is also out of scope here.
-    # Keep only evidence the serialized mailbox actually supplies.
+    # Foreground streams and explicit background work are normal busy states.
+    # The three non-busy stall states below are wedge evidence in their own
+    # right; stale_thread_proof is covered by its dedicated boolean clause.
+    # relay_owner_kind is not on this wire surface, so ownerless inflight is
+    # out of scope here. Keep only evidence the serialized mailbox supplies.
     _post_deploy_smoke_wedge_jq "$health_detail_path" '
         [
           .degraded_reasons[]?
@@ -3175,7 +3175,10 @@ _post_deploy_smoke_wedge_markers_from_file() {
           | . as $mailbox
           | (($mailbox.relay_stall_state // "healthy") | ascii_downcase) as $stall
           | select(
-              ($mailbox.relay_health.desynced == true)
+              ($stall == "orphan_pending_token")
+              or ($stall == "queue_blocked")
+              or ($stall == "tmux_alive_relay_dead")
+              or ($mailbox.relay_health.desynced == true)
               or ($mailbox.relay_health.stale_thread_proof == true)
               or ($mailbox.relay_health.watcher_attached_stale == true)
               or (
