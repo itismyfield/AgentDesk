@@ -22,6 +22,10 @@
 
 #[cfg(test)]
 mod tests {
+    use regex::Regex;
+    use std::collections::BTreeSet;
+    use std::ops::Range;
+
     /// The fixture sources under contract, paired with the module path a
     /// reviewer would grep for.
     const FIXTURE_SOURCES: &[(&str, &str)] = &[
@@ -45,6 +49,174 @@ mod tests {
 
     /// The shared helper the four fixtures now depend on.
     const SHARED_HELPER_SOURCE: &str = include_str!("../db/postgres.rs");
+    const TARGET_RULES_SOURCE: &str = include_str!("../db/fixture_target.rs");
+
+    fn masked_rust_source(source: &str) -> String {
+        let bytes = source.as_bytes();
+        let mut output = bytes.to_vec();
+        let mut index = 0;
+        while index < bytes.len() {
+            let raw_prefix = if bytes[index] == b'r' {
+                Some(index + 1)
+            } else if bytes[index] == b'b' && bytes.get(index + 1) == Some(&b'r') {
+                Some(index + 2)
+            } else {
+                None
+            };
+            if let Some(mut quote) = raw_prefix {
+                while bytes.get(quote) == Some(&b'#') {
+                    quote += 1;
+                }
+                if bytes.get(quote) == Some(&b'"') {
+                    let hashes = quote - raw_prefix.unwrap();
+                    let start = index;
+                    index = quote + 1;
+                    while index < bytes.len() {
+                        if bytes[index] == b'"'
+                            && bytes.get(index + 1..index + 1 + hashes)
+                                == Some(&vec![b'#'; hashes][..])
+                        {
+                            index += 1 + hashes;
+                            break;
+                        }
+                        index += 1;
+                    }
+                    for offset in start..index {
+                        if output[offset] != b'\n' {
+                            output[offset] = b' ';
+                        }
+                    }
+                    continue;
+                }
+            }
+            if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'/') {
+                let start = index;
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+                output[start..index].fill(b' ');
+                continue;
+            }
+            if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+                let start = index;
+                index += 2;
+                let mut depth = 1;
+                while index < bytes.len() && depth > 0 {
+                    if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+                        depth += 1;
+                        index += 2;
+                    } else if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                        depth -= 1;
+                        index += 2;
+                    } else {
+                        index += 1;
+                    }
+                }
+                for offset in start..index {
+                    if output[offset] != b'\n' {
+                        output[offset] = b' ';
+                    }
+                }
+                continue;
+            }
+            let quote = if bytes[index] == b'"' {
+                Some(index)
+            } else if bytes[index] == b'b' && bytes.get(index + 1) == Some(&b'"') {
+                Some(index + 1)
+            } else {
+                None
+            };
+            if let Some(quote) = quote {
+                let start = index;
+                index = quote + 1;
+                while index < bytes.len() {
+                    if bytes[index] == b'\\' {
+                        index = (index + 2).min(bytes.len());
+                    } else {
+                        let end = bytes[index] == b'"';
+                        index += 1;
+                        if end {
+                            break;
+                        }
+                    }
+                }
+                for offset in start..index {
+                    if output[offset] != b'\n' {
+                        output[offset] = b' ';
+                    }
+                }
+                continue;
+            }
+            let char_start = if bytes[index] == b'\'' {
+                Some(index)
+            } else if bytes[index] == b'b' && bytes.get(index + 1) == Some(&b'\'') {
+                Some(index + 1)
+            } else {
+                None
+            };
+            if let Some(quote) = char_start {
+                let closing = if bytes.get(quote + 1) == Some(&b'\\') {
+                    quote + 3
+                } else {
+                    quote + 2
+                };
+                if bytes.get(closing) == Some(&b'\'') {
+                    output[index..=closing].fill(b' ');
+                    index = closing + 1;
+                    continue;
+                }
+            }
+            index += 1;
+        }
+        String::from_utf8(output).expect("masking Rust source preserves UTF-8")
+    }
+
+    fn function_range(source: &str, function_name: &str) -> Range<usize> {
+        let masked = masked_rust_source(source);
+        let signature = Regex::new(&format!(r"\bfn\s+{}\s*\(", regex::escape(function_name)))
+            .expect("function signature regex");
+        let start = signature
+            .find(&masked)
+            .unwrap_or_else(|| panic!("missing function {function_name}"))
+            .start();
+        let open = masked[start..]
+            .find('{')
+            .map(|offset| start + offset)
+            .unwrap_or_else(|| panic!("missing body for {function_name}"));
+        let mut depth = 0_u32;
+        for (offset, byte) in masked.as_bytes()[open..].iter().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return start..open + offset + 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unterminated body for {function_name}")
+    }
+
+    fn function_range_after(source: &str, anchor: &str, function_name: &str) -> Range<usize> {
+        let offset = source
+            .find(anchor)
+            .unwrap_or_else(|| panic!("missing {anchor}"));
+        let range = function_range(&source[offset..], function_name);
+        offset + range.start..offset + range.end
+    }
+
+    fn own_test_names(source: &str) -> Vec<String> {
+        Regex::new(
+            r"(?s)#\s*\[\s*(?:tokio::)?test(?:\s*\([^]]*\))?\s*\]\s*(?:#\s*\[[^]]*\]\s*)*(?:async\s+)?fn\s+([A-Za-z0-9_]+)",
+        )
+        .expect("test declaration regex")
+        .captures_iter(source)
+        .map(|capture| capture[1].to_string())
+        .collect()
+    }
 
     /// The contract has to be read inside the helper's own body. The identical
     /// `AGENTDESK_REQUIRE_PG` comparison also appears in `require_pg_guard`
@@ -124,6 +296,128 @@ mod tests {
                  AGENTDESK_REQUIRE_PG=1 (#5218)"
             );
         }
+    }
+
+    #[test]
+    fn target_guard_syntactically_dominates_pool_construction() {
+        let range = function_range(SHARED_HELPER_SOURCE, "connect_test_pool_with_options");
+        let body = &masked_rust_source(SHARED_HELPER_SOURCE)[range];
+        let guard = body
+            .find("super::fixture_target::enforce_configured_target(")
+            .expect("test pool funnel must enforce its configured target");
+        let pool = body
+            .find("PgPoolOptions::new(")
+            .expect("test pool funnel must construct its pool");
+        assert!(
+            guard < pool,
+            "the fixture target guard must be textually before pool construction (#5229)"
+        );
+
+        let range = function_range_after(SHARED_HELPER_SOURCE, "struct TestDatabase", "create");
+        let body = &masked_rust_source(SHARED_HELPER_SOURCE)[range];
+        let preflight = body
+            .find("config_base_is_representable(&parsed_base)")
+            .expect("Config fixture creation must preflight its base");
+        let create = body
+            .find("create_test_database(")
+            .expect("Config fixture creation must call the shared CREATE helper");
+        assert!(
+            preflight < create,
+            "Config base representability must be checked before CREATE (#5229)"
+        );
+    }
+
+    #[test]
+    fn every_direct_connection_constructor_has_a_registered_owner() {
+        let masked = masked_rust_source(SHARED_HELPER_SOURCE);
+        let owners = [
+            "connect_with_settings_typed",
+            "pool_options",
+            "connect_test_pool_with_options",
+            "try_acquire_with_application_name",
+        ]
+        .map(|name| (name, function_range(SHARED_HELPER_SOURCE, name)));
+        for needle in ["PgPoolOptions::new(", "PgConnection::connect"] {
+            for (offset, _) in masked.match_indices(needle) {
+                let matching: Vec<_> = owners
+                    .iter()
+                    .filter(|(_, range)| range.contains(&offset))
+                    .map(|(name, _)| *name)
+                    .collect();
+                assert_eq!(
+                    matching.len(),
+                    1,
+                    "direct connection constructor `{needle}` at byte {offset} must belong to exactly one registered function; owners={matching:?} (#5229)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shared_target_entrypoint_set_is_exact() {
+        let declaration = Regex::new(
+            r"(?s)#\[cfg\(test\)\](?:(?:\s*#\[[^]]+\])|(?:\s*///[^\n]*\n)|(?:\s*//[^\n]*\n))*\s*pub\(crate\)\s+async\s+fn\s+([A-Za-z0-9_]+)\s*\((.*?)\)",
+        )
+        .expect("shared entrypoint declaration regex");
+        let actual: BTreeSet<_> = declaration
+            .captures_iter(SHARED_HELPER_SOURCE)
+            .filter(|capture| {
+                let arguments = &capture[2];
+                arguments.contains("database_url:")
+                    || arguments.contains("admin_url:")
+                    || arguments.contains("config: &Config")
+            })
+            .map(|capture| capture[1].to_string())
+            .collect();
+        let expected = BTreeSet::from([
+            "connect_test_pool".to_string(),
+            "connect_test_pool_and_migrate".to_string(),
+            "connect_test_pool_and_migrate_config".to_string(),
+            "connect_test_pool_with_max_connections".to_string(),
+            "connect_test_pool_with_max_connections_and_migrate".to_string(),
+            "create_test_database".to_string(),
+            "drop_test_database".to_string(),
+        ]);
+        assert_eq!(
+            actual, expected,
+            "shared fixture entrypoint set drifted (#5229)"
+        );
+    }
+
+    #[test]
+    fn override_and_config_derivation_sources_stay_single() {
+        assert_eq!(
+            SHARED_HELPER_SOURCE
+                .matches("slot.replace(Some(fixture_base.map(str::to_string)))")
+                .count(),
+            1,
+            "the thread-local fixture-base override must have exactly one setter (#5229)"
+        );
+        let range = function_range(SHARED_HELPER_SOURCE, "test_database_config_options");
+        let body = &masked_rust_source(SHARED_HELPER_SOURCE)[range];
+        for fragment in [
+            ".host(&config.database.host)",
+            ".port(config.database.port)",
+        ] {
+            assert!(
+                body.contains(fragment),
+                "Config option derivation lost `{fragment}`, reviving ambient endpoint input (#5229)"
+            );
+        }
+    }
+
+    #[test]
+    fn endpoint_enumeration_is_pinned_to_the_reviewed_dependency_version() {
+        let lock = include_str!("../../Cargo.lock");
+        let package =
+            Regex::new(r#"(?ms)^\[\[package\]\]\nname = "sqlx-postgres"\nversion = "([^"]+)""#)
+                .expect("lockfile package regex")
+                .captures(lock)
+                .expect("Cargo.lock must contain sqlx-postgres");
+        assert_eq!(
+            &package[1], "0.8.6",
+            "endpoint input enumeration was derived from sqlx-postgres 0.8.6 PgStream::connect and its TLS path; when upgrading, reread connection/stream.rs, options/parse.rs, and the TLS implementation, then update the enumeration (#5229)"
+        );
     }
 
     /// A missing base must stay a `?`/`else` skip and never widen into a
@@ -208,14 +502,23 @@ mod tests {
     /// filters would skip it and the contract above would stop being checked
     /// anywhere.
     #[test]
-    fn this_audit_module_is_not_itself_skipped_by_either_filter() {
-        let test_path = module_path!();
-        for token in ["_pg", "pg_", "postgres"] {
-            assert!(
-                !test_path.contains(token),
-                "{test_path} contains `{token}`, so the PR sweep would skip the \
-                 very audit that guards the PG-less lanes (#5218)"
-            );
+    fn every_audited_test_id_is_free_of_lane_skip_tokens() {
+        for (module, source) in [
+            (
+                "server::database_fixture_invariant_tests::tests",
+                include_str!("database_fixture_invariant_tests.rs"),
+            ),
+            ("db::fixture_target::tests", TARGET_RULES_SOURCE),
+        ] {
+            for name in own_test_names(source) {
+                let test_id = format!("{module}::{name}");
+                for token in ["_pg", "pg_", "postgres", "_pg_", "postgres_"] {
+                    assert!(
+                        !test_id.contains(token),
+                        "{test_id} contains lane skip token `{token}` and would evade an intended database-less audit lane (#5229)"
+                    );
+                }
+            }
         }
     }
 }

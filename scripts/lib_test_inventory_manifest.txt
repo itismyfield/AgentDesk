@@ -360,6 +360,13 @@ db::dispatches::metadata::tests::parse_pg_dispatch_context_ignores_empty_context
 db::dispatches::metadata::tests::parse_pg_dispatch_context_rejects_malformed_json
 db::dispatches::metadata::tests::parse_pg_dispatch_context_rejects_non_object_context
 db::dispatches::outbox::delivery::tests::old_owner_completion_after_stale_reclaim_is_noop_pg
+db::fixture_target::tests::config_representation_rejects_socket_transport
+db::fixture_target::tests::endpoint_enumeration_matrix_has_no_ambient_authority
+db::fixture_target::tests::explicit_authority_fields_are_required
+db::fixture_target::tests::loopback_aliases_normalize_without_collisions
+db::fixture_target::tests::mismatch_is_always_a_hard_failure
+db::fixture_target::tests::socket_transport_precedes_host_transport
+db::fixture_target::tests::tls_routing_is_part_of_identity
 db::idempotency::tests::fingerprint_differs_when_body_changes
 db::idempotency::tests::fingerprint_differs_when_path_changes
 db::idempotency::tests::fingerprint_handles_non_json_body
@@ -435,7 +442,6 @@ db::postgres::tests::require_pg_guard_preserves_errors_when_ci_lane_does_not_req
 db::postgres::tests::runtime_pool_settings_enable_dead_peer_detection
 db::postgres::tests::startup_pool_settings_raise_pool_size_and_acquire_timeout
 db::postgres::tests::sync_agents_writes_and_preserves_preferred_intake_node_labels
-db::postgres::tests::test_database_server_identity_normalizes_loopback_aliases_without_collisions
 db::postgres::tests::worker_node_reseed_does_not_clobber_shared_agent_roster
 db::prompt_manifests::tests::manifest_storage_stats_counts_utf8_bytes_not_chars_pg
 db::prompt_manifests::tests::prompt_manifest_apply_retention_trims_old_full_content_pg
@@ -743,7 +749,12 @@ server::database_fixture_invariant_tests::tests::cluster_fixtures_have_no_privat
 server::database_fixture_invariant_tests::tests::cluster_fixtures_never_hardcode_a_database_server_address
 server::database_fixture_invariant_tests::tests::cluster_fixtures_read_the_shared_base_url_helper
 server::database_fixture_invariant_tests::tests::database_backed_modules_carry_a_token_both_skip_filters_match
-server::database_fixture_invariant_tests::tests::this_audit_module_is_not_itself_skipped_by_either_filter
+server::database_fixture_invariant_tests::tests::endpoint_enumeration_is_pinned_to_the_reviewed_dependency_version
+server::database_fixture_invariant_tests::tests::every_audited_test_id_is_free_of_lane_skip_tokens
+server::database_fixture_invariant_tests::tests::every_direct_connection_constructor_has_a_registered_owner
+server::database_fixture_invariant_tests::tests::override_and_config_derivation_sources_stay_single
+server::database_fixture_invariant_tests::tests::shared_target_entrypoint_set_is_exact
+server::database_fixture_invariant_tests::tests::target_guard_syntactically_dominates_pool_construction
 server::dto::agents::tests::agent_container_response_shapes_are_stable
 server::dto::dispatches::tests::dispatch_route_response_omits_absent_counter_model_reason
 server::dto::dispatches::tests::dispatch_route_response_promotes_counter_model_reason
