@@ -305,7 +305,7 @@ async fn reregister_active_turn_from_inflight_inner(
             provider = %provider.as_str(),
             channel_id = channel_id.get(),
             reason,
-            owner_channel_id = owner.map(ChannelId::get),
+            owner_channel_id = ?owner.map(ChannelId::get),
             finalizer_turn_id,
             tmux_session = state.tmux_session_name.as_deref().unwrap_or_default(),
             "recovery mailbox token mint refused because no watcher will carry its completion authority"
@@ -322,6 +322,8 @@ async fn reregister_active_turn_from_inflight_inner(
                 channel_id: Some(channel_id.get().to_string()),
                 card_id: None,
                 dispatch_id: state.dispatch_id.clone(),
+                // Keep the allowlisted type: payload reason distinguishes refusal,
+                // and quality-event emission does not increment recovery-fires.
                 event_type: "recovery_fired".to_string(),
                 payload: serde_json::json!({
                     "reason": reason,
@@ -838,6 +840,7 @@ mod mint_gate_runtime_tests {
                     && event.payload["payload"]["finalizer_turn_id"] == user_msg_id.get()
             })
             .expect("mint refusal emits one structured observability event");
+        assert_eq!(event.payload["quality_event_type"], "recovery_fired");
         assert_eq!(event.payload["payload"]["reason"], "no_output_path");
         assert_eq!(
             event.payload["payload"]["finalizer_turn_id"],

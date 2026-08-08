@@ -435,7 +435,7 @@ fn recovery_mint_outlook(
     let incumbent = path_exists
         .then(|| {
             tmux_session_name.and_then(|name| {
-                (TmuxWatcherRegistry::FIND_WATCHER_BY_TMUX_SESSION)(&shared.tmux_watchers, name)
+                super::tmux::find_watcher_by_tmux_session(&shared.tmux_watchers, name)
             })
         })
         .flatten();

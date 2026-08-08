@@ -3,6 +3,15 @@
 //! The caller supplies the results of its one filesystem probe and one watcher
 //! registry probe. This module only classifies those values; it does not claim a
 //! watcher, mint a mailbox token, or acquire a lock.
+//!
+//! This gate does not guarantee:
+//! - that a `WillSpawn` or `Unknown` classification ultimately installs a watcher;
+//!   the later path resolver and claim can still decline it;
+//! - atomicity between the probes and the later watcher claim;
+//! - path identity across the ordinary restore site: its probe runs before
+//!   `restore_codex_rollout_output_path`, so a changed Codex rollout path can
+//!   conservatively produce a false-positive `IncumbentReuse`. That only removes
+//!   a mailbox mint from the legacy behavior.
 
 use super::*;
 
@@ -42,7 +51,7 @@ pub(super) fn watcher_install_outlook(
         };
     }
     if let Some((owner, cancelled, paused, existing_path)) = incumbent
-        && (TmuxWatcherRegistry::RESTORE_SCAN_SHOULD_SKIP_EXISTING_WATCHER)(
+        && super::super::tmux::restore_scan_should_skip_existing_watcher(
             cancelled,
             paused,
             existing_path,
@@ -129,22 +138,7 @@ mod tests {
     }
 
     #[test]
-    fn gate_is_strictly_subtractive_from_legacy_mint_eligibility() {
-        for outlook in [
-            WatcherInstallOutlook::WillSpawn,
-            WatcherInstallOutlook::NoOutputPath,
-            WatcherInstallOutlook::IncumbentReuse {
-                owner: ChannelId::new(OWNER),
-            },
-            WatcherInstallOutlook::Unknown,
-        ] {
-            let legacy_would_mint = true;
-            let gated_would_mint = legacy_would_mint && outlook.allows_mint();
-            assert!(
-                !gated_would_mint || legacy_would_mint,
-                "the gate must never mint on an input where the legacy path would not"
-            );
-        }
+    fn allows_mint_matches_the_four_value_policy() {
         assert!(WatcherInstallOutlook::WillSpawn.allows_mint());
         assert!(WatcherInstallOutlook::Unknown.allows_mint());
         assert!(!WatcherInstallOutlook::NoOutputPath.allows_mint());

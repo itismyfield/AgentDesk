@@ -3660,6 +3660,11 @@ services::discord::recovery_engine::manual_rebind_override::tests::health_rebind
 services::discord::recovery_engine::manual_rebind_override::tests::health_rebind_override_rejects_missing_and_non_regular_paths
 services::discord::recovery_engine::manual_rebind_override::tests::health_rebind_override_rejects_non_uuid_session_id
 services::discord::recovery_engine::manual_rebind_override::tests::health_rebind_override_rejects_symlink_escape_from_allowed_root
+services::discord::recovery_engine::mint_gate::tests::allows_mint_matches_the_four_value_policy
+services::discord::recovery_engine::mint_gate::tests::live_cross_channel_incumbent_with_same_path_refuses_mint
+services::discord::recovery_engine::mint_gate::tests::missing_codex_output_is_unknown_and_preserves_existing_behavior
+services::discord::recovery_engine::mint_gate::tests::missing_non_codex_output_refuses_orphan_mint
+services::discord::recovery_engine::mint_gate::tests::replaceable_incumbents_keep_minting_behavior
 services::discord::recovery_engine::phase_policy::tests::orphaned_synthetic_watcher_row_adoption_quadrants
 services::discord::recovery_engine::phase_policy::tests::ownerless_live_inflight_with_partial_response_can_reattach_watcher
 services::discord::recovery_engine::phase_policy::tests::planned_restart_ownerless_live_inflight_with_restore_anchor_can_reattach_watcher
@@ -3704,12 +3709,14 @@ services::discord::recovery_engine::recovery_two_message_panel::tests::replaceme
 services::discord::recovery_engine::recovery_two_message_panel::tests::restart_reanchors_stranded_panel_and_persists_new_epoch
 services::discord::recovery_engine::recovery_two_message_panel::tests::restart_recreates_missing_panel_without_duplicate_old_delete
 services::discord::recovery_engine::restore_inflight::tests::generic_recovery_consumes_restart_before_runtime_ready_and_persists_runtime_stamp
+services::discord::recovery_engine::restore_inflight::tests::missing_restore_output_path_refuses_mailbox_mint
 services::discord::recovery_engine::restore_inflight::tests::restore_claude_tui_without_runtime_output_uses_tmux_fallback_path
 services::discord::recovery_engine::restore_inflight::tests::restore_rollout_output_path_patch_preserves_concurrent_relay_fields
 services::discord::recovery_engine::routing_orphan::tests::orphan_with_probe_error_is_preserved_while_dead_pane_is_cleaned
 services::discord::recovery_engine::routing_orphan::tests::probe_error_is_treated_as_alive_not_dead
 services::discord::recovery_engine::runtime::delivered_inflight_reregister_tests::committed_terminal_delivery_is_not_recoverable_active_turn
 services::discord::recovery_engine::runtime::delivered_inflight_reregister_tests::ordinary_inflight_still_recoverable_even_with_relayed_prefix
+services::discord::recovery_engine::runtime::mint_gate_runtime_tests::mint_gate_refusal_leaves_mailbox_empty_but_preserves_c1_records
 services::discord::recovery_engine::runtime::readopted_ledger_record_gate_tests::only_real_owner_with_real_message_id_is_recorded
 services::discord::recovery_engine::runtime::reregister_ledger_reseed_tests::a0_characterization_tests::a0_recovery_completion_proceeds_with_cleanup
 services::discord::recovery_engine::runtime::reregister_ledger_reseed_tests::adopted_zero_owner_orphan_row_does_not_seize_the_mailbox
@@ -5231,6 +5238,7 @@ services::discord::tui_prompt_relay::synthetic_start::tests::readopted_from_infl
 services::discord::tui_prompt_relay::synthetic_start::tests::readopted_from_inflight_real_owner_committed_row_reclaims_for_starved_synthetic
 services::discord::tui_prompt_relay::synthetic_start::tests::readopted_from_inflight_real_owner_live_turn_is_never_stolen
 services::discord::tui_prompt_relay::synthetic_start::tests::readopted_from_inflight_turn_yields_mailbox_to_injection_and_task_notification
+services::discord::tui_prompt_relay::synthetic_start::tests::readopted_x_row_does_not_reclaim_fresh_successor_y_before_age_gate
 services::discord::tui_prompt_relay::synthetic_start::tests::real_owner_without_readopted_marker_is_never_reclaimed
 services::discord::tui_prompt_relay::synthetic_start::tests::stale_synthetic_owner_finalized_row_reclaims_for_new_turn
 services::discord::tui_prompt_relay::synthetic_start::tests::stale_synthetic_owner_live_inflight_still_skips_reclaim

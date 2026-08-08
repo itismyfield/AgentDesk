@@ -28,6 +28,24 @@ fn recovery_output_path_with_tmux_fallback(
         .or_else(|| (!fallback_output.is_empty()).then_some(fallback_output))
 }
 
+async fn reregister_active_turn_for_output_path(
+    shared: &Arc<SharedData>,
+    state: &inflight::InflightTurnState,
+    tmux_session_name: &str,
+    output_path: &str,
+) -> (bool, mint_gate::WatcherInstallOutlook) {
+    let path_exists = std::fs::metadata(output_path).is_ok();
+    let outlook = recovery_mint_outlook(
+        shared,
+        state,
+        Some(tmux_session_name),
+        output_path,
+        path_exists,
+    );
+    let started = reregister_active_turn_from_inflight_with_outlook(shared, state, outlook).await;
+    (started, outlook)
+}
+
 pub(in crate::services::discord) async fn finish_recovered_turn_mailbox(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -1899,17 +1917,13 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             // missing CodexTui is Unknown because the rollout resolver below may
             // find the real path; same-path live incumbent is IncumbentReuse;
             // every other present-path shape is WillSpawn.
-            let path_exists = std::fs::metadata(&output_path).is_ok();
-            let mint_outlook = recovery_mint_outlook(
+            let (finish_mailbox_on_completion, _) = reregister_active_turn_for_output_path(
                 shared,
                 &state,
-                Some(&tmux_session_name),
+                &tmux_session_name,
                 &output_path,
-                path_exists,
-            );
-            let finish_mailbox_on_completion =
-                reregister_active_turn_from_inflight_with_outlook(shared, &state, mint_outlook)
-                    .await;
+            )
+            .await;
 
             // #4380 backstop: `reregister_active_turn_from_inflight` stamps
             // `readopted_from_inflight`, which the watcher-yield escape hatch honours
@@ -2361,6 +2375,110 @@ mod tests {
         self, GuardedSaveOutcome, InflightTurnIdentity, InflightTurnState, RelayOwnerKind,
     };
     use crate::services::provider::ProviderKind;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::writer::MakeWriter;
+
+    #[derive(Clone)]
+    struct CapturingWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CapturingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log buffer").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_restore_output_path_refuses_mailbox_mint() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let shared = super::super::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = serenity::model::id::ChannelId::new(5_242_301);
+        let user_msg_id = serenity::model::id::MessageId::new(5_242_302);
+        let missing_output = root.path().join("missing-wrapper.jsonl");
+        assert!(
+            !missing_output.exists(),
+            "fixture output path must be absent"
+        );
+
+        let mut state = InflightTurnState::new(
+            provider.clone(),
+            channel_id.get(),
+            Some("adk-cc".to_string()),
+            5_242_303,
+            user_msg_id.get(),
+            user_msg_id.get() + 1,
+            "restore missing wrapper output".to_string(),
+            Some("session-5242-restore".to_string()),
+            Some("AgentDesk-claude-5242-restore".to_string()),
+            Some(missing_output.to_string_lossy().into_owned()),
+            None,
+            0,
+        );
+        state.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+        state.set_relay_owner_kind(RelayOwnerKind::Watcher);
+        inflight::save_inflight_state(&state).expect("seed restore row");
+
+        let log_buffer = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(CapturingWriter(log_buffer.clone()))
+            .finish();
+        let log_guard = tracing::subscriber::set_default(subscriber);
+
+        let (started, outlook) = super::reregister_active_turn_for_output_path(
+            &shared,
+            &state,
+            state.tmux_session_name.as_deref().expect("tmux session"),
+            missing_output.to_str().expect("UTF-8 fixture path"),
+        )
+        .await;
+        drop(log_guard);
+        let logs = String::from_utf8(log_buffer.lock().expect("log buffer").clone())
+            .expect("UTF-8 WARN output");
+
+        assert_eq!(
+            outlook,
+            super::mint_gate::WatcherInstallOutlook::NoOutputPath,
+            "a nonexistent non-Codex restore output must classify as NoOutputPath"
+        );
+        assert!(
+            !started,
+            "MUTATION GUARD: restore must not mint when its output path is absent"
+        );
+        for field in [
+            "reason=\"no_output_path\"",
+            "owner_channel_id=None",
+            "finalizer_turn_id=5242302",
+            "tmux_session=\"AgentDesk-claude-5242-restore\"",
+        ] {
+            assert!(
+                logs.contains(field),
+                "mint-refusal WARN must include {field}; logs={logs}"
+            );
+        }
+        let mailbox = super::super::mailbox_snapshot(&shared, channel_id).await;
+        assert!(
+            mailbox.cancel_token.is_none() && mailbox.active_user_message_id.is_none(),
+            "missing restore output must leave the mailbox empty"
+        );
+    }
 
     fn generic_recovery_runtime_ready(
         shared: &std::sync::Arc<super::SharedData>,
