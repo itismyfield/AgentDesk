@@ -308,12 +308,13 @@ fi
 
 # relay_stall_state is classified by an explicit allowlist. Drive the complete
 # check so each normal state must reach markers=absent and each abnormal state
-# must persist its own marker after resampling. Other marker fields are false,
-# which prevents those clauses from hiding a missing stall-state comparison.
-while read -r stall expected_rc; do
+# must persist its own marker after resampling. stale_thread_proof is serialized
+# with its matching boolean; all other marker fields are false, so every row
+# exercises only the production evidence associated with that classified state.
+while read -r stall stale_thread_proof expected_rc; do
     setup_case
     body=$(printf '%s\n' \
-        "{\"fully_recovered\":true,\"degraded_reasons\":[],\"mailboxes\":[{\"provider\":\"claude\",\"channel_id\":\"c1\",\"relay_stall_state\":\"$stall\",\"inflight_state_present\":false,\"watcher_attached\":true,\"relay_health\":{\"desynced\":false,\"stale_thread_proof\":false,\"watcher_attached_stale\":false}}]}")
+        "{\"fully_recovered\":true,\"degraded_reasons\":[],\"mailboxes\":[{\"provider\":\"claude\",\"channel_id\":\"c1\",\"relay_stall_state\":\"$stall\",\"inflight_state_present\":false,\"watcher_attached\":true,\"relay_health\":{\"desynced\":false,\"stale_thread_proof\":$stale_thread_proof,\"watcher_attached_stale\":false}}]}")
     printf '%s\n' "$body" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
     printf 'body\n' > "$STUB_STATE/curl.mode"
     printf '%s\n' "$body" > "$STUB_STATE/curl.body"
@@ -330,13 +331,34 @@ while read -r stall expected_rc; do
         fail_test "relay stall state $stall did not persist its marker"
     fi
 done <<'STALL_STATES'
-healthy 0
-active_foreground_stream 0
-explicit_background_work 0
-orphan_pending_token 1
-queue_blocked 1
-tmux_alive_relay_dead 1
+healthy false 0
+active_foreground_stream false 0
+explicit_background_work false 0
+orphan_pending_token false 1
+queue_blocked false 1
+tmux_alive_relay_dead false 1
+stale_thread_proof true 1
 STALL_STATES
+
+# Pin each boolean marker independently with a healthy stall state and every
+# sibling marker false. This keeps one clause from hiding the removal of
+# another clause from the production filter.
+while IFS='|' read -r marker body; do
+    setup_case
+    printf '%s\n' "$body" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
+    printf 'body\n' > "$STUB_STATE/curl.mode"
+    printf '%s\n' "$body" > "$STUB_STATE/curl.body"
+    run_check; check_rc 1 "$RUN_CHECK_RC" "$marker marker verdict"
+    if grep -q 'relay wedge marker persisted.*stall=healthy' "$POST_DEPLOY_SMOKE_EVIDENCE"; then
+        pass_test "$marker emits its own marker"
+    else
+        fail_test "$marker did not persist its own marker"
+    fi
+done <<'BOOLEAN_MARKERS'
+desynced|{"fully_recovered":true,"degraded_reasons":[],"mailboxes":[{"provider":"claude","channel_id":"c1","relay_stall_state":"healthy","inflight_state_present":false,"watcher_attached":true,"relay_health":{"desynced":true,"stale_thread_proof":false,"watcher_attached_stale":false}}]}
+watcher_attached_stale|{"fully_recovered":true,"degraded_reasons":[],"mailboxes":[{"provider":"claude","channel_id":"c1","relay_stall_state":"healthy","inflight_state_present":false,"watcher_attached":true,"relay_health":{"desynced":false,"stale_thread_proof":false,"watcher_attached_stale":true}}]}
+inflight_without_watcher|{"fully_recovered":true,"degraded_reasons":[],"mailboxes":[{"provider":"claude","channel_id":"c1","relay_stall_state":"healthy","inflight_state_present":true,"watcher_attached":false,"relay_health":{"desynced":false,"stale_thread_proof":false,"watcher_attached_stale":false}}]}
+BOOLEAN_MARKERS
 
 setup_case
 printf '%s\n' "$OWNERLESS_BODY" > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
