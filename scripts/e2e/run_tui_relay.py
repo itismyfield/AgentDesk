@@ -99,10 +99,11 @@ DEFAULT_PROVIDER_HOLD_SECONDS = 60
 # turn-start timeout (180s by default). Keeping that existing 180/240 envelope
 # means an environment override cannot turn one fetch into an unbounded wait.
 E2E_TURN_START_TIMEOUT_MAX_S = 180.0
-# A final refetch may settle for only the residual 240-180=60s of the E-1
-# scenario budget; the default two observations remain the hard count ceiling.
+# Final refetches run after the scenario step loop, outside the 240s scenario
+# wait. The 60s cap is an independent per-interval settle bound; the default is
+# one second and the default two observations may be raised to at most three.
 E2E_FINAL_REFETCH_INTERVAL_MAX_S = 60.0
-E2E_FINAL_REFETCHES_MAX = 2
+E2E_FINAL_REFETCHES_MAX = 3
 RUNTIME_QUEUE_DIRS: tuple[tuple[str, str], ...] = (
     ("pending_queue", "discord_pending_queue"),
     ("queued_placeholders", "discord_queued_placeholders"),
@@ -176,6 +177,7 @@ def parse_args() -> argparse.Namespace:
         minimum=1.0,
         maximum=E2E_TURN_START_TIMEOUT_MAX_S,
     )
+    final_refetch_defaults = _final_refetch_settings()
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -290,6 +292,7 @@ def parse_args() -> argparse.Namespace:
         minimum=1.0,
         maximum=E2E_TURN_START_TIMEOUT_MAX_S,
     )
+    args.final_refetches, args.final_refetch_interval_s = final_refetch_defaults
     return args
 
 
@@ -3476,7 +3479,8 @@ def run_one_cell(
         else:
             raise assertions.AssertionError(f"unknown step shape: {step!r}")
 
-    final_refetches, final_refetch_interval_s = _final_refetch_settings()
+    final_refetches = int(getattr(args, "final_refetches", 2))
+    final_refetch_interval_s = float(getattr(args, "final_refetch_interval_s", 1.0))
     for attempt in range(final_refetches):
         if attempt > 0:
             time.sleep(final_refetch_interval_s)

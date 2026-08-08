@@ -443,8 +443,12 @@ _notify_channel() {
 
     local rel_port
     rel_port="${REL_PORT:-$(_resolve_release_server_port)}"
-    # This payload-bearing POST follows the existing bounded POST probes below:
-    # a 2s connect cap and 15s total cap keep fail-open notification from blocking.
+    # This payload-bearing POST uses the same 2s connect and 15s total caps as
+    # the existing bounded GET probes below (/api/health and /api/health/detail).
+    # The send route performs its Discord REST work inside the request future, so
+    # a timeout can cancel an in-flight or partially delivered alert. This is a
+    # deliberate best-effort trade: deploy termination wins, and the caller
+    # cannot distinguish delivered, partial, or lost notification without retry.
     curl -sf --connect-timeout 2 --max-time 15 -X POST "http://${ADK_DEFAULT_LOOPBACK}:${rel_port}/api/discord/send" \
         -H "Origin: http://${ADK_DEFAULT_LOOPBACK}:${rel_port}" \
         -H 'Content-Type: application/json' \
@@ -3161,7 +3165,7 @@ _run_post_deploy_functional_smoke() {
 
 _report_post_deploy_smoke_failure() {
     local draft_path="$ADK_REL/logs/post-deploy-smoke-issue-draft-${POST_DEPLOY_SMOKE_STAMP}.md"
-    local commit_sha node_name issue_url finding alert_text
+    local commit_sha node_name issue_url finding alert_text tmp_issue_out rc
     commit_sha=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || printf 'unknown')
     node_name=$(hostname 2>/dev/null || printf 'unknown')
 
@@ -3198,15 +3202,30 @@ evidence: ${POST_DEPLOY_SMOKE_EVIDENCE}"
     # is a real regression, not a relay/API flake; only then may automation file.
     if [ "$POST_DEPLOY_SMOKE_CREATE_ISSUE" = "confirmed" ] && [ -f "$draft_path" ]; then
         if command -v gh >/dev/null 2>&1; then
-            # ci-timeout.py is the repository's existing bounded subprocess runner;
-            # its fixed 10s issue-create budget matches src/github/mod.rs's adapter.
-            if issue_url=$(python3 "$SCRIPT_DIR/ci-timeout.py" 10 gh issue create \
-                --repo itismyfield/AgentDesk \
-                --title "ops: post-deploy functional smoke regression (${node_name})" \
-                --body-file "$draft_path" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"); then
-                echo "⚠ Post-deploy smoke issue created (confirmed mode): $issue_url"
+            # ci-timeout.py supplies a 10s command budget. On timeout its
+            # diagnostics and cleanup can extend the block to roughly 35s
+            # (10s command + 10s diagnostics + 5s TERM grace + 10s KILL wait).
+            # Capture into a file: a command-substitution pipe would wait for
+            # stdout EOF from grandchildren that outlive gh itself.
+            if tmp_issue_out=$(mktemp "${TMPDIR:-/tmp}/agentdesk-issue-create.XXXXXX"); then
+                if python3 "$SCRIPT_DIR/ci-timeout.py" 10 gh issue create \
+                    --repo itismyfield/AgentDesk \
+                    --title "ops: post-deploy functional smoke regression (${node_name})" \
+                    --body-file "$draft_path" > "$tmp_issue_out" 2>&1; then
+                    rc=0
+                else
+                    rc=$?
+                fi
+                if [ "$rc" -eq 0 ]; then
+                    issue_url=$(<"$tmp_issue_out")
+                    echo "⚠ Post-deploy smoke issue created (confirmed mode): $issue_url"
+                else
+                    cat "$tmp_issue_out" >> "$POST_DEPLOY_SMOKE_EVIDENCE" 2>/dev/null || true
+                    echo "⚠ Post-deploy smoke issue creation FAILED; draft retained: $draft_path"
+                fi
+                rm -f "$tmp_issue_out"
             else
-                echo "⚠ Post-deploy smoke issue creation FAILED; draft retained: $draft_path"
+                echo "⚠ Post-deploy smoke issue creation FAILED: could not allocate output file; draft retained: $draft_path"
             fi
         else
             echo "⚠ Post-deploy smoke issue creation requested but gh is unavailable; draft retained: $draft_path"
@@ -3219,8 +3238,9 @@ evidence: ${POST_DEPLOY_SMOKE_EVIDENCE}"
 
 echo "▸ Running post-deploy functional smoke (#4262)..."
 # INVARIANT: the ENTIRE smoke block is fail-open. We are past DEPLOY_OK, so a
-# functional failure must degrade to a loud warning + channel alert + local
-# issue draft and let the script continue. It must NEVER roll back, exit 1,
+# functional failure must degrade to a loud warning + best-effort channel alert
+# (delivery may be partial or unknown) + local issue draft and let the script
+# continue. It must NEVER roll back, exit 1,
 # poison the healthy deploy's exit code, or skip watchdog/PG-tunnel install,
 # _write_release_source_manifest, or _deploy_to_all_peers below.
 #
