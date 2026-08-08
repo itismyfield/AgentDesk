@@ -536,6 +536,7 @@ src/
 │   │   │   ├── redaction.rs
 │   │   │   ├── relay_auto_heal.rs
 │   │   │   ├── relay_dead_reattach.rs
+│   │   │   ├── relay_health_snapshot.rs
 │   │   │   ├── relay_progress.rs
 │   │   │   ├── runtime_resolve.rs
 │   │   │   ├── session_enrichment.rs
@@ -543,6 +544,7 @@ src/
 │   │   │   ├── stall_liveness.rs
 │   │   │   ├── stall_verdict.rs
 │   │   │   ├── transcript_binding_stall.rs
+│   │   │   ├── unpaired_active_token.rs
 │   │   │   └── watcher_respawn.rs
 │   │   ├── idle_recap/
 │   │   │   ├── card.rs

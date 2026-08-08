@@ -89,18 +89,21 @@ fn snapshot() -> RelayHealthSnapshot {
         mailbox_has_cancel_token: false,
         mailbox_active_user_msg_id: None,
         mailbox_turn_started_at_ms: None,
+        mailbox_turn_age_secs: None,
         queue_depth: 0,
         pending_discord_callback_msg_id: None,
         pending_thread_proof: false,
         parent_channel_id: None,
         thread_channel_id: None,
         last_relay_ts_ms: None,
+        last_relay_age_secs: None,
         last_outbound_activity_ms: None,
         last_capture_offset: None,
         last_relay_offset: 0,
         unread_bytes: None,
         desynced: false,
         stale_thread_proof: false,
+        unpaired_active_token_reconfirmed: false,
     }
 }
 
@@ -210,6 +213,28 @@ fn active_foreground_stream_is_observe_only() {
     assert_eq!(
         decision.auto_heal.skipped_reason,
         Some("live_foreground_turn")
+    );
+}
+
+#[test]
+fn unpaired_active_token_is_observe_only() {
+    let decision = plan_relay_recovery(
+        &RelayHealthSnapshot {
+            active_turn: RelayActiveTurn::Foreground,
+            mailbox_has_cancel_token: true,
+            mailbox_turn_age_secs: Some(601),
+            unpaired_active_token_reconfirmed: true,
+            ..snapshot()
+        },
+        RelayStallState::UnpairedActiveToken,
+        1_000,
+    );
+
+    assert_eq!(decision.action, RelayRecoveryActionKind::ObserveOnly);
+    assert!(!decision.auto_heal.eligible);
+    assert_eq!(
+        decision.auto_heal.skipped_reason,
+        Some("unpaired_active_token_observe_only")
     );
 }
 

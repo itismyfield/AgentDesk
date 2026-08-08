@@ -34,6 +34,7 @@ pub(in crate::services::discord) enum RelayStallState {
     TmuxAliveRelayDead,
     StaleThreadProof,
     OrphanPendingToken,
+    UnpairedActiveToken,
     QueueBlocked,
 }
 
@@ -46,6 +47,7 @@ impl RelayStallState {
             Self::TmuxAliveRelayDead => "tmux_alive_relay_dead",
             Self::StaleThreadProof => "stale_thread_proof",
             Self::OrphanPendingToken => "orphan_pending_token",
+            Self::UnpairedActiveToken => "unpaired_active_token",
             Self::QueueBlocked => "queue_blocked",
         }
     }
@@ -77,18 +79,24 @@ pub(in crate::services::discord) struct RelayHealthSnapshot {
     pub mailbox_has_cancel_token: bool,
     pub mailbox_active_user_msg_id: Option<u64>,
     pub mailbox_turn_started_at_ms: Option<i64>,
+    pub mailbox_turn_age_secs: Option<u64>,
     pub queue_depth: usize,
     pub pending_discord_callback_msg_id: Option<u64>,
     pub pending_thread_proof: bool,
     pub parent_channel_id: Option<u64>,
     pub thread_channel_id: Option<u64>,
     pub last_relay_ts_ms: Option<i64>,
+    pub last_relay_age_secs: Option<u64>,
     pub last_outbound_activity_ms: Option<i64>,
     pub last_capture_offset: Option<u64>,
     pub last_relay_offset: u64,
     pub unread_bytes: Option<u64>,
     pub desynced: bool,
     pub stale_thread_proof: bool,
+    /// Internal proof that a second mailbox snapshot and inflight read still
+    /// saw the same active episode without a durable row.
+    #[serde(skip)]
+    pub unpaired_active_token_reconfirmed: bool,
 }
 
 impl RelayHealthSnapshot {
@@ -109,18 +117,21 @@ impl RelayHealthSnapshot {
             mailbox_has_cancel_token: false,
             mailbox_active_user_msg_id: None,
             mailbox_turn_started_at_ms: None,
+            mailbox_turn_age_secs: None,
             queue_depth: 0,
             pending_discord_callback_msg_id: None,
             pending_thread_proof: false,
             parent_channel_id: None,
             thread_channel_id: None,
             last_relay_ts_ms: None,
+            last_relay_age_secs: None,
             last_outbound_activity_ms: None,
             last_capture_offset: None,
             last_relay_offset: 0,
             unread_bytes: None,
             desynced: false,
             stale_thread_proof: false,
+            unpaired_active_token_reconfirmed: false,
         }
     }
 
@@ -146,6 +157,38 @@ impl RelayHealthSnapshot {
                 .is_some_and(|capture| capture > self.last_relay_offset)
             && self.unread_bytes.is_some_and(|bytes| bytes > 0)
     }
+
+    fn has_fresh_relay_progress_for_active_turn(&self) -> bool {
+        matches!(
+            (
+                self.mailbox_turn_started_at_ms,
+                self.last_relay_ts_ms,
+                self.last_relay_age_secs,
+            ),
+            (Some(turn_started_at), Some(relay_at), Some(relay_age))
+                if relay_at >= turn_started_at
+                    && relay_age < UNPAIRED_ACTIVE_TOKEN_PROGRESS_FRESH_SECS
+        )
+    }
+}
+
+/// Time allowed for a newly minted mailbox token to acquire its durable
+/// inflight row before an absent pairing becomes observable as a stall.
+/// Its initial value happens to equal the stall-watchdog threshold, but the
+/// two policies have different meanings and no reason to move together.
+pub(in crate::services::discord) const UNPAIRED_ACTIVE_TOKEN_GRACE_SECS: u64 = 600;
+
+/// A confirmed relay heartbeat this recent proves that a rowless turn is
+/// still delivering. This policy is intentionally independent of both the
+/// mint-to-row grace above and the stall-watchdog threshold.
+const UNPAIRED_ACTIVE_TOKEN_PROGRESS_FRESH_SECS: u64 = 600;
+
+pub(in crate::services::discord) fn observation_age_secs(
+    observed_at_ms: i64,
+    event_at_ms: Option<i64>,
+) -> Option<u64> {
+    let elapsed_ms = observed_at_ms.checked_sub(event_at_ms?)?;
+    (elapsed_ms >= 0).then_some(elapsed_ms as u64 / 1_000)
 }
 
 pub(in crate::services::discord) struct RelayStallClassifier;
@@ -175,6 +218,17 @@ impl RelayStallClassifier {
             && snapshot.tmux_alive != Some(true)
         {
             return RelayStallState::OrphanPendingToken;
+        }
+
+        if snapshot.mailbox_has_cancel_token
+            && !snapshot.bridge_inflight_present
+            && snapshot.unpaired_active_token_reconfirmed
+            && snapshot
+                .mailbox_turn_age_secs
+                .is_some_and(|age| age >= UNPAIRED_ACTIVE_TOKEN_GRACE_SECS)
+            && !snapshot.has_fresh_relay_progress_for_active_turn()
+        {
+            return RelayStallState::UnpairedActiveToken;
         }
 
         if snapshot.queue_depth > 0 && !snapshot.has_live_relay_evidence() {
@@ -300,6 +354,101 @@ mod tests {
                 },
                 RelayStallState::QueueBlocked,
             ),
+            (
+                "old rowless active token with null relay coordinates is unpaired",
+                RelayHealthSnapshot {
+                    active_turn: RelayActiveTurn::Foreground,
+                    tmux_alive: Some(true),
+                    watcher_attached: true,
+                    mailbox_has_cancel_token: true,
+                    mailbox_active_user_msg_id: Some(9001),
+                    mailbox_turn_started_at_ms: Some(1_000_000),
+                    mailbox_turn_age_secs: Some(601),
+                    unpaired_active_token_reconfirmed: true,
+                    ..RelayHealthSnapshot::test_snapshot()
+                },
+                RelayStallState::UnpairedActiveToken,
+            ),
+            (
+                "rowless active token with fresh relay progress stays active",
+                RelayHealthSnapshot {
+                    active_turn: RelayActiveTurn::Foreground,
+                    tmux_alive: Some(true),
+                    watcher_attached: true,
+                    mailbox_has_cancel_token: true,
+                    mailbox_turn_started_at_ms: Some(1_000_000),
+                    mailbox_turn_age_secs: Some(1_200),
+                    last_relay_ts_ms: Some(1_600_000),
+                    last_relay_age_secs: Some(1),
+                    last_relay_offset: 0,
+                    unpaired_active_token_reconfirmed: true,
+                    ..RelayHealthSnapshot::test_snapshot()
+                },
+                RelayStallState::ActiveForegroundStream,
+            ),
+            (
+                "fresh relay coordinate from a previous turn does not exempt",
+                RelayHealthSnapshot {
+                    active_turn: RelayActiveTurn::Foreground,
+                    tmux_alive: Some(true),
+                    watcher_attached: true,
+                    mailbox_has_cancel_token: true,
+                    mailbox_turn_started_at_ms: Some(2_000_000),
+                    mailbox_turn_age_secs: Some(1_200),
+                    last_relay_ts_ms: Some(1_999_999),
+                    last_relay_age_secs: Some(1),
+                    last_relay_offset: 128,
+                    unpaired_active_token_reconfirmed: true,
+                    ..RelayHealthSnapshot::test_snapshot()
+                },
+                RelayStallState::UnpairedActiveToken,
+            ),
+            (
+                "positive relay offset without a timestamp does not exempt",
+                RelayHealthSnapshot {
+                    active_turn: RelayActiveTurn::Foreground,
+                    tmux_alive: Some(true),
+                    watcher_attached: true,
+                    mailbox_has_cancel_token: true,
+                    mailbox_turn_started_at_ms: Some(1_000_000),
+                    mailbox_turn_age_secs: Some(1_200),
+                    last_relay_offset: 128,
+                    unpaired_active_token_reconfirmed: true,
+                    ..RelayHealthSnapshot::test_snapshot()
+                },
+                RelayStallState::UnpairedActiveToken,
+            ),
+            (
+                "stale relay timestamp from this turn does not exempt",
+                RelayHealthSnapshot {
+                    active_turn: RelayActiveTurn::Foreground,
+                    tmux_alive: Some(true),
+                    watcher_attached: true,
+                    mailbox_has_cancel_token: true,
+                    mailbox_turn_started_at_ms: Some(1_000_000),
+                    mailbox_turn_age_secs: Some(1_200),
+                    last_relay_ts_ms: Some(1_600_000),
+                    last_relay_age_secs: Some(600),
+                    last_relay_offset: 128,
+                    unpaired_active_token_reconfirmed: true,
+                    ..RelayHealthSnapshot::test_snapshot()
+                },
+                RelayStallState::UnpairedActiveToken,
+            ),
+            (
+                "unreconfirmed mixed-epoch candidate stays active",
+                RelayHealthSnapshot {
+                    active_turn: RelayActiveTurn::Foreground,
+                    tmux_alive: Some(true),
+                    watcher_attached: true,
+                    mailbox_has_cancel_token: true,
+                    mailbox_turn_started_at_ms: Some(1_000_000),
+                    mailbox_turn_age_secs: Some(1_200),
+                    unpaired_active_token_reconfirmed: false,
+                    ..RelayHealthSnapshot::test_snapshot()
+                },
+                RelayStallState::ActiveForegroundStream,
+            ),
         ];
 
         for (name, snapshot, expected) in cases {
@@ -309,5 +458,22 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn observation_age_rejects_future_and_overflowing_timestamps() {
+        assert_eq!(observation_age_secs(10_000, Some(9_001)), Some(0));
+        assert_eq!(observation_age_secs(10_000, Some(11_000)), None);
+        assert_eq!(observation_age_secs(i64::MAX, Some(i64::MIN)), None);
+        assert_eq!(observation_age_secs(10_000, None), None);
+    }
+
+    #[test]
+    fn serialized_snapshot_exposes_ages_but_not_internal_recheck_proof() {
+        let value = serde_json::to_value(RelayHealthSnapshot::test_snapshot()).unwrap();
+
+        assert!(value.get("mailbox_turn_age_secs").is_some());
+        assert!(value.get("last_relay_age_secs").is_some());
+        assert!(value.get("unpaired_active_token_reconfirmed").is_none());
     }
 }

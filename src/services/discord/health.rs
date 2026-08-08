@@ -30,6 +30,7 @@ mod recovery;
 mod redaction;
 mod relay_auto_heal;
 mod relay_dead_reattach;
+mod relay_health_snapshot;
 mod relay_progress;
 mod runtime_resolve;
 mod session_enrichment;
@@ -38,6 +39,7 @@ mod stall_liveness;
 mod stall_verdict;
 // #5188 (R5/R6): a delivery binding pointed at a transcript Claude abandoned.
 mod transcript_binding_stall;
+mod unpaired_active_token;
 mod watcher_respawn;
 
 // `HeadlessAgentTurnReservation` has no external referent today (callers
