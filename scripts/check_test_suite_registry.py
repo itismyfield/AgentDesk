@@ -1,12 +1,6 @@
 """Tracked test-suite registry core; policy/enforcement belongs to S3a-2."""
 from __future__ import annotations
-import ast
-import fnmatch
-import json
-import posixpath
-import re
-import shlex
-import subprocess
+import ast, json, posixpath, re, shlex, subprocess
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from enum import Enum
@@ -78,51 +72,43 @@ class RegistryResult:
     def suite_pin_counts(self) -> Mapping[PinStatus, int]:
         return self._counts("pin", PinStatus)
     def family_violations(self, floors: Mapping[Family, int]) -> tuple[FamilyViolation, ...]:
-        return tuple(FamilyViolation(f, minimum, self.family_counts.get(f, 0))
-                     for f, minimum in sorted(floors.items(), key=lambda item: item[0].value)
-                     if self.family_counts.get(f, 0) < minimum)
+        return tuple(FamilyViolation(f, minimum, self.family_counts.get(f, 0)) for f, minimum in
+                     sorted(floors.items(), key=lambda item: item[0].value) if self.family_counts.get(f, 0) < minimum)
     def partial_violations(self, allowed_exact_targets: Collection[tuple[str, str]] = ()) -> tuple[PartialViolation, ...]:
         allowed, violations = set(allowed_exact_targets), []
         for candidate in self.candidates:
             if candidate.execution is not ExecStatus.PARTIAL:
                 continue
-            targets = tuple(sorted(call.target + (f".{call.selector}" if call.selector else "")
-                                   for call in candidate.invocations if not call.glob))
+            targets = tuple(sorted(call.target + (f".{call.selector}" if call.selector else "") for call in candidate.invocations if not call.glob))
             if not targets or not all((candidate.path, target) in allowed for target in targets):
                 violations.append(PartialViolation(candidate.path, targets, candidate.unexecuted_tests))
         return tuple(violations)
 @dataclass(frozen=True)
 class _PythonTests:
     all: tuple[str, ...]; unittest: tuple[str, ...]; has_unittest_main: bool
-def _matches(path: str, patterns: Sequence[str]) -> bool:
-    """Match only the registry's anchored POSIX family grammar; **/ is zero-or-more directories."""
-    def expression(pattern: str) -> str:
-        escaped = re.escape(pattern).replace(r"\*\*/", r"(?:[^/]+/)*")
-        return escaped.replace(r"\*", r"[^/]*").replace(r"\?", r"[^/]")
-    return any(re.fullmatch(expression(pattern), path) is not None for pattern in patterns)
+def _compile_glob(pattern: str) -> re.Pattern[str]:
+    """Compile the supported anchored POSIX glob grammar; only ** crosses directories."""
+    escaped = re.escape(pattern).replace(r"\*\*/", r"(?:[^/]+/)*").replace(r"\*\*", r".*")
+    return re.compile(escaped.replace(r"\*", r"[^/]*").replace(r"\?", r"[^/]"))
+def _matches(path: str, patterns: Sequence[str]) -> bool: return any(_compile_glob(pattern).fullmatch(path) for pattern in patterns)
 def _family(path: str, config: RegistryConfig) -> tuple[Family, CandidateKind] | None:
-    ordered = ((Family.TESTS_PY, CandidateKind.PYTHON_SUITE), (Family.E2E_PY, CandidateKind.PYTHON_SUITE),
-               (Family.SCRIPTS_PY, CandidateKind.PYTHON_SUITE),
+    ordered = ((Family.TESTS_PY, CandidateKind.PYTHON_SUITE), (Family.E2E_PY, CandidateKind.PYTHON_SUITE), (Family.SCRIPTS_PY, CandidateKind.PYTHON_SUITE),
                (Family.SHELL, CandidateKind.SHELL_SUITE), (Family.GATE, CandidateKind.GATE))
-    return next(((family, kind) for family, kind in ordered
-                 if _matches(path, config.patterns.get(family, ()))), None)
+    return next(((family, kind) for family, kind in ordered if _matches(path, config.patterns.get(family, ()))), None)
 def _tracked_files(root: Path) -> tuple[list[str], Diagnostic | None]:
     try:
-        run = subprocess.run(["git", "ls-files", "-z"], cwd=root, check=False,
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        run = subprocess.run(["git", "ls-files", "-z"], cwd=root, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except OSError as error:
         return [], Diagnostic(DiagnosticKind.TRACKED_INPUT, str(error), fatal=True)
     if run.returncode:
-        return [], Diagnostic(DiagnosticKind.TRACKED_INPUT,
-                              run.stderr.decode("utf-8", "replace").strip(), fatal=True)
+        return [], Diagnostic(DiagnosticKind.TRACKED_INPUT, run.stderr.decode("utf-8", "replace").strip(), fatal=True)
     try:
         return sorted(part.decode() for part in run.stdout.split(b"\0") if part), None
     except UnicodeDecodeError as error:
         return [], Diagnostic(DiagnosticKind.TRACKED_INPUT, str(error), fatal=True)
 def _read_source(root: Path, relative: str) -> tuple[str | None, Diagnostic | None]:
     path = root / relative
-    if not path.exists():
-        return None, Diagnostic(DiagnosticKind.SOURCE_MISSING, f"required source missing: {relative}", relative, True)
+    if not path.exists(): return None, Diagnostic(DiagnosticKind.SOURCE_MISSING, f"required source missing: {relative}", relative, True)
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as error:
@@ -134,27 +120,30 @@ def _parse_python(text: str, path: str) -> tuple[ast.Module | None, Diagnostic |
     try:
         return ast.parse(text, filename=path), None
     except SyntaxError as error:
-        return None, Diagnostic(DiagnosticKind.PYTHON_MALFORMED,
-                                f"cannot parse {path}: {error}", path, True)
+        return None, Diagnostic(DiagnosticKind.PYTHON_MALFORMED, f"cannot parse {path}: {error}", path, True)
 def _logical_lines(text: str, source: str) -> tuple[list[str], Diagnostic | None]:
     result, pending = [], ""
     for raw in text.splitlines():
-        line = raw.rstrip()
+        line = _strip_comment(raw).rstrip()
         if line.endswith("\\"):
             pending += line[:-1].rstrip() + " "
         else:
             result.append(pending + line.lstrip() if pending else line)
             pending = ""
-    error = (Diagnostic(DiagnosticKind.SOURCE_MALFORMED,
-                        f"unterminated backslash continuation in {source}", source, True)
-             if pending else None)
+    error = Diagnostic(DiagnosticKind.SOURCE_MALFORMED, f"unterminated backslash continuation in {source}", source, True) if pending else None
     return result, error
 def _strip_comment(line: str) -> str:
-    single = double = False
+    single = double = escaped = False
     for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and not single:
+            escaped = True
+            continue
         if char == "'" and not double:
             single = not single
-        elif char == '"' and not single and (not index or line[index - 1] != "\\"):
+        elif char == '"' and not single:
             double = not double
         elif char == "#" and not single and not double:
             return line[:index]
@@ -162,11 +151,11 @@ def _strip_comment(line: str) -> str:
 def _workflow_payloads(text: str) -> list[str]:
     lines, payloads, index = text.splitlines(), [], 0
     while index < len(lines):
-        match = re.match(r"^(\s*)(?:-\s+)?run:\s*(.*?)\s*$", lines[index])
+        match = re.match(r"^(\s*)(?:(-\s+))?([A-Za-z_][\w-]*):\s*(.*?)\s*$", lines[index])
         if not match:
             index += 1
             continue
-        indent, value = len(match.group(1)), match.group(2)
+        indent, key, value = len(match.group(1)) + len(match.group(2) or ""), match.group(3), match.group(4)
         if re.fullmatch(r"[|>][+-]?", value):
             block, index = [], index + 1
             while index < len(lines):
@@ -178,9 +167,10 @@ def _workflow_payloads(text: str) -> list[str]:
                 index += 1
             widths = [len(line) - len(line.lstrip()) for line in block if line.strip()]
             margin = min(widths) if widths else 0
-            payloads.append("\n".join(line[margin:] for line in block))
+            if key == "run":
+                payloads.append(("\n" if value.startswith("|") else " ").join(line[margin:] for line in block))
             continue
-        if value and not value.startswith("#"):
+        if key == "run" and value and not value.startswith("#"):
             if len(value) > 1 and value[0] == value[-1] and value[0] in "'\"":
                 try:
                     value = ast.literal_eval(value)
@@ -208,12 +198,10 @@ def _source_commands(text: str, source: str) -> tuple[list[str], Diagnostic | No
         try:
             payload = json.loads(text)
         except json.JSONDecodeError as error:
-            return [], Diagnostic(DiagnosticKind.SOURCE_MALFORMED,
-                                  f"malformed package.json: {error}", source, True)
+            return [], Diagnostic(DiagnosticKind.SOURCE_MALFORMED, f"malformed package.json: {error}", source, True)
         scripts = payload.get("scripts") if isinstance(payload, dict) else None
         if scripts is not None and not isinstance(scripts, dict):
-            return [], Diagnostic(DiagnosticKind.SOURCE_MALFORMED,
-                                  "package.json scripts must be an object", source, True)
+            return [], Diagnostic(DiagnosticKind.SOURCE_MALFORMED, "package.json scripts must be an object", source, True)
         payloads = [value for value in (scripts or {}).values() if isinstance(value, str)]
     elif source.startswith(".github/workflows/") and source.endswith((".yml", ".yaml")):
         payloads = _workflow_payloads(text)
@@ -235,8 +223,7 @@ def _source_commands(text: str, source: str) -> tuple[list[str], Diagnostic | No
             if match := re.search(r"(?<!<)<<-?(?!<)\s*['\"]?([A-Za-z_]\w*)", command):
                 delimiter = match.group(1)
     if delimiter:
-        return commands, Diagnostic(DiagnosticKind.SOURCE_MALFORMED,
-                                    f"unterminated heredoc in {source}", source, True)
+        return commands, Diagnostic(DiagnosticKind.SOURCE_MALFORMED, f"unterminated heredoc in {source}", source, True)
     validated, pending = [], ""
     for command in commands:
         pending = f"{pending}\n{command}".strip()
@@ -245,11 +232,9 @@ def _source_commands(text: str, source: str) -> tuple[list[str], Diagnostic | No
         except ValueError as error:
             if "No closing quotation" in str(error):
                 continue
-            return validated, Diagnostic(DiagnosticKind.SOURCE_MALFORMED,
-                                         f"malformed shell command in {source}: {error}", source, True)
+            return validated, Diagnostic(DiagnosticKind.SOURCE_MALFORMED, f"malformed shell command in {source}: {error}", source, True)
         validated.append(pending); pending = ""
-    error = (Diagnostic(DiagnosticKind.SOURCE_MALFORMED,
-                        f"malformed shell command in {source}: unterminated quote", source, True) if pending else None)
+    error = Diagnostic(DiagnosticKind.SOURCE_MALFORMED, f"malformed shell command in {source}: unterminated quote", source, True) if pending else None
     return validated, error
 def _live_unittest_main(node: ast.AST) -> bool:
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
@@ -291,8 +276,7 @@ def _command_head(tokens: Sequence[str]) -> tuple[str, list[str]]:
     if not words:
         return "", []
     return words[0].lstrip("@+-"), words[1:]
-def _dynamic(value: str) -> bool:
-    return "$" in value or "{{" in value or "}}" in value
+def _dynamic(value: str) -> bool: return "$" in value or "{{" in value or "}}" in value
 def _repo_path(value: str, source: str) -> tuple[str | None, bool]:
     script_dir = None
     for prefix in ("$SCRIPT_DIR/", "${SCRIPT_DIR}/"):
@@ -303,8 +287,7 @@ def _repo_path(value: str, source: str) -> tuple[str | None, bool]:
         return None, False
     raw = posixpath.join(script_dir, value) if script_dir else value
     normalized = posixpath.normpath(raw)
-    if normalized.startswith("/") or normalized == ".." or normalized.startswith("../"):
-        return None, True
+    if normalized.startswith("/") or normalized == ".." or normalized.startswith("../"): return None, True
     return normalized.removeprefix("./"), False
 def _unique_invocations(values: Iterable[Invocation]) -> tuple[Invocation, ...]:
     key = lambda item: (item.source, item.command, item.target, item.selector or "", item.glob, item.runner)
@@ -373,7 +356,7 @@ def _collect_invocations(commands: Iterable[tuple[str, str]], candidates: Sequen
                         raw, _, selector = target.partition("::")
                         glob = any(char in raw for char in "*?[")
                         for path in candidates:
-                            if path.endswith(".py") and (path == raw or (glob and fnmatch.fnmatchcase(path, raw))
+                            if path.endswith(".py") and (path == raw or (glob and _matches(path, (raw,)))
                                                         or (raw.endswith("/") and path.startswith(raw))):
                                 status = PinStatus.GLOB_UNPINNED if glob or path != raw else PinStatus.PINNED
                                 record(path, Invocation(source, raw, selector or None,
@@ -386,7 +369,7 @@ def _collect_invocations(commands: Iterable[tuple[str, str]], candidates: Sequen
                 pattern = loop_vars.get((source, variable)) if target.startswith("$") else None
                 if pattern:
                     for path in candidates:
-                        if fnmatch.fnmatchcase(path, pattern):
+                        if _matches(path, (pattern,)):
                             record(path, Invocation(source, pattern, glob=True,
                                                     runner="shell", command=command), PinStatus.GLOB_UNPINNED)
                     continue

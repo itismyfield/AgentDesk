@@ -196,13 +196,31 @@ required_shell_suites=(tests/test_mentions.sh)
         self.repo.write("Makefile", "check:\n\tprintf pytest tests/test_meta.py\n")
         result = self.repo.scan(surface_sources=("justfile", "Makefile"))
         self.assertEqual(self.candidate(result, "tests/test_meta.py").execution, registry.ExecStatus.NONE)
-        workflow = "name: pytest tests/test_meta.py\ndescription: |\n  pytest tests/test_meta.py\n# run: pytest tests/test_meta.py\nuses: pytest tests/test_meta.py\njobs:\n  x:\n    name: python -m unittest tests.test_meta\n"
+        workflow = "name: pytest tests/test_meta.py\ndescription: |\n  run: pytest tests/test_meta.py\n# run: pytest tests/test_meta.py\nuses: pytest tests/test_meta.py\njobs:\n  x:\n    name: python -m unittest tests.test_meta\n"
         self.repo.write(".github/workflows/ci.yml", workflow)
         result = self.repo.scan(surface_sources=(".github/workflows/ci.yml",))
         self.assertEqual(self.candidate(result, "tests/test_meta.py").execution, registry.ExecStatus.NONE)
-        for run in ("      - run: python -m unittest tests.test_meta\n", "      - run: |\n          python -m unittest tests.test_meta\n"):
+        runs = ("      - run: python -m unittest tests.test_meta\n", "      - run: 'python -m unittest tests.test_meta'\n", '      - run: "python -m unittest tests.test_meta"\n')
+        runs += tuple(f"      - run: {style}\n          python -m unittest{suffix}\n" for style, suffix in (("|", " \\\n          tests.test_meta"), ("|-", " tests.test_meta"), ("|+", " tests.test_meta"), (">", "\n          tests.test_meta"), (">-", "\n          tests.test_meta"), (">+", "\n          tests.test_meta")))
+        runs += ("      - description: |\n          run: pytest tests/test_meta.py\n        run: python -m unittest tests.test_meta\n",)
+        for run in runs:
             self.repo.write(".github/workflows/ci.yml", workflow + "    steps:\n" + run); result = self.repo.scan(surface_sources=(".github/workflows/ci.yml",))
             self.assertEqual(self.candidate(result, "tests/test_meta.py").execution, registry.ExecStatus.FULL)
+    def test_execution_globs_are_path_segment_anchored(self) -> None:
+        fixtures = {"tests/test_root.py": SUITE, "tests/a/test_nested.py": SUITE, "tests/test_root.sh": "true\n", "tests/a/test_nested.sh": "true\n"}
+        for path, text in fixtures.items(): self.repo.write(path, text)
+        for patterns, expected in ((("tests/*.py", "tests/*.sh"), [registry.ExecStatus.GLOB, registry.ExecStatus.NONE] * 2), (("tests/**/*.py", "tests/**/*.sh"), [registry.ExecStatus.GLOB] * 4)):
+            self.repo.write("scripts/ci-script-checks.sh", f"pytest {patterns[0]}\nfor item in {patterns[1]}; do bash \"$item\"; done\n")
+            self.assertEqual([self.candidate(self.repo.scan(), path).execution for path in fixtures], expected)
+    def test_comment_backslashes_are_not_false_continuations(self) -> None:
+        cases = (("# harmless documentation \\", True), ("true # harmless documentation \\", True), ("printf '%s' '#' \\", False), ("printf '%s' \\# \\", False))
+        for text, valid in cases:
+            with self.subTest(text=text):
+                repo = FixtureRepo(); self.addCleanup(repo.close)
+                repo.write("tests/test_comment.sh", "#!/bin/sh\n" + text + "\n"); repo.write("scripts/ci-script-checks.sh", "bash tests/test_comment.sh\n")
+                result = repo.scan()
+                self.assertEqual(result.input_valid, valid)
+                self.assertEqual(next(c for c in result.candidates if c.path == "tests/test_comment.sh").execution, registry.ExecStatus.FULL if valid else registry.ExecStatus.NONE)
     def test_exact_method_selection_is_partial_and_preserves_unexecuted_ids(self) -> None:
         self.repo.write("tests/test_partial.py", SUITE + "\nclass Beta(unittest.TestCase):\n    def test_three(self): pass\n")
         self.repo.write("scripts/ci-script-checks.sh", '"$PYTHON" -m unittest tests.test_partial.Alpha.test_one\n')
