@@ -444,7 +444,7 @@ _notify_channel() {
 
     local rel_port
     rel_port="${REL_PORT:-$(_resolve_release_server_port)}"
-    curl -sf -X POST "http://${ADK_DEFAULT_LOOPBACK}:${rel_port}/api/discord/send" \
+    curl -sf --connect-timeout 2 --max-time 15 -X POST "http://${ADK_DEFAULT_LOOPBACK}:${rel_port}/api/discord/send" \
         -H "Origin: http://${ADK_DEFAULT_LOOPBACK}:${rel_port}" \
         -H 'Content-Type: application/json' \
         --data-binary "$payload" >/dev/null 2>&1 \
@@ -891,7 +891,7 @@ _rollback_release_binary() {
     domain="$(_launchd_domain)" || domain="gui/$(id -u 2>/dev/null)"
     # Stop the crash-looping new process before swapping the binary back.
     # NOTE: bootstrap may not spawn process (runs=0) despite rc=0 (#5151 root cause).
-    # Release rollback has tmux fallback (line 897) + health check (line 899); if bootstrap
+    # Release rollback has start_release_tmux_fallback + wait_for_http_service_health; if bootstrap
     # succeeds but process doesn't spawn, tmux fallback will restart via SSH.
     # Observed issue (#5151): explicit kickstart required after bootstrap. Scope: PG tunnel
     # only for now; release rollback suitable for future unification if measured necessary.
@@ -3145,6 +3145,7 @@ _run_post_deploy_functional_smoke() {
 _report_post_deploy_smoke_failure() {
     local draft_path="$ADK_REL/logs/post-deploy-smoke-issue-draft-${POST_DEPLOY_SMOKE_STAMP}.md"
     local commit_sha node_name issue_url finding alert_text
+    local issue_stderr tmp_issue_stdout tmp_issue_stderr rc issue_capture_limit=4096 LC_ALL=C
     commit_sha=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || printf 'unknown')
     node_name=$(hostname 2>/dev/null || printf 'unknown')
 
@@ -3180,17 +3181,42 @@ relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE:-not run: wedge check d
     done
     _notify_channel "$alert_text"
 
-    # Default OFF. The literal `confirmed` is an operator assertion that this
-    # is a real regression, not a relay/API flake; only then may automation file.
+    # Default OFF; only literal `confirmed` (a real regression, not relay/API flake) may file.
+    # Byte-count guarantees cover NUL-free text only; command substitution drops NULs and can undercount.
     if [ "$POST_DEPLOY_SMOKE_CREATE_ISSUE" = "confirmed" ] && [ -f "$draft_path" ]; then
         if command -v gh >/dev/null 2>&1; then
-            if issue_url=$(gh issue create \
-                --repo itismyfield/AgentDesk \
-                --title "ops: post-deploy functional smoke regression (${node_name})" \
-                --body-file "$draft_path" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"); then
-                echo "⚠ Post-deploy smoke issue created (confirmed mode): $issue_url"
+            if tmp_issue_stdout=$(mktemp "${TMPDIR:-/tmp}/agentdesk-issue-stdout.XXXXXX") \
+                && tmp_issue_stderr=$(mktemp "${TMPDIR:-/tmp}/agentdesk-issue-stderr.XXXXXX"); then
+                if python3 "$SCRIPT_DIR/ci-timeout.py" 10 gh issue create \
+                    --repo itismyfield/AgentDesk \
+                    --title "ops: post-deploy functional smoke regression (${node_name})" \
+                    --body-file "$draft_path" > "$tmp_issue_stdout" 2> "$tmp_issue_stderr"; then
+                    rc=0
+                else
+                    rc=$?
+                fi
+                issue_stderr=$(head -c "$((issue_capture_limit + 1))" "$tmp_issue_stderr" 2>/dev/null; printf x); issue_stderr=${issue_stderr%x}
+                printf '%s' "${issue_stderr:0:issue_capture_limit}" >> "$POST_DEPLOY_SMOKE_EVIDENCE"
+                [ "${#issue_stderr}" -le "$issue_capture_limit" ] || printf '\n[gh stderr truncated at %s bytes]\n' "$issue_capture_limit" >> "$POST_DEPLOY_SMOKE_EVIDENCE"
+                if [ "$rc" -eq 0 ]; then
+                    issue_url=$(head -c "$((issue_capture_limit + 1))" "$tmp_issue_stdout" 2>/dev/null; printf x)
+                    issue_url=${issue_url%x}
+                    if [ "${#issue_url}" -gt "$issue_capture_limit" ]; then
+                        echo "⚠ Post-deploy smoke issue creation returned truncated stdout; draft retained: $draft_path"
+                    elif issue_url=${issue_url%$'\n'}; [ -z "$issue_url" ]; then
+                        echo "⚠ Post-deploy smoke issue creation returned empty stdout; draft retained: $draft_path"
+                    elif [[ "$issue_url" =~ ^https://github\.com/itismyfield/AgentDesk/issues/[0-9]+$ ]]; then
+                        echo "⚠ Post-deploy smoke issue created (confirmed mode): $issue_url"
+                    else
+                        echo "⚠ Post-deploy smoke issue creation returned invalid stdout; draft retained: $draft_path"
+                    fi
+                else
+                    echo "⚠ Post-deploy smoke issue creation FAILED; draft retained: $draft_path"
+                fi
+                rm -f "$tmp_issue_stdout" "$tmp_issue_stderr"
             else
-                echo "⚠ Post-deploy smoke issue creation FAILED; draft retained: $draft_path"
+                rm -f "${tmp_issue_stdout:-}" "${tmp_issue_stderr:-}"
+                echo "⚠ Post-deploy smoke issue creation FAILED: could not allocate output files; draft retained: $draft_path"
             fi
         else
             echo "⚠ Post-deploy smoke issue creation requested but gh is unavailable; draft retained: $draft_path"
