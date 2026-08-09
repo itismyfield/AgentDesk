@@ -2105,14 +2105,20 @@ mod tests {
     impl TestDatabase {
         async fn create() -> Self {
             let base = super::postgres_test_database_url_base()
-                .expect("POSTGRES_TEST_DATABASE_URL_BASE must name the fixture server");
+                .unwrap_or_else(|| panic!("db::postgres Config fixtures require POSTGRES_TEST_DATABASE_URL_BASE before CREATE"));
             let parsed_base = crate::db::fixture_target::parse_fixture_url(
                 &base,
                 "db::postgres configured fixture base",
             )
-            .expect("parse configured fixture base before CREATE");
-            crate::db::fixture_target::config_base_is_representable(&parsed_base).expect(
-                "db::postgres Config fixtures require a TCP-representable base before CREATE",
+            .unwrap_or_else(|error| {
+                panic!("db::postgres fixture base is invalid before CREATE: {error}")
+            });
+            crate::db::fixture_target::config_base_is_representable(&parsed_base).unwrap_or_else(
+                |error| {
+                    panic!(
+                        "db::postgres Config fixtures cannot represent the configured base before CREATE: {error}"
+                    )
+                },
             );
             let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
                 .ok()
@@ -2289,6 +2295,24 @@ mod tests {
             preferred_intake_node_labels: None,
         }];
         config
+    }
+
+    #[test]
+    fn ownership_registry_key_matches_between_admin_url_and_config_options() {
+        let admin_url = "postgresql://fixture@db.example:15432/postgres";
+        let admin_options = super::parse_test_postgres_options(admin_url, "registry-key admin")
+            .expect("parse registry-key admin URL");
+        let database_name = "agentdesk_pg_key";
+        let mut config = crate::config::Config::default();
+        config.database.host = admin_options.get_host().to_string();
+        config.database.port = admin_options.get_port();
+        config.database.dbname = database_name.to_string();
+        let database_options = super::test_database_config_options(&config);
+
+        assert_eq!(
+            super::test_database_registry_key(&admin_options, database_name),
+            super::test_database_registry_key(&database_options, database_name)
+        );
     }
 
     #[test]
