@@ -36,16 +36,31 @@ fi
 runner_source="$TMP_ROOT/runner.sh"
 sed -n '/^_run_post_deploy_functional_smoke()/,/^_report_post_deploy_smoke_failure()/p' "$DEPLOY_SH" \
     | sed '$d' > "$runner_source"
-runner_output=$(bash -s -- "$runner_source" "$TMP_ROOT" <<'CHILD'
+DISPOSITION="$TMP_ROOT/disposition.sh"
+disposition_begin=$(grep -nF '# >>> BEGIN smoke-disposition region (#5244)' "$DEPLOY_SH" | cut -d: -f1 || true)
+disposition_end=$(grep -nF '# <<< END smoke-disposition region (#5244)' "$DEPLOY_SH" | cut -d: -f1 || true)
+sed -n "$((disposition_begin + 1)),$((disposition_end - 1))p" "$DEPLOY_SH" > "$DISPOSITION"
+durable_clean_coverage=$(sed -n 's/^POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE="\([^"]*\)"$/\1/p' "$DEPLOY_SH" | head -1 || true)
+[ -n "$durable_clean_coverage" ] || fail 'durable clean coverage declaration is missing'
+
+runner_output=$(DURABLE_CLEAN_COVERAGE="$durable_clean_coverage" bash -s -- "$runner_source" "$TMP_ROOT" "$DISPOSITION" <<'CHILD'
 set -euo pipefail
-runner_source="$1"; root="$2"; eval "$(<"$runner_source")"
+runner_source="$1"; root="$2"; disposition_source="$3"; eval "$(<"$runner_source")"
 ADK_REL="$root"; POST_DEPLOY_SMOKE_EVIDENCE="$root/runner.evidence"; POST_DEPLOY_SMOKE_TMP_DIR=""; POST_DEPLOY_SMOKE_FAILURES=(); POST_DEPLOY_SMOKE_STAMP=runner; REL_PORT=0; runner_wedge_called=0
-_post_deploy_smoke_note() { :; }; _post_deploy_smoke_probe_apis() { return 0; }; _post_deploy_smoke_check_wedges() { runner_wedge_called=1; return 0; }; _post_deploy_smoke_check_fail_closed_warn_rate() { return 0; }; _post_deploy_smoke_check_relay_round_trip() { return 0; }; _post_deploy_smoke_check_durable_record() { return 0; }
+POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID=""; POST_DEPLOY_SMOKE_WEDGE_COVERAGE="clean-sentinel"; POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE="clean-sentinel"; POST_DEPLOY_SMOKE_DURABLE_COVERAGE="unevaluable: E-35 did not run"; POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE="$DURABLE_CLEAN_COVERAGE"
+_post_deploy_smoke_note() { :; }; _post_deploy_smoke_probe_apis() { return 0; }; _post_deploy_smoke_check_wedges() { runner_wedge_called=1; return 0; }; _post_deploy_smoke_check_fail_closed_warn_rate() { return 0; }
+# E-1 rc-0 skip fixture: leave the channel unset, so the durable probe notes and returns 0.
+_post_deploy_smoke_check_relay_round_trip() { POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID=""; return 0; }
+_post_deploy_smoke_check_durable_record() { [ -z "$POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID" ] || return 1; return 0; }
 if _run_post_deploy_functional_smoke; then rc=0; else rc=$?; fi
+eval "$(<"$disposition_source")"
 printf 'CASE_DONE runner rc=%s wedge_called=%s\n' "$rc" "$runner_wedge_called"
 CHILD
 )
 grep -q 'CASE_DONE runner rc=0 wedge_called=1' <<< "$runner_output" || fail 'smoke runner did not execute check_wedges in its parent shell'
+grep -q '△ Post-deploy functional smoke completed with coverage gap' <<< "$runner_output" || fail 'E-1 skip did not produce a coverage gap'
+grep -q 'durable record coverage: unevaluable: E-35 did not run' <<< "$runner_output" || fail 'E-1 skip omitted durable coverage'
+! grep -q '✓ Post-deploy functional smoke passed' <<< "$runner_output" || fail 'E-1 skip produced a false pass'
 
 cleanup_to_signal=$(sed -n '/^_cleanup_on_exit()/,/^_handle_cleanup_signal()/p' "$DEPLOY_SH")
 grep -q '_finalize_detached_helper' <<< "$cleanup_to_signal" || fail 'cleanup text does not contain finalizer'
@@ -272,17 +287,15 @@ CHILD
 )
 grep -q 'CASE_DONE rc=1 coverage=not evaluated: startup recovery in progress' <<< "$observation_race_output" || fail 'observation evidence failure reverted to not-run coverage'
 
-DISPOSITION="$TMP_ROOT/disposition.sh"
-disposition_begin=$(grep -nF '# >>> BEGIN smoke-disposition region (#5244)' "$DEPLOY_SH" | cut -d: -f1 || true)
-disposition_end=$(grep -nF '# <<< END smoke-disposition region (#5244)' "$DEPLOY_SH" | cut -d: -f1 || true)
-sed -n "$((disposition_begin + 1)),$((disposition_end - 1))p" "$DEPLOY_SH" > "$DISPOSITION"
 disposition_case() {
-    local label="$1" smoke_rc="$2" coverage="$3" clean_coverage="$4" expected="$5"
+    local label="$1" smoke_rc="$2" coverage="$3" durable_coverage="$4" expected="$5"
     local output
-    output=$(SMOKE_RC="$smoke_rc" COVERAGE="$coverage" CLEAN_COVERAGE="$clean_coverage" bash -s -- "$DISPOSITION" <<'CHILD'
+    output=$(SMOKE_RC="$smoke_rc" COVERAGE="$coverage" DURABLE_COVERAGE="$durable_coverage" CLEAN_COVERAGE=clean-sentinel DURABLE_CLEAN_COVERAGE="$durable_clean_coverage" bash -s -- "$DISPOSITION" <<'CHILD'
 set -euo pipefail
 POST_DEPLOY_SMOKE_WEDGE_COVERAGE="$COVERAGE"
 POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE="$CLEAN_COVERAGE"
+POST_DEPLOY_SMOKE_DURABLE_COVERAGE="$DURABLE_COVERAGE"
+POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE="$DURABLE_CLEAN_COVERAGE"
 POST_DEPLOY_SMOKE_EVIDENCE=/tmp/5244-disposition.evidence
 POST_DEPLOY_SMOKE_TMP_DIR=""
 POST_DEPLOY_SMOKE_FAILURES=()
@@ -294,10 +307,40 @@ CHILD
     )
     grep -q 'CASE_DONE disposition' <<< "$output" || fail "$label: disposition completion token missing"
     grep -q "$expected" <<< "$output" || fail "$label: expected [$expected]"
+    if [ "$label" = evaluated_clean ]; then
+        grep -q 'durable record coverage: evaluated' <<< "$output" || fail "$label: durable summary missing"
+    fi
 }
-disposition_case evaluated_clean 0 clean-sentinel clean-sentinel 'passed (relay wedge coverage: clean-sentinel'
-disposition_case coverage_gap 0 'not evaluated: startup recovery in progress' clean-sentinel 'completed with coverage gap'
-disposition_case failed 1 'unevaluable: health/detail scan failed' clean-sentinel 'REPORT_CALLED'
+disposition_case evaluated_clean 0 clean-sentinel evaluated 'passed (relay wedge coverage: clean-sentinel; evidence:'
+disposition_case skip_unevaluable 0 clean-sentinel 'unevaluable: E-35 did not run' 'completed with coverage gap (relay wedge coverage: clean-sentinel; durable record coverage: unevaluable: E-35 did not run'
+disposition_case coverage_gap 0 'not evaluated: startup recovery in progress' evaluated 'completed with coverage gap'
+disposition_case failed 1 'unevaluable: health/detail scan failed' failed 'REPORT_CALLED'
+
+if [ -z "${MUTATION_CHILD:-}" ]; then
+    for mutation in logical_and_removed unevaluable_as_clean; do
+        mut="$TMP_ROOT/mut-$mutation.sh"
+        if [ "$mutation" = logical_and_removed ]; then
+            sed \
+                -e 's/\$POST_DEPLOY_SMOKE_WEDGE_COVERAGE:\$POST_DEPLOY_SMOKE_DURABLE_COVERAGE/\$POST_DEPLOY_SMOKE_WEDGE_COVERAGE/g' \
+                -e 's/\$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE:\$POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE/\$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE/g' \
+                "$DEPLOY_SH" > "$mut"
+            expected='E-1 skip produced a false pass'
+        else
+            sed 's/^POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE="evaluated"$/POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE="unevaluable: E-35 did not run"/' \
+                "$DEPLOY_SH" > "$mut"
+            expected='skip_unevaluable: expected'
+        fi
+        if ! bash -n "$mut" > "$mut.bash-n" 2>&1; then
+            fail "$mutation was not syntactically valid"
+        elif MUTATION_CHILD=1 DEPLOY_SH_OVERRIDE="$mut" bash "$0" > "$mut.out" 2>&1; then
+            fail "$mutation survived the skip fixture"
+        elif grep -q "$expected" "$mut.out"; then
+            printf 'MUTATION_CASE %s bash_n=0 fixture_rc=1\n' "$mutation"
+        else
+            fail "$mutation died without its target fixture self-assertion"
+        fi
+    done
+fi
 
 if [ "$failures" -ne 0 ]; then
     printf 'test_deploy_smoke_wedge_coverage_5244: %s assertion(s) failed\n' "$failures" >&2

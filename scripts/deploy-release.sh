@@ -2656,6 +2656,7 @@ POST_DEPLOY_SMOKE_SESSIONS_BODY=""
 POST_DEPLOY_SMOKE_FAILURES=()
 POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID=""
 POST_DEPLOY_SMOKE_DURABLE_COVERAGE="unevaluable: E-35 did not run"
+POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE="evaluated"
 
 # >>> BEGIN wedge-check region (#5244) — coverage is report-only and point-in-time
 POST_DEPLOY_SMOKE_WEDGE_MARKER_COVERAGE='evaluated: %s stall-state marker(s) observed (point-in-time)'; POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE="${POST_DEPLOY_SMOKE_WEDGE_MARKER_COVERAGE/\%s/0}"
@@ -3297,6 +3298,11 @@ echo "▸ Running post-deploy functional smoke (#4262)..."
 # The smoke function runs from an `if` guard, suspending `set -e` within it;
 # each fallible step is nevertheless explicitly guarded or carries `|| return`.
 if _run_post_deploy_functional_smoke; then
+    if case "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE:$POST_DEPLOY_SMOKE_DURABLE_COVERAGE" in
+        "$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE:$POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE") true ;;
+        *) false ;;
+    esac
+    then
     case "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE" in
         "$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE")
             echo "✓ Post-deploy functional smoke passed (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
@@ -3305,6 +3311,10 @@ if _run_post_deploy_functional_smoke; then
             echo "△ Post-deploy functional smoke completed with coverage gap (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
             ;;
     esac
+            echo "  durable record coverage: ${POST_DEPLOY_SMOKE_DURABLE_COVERAGE}"
+    else
+            echo "△ Post-deploy functional smoke completed with coverage gap (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; durable record coverage: ${POST_DEPLOY_SMOKE_DURABLE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
+    fi
 else
     echo "⚠ POST-DEPLOY FUNCTIONAL SMOKE FAILED — deploy remains healthy (fail-open)"
     echo "  relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}"
