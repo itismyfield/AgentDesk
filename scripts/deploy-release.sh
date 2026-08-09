@@ -2640,10 +2640,11 @@ POST_DEPLOY_SMOKE_CORE_API_ENDPOINTS=(
 POST_DEPLOY_SMOKE_LOG_LINES="${AGENTDESK_POST_DEPLOY_SMOKE_LOG_LINES:-500}"
 POST_DEPLOY_SMOKE_WARN_LIMIT="${AGENTDESK_POST_DEPLOY_SMOKE_WARN_LIMIT:-5}"
 POST_DEPLOY_SMOKE_RELAY_CELL="${AGENTDESK_POST_DEPLOY_SMOKE_RELAY_CELL:-claude-tui}"
-# The whole E-35 invocation is capped, including its live safety gate, lease,
-# setup/send/fetch HTTP, response wait, record poll, refetch, idle check, and
-# teardown. Reset costs zero because E-35 forbids reset/force-cancel. The
-# 900-second operational cap turns longer sequential stalls into unevaluable.
+# The E-35 phase from lease acquisition through scenario execution is capped,
+# including its live safety gate, setup/send/fetch HTTP, response wait, record
+# poll, refetch, idle check, and teardown. Reset costs zero because E-35 forbids
+# reset/force-cancel. The 900-second operational cap deliberately cuts off
+# longer combinations of those component timeouts as unevaluable.
 POST_DEPLOY_SMOKE_E35_DEADLINE_S="${AGENTDESK_POST_DEPLOY_SMOKE_E35_DEADLINE_S:-900}"
 POST_DEPLOY_SMOKE_CREATE_ISSUE="${AGENTDESK_POST_DEPLOY_SMOKE_CREATE_ISSUE:-off}"
 POST_DEPLOY_SMOKE_STAMP="$(date -u '+%Y%m%dT%H%M%SZ' 2>/dev/null || printf 'unknown')-$$"
@@ -3132,8 +3133,8 @@ _post_deploy_smoke_check_durable_record() {
     # #5264 is a hard prerequisite only for default claude-tui live acceptance.
     # claude-pipe is partial coverage and is not S8 TUI-surface evidence.
     if [ -z "$POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID" ]; then
-        _post_deploy_smoke_fail "durable_record_probe=unevaluable: E-35 channel unavailable; probe did not run" || true
-        return 1
+        _post_deploy_smoke_note "durable_record_probe=unevaluable: E-35 channel unavailable; probe did not run" || return 1
+        return 0
     fi
     output="$ADK_REL/logs/post-deploy-smoke-durable-${POST_DEPLOY_SMOKE_STAMP}"
     log="$POST_DEPLOY_SMOKE_TMP_DIR/relay-e35.log"

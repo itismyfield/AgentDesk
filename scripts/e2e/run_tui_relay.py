@@ -294,7 +294,7 @@ def parse_args() -> argparse.Namespace:
         "--phase-deadline-s",
         type=float,
         default=None,
-        help="Hard wall-clock limit for the whole invocation (E-35 post-deploy use).",
+        help="Hard wall-clock limit from lease acquisition through selected scenario execution.",
     )
     parser.add_argument(
         "--required-agent-mode",

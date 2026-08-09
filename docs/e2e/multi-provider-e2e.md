@@ -131,6 +131,12 @@ turn. It passes only when the newly observed outbound Discord response ID has
 exactly one authoritative receipt and that receipt has a same-generation
 covering frontier in the local atomic sidecar record. Inbound prompt IDs, old
 frontiers, completed-turn ledgers, leases, and in-memory offsets cannot pass it.
+For production-written records, that receipt also binds the provider, owner
+filename, source and delivery channels, and range; requires nonempty tmux session
+and turn nonce identities; and was current-generation at writer-lock time. On
+this probed short terminal path, reaching the writer follows that turn's
+successful lease commit. E-35 therefore detects both a frontier-only partial
+write and a normal-to-headless `send_prompt` regression that omits the receipt.
 The post-deploy invocation disables reset/force-cancel, rechecks standby,
 target-idle/queue state, and its cell lease immediately before setup, and makes
 busy or dirty residue `unevaluable` without attempting cleanup. Its single
@@ -147,9 +153,20 @@ atomic sidecar record에 남겼다. Here “이번 배포 세대” means the lo
 post-`DEPLOY_OK` probe transaction; it does not bind a peer, deployed commit SHA,
 or poll-time-current tmux generation. The proof also does not cover power-loss
 durability, every provider/call site, long/fallback/recovery/headless paths,
-completed-ledger persistence, continuous health, or S8 rollout. It does catch
-the probed `claude-tui` `.generation` absence from #5264 because ledger-only
-state lacks the required receipt/frontier pair.
+completed-ledger persistence, lease acquisition/clear/restart reconciliation,
+continuous health, or S8 rollout. E-35 PASS does not distinguish the spawn writer
+from the `restore.rs` old-generation adoption writer. When `.generation` remains
+absent, ledger-only state cannot satisfy the receipt/frontier conjunct; however,
+adoption can create the marker first, so without #5264 default `claude-tui`
+acceptance can pass nondeterministically (a flaky green). The safety gate also
+depends directly on private `lease._read_lease` because no public read API exists;
+an underscore-function refactor can silently leave E-35 fail-closed and
+`unevaluable` until the coupling is updated.
+
+E-35 alone supplies the durable-record provenance above. The full post-deploy
+E-1 + E-35 sequence additionally checks that the existing headless relay
+round-trip still works; it does not turn the headless E-1 response into S8 TUI
+durability evidence or broaden E-35 to the excluded paths.
 
 ## #2943 Scenario Coverage And Gaps
 

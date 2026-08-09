@@ -82,14 +82,20 @@ class RecordFixtures(unittest.TestCase):
         self.assertEqual(result["status"], "failed", result)
         self.assertEqual(result["exact_receipts"], 2)
 
-    def test_generation_rotation_before_write_has_no_acceptable_commit(self):
+    def test_receipt_frontier_generation_mismatch_is_failed(self):
         self.write(_record(_receipt(222, generation=77), generation=88))
         self.assertEqual(self.scan()["status"], "failed")
 
-    def test_generation_rotation_after_atomic_write_preserves_historical_proof(self):
+    def test_unrelated_generation_marker_does_not_override_committed_record_proof(self):
         self.write(_record(_receipt(222)))
         (self.root / "AgentDesk-claude-e2e.generation").write_text("88")
         self.assertEqual(self.scan()["status"], "evaluated")
+
+    def test_zero_generation_cannot_supply_durable_commit_proof(self):
+        self.write(_record(_receipt(222, generation=0), generation=0))
+        result = self.scan()
+        self.assertEqual(result["status"], "failed", result)
+        self.assertEqual(result["exact_receipts"], 0)
 
     def test_delayed_write_is_observed_by_bounded_poll(self):
         calls = 0
@@ -140,8 +146,8 @@ class SafetyAndDeadlineFixtures(unittest.TestCase):
             required_coverage_class=None,
         )
 
-    def test_active_mailbox_residue_counts_as_unevaluable_without_reset(self):
-        scenario = {
+    def _scenario(self) -> dict:
+        return {
             "id": "E-35",
             "agent_mode": "none",
             "coverage_class": "live",
@@ -150,16 +156,34 @@ class SafetyAndDeadlineFixtures(unittest.TestCase):
             "steps": [{"send_discord_prompt": "marker"}],
             "assertions": [],
         }
-        residue = {
-            "status": "unevaluable",
-            "dirty_active_residue": True,
-            "reasons": ["agent_turn_status=active"],
+
+    def test_preexisting_active_mailbox_is_unevaluable_without_reset(self):
+        scenario = {
+            **self._scenario(),
+        }
+        busy_mailbox = {
+            "provider": "claude",
+            "channel_id": "99",
+            "agent_turn_status": "active",
+            "relay_stall_state": "healthy",
+            "relay_health": {"active_turn": "none"},
         }
         with tempfile.TemporaryDirectory() as root, patch.object(
-            driver, "durable_probe_safety_gate", return_value=residue
+            driver,
+            "_read_api_json",
+            side_effect=[
+                (200, {"cluster_standby": False}),
+                (200, {"sessions": []}),
+            ],
+        ) as read_api, patch.object(
+            driver, "_read_health_detail", return_value={"mailboxes": [busy_mailbox]}
+        ) as read_detail, patch.object(
+            driver.lease,
+            "_read_lease",
+            return_value={"run_id": "claude-tui-fixture", "acquired_at": 1.0},
         ), patch.object(driver, "reset_channel_state") as reset, patch.object(
             driver, "run_one_cell", return_value={}
-        ):
+        ) as run_one:
             result = driver.run_scenario(
                 scenario,
                 args=self._args(root),
@@ -173,6 +197,29 @@ class SafetyAndDeadlineFixtures(unittest.TestCase):
             result,
         )
         self.assertTrue(result["dirty_active_residue"]["dirty_active_residue"])
+        self.assertIn("agent_turn_status=active", result["dirty_active_residue"]["reasons"])
+        self.assertEqual(read_api.call_count, 2)
+        read_detail.assert_called_once()
+        run_one.assert_not_called()
+        reset.assert_not_called()
+
+    def test_idle_gate_pass_never_enters_reset_for_durable_probe(self):
+        with tempfile.TemporaryDirectory() as root, patch.object(
+            driver,
+            "durable_probe_safety_gate",
+            return_value={"status": "idle", "dirty_active_residue": False},
+        ) as gate, patch.object(driver, "reset_channel_state") as reset, patch.object(
+            driver, "run_one_cell", return_value={}
+        ) as run_one, patch.object(driver.time, "sleep"):
+            result = driver.run_scenario(
+                self._scenario(),
+                args=self._args(root),
+                run_id="fixture",
+                client=object(),
+            )
+        self.assertNotEqual(result.get("reason"), "E-35 safety gate refused injection")
+        gate.assert_called_once()
+        run_one.assert_called_once()
         reset.assert_not_called()
 
     @unittest.skipUnless(hasattr(signal, "setitimer"), "POSIX wall-clock timer required")
