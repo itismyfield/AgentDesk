@@ -130,7 +130,7 @@ pub(crate) fn claim_cross_channel_tmux_watcher_for_high_risk_test(
 mod turn_completion_events;
 pub(in crate::services::discord) mod turn_end_wip_warning;
 #[cfg(unix)]
-pub(crate) use tmux::write_spawn_nonce;
+pub(crate) use tmux::{stamp_spawn_markers, write_spawn_nonce};
 #[cfg(unix)]
 mod tmux_error_detect;
 #[cfg(unix)]

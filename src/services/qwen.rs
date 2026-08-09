@@ -1384,15 +1384,10 @@ fn execute_streaming_local_tmux(
 
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
-    let gen_marker_path =
-        crate::services::tmux_common::session_temp_path(tmux_session_name, "generation");
-    let current_gen = crate::services::discord::runtime_store::process_generation();
-    let _ = std::fs::write(&gen_marker_path, current_gen.to_string());
-
     // #3087: stamp a per-spawn nonce in a SEPARATE marker (see claude.rs). The
     // status-panel session-instance key reads this unique nonce instead of the
     // `.generation` mtime, eliminating mtime missing/duplicate collisions.
-    if let Err(e) = crate::services::discord::write_spawn_nonce(tmux_session_name) {
+    if let Err(e) = crate::services::discord::stamp_spawn_markers(tmux_session_name) {
         tracing::warn!("failed to write spawn nonce for {tmux_session_name}: {e}");
     }
 

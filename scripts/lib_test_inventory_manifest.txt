@@ -4658,7 +4658,16 @@ services::discord::tmux::tmux_output_stream::tests::string_api_error_envelope_ha
 services::discord::tmux::tmux_output_stream::tests::unique_provider_prose_flood_uses_fixed_category_slots
 services::discord::tmux::tmux_output_stream::tests::watcher_status_panel_bound_placeholder_keeps_events_on_status_panel
 services::discord::tmux::tmux_output_stream::tests::watcher_status_panel_fallback_inlines_events_without_status_message
+services::discord::tmux::tmux_session_files::tests::adoption_current_generation_marker_is_a_noop
+services::discord::tmux::tmux_session_files::tests::adoption_never_stamps_a_fresh_incarnation_with_an_old_mtime
+services::discord::tmux::tmux_session_files::tests::adoption_recovers_an_absent_marker_with_nonzero_identity
 services::discord::tmux::tmux_session_files::tests::committed_frontier_gated_on_same_generation
+services::discord::tmux::tmux_session_files::tests::every_spawn_site_uses_the_combined_marker_gate
+services::discord::tmux::tmux_session_files::tests::generation_write_failure_emits_exactly_one_warn_and_still_writes_nonce
+services::discord::tmux::tmux_session_files::tests::spawn_markers_log_fixture_legacy_paths_unchanged
+services::discord::tmux::tmux_session_files::tests::spawn_markers_stamp_generation_before_nonce
+services::discord::tmux::tmux_session_files::tests::spawn_stamp_replaces_the_inode
+services::discord::tmux::tmux_session_files::tests::stamp_spawn_markers_returns_nonce_result_verbatim
 services::discord::tmux::tmux_watcher::commit_decisions::runtime_binding_offset_tests::acknowledged_session_bound_delivery_is_not_missing_inflight_fallback
 services::discord::tmux::tmux_watcher::commit_decisions::runtime_binding_offset_tests::busy_observation_without_delivery_still_advances_runtime_binding
 services::discord::tmux::tmux_watcher::commit_decisions::runtime_binding_offset_tests::busy_observation_without_terminal_delivery_allows_cleanup
