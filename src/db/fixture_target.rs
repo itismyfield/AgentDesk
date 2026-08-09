@@ -3,8 +3,9 @@
 //! SQLx 0.8.6 chooses a physical peer from `socket`, `host`, and `port`, then
 //! uses `host` plus `ssl_mode` while negotiating TLS. Fixture authorization
 //! therefore compares both the physical peer and those TLS routing inputs.
-//! URL authority host and port must be explicit so `PGHOST`, `PGPORT`, and
-//! SQLx's filesystem-based default-host probe cannot select the peer.
+//! URL authority host and port must be explicit so `PGHOSTADDR`, `PGHOST`,
+//! `PGPORT`, and SQLx's filesystem-based default-host probe cannot select the
+//! peer.
 
 use std::fmt;
 use std::net::IpAddr;
@@ -41,6 +42,7 @@ struct FixtureIdentity {
     transport: FixtureTransport,
     port: u16,
     routing_host: String,
+    tcp_connect_host: Option<String>,
     tls_mode: TlsMode,
 }
 
@@ -48,20 +50,25 @@ impl fmt::Display for FixtureIdentity {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "{:?}:{};route={};tls={:?}",
-            self.transport, self.port, self.routing_host, self.tls_mode
+            "{:?}:{};route={};tcp-host={:?};tls={:?}",
+            self.transport, self.port, self.routing_host, self.tcp_connect_host, self.tls_mode
         )
     }
 }
 
 fn normalized_host(host: &str) -> String {
     let host = host.trim();
+    // Strip a DNS-style trailing dot before removing IPv6 brackets so both
+    // `[::1]` and `[::1].` reach the same canonical parser input. Preserve
+    // Unix-socket paths verbatim below; a path is not a DNS host name.
     let host_for_ip_or_hostname = host.trim_end_matches('.');
     let unbracketed_host = host_for_ip_or_hostname
         .strip_prefix('[')
         .and_then(|value| value.strip_suffix(']'))
         .unwrap_or(host_for_ip_or_hostname);
     let normalized = if let Ok(address) = unbracketed_host.parse::<IpAddr>() {
+        // Canonicalize first: long-form IPv6 loopback parses to `::1`, so the
+        // alias match below covers every equivalent textual representation.
         address.to_string()
     } else if host.starts_with('/') {
         host.to_string()
@@ -69,7 +76,13 @@ fn normalized_host(host: &str) -> String {
         unbracketed_host.to_ascii_lowercase()
     };
     match normalized.as_str() {
-        "localhost" | "127.0.0.1" | "::1" => "<loopback>".to_string(),
+        "localhost" | "127.0.0.1" | "::1" => {
+            // Keep one recognizable label for loopback spellings while the raw
+            // host field below remains the authority discriminator. Angle
+            // brackets cannot occur in a URL host, so the sentinel cannot
+            // collide with a real DNS hostname such as `loopback`.
+            "<loopback>".to_string()
+        }
         _ => normalized,
     }
 }
@@ -86,18 +99,34 @@ fn tls_mode(options: &PgConnectOptions) -> TlsMode {
 }
 
 fn fixture_identity(options: &PgConnectOptions) -> FixtureIdentity {
-    let routing_host = normalized_host(options.get_host());
-    let transport = if let Some(socket) = options.get_socket() {
-        FixtureTransport::Socket(socket.to_string_lossy().into_owned())
+    let raw_host = options.get_host().to_string();
+    let normalized_host = normalized_host(options.get_host());
+    // TCP uses the raw host for both connect and TLS; socket transport uses it
+    // only for TLS routing. Keep the relevant raw value in a distinct field.
+    let (transport, routing_host, tcp_connect_host) = if let Some(socket) = options.get_socket() {
+        (
+            FixtureTransport::Socket(socket.to_string_lossy().into_owned()),
+            raw_host,
+            None,
+        )
     } else if options.get_host().starts_with('/') {
-        FixtureTransport::Socket(options.get_host().to_string())
+        (
+            FixtureTransport::Socket(options.get_host().to_string()),
+            raw_host,
+            None,
+        )
     } else {
-        FixtureTransport::Tcp(routing_host.clone())
+        (
+            FixtureTransport::Tcp(normalized_host.clone()),
+            normalized_host,
+            Some(raw_host),
+        )
     };
     FixtureIdentity {
         transport,
         port: options.get_port(),
         routing_host,
+        tcp_connect_host,
         tls_mode: tls_mode(options),
     }
 }
@@ -180,6 +209,7 @@ pub(super) fn options_match(
     if candidate.transport == base.transport
         && candidate.port == base.port
         && candidate.routing_host == base.routing_host
+        && candidate.tcp_connect_host == base.tcp_connect_host
         && candidate.tls_mode == base.tls_mode
     {
         return Ok(());
@@ -230,7 +260,7 @@ mod tests {
             (
                 "authority-host",
                 "postgresql://user@DB.EXAMPLE:15432/db?sslmode=disable",
-                true,
+                false,
             ),
             (
                 "socket-authority",
@@ -324,7 +354,7 @@ mod tests {
             "postgresql://route.example:secret@db.example:15432/root?sslmode=disable&host=%2Ftmp%2Fsafe",
         );
         let same = parsed(
-            "postgresql://route.example:secret@DB.EXAMPLE:15432/db?sslmode=disable&host=%2Ftmp%2Fsafe",
+            "postgresql://route.example:secret@db.example:15432/db?sslmode=disable&host=%2Ftmp%2Fsafe",
         );
         let other_socket = parsed(
             "postgresql://route.example:secret@db.example:15432/db?sslmode=disable&host=%2Ftmp%2Fother",
@@ -358,16 +388,8 @@ mod tests {
     }
 
     #[test]
-    fn loopback_aliases_normalize_without_collisions() {
-        fn identity(host: &str) -> String {
-            server_identity(
-                &PgConnectOptions::new()
-                    .host(host)
-                    .port(15432)
-                    .ssl_mode(PgSslMode::Disable),
-            )
-        }
-        let expected = identity("localhost");
+    fn loopback_aliases_share_a_label_but_raw_host_discriminates() {
+        let expected = normalized_host("localhost");
         for host in [
             "localhost",
             "127.0.0.1",
@@ -378,9 +400,20 @@ mod tests {
             "0:0:0:0:0:0:0:1",
             "LOCALHOST.",
         ] {
-            assert_eq!(identity(host), expected, "loopback spelling {host:?}");
+            assert_eq!(
+                normalized_host(host),
+                expected,
+                "loopback spelling {host:?}"
+            );
         }
-        assert_ne!(expected, identity("loopback"));
+        assert_ne!(expected, normalized_host("loopback"));
+
+        let ipv4 = parsed("postgresql://user@127.0.0.1:15432/root?sslmode=disable");
+        let ipv6 = parsed("postgresql://user@[::1]:15432/db?sslmode=disable");
+        assert!(
+            options_match(&ipv4.options, &ipv6.options).is_err(),
+            "distinct IPv4 and IPv6 listeners must not share target authority"
+        );
     }
 
     #[test]
@@ -391,6 +424,17 @@ mod tests {
             &candidate.options,
         );
         assert!(result.is_err(), "a changed host must be rejected");
+
+        let socket_candidate =
+            parsed("postgresql://user@other.example:15432/db?sslmode=disable&host=%2Ftmp%2Fsafe");
+        let socket_result = enforce_configured_target(
+            Some("postgresql://user@db.example:15432/root?sslmode=disable&host=%2Ftmp%2Fsafe"),
+            &socket_candidate.options,
+        );
+        assert!(
+            socket_result.is_err(),
+            "a changed TLS routing host over the same socket must be rejected"
+        );
     }
 
     #[test]
