@@ -342,8 +342,8 @@ tmux_watcher.rs  3569줄 (캡 3571, 여유 2줄)
 
 | 신호 | 생산 (`file:line`) | 소비 | **실제로 측정하는 것** |
 |---|---|---|---|
-| `RelayHealthSnapshot` (23필드) | `health/snapshot.rs:400-432` (`build_relay_health_snapshot`) | `/api/health/detail`, 분류기, 복구 플래너 | 구조 스냅샷 |
-| `relay_stall_state` | `relay_health.rs:154-191` (`RelayStallClassifier::classify`), 호출부 `health/snapshot.rs:623`, `:805` | `relay_recovery/decision.rs:314-410` (`plan_relay_recovery`), `stall_liveness.rs:515,599`, `relay_auto_heal.rs:690` | 구조 이상 7분류 |
+| `RelayHealthSnapshot` (23필드) | `health::unpaired_active_token::build_relay_health_snapshot` | `/api/health/detail`, 분류기, 복구 플래너 | 구조 스냅샷 |
+| `relay_stall_state` | `relay_health::RelayStallClassifier::classify`, 호출부 `health::snapshot::{watcher_state_snapshot_for_shared, build_health_snapshot_with_options}` | `relay_recovery::decision::plan_relay_recovery`, `health::stall_liveness` 판단 로그, `health::relay_auto_heal::apply_orphan_pending_token_cleanup` | 구조 이상 8분류 |
 | `desynced` | `health/session_enrichment.rs:186-190` (`SessionEnrichment::desynced`), 호출 `snapshot.rs:584`, `:758` | 분류기 `relay_health.rs:160-166`, 워치독 coverage | **capture offset과 confirmed-end offset의 격차** |
 | `capture_lagged` | `session_enrichment.rs:129-136` | `desynced` | 위와 동일. **`inflight_state_present` 필수 조건** |
 | `last_capture_offset` | `session_enrichment.rs:103-113` → `capture_coordinate_for_path()` `session_enrichment.rs:234-260` | `desynced`, `unread_bytes` | **인플라이트 행의 `output_path`를 `fs::metadata`한 파일 크기** |
@@ -1404,4 +1404,3 @@ range 집합**을 산출해야 하며, 불일치는 CI 실패다.
 | **`#4081 fingerprint`의 배달 증거 승격** | **NO-GO** | 오판 이력 [확인 `turn_identity.rs:333`]. dedup 권한으로만 유지 (§2.3-3) |
 | **워치독의 in-band 흡수** | **NO-GO** | #4381의 핵심 성질(릴레이가 죽어도 알림이 도착)이 소멸. 단방향 sidecar 인테이크로 권위만 부여 (§5) |
 | **S1 시점의 임계값 하드코딩** | **NO-GO** | 근거 없는 값. 관측 후 확정 (§3.4, §A6) |
-
