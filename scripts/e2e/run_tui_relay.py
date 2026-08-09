@@ -32,6 +32,7 @@ import datetime as dt
 import json
 import math
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -44,7 +45,7 @@ import yaml  # type: ignore[import-untyped]
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from tui_relay import assertions, discord, fixtures, lease, tmux  # noqa: E402
+from tui_relay import assertions, discord, durable_delivery, fixtures, lease, tmux  # noqa: E402
 
 
 SUPPORTED_CELLS: tuple[str, ...] = (
@@ -64,6 +65,7 @@ COVERAGE_CLASS_RANK = {
 }
 REAL_PROVIDER_STEP_KEYS: tuple[str, ...] = (
     "send_prompt",
+    "send_discord_prompt",
     "send_provider_hold_prompt",
     "send_timed_response_prompt",
     "send_prompts_concurrent",
@@ -150,7 +152,29 @@ REPORT_RECORD_KEYS: tuple[str, ...] = (
     "real_provider_contacted",
     "controlled_harness_evidence",
     "failure_attribution",
+    "durable_record_probe",
+    "dirty_active_residue",
 )
+
+
+class PhaseDeadlineExpired(BaseException):
+    """Hard wall-clock deadline; bypass scenario cleanup and preserve residue."""
+
+
+def _arm_phase_deadline(seconds: float):
+    previous = signal.getsignal(signal.SIGALRM)
+
+    def expire(_signum, _frame):
+        raise PhaseDeadlineExpired(f"E-35 phase exceeded {seconds:g}s")
+
+    signal.signal(signal.SIGALRM, expire)
+    signal.setitimer(signal.ITIMER_REAL, max(seconds, 0.001))
+    return previous
+
+
+def _disarm_phase_deadline(previous) -> None:
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    signal.signal(signal.SIGALRM, previous)
 
 
 class ScenarioStepAssertionError(assertions.AssertionError):
@@ -265,6 +289,12 @@ def parse_args() -> argparse.Namespace:
         "--turn-start-timeout-s",
         default=turn_start_timeout_default,
         help="How long send_prompt retries transient mailbox-busy turn/start responses.",
+    )
+    parser.add_argument(
+        "--phase-deadline-s",
+        type=float,
+        default=None,
+        help="Hard wall-clock limit for the whole invocation (E-35 post-deploy use).",
     )
     parser.add_argument(
         "--required-agent-mode",
@@ -2083,6 +2113,67 @@ def _mailbox_busy_reasons(mailbox: dict[str, Any]) -> list[str]:
     return reasons
 
 
+def durable_probe_safety_gate(
+    *, base_url: str, cell: str, channel_id: str, runtime_root: Path, lease_run_id: str
+) -> dict[str, Any]:
+    reasons: list[str] = []
+    try:
+        status, health = _read_api_json(base_url, "/api/health", timeout=5)
+        detail = _read_health_detail(base_url, timeout=5)
+        sessions_status, sessions_payload = _read_api_json(
+            base_url, "/api/sessions", timeout=5
+        )
+    except Exception as error:  # noqa: BLE001 - unreadable safety state forbids injection
+        return {
+            "status": "unevaluable",
+            "dirty_active_residue": True,
+            "reasons": [f"safety state unreadable: {type(error).__name__}: {error}"],
+        }
+    if status >= 400 or not isinstance(health, dict) or health.get("cluster_standby") is not False:
+        reasons.append("cluster_standby is true or unreadable")
+    mailboxes = detail.get("mailboxes")
+    provider = cell_provider(cell)
+    targets = [
+        box for box in mailboxes if isinstance(box, dict)
+        and _mailbox_channel_id(box) == str(channel_id)
+        and _mailbox_provider(box) == provider
+    ] if isinstance(mailboxes, list) else []
+    if not targets:
+        reasons.append("target mailbox unavailable")
+    for mailbox in targets:
+        reasons.extend(_mailbox_busy_reasons(mailbox))
+    sessions = (
+        sessions_payload.get("sessions")
+        if isinstance(sessions_payload, dict)
+        else sessions_payload
+    )
+    if sessions_status >= 400 or not isinstance(sessions, list):
+        reasons.append("target sessions unavailable")
+    else:
+        workspace = cell_workspace_substring(cell)
+        for session in sessions:
+            if not isinstance(session, dict):
+                continue
+            state = str(session.get("status") or "").lower()
+            session_channel = str(
+                session.get("channel_id") or session.get("channelId") or ""
+            )
+            session_key = str(session.get("session_key") or "")
+            if state in {"turn_active", "turn_busy", "active"} and (
+                session_channel == str(channel_id) or workspace in session_key
+            ):
+                reasons.append(f"active target session={session_key or session_channel}")
+    reasons.extend(_runtime_queue_violations(
+        runtime_root=runtime_root, provider=provider, channel_id=str(channel_id)
+    ))
+    held = lease._read_lease(lease.lease_path_for(cell))  # noqa: SLF001
+    if not held or held.get("run_id") != lease_run_id:
+        reasons.append("E2E cell lease is not held by this probe")
+    if reasons:
+        return {"status": "unevaluable", "dirty_active_residue": True, "reasons": reasons}
+    return {"status": "idle", "dirty_active_residue": False}
+
+
 def _mailbox_idle_evidence(mailbox: dict[str, Any]) -> dict[str, Any]:
     """Capture the /api/health/detail idle fields a regression like #2935 watches.
 
@@ -2768,7 +2859,22 @@ def run_scenario(
             )
         return result
 
-    if args.reset_before_each and not args.dry_run and not is_local_fixture_scenario(scenario):
+    durable_probe = bool(scenario.get("durable_delivery_probe"))
+    if durable_probe and not args.dry_run:
+        safety = durable_probe_safety_gate(
+            base_url=args.base_url,
+            cell=cell,
+            channel_id=target_channel_id,
+            runtime_root=Path(args.queue_runtime_root),
+            lease_run_id=f"{cell}-{run_id}",
+        )
+        if safety["status"] != "idle":
+            result["status"] = "fail"
+            result["reason"] = "E-35 safety gate refused injection"
+            result["durable_record_probe"] = {"status": "unevaluable", "reason": result["reason"]}
+            result["dirty_active_residue"] = safety
+            return result
+    if args.reset_before_each and not durable_probe and not args.dry_run and not is_local_fixture_scenario(scenario):
         runtime_root = Path(args.queue_runtime_root)
         result["resets"] = [
             reset_channel_state(
@@ -2999,6 +3105,12 @@ def run_one_cell(
         "provider_identity": provider_identity(cell, channel_id),
         "real_provider_contacted": False,
     }
+    if scenario.get("durable_delivery_probe"):
+        record["durable_record_probe"] = {
+            "status": "unevaluable",
+            "reason": "response not observed",
+        }
+        record["dirty_active_residue"] = {"possible": True, "cleanup_attempted": False}
     if partial_record_sink is not None:
         partial_record_sink["record"] = record
 
@@ -3048,7 +3160,17 @@ def run_one_cell(
             record.setdefault("controlled_harness_evidence", []).append(
                 controlled_evidence
             )
-        if "send_prompt" in step:
+        if "send_discord_prompt" in step:
+            _prepare_first_prompt_window()
+            window.mark_prompt_sent()
+            last_sent_prompt = str(step["send_discord_prompt"]).replace("{run_id}", run_id)
+            response = client.send(channel_id, last_sent_prompt)
+            record["durable_record_probe"]["inbound_prompt_id"] = str(
+                response.get("message_id") or response.get("id") or ""
+            )
+            _mark_real_provider_contacted(record, declared_agent_mode=declared_agent_mode, dry_run=dry_run)
+            time.sleep(3)
+        elif "send_prompt" in step:
             _prepare_first_prompt_window()
             window.mark_prompt_sent()
             last_sent_prompt = str(step["send_prompt"])
@@ -3142,7 +3264,7 @@ def run_one_cell(
         elif "wait_idle_s" in step:
             time.sleep(float(step["wait_idle_s"]))
         elif "wait_for_discord_text" in step:
-            needle = step["wait_for_discord_text"]
+            needle = str(step["wait_for_discord_text"]).replace("{run_id}", run_id)
             found, observed = wait_for_discord_text_with_tui_idle_draft_guard(
                 client=client,
                 channel_id=channel_id,
@@ -3179,6 +3301,26 @@ def run_one_cell(
                     f"diagnostic={_payload_summary(diagnostic, max_chars=1400)}",
                     record=record,
                 )
+            if scenario.get("durable_delivery_probe"):
+                response_id = str(found.get("id") or "")
+                record["durable_record_probe"] = durable_delivery.poll_records(
+                    Path(args.queue_runtime_root),
+                    provider=cell_provider(cell),
+                    channel_id=channel_id,
+                    message_id=response_id,
+                )
+                record["durable_record_probe"]["coverage_scope"] = (
+                    "partial coverage; not S8 TUI-surface evidence"
+                    if cell == "claude-pipe"
+                    else "default claude-tui live acceptance"
+                )
+                if record["durable_record_probe"]["status"] != "evaluated":
+                    _update_record_window_snapshot(record, window)
+                    raise ScenarioStepAssertionError(
+                        f"durable record probe {record['durable_record_probe']['status']}: "
+                        f"{record['durable_record_probe']['reason']}",
+                        record=record,
+                    )
         elif "wait_for_raw_discord_text" in step:
             needle = step["wait_for_raw_discord_text"]
             predicate = lambda message: (  # noqa: E731
@@ -3510,6 +3652,11 @@ def run_one_cell(
             runtime_root=Path(args.queue_runtime_root),
         )
         record["post_scenario_idle"] = idle_check
+        if scenario.get("durable_delivery_probe"):
+            record["dirty_active_residue"] = {
+                "possible": False,
+                "cleanup_attempted": False,
+            }
         record["assertions"].append(
             {
                 "spec": {"post_scenario_cell_idle": True},
@@ -4101,13 +4248,35 @@ def main() -> int:
     )
 
     lease_token = f"{cell}-{run_id}"
-    with lease.acquire(lease_token, cell=cell) if not args.dry_run else _null_lease(run_id):
-        results: list[dict[str, Any]] = []
-        for scenario in scenarios:
-            print(f"[e2e] running {scenario.get('id')} cell={cell}")
-            result = run_scenario(scenario, args=args, run_id=run_id, client=client)
-            print(f"[e2e]   → {result['status']} {result.get('reason') or ''}")
-            results.append(result)
+    results: list[dict[str, Any]] = []
+    previous_alarm = _arm_phase_deadline(args.phase_deadline_s) if args.phase_deadline_s else None
+    try:
+        with lease.acquire(lease_token, cell=cell) if not args.dry_run else _null_lease(run_id):
+            for scenario in scenarios:
+                print(f"[e2e] running {scenario.get('id')} cell={cell}")
+                result = run_scenario(scenario, args=args, run_id=run_id, client=client)
+                print(f"[e2e]   → {result['status']} {result.get('reason') or ''}")
+                results.append(result)
+    except PhaseDeadlineExpired as error:
+        results.append({
+            "id": "E-35", "cell": cell, "provider": cell_provider(cell),
+            "runtime": cell_runtime(cell), "status": "fail", "reason": str(error),
+            "durable_record_probe": {"status": "unevaluable", "reason": str(error)},
+            "dirty_active_residue": {"possible": True, "cleanup_attempted": False},
+        })
+    except Exception as error:  # lease/safety setup failed before a scenario artifact existed
+        if not args.phase_deadline_s:
+            raise
+        reason = f"E-35 phase unevaluable: {type(error).__name__}: {error}"
+        results.append({
+            "id": "E-35", "cell": cell, "provider": cell_provider(cell),
+            "runtime": cell_runtime(cell), "status": "fail", "reason": reason,
+            "durable_record_probe": {"status": "unevaluable", "reason": reason},
+            "dirty_active_residue": {"possible": True, "cleanup_attempted": False},
+        })
+    finally:
+        if previous_alarm is not None:
+            _disarm_phase_deadline(previous_alarm)
 
     # Always cell-tag the report filename so an orchestrator that passes a
     # shared --output dir for all 5 cells never overwrites a sibling report.

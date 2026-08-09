@@ -126,6 +126,31 @@ health/queue degradation. `E-26` through `E-29` are explicit
 CronCreate live creation, Codex modern-schema production-parser/live stream,
 Codex live tool-command coverage, and `claude-e` tool-use-to-text completeness.
 
+`E-35` preserves the headless `E-1` and adds one normal Discord short-response
+turn. It passes only when the newly observed outbound Discord response ID has
+exactly one authoritative receipt and that receipt has a same-generation
+covering frontier in the local atomic sidecar record. Inbound prompt IDs, old
+frontiers, completed-turn ledgers, leases, and in-memory offsets cannot pass it.
+The post-deploy invocation disables reset/force-cancel, rechecks standby,
+target-idle/queue state, and its cell lease immediately before setup, and makes
+busy or dirty residue `unevaluable` without attempting cleanup. Its single
+900-second wall-clock deadline covers the gate, lease, setup/send/fetch HTTP,
+response wait, record poll, final refetch, idle check, and teardown; expiry is a
+fail-open functional finding after `DEPLOY_OK`.
+
+#5264 is a hard prerequisite only for default `claude-tui` live acceptance.
+`claude-pipe` is allowed as `partial coverage`, but is not S8 TUI-surface
+evidence. The minimum positive claim is: 이 노드의 이번 배포 세대에서 E-35의
+한 short-response normal Discord turn이 confirmed durable record funnel을
+통과해, 그 새 Discord response에 결속된 exact receipt와 covering frontier를
+atomic sidecar record에 남겼다. Here “이번 배포 세대” means the local
+post-`DEPLOY_OK` probe transaction; it does not bind a peer, deployed commit SHA,
+or poll-time-current tmux generation. The proof also does not cover power-loss
+durability, every provider/call site, long/fallback/recovery/headless paths,
+completed-ledger persistence, continuous health, or S8 rollout. It does catch
+the probed `claude-tui` `.generation` absence from #5264 because ledger-only
+state lacks the required receipt/frontier pair.
+
 ## #2943 Scenario Coverage And Gaps
 
 Covered P0/P1 backlog items:

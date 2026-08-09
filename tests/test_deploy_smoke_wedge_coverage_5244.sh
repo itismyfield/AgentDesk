@@ -40,7 +40,7 @@ runner_output=$(bash -s -- "$runner_source" "$TMP_ROOT" <<'CHILD'
 set -euo pipefail
 runner_source="$1"; root="$2"; eval "$(<"$runner_source")"
 ADK_REL="$root"; POST_DEPLOY_SMOKE_EVIDENCE="$root/runner.evidence"; POST_DEPLOY_SMOKE_TMP_DIR=""; POST_DEPLOY_SMOKE_FAILURES=(); POST_DEPLOY_SMOKE_STAMP=runner; REL_PORT=0; runner_wedge_called=0
-_post_deploy_smoke_note() { :; }; _post_deploy_smoke_probe_apis() { return 0; }; _post_deploy_smoke_check_wedges() { runner_wedge_called=1; return 0; }; _post_deploy_smoke_check_fail_closed_warn_rate() { return 0; }; _post_deploy_smoke_check_relay_round_trip() { return 0; }
+_post_deploy_smoke_note() { :; }; _post_deploy_smoke_probe_apis() { return 0; }; _post_deploy_smoke_check_wedges() { runner_wedge_called=1; return 0; }; _post_deploy_smoke_check_fail_closed_warn_rate() { return 0; }; _post_deploy_smoke_check_relay_round_trip() { return 0; }; _post_deploy_smoke_check_durable_record() { return 0; }
 if _run_post_deploy_functional_smoke; then rc=0; else rc=$?; fi
 printf 'CASE_DONE runner rc=%s wedge_called=%s\n' "$rc" "$runner_wedge_called"
 CHILD
