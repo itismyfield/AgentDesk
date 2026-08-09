@@ -126,6 +126,79 @@ health/queue degradation. `E-26` through `E-29` are explicit
 CronCreate live creation, Codex modern-schema production-parser/live stream,
 Codex live tool-command coverage, and `claude-e` tool-use-to-text completeness.
 
+`E-35` preserves the headless `E-1` and adds one normal Discord short-response
+turn. It passes only when the newly observed outbound Discord response ID has
+exactly one authoritative receipt and that receipt has a same-generation
+covering frontier in the local atomic sidecar record. Inbound prompt IDs, old
+frontiers, completed-turn ledgers, leases, and in-memory offsets cannot pass it.
+For production-written records, that receipt also binds the provider, owner
+filename, source and delivery channels, and range; requires nonempty tmux session
+and turn nonce identities; and was current-generation at writer-lock time. On
+this probed short terminal path, reaching the writer follows that turn's
+successful lease commit. E-35 therefore detects both a frontier-only partial
+write and a normal-to-headless `send_prompt` regression that omits the receipt.
+The post-deploy invocation disables reset/force-cancel and rechecks standby,
+target-idle/queue state, and its cell lease before setup and immediately before
+the normal prompt. Busy or dirty residue becomes `unevaluable` without cleanup.
+The prompt-time recheck narrows the nominal gate-return-to-prompt window from
+368 seconds to 0 seconds, and the last-mailbox-snapshot-to-prompt window from
+373 seconds to 5 seconds. It does not close the TOCTOU: local filesystem and
+scheduling have no hard bound, and a turn can start after the recheck and before
+send.
+
+The component timeouts total **1,422 seconds**: two safety gates contribute
+`2 × (5 + 5 + 5) = 30`; setup POST/sleep and pre-send fetch contribute
+`180 + 8 + 180`; prompt POST/sleep, response wait, and durable poll contribute
+`180 + 3 + 240 + 15`; two final refetches plus settle contribute
+`2 × 180 + 1 = 361`; post-scenario idle and teardown contribute `45 + 180`.
+The single **900-second operational cutoff** covers the gate, lease,
+setup/send/fetch HTTP, response wait, record poll, final refetch, idle check, and
+teardown, but it is deliberately not the component sum. Expiry is a fail-open
+finding after `DEPLOY_OK`.
+
+#5264 is a hard prerequisite only for default `claude-tui` live acceptance.
+`claude-pipe` is allowed as `partial coverage`, but is not S8 TUI-surface
+evidence. The minimum positive claim is: 이 노드의 이번 배포 세대에서 E-35의
+한 short-response normal Discord turn이 confirmed durable record funnel을
+통과해, 그 새 Discord response에 결속된 exact receipt와 covering frontier를
+atomic sidecar record에 남겼다. Here “이번 배포 세대” means the local
+post-`DEPLOY_OK` probe transaction; it does not bind a peer, deployed commit SHA,
+or poll-time-current tmux generation. The proof also does not cover power-loss
+durability, every provider/call site, long/fallback/recovery/headless paths,
+completed-ledger persistence, lease acquisition/clear/restart reconciliation,
+continuous health, or S8 rollout. E-35 PASS does not distinguish the spawn writer
+from the `restore.rs` old-generation adoption writer because the durable record
+does not encode which writer produced it.
+
+The durable funnel depends on exactly **five symbols** arranged as **four
+independent enforcement stages**:
+
+1. `shadow_mirror_delivered_frontier_inner` rejects a zero generation and an
+   empty or invalid source range.
+2. `exact_receipt_from_inflight` binds the current inflight/source identity to
+   the receipt and current generation.
+3. `write_confirmed_delivery_at_with_lock_authority` enforces the receipt/frontier
+   coupling. Inside this delivery-writer stage it calls the fifth symbol,
+   `ExactJsonlSourceIdentity::is_authoritative`, as a subordinate predicate that
+   rejects zero or incomplete source identity; that predicate is not a fifth
+   independent enforcement stage.
+4. `write_confirmed_frontier_guarded_at_with_lock_authority` holds writer-lock
+   authority and rereads the current generation to reject a stale writer.
+
+When `.generation` remains absent, ledger-only state cannot satisfy the
+receipt/frontier conjunct. Adoption can create the marker first and allow the
+redundant current-generation defenses to pass together, so without #5264 default
+`claude-tui` acceptance can be a nondeterministic green. An E-35 PASS also includes
+post-scenario mailbox/queue idle evidence. The safety gate depends directly on
+private `lease._read_lease` because no public read API exists; an underscore-
+function refactor can leave E-35 fail-closed and `unevaluable` until the coupling
+is updated.
+
+E-35 alone supplies the durable-record provenance above. The full post-deploy
+E-1 + E-35 sequence additionally checks that the existing headless relay
+round-trip still works; it does not turn the headless E-1 response into S8 TUI
+durability evidence or broaden E-35 to the excluded paths.
+
 ## #2943 Scenario Coverage And Gaps
 
 Covered P0/P1 backlog items:
