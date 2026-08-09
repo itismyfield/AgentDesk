@@ -8,6 +8,8 @@ use super::redaction;
 use super::session_enrichment::SessionEnrichment;
 use super::stall_verdict;
 use super::transcript_binding_stall::{self, resolve_bound_selector};
+use super::unpaired_active_token;
+use super::unpaired_active_token::{RelayHealthBuildInput, build_relay_health_snapshot};
 use super::{BotTokenReloadScopes, HealthRegistry, bot_token_reload_scopes};
 use crate::services::discord;
 use crate::services::discord::SharedData;
@@ -187,10 +189,10 @@ impl DiscordHealthSnapshot {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct RelayThreadProofSnapshot {
-    parent_channel_id: Option<u64>,
-    thread_channel_id: Option<u64>,
-    stale_thread_proof: bool,
+pub(super) struct RelayThreadProofSnapshot {
+    pub(super) parent_channel_id: Option<u64>,
+    pub(super) thread_channel_id: Option<u64>,
+    pub(super) stale_thread_proof: bool,
 }
 
 /// #3631: a rebind-origin inflight row (POST /api/inflight/rebind) is a
@@ -335,31 +337,6 @@ async fn relay_thread_proof_for_channel(
     }
 }
 
-struct RelayHealthBuildInput {
-    provider: String,
-    channel_id: u64,
-    mailbox_has_cancel_token: bool,
-    mailbox_active_user_msg_id: Option<u64>,
-    mailbox_turn_started_at_ms: Option<i64>,
-    queue_depth: usize,
-    watcher_attached: bool,
-    watcher_attached_stale: bool,
-    watcher_owner_channel_id: Option<u64>,
-    tmux_session: Option<String>,
-    tmux_alive: Option<bool>,
-    bridge_inflight_present: bool,
-    bridge_current_msg_id: Option<u64>,
-    watcher_owns_live_relay: bool,
-    last_relay_ts_ms: i64,
-    last_relay_offset: u64,
-    last_capture_offset: Option<u64>,
-    unread_bytes: Option<u64>,
-    desynced: bool,
-    thread_proof: RelayThreadProofSnapshot,
-    active_turn: RelayActiveTurn,
-    last_outbound_activity_ms: Option<i64>,
-}
-
 fn authoritative_tmux_session(
     enriched_session: Option<&str>,
     mailbox_cancel_session: Option<&str>,
@@ -367,40 +344,6 @@ fn authoritative_tmux_session(
     enriched_session
         .or(mailbox_cancel_session)
         .map(str::to_string)
-}
-
-fn build_relay_health_snapshot(input: RelayHealthBuildInput) -> RelayHealthSnapshot {
-    RelayHealthSnapshot {
-        provider: input.provider,
-        channel_id: input.channel_id,
-        active_turn: input.active_turn,
-        tmux_session: input.tmux_session,
-        tmux_alive: input.tmux_alive,
-        watcher_attached: input.watcher_attached,
-        watcher_attached_stale: input.watcher_attached_stale,
-        watcher_owner_channel_id: input.watcher_owner_channel_id,
-        watcher_owns_live_relay: input.watcher_owns_live_relay,
-        bridge_inflight_present: input.bridge_inflight_present,
-        bridge_current_msg_id: input.bridge_current_msg_id,
-        mailbox_has_cancel_token: input.mailbox_has_cancel_token,
-        mailbox_active_user_msg_id: input.mailbox_active_user_msg_id,
-        mailbox_turn_started_at_ms: input.mailbox_turn_started_at_ms,
-        queue_depth: input.queue_depth,
-        pending_discord_callback_msg_id: input
-            .bridge_current_msg_id
-            .or(input.mailbox_active_user_msg_id),
-        pending_thread_proof: input.thread_proof.parent_channel_id.is_some()
-            || input.thread_proof.thread_channel_id.is_some(),
-        parent_channel_id: input.thread_proof.parent_channel_id,
-        thread_channel_id: input.thread_proof.thread_channel_id,
-        last_relay_ts_ms: (input.last_relay_ts_ms > 0).then_some(input.last_relay_ts_ms),
-        last_outbound_activity_ms: input.last_outbound_activity_ms,
-        last_capture_offset: input.last_capture_offset,
-        last_relay_offset: input.last_relay_offset,
-        unread_bytes: input.unread_bytes,
-        desynced: input.desynced,
-        stale_thread_proof: input.thread_proof.stale_thread_proof,
-    }
 }
 
 impl HealthRegistry {
@@ -556,6 +499,14 @@ async fn watcher_state_snapshot_for_shared(
     let desynced = session.desynced(tmux_session_alive == Some(true), session.attached);
     let active_turn =
         relay_active_turn_from_inflight(mailbox_has_cancel_token, session.inflight.as_ref());
+    let unpaired_active_token_reconfirmed = unpaired_active_token::reconfirm(
+        &shared,
+        provider_kind.as_ref(),
+        channel,
+        &mailbox_snapshot,
+        session.inflight_state_present,
+    )
+    .await;
     let relay_thread_proof = relay_thread_proof_for_channel(
         &shared,
         provider_kind.as_ref(),
@@ -571,6 +522,7 @@ async fn watcher_state_snapshot_for_shared(
         mailbox_turn_started_at_ms: mailbox_snapshot
             .turn_started_at
             .map(|started_at| started_at.timestamp_millis()),
+        unpaired_active_token_reconfirmed,
         queue_depth: mailbox_snapshot.intervention_queue.len(),
         watcher_attached: session.attached,
         watcher_attached_stale: session.watcher_attached_stale,
@@ -755,6 +707,14 @@ async fn build_health_snapshot_with_options(
                     mailbox_has_cancel_token,
                     session.inflight.as_ref(),
                 );
+                let unpaired_active_token_reconfirmed = unpaired_active_token::reconfirm(
+                    &entry.shared,
+                    provider_kind.as_ref(),
+                    channel,
+                    snapshot,
+                    session.inflight_state_present,
+                )
+                .await;
                 let relay_health = build_relay_health_snapshot(RelayHealthBuildInput {
                     provider: entry.name.clone(),
                     channel_id: channel.get(),
@@ -763,6 +723,7 @@ async fn build_health_snapshot_with_options(
                     mailbox_turn_started_at_ms: snapshot
                         .turn_started_at
                         .map(|started_at| started_at.timestamp_millis()),
+                    unpaired_active_token_reconfirmed,
                     queue_depth,
                     watcher_attached: session.watcher_attached,
                     watcher_attached_stale: session.watcher_attached_stale,

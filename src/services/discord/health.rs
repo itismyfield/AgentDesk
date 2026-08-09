@@ -38,6 +38,7 @@ mod stall_liveness;
 mod stall_verdict;
 // #5188 (R5/R6): a delivery binding pointed at a transcript Claude abandoned.
 mod transcript_binding_stall;
+mod unpaired_active_token;
 mod watcher_respawn;
 
 // `HeadlessAgentTurnReservation` has no external referent today (callers

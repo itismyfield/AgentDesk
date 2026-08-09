@@ -103,7 +103,7 @@ fixture recovering '{"fully_recovered":false,"mailboxes":[{"provider":"claude","
 fixture tmux_dead '{"fully_recovered":true,"mailboxes":[{"provider":"claude","channel_id":1,"relay_stall_state":"tmux_alive_relay_dead"}]}'
 fixture stale_thread '{"fully_recovered":true,"mailboxes":[{"provider":"claude","channel_id":1,"relay_stall_state":"stale_thread_proof"}]}'
 fixture orphan_token '{"fully_recovered":true,"mailboxes":[{"provider":"claude","channel_id":1,"relay_stall_state":"orphan_pending_token"}]}'
-fixture observations '{"fully_recovered":true,"mailboxes":[{"provider":"claude","channel_id":1,"relay_stall_state":"queue_blocked"},{"provider":"claude","channel_id":2,"relay_stall_state":"future_state"}]}'
+fixture observations '{"fully_recovered":true,"mailboxes":[{"provider":"claude","channel_id":1,"relay_stall_state":"queue_blocked"},{"provider":"claude","channel_id":2,"relay_stall_state":"future_state"},{"provider":"claude","channel_id":3,"relay_stall_state":"unpaired_active_token"}]}'
 fixture recovering_observations '{"fully_recovered":false,"mailboxes":[{"provider":"claude","channel_id":1,"relay_stall_state":"tmux_alive_relay_dead"},{"provider":"claude","channel_id":2,"relay_stall_state":"queue_blocked"},{"provider":"claude","channel_id":3,"relay_stall_state":"future_state"}]}'
 fixture malformed '{"fully_recovered":true,"mailboxes":[{"provider":"claude","channel_id":1,"relay_stall_state":42}]}'
 fixture malformed_json '{broken'
@@ -246,6 +246,8 @@ CHILD
 )
 grep -q 'relay wedge observation: queue_blocked' <<< "$observation_output" || fail 'queue_blocked was not reported as an observation'
 grep -q 'relay wedge observation: unknown_stall_state' <<< "$observation_output" || fail 'unknown stall was not reported as an observation'
+grep -q 'relay wedge observation: unpaired_active_token provider=claude channel=3' <<< "$observation_output" || fail 'unpaired active token was not reported as its dedicated observation'
+! grep -q 'unknown_stall_state provider=claude channel=3' <<< "$observation_output" || fail 'known unpaired active token leaked into unknown stall observations'
 
 recovery_observation_output=$(RECOVERY_EVIDENCE="$TMP_ROOT/recovery-observation.evidence" bash -s -- "$REGION" "$TMP_ROOT/recovering_observations.json" <<'CHILD'
 set -euo pipefail

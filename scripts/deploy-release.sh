@@ -2731,14 +2731,16 @@ _post_deploy_smoke_wedge_scan_from_file() {
                | "marker=stall-state provider=\(.pv) channel=\(.ch) state=\(.s)" ]) as $markers
           | ([ $mailboxes[] | select(.s == "queue_blocked")
                | "obs=queue_blocked provider=\(.pv) channel=\(.ch)" ]) as $queue_observations
+          | ([ $mailboxes[] | select(.s == "unpaired_active_token")
+               | "obs=unpaired_active_token provider=\(.pv) channel=\(.ch)" ]) as $unpaired_active_token_observations
           | ([ $mailboxes[]
                | select(.s | IN("healthy", "active_foreground_stream", "explicit_background_work",
                                "queue_blocked", "tmux_alive_relay_dead", "stale_thread_proof",
-                               "orphan_pending_token") | not)
+                               "orphan_pending_token", "unpaired_active_token") | not)
                | "obs=unknown_stall_state provider=\(.pv) channel=\(.ch) stall=\(.s)" ]) as $unknown_observations
           | ([ "recovered=\(.fully_recovered)",
                "count=\($markers | length)" ] + $markers
-             + $queue_observations + $unknown_observations)
+             + $queue_observations + $unpaired_active_token_observations + $unknown_observations)
           | .[]
         end
     ' "$health_detail_path" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE"

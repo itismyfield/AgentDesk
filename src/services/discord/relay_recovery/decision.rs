@@ -383,6 +383,12 @@ pub(in crate::services::discord) fn plan_relay_recovery(
                 }),
             )
         }
+        RelayStallState::UnpairedActiveToken => (
+            RelayRecoveryActionKind::ObserveOnly,
+            "active mailbox token remains unpaired after read-side confirmation",
+            false,
+            Some("unpaired_active_token_observe_only"),
+        ),
         RelayStallState::QueueBlocked => {
             let eligible = matches!(snapshot.active_turn, RelayActiveTurn::None)
                 && !snapshot.mailbox_has_cancel_token

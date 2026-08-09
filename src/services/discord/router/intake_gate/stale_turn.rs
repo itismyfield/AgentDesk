@@ -374,18 +374,21 @@ mod thread_guard_stale_pure_tests {
             mailbox_has_cancel_token: true,
             mailbox_active_user_msg_id: Some(user_msg_id),
             mailbox_turn_started_at_ms: None,
+            mailbox_turn_age_secs: None,
             queue_depth: 0,
             pending_discord_callback_msg_id: Some(8_002),
             pending_thread_proof: false,
             parent_channel_id: None,
             thread_channel_id: None,
             last_relay_ts_ms: None,
+            last_relay_age_secs: None,
             last_outbound_activity_ms: None,
             last_capture_offset: None,
             last_relay_offset: 0,
             unread_bytes: None,
             desynced,
             stale_thread_proof: false,
+            unpaired_active_token_reconfirmed: false,
         };
         let relay_stall_state =
             crate::services::discord::relay_health::RelayStallClassifier::classify(&relay_health);

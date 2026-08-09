@@ -2525,6 +2525,8 @@ services::discord::health::transcript_binding_stall::tests::a_superseded_binding
 services::discord::health::transcript_binding_stall::tests::a_transcript_that_grew_recently_is_healthy_even_mid_rotation
 services::discord::health::transcript_binding_stall::tests::an_idle_channel_is_never_alerted_on
 services::discord::health::transcript_binding_stall::tests::an_unresolvable_bound_transcript_is_not_this_verdict
+services::discord::health::unpaired_active_token::tests::completion_between_initial_reads_and_recheck_invalidates_candidate
+services::discord::health::unpaired_active_token::tests::every_identity_coordinate_must_remain_stable
 services::discord::health::watcher_respawn::tests::deadman_switch_escalates_after_threshold_then_clears_on_watcher_return
 services::discord::health::watcher_respawn::tests::deadman_switch_ignores_idle_channel_without_relay_work
 services::discord::health::watcher_respawn::tests::force_clean_respawn_offset_floor_ignores_stale_prior_generation_frontier
@@ -3785,7 +3787,9 @@ services::discord::recovery_paths::shared::tests::transient_failure_counts_until
 services::discord::relay_coord_tests::relay_progress_heartbeat_stamps_each_confirmed_chunk
 services::discord::relay_health::frontier::tests::reset_frontier_publishes_a_new_incarnation_token
 services::discord::relay_health::frontier::tests::reset_yields_to_pending_mutation_on_same_thread_without_deadlock
+services::discord::relay_health::tests::observation_age_rejects_future_and_overflowing_timestamps
 services::discord::relay_health::tests::relay_stall_classifier_is_table_driven
+services::discord::relay_health::tests::serialized_snapshot_exposes_ages_but_not_internal_recheck_proof
 services::discord::relay_owner_observability::tests::finalizer_ledger_owner_extra_fields
 services::discord::relay_owner_observability::tests::inflight_clear_extra_carries_three_signals_and_flag
 services::discord::relay_owner_observability::tests::invariant_violated_only_on_committed_without_ui_or_obligation
@@ -3872,6 +3876,7 @@ services::discord::relay_recovery::tests::relay_recovery_takeover_keeps_differen
 services::discord::relay_recovery::tests::stale_watcher_with_jsonl_progress_rebinds_without_canceling_turn
 services::discord::relay_recovery::tests::token_only_agentdesk_tmux_confirmed_dead_is_reclaimed_after_grace
 services::discord::relay_recovery::tests::token_only_agentdesk_tmux_with_unknown_liveness_stays_protected_after_grace
+services::discord::relay_recovery::tests::unpaired_active_token_is_observe_only
 services::discord::relay_recovery::tests::watchdog_auto_apply_is_rate_limited_after_first_token_reclaim
 services::discord::relay_recovery::tests::watcher_owned_live_relay_with_relay_progress_is_not_destructive_cancel_candidate
 services::discord::relay_recovery::tests::watcher_owned_live_relay_with_unread_bytes_and_zero_relay_offset_is_actionable
