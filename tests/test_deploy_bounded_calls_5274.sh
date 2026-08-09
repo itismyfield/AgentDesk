@@ -14,6 +14,7 @@ LISTENER_PIDS=()
 FAILURES=0
 SKIPPED_CASES=0
 ISSUE_CAPTURE_LIMIT=4096
+ISSUE_CAPTURE_READ_LIMIT=$((ISSUE_CAPTURE_LIMIT + 1))
 
 cleanup() {
     local listener_pid
@@ -36,6 +37,18 @@ extract_function() {
         printing && /^}$/ { exit }
     ' "$source_path"
 }
+
+record_skipped_cases() {
+    local count="$1"
+    SKIPPED_CASES=$((SKIPPED_CASES + count))
+}
+
+record_skipped_cases 1
+if [ "$SKIPPED_CASES" -ne 1 ]; then
+    echo "FAIL: skipped-case accounting did not preserve a non-PASS result" >&2
+    FAILURES=$((FAILURES + 1))
+fi
+SKIPPED_CASES=0
 
 if ! grep -Fq 'curl -sf --connect-timeout 2 --max-time 15 -X POST' "$DEPLOY_SH"; then
     echo "FAIL: _notify_channel is missing the fixed connect/total timeout" >&2
@@ -199,12 +212,21 @@ write_issue_output_case() {
     cat > "$bin/gh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-if [ "$output_mode" = truncated ]; then
-    printf '%s\\n' 'https://example.invalid/issues/5274'
-    head -c 8192 /dev/zero
-else
-    printf '%s\\n' 'https://example.invalid/issues/5274'
-fi
+case "$output_mode" in
+    truncated)
+        python3 -c 'import sys; p="https://github.com/itismyfield/AgentDesk/issues/"; sys.stdout.write(p + "7" * (8192 - len(p)))'
+        ;;
+    exact)
+        python3 -c 'import sys; p="https://github.com/itismyfield/AgentDesk/issues/"; sys.stdout.write(p + "7" * (4096 - len(p)))'
+        ;;
+    empty) : ;;
+    failure)
+        printf '%s\\n' 'https://github.com/itismyfield/AgentDesk/issues/5274'
+        exit 1
+        ;;
+    partial) printf '%s' 'https://github.com/itismyfield/AgentDesk/issu' ;;
+    *) printf '%s\\n' 'https://github.com/itismyfield/AgentDesk/issues/5274' ;;
+esac
 printf '%s\\n' 'https://stderr.example.invalid/first' >&2
 EOF
     chmod +x "$bin/gh"
@@ -231,13 +253,14 @@ EOF
 write_issue_stderr_case() {
     local source_path="$1"
     local label="$2"
+    local stderr_bytes="$3"
     local case_path="$TMP_ROOT/${label}.sh"
     local bin="$TMP_ROOT/${label}-bin"
     mkdir -p "$TMP_ROOT/release/logs" "$bin"
-    cat > "$bin/gh" <<'EOF'
+    cat > "$bin/gh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-head -c 8192 /dev/zero >&2
+python3 -c 'import sys; sys.stderr.write("e" * $stderr_bytes)'
 exit 1
 EOF
     chmod +x "$bin/gh"
@@ -273,13 +296,30 @@ run_issue_output_variant() {
     bash "$case_path" > "$output_path" 2>&1 || rc=$?
     cat "$output_path"
     if [ "$expected" = value ] && [ "$rc" -eq 0 ] \
-        && grep -qF 'Post-deploy smoke issue created (confirmed mode): https://example.invalid/issues/5274' "$output_path" \
+        && grep -qF 'Post-deploy smoke issue created (confirmed mode): https://github.com/itismyfield/AgentDesk/issues/5274' "$output_path" \
         && ! grep -qF 'https://stderr.example.invalid/first' "$output_path"; then
         echo "issue_url value restored: ok (stdout URL survived stderr noise)"
     elif [ "$expected" = truncation ] && [ "$rc" -eq 0 ] \
         && grep -qF 'returned truncated stdout' "$output_path" \
         && ! grep -qF 'Post-deploy smoke issue created (confirmed mode):' "$output_path"; then
         echo "stdout truncation detection restored: ok (no URL reported)"
+    elif [ "$expected" = exact ] && [ "$rc" -eq 0 ] \
+        && grep -qF 'Post-deploy smoke issue created (confirmed mode): https://github.com/itismyfield/AgentDesk/issues/' "$output_path" \
+        && ! grep -qF 'returned truncated stdout' "$output_path"; then
+        echo "exact-cap stdout restored: ok (4096 bytes not reported as truncated)"
+    elif [ "$expected" = empty ] && [ "$rc" -eq 0 ] \
+        && grep -qF 'returned empty stdout' "$output_path" \
+        && ! grep -qF 'Post-deploy smoke issue created (confirmed mode):' "$output_path"; then
+        echo "empty stdout guard restored: ok"
+    elif [ "$expected" = invalid ] && [ "$rc" -eq 0 ] \
+        && grep -qF 'returned invalid stdout' "$output_path" \
+        && ! grep -qF 'Post-deploy smoke issue created (confirmed mode):' "$output_path"; then
+        echo "partial stdout guard restored: ok (malformed URL rejected)"
+    elif [ "$expected" = failure ] && [ "$rc" -eq 0 ] \
+        && grep -qF 'issue creation FAILED' "$output_path" \
+        && ! grep -qF 'returned empty stdout' "$output_path" \
+        && ! grep -qF 'returned invalid stdout' "$output_path"; then
+        echo "gh failure gate restored: ok"
     else
         echo "FAIL: issue output assertion failed for $label (rc=$rc)" >&2
         FAILURES=$((FAILURES + 1))
@@ -298,14 +338,20 @@ run_issue_output_mutant() {
     bash "$case_path" > "$output_path" 2>&1 || rc=$?
     cat "$output_path"
     if [ "$mutant_kind" = value ] \
-        && ! grep -qF 'https://example.invalid/issues/5274' "$output_path"; then
+        && ! grep -qF 'https://github.com/itismyfield/AgentDesk/issues/5274' "$output_path"; then
         echo "issue_url value mutant: FAILED (self-assertion: fixture URL was not reported)"
     elif [ "$mutant_kind" = truncation ] \
-        && grep -qF 'Post-deploy smoke issue created (confirmed mode): https://example.invalid/issues/5274' "$output_path"; then
+        && grep -qF 'Post-deploy smoke issue created (confirmed mode): https://github.com/itismyfield/AgentDesk/issues/' "$output_path"; then
         echo "stdout truncation mutant: FAILED (self-assertion: truncated URL was reported)"
     elif [ "$mutant_kind" = merge ] \
-        && grep -qF 'https://stderr.example.invalid/first' "$output_path"; then
-        echo "stdout/stderr merge mutant: FAILED (self-assertion: stderr URL leaked into issue_url)"
+        && ! grep -qF 'Post-deploy smoke issue created (confirmed mode): https://github.com/itismyfield/AgentDesk/issues/5274' "$output_path"; then
+        echo "stdout/stderr merge mutant: FAILED (self-assertion: expected stdout URL was not reported)"
+    elif [ "$mutant_kind" = empty ] \
+        && ! grep -qF 'returned empty stdout' "$output_path"; then
+        echo "empty stdout guard mutant: FAILED (self-assertion: empty result was misclassified)"
+    elif [ "$mutant_kind" = rc ] \
+        && ! grep -qF 'issue creation FAILED' "$output_path"; then
+        echo "gh failure gate mutant: FAILED (self-assertion: nonzero gh result was accepted)"
     else
         echo "FAIL: $mutant_kind mutant survived its value/truncation assertion (rc=$rc)" >&2
         FAILURES=$((FAILURES + 1))
@@ -316,19 +362,24 @@ run_issue_stderr_variant() {
     local label="$1"
     local source_path="$2"
     local expected="$3"
+    local stderr_bytes="$4"
     local case_path="$TMP_ROOT/${label}.sh"
     local output_path="$TMP_ROOT/${label}.out"
     local evidence_path="$TMP_ROOT/${label}-evidence.log"
     local marker='[gh stderr truncated at 4096 bytes]'
     local max_bytes=$((ISSUE_CAPTURE_LIMIT + ${#marker} + 2))
     local actual_bytes=0 rc=0
-    write_issue_stderr_case "$source_path" "$label" "$case_path"
+    write_issue_stderr_case "$source_path" "$label" "$stderr_bytes"
     bash "$case_path" > "$output_path" 2>&1 || rc=$?
     actual_bytes=$(stat -f%z "$evidence_path" 2>/dev/null || stat -c%s "$evidence_path")
     if [ "$expected" = ok ] && [ "$rc" -eq 0 ] \
         && grep -aFq "$marker" "$evidence_path" \
         && [ "$actual_bytes" -le "$max_bytes" ]; then
         echo "stderr evidence cap restored: ok (bytes=$actual_bytes <= $max_bytes)"
+    elif [ "$expected" = exact ] && [ "$rc" -eq 0 ] \
+        && ! grep -aFq "$marker" "$evidence_path" \
+        && [ "$actual_bytes" -eq "$ISSUE_CAPTURE_LIMIT" ]; then
+        echo "exact-cap stderr restored: ok (4096 bytes without false truncation marker)"
     elif [ "$expected" = failed ] && { [ "$actual_bytes" -gt "$max_bytes" ] || ! grep -aFq "$marker" "$evidence_path"; }; then
         echo "stderr evidence cap removed: FAILED (self-assertion: bytes=$actual_bytes)"
     else
@@ -347,10 +398,11 @@ write_issue_writer_case() {
     local install_capture_wrappers="$7"
     local bin="$TMP_ROOT/${label}-bin"
     local ready_path="$TMP_ROOT/${label}.ready"
-    local real_head real_cat real_stat real_wc
+    local trigger_path="$TMP_ROOT/${label}.trigger"
+    local grown_path="$TMP_ROOT/${label}.grown"
+    local real_head real_cat real_wc
     real_head="$(command -v head)"
     real_cat="$(command -v cat)"
-    real_stat="$(command -v stat)"
     real_wc="$(command -v wc)"
     mkdir -p "$TMP_ROOT/release/logs" "$bin"
     cat > "$bin/gh" <<EOF
@@ -359,7 +411,7 @@ set -euo pipefail
 # The gh leader exits after its child has written the initial payload. The child
 # therefore keeps gh's stdout descriptor open after the leader is gone.
 (
-    python3 - "$ready_path" "$mode" "$linger_s" <<'PY'
+    python3 - "$ready_path" "$mode" "$linger_s" "$trigger_path" "$grown_path" <<'PY'
 import sys
 import time
 from pathlib import Path
@@ -367,11 +419,22 @@ from pathlib import Path
 ready_path = Path(sys.argv[1])
 mode = sys.argv[2]
 linger_s = float(sys.argv[3])
-payload = b"https://example.invalid/issues/5274\\n" + (b"f" * 8192)
+trigger_path = Path(sys.argv[4])
+grown_path = Path(sys.argv[5])
+prefix = b"https://github.com/itismyfield/AgentDesk/issues/"
+payload = prefix + (b"7" if mode == "race" else b"5274\\n" + (b"f" * 8192))
 sys.stdout.buffer.write(payload)
 sys.stdout.buffer.flush()
 ready_path.write_text("ready", encoding="ascii")
-if mode == "finite":
+if mode == "race":
+    deadline = time.monotonic() + linger_s
+    while not trigger_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.005)
+    if trigger_path.exists():
+        sys.stdout.buffer.write(b"7" * 8192)
+        sys.stdout.buffer.flush()
+        grown_path.write_text("grown", encoding="ascii")
+elif mode == "finite":
     time.sleep(linger_s)
 else:
     deadline = time.monotonic() + linger_s
@@ -395,6 +458,14 @@ EOF
 set -euo pipefail
 target="\${@: -1}"
 if [[ "\$target" == *agentdesk-issue-stdout* ]]; then
+    if [ "$mode" = race ]; then
+        : > "$trigger_path"
+        for _ in {1..400}; do
+            [ -f "$grown_path" ] && break
+            sleep 0.005
+        done
+        [ -f "$grown_path" ]
+    fi
     "$real_head" "\$@" > "$TMP_ROOT/${label}.capture"
     "$real_wc" -c < "$TMP_ROOT/${label}.capture" > "$observation_path"
     "$real_cat" "$TMP_ROOT/${label}.capture"
@@ -408,6 +479,14 @@ EOF
 set -euo pipefail
 target="\${@: -1}"
 if [[ "\$target" == *agentdesk-issue-stdout* ]]; then
+    if [ "$mode" = race ]; then
+        : > "$trigger_path"
+        for _ in {1..400}; do
+            [ -f "$grown_path" ] && break
+            sleep 0.005
+        done
+        [ -f "$grown_path" ]
+    fi
     "$real_cat" "\$@" > "$TMP_ROOT/${label}.capture"
     "$real_wc" -c < "$TMP_ROOT/${label}.capture" > "$observation_path"
     "$real_cat" "$TMP_ROOT/${label}.capture"
@@ -416,17 +495,6 @@ else
 fi
 EOF
         chmod +x "$bin/cat"
-        cat > "$bin/stat" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-target="\${@: -1}"
-if [[ "\$target" == *agentdesk-issue-stdout* ]]; then
-    printf '%s\\n' 1
-else
-    exec "$real_stat" "\$@"
-fi
-EOF
-        chmod +x "$bin/stat"
     fi
     {
         printf '%s\n' 'set -euo pipefail'
@@ -491,7 +559,7 @@ run_issue_variant() {
     wait "${LISTENER_PIDS[${#LISTENER_PIDS[@]}-1]}" 2>/dev/null || true
     if [ "$expected" = "ok" ]; then
         if [ "$rc" -ne 0 ]; then
-            echo "FAIL: restored gh issue-create guard exceeded its 10s command budget" >&2
+            echo "FAIL: restored gh issue-create guard exceeded the 17s assertion deadline" >&2
             FAILURES=$((FAILURES + 1))
         else
             echo "gh issue create restored: ok"
@@ -538,7 +606,7 @@ run_issue_writer_variant() {
     local case_path="$TMP_ROOT/${label}.sh"
     local observation_path="$TMP_ROOT/${label}.captured-bytes"
     local measure_output="$TMP_ROOT/${label}.measure.out"
-    local rc=0 assertion_rc=0 observed=""
+    local rc=0 assertion_rc=0 value_assertion_rc=0 observed=""
     write_issue_writer_case "$source_path" "$mode" 2 "$label" "$case_path" \
         "$observation_path" 1
     measure_case "$case_path" "$label" > "$measure_output" 2>&1 || rc=$?
@@ -547,21 +615,32 @@ run_issue_writer_variant() {
         observed="$(tr -d '[:space:]' < "$observation_path")"
     fi
     if [ -z "$observed" ] || ! [[ "$observed" =~ ^[0-9]+$ ]] \
-        || [ "$observed" -gt "$ISSUE_CAPTURE_LIMIT" ]; then
+        || [ "$observed" -gt "$ISSUE_CAPTURE_READ_LIMIT" ]; then
         assertion_rc=1
     fi
+    if ! grep -qF 'returned truncated stdout' "$measure_output" \
+        || grep -qF 'Post-deploy smoke issue created (confirmed mode):' "$measure_output"; then
+        value_assertion_rc=1
+    fi
     if [ "$expected" = "ok" ]; then
-        if [ "$rc" -ne 0 ] || [ "$assertion_rc" -ne 0 ]; then
-            echo "FAIL: $mode writer exceeded the ${ISSUE_CAPTURE_LIMIT}-byte capture bound" >&2
+        if [ "$rc" -ne 0 ] || [ "$assertion_rc" -ne 0 ] || [ "$value_assertion_rc" -ne 0 ]; then
+            echo "FAIL: $mode writer exceeded the capture lookahead or reported its capped value" >&2
             FAILURES=$((FAILURES + 1))
         else
-            echo "$mode writer restored: ok (read_bytes=$observed <= $ISSUE_CAPTURE_LIMIT)"
+            echo "$mode writer restored: ok (read_bytes=$observed <= $ISSUE_CAPTURE_READ_LIMIT; capped value rejected)"
+        fi
+    elif [ "$expected" = "truncation" ]; then
+        if grep -qF 'Post-deploy smoke issue created (confirmed mode):' "$measure_output"; then
+            echo "$mode growth-window truncation mutant: FAILED (self-assertion: capped value was reported)"
+        else
+            echo "FAIL: removing truncation detection did not report the $mode capped value" >&2
+            FAILURES=$((FAILURES + 1))
         fi
     elif [ "$assertion_rc" -eq 0 ]; then
         echo "FAIL: removing the capture bound did not fail the $mode writer assertion" >&2
         FAILURES=$((FAILURES + 1))
     else
-        echo "$mode writer cap removed: FAILED (self-assertion: read_bytes=$observed > $ISSUE_CAPTURE_LIMIT)"
+        echo "$mode writer cap removed: FAILED (self-assertion: read_bytes=$observed > $ISSUE_CAPTURE_READ_LIMIT)"
     fi
 }
 
@@ -572,6 +651,8 @@ MUTATED_ISSUE_READ="$TMP_ROOT/deploy-unbounded-issue-read.sh"
 MUTATED_ISSUE_VALUE="$TMP_ROOT/deploy-mutant-issue-value.sh"
 MUTATED_ISSUE_TRUNCATION="$TMP_ROOT/deploy-no-stdout-truncation.sh"
 MUTATED_ISSUE_MERGE="$TMP_ROOT/deploy-merged-issue-streams.sh"
+MUTATED_ISSUE_EMPTY_GUARD="$TMP_ROOT/deploy-no-empty-stdout-guard.sh"
+MUTATED_ISSUE_RC_GATE="$TMP_ROOT/deploy-no-gh-rc-gate.sh"
 python3 - "$DEPLOY_SH" "$MUTATED_NOTIFY" "$MUTATED_ISSUE" <<'PY'
 import sys
 from pathlib import Path
@@ -610,31 +691,51 @@ import sys
 from pathlib import Path
 
 source = Path(sys.argv[1]).read_text()
-needle = 'head -c "$issue_capture_limit"'
+needle = 'head -c "$((issue_capture_limit + 1))"'
 assert source.count(needle) == 2
 mutated = source.replace(needle, "cat")
+mutated = mutated.replace(
+    '"${issue_stderr:0:issue_capture_limit}"',
+    '"$issue_stderr"',
+    1,
+)
 assert mutated != source
 Path(sys.argv[2]).write_text(mutated)
 PY
-python3 - "$DEPLOY_SH" "$MUTATED_ISSUE_VALUE" "$MUTATED_ISSUE_TRUNCATION" <<'PY'
+python3 - "$DEPLOY_SH" "$MUTATED_ISSUE_VALUE" "$MUTATED_ISSUE_TRUNCATION" \
+    "$MUTATED_ISSUE_EMPTY_GUARD" "$MUTATED_ISSUE_RC_GATE" <<'PY'
 import sys
 from pathlib import Path
 
 source = Path(sys.argv[1]).read_text()
 value = source.replace(
-    'issue_url=$(head -c "$issue_capture_limit" "$tmp_issue_stdout")',
-    "issue_url=$(printf '%s\\n' 'MUTANT-NOT-A-URL')",
+    'issue_url=$(head -c "$((issue_capture_limit + 1))" "$tmp_issue_stdout" 2>/dev/null; printf x)',
+    "issue_url=$(printf '%s' 'MUTANT-NOT-A-URLx')",
     1,
 )
 truncation = source.replace(
-    'if [ "${issue_stdout_bytes:-0}" -ge "$issue_capture_limit" ] 2>/dev/null; then',
+    'if [ "${#issue_url}" -gt "$issue_capture_limit" ]; then',
     'if false; then',
+    1,
+)
+empty_guard = source.replace(
+    '''elif issue_url=${issue_url%$'\\n'}; [ -z "$issue_url" ]; then''',
+    '''elif issue_url=${issue_url%$'\\n'}; false; then''',
+    1,
+)
+rc_gate = source.replace(
+    '                if [ "$rc" -eq 0 ]; then',
+    '                if true; then',
     1,
 )
 assert value != source
 assert truncation != source
+assert empty_guard != source
+assert rc_gate != source
 Path(sys.argv[2]).write_text(value)
 Path(sys.argv[3]).write_text(truncation)
+Path(sys.argv[4]).write_text(empty_guard)
+Path(sys.argv[5]).write_text(rc_gate)
 PY
 python3 - "$DEPLOY_SH" "$MUTATED_ISSUE_MERGE" <<'PY'
 import sys
@@ -652,7 +753,8 @@ PY
 
 for syntax_path in "$DEPLOY_SH" "$MUTATED_NOTIFY" "$MUTATED_ISSUE" \
     "$MUTATED_ISSUE_PIPE" "$MUTATED_ISSUE_READ" "$MUTATED_ISSUE_VALUE" \
-    "$MUTATED_ISSUE_TRUNCATION" "$MUTATED_ISSUE_MERGE"; do
+    "$MUTATED_ISSUE_TRUNCATION" "$MUTATED_ISSUE_MERGE" \
+    "$MUTATED_ISSUE_EMPTY_GUARD" "$MUTATED_ISSUE_RC_GATE"; do
     if bash -n "$syntax_path"; then
         echo "bash -n rc=0: $(basename "$syntax_path")"
     else
@@ -664,16 +766,23 @@ done
 run_issue_output_variant restored_value "$DEPLOY_SH" valid value
 run_issue_output_mutant mutant_value "$MUTATED_ISSUE_VALUE" valid value
 run_issue_output_mutant mutant_merge "$MUTATED_ISSUE_MERGE" valid merge
+run_issue_output_variant restored_exact "$DEPLOY_SH" exact exact
 run_issue_output_variant restored_truncation "$DEPLOY_SH" truncated truncation
 run_issue_output_mutant mutant_truncation "$MUTATED_ISSUE_TRUNCATION" truncated truncation
-run_issue_stderr_variant restored_stderr "$DEPLOY_SH" ok
-run_issue_stderr_variant removed_stderr "$MUTATED_ISSUE_READ" failed
+run_issue_output_variant restored_empty "$DEPLOY_SH" empty empty
+run_issue_output_mutant mutant_empty "$MUTATED_ISSUE_EMPTY_GUARD" empty empty
+run_issue_output_variant restored_partial "$DEPLOY_SH" partial invalid
+run_issue_output_variant restored_failure "$DEPLOY_SH" failure failure
+run_issue_output_mutant mutant_rc "$MUTATED_ISSUE_RC_GATE" failure rc
+run_issue_stderr_variant restored_stderr "$DEPLOY_SH" ok 8192
+run_issue_stderr_variant restored_exact_stderr "$DEPLOY_SH" exact 4096
+run_issue_stderr_variant removed_stderr "$MUTATED_ISSUE_READ" failed 8192
 
 TCP_LISTENER_AVAILABLE=1
 TCP_PROBE_READY="$TMP_ROOT/tcp-probe.port"
 if ! start_hanging_listener "$TCP_PROBE_READY"; then
     TCP_LISTENER_AVAILABLE=0
-    SKIPPED_CASES=$((SKIPPED_CASES + 4))
+    record_skipped_cases 4
     echo "SKIP: loopback TCP bind is unavailable in this restricted runner; " \
         "the same listener mutation cases are exercised when local sockets are permitted"
 fi
@@ -690,6 +799,8 @@ run_issue_writer_variant restored_finite "$DEPLOY_SH" finite ok
 run_issue_writer_variant removed_finite "$MUTATED_ISSUE_READ" finite failed
 run_issue_writer_variant restored_persistent "$DEPLOY_SH" persistent ok
 run_issue_writer_variant removed_persistent "$MUTATED_ISSUE_READ" persistent failed
+run_issue_writer_variant restored_growth_window "$DEPLOY_SH" race ok
+run_issue_writer_variant mutant_growth_window "$MUTATED_ISSUE_TRUNCATION" race truncation
 
 python3 - "$RELAY_PY" "$MATRIX_PY" <<'PY'
 import ast
@@ -766,6 +877,20 @@ def probe(module, matrix_module) -> None:
                 os.environ[name] = value
 
 
+def probe_nonfinite(module) -> None:
+    for raw in ("nan", "inf"):
+        with contextlib.redirect_stderr(io.StringIO()) as warning:
+            bounded = module._bounded_value(
+                raw,
+                source="nonfinite-probe",
+                default=180.0,
+                minimum=1.0,
+                maximum=180.0,
+            )
+        assert bounded == 180.0, (raw, bounded)
+        assert "is invalid; clamped to 180.0" in warning.getvalue(), warning.getvalue()
+
+
 def probe_cli(module, matrix_module=None) -> None:
     """A huge explicit CLI value must be clamped independently of env defaults."""
 
@@ -814,8 +939,27 @@ with tempfile.TemporaryDirectory(prefix="agentdesk-e1-mutation-") as temp_dir:
     restored_module = load(source_path, "run_tui_relay")
     restored_matrix = load_matrix(restored_module, "matrix_5274_restored")
     probe(restored_module, restored_matrix)
+    probe_nonfinite(restored_module)
     probe_cli(restored_module, restored_matrix)
-    print("E-1/matrix guards restored: ok (1e12 inputs clamped; warnings observed at parse)")
+    print("E-1/matrix guards restored: ok (1e12/nan/inf inputs clamped; warnings observed)")
+
+    nonfinite_source = source.replace(
+        '''        if not math.isfinite(parsed_float):
+            raise ValueError("non-finite")
+''',
+        "",
+        1,
+    )
+    assert nonfinite_source != source
+    compile(nonfinite_source, str(temp_path), "exec")
+    temp_path.write_text(nonfinite_source)
+    try:
+        nonfinite_mutant = load(temp_path, "run_tui_relay_nonfinite_removed")
+        probe_nonfinite(nonfinite_mutant)
+    except (AssertionError, ValueError) as error:
+        print(f"math.isfinite guard removed: FAILED (self-assertion: {error})")
+    else:
+        raise SystemExit("removing math.isfinite did not fail its non-finite assertion")
 
     tui_cli_source = source.replace(
         '''    args.turn_start_timeout_s = _bounded_value(
@@ -894,7 +1038,7 @@ if [ "$FAILURES" -ne 0 ]; then
     exit 1
 fi
 if [ "$SKIPPED_CASES" -gt 0 ]; then
-    echo "test_deploy_bounded_calls_5274: completed with skipped=$SKIPPED_CASES (not evaluated); remaining assertions passed"
-else
-    echo "test_deploy_bounded_calls_5274: all assertions passed; skipped=0"
+    echo "test_deploy_bounded_calls_5274: incomplete with skipped=$SKIPPED_CASES (not evaluated); remaining assertions passed" >&2
+    exit 2
 fi
+echo "test_deploy_bounded_calls_5274: all assertions passed; skipped=0"

@@ -891,7 +891,7 @@ _rollback_release_binary() {
     domain="$(_launchd_domain)" || domain="gui/$(id -u 2>/dev/null)"
     # Stop the crash-looping new process before swapping the binary back.
     # NOTE: bootstrap may not spawn process (runs=0) despite rc=0 (#5151 root cause).
-    # Release rollback has tmux fallback (line 897) + health check (line 899); if bootstrap
+    # Release rollback has start_release_tmux_fallback + wait_for_http_service_health; if bootstrap
     # succeeds but process doesn't spawn, tmux fallback will restart via SSH.
     # Observed issue (#5151): explicit kickstart required after bootstrap. Scope: PG tunnel
     # only for now; release rollback suitable for future unification if measured necessary.
@@ -3144,7 +3144,8 @@ _run_post_deploy_functional_smoke() {
 
 _report_post_deploy_smoke_failure() {
     local draft_path="$ADK_REL/logs/post-deploy-smoke-issue-draft-${POST_DEPLOY_SMOKE_STAMP}.md"
-    local commit_sha node_name issue_url finding alert_text tmp_issue_stdout tmp_issue_stderr issue_stdout_bytes issue_stderr_bytes rc issue_capture_limit=4096
+    local commit_sha node_name issue_url finding alert_text
+    local issue_stderr tmp_issue_stdout tmp_issue_stderr rc issue_capture_limit=4096 LC_ALL=C
     commit_sha=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || printf 'unknown')
     node_name=$(hostname 2>/dev/null || printf 'unknown')
 
@@ -3194,21 +3195,20 @@ relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE:-not run: wedge check d
                 else
                     rc=$?
                 fi
-                issue_stderr_bytes=$(stat -f%z "$tmp_issue_stderr" 2>/dev/null || stat -c%s "$tmp_issue_stderr" 2>/dev/null || printf '%s' "$issue_capture_limit")
-                issue_stderr_bytes=${issue_stderr_bytes//[[:space:]]/}
-                head -c "$issue_capture_limit" "$tmp_issue_stderr" >> "$POST_DEPLOY_SMOKE_EVIDENCE" 2>/dev/null || true
-                if [ "${issue_stderr_bytes:-0}" -ge "$issue_capture_limit" ] 2>/dev/null; then
-                    printf '\n[gh stderr truncated at %s bytes]\n' "$issue_capture_limit" >> "$POST_DEPLOY_SMOKE_EVIDENCE"
-                fi
+                issue_stderr=$(head -c "$((issue_capture_limit + 1))" "$tmp_issue_stderr" 2>/dev/null; printf x); issue_stderr=${issue_stderr%x}
+                printf '%s' "${issue_stderr:0:issue_capture_limit}" >> "$POST_DEPLOY_SMOKE_EVIDENCE"
+                [ "${#issue_stderr}" -le "$issue_capture_limit" ] || printf '\n[gh stderr truncated at %s bytes]\n' "$issue_capture_limit" >> "$POST_DEPLOY_SMOKE_EVIDENCE"
                 if [ "$rc" -eq 0 ]; then
-                    issue_stdout_bytes=$(stat -f%z "$tmp_issue_stdout" 2>/dev/null || stat -c%s "$tmp_issue_stdout" 2>/dev/null || printf '%s' "$issue_capture_limit")
-                    issue_stdout_bytes=${issue_stdout_bytes//[[:space:]]/}
-                    if [ "${issue_stdout_bytes:-0}" -ge "$issue_capture_limit" ] 2>/dev/null; then
+                    issue_url=$(head -c "$((issue_capture_limit + 1))" "$tmp_issue_stdout" 2>/dev/null; printf x)
+                    issue_url=${issue_url%x}
+                    if [ "${#issue_url}" -gt "$issue_capture_limit" ]; then
                         echo "⚠ Post-deploy smoke issue creation returned truncated stdout; draft retained: $draft_path"
-                    elif issue_url=$(head -c "$issue_capture_limit" "$tmp_issue_stdout") && [ -n "$issue_url" ]; then
+                    elif issue_url=${issue_url%$'\n'}; [ -z "$issue_url" ]; then
+                        echo "⚠ Post-deploy smoke issue creation returned empty stdout; draft retained: $draft_path"
+                    elif [[ "$issue_url" =~ ^https://github\.com/itismyfield/AgentDesk/issues/[0-9]+$ ]]; then
                         echo "⚠ Post-deploy smoke issue created (confirmed mode): $issue_url"
                     else
-                        echo "⚠ Post-deploy smoke issue creation returned empty stdout; draft retained: $draft_path"
+                        echo "⚠ Post-deploy smoke issue creation returned invalid stdout; draft retained: $draft_path"
                     fi
                 else
                     echo "⚠ Post-deploy smoke issue creation FAILED; draft retained: $draft_path"
