@@ -3162,6 +3162,14 @@ def run_one_cell(
             )
         if "send_discord_prompt" in step:
             _prepare_first_prompt_window()
+            if scenario.get("durable_delivery_probe"):
+                safety = durable_probe_safety_gate(
+                    base_url=args.base_url, cell=cell, channel_id=channel_id,
+                    runtime_root=Path(args.queue_runtime_root), lease_run_id=f"{cell}-{run_id}",
+                )
+                if safety["status"] != "idle":
+                    record["dirty_active_residue"] = safety
+                    return record
             window.mark_prompt_sent()
             last_sent_prompt = str(step["send_discord_prompt"]).replace("{run_id}", run_id)
             response = client.send(channel_id, last_sent_prompt)

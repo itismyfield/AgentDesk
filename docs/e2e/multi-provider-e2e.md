@@ -137,12 +137,16 @@ and turn nonce identities; and was current-generation at writer-lock time. On
 this probed short terminal path, reaching the writer follows that turn's
 successful lease commit. E-35 therefore detects both a frontier-only partial
 write and a normal-to-headless `send_prompt` regression that omits the receipt.
-The post-deploy invocation disables reset/force-cancel, rechecks standby,
-target-idle/queue state, and its cell lease immediately before setup, and makes
-busy or dirty residue `unevaluable` without attempting cleanup. Its single
-900-second wall-clock deadline covers the gate, lease, setup/send/fetch HTTP,
-response wait, record poll, final refetch, idle check, and teardown; expiry is a
-fail-open functional finding after `DEPLOY_OK`.
+The post-deploy invocation disables reset/force-cancel and rechecks standby,
+target-idle/queue state, and its cell lease before setup and immediately before
+the normal prompt. Busy or dirty residue becomes `unevaluable` without cleanup.
+With the default HTTP timeouts, the prompt-time recheck narrows the nominal
+gate-return-to-prompt window from 368 seconds to 0 seconds, and the
+last-mailbox-snapshot-to-prompt window from 373 seconds to 5 seconds. It does not close the
+TOCTOU: local filesystem/scheduling has no hard bound, and a turn can start after
+the recheck and before send. Its single 900-second wall-clock deadline covers the
+gate, lease, setup/send/fetch HTTP, response wait, record poll, final refetch,
+idle check, and teardown; expiry is a fail-open finding after `DEPLOY_OK`.
 
 #5264 is a hard prerequisite only for default `claude-tui` live acceptance.
 `claude-pipe` is allowed as `partial coverage`, but is not S8 TUI-surface
@@ -157,8 +161,15 @@ completed-ledger persistence, lease acquisition/clear/restart reconciliation,
 continuous health, or S8 rollout. E-35 PASS does not distinguish the spawn writer
 from the `restore.rs` old-generation adoption writer. When `.generation` remains
 absent, ledger-only state cannot satisfy the receipt/frontier conjunct; however,
-adoption can create the marker first, so without #5264 default `claude-tui`
-acceptance can pass nondeterministically (a flaky green). The safety gate also
+adoption can create the marker first and let the redundant positive/current-
+generation defenses be satisfied together, so without #5264 default `claude-tui`
+acceptance can pass nondeterministically (a flaky green). Those Rust defenses are
+repeated across `exact_receipt_from_inflight`,
+`ExactJsonlSourceIdentity::is_authoritative`, `shadow_mirror_delivered_frontier_inner`,
+and `write_confirmed_frontier_guarded_at_with_lock_authority`: construction and
+identity checks reject zero/incomplete authority, the mirror rejects a zero
+generation or range, and the lock-held writer rereads the current generation. An
+E-35 PASS also includes post-scenario mailbox/queue idle evidence. The safety gate
 depends directly on private `lease._read_lease` because no public read API exists;
 an underscore-function refactor can silently leave E-35 fail-closed and
 `unevaluable` until the coupling is updated.

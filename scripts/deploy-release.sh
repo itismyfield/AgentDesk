@@ -3213,7 +3213,7 @@ _report_post_deploy_smoke_failure() {
         printf -- '- Port: `%s`\n' "$REL_PORT"
         printf -- '- Evidence: `%s`\n\n' "$POST_DEPLOY_SMOKE_EVIDENCE"
         printf -- '- Relay wedge coverage: `%s`\n\n' "${POST_DEPLOY_SMOKE_WEDGE_COVERAGE:-not run: wedge check did not execute}"
-        printf -- '- Durable record coverage: `%s`\n\n' "$POST_DEPLOY_SMOKE_DURABLE_COVERAGE"
+        printf -- '- Durable record coverage: `%s`\n\n' "${POST_DEPLOY_SMOKE_DURABLE_COVERAGE:-unevaluable: E-35 did not run}"
         printf '## Findings\n\n'
         for finding in "${POST_DEPLOY_SMOKE_FAILURES[@]}"; do
             printf -- '- %s\n' "$finding"
@@ -3233,7 +3233,7 @@ evidence: ${POST_DEPLOY_SMOKE_EVIDENCE}"
     alert_text="${alert_text}
 relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE:-not run: wedge check did not execute}"
     alert_text="${alert_text}
-durable record coverage: ${POST_DEPLOY_SMOKE_DURABLE_COVERAGE}"
+durable record coverage: ${POST_DEPLOY_SMOKE_DURABLE_COVERAGE:-unevaluable: E-35 did not run}"
     for finding in "${POST_DEPLOY_SMOKE_FAILURES[@]}"; do
         alert_text="${alert_text}
 - ${finding}"

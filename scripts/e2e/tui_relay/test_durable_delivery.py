@@ -86,6 +86,29 @@ class RecordFixtures(unittest.TestCase):
         self.write(_record(_receipt(222, generation=77), generation=88))
         self.assertEqual(self.scan()["status"], "failed")
 
+    def test_receipt_range_requires_covering_frontier(self):
+        self.write(_record(_receipt(222), end=15))
+        self.assertEqual(self.scan()["status"], "failed")
+
+    def test_frontier_panel_channel_must_match_delivery_channel(self):
+        self.write(_record(_receipt(222)))
+        record_path = self.records / "42.json"
+        record = json.loads(record_path.read_text())
+        record["delivered_frontier"]["panel_channel_id"] = 100
+        record_path.write_text(json.dumps(record))
+        self.assertEqual(self.scan()["status"], "failed")
+
+    def test_receipt_requires_nonempty_tmux_session_and_turn_nonce(self):
+        receipt = _receipt(222)
+        receipt["source"]["tmux_session_name"] = ""
+        receipt["source"]["turn_nonce"] = ""
+        self.write(_record(receipt))
+        self.assertEqual(self.scan()["status"], "failed")
+
+    def test_receipt_owner_must_match_record_filename(self):
+        self.write(_record(_receipt(222)), owner="7")
+        self.assertEqual(self.scan()["status"], "failed")
+
     def test_unrelated_generation_marker_does_not_override_committed_record_proof(self):
         self.write(_record(_receipt(222)))
         (self.root / "AgentDesk-claude-e2e.generation").write_text("88")
@@ -203,6 +226,34 @@ class SafetyAndDeadlineFixtures(unittest.TestCase):
         run_one.assert_not_called()
         reset.assert_not_called()
 
+    def test_safety_gate_requires_current_probe_lease_ownership(self):
+        idle_mailbox = {
+            "provider": "claude",
+            "channel_id": "99",
+            "agent_turn_status": "idle",
+            "relay_stall_state": "healthy",
+            "relay_health": {"active_turn": "none"},
+        }
+        with tempfile.TemporaryDirectory() as root, patch.object(
+            driver,
+            "_read_api_json",
+            side_effect=[
+                (200, {"cluster_standby": False}),
+                (200, {"sessions": []}),
+            ],
+        ), patch.object(
+            driver, "_read_health_detail", return_value={"mailboxes": [idle_mailbox]}
+        ), patch.object(driver.lease, "_read_lease", return_value=None):
+            result = driver.durable_probe_safety_gate(
+                base_url="http://agentdesk.test",
+                cell="claude-tui",
+                channel_id="99",
+                runtime_root=Path(root),
+                lease_run_id="claude-tui-fixture",
+            )
+        self.assertEqual(result["status"], "unevaluable", result)
+        self.assertIn("E2E cell lease is not held by this probe", result["reasons"])
+
     def test_idle_gate_pass_never_enters_reset_for_durable_probe(self):
         with tempfile.TemporaryDirectory() as root, patch.object(
             driver,
@@ -221,6 +272,83 @@ class SafetyAndDeadlineFixtures(unittest.TestCase):
         gate.assert_called_once()
         run_one.assert_called_once()
         reset.assert_not_called()
+
+    def test_prompt_recheck_refuses_new_busy_state_without_cleanup(self):
+        class Client:
+            def send_control(self, _channel, _content): return {"message_id": "100"}
+            def fetch_messages(self, _channel, **_kwargs): return []
+            def send(self, _channel, _content): raise AssertionError("prompt sent")
+
+        idle = {"status": "idle", "dirty_active_residue": False}
+        busy = {
+            "status": "unevaluable",
+            "dirty_active_residue": True,
+            "reasons": ["agent_turn_status=active"],
+        }
+        with tempfile.TemporaryDirectory() as root, patch.object(
+            driver, "durable_probe_safety_gate", side_effect=[idle, busy]
+        ) as gate, patch.object(driver, "reset_channel_state") as reset, patch.object(
+            driver.time, "sleep"
+        ):
+            result = driver.run_scenario(
+                {**self._scenario(), "agent_mode": "real_live"},
+                args=self._args(root),
+                run_id="fixture",
+                client=Client(),
+            )
+        self.assertEqual(gate.call_count, 2)
+        self.assertEqual(result["status"], "fail", result)
+        self.assertEqual(result["durable_record_probe"]["status"], "unevaluable")
+        self.assertEqual(result["dirty_active_residue"], busy)
+        reset.assert_not_called()
+
+    def test_recheck_to_send_residual_window_and_honesty_claim_are_pinned(self):
+        state = {"prompt_sent_after_recheck_race": False}
+        class Client:
+            base_url = "http://agentdesk.test"
+            def send_control(self, _channel, _content): return {"message_id": "100"}
+            def fetch_messages(self, _channel, **_kwargs): return []
+
+            def send(self, _channel, _content):
+                state["prompt_sent_after_recheck_race"] = True
+                return {"message_id": "111"}
+
+        scenario = {
+            **self._scenario(),
+            "agent_mode": "real_live",
+            "steps": [
+                {"send_discord_prompt": "marker"},
+                {"wait_for_discord_text": "marker", "timeout_s": 1},
+            ],
+        }
+        idle = {"status": "idle", "dirty_active_residue": False}
+        with tempfile.TemporaryDirectory() as root, patch.object(
+            driver, "durable_probe_safety_gate", return_value=idle
+        ) as gate, patch.object(driver.time, "sleep"), patch.object(
+            driver,
+            "wait_for_discord_text_with_tui_idle_draft_guard",
+            return_value=({"id": "222"}, []),
+        ), patch.object(
+            driver.durable_delivery,
+            "poll_records",
+            return_value={"status": "evaluated", "reason": "fixture"},
+        ), patch.object(driver, "assert_cell_idle", return_value={"status": "idle"}):
+            result = driver.run_scenario(
+                scenario,
+                args=self._args(root),
+                run_id="fixture",
+                client=Client(),
+            )
+        claim = " ".join((ROOT / "docs/e2e/multi-provider-e2e.md").read_text().split())
+        self.assertIn(
+            "the prompt-time recheck narrows the nominal gate-return-to-prompt window "
+            "from 368 seconds to 0 seconds, and the last-mailbox-snapshot-to-prompt "
+            "window from 373 seconds to 5 seconds. it does not close the toctou",
+            claim.lower(),
+        )
+        self.assertEqual(gate.call_count, 2)
+        self.assertTrue(state["prompt_sent_after_recheck_race"])
+        self.assertEqual(result["status"], "pass", result)
 
     @unittest.skipUnless(hasattr(signal, "setitimer"), "POSIX wall-clock timer required")
     def test_phase_deadline_interrupts_blocking_work(self):
