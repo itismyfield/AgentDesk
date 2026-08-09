@@ -33,7 +33,8 @@ GOOD_COMMAND = "cargo test --lib high_risk_recovery:: -- --test-threads=1"
 def build_fixture_repo(root: Path, command: str,
                        just_command: str | None = None,
                        just_text: str | None = None,
-                       integration_test: bool = False) -> Path:
+                       integration_test: bool = False,
+                       bin_test: bool = False) -> Path:
     """Materialize a minimal crate + workflow mirroring the real layout."""
     (root / "src").mkdir(parents=True)
     (root / "src" / "server").mkdir()
@@ -64,7 +65,16 @@ def build_fixture_repo(root: Path, command: str,
     (root / "src" / "redirected_impl.rs").write_text(
         "#[cfg(test)]\nmod tests {}\n", encoding="utf-8"
     )
-    (root / "src" / "main.rs").write_text("fn main() {}\n", encoding="utf-8")
+    (root / "src" / "main.rs").write_text(
+        "mod bin_owned;\nfn main() {}\n" if bin_test else "fn main() {}\n",
+        encoding="utf-8",
+    )
+    if bin_test:
+        (root / "src" / "bin_owned.rs").write_text(
+            "#[cfg(test)]\nmod tests {\n"
+            "    #[test]\n    fn owned_case() {}\n}\n",
+            encoding="utf-8",
+        )
     workflows = root / ".github" / "workflows"
     workflows.mkdir(parents=True)
     workflow = workflows / "ci-fixture.yml"
@@ -101,11 +111,12 @@ def build_fixture_repo(root: Path, command: str,
 def run_fixture(command: str, allowlist: str = "",
                 just_command: str | None = None,
                 just_text: str | None = None,
-                integration_test: bool = False) -> list:
+                integration_test: bool = False,
+                bin_test: bool = False) -> list:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         workflow = build_fixture_repo(
-            root, command, just_command, just_text, integration_test
+            root, command, just_command, just_text, integration_test, bin_test
         )
         allow = root / "allowlist.txt"
         allow.write_text(allowlist, encoding="utf-8")
@@ -160,9 +171,20 @@ class MutationProof(unittest.TestCase):
             spec.skipped,
             "fixture self-assert: --all-targets must stay observed",
         )
+        self.assertIs(spec.selection, integrity.TargetSelection.ALL_TARGETS)
+        self.assertEqual(
+            spec.targets, (),
+            "fixture self-assert: --all-targets must not collapse to lib",
+        )
         self.assertEqual(run_fixture(
             "cargo test --all-targets integration_only_case",
             integration_test=True,
+        ), [])
+
+    def test_all_targets_bin_owned_filter_is_not_rejected(self) -> None:
+        self.assertEqual(run_fixture(
+            "cargo test --all-targets bin_owned::tests::owned_case",
+            bin_test=True,
         ), [])
 
     def test_all_targets_lib_filter_fixed_passes(self) -> None:
@@ -177,6 +199,33 @@ class MutationProof(unittest.TestCase):
         )
         self.assertEqual([violation.kind for violation in violations],
                          ["zero-match"])
+
+    def test_literal_typo_is_checked_with_adjacent_shell_dynamic_arg(self) -> None:
+        for dynamic in ("${EXTRA_ARGS}", "$EXTRA_ARGS"):
+            with self.subTest(dynamic=dynamic):
+                violations = run_fixture(
+                    "cargo test --lib high_risk_recovery::renamed_case "
+                    + dynamic
+                )
+                self.assertEqual([violation.kind for violation in violations],
+                                 ["zero-match"])
+
+    def test_literal_typo_is_checked_with_adjacent_just_dynamic_arg(self) -> None:
+        violations = run_fixture(
+            GOOD_COMMAND,
+            just_text=(
+                "fixture EXTRA_ARGS:\n"
+                "    cargo test --lib high_risk_recovery::renamed_case "
+                "{{EXTRA_ARGS}}\n"
+            ),
+        )
+        self.assertEqual([violation.kind for violation in violations],
+                         ["zero-match"])
+
+    def test_dynamic_only_filter_does_not_create_false_zero_match(self) -> None:
+        self.assertEqual(run_fixture(
+            "cargo test --lib ${TEST_FILTER} ${EXTRA_ARGS}"
+        ), [])
 
     def test_skip_filters_are_counted_in_final_selection(self) -> None:
         violations = run_fixture(
@@ -200,6 +249,93 @@ class MutationProof(unittest.TestCase):
         self.assertEqual([violation.kind for violation in violations],
                          ["zero-match"])
 
+    def test_mixed_positive_hit_and_miss_uses_union_selection(self) -> None:
+        self.assertEqual(run_fixture(
+            "cargo test --lib high_risk_recovery::tests::recovery_case -- "
+            "no_such_case"
+        ), [])
+
+    def test_exact_mixed_positive_hit_and_miss_uses_union_selection(self) -> None:
+        self.assertEqual(run_fixture(
+            "cargo test --lib high_risk_recovery::tests::recovery_case -- "
+            "--exact no_such_case"
+        ), [])
+
+    def test_all_positive_filters_missing_is_zero_match(self) -> None:
+        violations = run_fixture(
+            "cargo test --lib no_such_case -- another_missing_case"
+        )
+        self.assertEqual([violation.kind for violation in violations],
+                         ["zero-match"])
+
+    def test_duplicate_and_mixed_positive_hits_keep_union_nonempty(self) -> None:
+        self.assertEqual(run_fixture(
+            "cargo test --lib high_risk_recovery::tests::recovery_case -- "
+            "high_risk_recovery::tests::recovery_case no_such_case"
+        ), [])
+
+    def test_exact_full_id_skip_empties_positive_union(self) -> None:
+        violations = run_fixture(
+            "cargo test --lib high_risk_recovery::tests::recovery_case -- "
+            "--exact no_such_case "
+            "--skip high_risk_recovery::tests::recovery_case"
+        )
+        self.assertEqual([violation.kind for violation in violations],
+                         ["zero-match"])
+
+    def test_libtest_logfile_separate_value_is_not_a_filter(self) -> None:
+        command = (
+            "cargo test --lib high_risk_recovery::tests::recovery_case -- "
+            "--logfile fixture.log"
+        )
+        self.assertEqual(run_fixture(command), [])
+        self.assertEqual(
+            integrity.parse_command(command.split()).filters,
+            ("high_risk_recovery::tests::recovery_case",),
+            "fixture self-assert: --logfile PATH must consume PATH",
+        )
+
+    def test_libtest_logfile_equal_value_is_not_a_filter(self) -> None:
+        command = (
+            "cargo test --lib high_risk_recovery::tests::recovery_case -- "
+            "--logfile=fixture.log"
+        )
+        self.assertEqual(run_fixture(command), [])
+        self.assertEqual(
+            integrity.parse_command(command.split()).filters,
+            ("high_risk_recovery::tests::recovery_case",),
+            "fixture self-assert: --logfile=PATH must not leak PATH",
+        )
+
+    def test_supported_libtest_value_options_do_not_leak_values(self) -> None:
+        values = {
+            "--test-threads": "1",
+            "--format": "pretty",
+            "--color": "always",
+            "--logfile": "fixture.log",
+            "-Z": "unstable-options",
+        }
+        self.assertEqual(set(values), set(integrity.LIBTEST_VALUE_OPTIONS))
+        for option, value in values.items():
+            with self.subTest(option=option):
+                spec = integrity.parse_command([
+                    "cargo", "test", "--lib",
+                    "high_risk_recovery::tests::recovery_case", "--",
+                    option, value,
+                ])
+                self.assertEqual(
+                    spec.filters,
+                    ("high_risk_recovery::tests::recovery_case",),
+                )
+        flag_only = integrity.parse_command([
+            "cargo", "test", "--lib",
+            "high_risk_recovery::tests::recovery_case", "--",
+            "--nocapture", "no_such_case",
+        ])
+        self.assertEqual(flag_only.filters, (
+            "high_risk_recovery::tests::recovery_case", "no_such_case",
+        ))
+
     def test_just_interpolation_is_dynamic_not_a_literal_filter(self) -> None:
         self.assertEqual(run_fixture(
             GOOD_COMMAND,
@@ -213,6 +349,24 @@ class MutationProof(unittest.TestCase):
         self.assertEqual(run_fixture(
             GOOD_COMMAND,
             just_text='fixture:\n    echo "cargo test --lib documentation_only"\n',
+        ), [])
+
+    def test_just_unquoted_echo_cargo_text_is_not_a_command(self) -> None:
+        self.assertEqual(run_fixture(
+            GOOD_COMMAND,
+            just_text=(
+                f"real:\n    {GOOD_COMMAND}\n"
+                "fixture:\n    echo cargo test --lib documentation_only\n"
+            ),
+        ), [])
+
+    def test_just_unquoted_printf_cargo_text_is_not_a_command(self) -> None:
+        self.assertEqual(run_fixture(
+            GOOD_COMMAND,
+            just_text=(
+                f"real:\n    {GOOD_COMMAND}\n"
+                "fixture:\n    printf cargo test --lib documentation_only\n"
+            ),
         ), [])
 
     def test_top_level_just_assignment_after_recipe_is_not_a_command(self) -> None:
@@ -346,6 +500,18 @@ class AllowlistContract(unittest.TestCase):
 
 
 class ParserContract(unittest.TestCase):
+    def test_real_repo_direct_extraction_surface_stays_at_153(self) -> None:
+        workflow_count = sum(
+            len(integrity.extract_commands(workflow))
+            for workflow in (REPO_ROOT / ".github/workflows").glob("*.yml")
+        )
+        justfile_count = len(integrity.extract_justfile_commands(
+            REPO_ROOT / "justfile"
+        ))
+        self.assertEqual(workflow_count, 66)
+        self.assertEqual(justfile_count, 87)
+        self.assertEqual(workflow_count + justfile_count, 153)
+
     def test_all_targets_and_unfiltered_commands_are_skipped(self) -> None:
         for command in (
             "cargo test --all-targets -- --skip _pg_ --skip postgres_",
@@ -355,10 +521,15 @@ class ParserContract(unittest.TestCase):
                 self.assertEqual(run_fixture(command), [])
 
     def test_wrapped_command_is_still_parsed(self) -> None:
-        violations = run_fixture(
-            "env -u AGENTDESK_ROOT_DIR " + BAD_COMMAND
-        )
-        self.assertEqual(len(violations), 1, violations)
+        for prefix in (
+            "env -u AGENTDESK_ROOT_DIR ",
+            "FIXTURE_MODE=ci ",
+            "nice -n 10 env AGENTDESK_MODE=test ",
+        ):
+            with self.subTest(prefix=prefix):
+                violations = run_fixture(prefix + BAD_COMMAND)
+                self.assertEqual(len(violations), 1, violations)
+                self.assertEqual(violations[0].kind, "target-mismatch")
 
     def test_substring_filter_without_module_match_is_zero_match(self) -> None:
         # The checked-in lib inventory lets the gate judge bare substring

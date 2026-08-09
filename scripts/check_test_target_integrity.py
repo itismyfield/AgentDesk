@@ -39,6 +39,7 @@ import subprocess
 import sys
 import tomllib
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 MOD_DECL = re.compile(
@@ -56,6 +57,12 @@ TARGET_VALUE_OPTIONS = {"--bin", "--test"}
 # Target selectors we cannot statically map to a module tree (skipped).
 UNSUPPORTED_TARGET_OPTIONS = {"--bins", "--tests", "--bench", "--benches",
                               "--example", "--examples", "--doc"}
+# Supported libtest options whose following token is a value, not a filter.
+# Equal forms are consumed as one token by the generic option path below.
+LIBTEST_VALUE_OPTIONS = frozenset({
+    "--test-threads", "--format", "--color", "--logfile", "-Z",
+})
+SHELL_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 LIST_SUMMARY = re.compile(r"(\d+) tests?, \d+ benchmarks")
 JOB_HEADER = re.compile(r"^  ([A-Za-z0-9_-]+):(?:\s*#.*)?$")
 RECIPE_HEADER = re.compile(
@@ -453,10 +460,63 @@ def _parse_cargo_line(line: str) -> list[str] | None:
         words = shlex.split(snippet, comments=True)
     except ValueError:
         return None
-    for index in range(len(words) - 1):
-        if words[index:index + 2] == ["cargo", "test"]:
-            return words[index:]
-    return None
+    return _direct_cargo_test(words)
+
+
+def _direct_cargo_test(words: list[str]) -> list[str] | None:
+    """Peel supported literal wrappers and return direct `cargo test` argv.
+
+    This deliberately does not interpret arbitrary argv, eval/xargs/find,
+    containers, or shell-generated commands. Text passed to echo/printf is
+    therefore data, not an invocation.
+    """
+    index = 0
+
+    def consume_assignments(position: int) -> int:
+        while position < len(words) and SHELL_ASSIGNMENT.match(words[position]):
+            position += 1
+        return position
+
+    while index < len(words):
+        index = consume_assignments(index)
+        if index >= len(words):
+            break
+        if words[index] == "env":
+            index += 1
+            while index < len(words):
+                token = words[index]
+                if token in ("-u", "--unset") and index + 1 < len(words):
+                    index += 2
+                elif token in ("-i", "--ignore-environment") \
+                        or token.startswith("--unset="):
+                    index += 1
+                elif token == "--":
+                    index += 1
+                    break
+                elif SHELL_ASSIGNMENT.match(token):
+                    index += 1
+                else:
+                    break
+            continue
+        if words[index] == "nice":
+            index += 1
+            if index < len(words) and words[index] in ("-n", "--adjustment"):
+                index += 2
+            elif index < len(words) and words[index].startswith("--adjustment="):
+                index += 1
+            continue
+        if words[index:index + 2] == ["python3", "scripts/ci-timeout.py"] \
+                and index + 2 < len(words):
+            index += 3
+            continue
+        if words[index:index + 2] == ["python3", "scripts/run_test_lane.py"]:
+            try:
+                index = words.index("--", index + 2) + 1
+            except ValueError:
+                return None
+            continue
+        break
+    return words[index:] if words[index:index + 2] == ["cargo", "test"] else None
 
 
 def extract_justfile_commands(justfile: Path) -> list[tuple[int, list[str], str]]:
@@ -482,14 +542,21 @@ def extract_justfile_commands(justfile: Path) -> list[tuple[int, list[str], str]
     return commands
 
 
+class TargetSelection(Enum):
+    """How conclusively the cargo target set is represented by `targets`."""
+
+    EXPLICIT = "explicit"
+    ALL_TARGETS = "all-targets"
+    UNJUDGED = "unjudged"
+
+
 @dataclass(frozen=True)
 class CommandSpec:
-    targets: tuple[str, ...]      # 'lib', 'bin:<name>', 'test:<name>'
+    targets: tuple[str, ...]      # explicit 'lib'/'bin:<name>'/'test:<name>'
     filters: tuple[str, ...]
     skip_filters: tuple[str, ...] = ()
     exact: bool = False
-    dynamic_filters: bool = False
-    all_targets: bool = False
+    selection: TargetSelection = TargetSelection.UNJUDGED
     skipped: bool = False         # cannot/should not be statically judged
 
 
@@ -503,12 +570,14 @@ def parse_command(words: list[str]) -> CommandSpec:
     filters: list[str] = []
     skip_filters: list[str] = []
     exact = False
-    dynamic_filters = False
     all_targets = False
     unsupported = False
 
     def is_dynamic(token: str) -> bool:
-        return "$" in token or "{{" in token
+        return bool(re.search(
+            r"\$(?:\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*)|\{\{[^{}]*\}\}",
+            token,
+        ))
 
     index = 0
     while index < len(before):
@@ -521,11 +590,6 @@ def parse_command(words: list[str]) -> CommandSpec:
         if token == "--lib":
             targets.append("lib")
         elif token == "--all-targets":
-            # `--all-targets` includes the library harness. We can therefore
-            # judge that portion against the lib inventory even though bin,
-            # integration-test, and doctest portions remain outside this
-            # static model.
-            targets.append("lib")
             all_targets = True
         elif token in UNSUPPORTED_TARGET_OPTIONS:
             unsupported = True
@@ -544,9 +608,7 @@ def parse_command(words: list[str]) -> CommandSpec:
         elif token in CARGO_VALUE_OPTIONS:
             index += 1
         elif not token.startswith("-"):
-            if is_dynamic(token):
-                dynamic_filters = True
-            else:
+            if not is_dynamic(token):
                 filters.append(token)
         index += 1
     index = 0
@@ -564,7 +626,7 @@ def parse_command(words: list[str]) -> CommandSpec:
                 skip_filters.append(value)
         elif token == "--exact":
             exact = True
-        elif token in ("--test-threads", "--format", "--color", "-Z"):
+        elif token in LIBTEST_VALUE_OPTIONS:
             index += 1
         elif not token.startswith("-"):
             if not is_dynamic(token):
@@ -573,9 +635,17 @@ def parse_command(words: list[str]) -> CommandSpec:
     # No explicit selection (all default targets run) or a target family we do
     # not model: nothing to cross-check statically.
     deduped_targets = tuple(dict.fromkeys(targets))
-    skipped = unsupported or not deduped_targets
+    if unsupported:
+        selection = TargetSelection.UNJUDGED
+    elif all_targets:
+        selection = TargetSelection.ALL_TARGETS
+    elif deduped_targets:
+        selection = TargetSelection.EXPLICIT
+    else:
+        selection = TargetSelection.UNJUDGED
+    skipped = selection is TargetSelection.UNJUDGED
     return CommandSpec(deduped_targets, tuple(filters), tuple(skip_filters),
-                       exact, dynamic_filters, all_targets, skipped=skipped)
+                       exact, selection, skipped=skipped)
 
 
 def _lib_filter_matches(test_ids: frozenset[str], filt: str, exact: bool) \
@@ -587,14 +657,14 @@ def _lib_filter_matches(test_ids: frozenset[str], filt: str, exact: bool) \
 
 
 def _lib_selection(spec: CommandSpec, test_ids: frozenset[str]) \
-        -> tuple[tuple[tuple[str, frozenset[str]], ...], frozenset[str]]:
-    """Return per-filter matches and the post-`--skip` selected IDs."""
+        -> frozenset[str]:
+    """Return libtest's positive-filter union after applying `--skip`."""
     if spec.filters:
-        matches = tuple((filt, _lib_filter_matches(test_ids, filt, spec.exact))
-                        for filt in spec.filters)
-        selected = frozenset().union(*(matched for _, matched in matches))
+        selected = frozenset().union(*(
+            _lib_filter_matches(test_ids, filt, spec.exact)
+            for filt in spec.filters
+        ))
     else:
-        matches = ()
         selected = test_ids
     if spec.skip_filters:
         selected = frozenset(
@@ -604,7 +674,7 @@ def _lib_selection(spec: CommandSpec, test_ids: frozenset[str]) \
                 for skip in spec.skip_filters
             )
         )
-    return matches, selected
+    return selected
 
 
 def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
@@ -614,7 +684,11 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
     """Return (kind, detail) findings for one parsed cargo test command."""
     findings: list[tuple[str, str]] = []
     selected: dict[str, str] = {}
-    for target in spec.targets:
+    selected_targets = (
+        tuple(inventories)
+        if spec.selection is TargetSelection.ALL_TARGETS else spec.targets
+    )
+    for target in selected_targets:
         if target.startswith("test:"):
             name = target.partition(":")[2]
             path = repo_root / "tests" / f"{name}.rs"
@@ -629,25 +703,20 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
             continue
         selected.update(inventories[target])
     lib_inventory_checked = (
-        lib_test_ids is not None and "lib" in spec.targets
-        and not spec.dynamic_filters
+        lib_test_ids is not None
+        and ("lib" in selected_targets
+             or spec.selection is TargetSelection.ALL_TARGETS)
     )
     if lib_inventory_checked:
-        per_filter, selected_ids = _lib_selection(spec, lib_test_ids)
-        for filt, matches in per_filter:
-            # `--all-targets` also selects bins, integration tests, benches,
-            # and examples. A lib miss is inconclusive: another harness can
-            # legitimately own the filter, so only explicit --lib misses are
-            # violations.
-            if not matches and not spec.all_targets:
-                findings.append(("zero-match", (
-                    f"lib inventory filter `{filt}` matches 0 test IDs in "
-                    f"{LIB_INVENTORY_MANIFEST_REL}")))
-        if spec.filters and not selected_ids and not spec.all_targets and not any(
-                kind == "zero-match" for kind, _ in findings):
+        selected_ids = _lib_selection(spec, lib_test_ids)
+        lib_only = (
+            spec.selection is TargetSelection.EXPLICIT
+            and selected_targets == ("lib",)
+        )
+        if spec.filters and not selected_ids and lib_only:
             findings.append(("zero-match", (
-                f"lib inventory selection matches 0 test IDs after "
-                f"--skip in {LIB_INVENTORY_MANIFEST_REL}")))
+                f"lib inventory positive-filter union matches 0 test IDs "
+                f"after --skip in {LIB_INVENTORY_MANIFEST_REL}")))
 
     for filt in spec.filters:
         lead = filt.split("::", 1)[0]
@@ -662,17 +731,18 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
                               sorted(declared_in.items()))
             findings.append(("target-mismatch", (
                 f"filter `{filt}` names module `{lead}` declared in {sites}, "
-                f"but the command only selects {'/'.join(spec.targets)}; the "
+                f"but the command only selects {'/'.join(selected_targets)}; the "
                 f"filter matches 0 tests there and cargo still exits 0")))
         elif "::" in filt and not lib_inventory_checked:
             findings.append(("unknown-module", (
                 f"module-path filter `{filt}`: leading segment `{lead}` is "
                 f"not a module in any known target")))
-    if spec.filters and not selected and not findings:
+    if spec.filters and not selected and not findings \
+            and spec.selection is TargetSelection.EXPLICIT:
         # Decisive signal: the selected target declares no modules at all, so
         # ANY filter (typo'd, ::-less, whatever) selects 0 tests there.
         findings.append(("empty-target", (
-            f"selected target(s) {'/'.join(spec.targets)} declare no modules; "
+            f"selected target(s) {'/'.join(selected_targets)} declare no modules; "
             f"every libtest filter runs 0 tests there and cargo still exits 0")))
     return findings
 
