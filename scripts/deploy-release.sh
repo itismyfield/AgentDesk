@@ -3181,8 +3181,8 @@ relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE:-not run: wedge check d
     done
     _notify_channel "$alert_text"
 
-    # Default OFF. The literal `confirmed` is an operator assertion that this
-    # is a real regression, not a relay/API flake; only then may automation file.
+    # Default OFF; only literal `confirmed` (a real regression, not relay/API flake) may file.
+    # Byte-count guarantees cover NUL-free text only; command substitution drops NULs and can undercount.
     if [ "$POST_DEPLOY_SMOKE_CREATE_ISSUE" = "confirmed" ] && [ -f "$draft_path" ]; then
         if command -v gh >/dev/null 2>&1; then
             if tmp_issue_stdout=$(mktemp "${TMPDIR:-/tmp}/agentdesk-issue-stdout.XXXXXX") \

@@ -58,6 +58,10 @@ if ! grep -Fq 'python3 "$SCRIPT_DIR/ci-timeout.py" 10 gh issue create' "$DEPLOY_
     echo "FAIL: confirmed-mode gh issue create is missing the repository timeout runner" >&2
     FAILURES=$((FAILURES + 1))
 fi
+if ! grep -Fq '# Byte-count guarantees cover NUL-free text only; command substitution drops NULs and can undercount.' "$DEPLOY_SH"; then
+    echo "FAIL: NUL-output byte-count non-guarantee is missing or changed" >&2
+    FAILURES=$((FAILURES + 1))
+fi
 
 start_hanging_listener() {
     local ready_path="$1"
@@ -219,6 +223,10 @@ case "$output_mode" in
     exact)
         python3 -c 'import sys; p="https://github.com/itismyfield/AgentDesk/issues/"; sys.stdout.write(p + "7" * (4096 - len(p)))'
         ;;
+    nul)
+        python3 -c 'import sys; from pathlib import Path; out=b"https://github.com/itismyfield/AgentDesk/issues/5274\n"+b"\0"*5000; err=b"\0"*5000; Path(sys.argv[1]).write_text(f"{len(out)} {len(err)}\n"); sys.stdout.buffer.write(out); sys.stderr.buffer.write(err)' "$TMP_ROOT/${label}-nul-counts"
+        exit 0
+        ;;
     empty) : ;;
     failure)
         printf '%s\\n' 'https://github.com/itismyfield/AgentDesk/issues/5274'
@@ -291,6 +299,8 @@ run_issue_output_variant() {
     local expected="$4"
     local case_path="$TMP_ROOT/${label}.sh"
     local output_path="$TMP_ROOT/${label}.out"
+    local evidence_path="$TMP_ROOT/${label}-evidence.log"
+    local nul_counts_path="$TMP_ROOT/${label}-nul-counts"
     local rc=0
     write_issue_output_case "$source_path" "$output_mode" "$label" "$case_path"
     bash "$case_path" > "$output_path" 2>&1 || rc=$?
@@ -307,6 +317,13 @@ run_issue_output_variant() {
         && grep -qF 'Post-deploy smoke issue created (confirmed mode): https://github.com/itismyfield/AgentDesk/issues/' "$output_path" \
         && ! grep -qF 'returned truncated stdout' "$output_path"; then
         echo "exact-cap stdout restored: ok (4096 bytes not reported as truncated)"
+    elif [ "$expected" = nul_unsupported ] && [ "$rc" -eq 0 ] \
+        && [ "$(tr -d '\n' < "$nul_counts_path")" = '5053 5000' ] \
+        && grep -qF 'Post-deploy smoke issue created (confirmed mode): https://github.com/itismyfield/AgentDesk/issues/5274' "$output_path" \
+        && ! grep -qF 'returned truncated stdout' "$output_path" \
+        && ! grep -aFq '[gh stderr truncated at 4096 bytes]' "$evidence_path" \
+        && [ ! -s "$evidence_path" ]; then
+        echo "NUL-output non-guarantee pinned: ok (5053-byte stdout accepted; 5000-byte stderr marker absent)"
     elif [ "$expected" = empty ] && [ "$rc" -eq 0 ] \
         && grep -qF 'returned empty stdout' "$output_path" \
         && ! grep -qF 'Post-deploy smoke issue created (confirmed mode):' "$output_path"; then
@@ -769,6 +786,7 @@ run_issue_output_mutant mutant_merge "$MUTATED_ISSUE_MERGE" valid merge
 run_issue_output_variant restored_exact "$DEPLOY_SH" exact exact
 run_issue_output_variant restored_truncation "$DEPLOY_SH" truncated truncation
 run_issue_output_mutant mutant_truncation "$MUTATED_ISSUE_TRUNCATION" truncated truncation
+run_issue_output_variant restored_nul_unsupported "$DEPLOY_SH" nul nul_unsupported
 run_issue_output_variant restored_empty "$DEPLOY_SH" empty empty
 run_issue_output_mutant mutant_empty "$MUTATED_ISSUE_EMPTY_GUARD" empty empty
 run_issue_output_variant restored_partial "$DEPLOY_SH" partial invalid
