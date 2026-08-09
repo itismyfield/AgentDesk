@@ -660,6 +660,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             turn_delivered: turn_delivered.clone(),
             last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
         };
+        let reservation_candidate = handle.clone();
         let mut locked_episode = if let Some(state) = pw.restored_state.as_ref() {
             match super::super::super::recovery::lock_readoption_episode(&provider, state).await {
                 Ok(guard) => Some(guard),
@@ -690,42 +691,30 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             );
             continue;
         }
+        let Some(mut reservation) = super::super::super::recovery::restore_watcher_claim::RecoveryWatcherReservation::from_claim(
+            shared,
+            &provider,
+            pw.restored_state.as_ref(),
+            pw.channel_id,
+            reservation_candidate,
+            true,
+            pw.channel_id,
+        ) else {
+            continue;
+        };
         let restored_turn = if let Some(state) = pw.restored_state.as_ref() {
-            let Some(adoption) =
-                super::super::super::recovery::begin_readoption_adoption(shared, state, true).await
-            else {
-                shared.tmux_watchers.cancel_and_remove_channel_if_current(
-                    &pw.channel_id,
-                    &pw.session_name,
-                    &pw.output_path,
-                    &cancel,
-                );
+            let committed = super::super::super::recovery::restore_watcher_claim::begin_and_commit_reserved_watcher(
+                shared,
+                state,
+                reservation,
+                true,
+                locked_episode.as_mut(),
+            )
+            .await;
+            let Ok(Some((committed_reservation, finish_mailbox_on_completion))) = committed else {
                 continue;
             };
-            let finish_mailbox_on_completion =
-                match super::super::super::recovery::commit_readoption_adoption(
-                    shared,
-                    &adoption,
-                    locked_episode.as_mut(),
-                ) {
-                    Ok(finish) => finish,
-                    Err(outcome) => {
-                        shared.tmux_watchers.cancel_and_remove_channel_if_current(
-                            &pw.channel_id,
-                            &pw.session_name,
-                            &pw.output_path,
-                            &cancel,
-                        );
-                        super::super::super::recovery::abandon_readoption_adoption(
-                            shared,
-                            adoption,
-                            "commit_failure",
-                            Some(outcome),
-                        )
-                        .await;
-                        continue;
-                    }
-                };
+            reservation = committed_reservation;
             restored_watcher_turn_from_inflight(
                 state,
                 &pw.session_name,
@@ -734,6 +723,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         } else {
             None
         };
+        let reserved_handle = reservation.handle.clone();
         if let Some(fallback) = pw.codex_direct_resume_fallback {
             codex_restore::commit_live_direct_resume_fallback(
                 &pw.session_name,
@@ -754,23 +744,24 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             "watchers_lifecycle_tmux_output_watcher_with_restore",
             shared.clone(),
             pw.session_name.clone(),
-            cancel.clone(),
+            reserved_handle.cancel.clone(),
             tmux_output_watcher_with_restore(
                 pw.channel_id,
                 http.clone(),
                 shared.clone(),
-                pw.output_path,
-                pw.session_name,
+                reserved_handle.output_path,
+                reserved_handle.tmux_session_name,
                 pw.initial_offset,
-                cancel,
-                paused,
-                resume_offset,
-                pause_epoch,
-                turn_delivered,
-                last_heartbeat_ts_ms,
+                reserved_handle.cancel,
+                reserved_handle.paused,
+                reserved_handle.resume_offset,
+                reserved_handle.pause_epoch,
+                reserved_handle.turn_delivered,
+                reserved_handle.last_heartbeat_ts_ms,
                 restored_turn,
             ),
         );
+        reservation.disarm();
     }
 
     // Clean up dead sessions: report idle to DB and kill tmux sessions

@@ -776,6 +776,49 @@ pub(in crate::services::discord::inflight) fn save_existing_inflight_rebind_adop
     )
 }
 
+pub(in crate::services::discord) fn rollback_committed_readoption_adoption_if_matches(
+    state: &InflightTurnState,
+    expected: &InflightTurnIdentity,
+    expected_episode: Option<&InflightEpisodePin>,
+    expected_turn_start_offset: Option<u64>,
+    expected_last_offset_for_rebase: Option<u64>,
+) -> GuardedSaveOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedSaveOutcome::IoError;
+    };
+    let Some(provider) = state.provider_kind() else {
+        return GuardedSaveOutcome::IoError;
+    };
+    let path = inflight_state_path(&root, &provider, state.channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return GuardedSaveOutcome::IoError;
+    };
+    let Some(on_disk) = load_inflight_state_unlocked(&path) else {
+        return GuardedSaveOutcome::Missing;
+    };
+    let exact_current = expected.matches_state(&on_disk)
+        && expected_episode.is_none_or(|pin| pin.matches_state(&on_disk))
+        && expected_turn_start_offset
+            .is_none_or(|offset| on_disk.turn_start_offset == Some(offset))
+        && expected_last_offset_for_rebase.is_none_or(|offset| on_disk.last_offset == offset);
+    if !exact_current
+        || on_disk.rebind_origin
+        || !on_disk.readopted_from_inflight
+        || on_disk.restart_mode.is_some()
+        || state.readopted_from_inflight
+        || state.restart_mode.is_none()
+    {
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
+    persist_under_lock(
+        &root,
+        &path,
+        state,
+        "src/services/discord/inflight/save_store/identity_gate.rs:rollback_committed_readoption_adoption_if_matches",
+    )
+    .map_or(GuardedSaveOutcome::IoError, |()| GuardedSaveOutcome::Saved)
+}
+
 pub(in crate::services::discord::inflight) fn save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_identity_in_root(
     root: &Path,
     state: &InflightTurnState,

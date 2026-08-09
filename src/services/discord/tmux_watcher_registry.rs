@@ -253,6 +253,34 @@ impl TmuxWatcherRegistry {
         true
     }
 
+    pub(in crate::services::discord) fn current_channel_handle_locked(
+        &self,
+        _guard: &TmuxWatcherRegistryGuard,
+        channel_id: &ChannelId,
+        expected_tmux_session_name: &str,
+        expected_output_path: &str,
+        expected_cancel: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Option<TmuxWatcherHandle> {
+        let tmux_session_name = self.tmux_session_by_channel.get(channel_id)?;
+        if tmux_session_name.value() != expected_tmux_session_name {
+            return None;
+        }
+        if self
+            .owner_channel_by_tmux_session
+            .get(expected_tmux_session_name)
+            .is_none_or(|owner| *owner.value() != *channel_id)
+        {
+            return None;
+        }
+        let handle = self.by_tmux_session.get(expected_tmux_session_name)?;
+        if handle.output_path != expected_output_path
+            || expected_cancel.is_some_and(|cancel| !Arc::ptr_eq(&handle.cancel, cancel))
+        {
+            return None;
+        }
+        Some(handle.clone())
+    }
+
     pub(in crate::services::discord) fn iter(&self) -> dashmap::iter::Iter<'_, String, TmuxWatcherHandle> {
         self.by_tmux_session.iter()
     }

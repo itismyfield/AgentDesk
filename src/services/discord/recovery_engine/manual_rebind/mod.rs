@@ -28,7 +28,7 @@ mod watcher_claim;
 #[cfg(test)]
 use test_barriers::await_post_adoption_claim_barrier;
 #[cfg(unix)]
-use watcher_claim::claim_rebind_watcher;
+use watcher_claim::{claim_rebind_watcher, compensate_post_commit_relay_setup_failure};
 
 pub(crate) use self::adoption::{
     claude_tui_force_initial_offset_for_adopted_transcript,
@@ -109,6 +109,20 @@ impl PendingRebindInflightRollback {
                         &expected,
                         expected_turn_start_offset,
                     )
+                };
+                let outcome = if matches!(
+                    outcome,
+                    super::inflight::GuardedSaveOutcome::IdentityMismatch
+                ) {
+                    super::inflight::rollback_committed_readoption_adoption_if_matches(
+                        &state,
+                        &expected,
+                        expected_episode.as_ref(),
+                        expected_turn_start_offset,
+                        expected_last_offset_for_rebase,
+                    )
+                } else {
+                    outcome
                 };
                 format!("restore_existing_adoption:{outcome:?}")
             }
@@ -785,10 +799,11 @@ async fn rebind_inflight_for_channel_inner(
                 turn_delivered: turn_delivered.clone(),
                 last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
             };
+            let reservation_candidate = handle.clone();
             let (
                 watcher_should_spawn,
                 watcher_replaced,
-                consumer_reserved,
+                _consumer_reserved,
                 watcher_owner_channel_id,
             ) = claim_rebind_watcher(
                 &shared.tmux_watchers,
@@ -802,13 +817,17 @@ async fn rebind_inflight_for_channel_inner(
                     recovered_state_for_session.thread_id,
                 ),
             );
-            if !consumer_reserved {
-                super::runtime::observe_readoption_adoption_abandon(
+            let Some(mut reservation) =
+                super::restore_watcher_claim::RecoveryWatcherReservation::from_claim(
+                    shared,
                     provider,
-                    &recovered_state_for_session,
-                    "cross_channel_reuse",
-                    None,
-                );
+                    Some(&recovered_state_for_session),
+                    discord_channel_id,
+                    reservation_candidate,
+                    watcher_should_spawn,
+                    watcher_owner_channel_id,
+                )
+            else {
                 drop(locked_episode);
                 return Ok(RebindOutcome {
                     tmux_session: tmux_session_name,
@@ -817,28 +836,24 @@ async fn rebind_inflight_for_channel_inner(
                     watcher_spawned: false,
                     watcher_replaced: false,
                 });
-            }
+            };
             debug_assert!(watcher_should_spawn || watcher_owner_channel_id == discord_channel_id);
 
             let finish_mailbox_on_completion = if existing_inflight.is_some() {
-                match super::runtime::begin_and_commit_readoption_adoption(
+                match super::restore_watcher_claim::begin_and_commit_reserved_watcher(
                     shared,
                     &recovered_state_for_session,
+                    reservation,
                     locked_episode.is_some(),
                     locked_episode.as_mut(),
                 )
                 .await
                 {
-                    Ok(Some(finish)) => finish,
+                    Ok(Some((committed_reservation, finish))) => {
+                        reservation = committed_reservation;
+                        finish
+                    }
                     Ok(None) => {
-                        if watcher_should_spawn {
-                            shared.tmux_watchers.cancel_and_remove_channel_if_current(
-                                &discord_channel_id,
-                                &tmux_session_name,
-                                &output_path,
-                                &cancel,
-                            );
-                        }
                         drop(locked_episode);
                         return Ok(RebindOutcome {
                             tmux_session: tmux_session_name,
@@ -849,14 +864,6 @@ async fn rebind_inflight_for_channel_inner(
                         });
                     }
                     Err(outcome) => {
-                        if watcher_should_spawn {
-                            shared.tmux_watchers.cancel_and_remove_channel_if_current(
-                                &discord_channel_id,
-                                &tmux_session_name,
-                                &output_path,
-                                &cancel,
-                            );
-                        }
                         drop(locked_episode);
                         return Err(RebindError::Internal(format!(
                             "persist readoption marker for channel {channel_id}: {outcome:?}"
@@ -888,18 +895,13 @@ async fn rebind_inflight_for_channel_inner(
                     ) {
                         Ok(path) => path,
                         Err(error) => {
-                            let rolled_back =
-                                shared.tmux_watchers.cancel_and_remove_channel_if_current(
-                                    &discord_channel_id,
-                                    &tmux_session_name,
-                                    &output_path,
-                                    &cancel,
-                                );
-                            drop(locked_episode);
-                            let inflight_rollback = inflight_rollback_on_relay_setup_failure
-                                .take()
-                                .map(PendingRebindInflightRollback::apply)
-                                .unwrap_or_else(|| "none".to_string());
+                            let (rolled_back, inflight_rollback) =
+                                compensate_post_commit_relay_setup_failure(
+                                    reservation,
+                                    locked_episode.take(),
+                                    inflight_rollback_on_relay_setup_failure.take(),
+                                )
+                                .await;
                             tracing::warn!(
                                 tmux_session = %tmux_session_name,
                                 output_path = %output_path,
@@ -926,6 +928,7 @@ async fn rebind_inflight_for_channel_inner(
                         }
                     );
                 }
+                let reserved_handle = reservation.handle.clone();
                 shared.record_tmux_watcher_reconnect(discord_channel_id);
                 let restored_turn = if discard_restored_render_seed {
                     None
@@ -940,23 +943,26 @@ async fn rebind_inflight_for_channel_inner(
                     "recovery_restore_inflight_tmux_output_watcher",
                     shared.clone(),
                     tmux_session_name.clone(),
-                    cancel.clone(),
+                    reserved_handle.cancel.clone(),
                     super::tmux::tmux_output_watcher_with_restore(
                         discord_channel_id,
                         http.clone(),
                         shared.clone(),
-                        output_path.clone(),
-                        tmux_session_name.clone(),
+                        reserved_handle.output_path,
+                        reserved_handle.tmux_session_name,
                         initial_offset,
-                        cancel,
-                        paused,
-                        resume_offset,
-                        pause_epoch,
-                        turn_delivered,
-                        last_heartbeat_ts_ms,
+                        reserved_handle.cancel,
+                        reserved_handle.paused,
+                        reserved_handle.resume_offset,
+                        reserved_handle.pause_epoch,
+                        reserved_handle.turn_delivered,
+                        reserved_handle.last_heartbeat_ts_ms,
                         restored_turn,
                     ),
                 );
+                reservation.disarm();
+            } else {
+                reservation.disarm();
             }
             (watcher_should_spawn, watcher_replaced)
         }

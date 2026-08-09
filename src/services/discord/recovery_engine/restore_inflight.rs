@@ -2038,9 +2038,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         // before the reader publishes RuntimeReady. `activated_turn` is only
         // global-active accounting; an open actor accepts and rewrites the exact
         // recovery identity even when that field is false.
-        if super::runtime::recovery_kickoff_actor_accepted(&kickoff)
-            && super::runtime::readopt_marker_eligible_real_user(&state)
-        {
+        if super::runtime::recovery_kickoff_should_commit_readoption(&kickoff, &state) {
             let _ = super::runtime::commit_recovery_kickoff_readoption(
                 shared, provider, channel_id, &state,
             );
@@ -2235,6 +2233,7 @@ mod tests {
         self, GuardedSaveOutcome, InflightTurnIdentity, InflightTurnState, RelayOwnerKind,
     };
     use crate::services::provider::ProviderKind;
+    use crate::services::turn_orchestrator::RecoveryKickoffResult;
 
     fn generic_recovery_runtime_ready(
         shared: &std::sync::Arc<super::SharedData>,
@@ -2297,6 +2296,45 @@ mod tests {
         }
         // This source contract does not exclude await cancellation, panic/unwind,
         // or OS-thread spawn panic; E4 has no runtime watcher reservation.
+    }
+
+    #[test]
+    fn generic_recovery_outer_marker_guard_enforces_actor_and_row_receipts() {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            4_259_704,
+            Some("outer-marker-guard".to_string()),
+            343_742_347_365_974_026,
+            4_259_714,
+            4_259_715,
+            "outer marker guard".to_string(),
+            Some("provider-session".to_string()),
+            Some("AgentDesk-claude-outer-marker-guard".to_string()),
+            Some("/tmp/outer-marker-guard.jsonl".to_string()),
+            None,
+            0,
+        );
+        state.set_restart_mode(InflightRestartMode::DrainRestart);
+        let accepted = RecoveryKickoffResult {
+            activated_turn: false,
+            refused_closed: false,
+        };
+        assert!(
+            super::super::runtime::recovery_kickoff_should_commit_readoption(&accepted, &state)
+        );
+
+        let refused = RecoveryKickoffResult {
+            activated_turn: true,
+            refused_closed: true,
+        };
+        assert!(
+            !super::super::runtime::recovery_kickoff_should_commit_readoption(&refused, &state)
+        );
+
+        state.request_owner_user_id = 0;
+        assert!(
+            !super::super::runtime::recovery_kickoff_should_commit_readoption(&accepted, &state)
+        );
     }
 
     #[test]

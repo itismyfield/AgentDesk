@@ -167,6 +167,7 @@ pub(in crate::services::discord) use self::save_store::{
     persist_leak_recovery_response_offset_if_matches_identity_locked,
     persist_recovery_output_path_if_matches_identity_locked,
     recovery_anchor_message_if_matches_identity, recovery_anchor_msg_id_if_matches_identity,
+    rollback_committed_readoption_adoption_if_matches,
     save_existing_inflight_rebind_adoption_if_matches_episode,
     save_existing_inflight_rebind_adoption_if_matches_identity,
     save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_episode,

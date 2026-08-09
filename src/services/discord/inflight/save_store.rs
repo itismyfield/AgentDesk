@@ -31,6 +31,7 @@ pub(in crate::services::discord) use self::identity_gate::{
     persist_leak_recovery_response_offset_if_matches_identity_locked,
     persist_recovery_output_path_if_matches_identity_locked,
     recovery_anchor_message_if_matches_identity, recovery_anchor_msg_id_if_matches_identity,
+    rollback_committed_readoption_adoption_if_matches,
     save_inflight_state_if_identity_matches_allow_output_restamp,
     save_inflight_state_if_identity_unchanged, save_inflight_state_if_matches_identity,
     save_stream_tick_state_if_bridge_authority,

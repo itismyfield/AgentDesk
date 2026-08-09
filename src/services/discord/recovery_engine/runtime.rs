@@ -314,6 +314,20 @@ pub(in crate::services::discord) async fn begin_readoption_adoption(
         }
         return None;
     }
+    // Ownerless recovery has no mailbox identity to restore. A live mailbox
+    // token can belong to an unrelated turn on the same channel and must not
+    // veto reattaching the persisted watcher consumer.
+    if state.request_owner_user_id == 0 {
+        return Some(ReadoptionAdoption {
+            state: state.clone(),
+            provider,
+            channel_id,
+            finalizer_msg_id,
+            mailbox_claim: ReadoptionMailboxClaim::Ownerless,
+            episode_scoped_ledger,
+        });
+    }
+
     if snapshot.cancel_token.is_some() {
         if let Some(token) = snapshot.cancel_token.as_ref()
             && snapshot.active_user_message_id == Some(finalizer_msg_id)
@@ -338,17 +352,6 @@ pub(in crate::services::discord) async fn begin_readoption_adoption(
         };
         record_readoption_claim(shared, &adoption);
         return Some(adoption);
-    }
-
-    if state.request_owner_user_id == 0 {
-        return Some(ReadoptionAdoption {
-            state: state.clone(),
-            provider,
-            channel_id,
-            finalizer_msg_id,
-            mailbox_claim: ReadoptionMailboxClaim::Ownerless,
-            episode_scoped_ledger,
-        });
     }
 
     let cancel_token = Arc::new(CancelToken::new());
@@ -450,30 +453,18 @@ pub(in crate::services::discord) async fn abandon_readoption_adoption(
     );
 }
 
-pub(in crate::services::discord) async fn begin_and_commit_readoption_adoption(
-    shared: &Arc<SharedData>,
-    state: &inflight::InflightTurnState,
-    episode_scoped_ledger: bool,
-    locked_episode: Option<&mut inflight::LockedInflightEpisode>,
-) -> Result<Option<bool>, inflight::GuardedSaveOutcome> {
-    let Some(adoption) = begin_readoption_adoption(shared, state, episode_scoped_ledger).await
-    else {
-        return Ok(None);
-    };
-    match commit_readoption_adoption(shared, &adoption, locked_episode) {
-        Ok(finish) => Ok(Some(finish)),
-        Err(outcome) => {
-            abandon_readoption_adoption(shared, adoption, "commit_failure", Some(outcome)).await;
-            Err(outcome)
-        }
-    }
-}
-
 /// E4 has no watcher reservation. Its narrower receipt is acceptance by the
 /// mailbox actor; `activated_turn` reports whether global-active accounting
 /// incremented, not whether the actor wrote the recovery identity.
 pub(super) fn recovery_kickoff_actor_accepted(result: &RecoveryKickoffResult) -> bool {
     !result.refused_closed
+}
+
+pub(super) fn recovery_kickoff_should_commit_readoption(
+    result: &RecoveryKickoffResult,
+    state: &inflight::InflightTurnState,
+) -> bool {
+    recovery_kickoff_actor_accepted(result) && readopt_marker_eligible_real_user(state)
 }
 
 pub(super) fn commit_recovery_kickoff_readoption(
@@ -670,6 +661,49 @@ mod adoption_commit_tests {
             &token
         ));
         assert_eq!(mailbox.active_user_message_id, Some(message));
+    }
+
+    #[tokio::test]
+    async fn ownerless_begin_ignores_unrelated_mailbox_but_owned_mismatch_stays_closed() {
+        let shared = super::super::make_shared_data_for_tests_with_storage(None);
+        let channel = ChannelId::new(524_204);
+        let mailbox_message = MessageId::new(524_214);
+        let token = Arc::new(CancelToken::new());
+        assert!(
+            super::mailbox_try_start_turn(
+                &shared,
+                channel,
+                token.clone(),
+                UserId::new(343_742_347_365_974_026),
+                mailbox_message,
+            )
+            .await
+        );
+
+        let mut ownerless = state(channel.get(), 0);
+        ownerless.request_owner_user_id = 0;
+        ownerless.user_msg_id = 0;
+        ownerless.current_msg_id = 524_215;
+        assert!(
+            begin_readoption_adoption(&shared, &ownerless, true)
+                .await
+                .is_some(),
+            "an unrelated mailbox token cannot veto ownerless consumer adoption"
+        );
+
+        let owned = state(channel.get(), 524_216);
+        assert!(
+            begin_readoption_adoption(&shared, &owned, true)
+                .await
+                .is_none(),
+            "a real owned turn must still reject a foreign mailbox identity"
+        );
+        let mailbox = super::mailbox_snapshot(&shared, channel).await;
+        assert!(Arc::ptr_eq(
+            mailbox.cancel_token.as_ref().expect("incumbent token"),
+            &token
+        ));
+        assert_eq!(mailbox.active_user_message_id, Some(mailbox_message));
     }
 }
 

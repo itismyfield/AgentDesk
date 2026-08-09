@@ -168,7 +168,7 @@ fn durable_episode_authority_lexically_covers_every_handoff_side_effect() {
         .map(|relative| commit + relative)
         .expect("guarded watcher claim");
     let adoption_commit = parent[claim..]
-        .find("begin_and_commit_readoption_adoption")
+        .find("begin_and_commit_reserved_watcher")
         .map(|relative| claim + relative)
         .expect("mailbox BEGIN and durable COMMIT after watcher reservation");
     let spawn = parent[adoption_commit..]
@@ -187,18 +187,21 @@ fn durable_episode_authority_lexically_covers_every_handoff_side_effect() {
             && spawn < release
     );
 
-    let runtime = include_str!("../runtime.rs");
-    let helper = runtime
-        .find("async fn begin_and_commit_readoption_adoption")
-        .expect("shared adoption helper");
-    let helper = &runtime[helper..];
+    let helper = include_str!("../restore_watcher_claim.rs");
+    let helper = helper
+        .find("async fn begin_and_commit_reserved_watcher")
+        .map(|start| &helper[start..])
+        .expect("shared reservation lifecycle helper");
     let begin = helper
-        .find("let Some(adoption) = begin_readoption_adoption")
+        .find("begin_readoption_adoption")
         .expect("mailbox BEGIN inside shared helper");
+    let revalidate = helper
+        .find("current_under_guard")
+        .expect("registry proof revalidation before COMMIT");
     let authority_commit = helper
-        .find("match commit_readoption_adoption")
+        .find("commit_readoption_adoption")
         .expect("durable COMMIT inside shared helper");
-    assert!(begin < authority_commit);
+    assert!(begin < revalidate && revalidate < authority_commit);
 }
 
 #[test]
@@ -710,5 +713,104 @@ fn relay_setup_failure_rollbacks_are_exact_episode_guarded() {
         )
         .expect("serialize origin after"),
         origin_before
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn post_commit_relay_setup_failure_clears_every_unwatched_authority() {
+    let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let root = tempfile::tempdir().expect("runtime root");
+    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        root.path(),
+    );
+    let shared = super::super::make_shared_data_for_tests_with_storage(None);
+    let provider = ProviderKind::Codex;
+    let channel_id = 4_465_891;
+    let mut state = super::inflight::InflightTurnState::new(
+        provider.clone(),
+        channel_id,
+        Some("post-commit-setup-failure".to_string()),
+        343_742_347_365_974_026,
+        4_465_892,
+        4_465_893,
+        "post commit setup failure".to_string(),
+        Some("provider-session".to_string()),
+        Some("AgentDesk-codex-post-commit-setup-failure".to_string()),
+        Some("/tmp/post-commit-setup-failure.jsonl".to_string()),
+        None,
+        0,
+    );
+    state.set_restart_mode(crate::services::discord::InflightRestartMode::DrainRestart);
+    super::inflight::save_inflight_state(&state).expect("planned restart row");
+    let state = super::inflight::load_inflight_state(&provider, channel_id)
+        .expect("normalized planned restart row");
+    let channel = serenity::model::id::ChannelId::new(channel_id);
+    let reservation = super::super::restore_watcher_claim::reserve_recovery_watcher(
+        &shared,
+        &provider,
+        channel,
+        &state,
+        state.tmux_session_name.as_deref().expect("session"),
+        state.output_path.clone().expect("output"),
+        "post_commit_setup_failure_test",
+        None,
+    )
+    .expect("watcher reservation");
+    let mut episode = super::super::runtime::lock_readoption_episode(&provider, &state)
+        .await
+        .expect("episode lock");
+    let (reservation, _) = super::super::restore_watcher_claim::begin_and_commit_reserved_watcher(
+        &shared,
+        &state,
+        reservation,
+        true,
+        Some(&mut episode),
+    )
+    .await
+    .expect("COMMIT result")
+    .expect("COMMIT receipt");
+    assert!(
+        super::inflight::load_inflight_state(&provider, channel_id)
+            .expect("committed row")
+            .readopted_from_inflight
+    );
+    assert!(
+        shared
+            .readopted_mailbox_turn_pin_for_test(&provider, channel_id)
+            .is_some()
+    );
+
+    let rollback = PendingRebindInflightRollback::RestoreExistingAdoption {
+        state: state.clone(),
+        expected: super::inflight::InflightTurnIdentity::from_state(&state),
+        expected_turn_start_offset: state.turn_start_offset,
+        expected_last_offset_for_rebase: None,
+        expected_episode: None,
+    };
+    let (registry_rolled_back, rollback_outcome) =
+        compensate_post_commit_relay_setup_failure(reservation, Some(episode), Some(rollback))
+            .await;
+    assert!(registry_rolled_back);
+    assert!(rollback_outcome.contains("Saved"), "{rollback_outcome}");
+
+    let persisted =
+        super::inflight::load_inflight_state(&provider, channel_id).expect("compensated row");
+    assert!(!persisted.readopted_from_inflight);
+    assert_eq!(
+        persisted.restart_mode,
+        Some(crate::services::discord::InflightRestartMode::DrainRestart)
+    );
+    assert!(!shared.tmux_watchers.contains_key(&channel));
+    assert!(
+        super::mailbox_snapshot(&shared, channel)
+            .await
+            .cancel_token
+            .is_none()
+    );
+    assert!(
+        shared
+            .readopted_mailbox_turn_pin_for_test(&provider, channel_id)
+            .is_none()
     );
 }

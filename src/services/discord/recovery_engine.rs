@@ -98,7 +98,7 @@ mod completion_delivery;
 #[path = "recovery_engine/restore_inflight.rs"]
 mod restore_inflight;
 #[path = "recovery_engine/restore_watcher_claim.rs"]
-mod restore_watcher_claim;
+pub(in crate::services::discord) mod restore_watcher_claim;
 // #4111: behavior-preserving extraction of guarded Codex rollout persist-outcome
 // handling before restart-path watcher spawn into a leaf module.
 #[path = "recovery_engine/restore_persist_outcome.rs"]
