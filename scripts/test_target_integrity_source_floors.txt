@@ -1,0 +1,5 @@
+# Reviewed lower bounds for independently extracted curated command families.
+# Additions are green; deletion, parser drift, partial reads, or zero extraction
+# fail the enforced gate until the change is deliberately reviewed.
+workflows=66
+justfile=87
