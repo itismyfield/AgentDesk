@@ -574,6 +574,7 @@ class CommandSpec:
     exact: bool = False
     selection: TargetSelection = TargetSelection.UNJUDGED
     skipped: bool = False
+    target_inconclusive: bool = False
 
 
 def parse_command(words: list[str]) -> CommandSpec:
@@ -588,6 +589,7 @@ def parse_command(words: list[str]) -> CommandSpec:
     exact = False
     all_targets = False
     unsupported = False
+    target_inconclusive = False
 
     def dynamic(token: str) -> bool:
         return bool(re.search(
@@ -616,7 +618,10 @@ def parse_command(words: list[str]) -> CommandSpec:
         token = before[index]
         if token in TARGET_VALUE_OPTIONS and index + 1 < len(before):
             kind = "bin" if token == "--bin" else "test"
-            targets.append(f"{kind}:{before[index + 1]}")
+            if dynamic(before[index + 1]):
+                target_inconclusive = True
+            else:
+                targets.append(f"{kind}:{before[index + 1]}")
             index += 2
             continue
         if token == "--lib":
@@ -653,8 +658,13 @@ def parse_command(words: list[str]) -> CommandSpec:
         selection = TargetSelection.EXPLICIT
     else:
         selection = TargetSelection.UNJUDGED
-    return CommandSpec(targets_tuple, tuple(filters), tuple(skip_filters), exact,
-                       selection, selection is TargetSelection.UNJUDGED)
+    return CommandSpec(
+        targets_tuple, tuple(filters), tuple(skip_filters), exact, selection,
+        unsupported or (
+            selection is TargetSelection.UNJUDGED and not target_inconclusive
+        ),
+        target_inconclusive,
+    )
 
 
 def _filter_matches(test_ids: frozenset[str], value: str, exact: bool) \
@@ -701,13 +711,13 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
         selected.update(inventories[target])
     lib_judged = lib_test_ids is not None and "lib" in selected_targets
     if lib_judged and spec.selection is TargetSelection.EXPLICIT \
-            and selected_targets == ("lib",) and spec.filters \
+            and not spec.target_inconclusive and selected_targets == ("lib",) \
             and not _lib_selection(spec, lib_test_ids):
         findings.append(("zero-match", (
-            "lib inventory positive-filter union matches 0 test IDs after "
-            f"--skip in {LIB_INVENTORY_MANIFEST_REL}"
+            "lib inventory final selection matches 0 test IDs in "
+            f"{LIB_INVENTORY_MANIFEST_REL}"
         )))
-    for filt in spec.filters:
+    for filt in (() if spec.target_inconclusive else spec.filters):
         lead = filt.split("::", 1)[0]
         if not lead or lead in selected:
             continue
@@ -726,7 +736,8 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
             findings.append(("unknown-module", (
                 f"module-path filter `{filt}`: leading segment `{lead}` is "
                 f"not a module in any known target")))
-    if spec.filters and not selected and not findings \
+    if spec.filters and not spec.target_inconclusive \
+            and not selected and not findings \
             and spec.selection is TargetSelection.EXPLICIT:
         # Decisive signal: the selected target declares no modules at all, so
         # ANY filter (typo'd, ::-less, whatever) selects 0 tests there.

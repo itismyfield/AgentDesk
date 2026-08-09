@@ -198,6 +198,33 @@ class MutationProof(unittest.TestCase):
             "cargo test --lib ${TEST_FILTER} $EXTRA_ARGS {{JUST_ARGS}}"
         ), [])
 
+    def test_dynamic_target_values_are_token_local(self) -> None:
+        owned = "bin_owned::tests::owned_case"
+        cases = (
+            (f"cargo test --bin $BIN {owned}", (), True, True),
+            (f"cargo test --bin ${{BIN}} {owned}", (), True, True),
+            (f"cargo test --bin {{{{BIN}}}} {owned}", (), True, True),
+            (f"cargo test --test $TEST {owned}", (), True, True),
+            (f"cargo test --test ${{TEST}} {owned}", (), True, True),
+            (f"cargo test --test {{{{TEST}}}} {owned}", (), True, True),
+            (f"cargo test --bin missing-bin $FILTER",
+             ("unknown-target",), False, False),
+            (f"cargo test --bin missing-bin --test $TEST {owned}",
+             ("unknown-target",), False, True),
+            ("cargo test --lib --bin $BIN missing_case", (), False, True),
+        )
+        for command, kinds, bin_test, target_inconclusive in cases:
+            with self.subTest(command=command):
+                spec = integrity.parse_command(command.split())
+                self.assertEqual(spec.target_inconclusive, target_inconclusive)
+                self.assertEqual(
+                    tuple(item.kind for item in run_fixture(
+                        command, bin_test=bin_test,
+                    )),
+                    kinds,
+                    "mutation self-assert: dynamic target values stay unjudged",
+                )
+
     def test_positive_filters_form_one_or_union(self) -> None:
         hit = "high_risk_recovery::tests::recovery_case"
         for suffix in (
@@ -224,6 +251,11 @@ class MutationProof(unittest.TestCase):
             (f"cargo test --lib {full} -- --exact --skip recovery_case", False),
             (f"cargo test --lib recovery_case -- --skip recovery_case", True),
             (f"cargo test --lib {full} -- --exact --skip other --skip nope", False),
+            ("cargo test --lib -- --skip tests", True),
+            ("cargo test --lib -- --skip high_risk_recovery "
+             "--skip multinode_regression --skip redirected_case", True),
+            ("cargo test --lib -- --skip recovery_case", False),
+            ("cargo test --lib -- --skip $SKIP", False),
         )
         for command, blocked in cases:
             with self.subTest(command=command):
@@ -304,10 +336,11 @@ class EmptyTargetRule(unittest.TestCase):
 class ExitCodeContract(unittest.TestCase):
     """Warn-only rollout must exit 0; --enforce must exit 1 on violations."""
 
-    def _main_rc(self, command: str, extra: list[str]) -> int:
+    def _main_rc(self, command: str, extra: list[str], *,
+                 bin_test: bool = False) -> int:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            workflow = build_fixture_repo(root, command)
+            workflow = build_fixture_repo(root, command, bin_test=bin_test)
             allow = root / "allowlist.txt"
             allow.write_text("", encoding="utf-8")
             argv = ["--repo-root", str(root), "--workflow", str(workflow),
@@ -323,6 +356,20 @@ class ExitCodeContract(unittest.TestCase):
 
     def test_enforce_exits_zero_when_clean(self) -> None:
         self.assertEqual(self._main_rc(GOOD_COMMAND, ["--enforce"]), 0)
+
+    def test_dynamic_target_value_enforce_exit_codes(self) -> None:
+        owned = "bin_owned::tests::owned_case"
+        for value in ("$BIN", "${BIN}", "{{BIN}}"):
+            with self.subTest(value=value, dynamic=True):
+                self.assertEqual(self._main_rc(
+                    f"cargo test --bin {value} {owned}", ["--enforce"],
+                    bin_test=True,
+                ), 0)
+            with self.subTest(value=value, dynamic=False):
+                self.assertEqual(self._main_rc(
+                    f"cargo test --bin missing-bin {owned}", ["--enforce"],
+                    bin_test=True,
+                ), 1)
 
     def test_source_floor_shrink_fails_and_addition_stays_green(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
