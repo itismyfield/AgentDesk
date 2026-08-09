@@ -26,8 +26,6 @@ EXPECTED_FALSE_POSITIVES = (
     "db::postgres::tests::clamp_foreground_reserve_always_leaves_a_background_slot",
     "db::postgres::tests::runtime_pool_settings_enable_dead_peer_detection",
     "db::postgres::tests::startup_pool_settings_raise_pool_size_and_acquire_timeout",
-    "db::postgres::tests::"
-    "test_database_server_identity_normalizes_loopback_aliases_without_collisions",
     "reconcile::dispatch_delivery_reconcile_tests::"
     "dispatch_delivery_reconcile_classifies_rows_without_postgres",
     "services::discord::turn_bridge::completion_guard::completion_postgres::"
