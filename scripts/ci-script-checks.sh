@@ -168,6 +168,9 @@ echo "=== Test-target integrity gate (#5003/#5008) ==="
 "$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory
 "$PYTHON" -m unittest tests.test_check_test_target_integrity
 
+echo "=== Test-suite registry core tests (#5003 S3a-1) ==="
+"$PYTHON" -m unittest tests.test_check_test_suite_registry
+
 echo "=== PostgreSQL test-lane membership gate (#4979, enforced) ==="
 "$PYTHON" scripts/check_pg_test_lane_membership.py --baseline-ref "$TEST_LANE_BASELINE_REF"
 "$PYTHON" -m unittest tests.test_check_pg_test_lane_membership
