@@ -2640,6 +2640,12 @@ POST_DEPLOY_SMOKE_CORE_API_ENDPOINTS=(
 POST_DEPLOY_SMOKE_LOG_LINES="${AGENTDESK_POST_DEPLOY_SMOKE_LOG_LINES:-500}"
 POST_DEPLOY_SMOKE_WARN_LIMIT="${AGENTDESK_POST_DEPLOY_SMOKE_WARN_LIMIT:-5}"
 POST_DEPLOY_SMOKE_RELAY_CELL="${AGENTDESK_POST_DEPLOY_SMOKE_RELAY_CELL:-claude-tui}"
+# The E-35 phase from lease acquisition through scenario execution is capped,
+# including its live safety gate, setup/send/fetch HTTP, response wait, record
+# poll, refetch, idle check, and teardown. The component timeouts total 1,422
+# seconds; 900 seconds is an operational cutoff, not that component sum.
+# Reset costs zero because E-35 forbids reset/force-cancel.
+POST_DEPLOY_SMOKE_E35_DEADLINE_S="${AGENTDESK_POST_DEPLOY_SMOKE_E35_DEADLINE_S:-900}"
 POST_DEPLOY_SMOKE_CREATE_ISSUE="${AGENTDESK_POST_DEPLOY_SMOKE_CREATE_ISSUE:-off}"
 POST_DEPLOY_SMOKE_STAMP="$(date -u '+%Y%m%dT%H%M%SZ' 2>/dev/null || printf 'unknown')-$$"
 POST_DEPLOY_SMOKE_EVIDENCE="$ADK_REL/logs/post-deploy-smoke-${POST_DEPLOY_SMOKE_STAMP}.log"
@@ -2648,6 +2654,9 @@ POST_DEPLOY_SMOKE_HEALTH_BODY=""
 POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY=""
 POST_DEPLOY_SMOKE_SESSIONS_BODY=""
 POST_DEPLOY_SMOKE_FAILURES=()
+POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID=""
+POST_DEPLOY_SMOKE_DURABLE_COVERAGE="unevaluable: E-35 did not run"
+POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE="evaluated"
 
 # >>> BEGIN wedge-check region (#5244) — coverage is report-only and point-in-time
 POST_DEPLOY_SMOKE_WEDGE_MARKER_COVERAGE='evaluated: %s stall-state marker(s) observed (point-in-time)'; POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE="${POST_DEPLOY_SMOKE_WEDGE_MARKER_COVERAGE/\%s/0}"
@@ -3009,6 +3018,8 @@ PY
         return 1
     fi
 
+    POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID="$channel_id"
+
     # E-1 is a real live turn, so reuse the E2E driver's mailbox/session busy
     # predicates against the authenticated core-probe snapshots before sending.
     # An unreadable snapshot skips the injection fail-open: safety requires
@@ -3118,6 +3129,49 @@ PY
     _post_deploy_smoke_note "relay E-1 round-trip=pass" || return 1
 }
 
+_post_deploy_smoke_check_durable_record() {
+    local output log report status rc=0
+    # #5264 is a hard prerequisite only for default claude-tui live acceptance.
+    # claude-pipe is partial coverage and is not S8 TUI-surface evidence.
+    if [ -z "$POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID" ]; then
+        _post_deploy_smoke_note "durable_record_probe=unevaluable: E-35 channel unavailable; probe did not run" || return 1
+        return 0
+    fi
+    output="$ADK_REL/logs/post-deploy-smoke-durable-${POST_DEPLOY_SMOKE_STAMP}"
+    log="$POST_DEPLOY_SMOKE_TMP_DIR/relay-e35.log"
+    (
+        cd "$REPO" || exit 1
+        python3 scripts/e2e/run_tui_relay.py \
+            --base-url "http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}" \
+            --cell "$POST_DEPLOY_SMOKE_RELAY_CELL" \
+            --channel-id "$POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID" \
+            --scenarios "$REPO/tests/e2e/tui_relay/scenarios" \
+            --filter E-35 --no-reset-before-each \
+            --phase-deadline-s "$POST_DEPLOY_SMOKE_E35_DEADLINE_S" \
+            --output "$output" --queue-runtime-root "$ADK_REL/runtime" \
+            --required-agent-mode real_live --required-coverage-class live
+    ) > "$log" 2>&1 || rc=$?
+    tail -n 40 "$log" >> "$POST_DEPLOY_SMOKE_EVIDENCE" 2>/dev/null || true
+    report="$output/report.${POST_DEPLOY_SMOKE_RELAY_CELL}.json"
+    status=$(python3 - "$report" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE" <<'PY' || printf 'unevaluable'
+import json, sys
+try:
+    report = json.load(open(sys.argv[1], encoding="utf-8"))
+    probes = [s.get("durable_record_probe", {}) for s in report.get("scenarios", []) if s.get("id") == "E-35"]
+    print(probes[-1].get("status", "unevaluable") if probes else "unevaluable")
+except Exception:
+    print("unevaluable")
+PY
+    )
+    POST_DEPLOY_SMOKE_DURABLE_COVERAGE="$status"
+    if [ "$rc" -eq 0 ] && [ "$status" = "evaluated" ]; then
+        _post_deploy_smoke_note "durable_record_probe=evaluated: exact durable receipt and covering frontier observed" || return 1
+        return 0
+    fi
+    _post_deploy_smoke_fail "durable_record_probe=${status}: E-35 rc=${rc}; no cleanup attempted; dirty/active residue may remain (evidence: ${output})" || true
+    return 1
+}
+
 _run_post_deploy_functional_smoke() {
     local failed=0
     mkdir -p "$ADK_REL/logs" || return 1
@@ -3135,6 +3189,9 @@ _run_post_deploy_functional_smoke() {
         failed=1
     fi
     if ! _post_deploy_smoke_check_relay_round_trip; then
+        failed=1
+    fi
+    if ! _post_deploy_smoke_check_durable_record; then
         failed=1
     fi
     rm -rf "$POST_DEPLOY_SMOKE_TMP_DIR" 2>/dev/null || true
@@ -3157,6 +3214,7 @@ _report_post_deploy_smoke_failure() {
         printf -- '- Port: `%s`\n' "$REL_PORT"
         printf -- '- Evidence: `%s`\n\n' "$POST_DEPLOY_SMOKE_EVIDENCE"
         printf -- '- Relay wedge coverage: `%s`\n\n' "${POST_DEPLOY_SMOKE_WEDGE_COVERAGE:-not run: wedge check did not execute}"
+        printf -- "- Durable record coverage: \`%s\`\n\n" "${POST_DEPLOY_SMOKE_DURABLE_COVERAGE:-unevaluable: E-35 did not run}"
         printf '## Findings\n\n'
         for finding in "${POST_DEPLOY_SMOKE_FAILURES[@]}"; do
             printf -- '- %s\n' "$finding"
@@ -3175,6 +3233,8 @@ draft: ${draft_path}
 evidence: ${POST_DEPLOY_SMOKE_EVIDENCE}"
     alert_text="${alert_text}
 relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE:-not run: wedge check did not execute}"
+    alert_text="${alert_text}
+durable record coverage: ${POST_DEPLOY_SMOKE_DURABLE_COVERAGE:-unevaluable: E-35 did not run}"
     for finding in "${POST_DEPLOY_SMOKE_FAILURES[@]}"; do
         alert_text="${alert_text}
 - ${finding}"
@@ -3238,6 +3298,11 @@ echo "▸ Running post-deploy functional smoke (#4262)..."
 # The smoke function runs from an `if` guard, suspending `set -e` within it;
 # each fallible step is nevertheless explicitly guarded or carries `|| return`.
 if _run_post_deploy_functional_smoke; then
+    if case "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE:$POST_DEPLOY_SMOKE_DURABLE_COVERAGE" in
+        "$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE:$POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE") true ;;
+        *) false ;;
+    esac
+    then
     case "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE" in
         "$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE")
             echo "✓ Post-deploy functional smoke passed (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
@@ -3246,6 +3311,10 @@ if _run_post_deploy_functional_smoke; then
             echo "△ Post-deploy functional smoke completed with coverage gap (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
             ;;
     esac
+            echo "  durable record coverage: ${POST_DEPLOY_SMOKE_DURABLE_COVERAGE}"
+    else
+            echo "△ Post-deploy functional smoke completed with coverage gap (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; durable record coverage: ${POST_DEPLOY_SMOKE_DURABLE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
+    fi
 else
     echo "⚠ POST-DEPLOY FUNCTIONAL SMOKE FAILED — deploy remains healthy (fail-open)"
     echo "  relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}"
