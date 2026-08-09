@@ -147,7 +147,9 @@ test-non-pg:
 
 # PostgreSQL tests belong in the library harness. Integration and doctest targets
 # are intentionally excluded; add a separate PG lane command if either gains PG coverage.
+# The fixture server must be explicit; PG* variables alone are not authorization.
 test-postgres:
+    @test -n "${POSTGRES_TEST_DATABASE_URL_BASE:-}" || (echo "POSTGRES_TEST_DATABASE_URL_BASE must name the dedicated PostgreSQL test server with an explicit host and port" >&2; exit 1)
     cargo test --lib -- _pg pg_ postgres --nocapture --test-threads=1
 
 check: fmt-check lint cargo-check test

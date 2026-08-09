@@ -359,7 +359,7 @@ high_risk_recovery: # ci-pr.yml only additions
 
 ### Pool sizing
 
-- pool=1 은 공용 상수 `TEST_POSTGRES_POOL_MAX_CONNECTIONS`(`src/db/postgres.rs:1174`)가 강제한다. 단일 connection 이므로 startup reconcile 이 runtime pool 을 점유한 채 끝나면 곧바로 pool timeout 으로 드러난다.
+- pool=1 은 `src/db/postgres.rs`의 공용 상수 `TEST_POSTGRES_POOL_MAX_CONNECTIONS`가 강제한다. 단일 connection 이므로 startup reconcile 이 runtime pool 을 점유한 채 끝나면 곧바로 pool timeout 으로 드러난다.
 - ⚠️ 이전 판이 인용하던 `pg_recovery_test_config` 와 `scenario_969_pg_boot_reconcile_uses_startup_pool_without_pool_timeout_logs` 는 **코드에 존재하지 않는다**(`git grep` 0건). 이 문서에 심볼을 적을 때는 실재를 확인하고 적는다.
 
 ## 5. Triage 분류 규약

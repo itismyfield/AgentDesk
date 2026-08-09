@@ -1,8 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
-#[cfg(test)]
-use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -1158,10 +1156,13 @@ fn database_url_override() -> Option<String> {
 /// PG fixture constructors still read environment variables directly and are
 /// deferred to the S3 follow-up.
 pub(crate) fn postgres_test_database_url_base() -> Option<String> {
-    let base = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE")
-        .ok()
-        .map(|value| value.trim().trim_end_matches('/').to_string())
-        .filter(|value| !value.is_empty());
+    let override_value = FIXTURE_BASE_OVERRIDE.with(|slot| slot.borrow().clone());
+    let base = override_value.unwrap_or_else(|| {
+        std::env::var("POSTGRES_TEST_DATABASE_URL_BASE")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty())
+    });
     if base.is_none() && std::env::var(AGENTDESK_REQUIRE_PG_ENV).ok().as_deref() == Some("1") {
         panic!("PG required but POSTGRES_TEST_DATABASE_URL_BASE unset"); // agentdesk-audit: allow-unwrap — AGENTDESK_REQUIRE_PG=1 CI 계약: PG fixture base 누락을 soft-skip green으로 붕괴시키지 않는 의도적 hard-fail (#4979 S2)
     }
@@ -1188,6 +1189,11 @@ static POSTGRES_TEST_LIFECYCLE_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
 static POSTGRES_TEST_DATABASE_OWNERS: std::sync::OnceLock<
     std::sync::Mutex<BTreeMap<(String, String), TestDatabaseOwnershipToken>>,
 > = std::sync::OnceLock::new();
+#[cfg(test)]
+thread_local! {
+    static FIXTURE_BASE_OVERRIDE: std::cell::RefCell<Option<Option<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 #[cfg(test)]
 struct TestDatabaseOwnershipToken {
@@ -1204,40 +1210,7 @@ fn test_database_owners()
 
 #[cfg(test)]
 fn test_database_server_identity(options: &PgConnectOptions) -> String {
-    let host = options.get_host().trim();
-    // Strip a DNS-style trailing dot before removing IPv6 brackets so both
-    // `[::1]` and `[::1].` reach the same canonical parser input. Preserve
-    // Unix-socket paths verbatim below; a path is not a DNS host name.
-    let host_for_ip_or_hostname = host.trim_end_matches('.');
-    let unbracketed_host = host_for_ip_or_hostname
-        .strip_prefix('[')
-        .and_then(|value| value.strip_suffix(']'))
-        .unwrap_or(host_for_ip_or_hostname);
-    let normalized_host = if let Ok(address) = unbracketed_host.parse::<IpAddr>() {
-        // Canonicalize first: long-form IPv6 loopback parses to `::1`, so the
-        // alias match below covers every equivalent textual representation.
-        address.to_string()
-    } else if host.starts_with('/') {
-        host.to_string()
-    } else {
-        unbracketed_host.to_ascii_lowercase()
-    };
-    let normalized_host = match normalized_host.as_str() {
-        "localhost" | "127.0.0.1" | "::1" => {
-            // PostgreSQL fixtures may create through the CI base URL and connect
-            // through config.host; treat the three loopback spellings as one
-            // server identity so ownership cleanup cannot split its registry key.
-            // Angle brackets cannot occur in a URL host, keeping this key distinct
-            // from a real DNS hostname such as `loopback`.
-            "<loopback>".to_string()
-        }
-        _ => normalized_host,
-    };
-    if normalized_host.contains(':') {
-        format!("[{normalized_host}]:{}", options.get_port())
-    } else {
-        format!("{normalized_host}:{}", options.get_port())
-    }
+    super::fixture_target::server_identity(options)
 }
 
 #[cfg(test)]
@@ -1374,8 +1347,7 @@ fn parse_test_postgres_options(
     database_url: &str,
     label: &str,
 ) -> Result<PgConnectOptions, String> {
-    PgConnectOptions::from_str(database_url)
-        .map_err(|error| format!("{label} parse postgres url: {error}"))
+    super::fixture_target::parse_fixture_url(database_url, label).map(|parsed| parsed.options)
 }
 
 #[cfg(test)]
@@ -1384,6 +1356,10 @@ async fn connect_test_pool_with_options(
     label: &str,
     max_connections: u32,
 ) -> Result<PgPool, String> {
+    super::fixture_target::enforce_configured_target(
+        postgres_test_database_url_base().as_deref(),
+        &options,
+    )?;
     let acquire_timeout = std::env::var(TEST_POSTGRES_ACQUIRE_TIMEOUT_ENV)
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
@@ -1723,14 +1699,7 @@ pub(crate) async fn connect_test_pool_with_max_connections_and_migrate(
 }
 
 #[cfg(test)]
-async fn connect_test_pool_and_migrate_config_inner(
-    config: &Config,
-    label: &str,
-) -> Result<Option<PgPool>, String> {
-    if !database_enabled(config) {
-        return Ok(None);
-    }
-
+fn test_database_config_options(config: &Config) -> PgConnectOptions {
     let mut options = PgConnectOptions::new()
         .host(&config.database.host)
         .port(config.database.port)
@@ -1739,6 +1708,19 @@ async fn connect_test_pool_and_migrate_config_inner(
     if let Some(password) = config.database.password.as_deref() {
         options = options.password(password);
     }
+    options
+}
+
+#[cfg(test)]
+async fn connect_test_pool_and_migrate_config_inner(
+    config: &Config,
+    label: &str,
+) -> Result<Option<PgPool>, String> {
+    if !database_enabled(config) {
+        return Ok(None);
+    }
+
+    let options = test_database_config_options(config);
 
     let pool =
         connect_test_pool_with_options(options.clone(), label, config.database.pool_max.max(1))
@@ -1879,7 +1861,7 @@ mod tests {
         connect_test_pool_with_max_connections_and_migrate, create_test_database, database_enabled,
         database_summary, health_check, require_pg_guard, run_test_postgres_sqlx_op_with_timeout,
         runtime_pool_settings, should_yield_for_counters, startup_pool_settings, startup_reseed,
-        sync_agents_from_config_pg, test_database_server_identity, with_startup_advisory_lock,
+        sync_agents_from_config_pg, with_startup_advisory_lock,
     };
     use sqlx::postgres::PgConnectOptions;
     use sqlx::{Executor as _, PgPool, Row};
@@ -1905,15 +1887,18 @@ mod tests {
         _lifecycle: super::PostgresTestLifecycleGuard,
         previous: Option<std::ffi::OsString>,
         previous_acquire_timeout: Option<std::ffi::OsString>,
+        previous_fixture_base_override: Option<Option<String>>,
     }
 
     impl RequirePgEnvGuard {
-        fn set(value: Option<&str>) -> Self {
+        fn set(value: Option<&str>, fixture_base: Option<&str>) -> Self {
             let env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
             let lifecycle = super::lock_test_lifecycle();
             let previous = std::env::var_os(AGENTDESK_REQUIRE_PG_ENV);
             let previous_acquire_timeout =
                 std::env::var_os(super::TEST_POSTGRES_ACQUIRE_TIMEOUT_ENV);
+            let previous_fixture_base_override = super::FIXTURE_BASE_OVERRIDE
+                .with(|slot| slot.replace(Some(fixture_base.map(str::to_string))));
             match value {
                 Some(value) => unsafe { std::env::set_var(AGENTDESK_REQUIRE_PG_ENV, value) },
                 None => unsafe { std::env::remove_var(AGENTDESK_REQUIRE_PG_ENV) },
@@ -1926,6 +1911,7 @@ mod tests {
                 _lifecycle: lifecycle,
                 previous,
                 previous_acquire_timeout,
+                previous_fixture_base_override,
             }
         }
     }
@@ -1942,6 +1928,9 @@ mod tests {
                 },
                 None => unsafe { std::env::remove_var(super::TEST_POSTGRES_ACQUIRE_TIMEOUT_ENV) },
             }
+            super::FIXTURE_BASE_OVERRIDE.with(|slot| {
+                slot.replace(self.previous_fixture_base_override.take());
+            });
         }
     }
 
@@ -2025,7 +2014,7 @@ mod tests {
 
     #[test]
     fn require_pg_guard_panics_for_all_entrypoints_on_unreachable_database() {
-        let _env = RequirePgEnvGuard::set(Some("1"));
+        let _env = RequirePgEnvGuard::set(Some("1"), Some(UNREACHABLE_POSTGRES_URL));
         // Environment premise: CI runners and developer machines do not run a
         // PostgreSQL listener on privileged loopback port 1. If that premise
         // is violated, the assertions above must identify it as the cause.
@@ -2059,7 +2048,7 @@ mod tests {
 
     #[test]
     fn require_pg_guard_preserves_errors_when_ci_lane_does_not_require_postgres() {
-        let _env = RequirePgEnvGuard::set(None);
+        let _env = RequirePgEnvGuard::set(None, Some(UNREACHABLE_POSTGRES_URL));
         // Keep the same explicit no-listener premise as the required-lane
         // probe; a live port-1 service would invalidate the timeout contract.
         const UNREACHABLE_POSTGRES_URL: &str = "postgresql://postgres@127.0.0.1:1/postgres";
@@ -2092,7 +2081,7 @@ mod tests {
 
     #[test]
     fn require_pg_guard_leaves_success_untouched_when_ci_lane_requires_postgres() {
-        let _env = RequirePgEnvGuard::set(Some("1"));
+        let _env = RequirePgEnvGuard::set(Some("1"), None);
         assert_eq!(require_pg_guard(Ok::<_, String>(42)), Ok(42));
         let config = crate::config::Config::default();
         assert!(matches!(
@@ -2104,46 +2093,45 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_database_server_identity_normalizes_loopback_aliases_without_collisions() {
-        fn identity(host: &str) -> String {
-            let options = PgConnectOptions::new().host(host).port(5432);
-            test_database_server_identity(&options)
-        }
-
-        let expected = identity("localhost");
-        for host in [
-            "localhost",
-            "127.0.0.1",
-            "127.0.0.1.",
-            "::1",
-            "[::1]",
-            "[::1].",
-            "0:0:0:0:0:0:0:1",
-            "LOCALHOST.",
-        ] {
-            assert_eq!(identity(host), expected, "loopback spelling {host:?}");
-        }
-
-        assert_ne!(
-            expected,
-            identity("loopback"),
-            "the loopback sentinel must not collide with a real DNS hostname"
-        );
-        assert_eq!(identity("DB.Example.COM."), "db.example.com:5432");
-    }
-
     struct TestDatabase {
         admin_url: String,
         database_name: String,
         database_url: String,
+        base_options: PgConnectOptions,
+        base_password: Option<String>,
+        cleanup_armed: bool,
     }
 
     impl TestDatabase {
         async fn create() -> Self {
-            let admin_url = admin_database_url();
+            let base = super::postgres_test_database_url_base()
+                .unwrap_or_else(|| panic!("db::postgres Config fixtures require POSTGRES_TEST_DATABASE_URL_BASE before CREATE"));
+            let parsed_base = crate::db::fixture_target::parse_fixture_url(
+                &base,
+                "db::postgres configured fixture base",
+            )
+            .unwrap_or_else(|error| {
+                panic!("db::postgres fixture base is invalid before CREATE: {error}")
+            });
+            crate::db::fixture_target::config_base_is_representable(&parsed_base).unwrap_or_else(
+                |error| {
+                    panic!(
+                        "db::postgres Config fixtures cannot represent the configured base before CREATE: {error}"
+                    )
+                },
+            );
+            let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "postgres".to_string());
             let database_name = format!("agentdesk_pg_{}", uuid::Uuid::new_v4().simple());
-            let database_url = format!("{}/{}", base_database_url(), database_name);
+            let database_url_for = |database: &str| {
+                let mut url = parsed_base.url.clone();
+                url.set_path(&format!("/{database}"));
+                url.to_string()
+            };
+            let admin_url = database_url_for(&admin_db);
+            let database_url = database_url_for(&database_name);
             create_test_database(&admin_url, &database_name, "db::postgres tests")
                 .await
                 .expect("create postgres test db");
@@ -2152,57 +2140,72 @@ mod tests {
                 admin_url,
                 database_name,
                 database_url,
+                base_options: parsed_base.options,
+                base_password: parsed_base.password,
+                cleanup_armed: true,
             }
         }
 
-        async fn drop(self) {
-            super::drop_test_database(&self.admin_url, &self.database_name, "db::postgres tests")
-                .await
-                .expect("drop postgres test db");
+        async fn drop(mut self) {
+            let result = super::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                "db::postgres tests",
+            )
+            .await;
+            if result.is_ok() {
+                self.cleanup_armed = false;
+            }
+            result.expect("drop postgres test db");
         }
     }
 
-    fn base_database_url() -> String {
-        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
-            let trimmed = base.trim();
-            if !trimmed.is_empty() {
-                return trimmed.trim_end_matches('/').to_string();
+    impl Drop for TestDatabase {
+        fn drop(&mut self) {
+            if !self.cleanup_armed {
+                return;
+            }
+            let result =
+                cleanup_test_database_from_drop(self.admin_url.clone(), self.database_name.clone());
+            if let Err(error) = result {
+                if std::thread::panicking() {
+                    eprintln!("LEAKED-TEST-DATABASE {}: {error}", self.database_name);
+                } else {
+                    panic!(
+                        "postgres test database {} leaked: {error}",
+                        self.database_name
+                    );
+                }
             }
         }
+    }
 
-        let user = std::env::var("PGUSER")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| {
-                std::env::var("USER")
-                    .ok()
-                    .filter(|value| !value.trim().is_empty())
+    fn cleanup_test_database_from_drop(
+        admin_url: String,
+        database_name: String,
+    ) -> Result<(), String> {
+        let worker_name = format!("db fixture cleanup {database_name}");
+        let handle = std::thread::Builder::new()
+            .name(worker_name)
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| format!("cleanup runtime build failed: {error}"))?;
+                runtime.block_on(super::drop_test_database(
+                    &admin_url,
+                    &database_name,
+                    "db::postgres tests Drop",
+                ))
             })
-            .unwrap_or_else(|| "postgres".to_string());
-        let password = std::env::var("PGPASSWORD")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
-        let host = std::env::var("PGHOST")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "localhost".to_string());
-        let port = std::env::var("PGPORT")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "5432".to_string());
-
-        match password {
-            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
-            None => format!("postgresql://{user}@{host}:{port}"),
+            .map_err(|error| format!("cleanup worker spawn failed: {error}"))?;
+        match handle.join() {
+            Ok(result) => result.map_err(|error| format!("async cleanup failed: {error}")),
+            Err(payload) => Err(format!(
+                "cleanup worker panicked: {}",
+                panic_message(payload)
+            )),
         }
-    }
-
-    fn admin_database_url() -> String {
-        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "postgres".to_string());
-        format!("{}/{}", base_database_url(), admin_db)
     }
 
     async fn migrate_through_version(pool: &PgPool, max_version: i64) -> Result<(), String> {
@@ -2266,24 +2269,11 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.database.enabled = true;
         config.database.pool_max = 4;
-        config.database.host = "localhost".to_string();
-        config.database.port = std::env::var("PGPORT")
-            .ok()
-            .and_then(|raw| raw.parse::<u16>().ok())
-            .unwrap_or(5432);
+        config.database.host = test_db.base_options.get_host().to_string();
+        config.database.port = test_db.base_options.get_port();
         config.database.dbname = test_db.database_name.clone();
-        config.database.user = std::env::var("PGUSER")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| {
-                std::env::var("USER")
-                    .ok()
-                    .filter(|value| !value.trim().is_empty())
-            })
-            .unwrap_or_else(|| "postgres".to_string());
-        config.database.password = std::env::var("PGPASSWORD")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
+        config.database.user = test_db.base_options.get_username().to_string();
+        config.database.password = test_db.base_password.clone();
         config.github.repos = vec!["itismyfield/AgentDesk".to_string()];
         config.agents = vec![crate::config::AgentDef {
             id: "pg-agent".to_string(),
@@ -2305,6 +2295,24 @@ mod tests {
             preferred_intake_node_labels: None,
         }];
         config
+    }
+
+    #[test]
+    fn ownership_registry_key_matches_between_admin_url_and_config_options() {
+        let admin_url = "postgresql://fixture@db.example:15432/postgres";
+        let admin_options = super::parse_test_postgres_options(admin_url, "registry-key admin")
+            .expect("parse registry-key admin URL");
+        let database_name = "agentdesk_pg_key";
+        let mut config = crate::config::Config::default();
+        config.database.host = admin_options.get_host().to_string();
+        config.database.port = admin_options.get_port();
+        config.database.dbname = database_name.to_string();
+        let database_options = super::test_database_config_options(&config);
+
+        assert_eq!(
+            super::test_database_registry_key(&admin_options, database_name),
+            super::test_database_registry_key(&database_options, database_name)
+        );
     }
 
     #[test]

@@ -76,5 +76,8 @@ without a visible reason, diagnostics that omit correlation ids, or any default
 sandbox mutation of production cards, PR/branch tracking, live sessions,
 dispatch delivery, channel messages, or worktree/branch context.
 
-Requirements: the same local PostgreSQL test environment used by the repo's
-Postgres-backed tests (`POSTGRES_TEST_DATABASE_URL_BASE` or `PG*` variables).
+Requirements: set `POSTGRES_TEST_DATABASE_URL_BASE` to the local test server URL
+with an explicit TCP host and port. For Config fixtures, its `sslmode` must match
+the Config-derived options; when `PGSSLMODE` is unset, omit it or use `prefer`.
+`PG*` variables may supply credentials or database names, but do not authorize
+a server alone.
