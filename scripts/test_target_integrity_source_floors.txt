@@ -1,0 +1,5 @@
+# Empirical extraction floors measured at #5003 S1 correction r2.
+# These are lower bounds, not expected exact counts: additions need no re-pin,
+# while parser drift, deletion, or partial reads cannot gradually reach zero.
+workflows=66
+justfile=87

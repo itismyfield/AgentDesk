@@ -30,7 +30,10 @@ BAD_COMMAND = "cargo test --bin agentdesk high_risk_recovery:: -- --test-threads
 GOOD_COMMAND = "cargo test --lib high_risk_recovery:: -- --test-threads=1"
 
 
-def build_fixture_repo(root: Path, command: str) -> Path:
+def build_fixture_repo(root: Path, command: str,
+                       just_command: str | None = None,
+                       just_text: str | None = None,
+                       integration_test: bool = False) -> Path:
     """Materialize a minimal crate + workflow mirroring the real layout."""
     (root / "src").mkdir(parents=True)
     (root / "src" / "server").mkdir()
@@ -69,13 +72,41 @@ def build_fixture_repo(root: Path, command: str) -> Path:
         f'jobs:\n  lane:\n    steps:\n      - run: "{command}"\n',
         encoding="utf-8",
     )
+    # The S1 gate consumes the checked-in full-path library inventory for
+    # `--lib` and `--all-targets` sites. Keep the fixture manifest explicit so
+    # mutation tests prove the same source of truth as the real repository.
+    manifest = root / integrity.LIB_INVENTORY_MANIFEST_REL
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        integrity.render_lib_inventory_manifest({
+            "high_risk_recovery::tests::recovery_case",
+            "server::multinode_regression::tests::nested_case",
+            "route::redirected_impl::tests::redirected_case",
+        }),
+        encoding="utf-8",
+    )
+    if integration_test:
+        (root / "tests").mkdir()
+        (root / "tests" / "integration_only.rs").write_text(
+            "#[test]\nfn integration_only_case() {}\n", encoding="utf-8"
+        )
+    if just_text is None:
+        just_text = f"fixture:\n    {just_command or GOOD_COMMAND}\n"
+    (root / "justfile").write_text(just_text, encoding="utf-8")
+    floor = root / integrity.SOURCE_FLOOR_REL
+    floor.write_text("workflows=1\njustfile=1\n", encoding="utf-8")
     return workflow
 
 
-def run_fixture(command: str, allowlist: str = "") -> list:
+def run_fixture(command: str, allowlist: str = "",
+                just_command: str | None = None,
+                just_text: str | None = None,
+                integration_test: bool = False) -> list:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        workflow = build_fixture_repo(root, command)
+        workflow = build_fixture_repo(
+            root, command, just_command, just_text, integration_test
+        )
         allow = root / "allowlist.txt"
         allow.write_text(allowlist, encoding="utf-8")
         return integrity.check_workflows(
@@ -98,6 +129,100 @@ class MutationProof(unittest.TestCase):
 
     def test_fixed_lib_command_passes(self) -> None:
         self.assertEqual(run_fixture(GOOD_COMMAND), [])
+
+    def test_justfile_bad_bin_command_is_flagged(self) -> None:
+        violations = run_fixture(
+            "cargo test --bin agentdesk",
+            just_command=BAD_COMMAND,
+        )
+        self.assertEqual(len(violations), 1, violations)
+        self.assertEqual(violations[0].workflow, "justfile")
+        self.assertEqual(violations[0].kind, "target-mismatch")
+
+    def test_justfile_fixed_lib_command_passes(self) -> None:
+        self.assertEqual(run_fixture(
+            "cargo test --bin agentdesk",
+            just_command=GOOD_COMMAND,
+        ), [])
+
+    def test_full_path_suffix_typo_is_zero_match(self) -> None:
+        violations = run_fixture(
+            "cargo test --lib high_risk_recovery::renamed_case"
+        )
+        self.assertEqual([violation.kind for violation in violations],
+                         ["zero-match"])
+
+    def test_all_targets_integration_only_filter_is_not_rejected(self) -> None:
+        spec = integrity.parse_command([
+            "cargo", "test", "--all-targets", "integration_only_case"
+        ])
+        self.assertFalse(
+            spec.skipped,
+            "fixture self-assert: --all-targets must stay observed",
+        )
+        self.assertEqual(run_fixture(
+            "cargo test --all-targets integration_only_case",
+            integration_test=True,
+        ), [])
+
+    def test_all_targets_lib_filter_fixed_passes(self) -> None:
+        self.assertEqual(run_fixture(
+            "cargo test --all-targets high_risk_recovery::"
+        ), [])
+
+    def test_static_filter_is_checked_with_dynamic_skip_args(self) -> None:
+        violations = run_fixture(
+            "cargo test --lib high_risk_recovery::renamed_case -- "
+            '"${NON_PG_SKIP_ARGS[@]}"'
+        )
+        self.assertEqual([violation.kind for violation in violations],
+                         ["zero-match"])
+
+    def test_skip_filters_are_counted_in_final_selection(self) -> None:
+        violations = run_fixture(
+            "cargo test --lib high_risk_recovery:: -- "
+            "--skip high_risk_recovery::"
+        )
+        self.assertEqual([violation.kind for violation in violations],
+                         ["zero-match"])
+
+    def test_exact_applies_to_non_matching_short_skip(self) -> None:
+        self.assertEqual(run_fixture(
+            "cargo test --lib high_risk_recovery::tests::recovery_case -- "
+            "--exact --skip recovery_case"
+        ), [])
+
+    def test_exact_skip_of_the_full_id_is_still_zero_match(self) -> None:
+        violations = run_fixture(
+            "cargo test --lib high_risk_recovery::tests::recovery_case -- "
+            "--exact --skip high_risk_recovery::tests::recovery_case"
+        )
+        self.assertEqual([violation.kind for violation in violations],
+                         ["zero-match"])
+
+    def test_just_interpolation_is_dynamic_not_a_literal_filter(self) -> None:
+        self.assertEqual(run_fixture(
+            GOOD_COMMAND,
+            just_text=(
+                'FILTER := "high_risk_recovery::"\n'
+                "fixture FILTER:\n    cargo test --lib {{FILTER}}\n"
+            ),
+        ), [])
+
+    def test_just_echo_string_is_not_a_command(self) -> None:
+        self.assertEqual(run_fixture(
+            GOOD_COMMAND,
+            just_text='fixture:\n    echo "cargo test --lib documentation_only"\n',
+        ), [])
+
+    def test_top_level_just_assignment_after_recipe_is_not_a_command(self) -> None:
+        self.assertEqual(run_fixture(
+            GOOD_COMMAND,
+            just_text=(
+                f"fixture:\n    {GOOD_COMMAND}\n\n"
+                'EXAMPLE := "cargo test --lib documentation_only"\n'
+            ),
+        ), [])
 
     def test_nested_lib_module_under_bin_is_flagged(self) -> None:
         violations = run_fixture(
@@ -172,6 +297,33 @@ class ExitCodeContract(unittest.TestCase):
     def test_enforce_exits_zero_when_clean(self) -> None:
         self.assertEqual(self._main_rc(GOOD_COMMAND, ["--enforce"]), 0)
 
+    def test_workflow_extraction_floor_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workflow = build_fixture_repo(root, "echo no-test-command")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rc = integrity.main([
+                    "--repo-root", str(root), "--workflow", str(workflow),
+                    "--enforce",
+                ])
+        self.assertEqual(rc, 1, output.getvalue())
+        self.assertIn("extraction-floor", output.getvalue())
+
+    def test_justfile_extraction_floor_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workflow = build_fixture_repo(root, GOOD_COMMAND)
+            (root / "justfile").unlink()
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rc = integrity.main([
+                    "--repo-root", str(root), "--workflow", str(workflow),
+                    "--enforce",
+                ])
+        self.assertEqual(rc, 1, output.getvalue())
+        self.assertIn("extraction-floor", output.getvalue())
+
 
 class AllowlistContract(unittest.TestCase):
     def test_allowlist_cannot_excuse_target_mismatch(self) -> None:
@@ -184,7 +336,7 @@ class AllowlistContract(unittest.TestCase):
     def test_allowlist_excuses_non_mismatch_kinds(self) -> None:
         command = "cargo test --lib bogus_module::tests"
         self.assertEqual(
-            [v.kind for v in run_fixture(command)], ["unknown-module"])
+            [v.kind for v in run_fixture(command)], ["zero-match"])
         allow = "# legitimately-empty on this platform\n" + command + "\n"
         self.assertEqual(run_fixture(command, allowlist=allow), [])
 
@@ -208,11 +360,13 @@ class ParserContract(unittest.TestCase):
         )
         self.assertEqual(len(violations), 1, violations)
 
-    def test_substring_filter_without_module_match_is_skipped(self) -> None:
-        # A bare substring filter (no ::) that is not a module name cannot be
-        # judged statically and must not false-positive.
+    def test_substring_filter_without_module_match_is_zero_match(self) -> None:
+        # The checked-in lib inventory lets the gate judge bare substring
+        # filters too; a typo is no longer silently skipped.
         self.assertEqual(
-            run_fixture("cargo test --lib some_test_name_fragment"), []
+            [v.kind for v in run_fixture(
+                "cargo test --lib some_test_name_fragment"
+            )], ["zero-match"]
         )
 
 
@@ -438,6 +592,10 @@ mod after_string_brace {
         ).splitlines()
         self.assertIn(
             '"$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory',
+            lines,
+        )
+        self.assertIn(
+            '"$PYTHON" scripts/check_test_target_integrity.py --enforce',
             lines,
         )
 
