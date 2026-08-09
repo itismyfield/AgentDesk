@@ -61,14 +61,133 @@ class RecordFixtures(unittest.TestCase):
     def write(self, record: dict, owner: str = "42") -> None:
         (self.records / f"{owner}.json").write_text(json.dumps(record), encoding="utf-8")
 
-    def scan(self, message_id: str = "222") -> dict:
+    def scan(
+        self,
+        message_id: str = "222",
+        *,
+        channel_id: str = "99",
+        provider: str = "claude",
+    ) -> dict:
         return durable_delivery.scan_records(
-            self.root, provider="claude", channel_id="99", message_id=message_id
+            self.root, provider=provider, channel_id=channel_id, message_id=message_id
         )
 
     def test_exact_response_receipt_and_covering_frontier_are_evaluated(self):
         self.write(_record(_receipt(222), end=30))
         self.assertEqual(self.scan()["status"], "evaluated")
+
+    def test_raw_authority_numbers_require_exact_json_integers(self):
+        cases = (
+            ("receipt message fractional", ("confirmed_deliveries", 0, "message_id"), 222.9),
+            ("receipt message integer float", ("confirmed_deliveries", 0, "message_id"), 222.0),
+            ("receipt message numeric string", ("confirmed_deliveries", 0, "message_id"), "222"),
+            ("receipt message bool", ("confirmed_deliveries", 0, "message_id"), True),
+            ("receipt message null", ("confirmed_deliveries", 0, "message_id"), None),
+            ("receipt message list", ("confirmed_deliveries", 0, "message_id"), [222]),
+            ("receipt message object", ("confirmed_deliveries", 0, "message_id"), {"id": 222}),
+            ("receipt range start", ("confirmed_deliveries", 0, "source", "range", 0), 10.9),
+            ("receipt range end", ("confirmed_deliveries", 0, "source", "range", 1), 20.9),
+            (
+                "receipt generation",
+                ("confirmed_deliveries", 0, "source", "generation_mtime_ns"),
+                77.9,
+            ),
+            (
+                "offset authority channel",
+                ("confirmed_deliveries", 0, "source", "offset_authority_channel_id"),
+                42.9,
+            ),
+            (
+                "source delivery channel",
+                ("confirmed_deliveries", 0, "source", "delivery_channel_id"),
+                99.9,
+            ),
+            (
+                "receipt delivery channel",
+                ("confirmed_deliveries", 0, "delivery_channel_id"),
+                99.9,
+            ),
+            ("frontier range start", ("delivered_frontier", "range", 0), 10.9),
+            ("frontier range end", ("delivered_frontier", "range", 1), 30.9),
+            (
+                "frontier generation",
+                ("delivered_frontier", "generation_mtime_ns"),
+                77.9,
+            ),
+            ("frontier channel", ("delivered_frontier", "panel_channel_id"), 99.9),
+        )
+        for name, path, malformed in cases:
+            with self.subTest(name=name):
+                record = _record(_receipt(222), end=30)
+                target = record
+                for component in path[:-1]:
+                    target = target[component]
+                target[path[-1]] = malformed
+                self.write(record)
+                result = self.scan()
+                self.assertEqual(result["status"], "failed", result)
+
+    def test_receipt_identity_fields_require_nonempty_strings(self):
+        cases = (
+            ("tmux integer", "tmux_session_name", 1),
+            ("turn nonce list", "turn_nonce", ["n"]),
+            ("tmux whitespace", "tmux_session_name", "  \t"),
+            ("turn nonce whitespace", "turn_nonce", "\n"),
+        )
+        for name, field, malformed in cases:
+            with self.subTest(name=name):
+                receipt = _receipt(222)
+                receipt["source"][field] = malformed
+                self.write(_record(receipt))
+                result = self.scan()
+                self.assertEqual(result["status"], "failed", result)
+
+    def test_source_and_expected_provider_require_nonempty_strings(self):
+        for malformed in (1, ["claude"], {"name": "claude"}, True, "", "  "):
+            with self.subTest(record_provider=malformed):
+                receipt = _receipt(222)
+                receipt["source"]["provider"] = malformed
+                self.write(_record(receipt))
+                self.assertEqual(self.scan()["status"], "failed")
+            with self.subTest(expected_provider=malformed):
+                result = self.scan(provider=malformed)
+                self.assertEqual(result["status"], "failed", result)
+                self.assertIn("invalid query identity", result["reason"])
+
+    def test_owner_filename_requires_nonzero_ascii_decimal(self):
+        for owner in (" 42", "+42", "42.0", "true", ""):
+            with self.subTest(owner=owner):
+                path = self.records / f"{owner}.json"
+                path.write_text(json.dumps(_record(_receipt(222))), encoding="utf-8")
+                result = self.scan()
+                self.assertEqual(result["status"], "failed", result)
+                path.unlink()
+
+    def test_expected_ids_require_nonzero_ascii_decimal_strings(self):
+        malformed_values = (
+            " 99", "99 ", "+99", "-99", "99.0", "9.9e1", "true", "", "0", "９９", 99, True
+        )
+        self.write(_record(_receipt(222)))
+        for field in ("channel_id", "message_id"):
+            for malformed in malformed_values:
+                with self.subTest(field=field, value=malformed):
+                    kwargs = {field: malformed}
+                    result = self.scan(**kwargs)
+                    self.assertEqual(result["status"], "failed", result)
+                    self.assertIn("invalid query identity", result["reason"])
+
+    def test_poll_rejects_malformed_expected_id_without_retry(self):
+        ticks = iter((0.0, 0.0))
+        result = durable_delivery.poll_records(
+            self.root,
+            provider="claude",
+            channel_id="99",
+            message_id="222.9",
+            monotonic=lambda: next(ticks),
+            sleep=lambda _seconds: self.fail("malformed query retried"),
+        )
+        self.assertEqual(result["status"], "failed", result)
+        self.assertIn("invalid query identity", result["reason"])
 
     def test_inbound_prompt_id_cannot_substitute_for_outbound_response_id(self):
         self.write(_record(_receipt(111)))
