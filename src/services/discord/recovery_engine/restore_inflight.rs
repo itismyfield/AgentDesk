@@ -710,9 +710,6 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     http, shared, provider, &mut state,
                 )
                 .await;
-                let finish_mailbox_on_completion =
-                    reregister_active_turn_from_inflight(shared, &state).await;
-
                 // Spawn the tmux watcher immediately rather than deferring to
                 // restore_tmux_watchers(): the "watcher will adopt" approach raced
                 // — the session could die in the ~50s gap and lose the response.
@@ -720,49 +717,26 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     if let Some((output_path, initial_offset, current_len, truncated)) =
                         restart_report_watcher_start(tmux_session_name, &state)
                     {
-                        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                        let paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                        let resume_offset = std::sync::Arc::new(std::sync::Mutex::new(None::<u64>));
-                        let pause_epoch = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-                        let turn_delivered =
-                            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                        let last_heartbeat_ts_ms = std::sync::Arc::new(
-                            std::sync::atomic::AtomicI64::new(super::tmux_watcher_now_ms()),
-                        );
-                        let handle = TmuxWatcherHandle {
-                            tmux_session_name: tmux_session_name.clone(),
-                            output_path: output_path.clone(),
-                            paused: paused.clone(),
-                            resume_offset: resume_offset.clone(),
-                            cancel: cancel.clone(),
-                            pause_epoch: pause_epoch.clone(),
-                            turn_delivered: turn_delivered.clone(),
-                            last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
-                        };
-                        let watcher_claimed = {
-                            #[cfg(unix)]
-                            {
-                                let claim = super::tmux::claim_or_reuse_watcher_with_thread_parent(
-                                    &shared.tmux_watchers,
+                        let Some((reservation, finish_mailbox_on_completion)) =
+                            super::restore_watcher_claim::reserve_and_commit_recovery_watcher(
+                                shared,
+                                provider,
+                                channel_id,
+                                &state,
+                                tmux_session_name,
+                                output_path,
+                                "restart_report_recovery",
+                                super::tmux::thread_follow_up_parent_channel_id(
                                     channel_id,
-                                    handle,
-                                    provider,
-                                    "restart_report_recovery",
-                                    super::tmux::thread_follow_up_parent_channel_id(
-                                        channel_id,
-                                        state.logical_channel_id,
-                                        state.thread_id,
-                                    ),
-                                );
-                                claim.should_spawn()
-                            }
-                            #[cfg(not(unix))]
-                            {
-                                let _ = handle;
-                                false
-                            }
+                                    state.logical_channel_id,
+                                    state.thread_id,
+                                ),
+                            )
+                            .await
+                        else {
+                            continue;
                         };
-                        if watcher_claimed {
+                        if reservation.should_spawn {
                             let ts2 = chrono::Local::now().format("%H:%M:%S");
                             if truncated {
                                 tracing::info!(
@@ -777,38 +751,17 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                                 tmux_session_name,
                                 initial_offset
                             );
-                            #[cfg(unix)]
-                            {
-                                let restored_turn =
-                                    super::tmux::restored_watcher_turn_from_inflight(
-                                        &state,
-                                        tmux_session_name,
-                                        finish_mailbox_on_completion,
-                                    );
-                                shared.record_tmux_watcher_reconnect(channel_id);
-                                super::task_supervisor::spawn_observed_tmux_watcher(
-                                    "recovery_tmux_output_watcher_with_restore",
-                                    shared.clone(),
-                                    tmux_session_name.clone(),
-                                    cancel.clone(),
-                                    super::tmux::tmux_output_watcher_with_restore(
-                                        channel_id,
-                                        http.clone(),
-                                        shared.clone(),
-                                        output_path,
-                                        tmux_session_name.clone(),
-                                        initial_offset,
-                                        cancel,
-                                        paused,
-                                        resume_offset,
-                                        pause_epoch,
-                                        turn_delivered,
-                                        last_heartbeat_ts_ms,
-                                        restored_turn,
-                                    ),
-                                );
-                            }
                         }
+                        super::restore_watcher_claim::spawn_committed_recovery_watcher(
+                            "recovery_tmux_output_watcher_with_restore",
+                            http,
+                            shared,
+                            channel_id,
+                            &state,
+                            reservation,
+                            initial_offset,
+                            finish_mailbox_on_completion,
+                        );
                     }
                 }
 
@@ -1876,19 +1829,6 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 http, shared, provider, &mut state,
             )
             .await;
-            let finish_mailbox_on_completion =
-                reregister_active_turn_from_inflight(shared, &state).await;
-
-            // #4380 backstop: `reregister_active_turn_from_inflight` stamps
-            // `readopted_from_inflight`, which the watcher-yield escape hatch honours
-            // to resume relay for this re-adopted live turn. If that marker did NOT
-            // durably persist (IoError), the recovered watcher will still yield to
-            // the dead bridge and drop the remaining output silently — dead-letter it
-            // so the loss is observable/recoverable instead of a silent wedge. No-op
-            // on the normal path (marker present).
-            #[cfg(unix)]
-            super::guard_readopt_relay_resume_or_dead_letter(shared, provider, channel_id);
-
             let output_path = match restore_codex_rollout_output_path(provider, &state, output_path)
             {
                 RestorePersistOutcome::UseOutputPath(output_path) => output_path,
@@ -1899,48 +1839,27 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             if std::fs::metadata(&output_path).is_ok() {
                 let (initial_offset, current_len, truncated) =
                     recovery_watcher_start_offset_for_state(&output_path, &state);
-                let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let resume_offset = std::sync::Arc::new(std::sync::Mutex::new(None::<u64>));
-                let pause_epoch = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-                let turn_delivered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let last_heartbeat_ts_ms = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(
-                    super::tmux_watcher_now_ms(),
-                ));
-                let handle = TmuxWatcherHandle {
-                    tmux_session_name: tmux_session_name.clone(),
-                    output_path: output_path.clone(),
-                    paused: paused.clone(),
-                    resume_offset: resume_offset.clone(),
-                    cancel: cancel.clone(),
-                    pause_epoch: pause_epoch.clone(),
-                    turn_delivered: turn_delivered.clone(),
-                    last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
+                let committed = super::restore_watcher_claim::reserve_and_commit_recovery_watcher(
+                    shared,
+                    provider,
+                    channel_id,
+                    &state,
+                    &tmux_session_name,
+                    output_path,
+                    "inflight_recovery",
+                    super::tmux::thread_follow_up_parent_channel_id(
+                        channel_id,
+                        state.logical_channel_id,
+                        state.thread_id,
+                    ),
+                )
+                .await;
+                #[cfg(unix)]
+                super::guard_readopt_relay_resume_or_dead_letter(shared, provider, channel_id);
+                let Some((reservation, finish_mailbox_on_completion)) = committed else {
+                    continue;
                 };
-                let watcher_claimed = {
-                    #[cfg(unix)]
-                    {
-                        let claim = super::tmux::claim_or_reuse_watcher_with_thread_parent(
-                            &shared.tmux_watchers,
-                            channel_id,
-                            handle,
-                            provider,
-                            "inflight_recovery",
-                            super::tmux::thread_follow_up_parent_channel_id(
-                                channel_id,
-                                state.logical_channel_id,
-                                state.thread_id,
-                            ),
-                        );
-                        claim.should_spawn()
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        let _ = handle;
-                        false
-                    }
-                };
-                if watcher_claimed {
+                if reservation.should_spawn {
                     let ts2 = chrono::Local::now().format("%H:%M:%S");
                     if truncated {
                         tracing::info!(
@@ -1955,37 +1874,20 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                         tmux_session_name,
                         initial_offset
                     );
-                    #[cfg(unix)]
-                    {
-                        let restored_turn = super::tmux::restored_watcher_turn_from_inflight(
-                            &state,
-                            &tmux_session_name,
-                            finish_mailbox_on_completion,
-                        );
-                        shared.record_tmux_watcher_reconnect(channel_id);
-                        super::task_supervisor::spawn_observed_tmux_watcher(
-                            "recovery_restore_inflight_tmux_output_watcher_with_restore",
-                            shared.clone(),
-                            tmux_session_name.clone(),
-                            cancel.clone(),
-                            super::tmux::tmux_output_watcher_with_restore(
-                                channel_id,
-                                http.clone(),
-                                shared.clone(),
-                                output_path.clone(),
-                                tmux_session_name.clone(),
-                                initial_offset,
-                                cancel,
-                                paused,
-                                resume_offset,
-                                pause_epoch,
-                                turn_delivered,
-                                last_heartbeat_ts_ms,
-                                restored_turn,
-                            ),
-                        );
-                    }
                 }
+                super::restore_watcher_claim::spawn_committed_recovery_watcher(
+                    "recovery_restore_inflight_tmux_output_watcher_with_restore",
+                    http,
+                    shared,
+                    channel_id,
+                    &state,
+                    reservation,
+                    initial_offset,
+                    finish_mailbox_on_completion,
+                );
+            } else {
+                #[cfg(unix)]
+                super::guard_readopt_relay_resume_or_dead_letter(shared, provider, channel_id);
             }
 
             // Keep the inflight state until the watcher either relays the final response or
@@ -2121,7 +2023,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             restore_recovered_session_worktree(session, &state);
         }
 
-        mailbox_recovery_kickoff(
+        let kickoff = mailbox_recovery_kickoff(
             shared,
             channel_id,
             cancel_token.clone(),
@@ -2133,10 +2035,14 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         .await;
 
         // Consume outgoing planned-restart authority (identity-guarded readoption)
-        // before the reader publishes RuntimeReady; failed adoption stays fail-closed.
-        if super::runtime::readopt_marker_eligible_real_user(&state) {
-            let _ = super::runtime::mark_readopted_from_inflight(
-                shared, provider, channel_id, &state, true,
+        // before the reader publishes RuntimeReady. `activated_turn` is only
+        // global-active accounting; an open actor accepts and rewrites the exact
+        // recovery identity even when that field is false.
+        if super::runtime::recovery_kickoff_actor_accepted(&kickoff)
+            && super::runtime::readopt_marker_eligible_real_user(&state)
+        {
+            let _ = super::runtime::commit_recovery_kickoff_readoption(
+                shared, provider, channel_id, &state,
             );
         }
         let adk_session_key = build_adk_session_key(shared, channel_id, provider, None).await;
@@ -2346,6 +2252,7 @@ mod tests {
             serenity::model::id::ChannelId::new(state.channel_id),
             state,
             true,
+            true,
         );
         tx.send(StreamMessage::RuntimeReady {
             handoff: super::super::runtime_handoff_for_recovery(
@@ -2369,6 +2276,27 @@ mod tests {
             "the generic recovery handoff must observe consumed restart authority"
         );
         outcome
+    }
+
+    #[test]
+    fn generic_recovery_marker_to_bridge_is_only_a_lexical_continuation() {
+        let source = include_str!("restore_inflight.rs");
+        let marker = source
+            .find("commit_recovery_kickoff_readoption")
+            .expect("E4 actor-accepted marker commit");
+        let bridge = source[marker..]
+            .find("spawn_turn_bridge")
+            .map(|relative| marker + relative)
+            .expect("E4 bridge spawn after marker");
+        let continuation = &source[marker..bridge];
+        for forbidden in ["continue", "return", "?"] {
+            assert!(
+                !continuation.contains(forbidden),
+                "E4 lexical continuation gained an early-exit token: {forbidden}"
+            );
+        }
+        // This source contract does not exclude await cancellation, panic/unwind,
+        // or OS-thread spawn panic; E4 has no runtime watcher reservation.
     }
 
     #[test]

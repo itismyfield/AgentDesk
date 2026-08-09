@@ -116,29 +116,25 @@ pub(in crate::services::discord) fn readopt_marker_eligible_real_user(
 ///     canonical lock it also consumes any planned-restart marker, transferring
 ///     durable authority to the replacement process before runtime handoff.
 ///
-/// This does NOT touch the completion lifecycle: the re-adopted turn's own
-/// `✅`/footer + analytics still fire (see the `readopted_from_inflight` field doc
-/// for why it is DISTINCT from `relay_ownership_only`).
+/// `record_ledger=false` is the post-BEGIN commit path: BEGIN already wrote the
+/// inert ledger entry, so COMMIT performs only the durable half.
 pub(super) fn mark_readopted_from_inflight(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
     state: &inflight::InflightTurnState,
     persist_durable_marker: bool,
+    record_ledger: bool,
 ) -> inflight::GuardedSaveOutcome {
-    // The re-adopted mailbox slot carries the turn's effective finalizer id as its
-    // `active_user_message_id` (`mailbox_try_start_turn(..., finalizer_msg_id)` /
-    // the existing-active-turn rebind below), so the ledger keys the row-ABSENT
-    // reclaim decision on exactly that id.
     let active_user_message_id = state.effective_finalizer_turn_id();
-    if persist_durable_marker {
+    if record_ledger && persist_durable_marker {
         shared.record_readopted_mailbox_owner(
             provider,
             channel_id.get(),
             state.request_owner_user_id,
             active_user_message_id,
         );
-    } else {
+    } else if record_ledger {
         shared.record_readopted_mailbox_owner_for_episode(
             provider,
             channel_id.get(),
@@ -148,7 +144,6 @@ pub(super) fn mark_readopted_from_inflight(
         );
         return inflight::GuardedSaveOutcome::Saved;
     }
-
     let expected = inflight::InflightTurnIdentity::from_state(state);
     let outcome = inflight::mark_readopted_from_inflight_if_identity_unchanged(
         provider,
@@ -182,11 +177,95 @@ pub(super) fn mark_readopted_from_inflight(
     outcome
 }
 
-async fn reregister_active_turn_from_inflight_inner(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReadoptionMailboxClaim {
+    Ownerless,
+    Restored,
+    Minted,
+}
+
+/// BEGIN receipt distinguishes mint from restore for exact ABANDON compensation.
+pub(in crate::services::discord) struct ReadoptionAdoption {
+    state: inflight::InflightTurnState,
+    provider: ProviderKind,
+    channel_id: ChannelId,
+    finalizer_msg_id: MessageId,
+    mailbox_claim: ReadoptionMailboxClaim,
+    episode_scoped_ledger: bool,
+}
+
+impl ReadoptionAdoption {
+    pub(in crate::services::discord) fn finish_mailbox_on_completion(&self) -> bool {
+        !matches!(self.mailbox_claim, ReadoptionMailboxClaim::Ownerless)
+    }
+
+    pub(in crate::services::discord) fn finalizer_turn_id(&self) -> u64 {
+        self.finalizer_msg_id.get()
+    }
+}
+
+fn record_readoption_claim(shared: &SharedData, adoption: &ReadoptionAdoption) {
+    if !readopted_ledger_record_allowed(&adoption.state) {
+        return;
+    }
+    if adoption.episode_scoped_ledger {
+        shared.record_readopted_mailbox_owner_for_episode(
+            &adoption.provider,
+            adoption.channel_id.get(),
+            adoption.state.request_owner_user_id,
+            adoption.finalizer_turn_id(),
+            &adoption.state,
+        );
+    } else {
+        shared.record_readopted_mailbox_owner(
+            &adoption.provider,
+            adoption.channel_id.get(),
+            adoption.state.request_owner_user_id,
+            adoption.finalizer_turn_id(),
+        );
+    }
+}
+
+pub(in crate::services::discord) fn observe_readoption_adoption_abandon(
+    provider: &ProviderKind,
+    state: &inflight::InflightTurnState,
+    reason: &str,
+    marker_outcome: Option<inflight::GuardedSaveOutcome>,
+) {
+    let invariant = match reason {
+        "cross_channel_reuse" => "readoption_adoption_abandoned_cross_channel_reuse",
+        _ => "readoption_adoption_abandoned_commit_failure",
+    };
+    let _ = crate::services::observability::record_invariant_check_with_severity(
+        false,
+        crate::services::observability::InvariantViolation {
+            provider: Some(provider.as_str()),
+            channel_id: Some(state.channel_id),
+            dispatch_id: state.dispatch_id.as_deref(),
+            session_key: state.session_key.as_deref(),
+            turn_id: None,
+            invariant,
+            code_location: "src/services/discord/recovery_engine/runtime.rs",
+            message: "readoption adoption abandoned before durable authority commit",
+            details: serde_json::json!({
+                "reason": reason,
+                "finalizer_turn_id": state.effective_finalizer_turn_id(),
+                "marker_outcome": marker_outcome.map(|outcome| format!("{outcome:?}")),
+                "restart_mode": state.restart_mode.map(|mode| format!("{mode:?}")),
+            }),
+        },
+        crate::services::observability::InvariantSeverity::Warn,
+    );
+}
+
+/// BEGIN: establish or restore the exact mailbox claim and record only the
+/// inert (`finished=false`) in-memory Path B ledger. Durable marker and finalizer
+/// authority remain untouched until [`commit_readoption_adoption`].
+pub(in crate::services::discord) async fn begin_readoption_adoption(
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
-    persist_durable_marker: bool,
-) -> bool {
+    episode_scoped_ledger: bool,
+) -> Option<ReadoptionAdoption> {
     let Some(finalizer_msg_id) =
         super::inflight::opt_message_id(state.effective_finalizer_turn_id())
     else {
@@ -194,11 +273,11 @@ async fn reregister_active_turn_from_inflight_inner(
             channel_id = state.channel_id,
             "inflight reregister skipped because finalizer turn id is zero"
         );
-        return false;
+        return None;
     };
     let Some(channel_id) = super::inflight::opt_channel_id(state.channel_id) else {
         tracing::warn!("inflight reregister skipped because persisted channel id is zero");
-        return false;
+        return None;
     };
     let finalizer_turn_id = finalizer_msg_id.get();
     let snapshot = super::mailbox_snapshot(shared, channel_id).await;
@@ -208,7 +287,7 @@ async fn reregister_active_turn_from_inflight_inner(
             state.provider,
             state.channel_id
         );
-        return false;
+        return None;
     };
     if recovery_terminal_delivery_already_committed(state) {
         tracing::info!(
@@ -224,16 +303,16 @@ async fn reregister_active_turn_from_inflight_inner(
             "recovery_terminal_delivery_already_committed",
         )
         .await;
-        if persist_durable_marker {
-            clear_inflight_state(&provider, state.channel_id);
-        } else {
+        if episode_scoped_ledger {
             tracing::warn!(
                 provider = %provider.as_str(),
                 channel_id = state.channel_id,
                 "inflight reregister skipped recursive clear while exact-episode guard owns the sidecar flock"
             );
+        } else {
+            clear_inflight_state(&provider, state.channel_id);
         }
-        return false;
+        return None;
     }
     if snapshot.cancel_token.is_some() {
         if let Some(token) = snapshot.cancel_token.as_ref()
@@ -246,38 +325,30 @@ async fn reregister_active_turn_from_inflight_inner(
                 "inflight reregister existing active turn",
             );
         }
-        let restored = snapshot.active_user_message_id == Some(finalizer_msg_id);
-        if restored {
-            reseed_recovered_finalizer_ledger(
-                shared,
-                channel_id,
-                finalizer_turn_id,
-                &provider,
-                state.effective_relay_owner_kind(),
-            );
-            // #4370: a real-user turn re-bound to the mailbox across a restart.
-            if readopted_ledger_record_allowed(state) {
-                let _ = mark_readopted_from_inflight(
-                    shared,
-                    &provider,
-                    channel_id,
-                    state,
-                    persist_durable_marker,
-                );
-            }
+        if snapshot.active_user_message_id != Some(finalizer_msg_id) {
+            return None;
         }
-        return restored;
+        let adoption = ReadoptionAdoption {
+            state: state.clone(),
+            provider,
+            channel_id,
+            finalizer_msg_id,
+            mailbox_claim: ReadoptionMailboxClaim::Restored,
+            episode_scoped_ledger,
+        };
+        record_readoption_claim(shared, &adoption);
+        return Some(adoption);
     }
 
     if state.request_owner_user_id == 0 {
-        reseed_recovered_finalizer_ledger(
-            shared,
+        return Some(ReadoptionAdoption {
+            state: state.clone(),
+            provider,
             channel_id,
-            finalizer_turn_id,
-            &provider,
-            state.effective_relay_owner_kind(),
-        );
-        return false;
+            finalizer_msg_id,
+            mailbox_claim: ReadoptionMailboxClaim::Ownerless,
+            episode_scoped_ledger,
+        });
     }
 
     let cancel_token = Arc::new(CancelToken::new());
@@ -296,50 +367,310 @@ async fn reregister_active_turn_from_inflight_inner(
         finalizer_msg_id,
     )
     .await;
-    if started {
-        reseed_recovered_finalizer_ledger(
-            shared,
-            channel_id,
-            finalizer_turn_id,
-            &provider,
-            state.effective_relay_owner_kind(),
-        );
-        // #4370: the mailbox now carries a re-adopted-from-inflight REAL user turn
-        // (owner == request_owner_user_id). Record it in the ledger + on-disk
-        // marker so a later starved injection / task-notification synthetic turn
-        // can reclaim this mailbox once the re-adopted turn is stale — without
-        // this, #4018's synthetic-owner-only reclaim can never free it and the
-        // follow-up relay text is silently dropped.
-        if readopted_ledger_record_allowed(state) {
-            mark_readopted_from_inflight(
-                shared,
-                &provider,
-                channel_id,
-                state,
-                persist_durable_marker,
-            );
-        }
+    if !started {
+        return None;
     }
-    started
+    let adoption = ReadoptionAdoption {
+        state: state.clone(),
+        provider,
+        channel_id,
+        finalizer_msg_id,
+        mailbox_claim: ReadoptionMailboxClaim::Minted,
+        episode_scoped_ledger,
+    };
+    record_readoption_claim(shared, &adoption);
+    Some(adoption)
 }
 
+/// COMMIT: consume durable restart authority first, then seed finalizer
+/// authority. A failed marker write leaves `restart_mode` untouched and returns
+/// the receipt to the caller for exact compensation.
+pub(in crate::services::discord) fn commit_readoption_adoption(
+    shared: &Arc<SharedData>,
+    adoption: &ReadoptionAdoption,
+    locked_episode: Option<&mut inflight::LockedInflightEpisode>,
+) -> Result<bool, inflight::GuardedSaveOutcome> {
+    if readopted_ledger_record_allowed(&adoption.state) {
+        let outcome = match locked_episode {
+            Some(guard) => guard.mark_readopted_under_guard(),
+            None => mark_readopted_from_inflight(
+                shared,
+                &adoption.provider,
+                adoption.channel_id,
+                &adoption.state,
+                true,
+                false,
+            ),
+        };
+        if !matches!(outcome, inflight::GuardedSaveOutcome::Saved) {
+            return Err(outcome);
+        }
+    }
+    reseed_recovered_finalizer_ledger(
+        shared,
+        adoption.channel_id,
+        adoption.finalizer_turn_id(),
+        &adoption.provider,
+        adoption.state.effective_relay_owner_kind(),
+    );
+    Ok(adoption.finish_mailbox_on_completion())
+}
+
+/// ABANDON: remove only this attempt's ledger entry. Release the mailbox only
+/// when BEGIN minted the token; a restored claim belongs to an incumbent and is
+/// deliberately left untouched.
+pub(in crate::services::discord) async fn abandon_readoption_adoption(
+    shared: &Arc<SharedData>,
+    adoption: ReadoptionAdoption,
+    reason: &str,
+    marker_outcome: Option<inflight::GuardedSaveOutcome>,
+) {
+    if readopted_ledger_record_allowed(&adoption.state) {
+        shared.evict_readopted_mailbox_owner_if_matches(
+            &adoption.provider,
+            adoption.channel_id.get(),
+            adoption.state.request_owner_user_id,
+            adoption.finalizer_turn_id(),
+        );
+    }
+    if matches!(adoption.mailbox_claim, ReadoptionMailboxClaim::Minted) {
+        let _ = super::mailbox_finish_turn_if_matches(
+            shared,
+            &adoption.provider,
+            adoption.channel_id,
+            adoption.finalizer_msg_id,
+        )
+        .await;
+    }
+    observe_readoption_adoption_abandon(
+        &adoption.provider,
+        &adoption.state,
+        reason,
+        marker_outcome,
+    );
+}
+
+pub(in crate::services::discord) async fn begin_and_commit_readoption_adoption(
+    shared: &Arc<SharedData>,
+    state: &inflight::InflightTurnState,
+    episode_scoped_ledger: bool,
+    locked_episode: Option<&mut inflight::LockedInflightEpisode>,
+) -> Result<Option<bool>, inflight::GuardedSaveOutcome> {
+    let Some(adoption) = begin_readoption_adoption(shared, state, episode_scoped_ledger).await
+    else {
+        return Ok(None);
+    };
+    match commit_readoption_adoption(shared, &adoption, locked_episode) {
+        Ok(finish) => Ok(Some(finish)),
+        Err(outcome) => {
+            abandon_readoption_adoption(shared, adoption, "commit_failure", Some(outcome)).await;
+            Err(outcome)
+        }
+    }
+}
+
+/// E4 has no watcher reservation. Its narrower receipt is acceptance by the
+/// mailbox actor; `activated_turn` reports whether global-active accounting
+/// incremented, not whether the actor wrote the recovery identity.
+pub(super) fn recovery_kickoff_actor_accepted(result: &RecoveryKickoffResult) -> bool {
+    !result.refused_closed
+}
+
+pub(super) fn commit_recovery_kickoff_readoption(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    state: &inflight::InflightTurnState,
+) -> inflight::GuardedSaveOutcome {
+    mark_readopted_from_inflight(shared, provider, channel_id, state, true, true)
+}
+
+pub(in crate::services::discord) async fn lock_readoption_episode(
+    provider: &ProviderKind,
+    state: &inflight::InflightTurnState,
+) -> Result<inflight::LockedInflightEpisode, inflight::InflightEpisodeLockError> {
+    let provider = provider.clone();
+    let channel_id = state.channel_id;
+    let expected = inflight::InflightEpisodePin::from_state(state);
+    tokio::task::spawn_blocking(move || {
+        inflight::lock_inflight_episode(&provider, channel_id, &expected)
+    })
+    .await
+    .unwrap_or(Err(inflight::InflightEpisodeLockError::Io))
+}
+
+#[cfg(test)]
 pub(in crate::services::discord) async fn reregister_active_turn_from_inflight(
     shared: &Arc<SharedData>,
     state: &inflight::InflightTurnState,
 ) -> bool {
-    reregister_active_turn_from_inflight_inner(shared, state, true).await
+    let Some(adoption) = begin_readoption_adoption(shared, state, false).await else {
+        return false;
+    };
+    match commit_readoption_adoption(shared, &adoption, None) {
+        Ok(finish) => finish,
+        Err(inflight::GuardedSaveOutcome::Missing) => {
+            // Legacy ledger-only fixtures intentionally omit the durable row.
+            // Production callers never use this cfg(test) compatibility entry.
+            reseed_recovered_finalizer_ledger(
+                shared,
+                adoption.channel_id,
+                adoption.finalizer_turn_id(),
+                &adoption.provider,
+                adoption.state.effective_relay_owner_kind(),
+            );
+            adoption.finish_mailbox_on_completion()
+        }
+        Err(outcome) => {
+            abandon_readoption_adoption(
+                shared,
+                adoption,
+                "test_compat_commit_failure",
+                Some(outcome),
+            )
+            .await;
+            false
+        }
+    }
 }
 
-/// Automatic reattach holds the canonical episode flock across mailbox and
-/// finalizer re-registration. The ordinary marker helper would recursively
-/// acquire that flock, so this variant records the episode-scoped in-memory
-/// ledger only; the caller persists the durable marker directly through the
-/// still-live guard before releasing authority.
-pub(in crate::services::discord) async fn reregister_active_turn_from_inflight_under_episode_guard(
-    shared: &Arc<SharedData>,
-    state: &inflight::InflightTurnState,
-) -> bool {
-    reregister_active_turn_from_inflight_inner(shared, state, false).await
+#[cfg(test)]
+mod adoption_commit_tests {
+    use super::*;
+    use crate::services::discord::InflightRestartMode;
+
+    fn state(channel_id: u64, message_id: u64) -> inflight::InflightTurnState {
+        let mut state = inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            channel_id,
+            Some(format!("adk-{channel_id}")),
+            343_742_347_365_974_026,
+            message_id,
+            message_id + 1,
+            "readoption adoption contract".to_string(),
+            Some("provider-session".to_string()),
+            Some(format!("AgentDesk-claude-{channel_id}")),
+            Some(format!("/tmp/adk-{channel_id}.jsonl")),
+            None,
+            0,
+        );
+        state.set_restart_mode(InflightRestartMode::DrainRestart);
+        state
+    }
+
+    #[test]
+    fn accepted_kickoff_commits_marker_when_activation_was_already_accounted() {
+        let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let shared = super::super::make_shared_data_for_tests_with_storage(None);
+        let state = state(524_201, 524_211);
+        inflight::save_inflight_state(&state).expect("planned restart row");
+        let kickoff = RecoveryKickoffResult {
+            activated_turn: false,
+            refused_closed: false,
+        };
+
+        assert!(recovery_kickoff_actor_accepted(&kickoff));
+        assert_eq!(
+            commit_recovery_kickoff_readoption(
+                &shared,
+                &ProviderKind::Claude,
+                ChannelId::new(state.channel_id),
+                &state,
+            ),
+            inflight::GuardedSaveOutcome::Saved
+        );
+        let persisted = inflight::load_inflight_state(&ProviderKind::Claude, state.channel_id)
+            .expect("accepted kickoff row");
+        assert!(persisted.readopted_from_inflight);
+        assert_eq!(persisted.restart_mode, None);
+    }
+
+    #[tokio::test]
+    async fn failed_commit_preserves_restart_and_releases_only_a_minted_claim() {
+        let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let shared = super::super::make_shared_data_for_tests_with_storage(None);
+        let mut minted_state = state(524_202, 524_212);
+        minted_state.rebind_origin = true;
+        inflight::save_inflight_state(&minted_state).expect("planned restart row");
+        let mut guard = lock_readoption_episode(&ProviderKind::Claude, &minted_state)
+            .await
+            .expect("exact episode lock");
+        let adoption = begin_readoption_adoption(&shared, &minted_state, true)
+            .await
+            .expect("minted BEGIN");
+        assert!(
+            super::mailbox_snapshot(&shared, ChannelId::new(minted_state.channel_id))
+                .await
+                .cancel_token
+                .is_some()
+        );
+
+        let outcome = commit_readoption_adoption(&shared, &adoption, Some(&mut guard))
+            .expect_err("rebind-origin marker commit refuses closed");
+        abandon_readoption_adoption(&shared, adoption, "commit_failure", Some(outcome)).await;
+        drop(guard);
+
+        let mailbox =
+            super::mailbox_snapshot(&shared, ChannelId::new(minted_state.channel_id)).await;
+        assert!(mailbox.cancel_token.is_none());
+        assert!(mailbox.active_user_message_id.is_none());
+        let persisted =
+            inflight::load_inflight_state(&ProviderKind::Claude, minted_state.channel_id)
+                .expect("abandoned row retained");
+        assert!(!persisted.readopted_from_inflight);
+        assert_eq!(
+            persisted.restart_mode,
+            Some(InflightRestartMode::DrainRestart)
+        );
+
+        let mut restored_state = state(524_203, 524_213);
+        restored_state.rebind_origin = true;
+        inflight::save_inflight_state(&restored_state).expect("planned restart row");
+        let channel = ChannelId::new(restored_state.channel_id);
+        let message = MessageId::new(restored_state.effective_finalizer_turn_id());
+        let token = Arc::new(CancelToken::new());
+        assert!(
+            super::mailbox_try_start_turn(
+                &shared,
+                channel,
+                token.clone(),
+                UserId::new(restored_state.request_owner_user_id),
+                message,
+            )
+            .await
+        );
+        let mut guard = lock_readoption_episode(&ProviderKind::Claude, &restored_state)
+            .await
+            .expect("exact episode lock");
+        let adoption = begin_readoption_adoption(&shared, &restored_state, true)
+            .await
+            .expect("restored BEGIN");
+
+        let outcome = commit_readoption_adoption(&shared, &adoption, Some(&mut guard))
+            .expect_err("rebind-origin marker commit refuses closed");
+        abandon_readoption_adoption(&shared, adoption, "commit_failure", Some(outcome)).await;
+        drop(guard);
+
+        let mailbox = super::mailbox_snapshot(&shared, channel).await;
+        assert!(Arc::ptr_eq(
+            mailbox
+                .cancel_token
+                .as_ref()
+                .expect("restored token survives"),
+            &token
+        ));
+        assert_eq!(mailbox.active_user_message_id, Some(message));
+    }
 }
 
 #[cfg(test)]

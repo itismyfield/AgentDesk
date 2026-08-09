@@ -6,9 +6,10 @@ use super::{
     discard_restored_response_seed_before_no_inflight_terminal_relay,
     legacy_wrapper_prompt_candidates_from_pane, local_cmd_no_output,
     mark_watcher_terminal_delivery_committed, merge_persisted_rollover_frozen_msg_ids,
-    reacquire_watcher_inflight_for_active_stream, refresh_watcher_turn_identity,
-    should_probe_tmux_liveness, terminal_relay_decision, watcher_batch_contains_assistant_event,
-    watcher_batch_contains_relayable_response,
+    pinned_finalizer_turn_id, reacquire_watcher_inflight_for_active_stream,
+    refresh_watcher_turn_identity, should_probe_tmux_liveness,
+    should_submit_restored_watcher_finalize, terminal_relay_decision,
+    watcher_batch_contains_assistant_event, watcher_batch_contains_relayable_response,
     watcher_fallback_edit_failure_can_delete_original_placeholder,
     watcher_fresh_idle_finalize_decision, watcher_fresh_idle_session_bound_retry_plan,
     watcher_handle_no_dispatch_post_work_idle_body, watcher_inflight_absence_is_abandonment,
@@ -32,7 +33,7 @@ use crate::services::discord::replace_outcome_policy::{
 };
 use crate::services::discord::{
     mailbox_enqueue_intervention, mailbox_snapshot, mailbox_take_next_soft_intervention,
-    mailbox_try_start_turn,
+    mailbox_try_start_turn, make_shared_data_for_tests, tmux,
 };
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::turn_orchestrator::{Intervention, InterventionMode};
@@ -1541,6 +1542,65 @@ fn fresh_idle_inflight(
     state.last_offset = turn_start_offset;
     state.turn_start_offset = Some(turn_start_offset);
     state
+}
+
+#[test]
+fn same_channel_reuse_refreshes_long_lived_watcher_and_finalizes_only_x_range() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+    let shared = make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel = ChannelId::new(524_240);
+    let session = "AgentDesk-claude-5242-long-lived";
+
+    let first = tmux::claim_or_reuse_watcher_with_thread_parent(
+        &shared.tmux_watchers,
+        channel,
+        test_watcher_handle(session),
+        &provider,
+        "inflight_recovery",
+        None,
+    );
+    assert!(first.should_spawn());
+    let reused = tmux::claim_or_reuse_watcher_with_thread_parent(
+        &shared.tmux_watchers,
+        channel,
+        test_watcher_handle(session),
+        &provider,
+        "inflight_recovery",
+        None,
+    );
+    assert!(!reused.should_spawn());
+    assert_eq!(reused.owner_channel_id(), channel);
+
+    let previous = fresh_idle_inflight(provider.clone(), channel.get(), session, 524_241, 0);
+    let mut x = fresh_idle_inflight(provider.clone(), channel.get(), session, 524_242, 10);
+    x.turn_nonce = Some("turn-x".to_string());
+    crate::services::discord::inflight::save_inflight_state(&x).expect("persist X row");
+    let mut observed = Some(InflightTurnIdentity::from_state(&previous));
+    let mut observed_nonce = previous.turn_nonce.clone();
+
+    refresh_watcher_turn_identity(
+        &mut observed,
+        &mut observed_nonce,
+        &provider,
+        channel,
+        session,
+        50,
+    );
+    assert_eq!(observed, Some(InflightTurnIdentity::from_state(&x)));
+    assert_eq!(observed_nonce.as_deref(), Some("turn-x"));
+    let x_id = pinned_finalizer_turn_id(Some(&x), session, 50);
+    assert_eq!(x_id, x.effective_finalizer_turn_id());
+    assert!(should_submit_restored_watcher_finalize(false, x_id));
+
+    let newer_y = fresh_idle_inflight(provider, channel.get(), session, 524_243, 50);
+    let newer_id = pinned_finalizer_turn_id(Some(&newer_y), session, 50);
+    assert_eq!(newer_id, 0);
+    assert!(!should_submit_restored_watcher_finalize(false, newer_id));
 }
 
 // #3016 S3 — drives the REAL fresh-idle decision helper that the production

@@ -224,6 +224,26 @@ impl SharedData {
             .remove(&(provider.clone(), channel_id));
     }
 
+    /// Remove only the exact readoption entry being compensated. A newer turn
+    /// may overwrite the channel-keyed slot while an older recovery attempt is
+    /// awaiting mailbox cleanup; that successor is not part of the older
+    /// attempt and must survive its compensation.
+    pub(in crate::services::discord) fn evict_readopted_mailbox_owner_if_matches(
+        &self,
+        provider: &ProviderKind,
+        channel_id: u64,
+        owner_user_id: u64,
+        active_user_message_id: u64,
+    ) -> bool {
+        self.readopted_mailbox_ledger
+            .entries
+            .remove_if(&(provider.clone(), channel_id), |_, entry| {
+                entry.owner_user_id == owner_user_id
+                    && entry.active_user_message_id == active_user_message_id
+            })
+            .is_some()
+    }
+
     #[cfg(test)]
     pub(in crate::services::discord) fn readopted_mailbox_turn_pin_for_test(
         &self,
@@ -234,5 +254,26 @@ impl SharedData {
             .entries
             .get(&(provider.clone(), channel_id))
             .and_then(|entry| entry.turn_pin.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_compensation_preserves_successor_entry() {
+        let shared = super::super::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        shared.record_readopted_mailbox_owner(&provider, 45, 8, 902);
+
+        assert!(!shared.evict_readopted_mailbox_owner_if_matches(&provider, 45, 7, 901));
+        let survivor = shared
+            .readopted_mailbox_ledger
+            .entries
+            .get(&(provider, 45))
+            .expect("successor survives older compensation");
+        assert_eq!(survivor.owner_user_id, 8);
+        assert_eq!(survivor.active_user_message_id, 902);
     }
 }

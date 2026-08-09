@@ -145,7 +145,6 @@ fn durable_episode_authority_lexically_covers_every_handoff_side_effect() {
     for mutation in [
         "note_footer_suppressed_for_message_takeover",
         "let session = core",
-        "reregister_active_turn_from_inflight_under_episode_guard",
         "register_rehydrated_tmux_runtime_binding",
     ] {
         handoff
@@ -168,15 +167,38 @@ fn durable_episode_authority_lexically_covers_every_handoff_side_effect() {
         .find("claim_rebind_watcher")
         .map(|relative| commit + relative)
         .expect("guarded watcher claim");
-    let spawn = parent[claim..]
-        .find("spawn_observed_tmux_watcher")
+    let adoption_commit = parent[claim..]
+        .find("begin_and_commit_readoption_adoption")
         .map(|relative| claim + relative)
+        .expect("mailbox BEGIN and durable COMMIT after watcher reservation");
+    let spawn = parent[adoption_commit..]
+        .find("spawn_observed_tmux_watcher")
+        .map(|relative| adoption_commit + relative)
         .expect("guarded watcher spawn");
     let release = parent[spawn..]
         .find("drop(locked_episode);")
         .map(|relative| spawn + relative)
         .expect("authority release after watcher spawn");
-    assert!(acquire < commit && commit < claim && claim < spawn && spawn < release);
+    assert!(
+        acquire < commit
+            && commit < claim
+            && claim < adoption_commit
+            && adoption_commit < spawn
+            && spawn < release
+    );
+
+    let runtime = include_str!("../runtime.rs");
+    let helper = runtime
+        .find("async fn begin_and_commit_readoption_adoption")
+        .expect("shared adoption helper");
+    let helper = &runtime[helper..];
+    let begin = helper
+        .find("let Some(adoption) = begin_readoption_adoption")
+        .expect("mailbox BEGIN inside shared helper");
+    let authority_commit = helper
+        .find("match commit_readoption_adoption")
+        .expect("durable COMMIT inside shared helper");
+    assert!(begin < authority_commit);
 }
 
 #[test]

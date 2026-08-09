@@ -143,7 +143,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         output_path: String,
         session_name: String,
         initial_offset: u64,
-        restored_turn: Option<RestoredWatcherTurn>,
+        restored_state: Option<super::super::super::inflight::InflightTurnState>,
         thread_parent: Option<ThreadFollowUpParent>,
         codex_direct_resume_fallback: Option<codex_restore::DirectResumeFallback>,
     }
@@ -457,7 +457,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             .entry(*channel_id)
             .or_insert_with(|| channel_name.clone());
 
-        let mut restored_turn = None;
+        let mut restored_state = None;
         let mut thread_parent = None;
         let initial_offset = if let Some(state) =
             super::super::super::inflight::load_inflight_state(&provider, channel_id.get())
@@ -482,15 +482,8 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                     );
                     continue;
                 }
-                let finish_mailbox_on_completion =
-                    super::super::super::recovery::reregister_active_turn_from_inflight(
-                        &shared, &state,
-                    )
-                    .await;
-                restored_turn = Some(RestoredWatcherTurn {
-                    finish_mailbox_on_completion,
-                    ..restored_tmux
-                });
+                let _ = restored_tmux;
+                restored_state = Some(state.clone());
                 let file_len = std::fs::metadata(&output_path)
                     .map(|m| m.len())
                     .unwrap_or(0);
@@ -515,7 +508,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             output_path,
             session_name: session_name.to_string(),
             initial_offset,
-            restored_turn,
+            restored_state,
             thread_parent,
             codex_direct_resume_fallback,
         });
@@ -637,7 +630,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             continue;
         }
 
-        if pw.restored_turn.is_none() {
+        if pw.restored_state.is_none() {
             reconcile_orphan_suppressed_placeholder_for_restored_watcher(
                 http,
                 shared,
@@ -667,6 +660,22 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             turn_delivered: turn_delivered.clone(),
             last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
         };
+        let mut locked_episode = if let Some(state) = pw.restored_state.as_ref() {
+            match super::super::super::recovery::lock_readoption_episode(&provider, state).await {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    tracing::warn!(
+                        provider = %provider.as_str(),
+                        channel_id = pw.channel_id.get(),
+                        error = ?error,
+                        "restored watcher readoption skipped: exact episode lock unavailable"
+                    );
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
         if !try_claim_watcher_with_thread_parent(
             &shared.tmux_watchers,
             pw.channel_id,
@@ -681,6 +690,50 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             );
             continue;
         }
+        let restored_turn = if let Some(state) = pw.restored_state.as_ref() {
+            let Some(adoption) =
+                super::super::super::recovery::begin_readoption_adoption(shared, state, true).await
+            else {
+                shared.tmux_watchers.cancel_and_remove_channel_if_current(
+                    &pw.channel_id,
+                    &pw.session_name,
+                    &pw.output_path,
+                    &cancel,
+                );
+                continue;
+            };
+            let finish_mailbox_on_completion =
+                match super::super::super::recovery::commit_readoption_adoption(
+                    shared,
+                    &adoption,
+                    locked_episode.as_mut(),
+                ) {
+                    Ok(finish) => finish,
+                    Err(outcome) => {
+                        shared.tmux_watchers.cancel_and_remove_channel_if_current(
+                            &pw.channel_id,
+                            &pw.session_name,
+                            &pw.output_path,
+                            &cancel,
+                        );
+                        super::super::super::recovery::abandon_readoption_adoption(
+                            shared,
+                            adoption,
+                            "commit_failure",
+                            Some(outcome),
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+            restored_watcher_turn_from_inflight(
+                state,
+                &pw.session_name,
+                finish_mailbox_on_completion,
+            )
+        } else {
+            None
+        };
         if let Some(fallback) = pw.codex_direct_resume_fallback {
             codex_restore::commit_live_direct_resume_fallback(
                 &pw.session_name,
@@ -715,7 +768,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                 pause_epoch,
                 turn_delivered,
                 last_heartbeat_ts_ms,
-                pw.restored_turn,
+                restored_turn,
             ),
         );
     }

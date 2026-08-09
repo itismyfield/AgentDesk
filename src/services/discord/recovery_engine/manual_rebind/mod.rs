@@ -747,24 +747,22 @@ async fn rebind_inflight_for_channel_inner(
         state
     };
 
-    let (locked_episode, finish_mailbox_on_completion) =
-        episode_handoff::commit_episode_side_effects(
-            shared,
-            provider,
-            channel_id,
-            discord_channel_id,
-            &recovered_state_for_session,
-            locked_episode_from_adoption.take(),
-            existing_inflight.is_some(),
-            &existing_session_id,
-            &channel_name,
-            &session_id_for_state,
-            runtime_kind_for_state,
-            &output_path,
-            &tmux_session_name,
-            initial_offset,
-        )
-        .await?;
+    let mut locked_episode = episode_handoff::commit_episode_side_effects(
+        shared,
+        provider,
+        channel_id,
+        discord_channel_id,
+        &recovered_state_for_session,
+        locked_episode_from_adoption.take(),
+        &existing_session_id,
+        &channel_name,
+        &session_id_for_state,
+        runtime_kind_for_state,
+        &output_path,
+        &tmux_session_name,
+        initial_offset,
+    )
+    .await?;
 
     let (watcher_spawned, watcher_replaced) = {
         #[cfg(unix)]
@@ -787,7 +785,12 @@ async fn rebind_inflight_for_channel_inner(
                 turn_delivered: turn_delivered.clone(),
                 last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
             };
-            let (watcher_should_spawn, watcher_replaced) = claim_rebind_watcher(
+            let (
+                watcher_should_spawn,
+                watcher_replaced,
+                consumer_reserved,
+                watcher_owner_channel_id,
+            ) = claim_rebind_watcher(
                 &shared.tmux_watchers,
                 discord_channel_id,
                 handle,
@@ -799,6 +802,70 @@ async fn rebind_inflight_for_channel_inner(
                     recovered_state_for_session.thread_id,
                 ),
             );
+            if !consumer_reserved {
+                super::runtime::observe_readoption_adoption_abandon(
+                    provider,
+                    &recovered_state_for_session,
+                    "cross_channel_reuse",
+                    None,
+                );
+                drop(locked_episode);
+                return Ok(RebindOutcome {
+                    tmux_session: tmux_session_name,
+                    channel_id,
+                    initial_offset,
+                    watcher_spawned: false,
+                    watcher_replaced: false,
+                });
+            }
+            debug_assert!(watcher_should_spawn || watcher_owner_channel_id == discord_channel_id);
+
+            let finish_mailbox_on_completion = if existing_inflight.is_some() {
+                match super::runtime::begin_and_commit_readoption_adoption(
+                    shared,
+                    &recovered_state_for_session,
+                    locked_episode.is_some(),
+                    locked_episode.as_mut(),
+                )
+                .await
+                {
+                    Ok(Some(finish)) => finish,
+                    Ok(None) => {
+                        if watcher_should_spawn {
+                            shared.tmux_watchers.cancel_and_remove_channel_if_current(
+                                &discord_channel_id,
+                                &tmux_session_name,
+                                &output_path,
+                                &cancel,
+                            );
+                        }
+                        drop(locked_episode);
+                        return Ok(RebindOutcome {
+                            tmux_session: tmux_session_name,
+                            channel_id,
+                            initial_offset,
+                            watcher_spawned: false,
+                            watcher_replaced: false,
+                        });
+                    }
+                    Err(outcome) => {
+                        if watcher_should_spawn {
+                            shared.tmux_watchers.cancel_and_remove_channel_if_current(
+                                &discord_channel_id,
+                                &tmux_session_name,
+                                &output_path,
+                                &cancel,
+                            );
+                        }
+                        drop(locked_episode);
+                        return Err(RebindError::Internal(format!(
+                            "persist readoption marker for channel {channel_id}: {outcome:?}"
+                        )));
+                    }
+                }
+            } else {
+                false
+            };
             if watcher_should_spawn {
                 if let Some(PendingCodexTuiRebindRelay {
                     rollout_path,

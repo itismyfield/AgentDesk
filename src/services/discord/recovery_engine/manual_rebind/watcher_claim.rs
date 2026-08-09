@@ -9,7 +9,7 @@ pub(super) fn claim_rebind_watcher(
     provider: &ProviderKind,
     crossed_codex_turn: bool,
     thread_parent: Option<super::tmux::ThreadFollowUpParent>,
-) -> (bool, bool) {
+) -> (bool, bool, bool, ChannelId) {
     let claim = if crossed_codex_turn {
         super::tmux::claim_or_replace_watcher_with_thread_parent(
             watchers,
@@ -29,5 +29,12 @@ pub(super) fn claim_rebind_watcher(
             thread_parent,
         )
     };
-    (claim.should_spawn(), claim.replaced_existing())
+    let should_spawn = claim.should_spawn();
+    let owner_channel_id = claim.owner_channel_id();
+    (
+        should_spawn,
+        claim.replaced_existing(),
+        should_spawn || owner_channel_id == channel_id,
+        owner_channel_id,
+    )
 }

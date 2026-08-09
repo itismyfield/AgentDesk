@@ -9,8 +9,7 @@ pub(super) async fn commit_episode_side_effects(
     channel_id: u64,
     discord_channel_id: ChannelId,
     recovered_state: &super::inflight::InflightTurnState,
-    mut locked_episode: Option<super::inflight::LockedInflightEpisode>,
-    existing_inflight_present: bool,
+    locked_episode: Option<super::inflight::LockedInflightEpisode>,
     existing_session_id: &Option<String>,
     channel_name: &Option<String>,
     session_id_for_state: &Option<String>,
@@ -18,7 +17,7 @@ pub(super) async fn commit_episode_side_effects(
     output_path: &str,
     tmux_session_name: &str,
     initial_offset: u64,
-) -> Result<(Option<super::inflight::LockedInflightEpisode>, bool), RebindError> {
+) -> Result<Option<super::inflight::LockedInflightEpisode>, RebindError> {
     // A terminal commit is a lifecycle-authority transition, not a reattachable
     // episode. The reservation pin normally rejects a commit that wins before
     // adoption; keep this lock-held check as defense in depth so the guarded
@@ -93,30 +92,6 @@ pub(super) async fn commit_episode_side_effects(
         super::test_barriers::await_episode_authority_held_barrier().await;
     }
 
-    let finish_mailbox_on_completion = if existing_inflight_present {
-        if locked_episode.is_some() {
-            super::reregister_active_turn_from_inflight_under_episode_guard(
-                shared,
-                authoritative_state,
-            )
-            .await
-        } else {
-            reregister_active_turn_from_inflight(shared, authoritative_state).await
-        }
-    } else {
-        false
-    };
-
-    if finish_mailbox_on_completion && let Some(guard) = locked_episode.as_mut() {
-        let outcome = guard.mark_readopted_under_guard();
-        if !matches!(outcome, super::inflight::GuardedSaveOutcome::Saved) {
-            shared.evict_readopted_mailbox_owner(provider, channel_id);
-            return Err(RebindError::Internal(format!(
-                "persist exact-episode readoption marker for channel {channel_id}: {outcome:?}"
-            )));
-        }
-    }
-
     let authoritative_runtime_kind = locked_episode
         .as_ref()
         .map(|_| authoritative_state.runtime_kind)
@@ -149,5 +124,5 @@ pub(super) async fn commit_episode_side_effects(
         );
     }
 
-    Ok((locked_episode, finish_mailbox_on_completion))
+    Ok(locked_episode)
 }

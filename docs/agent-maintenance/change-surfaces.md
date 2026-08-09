@@ -8,6 +8,8 @@
 > [`docs/generated/giant-file-registry.md`](../generated/giant-file-registry.md);
 > the rows below project the operational meaning of each entry.
 >
+> Last refreshed: 2026-08-09 (against #5242 readoption commit authority: watcher-backed recovery now reserves before BEGIN/COMMIT; generic bridge recovery remains the actor-acceptance plus lexical-continuation exception).
+>
 > Last refreshed: 2026-08-06 (against #5071 T1 S3b).
 >
 > — the dead-tmux tail drain in `tmux.rs`
@@ -1329,6 +1331,16 @@ time for diagnostics; neither is a stored approval value.
     retry handoff. #4111's codex rollout fallback output-path persist site moved
     here verbatim; the #4117 session-retry signal path moved here while the
     recovery-context take helper remains in `turn_bridge/recovery_text.rs`.
+    #5242 extracted the duplicated watcher handle/claim block into
+    `restore_watcher_claim.rs` and ratcheted this surface to 2229 production
+    lines. For watcher-backed entries the durable marker is committed only
+    after the same-channel reservation receipt. Generic session-died recovery
+    has no watcher reservation: its narrower contract is mailbox actor
+    acceptance followed by a source-lexical path to `spawn_turn_bridge`; it does
+    not exclude await cancellation, panic/unwind, or thread-spawn panic.
+    An abandoned `DrainRestart` row preserves `restart_mode` and remains
+    save-disabled while retained. A live tmux pane can prevent stale removal
+    until a later generation, so no finite time retention bound is promised.
     Further work should split internal scan/session-retry helpers out of this
     child before adding behavior.)
   - `src/services/discord/recovery_engine.rs` (sub-1000 production module after #3834 r2;
@@ -1340,7 +1352,7 @@ time for diagnostics; neither is a stored approval value.
   - `src/services/discord/recovery_engine/completion_delivery.rs` (sub-1000;
     behavior-preserving #3834 r2 extraction of recovery terminal relay,
     visible completion/status-panel completion helpers, and their tests.)
-  - `src/services/discord/recovery_engine/manual_rebind/mod.rs` (911 prod lines
+  - `src/services/discord/recovery_engine/manual_rebind/mod.rs` (983 prod lines
     after the #4712 pure-move extraction of the test-only race-seam barrier
     cluster into `manual_rebind/test_barriers.rs` (114 prod lines); no longer a
     prod giant. Keeps the manual rebind entrypoints,
@@ -1348,8 +1360,9 @@ time for diagnostics; neither is a stored approval value.
     watcher claim/spawn path. #4465's durable automatic lane performs the
     blocking exact-episode adoption on `spawn_blocking`, retains that same
     canonical flock through footer/session/mailbox/finalizer/runtime-binding
-    mutation and watcher claim/spawn, and commits the episode-scoped readoption
-    marker plus in-memory ledger before releasing authority. The
+    mutation and watcher claim/spawn. #5242 keeps the canonical flock through
+    watcher reservation, mailbox BEGIN, durable marker/finalizer COMMIT, and
+    spawn before releasing authority. The
     `episode_handoff.rs` child never waits for a flock while holding
     `shared.core`. #4455 keeps the crossed-turn watcher selection in the
     30-line `watcher_claim.rs` child so the parent stays below the threshold.

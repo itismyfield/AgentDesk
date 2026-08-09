@@ -435,7 +435,9 @@
 # helpers) into recovery_engine/restore_inflight.rs. The root facade is now below
 # the prod-giant threshold and the remaining restart child stays registered for
 # follow-up #3834 slices.
-"src/services/discord/recovery_engine/restore_inflight.rs" = 2335
+# #5242: lowered 2335 -> 2229 by extracting the duplicated recovery watcher
+# handle/claim block and moving durable readoption commit behind reservation.
+"src/services/discord/recovery_engine/restore_inflight.rs" = 2229
 # #3034 batch-8: lowered 3771 -> 3770 (dead-code removal).
 # #3038 S1: +1 (3770 -> 3771) for the mechanical `shared.queued_placeholders` ->
 # `shared.queued.queued_placeholders` re-wire (one extra method-chain line) forced

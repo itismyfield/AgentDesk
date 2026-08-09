@@ -3576,6 +3576,7 @@ services::discord::queued_placeholder_cluster_characterization_tests::queued_pla
 services::discord::reaction_cleanup::tests::recovered_catch_up_message_removes_stale_hourglass
 services::discord::reaction_lifecycle::tests::dispatch_thread_reaction_targets_parent_channel
 services::discord::reaction_lifecycle::tests::real_discord_message_id_guard_rejects_synthetic_ranges
+services::discord::readopted_mailbox_ledger::tests::exact_compensation_preserves_successor_entry
 services::discord::recovery_engine::completion_delivery::no_anchored_placeholder_recovery_tests::optional_message_id_maps_zero_to_none_without_panicking
 services::discord::recovery_engine::completion_delivery::no_anchored_placeholder_recovery_tests::recovered_transcript_turn_id_avoids_bogus_zero_key
 services::discord::recovery_engine::completion_delivery::no_anchored_placeholder_recovery_tests::recovery_external_input_zero_user_msg_needs_anchor_cleanup
@@ -3706,10 +3707,14 @@ services::discord::recovery_engine::recovery_two_message_panel::tests::replaceme
 services::discord::recovery_engine::recovery_two_message_panel::tests::restart_reanchors_stranded_panel_and_persists_new_epoch
 services::discord::recovery_engine::recovery_two_message_panel::tests::restart_recreates_missing_panel_without_duplicate_old_delete
 services::discord::recovery_engine::restore_inflight::tests::generic_recovery_consumes_restart_before_runtime_ready_and_persists_runtime_stamp
+services::discord::recovery_engine::restore_inflight::tests::generic_recovery_marker_to_bridge_is_only_a_lexical_continuation
 services::discord::recovery_engine::restore_inflight::tests::restore_claude_tui_without_runtime_output_uses_tmux_fallback_path
 services::discord::recovery_engine::restore_inflight::tests::restore_rollout_output_path_patch_preserves_concurrent_relay_fields
+services::discord::recovery_engine::restore_watcher_claim::tests::cross_channel_reuse_is_not_a_reservation_for_the_requester
 services::discord::recovery_engine::routing_orphan::tests::orphan_with_probe_error_is_preserved_while_dead_pane_is_cleaned
 services::discord::recovery_engine::routing_orphan::tests::probe_error_is_treated_as_alive_not_dead
+services::discord::recovery_engine::runtime::adoption_commit_tests::accepted_kickoff_commits_marker_when_activation_was_already_accounted
+services::discord::recovery_engine::runtime::adoption_commit_tests::failed_commit_preserves_restart_and_releases_only_a_minted_claim
 services::discord::recovery_engine::runtime::delivered_inflight_reregister_tests::committed_terminal_delivery_is_not_recoverable_active_turn
 services::discord::recovery_engine::runtime::delivered_inflight_reregister_tests::ordinary_inflight_still_recoverable_even_with_relayed_prefix
 services::discord::recovery_engine::runtime::readopted_ledger_record_gate_tests::only_real_owner_with_real_message_id_is_recorded
@@ -4873,6 +4878,7 @@ services::discord::tmux::tmux_watcher::tests::relay_emission_timeout_rewinds_and
 services::discord::tmux::tmux_watcher::tests::relay_emission_timeout_wiring_source_assertion_4194
 services::discord::tmux::tmux_watcher::tests::restored_response_seed_is_kept_for_managed_inflight
 services::discord::tmux::tmux_watcher::tests::rollback_sender_marks_serenity_5xx_html_decode_failure_transient_4154
+services::discord::tmux::tmux_watcher::tests::same_channel_reuse_refreshes_long_lived_watcher_and_finalizes_only_x_range
 services::discord::tmux::tmux_watcher::tests::stale_normal_completion_does_not_release_newer_active_turn
 services::discord::tmux::tmux_watcher::tests::status_panel_v2_watcher_streaming_edit_moves_processing_footer_to_response_message
 services::discord::tmux::tmux_watcher::tests::terminal_delivery_timeout_cleanup_releases_mailbox_and_preserves_followup_queue

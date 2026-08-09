@@ -682,8 +682,8 @@ decompose_issue = "#4712"
 
 [[entry]]
 # #3834 r2: restart-path scan moved out of the recovery_engine root, but the
-# verbatim `restore_inflight_turns` body remains a tracked giant until follow-up
-# slices can split the scan/session-retry internals without behavior changes.
+# `restore_inflight_turns` remains a tracked giant after #5242 extracted its
+# duplicated watcher claim block and lowered the production surface to 2229.
 file = "src/services/discord/recovery_engine/restore_inflight.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"

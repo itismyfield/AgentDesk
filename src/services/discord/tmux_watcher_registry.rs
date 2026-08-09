@@ -2,6 +2,7 @@ use super::*;
 
 /// Shared state for the Discord bot (multi-channel: each channel has its own session)
 /// Handle for a background tmux output watcher
+#[derive(Clone)]
 pub(in crate::services::discord) struct TmuxWatcherHandle {
     /// Tmux session this watcher owns. Used to enforce the single-watcher
     /// policy when the same session is reattached through another path.

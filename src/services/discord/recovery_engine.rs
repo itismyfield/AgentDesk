@@ -97,6 +97,8 @@ mod completion_delivery;
 // leaf module. Entry points are re-exported below so external paths stay stable.
 #[path = "recovery_engine/restore_inflight.rs"]
 mod restore_inflight;
+#[path = "recovery_engine/restore_watcher_claim.rs"]
+mod restore_watcher_claim;
 // #4111: behavior-preserving extraction of guarded Codex rollout persist-outcome
 // handling before restart-path watcher spawn into a leaf module.
 #[path = "recovery_engine/restore_persist_outcome.rs"]
@@ -164,6 +166,11 @@ pub(super) use self::state_extractors::save_missing_session_handoff;
 // #3834: `rebind_inflight_for_channel` is re-exported (not just re-imported) so the
 // `recovery_engine::rebind_inflight_for_channel` path stays valid for its `health`
 // caller. Its private cluster (`codex_tui_*`, `Pending*`) is not re-exported.
+pub(in crate::services::discord) use self::completion_delivery::relay_recovered_terminal_text_to_placeholder;
+use self::completion_delivery::{
+    RecoveryCompletionOutcome, complete_recovery_visible_turn, relay_recovery_terminal_notice,
+    should_advance_recovery_dispatch_after_relay,
+};
 #[cfg(test)]
 pub(crate) use self::manual_rebind::{
     EpisodeAuthorityHeldBarrier, PostAdoptionClaimBarrier, install_episode_authority_held_barrier,
@@ -173,17 +180,11 @@ pub(crate) use self::manual_rebind::{
     rebind_inflight_for_channel, rebind_inflight_for_channel_with_minimum_start_offset,
 };
 pub(crate) use self::manual_rebind_override::ManualRebindOverrides;
-pub(in crate::services::discord) use self::runtime::reregister_active_turn_from_inflight_under_episode_guard;
-// #3834: `reregister_active_turn_from_inflight` is re-exported (not just
-// re-imported) so the `recovery_engine::reregister_active_turn_from_inflight`
-// path stays valid for its `watchers::lifecycle` caller (via the `recovery`
-// alias) and so the root's `restore_inflight_turns` reattach call sites stay
-// byte-identical. Its private `reseed_watcher_owned_finalizer_ledger` helper is
-// not re-exported.
-pub(in crate::services::discord) use self::completion_delivery::relay_recovered_terminal_text_to_placeholder;
-use self::completion_delivery::{
-    RecoveryCompletionOutcome, complete_recovery_visible_turn, relay_recovery_terminal_notice,
-    should_advance_recovery_dispatch_after_relay,
+#[cfg(test)]
+pub(in crate::services::discord) use self::runtime::reregister_active_turn_from_inflight;
+pub(in crate::services::discord) use self::runtime::{
+    abandon_readoption_adoption, begin_readoption_adoption, commit_readoption_adoption,
+    lock_readoption_episode,
 };
 // `detect_live_tmux_output_path` exists only under `#[cfg(unix)]` in the child;
 // a by-name import of a cfg'd-out item is a hard E0432 on non-unix targets.
@@ -193,7 +194,6 @@ pub(in crate::services::discord) use self::restore_inflight::{
     finish_recovered_turn_mailbox, restore_inflight_turns,
 };
 use self::restore_persist_outcome::{RestorePersistOutcome, restore_codex_rollout_output_path};
-pub(super) use self::runtime::reregister_active_turn_from_inflight;
 pub(in crate::services::discord) use self::terminal_text_idempotency::RecoveryDeliveryContext;
 use self::tmux_probe::tmux_session_alive_with_retry;
 // #3479: re-import the analytics + transcript helpers so root call sites stay
