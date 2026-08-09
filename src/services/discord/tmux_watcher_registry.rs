@@ -51,6 +51,18 @@ impl TmuxWatcherHandle {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) enum TmuxWatcherConsumerPhase {
+    Reserved,
+    Spawned,
+}
+
+#[derive(Clone)]
+struct TmuxWatcherConsumerLifecycle {
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    phase: TmuxWatcherConsumerPhase,
+}
+
 pub(in crate::services::discord) type TmuxWatcherRegistryGuard = std::sync::MutexGuard<'static, ()>;
 
 static TMUX_WATCHER_REGISTRY_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
@@ -72,6 +84,11 @@ pub(in crate::services) struct TmuxWatcherRegistry {
     pub(in crate::services::discord) by_tmux_session: dashmap::DashMap<String, TmuxWatcherHandle>,
     tmux_session_by_channel: dashmap::DashMap<ChannelId, String>,
     owner_channel_by_tmux_session: dashmap::DashMap<String, ChannelId>,
+    /// Recovery reservations publish `Reserved` before releasing their claim
+    /// window and transition to `Spawned` only after the watcher task exists.
+    /// Slots created by legacy/non-recovery claimers have no entry and retain
+    /// their historical meaning as live consumers.
+    consumer_lifecycle_by_tmux_session: dashmap::DashMap<String, TmuxWatcherConsumerLifecycle>,
     /// #3105: authoritative owner-channel bindings re-registered for LIVE tmux
     /// sessions that currently have no live watcher handle — e.g. a Claude TUI
     /// session the user is typing into directly whose watcher slot was evicted
@@ -101,6 +118,7 @@ impl TmuxWatcherRegistry {
             by_tmux_session: dashmap::DashMap::new(),
             tmux_session_by_channel: dashmap::DashMap::new(),
             owner_channel_by_tmux_session: dashmap::DashMap::new(),
+            consumer_lifecycle_by_tmux_session: dashmap::DashMap::new(),
             restored_owner_by_tmux_session: dashmap::DashMap::new(),
         }
     }
@@ -145,6 +163,8 @@ impl TmuxWatcherRegistry {
             self.owner_channel_by_tmux_session
                 .remove(&old_tmux_session_name);
             self.by_tmux_session.remove(&old_tmux_session_name);
+            self.consumer_lifecycle_by_tmux_session
+                .remove(&old_tmux_session_name);
         }
 
         let tmux_session_name = handle.tmux_session_name.clone();
@@ -154,6 +174,9 @@ impl TmuxWatcherRegistry {
         {
             self.tmux_session_by_channel.remove(&old_owner_channel_id);
         }
+
+        self.consumer_lifecycle_by_tmux_session
+            .remove(&tmux_session_name);
 
         // #3105: a live watcher handle is now the authoritative owner for this
         // session — drop any restored owner-only binding so it can never shadow
@@ -181,6 +204,8 @@ impl TmuxWatcherRegistry {
         let (_, tmux_session_name) = self.tmux_session_by_channel.remove(channel_id)?;
         self.owner_channel_by_tmux_session
             .remove(&tmux_session_name);
+        self.consumer_lifecycle_by_tmux_session
+            .remove(&tmux_session_name);
         self.by_tmux_session
             .remove(&tmux_session_name)
             .map(|(_, handle)| (*channel_id, handle))
@@ -195,6 +220,8 @@ impl TmuxWatcherRegistry {
             .owner_channel_by_tmux_session
             .remove(tmux_session_name)?;
         self.tmux_session_by_channel.remove(&owner_channel_id);
+        self.consumer_lifecycle_by_tmux_session
+            .remove(tmux_session_name);
         self.by_tmux_session
             .remove(tmux_session_name)
             .map(|(_, handle)| (owner_channel_id, handle))
@@ -253,14 +280,14 @@ impl TmuxWatcherRegistry {
         true
     }
 
-    pub(in crate::services::discord) fn current_channel_handle_locked(
+    pub(in crate::services::discord) fn current_channel_consumer_locked(
         &self,
         _guard: &TmuxWatcherRegistryGuard,
         channel_id: &ChannelId,
         expected_tmux_session_name: &str,
         expected_output_path: &str,
         expected_cancel: Option<&Arc<std::sync::atomic::AtomicBool>>,
-    ) -> Option<TmuxWatcherHandle> {
+    ) -> Option<(TmuxWatcherHandle, TmuxWatcherConsumerPhase)> {
         let tmux_session_name = self.tmux_session_by_channel.get(channel_id)?;
         if tmux_session_name.value() != expected_tmux_session_name {
             return None;
@@ -278,7 +305,92 @@ impl TmuxWatcherRegistry {
         {
             return None;
         }
-        Some(handle.clone())
+        let phase = self
+            .consumer_lifecycle_by_tmux_session
+            .get(expected_tmux_session_name)
+            .filter(|lifecycle| Arc::ptr_eq(&lifecycle.cancel, &handle.cancel))
+            .map(|lifecycle| lifecycle.phase)
+            .unwrap_or(TmuxWatcherConsumerPhase::Spawned);
+        Some((handle.clone(), phase))
+    }
+
+    pub(in crate::services::discord) fn reserve_channel_consumer_if_current(
+        &self,
+        channel_id: &ChannelId,
+        expected_tmux_session_name: &str,
+        expected_output_path: &str,
+        expected_cancel: &Arc<std::sync::atomic::AtomicBool>,
+    ) -> bool {
+        let guard = lock_tmux_watcher_registry();
+        if self
+            .current_channel_consumer_locked(
+                &guard,
+                channel_id,
+                expected_tmux_session_name,
+                expected_output_path,
+                Some(expected_cancel),
+            )
+            .is_none()
+        {
+            return false;
+        }
+        self.consumer_lifecycle_by_tmux_session.insert(
+            expected_tmux_session_name.to_string(),
+            TmuxWatcherConsumerLifecycle {
+                cancel: expected_cancel.clone(),
+                phase: TmuxWatcherConsumerPhase::Reserved,
+            },
+        );
+        true
+    }
+
+    pub(in crate::services::discord) fn tmux_session_has_reserved_consumer(
+        &self,
+        tmux_session_name: &str,
+    ) -> bool {
+        let _guard = lock_tmux_watcher_registry();
+        let Some(handle) = self.by_tmux_session.get(tmux_session_name) else {
+            return false;
+        };
+        self.consumer_lifecycle_by_tmux_session
+            .get(tmux_session_name)
+            .is_some_and(|lifecycle| {
+                Arc::ptr_eq(&lifecycle.cancel, &handle.cancel)
+                    && lifecycle.phase == TmuxWatcherConsumerPhase::Reserved
+            })
+    }
+
+    pub(in crate::services::discord) fn mark_channel_consumer_spawned_if_current(
+        &self,
+        channel_id: &ChannelId,
+        expected_tmux_session_name: &str,
+        expected_output_path: &str,
+        expected_cancel: &Arc<std::sync::atomic::AtomicBool>,
+    ) -> bool {
+        let guard = lock_tmux_watcher_registry();
+        let Some((_, phase)) = self.current_channel_consumer_locked(
+            &guard,
+            channel_id,
+            expected_tmux_session_name,
+            expected_output_path,
+            Some(expected_cancel),
+        ) else {
+            return false;
+        };
+        if phase != TmuxWatcherConsumerPhase::Reserved {
+            return false;
+        }
+        let Some(mut lifecycle) = self
+            .consumer_lifecycle_by_tmux_session
+            .get_mut(expected_tmux_session_name)
+        else {
+            return false;
+        };
+        if !Arc::ptr_eq(&lifecycle.cancel, expected_cancel) {
+            return false;
+        }
+        lifecycle.phase = TmuxWatcherConsumerPhase::Spawned;
+        true
     }
 
     pub(in crate::services::discord) fn iter(&self) -> dashmap::iter::Iter<'_, String, TmuxWatcherHandle> {

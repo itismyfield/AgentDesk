@@ -234,6 +234,9 @@ pub(in crate::services::discord) fn observe_readoption_adoption_abandon(
 ) {
     let invariant = match reason {
         "cross_channel_reuse" => "readoption_adoption_abandoned_cross_channel_reuse",
+        "reserved_consumer_not_spawned" => {
+            "readoption_adoption_abandoned_reserved_consumer_not_spawned"
+        }
         _ => "readoption_adoption_abandoned_commit_failure",
     };
     let _ = crate::services::observability::record_invariant_check_with_severity(

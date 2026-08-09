@@ -660,7 +660,6 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             turn_delivered: turn_delivered.clone(),
             last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
         };
-        let reservation_candidate = handle.clone();
         let mut locked_episode = if let Some(state) = pw.restored_state.as_ref() {
             match super::super::super::recovery::lock_readoption_episode(&provider, state).await {
                 Ok(guard) => Some(guard),
@@ -677,29 +676,21 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         } else {
             None
         };
-        if !try_claim_watcher_with_thread_parent(
-            &shared.tmux_watchers,
-            pw.channel_id,
-            handle,
-            Some(&provider),
-            pw.thread_parent,
-        ) {
+        let Some(mut reservation) =
+            super::super::super::recovery::restore_watcher_claim::reserve_prepared_recovery_watcher(
+                shared,
+                &provider,
+                pw.restored_state.as_ref(),
+                pw.channel_id,
+                handle,
+                pw.thread_parent,
+            )
+        else {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] ⏭ watcher skip for {} — already watching (created during scan)",
                 pw.session_name
             );
-            continue;
-        }
-        let Some(mut reservation) = super::super::super::recovery::restore_watcher_claim::RecoveryWatcherReservation::from_claim(
-            shared,
-            &provider,
-            pw.restored_state.as_ref(),
-            pw.channel_id,
-            reservation_candidate,
-            true,
-            pw.channel_id,
-        ) else {
             continue;
         };
         let restored_turn = if let Some(state) = pw.restored_state.as_ref() {
@@ -761,7 +752,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                 restored_turn,
             ),
         );
-        reservation.disarm();
+        reservation.disarm_after_consumer_spawn();
     }
 
     // Clean up dead sessions: report idle to DB and kill tmux sessions

@@ -800,7 +800,8 @@ pub(in crate::services::discord) fn rollback_committed_readoption_adoption_if_ma
         && expected_episode.is_none_or(|pin| pin.matches_state(&on_disk))
         && expected_turn_start_offset
             .is_none_or(|offset| on_disk.turn_start_offset == Some(offset))
-        && expected_last_offset_for_rebase.is_none_or(|offset| on_disk.last_offset == offset);
+        && expected_last_offset_for_rebase.is_none_or(|offset| on_disk.last_offset == offset)
+        && on_disk.terminal_delivery_committed == state.terminal_delivery_committed;
     if !exact_current
         || on_disk.rebind_origin
         || !on_disk.readopted_from_inflight
@@ -810,10 +811,16 @@ pub(in crate::services::discord) fn rollback_committed_readoption_adoption_if_ma
     {
         return GuardedSaveOutcome::IdentityMismatch;
     }
+    // COMMIT changes only these two authority fields. Preserve every other
+    // current on-disk field so compensation cannot rewind same-turn progress
+    // that advanced after the pre-COMMIT snapshot was captured.
+    let mut rollback = on_disk;
+    rollback.readopted_from_inflight = state.readopted_from_inflight;
+    rollback.restart_mode = state.restart_mode;
     persist_under_lock(
         &root,
         &path,
-        state,
+        &rollback,
         "src/services/discord/inflight/save_store/identity_gate.rs:rollback_committed_readoption_adoption_if_matches",
     )
     .map_or(GuardedSaveOutcome::IoError, |()| GuardedSaveOutcome::Saved)

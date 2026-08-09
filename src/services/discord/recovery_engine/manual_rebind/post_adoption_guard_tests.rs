@@ -814,3 +814,96 @@ async fn post_commit_relay_setup_failure_clears_every_unwatched_authority() {
             .is_none()
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn post_commit_compensation_preserves_newer_terminal_authority() {
+    let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let root = tempfile::tempdir().expect("runtime root");
+    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        root.path(),
+    );
+    let shared = super::super::make_shared_data_for_tests_with_storage(None);
+    let provider = ProviderKind::Codex;
+    let channel_id = 4_465_894;
+    let mut state = super::inflight::InflightTurnState::new(
+        provider.clone(),
+        channel_id,
+        Some("post-commit-terminal-successor".to_string()),
+        343_742_347_365_974_026,
+        4_465_895,
+        4_465_896,
+        "post commit terminal successor".to_string(),
+        Some("provider-session".to_string()),
+        Some("AgentDesk-codex-post-commit-terminal-successor".to_string()),
+        Some("/tmp/post-commit-terminal-successor.jsonl".to_string()),
+        None,
+        0,
+    );
+    state.set_restart_mode(crate::services::discord::InflightRestartMode::DrainRestart);
+    super::inflight::save_inflight_state(&state).expect("planned restart row");
+    let state = super::inflight::load_inflight_state(&provider, channel_id)
+        .expect("normalized planned restart row");
+    let channel = serenity::model::id::ChannelId::new(channel_id);
+    let reservation = super::super::restore_watcher_claim::reserve_recovery_watcher(
+        &shared,
+        &provider,
+        channel,
+        &state,
+        state.tmux_session_name.as_deref().expect("session"),
+        state.output_path.clone().expect("output"),
+        "post_commit_terminal_successor_test",
+        None,
+    )
+    .expect("watcher reservation");
+    let (reservation, _) = super::super::restore_watcher_claim::begin_and_commit_reserved_watcher(
+        &shared,
+        &state,
+        reservation,
+        false,
+        None,
+    )
+    .await
+    .expect("COMMIT result")
+    .expect("COMMIT receipt");
+
+    let terminal_body = "newer terminal delivery authority";
+    assert_eq!(
+        super::inflight::commit_watcher_terminal_delivery_locked(
+            &provider,
+            channel_id,
+            &super::inflight::InflightTurnIdentity::from_state(&state),
+            state.tmux_session_name.as_deref().expect("session"),
+            super::inflight::WatcherTerminalCommitPatch {
+                full_response: terminal_body.to_string(),
+                last_offset: state.last_offset,
+                last_watcher_relayed_offset: None,
+                last_watcher_relayed_generation_mtime_ns: None,
+            },
+        ),
+        super::inflight::WatcherTerminalCommitOutcome::Committed
+    );
+
+    let rollback = PendingRebindInflightRollback::RestoreExistingAdoption {
+        state: state.clone(),
+        expected: super::inflight::InflightTurnIdentity::from_state(&state),
+        expected_turn_start_offset: state.turn_start_offset,
+        expected_last_offset_for_rebase: None,
+        expected_episode: None,
+    };
+    let (registry_rolled_back, rollback_outcome) =
+        compensate_post_commit_relay_setup_failure(reservation, None, Some(rollback)).await;
+    assert!(registry_rolled_back);
+    assert!(
+        rollback_outcome.contains("IdentityMismatch"),
+        "{rollback_outcome}"
+    );
+
+    let persisted =
+        super::inflight::load_inflight_state(&provider, channel_id).expect("successor row");
+    assert!(persisted.terminal_delivery_committed);
+    assert!(persisted.readopted_from_inflight);
+    assert_eq!(persisted.restart_mode, None);
+    assert_eq!(persisted.full_response, terminal_body);
+    assert!(!shared.tmux_watchers.contains_key(&channel));
+}

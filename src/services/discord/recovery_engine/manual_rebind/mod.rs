@@ -799,15 +799,10 @@ async fn rebind_inflight_for_channel_inner(
                 turn_delivered: turn_delivered.clone(),
                 last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
             };
-            let reservation_candidate = handle.clone();
-            let (
-                watcher_should_spawn,
-                watcher_replaced,
-                _consumer_reserved,
-                watcher_owner_channel_id,
-            ) = claim_rebind_watcher(
-                &shared.tmux_watchers,
+            let (reservation, watcher_replaced) = claim_rebind_watcher(
+                shared,
                 discord_channel_id,
+                &recovered_state_for_session,
                 handle,
                 provider,
                 discard_restored_render_seed,
@@ -817,17 +812,7 @@ async fn rebind_inflight_for_channel_inner(
                     recovered_state_for_session.thread_id,
                 ),
             );
-            let Some(mut reservation) =
-                super::restore_watcher_claim::RecoveryWatcherReservation::from_claim(
-                    shared,
-                    provider,
-                    Some(&recovered_state_for_session),
-                    discord_channel_id,
-                    reservation_candidate,
-                    watcher_should_spawn,
-                    watcher_owner_channel_id,
-                )
-            else {
+            let Some(mut reservation) = reservation else {
                 drop(locked_episode);
                 return Ok(RebindOutcome {
                     tmux_session: tmux_session_name,
@@ -837,7 +822,7 @@ async fn rebind_inflight_for_channel_inner(
                     watcher_replaced: false,
                 });
             };
-            debug_assert!(watcher_should_spawn || watcher_owner_channel_id == discord_channel_id);
+            let watcher_should_spawn = reservation.should_spawn;
 
             let finish_mailbox_on_completion = if existing_inflight.is_some() {
                 match super::restore_watcher_claim::begin_and_commit_reserved_watcher(
@@ -960,9 +945,9 @@ async fn rebind_inflight_for_channel_inner(
                         restored_turn,
                     ),
                 );
-                reservation.disarm();
+                reservation.disarm_after_consumer_spawn();
             } else {
-                reservation.disarm();
+                reservation.disarm_reused_consumer();
             }
             (watcher_should_spawn, watcher_replaced)
         }

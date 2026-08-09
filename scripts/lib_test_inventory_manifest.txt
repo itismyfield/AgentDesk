@@ -3635,6 +3635,7 @@ services::discord::recovery_engine::manual_rebind::codex_tui_replay::tests::norm
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::crossed_codex_turn_forces_watcher_replacement_before_normal_reuse
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::durable_episode_authority_lexically_covers_every_handoff_side_effect
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::episode_pin_rejects_every_handoff_consumed_authority_axis
+services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::post_commit_compensation_preserves_newer_terminal_authority
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::post_commit_relay_setup_failure_clears_every_unwatched_authority
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::relay_setup_failure_rollbacks_are_exact_episode_guarded
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::replacement_after_adoption_before_claim_is_untouched
@@ -3714,7 +3715,9 @@ services::discord::recovery_engine::restore_inflight::tests::restore_claude_tui_
 services::discord::recovery_engine::restore_inflight::tests::restore_rollout_output_path_patch_preserves_concurrent_relay_fields
 services::discord::recovery_engine::restore_watcher_claim::tests::cross_channel_reuse_is_not_a_reservation_for_the_requester
 services::discord::recovery_engine::restore_watcher_claim::tests::dropping_reservation_rolls_back_only_its_exact_registry_handle
+services::discord::recovery_engine::restore_watcher_claim::tests::episode_flock_wait_never_holds_the_registry_mutex
 services::discord::recovery_engine::restore_watcher_claim::tests::replacement_before_commit_abandons_without_clobbering_successor
+services::discord::recovery_engine::restore_watcher_claim::tests::reserved_pre_spawn_slot_cannot_be_reused_as_a_live_consumer
 services::discord::recovery_engine::restore_watcher_claim::tests::watcher_reservation_lexically_precedes_begin_commit_and_spawn
 services::discord::recovery_engine::routing_orphan::tests::orphan_with_probe_error_is_preserved_while_dead_pane_is_cleaned
 services::discord::recovery_engine::routing_orphan::tests::probe_error_is_treated_as_alive_not_dead
