@@ -61,11 +61,11 @@ pub(super) use self::tmux_session_files::read_generation_file_mtime_ns;
 pub(in crate::services::discord) use self::tmux_session_files::reset_relay_watermark_on_generation_change;
 pub(in crate::services::discord) use self::tmux_session_files::reset_stale_relay_watermark_if_output_regressed;
 pub(super) use self::tmux_session_files::session_panel_instance_key;
-pub(crate) use self::tmux_session_files::write_spawn_nonce;
 use self::tmux_session_files::{
     preserve_mtime_after_write, reset_stale_local_relay_offset_if_output_regressed,
     sweep_orphan_session_files,
 };
+pub(crate) use self::tmux_session_files::{stamp_spawn_markers, write_spawn_nonce};
 #[cfg(test)]
 pub(in crate::services::discord) use self::watcher_lifecycle::claim_cross_channel_tmux_watcher_for_test;
 use self::watcher_lifecycle::*;

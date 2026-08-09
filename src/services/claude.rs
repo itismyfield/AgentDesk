@@ -1847,7 +1847,7 @@ fn execute_streaming_local_tui_tmux(
     // #3087: stamp a per-spawn nonce on the Claude-TUI DIRECT spawn path too.
     // Without it this path produces no `.spawn_nonce`, so the status-panel
     // instance key is `None` and the new-session boundary cannot be detected.
-    if let Err(e) = crate::services::discord::write_spawn_nonce(tmux_session_name) {
+    if let Err(e) = crate::services::discord::stamp_spawn_markers(tmux_session_name) {
         debug_log(&format!(
             "failed to write spawn nonce for {tmux_session_name} (claude-tui): {e}"
         ));
@@ -2886,19 +2886,13 @@ fn execute_streaming_local_tmux(
     // Keep tmux session alive after process exits for post-mortem analysis
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
-    // Stamp generation marker so post-restart watcher restore can detect old sessions
-    let gen_marker_path =
-        crate::services::tmux_common::session_temp_path(tmux_session_name, "generation");
-    let current_gen = crate::services::discord::runtime_store::process_generation();
-    let _ = std::fs::write(&gen_marker_path, current_gen.to_string());
-
     // #3087: stamp a per-spawn nonce in a SEPARATE marker. The status-panel
     // session-instance key reads this nonce (unique per spawn) instead of the
     // `.generation` mtime, so a missing/duplicate mtime can never collapse two
     // distinct spawns into one instance key. Write errors are logged (not
     // silently swallowed) since a missing nonce degrades the panel-reset
     // boundary to best-effort.
-    if let Err(e) = crate::services::discord::write_spawn_nonce(tmux_session_name) {
+    if let Err(e) = crate::services::discord::stamp_spawn_markers(tmux_session_name) {
         debug_log(&format!(
             "failed to write spawn nonce for {tmux_session_name}: {e}"
         ));

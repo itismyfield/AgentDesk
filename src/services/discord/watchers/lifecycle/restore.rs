@@ -408,8 +408,9 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                 session_gen,
                 current_gen
             );
-            // Update generation marker to current gen, preserving the
-            // existing mtime.
+            // Update through one fd so a concurrent spawn replacement cannot
+            // receive this wrapper's old mtime. A missing marker is recovered
+            // with create-new/retry inside the helper.
             //
             // #1275 P2 #1: the `.generation` mtime is the wrapper-identity
             // signal used by `watermark_after_output_regression`. Adoption

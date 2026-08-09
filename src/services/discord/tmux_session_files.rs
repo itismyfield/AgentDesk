@@ -1,5 +1,7 @@
 use poise::serenity_prelude::ChannelId;
 
+use std::io::{Read, Seek, Write};
+
 use super::SharedData;
 
 /// Read the `.generation` marker file mtime in nanoseconds since the unix
@@ -9,13 +11,12 @@ use super::SharedData;
 /// migration window). All of those conditions are treated by callers as
 /// "fresh wrapper".
 ///
-/// `.generation` is written exactly once per spawn by `claude.rs` after
-/// `tmux::create_session` and never touched by the live wrapper, so its
-/// mtime uniquely identifies the wrapper instance even when jsonl
-/// rotation changes the jsonl inode (#1270). NOTE: this mtime signal is the
-/// #1270 wrapper-identity consumer ONLY. The status-panel session-instance
-/// key (#3087) no longer reads this mtime — it reads the dedicated
-/// `.spawn_nonce` marker content instead (see `session_panel_instance_key`).
+/// `.generation` is atomically replaced once per successful provider spawn and
+/// rewritten through a pinned fd when a surviving wrapper is adopted after a
+/// dcserver restart. Spawn replacement changes the wrapper identity mtime;
+/// adoption preserves it. NOTE: this mtime signal is the #1270 wrapper-identity
+/// consumer ONLY. The status-panel session-instance key (#3087) reads the
+/// dedicated `.spawn_nonce` marker content instead.
 pub(in crate::services::discord) fn read_generation_file_mtime_ns(tmux_session_name: &str) -> i64 {
     let Some(path) =
         crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "generation")
@@ -41,6 +42,102 @@ pub(in crate::services::discord) fn read_generation_file_mtime_ns(tmux_session_n
 /// parsed by the adoption path (`watchers::lifecycle`). The nonce lives in its
 /// own file so neither of those `.generation` consumers is perturbed.
 const SPAWN_NONCE_SUFFIX: &str = "spawn_nonce";
+
+#[cfg(test)]
+type GenerationStampBeforeCreateHook = std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
+#[cfg(test)]
+static GENERATION_STAMP_BEFORE_CREATE_HOOK: std::sync::LazyLock<
+    std::sync::Mutex<Option<GenerationStampBeforeCreateHook>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+#[cfg(test)]
+fn run_generation_stamp_before_create_hook_for_tests() {
+    let hook = GENERATION_STAMP_BEFORE_CREATE_HOOK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+/// Stamp the `.generation` marker for one successful provider spawn.
+///
+/// A successful call creates a new sibling inode with `create_new` and atomically
+/// renames that inode over the marker path. Adoption can therefore keep writing
+/// an fd for the prior inode without changing the marker visible at this path.
+/// Failures leave the destination untouched, emit one warning, and do not fail
+/// the provider spawn. The write is not fsynced.
+pub(in crate::services::discord) fn stamp_session_generation_marker(
+    tmux_session_name: &str,
+) -> Option<i64> {
+    let generation = crate::services::discord::runtime_store::process_generation();
+    let path = crate::services::tmux_common::session_temp_path(tmux_session_name, "generation");
+    let tmp_path = format!(
+        "{path}.tmp.{}.{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    );
+
+    #[cfg(test)]
+    run_generation_stamp_before_create_hook_for_tests();
+
+    let stamp = || -> std::io::Result<i64> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)?;
+        file.write_all(generation.to_string().as_bytes())?;
+        let modified = file.metadata()?.modified()?;
+        let modified_ns = modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
+            .ok_or_else(|| std::io::Error::other("generation marker mtime is out of range"))?;
+        drop(file);
+        std::fs::rename(&tmp_path, &path)?;
+        Ok(modified_ns)
+    };
+
+    match stamp() {
+        Ok(modified_ns) => Some(modified_ns),
+        Err(error) => {
+            let _ = std::fs::remove_file(&tmp_path);
+            tracing::warn!("failed to stamp generation marker for {tmux_session_name}: {error}");
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+type SpawnMarkersAfterGenerationHook = std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
+#[cfg(test)]
+static SPAWN_MARKERS_AFTER_GENERATION_HOOK: std::sync::LazyLock<
+    std::sync::Mutex<Option<SpawnMarkersAfterGenerationHook>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+#[cfg(test)]
+fn run_spawn_markers_after_generation_hook_for_tests() {
+    let hook = SPAWN_MARKERS_AFTER_GENERATION_HOOK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+/// Stamp the generation identity before the per-spawn nonce.
+///
+/// Generation failures remain best-effort and do not suppress nonce creation.
+/// The returned result is exactly `write_spawn_nonce`'s result, including its
+/// successful nonce value and its `std::io::Error`.
+pub(crate) fn stamp_spawn_markers(tmux_session_name: &str) -> std::io::Result<String> {
+    let _ = stamp_session_generation_marker(tmux_session_name);
+    #[cfg(test)]
+    run_spawn_markers_after_generation_hook_for_tests();
+    write_spawn_nonce(tmux_session_name)
+}
 
 /// Write a fresh, globally-unique per-spawn nonce to the `.spawn_nonce` marker.
 ///
@@ -138,61 +235,129 @@ pub(in crate::services::discord) fn session_panel_instance_key(
     Some(format!("{name}#{nonce}"))
 }
 
-/// Rewrite a file's contents while preserving its prior modified time. Used
-/// by the adoption path to refresh the `.generation` marker payload (so the
-/// generation number on disk matches the current dcserver runtime) without
-/// changing the file's mtime — the mtime is the wrapper-identity signal that
-/// the regression resolver uses to distinguish "same wrapper, mid-flight
-/// rotation" from "fresh wrapper after cancel→respawn" (see
-/// `watermark_after_output_regression`). Adoption changes the runtime that
-/// owns the wrapper, but it does NOT respawn the wrapper itself, so the
-/// identity signal must stay pinned.
-///
-/// Failures are logged and swallowed: the worst case is a redundant fresh-
-/// wrapper reset on a restored offset, which is the same behaviour the
-/// codebase had before #1271. Returning an error would not unblock the
-/// adoption.
-pub(super) fn preserve_mtime_after_write(path: &str, content: &[u8], context: &str) {
-    let prior_mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
-    if let Err(e) = std::fs::write(path, content) {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ⚠ preserve_mtime_after_write: failed to write {} (context={}, error={})",
-            path,
-            context,
-            e
-        );
-        return;
+#[cfg(test)]
+type PreserveMtimeAfterMetadataHook = std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
+#[cfg(test)]
+static PRESERVE_MTIME_AFTER_METADATA_HOOK: std::sync::LazyLock<
+    std::sync::Mutex<Option<PreserveMtimeAfterMetadataHook>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+#[cfg(test)]
+static PRESERVE_MTIME_BEFORE_REWRITE_HOOK: std::sync::LazyLock<
+    std::sync::Mutex<Option<PreserveMtimeAfterMetadataHook>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+#[cfg(test)]
+fn run_preserve_mtime_after_metadata_hook_for_tests() {
+    let hook = PRESERVE_MTIME_AFTER_METADATA_HOOK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    if let Some(hook) = hook {
+        hook();
     }
-    let Some(prior) = prior_mtime else {
-        // No prior mtime to preserve (file did not exist or metadata unavailable).
-        // The post-write mtime is the only baseline we have, which is the same
-        // outcome as before this helper existed.
-        return;
+}
+
+#[cfg(test)]
+fn run_preserve_mtime_before_rewrite_hook_for_tests() {
+    let hook = PRESERVE_MTIME_BEFORE_REWRITE_HOOK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+/// Rewrite an adopted `.generation` marker through one pinned file descriptor.
+///
+/// For an existing marker, metadata, content replacement, and mtime restoration
+/// all target the inode opened at entry. If a concurrent spawn atomically
+/// replaces the path, adoption can only modify the unlinked prior inode. If the
+/// marker is absent, `create_new` retains restart healing; `AlreadyExists`
+/// retries the existing-fd path so adoption never joins a concurrent writer by
+/// using `create(true)`. Existing current-generation content is a no-op.
+/// Failures are logged and swallowed because adoption itself can still proceed.
+pub(super) fn preserve_mtime_after_write(path: &str, content: &[u8], context: &str) {
+    let mut file = loop {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+        {
+            Ok(file) => break file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                {
+                    Ok(mut file) => {
+                        if let Err(error) = file.write_all(content) {
+                            warn_preserve_mtime_failure(path, context, "create/write", &error);
+                        }
+                        return;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => {
+                        warn_preserve_mtime_failure(path, context, "create", &error);
+                        return;
+                    }
+                }
+            }
+            Err(error) => {
+                warn_preserve_mtime_failure(path, context, "open", &error);
+                return;
+            }
+        }
     };
-    let times = std::fs::FileTimes::new().set_modified(prior);
-    let file = match std::fs::OpenOptions::new().write(true).open(path) {
-        Ok(f) => f,
-        Err(e) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
-                "  [{ts}] ⚠ preserve_mtime_after_write: failed to reopen {} for set_times (context={}, error={})",
-                path,
-                context,
-                e
-            );
+
+    let prior_mtime = match file.metadata().and_then(|metadata| metadata.modified()) {
+        Ok(modified) => modified,
+        Err(error) => {
+            warn_preserve_mtime_failure(path, context, "metadata", &error);
             return;
         }
     };
-    if let Err(e) = file.set_times(times) {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ⚠ preserve_mtime_after_write: set_times failed for {} (context={}, error={})",
-            path,
-            context,
-            e
-        );
+
+    #[cfg(test)]
+    run_preserve_mtime_after_metadata_hook_for_tests();
+
+    let mut existing = Vec::new();
+    if let Err(error) = file.read_to_end(&mut existing) {
+        warn_preserve_mtime_failure(path, context, "read", &error);
+        return;
     }
+    if existing == content {
+        return;
+    }
+
+    #[cfg(test)]
+    run_preserve_mtime_before_rewrite_hook_for_tests();
+
+    if let Err(error) = file.set_len(0) {
+        warn_preserve_mtime_failure(path, context, "truncate", &error);
+        return;
+    }
+    if let Err(error) = file.rewind().and_then(|()| file.write_all(content)) {
+        warn_preserve_mtime_failure(path, context, "write", &error);
+        return;
+    }
+    let times = std::fs::FileTimes::new().set_modified(prior_mtime);
+    if let Err(error) = file.set_times(times) {
+        warn_preserve_mtime_failure(path, context, "set_times", &error);
+    }
+}
+
+fn warn_preserve_mtime_failure(path: &str, context: &str, operation: &str, error: &std::io::Error) {
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::warn!(
+        "  [{ts}] ⚠ preserve_mtime_after_write: {} failed for {} (context={}, error={})",
+        operation,
+        path,
+        context,
+        error
+    );
 }
 
 /// Decide what watermark a stale-output regression (current EOF lower than
@@ -548,6 +713,124 @@ pub(super) async fn sweep_orphan_session_files() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::writer::MakeWriter;
+
+    struct TestHookGuard;
+
+    impl Drop for TestHookGuard {
+        fn drop(&mut self) {
+            *PRESERVE_MTIME_AFTER_METADATA_HOOK
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = None;
+            *PRESERVE_MTIME_BEFORE_REWRITE_HOOK
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = None;
+            *SPAWN_MARKERS_AFTER_GENERATION_HOOK
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = None;
+            *GENERATION_STAMP_BEFORE_CREATE_HOOK
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = None;
+        }
+    }
+
+    fn set_preserve_after_metadata_hook(hook: PreserveMtimeAfterMetadataHook) -> TestHookGuard {
+        *PRESERVE_MTIME_AFTER_METADATA_HOOK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(hook);
+        TestHookGuard
+    }
+
+    fn set_preserve_before_rewrite_hook(hook: PreserveMtimeAfterMetadataHook) -> TestHookGuard {
+        *PRESERVE_MTIME_BEFORE_REWRITE_HOOK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(hook);
+        TestHookGuard
+    }
+
+    fn set_spawn_after_generation_hook(hook: SpawnMarkersAfterGenerationHook) -> TestHookGuard {
+        *SPAWN_MARKERS_AFTER_GENERATION_HOOK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(hook);
+        TestHookGuard
+    }
+
+    fn set_generation_before_create_hook(hook: GenerationStampBeforeCreateHook) -> TestHookGuard {
+        *GENERATION_STAMP_BEFORE_CREATE_HOOK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(hook);
+        TestHookGuard
+    }
+
+    fn isolated_runtime_root() -> (tempfile::TempDir, crate::config::TestEnvVarGuard) {
+        let root = tempfile::tempdir().expect("isolated runtime root");
+        let env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+        (root, env)
+    }
+
+    fn unique_session(label: &str) -> String {
+        format!("AgentDesk-5264-{label}-{}", uuid::Uuid::new_v4().simple())
+    }
+
+    fn generation_path(session: &str) -> String {
+        crate::services::tmux_common::session_temp_path(session, "generation")
+    }
+
+    fn nonce_path(session: &str) -> String {
+        crate::services::tmux_common::session_temp_path(session, SPAWN_NONCE_SUFFIX)
+    }
+
+    #[derive(Clone)]
+    struct CapturingWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl io::Write for CapturingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.buffer
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture_warns<F>(emit: F) -> String
+    where
+        F: FnOnce(),
+    {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(CapturingWriter {
+                buffer: buffer.clone(),
+            })
+            .finish();
+        tracing::subscriber::with_default(subscriber, emit);
+        String::from_utf8(
+            buffer
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .clone(),
+        )
+        .expect("captured warnings are utf-8")
+    }
 
     // #3358 round 2 — Finding 1 guard at the pure-decision level.
     #[test]
@@ -575,5 +858,255 @@ mod tests {
         );
         // No committed delivery yet (offset 0) → None even if generations match.
         assert_eq!(committed_frontier_for_same_generation(0, 42, 42), None);
+    }
+
+    #[test]
+    fn spawn_markers_stamp_generation_before_nonce() {
+        let (_root, _env) = isolated_runtime_root();
+        let session = unique_session("stamp-order");
+
+        stamp_spawn_markers(&session).expect("stamp both spawn markers");
+
+        assert_ne!(
+            read_generation_file_mtime_ns(&session),
+            0,
+            "combined marker gate must create generation identity"
+        );
+        let generation =
+            std::fs::read_to_string(generation_path(&session)).expect("generation marker content");
+        assert_eq!(
+            generation,
+            crate::services::discord::runtime_store::process_generation().to_string()
+        );
+        let generation_mtime = std::fs::metadata(generation_path(&session))
+            .and_then(|metadata| metadata.modified())
+            .expect("generation marker mtime");
+        let nonce_mtime = std::fs::metadata(nonce_path(&session))
+            .and_then(|metadata| metadata.modified())
+            .expect("nonce marker mtime");
+        assert!(
+            generation_mtime <= nonce_mtime,
+            "generation must be written before the nonce"
+        );
+    }
+
+    #[test]
+    fn every_spawn_site_uses_the_combined_marker_gate() {
+        let claude = include_str!("../claude.rs");
+        let codex = include_str!("../codex.rs");
+        let qwen = include_str!("../qwen.rs");
+        let combined = "crate::services::discord::stamp_spawn_markers(tmux_session_name)";
+        let nonce_only = "crate::services::discord::write_spawn_nonce(tmux_session_name)";
+        let inline_generation = "session_temp_path(tmux_session_name, \"generation\")";
+
+        assert_eq!(claude.matches(combined).count(), 2);
+        assert_eq!(codex.matches(combined).count(), 2);
+        assert_eq!(qwen.matches(combined).count(), 1);
+        for source in [claude, codex, qwen] {
+            assert!(!source.contains(nonce_only));
+            assert!(!source.contains(inline_generation));
+        }
+    }
+
+    #[test]
+    fn adoption_never_stamps_a_fresh_incarnation_with_an_old_mtime() {
+        let (_root, _env) = isolated_runtime_root();
+        let session = unique_session("adoption-race");
+        let path = generation_path(&session);
+        std::fs::write(&path, b"old").expect("old marker");
+        let old_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open old marker")
+            .set_times(std::fs::FileTimes::new().set_modified(old_time))
+            .expect("set old marker time");
+
+        let fresh_mtime = Arc::new(Mutex::new(None));
+        let fresh_mtime_from_hook = fresh_mtime.clone();
+        let session_from_hook = session.clone();
+        let path_from_hook = path.clone();
+        let _hook = set_preserve_after_metadata_hook(Arc::new(move || {
+            stamp_session_generation_marker(&session_from_hook).expect("fresh spawn stamp");
+            *fresh_mtime_from_hook
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = Some(
+                std::fs::metadata(&path_from_hook)
+                    .and_then(|metadata| metadata.modified())
+                    .expect("fresh marker mtime"),
+            );
+        }));
+        let current = crate::services::discord::runtime_store::process_generation().to_string();
+
+        preserve_mtime_after_write(&path, current.as_bytes(), "adoption-race-test");
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), current);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            fresh_mtime
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .expect("hook captured fresh mtime"),
+            "adoption must not copy the old inode mtime onto the fresh marker"
+        );
+    }
+
+    #[test]
+    fn adoption_recovers_an_absent_marker_with_nonzero_identity() {
+        let (_root, _env) = isolated_runtime_root();
+        let session = unique_session("adoption-absent");
+        let path = generation_path(&session);
+        let current = crate::services::discord::runtime_store::process_generation().to_string();
+        assert!(!std::path::Path::new(&path).exists());
+
+        preserve_mtime_after_write(&path, current.as_bytes(), "adoption-absent-test");
+
+        assert!(
+            std::path::Path::new(&path).exists(),
+            "restart adoption must recreate an absent marker"
+        );
+        assert_ne!(
+            read_generation_file_mtime_ns(&session),
+            0,
+            "restart adoption must recover a usable generation identity"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), current);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_stamp_replaces_the_inode() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (_root, _env) = isolated_runtime_root();
+        let session = unique_session("inode-replace");
+        let path = generation_path(&session);
+        std::fs::write(&path, b"old").expect("old marker");
+        let old_inode = std::fs::metadata(&path).unwrap().ino();
+
+        stamp_session_generation_marker(&session).expect("spawn generation stamp");
+
+        let new_inode = std::fs::metadata(&path).unwrap().ino();
+        assert_ne!(
+            new_inode, old_inode,
+            "successful stamp must install a new inode"
+        );
+    }
+
+    #[test]
+    fn adoption_current_generation_marker_is_a_noop() {
+        let (_root, _env) = isolated_runtime_root();
+        let session = unique_session("adoption-current-noop");
+        let path = generation_path(&session);
+        let current = crate::services::discord::runtime_store::process_generation().to_string();
+        std::fs::write(&path, current.as_bytes()).expect("current marker");
+        let rewrite_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rewrite_count_from_hook = rewrite_count.clone();
+        let _hook = set_preserve_before_rewrite_hook(Arc::new(move || {
+            rewrite_count_from_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }));
+
+        preserve_mtime_after_write(&path, current.as_bytes(), "adoption-current-test");
+
+        assert_eq!(
+            rewrite_count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "current-generation content must return before truncate/write"
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), current);
+    }
+
+    #[test]
+    fn spawn_markers_log_fixture_legacy_paths_unchanged() {
+        let claude = include_str!("../claude.rs");
+        let codex = include_str!("../codex.rs");
+        let qwen = include_str!("../qwen.rs");
+        let legacy = "failed to write spawn nonce for {tmux_session_name}: {e}";
+
+        assert!(claude.contains(legacy));
+        assert!(codex.contains(legacy));
+        assert!(qwen.contains(legacy));
+        assert!(
+            claude
+                .contains("failed to write spawn nonce for {tmux_session_name} (claude-tui): {e}")
+        );
+        assert!(
+            codex.contains("failed to write spawn nonce for {tmux_session_name} (codex-tui): {e}")
+        );
+    }
+
+    #[test]
+    fn stamp_spawn_markers_returns_nonce_result_verbatim() {
+        let (_root, _env) = isolated_runtime_root();
+        let success_session = unique_session("nonce-verbatim-success");
+        let nonce = stamp_spawn_markers(&success_session).expect("combined marker success");
+        assert_eq!(
+            std::fs::read_to_string(nonce_path(&success_session)).unwrap(),
+            nonce
+        );
+
+        let direct_session = unique_session("nonce-verbatim-direct-error");
+        let direct_tmp = format!("{}.tmp.{}", nonce_path(&direct_session), std::process::id());
+        std::fs::create_dir(&direct_tmp).expect("block direct nonce temp path");
+        let direct_kind = write_spawn_nonce(&direct_session).unwrap_err().kind();
+
+        let combined_session = unique_session("nonce-verbatim-combined-error");
+        let combined_tmp = format!(
+            "{}.tmp.{}",
+            nonce_path(&combined_session),
+            std::process::id()
+        );
+        std::fs::create_dir(&combined_tmp).expect("block combined nonce temp path");
+        let combined_kind = stamp_spawn_markers(&combined_session).unwrap_err().kind();
+        assert_eq!(combined_kind, direct_kind);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generation_write_failure_emits_exactly_one_warn_and_still_writes_nonce() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_root, _env) = isolated_runtime_root();
+        let session = unique_session("generation-permission-failure");
+        let sessions_dir =
+            std::path::PathBuf::from(crate::services::tmux_common::agentdesk_temp_dir());
+        let sessions_dir_before_create = sessions_dir.clone();
+        let _permission_hook = set_generation_before_create_hook(Arc::new(move || {
+            std::fs::set_permissions(
+                &sessions_dir_before_create,
+                std::fs::Permissions::from_mode(0o500),
+            )
+            .expect("block marker creation");
+        }));
+        let sessions_dir_from_hook = sessions_dir.clone();
+        let _hook = set_spawn_after_generation_hook(Arc::new(move || {
+            std::fs::set_permissions(
+                &sessions_dir_from_hook,
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .expect("restore nonce write permission");
+        }));
+
+        let mut result = None;
+        let logs = capture_warns(|| {
+            result = Some(stamp_spawn_markers(&session));
+        });
+        std::fs::set_permissions(&sessions_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("restore sessions permissions");
+
+        let nonce = result
+            .expect("combined call ran")
+            .expect("nonce still succeeds");
+        assert_eq!(
+            std::fs::read_to_string(nonce_path(&session)).unwrap(),
+            nonce
+        );
+        assert!(!std::path::Path::new(&generation_path(&session)).exists());
+        assert_eq!(logs.lines().count(), 1, "captured WARN events: {logs}");
+        assert_eq!(
+            logs.matches("failed to stamp generation marker").count(),
+            1,
+            "generation failure must emit exactly one WARN: {logs}"
+        );
     }
 }

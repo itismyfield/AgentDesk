@@ -307,6 +307,24 @@ time for diagnostics; neither is a stored approval value.
   logging), `src/services/discord/inflight/clear_store/mod.rs` and
   `src/services/discord/inflight/clear_store/abandon.rs` (clear/abandon
   store-side CAS paths).
+- `.generation` writer contract (#5264):
+
+  | Writer family | Spawn/adoption sites | Contract |
+  |---|---|---|
+  | Claude spawn | legacy wrapper + direct TUI | `stamp_spawn_markers` installs generation before nonce |
+  | Codex spawn | legacy wrapper + direct TUI | same combined helper |
+  | Qwen spawn | legacy wrapper | same combined helper |
+  | restart adoption | `watchers::lifecycle::restore_tmux_watchers` | `preserve_mtime_after_write` pins metadata, content replacement, and `set_times` to one fd |
+
+  A successful spawn stamp writes a `create_new` sibling and atomically renames
+  that new inode over `.generation`; adoption therefore cannot project an old
+  inode's mtime onto the successful spawn marker. Stamp failure leaves the
+  destination untouched, logs one warning, and does not fail the spawn, so
+  marker presence is not guaranteed on an I/O failure. Adoption retains the
+  missing-marker restart-healing path with `create_new`; `AlreadyExists` retries
+  the existing-fd path, and already-current content is not rewritten. The
+  source-level test covers the five sites in the three provider files but does
+  not automatically discover a future provider file.
 - legacy_modules: none — relay routes are being consolidated, not replaced.
 - do_not_edit_without_migration_plan (giant-file):
   - `src/services/discord/watchers/lifecycle.rs` retired as a frozen giant in
@@ -314,7 +332,7 @@ time for diagnostics; neither is a stored approval value.
     output policy, recovery marker, and test clusters moved verbatim into
     sub-1000-LoC `watchers/lifecycle/*.rs` modules. The root remains the
     canonical facade and preserves all prior call paths through re-exports.
-  - `src/services/discord/tmux.rs` (frozen giant surface; current generated inventory: 1677 production LoC; #4895 removes untyped auth/overload terminal variants and authority-bearing outcome fields; parser diagnostics now use a fixed redacted category while generic error results remain `HardResult`; test-only #4277 re-exports
+  - `src/services/discord/tmux.rs` (frozen giant surface; current generated inventory: 1690 production LoC; #4895 removes untyped auth/overload terminal variants and authority-bearing outcome fields; parser diagnostics now use a fixed redacted category while generic error results remain `HardResult`; test-only #4277 re-exports
     the watcher delivery-lease key helper so session-sink production-entry tests
     prove bidirectional contention on the same idle JSONL range; -9 from the #4804
     Windows-compile hotfix moving `footer_background_marker_session_key` into
