@@ -3,26 +3,22 @@ use crate::services::agent_protocol::StreamMessage;
 use crate::services::discord::inflight::store::persist_under_lock_with_snapshot;
 use crate::services::discord::outbound::delivery_record::ExactJsonlSourceIdentity;
 use crate::services::discord::turn_bridge::{tmux_generation_file_mtime_ns, tmux_runtime_paths};
-
 #[derive(Clone, Debug)]
 pub(in crate::services::discord) struct CodexRange {
-    identity: InflightTurnIdentity,
-    result: String,
-    rollout_path: String,
-    session_id: String,
-    source: ExactJsonlSourceIdentity,
+    pub(in crate::services::discord) identity: InflightTurnIdentity,
+    pub(in crate::services::discord) result: String,
+    pub(in crate::services::discord) rollout_path: String,
+    pub(in crate::services::discord) session_id: String,
+    pub(in crate::services::discord) source: ExactJsonlSourceIdentity,
 }
-
 fn nonempty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
-
 fn canonical_regular_file(path: &str) -> Option<(PathBuf, u64)> {
     let path = std::fs::canonicalize(path).ok()?;
     let metadata = std::fs::metadata(&path).ok()?;
     metadata.is_file().then_some((path, metadata.len()))
 }
-
 fn marker_matches(tmux: &str, path: &Path, session: &str, start: u64) -> bool {
     crate::services::codex_tui::session::read_codex_tui_rollout_marker(tmux).is_some_and(|marker| {
         nonempty(marker.session_id.as_deref()) == Some(session)
@@ -30,7 +26,6 @@ fn marker_matches(tmux: &str, path: &Path, session: &str, start: u64) -> bool {
             && std::fs::canonicalize(marker.rollout_path).ok().as_deref() == Some(path)
     })
 }
-
 fn binding_matches(tmux: &str, path: &Path, session: &str, offsets: [u64; 2]) -> bool {
     crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux).is_some_and(
         |binding| {
@@ -41,7 +36,6 @@ fn binding_matches(tmux: &str, path: &Path, session: &str, offsets: [u64; 2]) ->
         },
     )
 }
-
 impl InflightTurnState {
     #[allow(dead_code)]
     pub(in crate::services::discord) fn admit_codex_tui_terminal_frame(
@@ -82,7 +76,6 @@ impl InflightTurnState {
         (done, admitted.ok(), true)
     }
 }
-
 fn admit_codex_terminal_range_in_root(
     root: &Path,
     states: (&mut InflightTurnState, &mut InflightTurnState),
@@ -182,13 +175,19 @@ fn admit_codex_terminal_range_in_root(
         },
     })
 }
-
 impl CodexRange {
+    pub(in crate::services::discord) fn live_source_path(&self) -> Option<PathBuf> {
+        let source = &self.source;
+        let (path, len) = canonical_regular_file(&self.rollout_path)?;
+        let (start, end) = source.range;
+        let tmux = &source.tmux_session_name;
+        (len >= end && marker_matches(tmux, &path, &self.session_id, start)).then_some(path)
+    }
     #[allow(dead_code)]
     pub(in crate::services::discord) fn revalidated_source(
         &self,
         local: &InflightTurnState,
-    ) -> Result<Option<ExactJsonlSourceIdentity>, ()> {
+    ) -> Result<Option<CodexRange>, ()> {
         let source = &self.source;
         let (start, end) = source.range;
         if source.delivery_channel_id != local.channel_id
@@ -226,28 +225,19 @@ impl CodexRange {
         {
             return Err(());
         }
-        let Some((canonical, file_len)) = canonical_regular_file(&self.rollout_path) else {
+        let Some(canonical) = self.live_source_path() else {
             return Ok(None);
         };
-        Ok(
-            (fresh.output_path.as_deref() == Some(canonical.to_string_lossy().as_ref())
-                && fresh.last_offset == end
-                && fresh.full_response == self.result
-                && file_len >= end
-                && marker_matches(
-                    &source.tmux_session_name,
-                    &canonical,
-                    &self.session_id,
-                    start,
-                )
-                && binding_matches(
-                    &source.tmux_session_name,
-                    &canonical,
-                    &self.session_id,
-                    [end; 2],
-                ))
-            .then(|| source.clone()),
-        )
+        let exact = fresh.output_path.as_deref() == Some(canonical.to_string_lossy().as_ref())
+            && fresh.last_offset == end
+            && fresh.full_response == self.result
+            && binding_matches(
+                &source.tmux_session_name,
+                &canonical,
+                &self.session_id,
+                [end; 2],
+            );
+        Ok(exact.then(|| self.clone()))
     }
 }
 
@@ -533,16 +523,15 @@ mod tests {
             binding.last_offset = end;
             dedupe::register_tmux_runtime_binding(&tmux, binding);
             let source = latch.revalidated_source(&local).unwrap().unwrap();
-            assert_eq!(source.range, (start, end));
-            assert_eq!(source.turn_nonce, "turn-nonce");
-            assert_eq!(source.offset_authority_channel_id, local.channel_id);
-            assert_eq!(source.delivery_channel_id, local.channel_id);
+            assert_eq!(source.source.range, (start, end));
+            assert_eq!(source.source.turn_nonce, "turn-nonce");
+            assert_eq!(source.source.offset_authority_channel_id, local.channel_id);
+            assert_eq!(source.source.delivery_channel_id, local.channel_id);
             persisted.set_relay_owner_kind(RelayOwnerKind::Watcher);
             save_inflight_state_in_root(&root, &persisted).unwrap();
-            assert_eq!(latch.revalidated_source(&local), Err(()));
+            assert!(matches!(latch.revalidated_source(&local), Err(())));
         }
     }
-
     #[test]
     fn runtime_first_stamp_supports_process_claude_tui_and_codex_tui() {
         for (index, provider, runtime_kind, session_name) in [

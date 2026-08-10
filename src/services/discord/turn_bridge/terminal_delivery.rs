@@ -1,6 +1,8 @@
 use super::super::formatting::ReplaceLongMessageOutcome;
 #[cfg(unix)]
-use super::super::outbound::delivery_record::{self as dr, ExactJsonlSourceIdentity};
+use super::super::inflight::CodexRange;
+#[cfg(unix)]
+use super::super::outbound::delivery_record as dr;
 #[cfg(unix)]
 use super::super::tmux::tmux_watcher::terminal_long_chunks as watcher_mutation;
 use super::*;
@@ -492,17 +494,15 @@ pub(super) struct BridgeDeliveryLease {
     heartbeat: Option<crate::services::discord::DeliveryLeaseHeartbeat>,
     release_on_drop: bool,
 }
-
 #[cfg(unix)]
 pub(super) struct PinnedBridgeDeliveryLease {
     lease: BridgeDeliveryLease,
-    source: ExactJsonlSourceIdentity,
+    source: CodexRange,
     provider: ProviderKind,
     reset_incarnation: u64,
     committed_current: Option<bool>,
     message_id: Option<u64>,
 }
-
 #[cfg(unix)]
 pub(super) enum PinnedBridgeCommit {
     Current,
@@ -714,12 +714,10 @@ impl BridgeDeliveryLease {
         self.cell
             .commit(self.holder, self.key.clone(), self.start, self.end, outcome)
     }
-
     fn release_lease(&self) -> bool {
         self.cell
             .release(self.holder, self.key.clone(), self.start, self.end)
     }
-
     /// Stop the heartbeat, commit the 3-way `outcome`, and — ONLY on a successful
     /// `Delivered` commit — advance `confirmed_end_offset` to the leased `end` via
     /// `advance_tmux_relay_confirmed_end`. Then release. This is the B6 gate: the
@@ -766,22 +764,23 @@ impl BridgeDeliveryLease {
         shared: &SharedData,
         provider: &ProviderKind,
         delivery_channel: ChannelId,
-        source: ExactJsonlSourceIdentity,
+        source: CodexRange,
     ) -> Option<PinnedBridgeDeliveryLease> {
+        let exact = &source.source;
         let owner =
-            crate::services::discord::inflight::opt_channel_id(source.offset_authority_channel_id)?;
-        let generation = || dr::current_generation_mtime_ns(&source.tmux_session_name);
-        if !source.is_authoritative()
-            || source.provider != provider.as_str()
-            || source.delivery_channel_id != delivery_channel.get()
+            crate::services::discord::inflight::opt_channel_id(exact.offset_authority_channel_id)?;
+        let generation = || dr::current_generation_mtime_ns(&exact.tmux_session_name);
+        if !exact.is_authoritative()
+            || exact.provider != provider.as_str()
+            || exact.delivery_channel_id != delivery_channel.get()
             || self.cell.channel_id() != owner
-            || source.range != (self.start, self.end)
-            || generation() != source.generation_mtime_ns
+            || exact.range != (self.start, self.end)
+            || generation() != exact.generation_mtime_ns
         {
             return None;
         }
         let reset_incarnation = shared.relay_frontier_token(owner).reset_incarnation;
-        (generation() == source.generation_mtime_ns).then_some(PinnedBridgeDeliveryLease {
+        (generation() == exact.generation_mtime_ns).then_some(PinnedBridgeDeliveryLease {
             lease: self,
             source,
             provider: provider.clone(),
@@ -791,7 +790,6 @@ impl BridgeDeliveryLease {
         })
     }
 }
-
 #[cfg(unix)]
 impl PinnedBridgeDeliveryLease {
     #[allow(dead_code)]
@@ -808,9 +806,10 @@ impl PinnedBridgeDeliveryLease {
             return PinnedBridgeCommit::Pending(self);
         }
         self.message_id = Some(message_id);
-        let owner = ChannelId::new(self.source.offset_authority_channel_id);
-        let source_generation = self.source.generation_mtime_ns;
-        let tmux = self.source.tmux_session_name.clone();
+        let exact = self.source.source.clone();
+        let owner = ChannelId::new(exact.offset_authority_channel_id);
+        let source_generation = exact.generation_mtime_ns;
+        let tmux = exact.tmux_session_name.clone();
         let generation_current = || dr::current_generation_mtime_ns(&tmux) == source_generation;
         let identity = watcher_mutation::watcher_delivery_identity(
             source_generation,
@@ -820,7 +819,7 @@ impl PinnedBridgeDeliveryLease {
         let guard =
             watcher_mutation::begin_watcher_delivery_mutation(shared, owner, &tmux, identity);
         if self.committed_current.is_none() {
-            let current = guard.is_some();
+            let current = guard.is_some() && self.source.live_source_path().is_some();
             let outcome = if current {
                 crate::services::discord::LeaseOutcome::Delivered
             } else {
@@ -838,9 +837,9 @@ impl PinnedBridgeDeliveryLease {
                             shared,
                             provider: &self.provider,
                             channel_id: owner,
-                            tmux_session_name: &self.source.tmux_session_name,
+                            tmux_session_name: &exact.tmux_session_name,
                         },
-                        self.source.range.1,
+                        exact.range.1,
                         "turn_bridge::pinned_exact_source",
                     )
                 })
@@ -850,15 +849,15 @@ impl PinnedBridgeDeliveryLease {
         }
         let record = dr::record_historical_pinned_delivery;
         let disposition = if self.committed_current == Some(true) && guard.is_some() {
-            match dr::record_current_pinned_delivery(&self.source, message_id) {
+            match dr::record_current_pinned_delivery(&exact, message_id) {
                 Ok(()) => Some(PinnedBridgeCommit::Current),
-                Err(_) if !generation_current() => record(&self.source, message_id)
+                Err(_) if !generation_current() => record(&exact, message_id)
                     .ok()
                     .map(|_| PinnedBridgeCommit::Historical),
                 Err(_) => None,
             }
         } else {
-            record(&self.source, message_id)
+            record(&exact, message_id)
                 .ok()
                 .map(|_| PinnedBridgeCommit::Historical)
         };
@@ -873,7 +872,6 @@ impl PinnedBridgeDeliveryLease {
         disposition
     }
 }
-
 impl Drop for BridgeDeliveryLease {
     fn drop(&mut self) {
         // Safety net for an early return / panic between `acquire` and
@@ -2096,7 +2094,7 @@ mod tests {
     mod a0_i2_advance_characterization_tests {
         use super::super::{BridgeDeliveryLease, BridgeLeaseAcquire};
         #[cfg(unix)]
-        use super::super::{PinnedBridgeCommit, dr};
+        use super::super::{CodexRange, PinnedBridgeCommit, dr};
         use crate::services::discord::turn_finalizer::TurnKey;
         use crate::services::discord::{
             DeliveryLeaseKey, LeaseOutcome, make_shared_data_for_tests,
@@ -2165,10 +2163,13 @@ mod tests {
                 0,
                 "NotDelivered must NOT advance the offset (I2)"
             );
-
             #[cfg(unix)]
             {
-                use crate::services::discord::outbound::delivery_record::ExactJsonlSourceIdentity;
+                use crate::services::codex_tui::session::write_codex_tui_rollout_marker_with_start_offset as write_marker;
+                use crate::services::discord::{
+                    inflight::InflightTurnIdentity,
+                    outbound::delivery_record::ExactJsonlSourceIdentity,
+                };
                 use std::sync::atomic::Ordering;
                 #[rustfmt::skip]
                 let _lock = crate::config::shared_test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -2185,6 +2186,9 @@ mod tests {
                     dr::current_generation_mtime_ns(tmux)
                 };
                 let g1 = stamp(1_700_526_400);
+                let rollout = root.path().join("rollout-a.jsonl");
+                std::fs::write(&rollout, [b'x'; 64]).unwrap();
+                write_marker(tmux, &rollout, Some("raw-session"), Some(0)).unwrap();
                 let source = ExactJsonlSourceIdentity {
                     provider: provider.as_str().into(),
                     tmux_session_name: tmux.into(),
@@ -2193,6 +2197,18 @@ mod tests {
                     generation_mtime_ns: g1,
                     offset_authority_channel_id: CH,
                     delivery_channel_id: CH,
+                };
+                let range = |source| CodexRange {
+                    identity: InflightTurnIdentity {
+                        user_msg_id: 1,
+                        started_at: "now".into(),
+                        tmux_session_name: Some(tmux.into()),
+                        turn_start_offset: Some(0),
+                    },
+                    result: "answer".into(),
+                    rollout_path: rollout.display().to_string(),
+                    session_id: "raw-session".into(),
+                    source,
                 };
                 let invalid_shared = make_shared_data_for_tests();
                 let mutations: [fn(&mut ExactJsonlSourceIdentity); 6] = [
@@ -2207,20 +2223,29 @@ mod tests {
                     let mut invalid = source.clone();
                     mutate(&mut invalid);
                     #[rustfmt::skip]
-                    assert!(held_lease(&invalid_shared, ch, 4).pin_exact_source(&invalid_shared, &provider, ch, invalid).is_none());
+                    assert!(held_lease(&invalid_shared, ch, 4).pin_exact_source(&invalid_shared, &provider, ch, range(invalid)).is_none());
                 }
                 let current_shared = make_shared_data_for_tests();
                 #[rustfmt::skip]
-                let current = held_lease(&current_shared, ch, 5).pin_exact_source(&current_shared, &provider, ch, source.clone()).unwrap().commit_after_send(&current_shared, 5_264_001);
+                let current = held_lease(&current_shared, ch, 5).pin_exact_source(&current_shared, &provider, ch, range(source.clone())).unwrap().commit_after_send(&current_shared, 5_264_001);
                 assert!(matches!(current, PinnedBridgeCommit::Current));
                 assert_eq!(current_shared.committed_relay_offset(ch), 64);
                 assert!(dr::historical_pinned_delivery_exists(&source, 5_264_001));
-
+                let swapped_shared = make_shared_data_for_tests();
+                #[rustfmt::skip]
+                let swapped = held_lease(&swapped_shared, ch, 6).pin_exact_source(&swapped_shared, &provider, ch, range(source.clone())).unwrap();
+                let rollout_b = root.path().join("rollout-b.jsonl");
+                std::fs::write(&rollout_b, [b'y'; 64]).unwrap();
+                write_marker(tmux, &rollout_b, Some("other-session"), Some(0)).unwrap();
+                #[rustfmt::skip]
+                assert!(matches!(swapped.commit_after_send(&swapped_shared, 5_264_002), PinnedBridgeCommit::Historical));
+                assert_eq!(swapped_shared.committed_relay_offset(ch), 0);
+                assert!(dr::historical_pinned_delivery_exists(&source, 5_264_002));
                 let stale_shared = make_shared_data_for_tests();
                 let coord = stale_shared.tmux_relay_coord(ch);
                 coord.confirmed_end_offset.store(100, Ordering::Release);
                 #[rustfmt::skip]
-                let stale = held_lease(&stale_shared, ch, 6).pin_exact_source(&stale_shared, &provider, ch, source.clone()).unwrap();
+                let stale = held_lease(&stale_shared, ch, 7).pin_exact_source(&stale_shared, &provider, ch, range(source.clone())).unwrap();
                 assert!(coord.reset_confirmed_frontier(100, 0));
                 let g2 = stamp(1_800_526_400);
                 let current_source = ExactJsonlSourceIdentity {
@@ -2229,13 +2254,13 @@ mod tests {
                     turn_nonce: "new-turn".into(),
                     ..source.clone()
                 };
-                dr::record_current_pinned_delivery(&current_source, 5_264_002).unwrap();
+                dr::record_current_pinned_delivery(&current_source, 5_264_003).unwrap();
                 #[rustfmt::skip]
-                assert!(matches!(stale.commit_after_send(&stale_shared, 5_264_003), PinnedBridgeCommit::Historical));
+                assert!(matches!(stale.commit_after_send(&stale_shared, 5_264_004), PinnedBridgeCommit::Historical));
                 assert_eq!(stale_shared.committed_relay_offset(ch), 0);
                 let record = dr::read_record(&provider, CH).unwrap();
                 assert_eq!(record.delivered_frontier.unwrap().generation_mtime_ns, g2);
-                assert!(dr::historical_pinned_delivery_exists(&source, 5_264_003));
+                assert!(dr::historical_pinned_delivery_exists(&source, 5_264_004));
                 #[rustfmt::skip]
                 assert!(matches!(stale_shared.delivery_lease(ch).read(), crate::services::discord::LeaseSnapshot::Unleased));
             }

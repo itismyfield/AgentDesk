@@ -450,19 +450,16 @@ fn merge_confirmed_frontier(
 }
 
 fn append_confirmed_receipt(record: &mut DeliveryRecord, receipt: ConfirmedDeliveryReceipt) {
-    record
-        .confirmed_deliveries
-        .retain(|existing| existing != &receipt);
-    record.confirmed_deliveries.push(receipt);
-    let excess = record
-        .confirmed_deliveries
+    let receipts = &mut record.confirmed_deliveries;
+    receipts.retain(|existing| existing != &receipt);
+    receipts.push(receipt);
+    let excess = receipts
         .len()
         .saturating_sub(CONFIRMED_DELIVERY_RECEIPT_LIMIT);
     if excess > 0 {
-        record.confirmed_deliveries.drain(..excess);
+        receipts.drain(..excess);
     }
 }
-
 #[derive(Clone, Copy)]
 enum EqualRangeAnchorPolicy {
     PreserveExisting,
@@ -832,7 +829,6 @@ fn pinned_source_receipt(
         },
     ))
 }
-
 #[allow(dead_code)]
 pub(in crate::services::discord) fn record_current_pinned_delivery(
     source: &ExactJsonlSourceIdentity,
@@ -852,7 +848,6 @@ pub(in crate::services::discord) fn record_current_pinned_delivery(
         receipt,
     )
 }
-
 /// Append only the exact historical receipt; never alter the current frontier.
 #[allow(dead_code)]
 pub(in crate::services::discord) fn record_historical_pinned_delivery(
@@ -869,7 +864,6 @@ pub(in crate::services::discord) fn record_historical_pinned_delivery(
     append_confirmed_receipt(&mut record, receipt);
     write_record_at(&path, &record)
 }
-
 #[allow(dead_code)]
 pub(in crate::services::discord) fn historical_pinned_delivery_exists(
     source: &ExactJsonlSourceIdentity,
@@ -881,7 +875,6 @@ pub(in crate::services::discord) fn historical_pinned_delivery_exists(
     read_record(&provider, source.offset_authority_channel_id)
         .is_some_and(|record| record.confirmed_deliveries.contains(&receipt))
 }
-
 fn commit_ordered_jsonl_range_at(
     path: &Path,
     tmux_session_name: &str,
@@ -2681,7 +2674,6 @@ mod tests {
                 .confirmed_deliveries,
             vec![exact]
         );
-
         #[rustfmt::skip]
         let (_, historical) = exact_delivery_fixture(&provider, tmux, "old-turn", (3, 6),
             g1, (owner, delivery), 5_264_006);
@@ -2720,7 +2712,6 @@ mod tests {
             historical.message_id
         ));
     }
-
     #[test]
     fn ordered_jsonl_commit_is_generation_scoped_and_monotonic() {
         let _root = IsolatedRoot::new();
