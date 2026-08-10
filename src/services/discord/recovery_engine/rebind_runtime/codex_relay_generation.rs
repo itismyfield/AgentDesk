@@ -92,10 +92,6 @@ pub(super) fn write_message(
         .map_err(|error| format!("stat {} after write: {error}", relay_path.display()))
 }
 
-/// Synchronous raw-rollout -> canonical JSONL -> bridge adapter shared by
-/// managed and external Codex-TUI turns.  The bridge never sees a message until
-/// its normalized record is durable, and raw rollout offsets never cross this
-/// boundary.
 impl crate::services::discord::CodexCanonicalRelay {
     pub(crate) fn sender(
         &self,

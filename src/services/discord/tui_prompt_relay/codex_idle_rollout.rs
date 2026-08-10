@@ -438,6 +438,13 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
 }
 
 #[cfg(unix)]
+pub(super) fn closed_codex_idle_bridge_receiver() -> mpsc::Receiver<StreamMessage> {
+    let (sender, receiver) = mpsc::channel();
+    drop(sender);
+    receiver
+}
+
+#[cfg(unix)]
 async fn run_codex_idle_response_tail(
     shared: Arc<SharedData>,
     tmux_session_name: String,
@@ -610,7 +617,7 @@ async fn run_codex_idle_response_tail(
         .await;
         return;
     }
-    let (_closed_tx, reader_rx) = mpsc::channel();
+    let reader_rx = closed_codex_idle_bridge_receiver();
     let delivery_result = stream_tui_idle_response_through_bridge(
         &shared,
         ProviderKind::Codex,

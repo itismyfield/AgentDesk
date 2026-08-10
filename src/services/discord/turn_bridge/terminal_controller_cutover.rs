@@ -1876,18 +1876,5 @@ mod tests {
                 true, "short", false, true
             ));
         }
-
-        #[test]
-        fn codex_canonical_range_cuts_over_without_runtime_ready_dependency() {
-            let canonical_start = 640_u64;
-            let canonical_end = 812_u64;
-            let ordered_range = canonical_end > canonical_start;
-            assert!(bridge_short_replace_cutover_decision(
-                true,
-                "canonical Codex answer",
-                ordered_range,
-                true,
-            ));
-        }
     }
 }

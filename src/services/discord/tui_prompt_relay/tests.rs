@@ -2457,6 +2457,22 @@ fn bridge_adapter_tail_guard_clears_only_current_external_lease() {
         tmux,
         original.clone(),
     );
+    let (bridge_tx, bridge_rx) = std::sync::mpsc::channel();
+    assert_eq!(
+        forward_idle_stream_into_bridge(
+            vec![StreamMessage::Done {
+                result: "done".to_string(),
+                session_id: None,
+            }],
+            super::codex_idle_rollout::closed_codex_idle_bridge_receiver(),
+            bridge_tx,
+        ),
+        0,
+    );
+    assert!(matches!(
+        bridge_rx.recv_timeout(std::time::Duration::from_millis(10)),
+        Ok(StreamMessage::Done { .. })
+    ));
 
     {
         let _guard = TuiDirectExternalInputLeaseGuard::new(

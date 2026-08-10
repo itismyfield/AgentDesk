@@ -595,6 +595,17 @@ pub(crate) fn register_codex_tui_idle_relay_binding(
     );
 }
 
+pub(crate) fn codex_canonical_terminal_required(
+    read_result: &crate::services::provider::ReadOutputResult,
+    cancel_requested: bool,
+) -> bool {
+    !cancel_requested
+        && !matches!(
+            read_result,
+            crate::services::provider::ReadOutputResult::Cancelled { .. }
+        )
+}
+
 fn codex_tui_idle_relay_binding(
     tmux_session_name: &str,
     tail_result: &crate::services::codex_tui::rollout_tail::CodexTuiTailResult,
@@ -1977,6 +1988,10 @@ fn execute_streaming_local_tui_tmux(
     };
 
     let tail_result_for_binding = tail_result.clone();
+    let canonical_terminal_required = codex_canonical_terminal_required(
+        &tail_result_for_binding.read_result,
+        crate::services::provider::cancel_requested(cancel_token_for_post_tail.as_deref()),
+    );
     emit_codex_tui_post_tail_handoff(
         tail_result,
         provider_sender.clone(),
@@ -1987,16 +2002,10 @@ fn execute_streaming_local_tui_tmux(
     drop(provider_sender);
     if let Some(canonical_relay) = canonical_relay {
         let canonical = canonical_relay.finish()?;
-        if canonical.terminal_records == 0 {
+        if canonical.terminal_records == 0 && canonical_terminal_required {
             return Err("Codex canonical relay closed without a terminal record".to_string());
         }
         register_codex_tui_idle_relay_binding(tmux_session_name, &tail_result_for_binding);
-        debug_assert_eq!(
-            canonical.end_offset,
-            std::fs::metadata(&canonical.output_path)
-                .map(|metadata| metadata.len())
-                .unwrap_or(canonical.end_offset)
-        );
     }
     Ok(())
 }

@@ -1856,6 +1856,14 @@ mod tests {
         assert_eq!(rollout_path, &result.output_path);
         assert_eq!(*last_offset, result.end_offset);
         assert_eq!(result.terminal_records, 1);
+        assert!(!crate::services::codex::codex_canonical_terminal_required(
+            &crate::services::provider::ReadOutputResult::Cancelled { offset: 0 },
+            false,
+        ));
+        assert!(!crate::services::codex::codex_canonical_terminal_required(
+            &crate::services::provider::ReadOutputResult::Completed { offset: 0 },
+            true,
+        ));
         assert_eq!(
             std::fs::read_to_string(&result.output_path)
                 .unwrap()
@@ -1889,12 +1897,37 @@ mod tests {
         let first_result = first.finish().unwrap();
         drop(first_receiver);
 
+        let raw_rollout = tmp.path().join("rollout.jsonl");
+        std::fs::write(&raw_rollout, "{}\n").unwrap();
+        let mut ownerless = crate::services::discord::InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            None,
+            0,
+            101,
+            0,
+            "external".to_string(),
+            None,
+            Some(tmux.to_string()),
+            Some(first_result.output_path.clone()),
+            None,
+            0,
+        );
+        ownerless.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
+        ownerless.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
+        ownerless.injected_prompt_message_id = Some(101);
+        crate::services::discord::inflight::save_inflight_state(&ownerless).unwrap();
+        let rehydrated = crate::services::discord::tui_prompt_relay::rehydration::codex_tui_rehydrated_binding_from_rollout_path(
+            tmux, &raw_rollout, None,
+        ).unwrap();
+        assert_eq!(rehydrated.relay_last_offset(), 0);
+
         let (second_downstream, second_receiver) = std::sync::mpsc::channel();
         let second = crate::services::discord::CodexCanonicalRelay::start(
             tmux,
             second_downstream,
             false,
-            Some(0),
+            Some(rehydrated.relay_last_offset()),
         )
         .unwrap();
         let second_sender = second.sender();

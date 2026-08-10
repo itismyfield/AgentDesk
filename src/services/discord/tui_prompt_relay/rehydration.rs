@@ -735,9 +735,20 @@ pub(in crate::services::discord) fn codex_tui_rehydrated_binding_from_rollout_pa
         .unwrap_or(0);
     let relay_output_path =
         crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
-    let relay_last_offset = std::fs::metadata(&relay_output_path)
+    let physical_relay_end = std::fs::metadata(&relay_output_path)
         .map(|metadata| metadata.len())
         .unwrap_or(0);
+    let relay_last_offset = super::super::inflight::load_inflight_states(&ProviderKind::Codex)
+        .into_iter()
+        .find(|state| {
+            super::synthetic_start::codex_ownerless_external_input_inflight_needs_rollout_recovery(
+                state,
+                tmux_session_name,
+            ) && state.output_path.as_deref() == Some(relay_output_path.as_str())
+        })
+        .map(|state| state.turn_start_offset.unwrap_or(state.last_offset))
+        .unwrap_or(physical_relay_end)
+        .min(physical_relay_end);
     Some(crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
         runtime_kind: RuntimeHandoffKind::CodexTui,
         output_path: rollout_path.display().to_string(),

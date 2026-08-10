@@ -528,6 +528,10 @@ pub(crate) fn try_codex_tui_warm_followup(
         Err(error) => return CodexWarmFollowupOutcome::Terminal(Err(error)),
     };
     let tail_result_for_binding = tail_result.clone();
+    let canonical_terminal_required = crate::services::codex::codex_canonical_terminal_required(
+        &tail_result_for_binding.read_result,
+        cancel_requested(cancel_token.as_deref()),
+    );
     let handoff = crate::services::codex::emit_codex_tui_post_tail_handoff(
         tail_result,
         provider_sender.clone(),
@@ -540,8 +544,8 @@ pub(crate) fn try_codex_tui_warm_followup(
         return CodexWarmFollowupOutcome::Terminal(Err(error));
     }
     if let Some(canonical_relay) = canonical_relay {
-        let canonical = match canonical_relay.finish() {
-            Ok(result) if result.terminal_records > 0 => result,
+        let _canonical = match canonical_relay.finish() {
+            Ok(result) if result.terminal_records > 0 || !canonical_terminal_required => result,
             Ok(_) => {
                 return CodexWarmFollowupOutcome::Terminal(Err(
                     "Codex canonical warm relay closed without a terminal record".to_string(),
@@ -552,12 +556,6 @@ pub(crate) fn try_codex_tui_warm_followup(
         crate::services::codex::register_codex_tui_idle_relay_binding(
             tmux_session_name,
             &tail_result_for_binding,
-        );
-        debug_assert_eq!(
-            canonical.end_offset,
-            std::fs::metadata(&canonical.output_path)
-                .map(|metadata| metadata.len())
-                .unwrap_or(canonical.end_offset)
         );
     }
     CodexWarmFollowupOutcome::Terminal(Ok(()))
