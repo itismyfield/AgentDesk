@@ -62,7 +62,10 @@ pub(in crate::services::discord) fn is_done_setting_terminal_frame(
     msg: &crate::services::agent_protocol::StreamMessage,
 ) -> bool {
     use crate::services::agent_protocol::StreamMessage::*;
-    matches!(msg, Done { .. } | Error { .. })
+    matches!(
+        msg,
+        Done { .. } | CodexTuiTerminalDone { .. } | Error { .. }
+    )
 }
 
 /// #2289 cancel-vs-terminal-frame priority decision.

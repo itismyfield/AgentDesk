@@ -1245,7 +1245,10 @@ IMPORTANT: Format your responses using Markdown for better readability:
                             content_preview
                         ));
                     }
-                    StreamMessage::Done { result, session_id } => {
+                    StreamMessage::Done { result, session_id }
+                    | StreamMessage::CodexTuiTerminalDone {
+                        result, session_id, ..
+                    } => {
                         let result_preview: String = result.chars().take(100).collect();
                         debug_log(&format!(
                             "  >>> Done: result_len={}, session_id={:?}, preview={:?}",

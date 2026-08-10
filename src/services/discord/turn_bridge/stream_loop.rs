@@ -16,7 +16,6 @@ use tool_arms::{
     StreamToolArmContext, StreamToolArmMessage, StreamToolArmOutcome, StreamToolArmState,
     handle_stream_tool_message, reconcile_exact_stream_frame_after_tool_outcome,
 };
-
 mod content_arms;
 mod exit_reconcile;
 mod expected_identity;
@@ -774,6 +773,7 @@ pub(super) async fn run_stream_loop(
                                 break;
                             }
                         }
+                        StreamMessage::CodexTuiTerminalDone { .. } => unreachable!(),
                     }
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
