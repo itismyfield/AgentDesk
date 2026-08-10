@@ -10,7 +10,7 @@ mod guarded_read;
 #[path = "identity_gate/heartbeat.rs"]
 mod heartbeat;
 #[path = "identity_gate/runtime_stamp.rs"]
-mod runtime_stamp;
+pub(in crate::services::discord::inflight) mod runtime_stamp;
 #[path = "identity_gate/stamp_merge.rs"]
 mod stamp_merge;
 #[path = "identity_gate/stream_loop_patch.rs"]

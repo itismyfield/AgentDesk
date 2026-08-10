@@ -1,5 +1,245 @@
 use super::*;
+use crate::services::agent_protocol::StreamMessage;
 use crate::services::discord::inflight::store::persist_under_lock_with_snapshot;
+use crate::services::discord::outbound::delivery_record::ExactJsonlSourceIdentity;
+use crate::services::discord::turn_bridge::{tmux_generation_file_mtime_ns, tmux_runtime_paths};
+#[derive(Clone, Debug)]
+pub(in crate::services::discord) struct CodexRange {
+    pub(in crate::services::discord) identity: InflightTurnIdentity,
+    pub(in crate::services::discord) result: String,
+    pub(in crate::services::discord) rollout_path: String,
+    pub(in crate::services::discord) session_id: String,
+    pub(in crate::services::discord) source: ExactJsonlSourceIdentity,
+}
+fn nonempty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+fn canonical_regular_file(path: &str) -> Option<(PathBuf, u64)> {
+    let path = std::fs::canonicalize(path).ok()?;
+    let metadata = std::fs::metadata(&path).ok()?;
+    metadata.is_file().then_some((path, metadata.len()))
+}
+fn marker_matches(tmux: &str, path: &Path, session: &str, start: u64) -> bool {
+    crate::services::codex_tui::session::read_codex_tui_rollout_marker(tmux).is_some_and(|marker| {
+        nonempty(marker.session_id.as_deref()) == Some(session)
+            && marker.rollout_start_offset == Some(start)
+            && std::fs::canonicalize(marker.rollout_path).ok().as_deref() == Some(path)
+    })
+}
+fn binding_matches(tmux: &str, path: &Path, session: &str, offsets: [u64; 2]) -> bool {
+    crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux).is_some_and(
+        |binding| {
+            binding.runtime_kind == RuntimeHandoffKind::CodexTui
+                && nonempty(binding.session_id.as_deref()) == Some(session)
+                && offsets.contains(&binding.last_offset)
+                && std::fs::canonicalize(binding.output_path).ok().as_deref() == Some(path)
+        },
+    )
+}
+impl InflightTurnState {
+    #[allow(dead_code)]
+    pub(in crate::services::discord) fn admit_codex_tui_terminal_frame(
+        &mut self,
+        persisted_baseline: &mut InflightTurnState,
+        expected: &InflightTurnIdentity,
+        can_chain_locally: bool,
+        message: StreamMessage,
+    ) -> (StreamMessage, Option<CodexRange>, bool) {
+        let StreamMessage::CodexTuiTerminalDone {
+            result,
+            session_id,
+            rollout_path,
+            tmux_session_name,
+            turn_nonce,
+            source_start,
+            complete_record_end,
+        } = message
+        else {
+            return (message, None, false);
+        };
+        let done = StreamMessage::Done {
+            result: result.clone(),
+            session_id: session_id.clone(),
+        };
+        let Some(root) = inflight_runtime_root() else {
+            return (done, None, true);
+        };
+        let admitted = admit_codex_terminal_range_in_root(
+            &root,
+            (self, persisted_baseline),
+            expected,
+            can_chain_locally,
+            (&result, session_id.as_deref(), &rollout_path),
+            (&tmux_session_name, &turn_nonce),
+            (source_start, complete_record_end),
+        );
+        (done, admitted.ok(), true)
+    }
+}
+fn admit_codex_terminal_range_in_root(
+    root: &Path,
+    states: (&mut InflightTurnState, &mut InflightTurnState),
+    expected: &InflightTurnIdentity,
+    can_chain_locally: bool,
+    frame: (&str, Option<&str>, &str),
+    authority: (&str, &str),
+    range: (u64, u64),
+) -> Result<CodexRange, GuardedSaveOutcome> {
+    let (local, baseline) = states;
+    let (result, session, rollout) = frame;
+    let (tmux, nonce) = authority;
+    let (start, end) = range;
+    let session = nonempty(session).ok_or(GuardedSaveOutcome::IdentityMismatch)?;
+    let tmux = nonempty(Some(tmux)).ok_or(GuardedSaveOutcome::IdentityMismatch)?;
+    let nonce = nonempty(Some(nonce)).ok_or(GuardedSaveOutcome::IdentityMismatch)?;
+    if !can_chain_locally
+        || local.provider_kind() != Some(ProviderKind::Codex)
+        || local.runtime_kind != Some(RuntimeHandoffKind::CodexTui)
+        || !StreamRelayAuthority::from_state(local).bridge_owns_relay()
+        || local.response_sent_offset != 0
+        || result.trim().is_empty()
+        || end <= start
+    {
+        return Err(GuardedSaveOutcome::IdentityMismatch);
+    }
+    let path = inflight_state_path(root, &ProviderKind::Codex, local.channel_id);
+    let _lock = lock_inflight_state_path(&path).map_err(|_| GuardedSaveOutcome::IoError)?;
+    let mut fresh = read_inflight_state_for_guarded_write(
+        &path,
+        &ProviderKind::Codex,
+        local.channel_id,
+        expected,
+        "turn_bridge::codex_terminal_range",
+    )?;
+    if !expected.matches_state(&fresh)
+        || fresh.runtime_kind != Some(RuntimeHandoffKind::CodexTui)
+        || fresh.tmux_session_name.as_deref() != Some(tmux)
+        || nonempty(fresh.turn_nonce.as_deref()) != Some(nonce)
+        || fresh.turn_start_offset != Some(start)
+        || fresh.last_offset != start
+        || fresh.response_sent_offset != 0
+        || fresh.restart_mode.is_some()
+        || fresh.rebind_origin
+        || fresh.terminal_delivery_committed
+        || !StreamRelayAuthority::from_state(&fresh).bridge_owns_relay()
+    {
+        return Err(GuardedSaveOutcome::IdentityMismatch);
+    }
+    let (canonical, file_len) =
+        canonical_regular_file(rollout).ok_or(GuardedSaveOutcome::IdentityMismatch)?;
+    if file_len < end || !marker_matches(tmux, &canonical, session, start) {
+        return Err(GuardedSaveOutcome::IdentityMismatch);
+    }
+    let cold =
+        start == 0 && fresh.output_path.as_deref() == Some(tmux_runtime_paths(tmux).0.as_str());
+    let warm = fresh
+        .output_path
+        .as_deref()
+        .and_then(|path| std::fs::canonicalize(path).ok())
+        .as_deref()
+        == Some(canonical.as_path())
+        && binding_matches(tmux, &canonical, session, [start, end]);
+    let generation = tmux_generation_file_mtime_ns(tmux);
+    if (!cold && !warm) || generation == 0 {
+        return Err(GuardedSaveOutcome::IdentityMismatch);
+    }
+    let canonical = canonical.display().to_string();
+    fresh.output_path = Some(canonical.clone());
+    fresh.full_response = result.to_string();
+    fresh.last_offset = end;
+    let persisted = persist_under_lock_with_snapshot(
+        root,
+        &path,
+        &fresh,
+        "inflight::runtime_stamp::admit_codex_terminal_range",
+    )
+    .map_err(|_| GuardedSaveOutcome::IoError)?
+    .ok_or(GuardedSaveOutcome::IdentityMismatch)?;
+    baseline.clone_from(&persisted);
+    local.output_path.clone_from(&persisted.output_path);
+    local.last_offset = persisted.last_offset;
+    local.save_generation = persisted.save_generation;
+    Ok(CodexRange {
+        identity: InflightTurnIdentity::from_state(&persisted),
+        result: result.to_string(),
+        rollout_path: canonical,
+        session_id: session.to_string(),
+        source: ExactJsonlSourceIdentity {
+            provider: ProviderKind::Codex.as_str().to_string(),
+            tmux_session_name: tmux.to_string(),
+            turn_nonce: nonce.to_string(),
+            range: (start, end),
+            generation_mtime_ns: generation,
+            offset_authority_channel_id: persisted.delivery_record_owner_channel_id(),
+            delivery_channel_id: persisted.channel_id,
+        },
+    })
+}
+impl CodexRange {
+    pub(in crate::services::discord) fn live_source_path(&self) -> Option<PathBuf> {
+        let source = &self.source;
+        let (path, len) = canonical_regular_file(&self.rollout_path)?;
+        let (start, end) = source.range;
+        let tmux = &source.tmux_session_name;
+        (len >= end && marker_matches(tmux, &path, &self.session_id, start)).then_some(path)
+    }
+    #[allow(dead_code)]
+    pub(in crate::services::discord) fn revalidated_source(
+        &self,
+        local: &InflightTurnState,
+    ) -> Result<Option<CodexRange>, ()> {
+        let source = &self.source;
+        let (start, end) = source.range;
+        if source.delivery_channel_id != local.channel_id
+            || !self.identity.matches_state(local)
+            || !StreamRelayAuthority::from_state(local).bridge_owns_relay()
+            || local.restart_mode.is_some()
+            || local.rebind_origin
+            || local.terminal_delivery_committed
+        {
+            return Err(());
+        }
+        let root = inflight_runtime_root().ok_or(())?;
+        let path = inflight_state_path(&root, &ProviderKind::Codex, local.channel_id);
+        let _lock = lock_inflight_state_path(&path).map_err(|_| ())?;
+        let fresh = read_inflight_state_for_guarded_write(
+            &path,
+            &ProviderKind::Codex,
+            local.channel_id,
+            &self.identity,
+            "terminal_delivery::codex_terminal_range",
+        )
+        .map_err(|_| ())?;
+        if !self.identity.matches_state(&fresh)
+            || fresh.runtime_kind != Some(RuntimeHandoffKind::CodexTui)
+            || fresh.tmux_session_name.as_deref() != Some(source.tmux_session_name.as_str())
+            || nonempty(fresh.turn_nonce.as_deref()) != Some(source.turn_nonce.as_str())
+            || fresh.turn_start_offset != Some(start)
+            || fresh.delivery_record_owner_channel_id() != source.offset_authority_channel_id
+            || fresh.restart_mode.is_some()
+            || fresh.rebind_origin
+            || fresh.terminal_delivery_committed
+            || !StreamRelayAuthority::from_state(&fresh).bridge_owns_relay()
+            || tmux_generation_file_mtime_ns(&source.tmux_session_name)
+                != source.generation_mtime_ns
+        {
+            return Err(());
+        }
+        let Some(canonical) = self.live_source_path() else {
+            return Ok(None);
+        };
+        let exact = fresh.output_path.as_deref() == Some(canonical.to_string_lossy().as_ref())
+            && fresh.last_offset == end
+            && fresh.full_response == self.result
+            && binding_matches(
+                &source.tmux_session_name,
+                &canonical,
+                &self.session_id,
+                [end; 2],
+            );
+        Ok(exact.then(|| self.clone()))
+    }
+}
 
 pub(in crate::services::discord) fn stamp_runtime_handoff_if_matches_identity<
     T: GuardedStampTarget,
@@ -187,6 +427,9 @@ pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_i
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::codex_tui::session::write_codex_tui_rollout_marker_with_start_offset as write_marker;
+    use crate::services::tmux_common::session_temp_path;
+    use crate::services::tui_prompt_dedupe as dedupe;
 
     fn runtime_seed(
         provider: ProviderKind,
@@ -215,6 +458,80 @@ mod tests {
             .expect("parse inflight row")
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn codex_terminal_range_cold_admission_and_exit_owner_5264() {
+        let temp = tempfile::tempdir().unwrap();
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let root = inflight_runtime_root().unwrap();
+        let _dedupe = dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for (index, start, binding_at_end) in [(0, 0, false), (1, 3, false), (2, 3, true)] {
+            dedupe::reset_state_for_tests();
+            let tmux = format!("AgentDesk-codex-range-5264-{index}");
+            let rollout = temp.path().join(format!("rollout-{index}.jsonl"));
+            std::fs::write(&rollout, b"{}\n{}\n{}\n").unwrap();
+            let end = start + 3;
+            write_marker(&tmux, &rollout, Some("raw-session"), Some(start)).unwrap();
+            std::fs::write(session_temp_path(&tmux, "generation"), b"1").unwrap();
+            let mut local = runtime_seed(ProviderKind::Codex, 52_640_001 + index, Some(&tmux));
+            local.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
+            local.turn_nonce = Some("turn-nonce".into());
+            (local.turn_start_offset, local.last_offset) = (Some(start), start);
+            local.output_path = Some(tmux_runtime_paths(&tmux).0);
+            let mut binding = dedupe::TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::CodexTui,
+                output_path: rollout.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some("raw-session".into()),
+                last_offset: if binding_at_end { end } else { start },
+                relay_last_offset: None,
+            };
+            if start > 0 {
+                dedupe::register_tmux_runtime_binding(&tmux, binding.clone());
+                local.output_path = Some(binding.output_path.clone());
+            }
+            save_inflight_state_in_root(&root, &local).unwrap();
+            let expected = InflightTurnIdentity::from_state(&local);
+            let mut baseline = local.clone();
+            let frame = |nonce: &str| StreamMessage::CodexTuiTerminalDone {
+                result: "answer".into(),
+                session_id: Some("raw-session".into()),
+                rollout_path: rollout.display().to_string(),
+                tmux_session_name: tmux.clone(),
+                turn_nonce: nonce.into(),
+                source_start: start,
+                complete_record_end: end,
+            };
+            let rejected = local.admit_codex_tui_terminal_frame(
+                &mut baseline,
+                &expected,
+                true,
+                frame("wrong"),
+            );
+            assert!(rejected.1.is_none());
+            let latch = local
+                .admit_codex_tui_terminal_frame(&mut baseline, &expected, true, frame("turn-nonce"))
+                .1
+                .unwrap();
+            let mut persisted = load(&root, &ProviderKind::Codex, local.channel_id);
+            assert_eq!(persisted.full_response, "answer");
+            assert_eq!(persisted.last_offset, end);
+            assert_eq!(persisted.response_sent_offset, 0);
+            binding.last_offset = end;
+            dedupe::register_tmux_runtime_binding(&tmux, binding);
+            let source = latch.revalidated_source(&local).unwrap().unwrap();
+            assert_eq!(source.source.range, (start, end));
+            assert_eq!(source.source.turn_nonce, "turn-nonce");
+            assert_eq!(source.source.offset_authority_channel_id, local.channel_id);
+            assert_eq!(source.source.delivery_channel_id, local.channel_id);
+            persisted.set_relay_owner_kind(RelayOwnerKind::Watcher);
+            save_inflight_state_in_root(&root, &persisted).unwrap();
+            assert!(matches!(latch.revalidated_source(&local), Err(())));
+        }
+    }
     #[test]
     fn runtime_first_stamp_supports_process_claude_tui_and_codex_tui() {
         for (index, provider, runtime_kind, session_name) in [

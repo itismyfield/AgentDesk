@@ -139,7 +139,7 @@ pub(in crate::services::discord) struct ExactJsonlSourceIdentity {
 }
 
 impl ExactJsonlSourceIdentity {
-    fn is_authoritative(&self) -> bool {
+    pub(in crate::services::discord) fn is_authoritative(&self) -> bool {
         ProviderKind::from_str(&self.provider).is_some()
             && !self.tmux_session_name.is_empty()
             && !self.turn_nonce.is_empty()
@@ -449,6 +449,17 @@ fn merge_confirmed_frontier(
     }
 }
 
+fn append_confirmed_receipt(record: &mut DeliveryRecord, receipt: ConfirmedDeliveryReceipt) {
+    let receipts = &mut record.confirmed_deliveries;
+    receipts.retain(|existing| existing != &receipt);
+    receipts.push(receipt);
+    let excess = receipts
+        .len()
+        .saturating_sub(CONFIRMED_DELIVERY_RECEIPT_LIMIT);
+    if excess > 0 {
+        receipts.drain(..excess);
+    }
+}
 #[derive(Clone, Copy)]
 enum EqualRangeAnchorPolicy {
     PreserveExisting,
@@ -637,17 +648,7 @@ fn write_confirmed_frontier_guarded_at_with_lock_authority(
     if let Some(receipt) = receipt {
         // A delayed, lower-range receipt remains exact proof for its own restored
         // seed. Append it even when the monotonic frontier correctly stays put.
-        record
-            .confirmed_deliveries
-            .retain(|existing| existing != &receipt);
-        record.confirmed_deliveries.push(receipt);
-        let excess = record
-            .confirmed_deliveries
-            .len()
-            .saturating_sub(CONFIRMED_DELIVERY_RECEIPT_LIMIT);
-        if excess > 0 {
-            record.confirmed_deliveries.drain(..excess);
-        }
+        append_confirmed_receipt(&mut record, receipt);
     }
     write_record_at(path, &record)
 }
@@ -812,6 +813,68 @@ pub(in crate::services::discord) fn write_confirmed_delivery(
     )
 }
 
+fn pinned_source_receipt(
+    source: &ExactJsonlSourceIdentity,
+    message_id: u64,
+) -> Result<(ProviderKind, ConfirmedDeliveryReceipt), String> {
+    let provider = ProviderKind::from_str(&source.provider)
+        .filter(|_| source.is_authoritative() && message_id != 0)
+        .ok_or_else(|| "delivery_record: incomplete pinned source receipt".to_string())?;
+    Ok((
+        provider,
+        ConfirmedDeliveryReceipt {
+            source: source.clone(),
+            delivery_channel_id: source.delivery_channel_id,
+            message_id,
+        },
+    ))
+}
+#[allow(dead_code)]
+pub(in crate::services::discord) fn record_current_pinned_delivery(
+    source: &ExactJsonlSourceIdentity,
+    message_id: u64,
+) -> Result<(), String> {
+    let (provider, receipt) = pinned_source_receipt(source, message_id)?;
+    let frontier = DeliveredCommit {
+        range: source.range,
+        generation_mtime_ns: source.generation_mtime_ns,
+        attempts: 0,
+        panel_msg_id: Some(message_id),
+        panel_channel_id: Some(source.delivery_channel_id),
+    };
+    write_confirmed_delivery_at(
+        &record_path_or_err(&provider, source.offset_authority_channel_id)?,
+        frontier,
+        receipt,
+    )
+}
+/// Append only the exact historical receipt; never alter the current frontier.
+#[allow(dead_code)]
+pub(in crate::services::discord) fn record_historical_pinned_delivery(
+    source: &ExactJsonlSourceIdentity,
+    message_id: u64,
+) -> Result<(), String> {
+    let (provider, receipt) = pinned_source_receipt(source, message_id)?;
+    let path = record_path_or_err(&provider, source.offset_authority_channel_id)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let _lock = lock_record_path(&path)?;
+    let mut record = read_record_at(&path).unwrap_or_default();
+    append_confirmed_receipt(&mut record, receipt);
+    write_record_at(&path, &record)
+}
+#[allow(dead_code)]
+pub(in crate::services::discord) fn historical_pinned_delivery_exists(
+    source: &ExactJsonlSourceIdentity,
+    message_id: u64,
+) -> bool {
+    let Ok((provider, receipt)) = pinned_source_receipt(source, message_id) else {
+        return false;
+    };
+    read_record(&provider, source.offset_authority_channel_id)
+        .is_some_and(|record| record.confirmed_deliveries.contains(&receipt))
+}
 fn commit_ordered_jsonl_range_at(
     path: &Path,
     tmux_session_name: &str,
@@ -2581,6 +2644,74 @@ mod tests {
         )
     }
 
+    #[test]
+    fn codex_admitted_range_receipt_is_exact_and_idempotent_5264() {
+        let _root = IsolatedRoot::new();
+        let (provider, delivery, owner) = (ProviderKind::Codex, 5_264_001, 5_264_009);
+        let tmux = "AgentDesk-codex-5264-pinned";
+        let g1 = set_phase_a_generation(tmux, 1_700_526_400);
+        #[rustfmt::skip]
+        let mut state = crate::services::discord::inflight::InflightTurnState::new(
+            provider.clone(), delivery, None, 1, 5_264_003, 5_264_002, "answer".into(),
+            None, Some(tmux.into()), None, None, 0);
+        (state.last_offset, state.turn_nonce) = (3, Some("turn-nonce".into()));
+        #[rustfmt::skip]
+        let receipt = |state: &crate::services::discord::inflight::InflightTurnState| exact_receipt_from_inflight(
+            &provider, Some(state), ChannelId::new(delivery), ChannelId::new(delivery),
+            Some(5_264_002), (0, 3), g1);
+        let exact = receipt(&state).expect("exact current receipt");
+        state.turn_start_offset = Some(1);
+        assert!(receipt(&state).is_none(), "mismatched start is not exact");
+        #[rustfmt::skip]
+        let (frontier, _) = exact_delivery_fixture(&provider, tmux, "turn-nonce", (0, 3),
+            g1, (delivery, delivery), 5_264_002);
+        for _ in 0..2 {
+            write_confirmed_delivery(&provider, delivery, frontier.clone(), exact.clone()).unwrap();
+        }
+        assert_eq!(
+            read_record(&provider, delivery)
+                .unwrap()
+                .confirmed_deliveries,
+            vec![exact]
+        );
+        #[rustfmt::skip]
+        let (_, historical) = exact_delivery_fixture(&provider, tmux, "old-turn", (3, 6),
+            g1, (owner, delivery), 5_264_006);
+        let g2 = set_phase_a_generation(tmux, 1_800_526_400);
+        #[rustfmt::skip]
+        let (current, current_receipt) = exact_delivery_fixture(&provider, tmux, "new-turn", (0, 7),
+            g2, (owner, delivery), 5_264_007);
+        write_confirmed_delivery(&provider, owner, current.clone(), current_receipt).unwrap();
+        record_historical_pinned_delivery(&historical.source, historical.message_id).unwrap();
+        let record = read_record(&provider, owner).unwrap();
+        assert_eq!(
+            record.delivered_frontier,
+            Some(current),
+            "G2 frontier is preserved"
+        );
+        assert!(historical_pinned_delivery_exists(
+            &historical.source,
+            historical.message_id
+        ));
+        let source = &historical.source;
+        let wrong = ExactJsonlSourceIdentity {
+            generation_mtime_ns: g2,
+            ..source.clone()
+        };
+        assert!(!historical_pinned_delivery_exists(
+            &wrong,
+            historical.message_id
+        ));
+        std::fs::remove_file(crate::services::tmux_common::session_temp_path(
+            tmux,
+            "generation",
+        ))
+        .unwrap();
+        assert!(historical_pinned_delivery_exists(
+            source,
+            historical.message_id
+        ));
+    }
     #[test]
     fn ordered_jsonl_commit_is_generation_scoped_and_monotonic() {
         let _root = IsolatedRoot::new();

@@ -641,7 +641,10 @@ fn write_codex_rebind_normalized_stream_for_generation(
         else {
             continue;
         };
-        if let crate::services::agent_protocol::StreamMessage::Done { result, .. } = &message
+        if let crate::services::agent_protocol::StreamMessage::Done { result, .. }
+        | crate::services::agent_protocol::StreamMessage::CodexTuiTerminalDone {
+            result, ..
+        } = &message
             && let Some(suffix) = codex_rebind_done_result_suffix(&known_response_for_done, result)
         {
             let suffix_message = crate::services::agent_protocol::StreamMessage::Text {
@@ -879,14 +882,17 @@ fn codex_rebind_stream_message_json(
             "summary": summary,
             "task_notification_kind": kind.as_str(),
         })),
-        crate::services::agent_protocol::StreamMessage::Done { result, session_id } => {
-            Some(serde_json::json!({
-                "type": "result",
-                "subtype": "success",
-                "result": result,
-                "session_id": session_id,
-            }))
-        }
+        crate::services::agent_protocol::StreamMessage::Done { result, session_id }
+        | crate::services::agent_protocol::StreamMessage::CodexTuiTerminalDone {
+            result,
+            session_id,
+            ..
+        } => Some(serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "result": result,
+            "session_id": session_id,
+        })),
         crate::services::agent_protocol::StreamMessage::Error {
             message, stderr, ..
         } => {

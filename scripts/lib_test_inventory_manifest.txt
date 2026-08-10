@@ -2746,6 +2746,7 @@ services::discord::inflight::save_store::identity_gate::claude_e_stamp::tests::d
 services::discord::inflight::save_store::identity_gate::claude_e_stamp::tests::stale_claude_e_stamp_cannot_overwrite_newer_runtime_or_process_group
 services::discord::inflight::save_store::identity_gate::claude_e_stamp::tests::transient_claude_e_stamp_read_error_is_retryable_and_preserves_process_frame
 services::discord::inflight::save_store::identity_gate::runtime_stamp::tests::claude_tui_runtime_stamp_accepts_none_to_projects_output_path
+services::discord::inflight::save_store::identity_gate::runtime_stamp::tests::codex_terminal_range_cold_admission_and_exit_owner_5264
 services::discord::inflight::save_store::identity_gate::runtime_stamp::tests::divergent_runtime_response_is_non_retryable_and_preserves_both_snapshots
 services::discord::inflight::save_store::identity_gate::runtime_stamp::tests::runtime_first_stamp_supports_process_claude_tui_and_codex_tui
 services::discord::inflight::save_store::identity_gate::runtime_stamp::tests::runtime_stamp_accepts_same_session_restamp_and_rejects_changed_session
@@ -2974,6 +2975,7 @@ services::discord::outbound::delivery_record::tests::authority_blocks_backward_i
 services::discord::outbound::delivery_record::tests::clear_lease_preserves_frontier
 services::discord::outbound::delivery_record::tests::cleared_inflight_current_generation_persists_frontier_without_receipt_4911
 services::discord::outbound::delivery_record::tests::cleared_inflight_stale_caller_generation_rejects_frontier_4911
+services::discord::outbound::delivery_record::tests::codex_admitted_range_receipt_is_exact_and_idempotent_5264
 services::discord::outbound::delivery_record::tests::committed_floor_authority_on_does_not_oversuppress_rollover_resend_3871
 services::discord::outbound::delivery_record::tests::committed_floor_authority_on_suppresses_watchdog_rerelay_3885
 services::discord::outbound::delivery_record::tests::confirmed_receipt_write_rejects_destination_owner_and_provider_mismatch_4911
