@@ -1,12 +1,7 @@
 //! #3089 A5 turn_bridge terminal cutover to the unified turn-output controller.
 //!
-//! Sibling of `turn_bridge/terminal_delivery.rs` (which owns `BridgeDeliveryLease`,
-//! `advance_tmux_relay_confirmed_end`, and `turn_bridge_replace_outcome_committed`).
-//! This module holds the A5 cutover surface — the pure cut-over decision +
-//! `bridge_terminal_lease_range` gate, the `BridgePostHeartbeat`
-//! adapter, and the short-replace/long-chunk controller write-backs — extracted here so
-//! `terminal_delivery.rs` stays below the 1000-prod giant-file threshold (mirrors
-//! A4's `tmux_watcher/terminal_send.rs` sibling).
+//! Owns the A5 cutover decision, lease gate, heartbeat adapter, and controller
+//! write-backs so `terminal_delivery.rs` remains below its production LoC cap.
 
 use super::*;
 // #5071 T1 S4: the ONE door from this file to the `#[cfg(unix)]` journal.
@@ -23,7 +18,20 @@ use super::super::turn_finalizer::TurnKey;
 use crate::services::discord::{
     DeliveryLeaseCell, DeliveryLeaseHeartbeat, DeliveryLeaseKey, LeaseHolder, lease_now_ms,
 };
-use unix_journal::Disposition;
+use unix_journal::{
+    Disposition, begin_controller_terminal as journal_begin,
+    settle_controller_terminal as journal_settle,
+};
+#[cfg(unix)]
+#[rustfmt::skip]
+pub(super) fn begin_pinned_terminal(
+    shared: &SharedData, provider: &ProviderKind, long: bool,
+    channels: (ChannelId, ChannelId), range: (u64, u64),
+) -> impl FnOnce(Option<MessageId>, bool) {
+    let kind = if long { Disposition::LongChunks } else { Disposition::ShortReplace };
+    let mut journal = journal_begin(shared, provider, kind, channels, Some(range));
+    move |message_id, committed| drop(journal_settle(&mut journal, message_id, committed))
+}
 
 /// #3089 A5: the bridge short-replace cut-over decision, computed at the site-5
 /// lease-acquire site (mod.rs ~6134).
@@ -805,13 +813,7 @@ pub(super) async fn apply_bridge_short_replace_controller(
     );
 }
 
-/// #3089 A5: write the controller-path `DeliveryOutcome` back into the site-5
-/// send-arm locals. Split out of [`apply_bridge_short_replace_controller`] (a
-/// pure, synchronous mapping with NO gateway/transport) so the per-arm
-/// side-effects — the dual-offset fallback bump, the cleanup record, the
-/// completion-footer fork — are unit-testable WITHOUT a live gateway. Mirrors
-/// A4's `apply_watcher_short_replace_result`.
-///
+/// Maps site-5 outcomes onto footer, retry, sent-offset, and holder cleanup state.
 /// Reproduces the legacy site-5 mapping (mod.rs 6160-6245) EXACTLY:
 /// - `Delivered` (EditedOriginal): committed → `terminal_delivery_committed = true;
 ///   terminal_body_visible = true;` footer if footer-mode; `Succeeded` cleanup;
@@ -823,19 +825,6 @@ pub(super) async fn apply_bridge_short_replace_controller(
 ///   `preserve_inflight_for_cleanup_retry = true;` AND the dual-offset bump
 ///   `inflight_response_sent_offset = full_response_len` (mod.rs:6241); record
 ///   `failed(..)` cleanup; NO `confirmed_end` advance (released Unknown without
-///   commit); NO completion_footer.
-/// - `Unknown { fell_back: false }` (Partial / Err):
-///   `preserve_inflight_for_cleanup_retry = true;` record `failed(detail)` cleanup;
-///   NO `response_sent_offset` bump (distinguishes from the fell_back arm).
-/// - `Transient` (lost acquire / B2-skip): `preserve_inflight_for_cleanup_retry =
-///   true; bridge_skip_holder_owns_inflight = true;` no transport, no cleanup
-///   record (the legacy B2-skip arm at mod.rs:6145 records none).
-/// - `NotDelivered` (advance refused — not normally reachable: site-5's advance is
-///   unconditional on a committed replace): conservative
-///   `preserve_inflight_for_cleanup_retry = true` (no commit), record failed
-///   cleanup. Documented as the defensive default.
-/// - `Skipped` (empty body — excluded by the cutover gate; unreachable in prod):
-///   `preserve_inflight_for_cleanup_retry = true`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn apply_bridge_short_replace_outcome(
     outcome: toc::DeliveryOutcome,
@@ -1033,6 +1022,12 @@ mod tests {
         // (mod.rs:2207-2213). The edit MUST land in the delivery channel.
         const OWNER_CH: u64 = 9_999;
 
+        #[cfg(unix)]
+        #[rustfmt::skip]
+        use super::super::super::{terminal_delivery::{BridgeDeliveryLease, BridgeLeaseAcquire, PinnedBridgeDeliveryLease}, terminal_outcome_delivery::PinnedTerminalTransport};
+        #[cfg(unix)]
+        #[rustfmt::skip]
+        use crate::services::discord::{inflight::{CodexRange, InflightTurnIdentity}, outbound::delivery_record::{self as dr, ExactJsonlSourceIdentity}};
         fn ch() -> ChannelId {
             ChannelId::new(CH)
         }
@@ -1046,6 +1041,44 @@ mod tests {
             DeliveryLeaseKey::from_turn_key(turn())
         }
 
+        #[cfg(unix)]
+        #[rustfmt::skip]
+        fn stamp(tmux: &str, seconds: i64) -> i64 {
+            let path = crate::services::tmux_common::session_temp_path(tmux, "generation");
+            std::fs::create_dir_all(std::path::Path::new(&path).parent().unwrap()).unwrap(); std::fs::write(&path, "g").unwrap();
+            filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(seconds, 1)).unwrap(); dr::current_generation_mtime_ns(tmux)
+        }
+        #[cfg(unix)]
+        #[rustfmt::skip]
+        fn pinned(shared: &Arc<SharedData>, root: &std::path::Path, owner: ChannelId, user: u64) -> (PinnedBridgeDeliveryLease, ExactJsonlSourceIdentity) {
+            use crate::services::codex_tui::session::write_codex_tui_rollout_marker_with_start_offset as write_marker;
+            let (tmux, rollout) = ("AgentDesk-codex-5264-barrier", root.join(format!("rollout-{user}.jsonl")));
+            std::fs::write(&rollout, [b'x'; 64]).unwrap(); write_marker(tmux, &rollout, Some("raw-session"), Some(0)).unwrap();
+            let source = ExactJsonlSourceIdentity { provider: "codex".into(), tmux_session_name: tmux.into(), turn_nonce: format!("nonce-{user}"), range: (0,64), generation_mtime_ns: stamp(tmux, 1_700_526_400), offset_authority_channel_id: owner.get(), delivery_channel_id: CH };
+            let range = CodexRange { identity: InflightTurnIdentity { user_msg_id: user, started_at: "now".into(), tmux_session_name: Some(tmux.into()), turn_start_offset: Some(0) }, result: "answer".into(), rollout_path: rollout.display().to_string(), session_id: "raw-session".into(), source: source.clone() };
+            let key = DeliveryLeaseKey::from_turn_key(TurnKey::new(owner, user, 1));
+            let lease = match BridgeDeliveryLease::acquire(shared, owner, key, 0, Some(64)) { BridgeLeaseAcquire::Held(lease) => lease, _ => panic!("held") };
+            (lease.pin_exact_source(shared, &ProviderKind::Codex, ch(), range).unwrap(), source)
+        }
+        #[cfg(unix)]
+        #[rustfmt::skip]
+        fn flip(source: ExactJsonlSourceIdentity) -> Arc<dyn Fn() + Send + Sync> {
+            Arc::new(move || { let mut g2 = source.clone(); g2.generation_mtime_ns = stamp(&g2.tmux_session_name, 1_800_526_400); g2.turn_nonce = "g2".into(); g2.range = (0, 7); dr::record_current_pinned_delivery(&g2, 9_999).unwrap(); })
+        }
+        #[cfg(unix)]
+        #[rustfmt::skip]
+        fn pinned_transport<'a>(shared: &'a SharedData, gateway: &'a dyn TurnGateway, provider: &'a ProviderKind, owner: ChannelId) -> PinnedTerminalTransport<'a> {
+            PinnedTerminalTransport { source: (shared, gateway, provider), target: (owner, ch(), MessageId::new(MSG)), payload: (Some("AgentDesk-codex-5264-barrier"), "answer", (0, 64)), trace: (None, None, None) }
+        }
+        #[cfg(unix)]
+        #[rustfmt::skip]
+        fn assert_pinned_barrier(source: &ExactJsonlSourceIdentity, message_id: u64) {
+            let record = dr::read_record(&ProviderKind::Codex, source.offset_authority_channel_id).unwrap(); let frontier = record.delivered_frontier.unwrap();
+            assert_eq!((frontier.range, frontier.generation_mtime_ns), ((0, 7), dr::current_generation_mtime_ns(&source.tmux_session_name)));
+            assert!(dr::historical_pinned_delivery_exists(source, message_id));
+            let mut wrong = source.clone(); wrong.generation_mtime_ns = frontier.generation_mtime_ns; wrong.turn_nonce = "g2".into();
+            assert!(!dr::historical_pinned_delivery_exists(&wrong, message_id));
+        }
         // A fake `TurnGateway` whose `replace_message_with_outcome` returns a fixed
         // outcome (or `Err`), counts transport calls, AND records the `channel_id`
         // it was called with (0 = never called) so a test can assert the edit was
@@ -1056,6 +1089,7 @@ mod tests {
         struct ShortReplaceFakeGateway {
             outcome: ReplaceLongMessageOutcome,
             ok: bool,
+            hook: Option<Arc<dyn Fn() + Send + Sync>>,
             replace_calls: AtomicUsize,
             replace_channel: AtomicU64,
         }
@@ -1070,6 +1104,7 @@ mod tests {
                 Box::pin(async move {
                     self.replace_calls.fetch_add(1, Ordering::SeqCst);
                     self.replace_channel.store(c.get(), Ordering::SeqCst);
+                    self.hook.iter().for_each(|hook| hook());
                     if self.ok {
                         Ok(self.outcome.clone())
                     } else {
@@ -1149,6 +1184,7 @@ mod tests {
             ShortReplaceFakeGateway {
                 outcome,
                 ok,
+                hook: None,
                 replace_calls: AtomicUsize::new(0),
                 replace_channel: AtomicU64::new(0),
             }
@@ -1271,6 +1307,7 @@ mod tests {
         struct LongChunksFakeGateway {
             send_ok: bool,
             delete_ok: bool,
+            hook: Option<Arc<dyn Fn() + Send + Sync>>,
             send_calls: AtomicUsize,
             delete_calls: AtomicUsize,
             clock: AtomicUsize,
@@ -1279,6 +1316,7 @@ mod tests {
         }
 
         impl TurnGateway for LongChunksFakeGateway {
+            #[rustfmt::skip]
             fn send_long_message_with_rollback<'a>(
                 &'a self,
                 _c: ChannelId,
@@ -1287,10 +1325,11 @@ mod tests {
             ) -> GatewayFuture<'a, Result<Vec<MessageId>, String>> {
                 Box::pin(async move {
                     self.send_calls.fetch_add(1, Ordering::SeqCst);
+                    self.hook.iter().for_each(|hook| hook());
                     self.send_step
                         .store(self.clock.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
                     if self.send_ok {
-                        Ok(vec![MessageId::new(9000), MessageId::new(9001)])
+                        Ok((self.send_step.load(Ordering::SeqCst) != usize::MAX).then_some(vec![MessageId::new(9000), MessageId::new(9001)]).unwrap_or_default())
                     } else {
                         Err("chunk send failed after rollback".to_string())
                     }
@@ -1377,12 +1416,36 @@ mod tests {
             LongChunksFakeGateway {
                 send_ok,
                 delete_ok,
+                hook: None,
                 send_calls: AtomicUsize::new(0),
                 delete_calls: AtomicUsize::new(0),
                 clock: AtomicUsize::new(1),
                 send_step: AtomicUsize::new(0),
                 delete_step: AtomicUsize::new(0),
             }
+        }
+
+        #[cfg(unix)]
+        #[tokio::test(flavor = "current_thread")]
+        #[rustfmt::skip]
+        async fn pinned_codex_short_replace_generation_flip_5264() {
+            let _lock = crate::config::shared_test_env_lock().lock().unwrap_or_else(|e| e.into_inner()); let root = runtime_root_guard(); let provider = ProviderKind::Codex;
+            for owner in [ch(), owner_ch()] { let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), owner, owner.get()); let mut gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, true); gw.hook = Some(flip(source.clone()));
+                let (committed, fallback) = pinned_transport(shared.as_ref(), &gw, &provider, owner).deliver(pin, false).await;
+                assert!(committed && !fallback); assert_eq!(gw.replace_calls.load(Ordering::SeqCst), 1); assert_pinned_barrier(&source, MSG); assert!(matches!(shared.delivery_lease(owner).read(), LeaseSnapshot::Unleased)); }
+            let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), ch(), 3); let gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, false);
+            assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, false).await.0); assert!(!dr::historical_pinned_delivery_exists(&source, MSG)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased)); let broken = runtime_root_guard(); std::fs::create_dir_all(broken._temp.path().join("runtime")).unwrap(); std::fs::write(broken._temp.path().join("runtime/discord_delivery_records"), b"blocked").unwrap(); let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, broken._temp.path(), ch(), 6); let gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, true); assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, false).await.0); assert_eq!((gw.replace_calls.load(Ordering::SeqCst), shared.committed_relay_offset(ch())), (1, 64)); assert!(dr::read_record(&provider, CH).is_none()); assert!(!dr::historical_pinned_delivery_exists(&source, MSG)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased));
+        }
+
+        #[cfg(unix)]
+        #[tokio::test(flavor = "current_thread")]
+        #[rustfmt::skip]
+        async fn pinned_codex_long_chunks_generation_flip_5264() {
+            let _lock = crate::config::shared_test_env_lock().lock().unwrap_or_else(|e| e.into_inner()); let root = runtime_root_guard(); let provider = ProviderKind::Codex;
+            for owner in [ch(), owner_ch()] { let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), owner, owner.get() + 4); let mut gw = long_gateway(true, true); gw.hook = Some(flip(source.clone())); let outcome = pinned_transport(shared.as_ref(), &gw, &provider, owner).deliver(pin, true).await;
+                assert_eq!(outcome, (true, false)); assert_eq!(gw.send_calls.load(Ordering::SeqCst), 1); assert_pinned_barrier(&source, 9001); assert!(!dr::historical_pinned_delivery_exists(&source, 9000)); assert!(!dr::historical_pinned_delivery_exists(&source, MSG)); assert!(matches!(shared.delivery_lease(owner).read(), LeaseSnapshot::Unleased)); }
+            let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), ch(), 5); let gw = long_gateway(false, true);
+            assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, true).await.0); assert!(!dr::historical_pinned_delivery_exists(&source, 9001)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased)); let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), ch(), 7); let gw = long_gateway(true, true); gw.clock.store(usize::MAX, Ordering::SeqCst); assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, true).await.0); assert_eq!(gw.send_calls.load(Ordering::SeqCst), 1); assert!(!dr::historical_pinned_delivery_exists(&source, 9001)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased)); let broken = runtime_root_guard(); std::fs::create_dir_all(broken._temp.path().join("runtime")).unwrap(); std::fs::write(broken._temp.path().join("runtime/discord_delivery_records"), b"blocked").unwrap(); let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, broken._temp.path(), ch(), 8); let gw = long_gateway(true, true); assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, true).await.0); assert_eq!((gw.send_calls.load(Ordering::SeqCst), shared.committed_relay_offset(ch())), (1, 64)); assert!(dr::read_record(&provider, CH).is_none()); assert!(!dr::historical_pinned_delivery_exists(&source, 9001)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased));
         }
 
         async fn run_long_apply(

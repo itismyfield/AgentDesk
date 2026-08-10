@@ -1026,7 +1026,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     .await;
 
     let (inflight_tmux_name, inflight_output_path, inflight_input_fifo, inflight_offset) =
-        prelaunch_inflight_runtime_seed(
+        prelaunch_inflight_runtime_seed_without_codex_raw(
             &provider,
             remote_profile.is_none(),
             tmux_session_name.as_deref(),

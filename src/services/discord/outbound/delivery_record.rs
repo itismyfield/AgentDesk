@@ -875,6 +875,27 @@ pub(in crate::services::discord) fn historical_pinned_delivery_exists(
     read_record(&provider, source.offset_authority_channel_id)
         .is_some_and(|record| record.confirmed_deliveries.contains(&receipt))
 }
+fn append_completed_turn_if_nonzero(provider: &ProviderKind, channel_id: u64, user_msg_id: u64) {
+    if user_msg_id != 0 {
+        completed_turn_ledger::append_completed_turn(provider, channel_id, user_msg_id);
+    }
+}
+pub(in crate::services::discord) fn record_pinned_delivery_metadata(
+    source: &ExactJsonlSourceIdentity,
+    body: &str,
+    user_msg_id: u64,
+) {
+    let Some(provider) = ProviderKind::from_str(&source.provider) else {
+        return;
+    };
+    record_delivered_content_fingerprint_for_generation(
+        &provider,
+        source.delivery_channel_id,
+        body,
+        source.generation_mtime_ns,
+    );
+    append_completed_turn_if_nonzero(&provider, source.delivery_channel_id, user_msg_id);
+}
 fn commit_ordered_jsonl_range_at(
     path: &Path,
     tmux_session_name: &str,
@@ -1050,8 +1071,14 @@ pub(in crate::services::discord) fn confirmed_delivery_receipt_exists(
     message_id: u64,
     source: &ExactJsonlSourceIdentity,
 ) -> bool {
-    if message_id == 0 {
+    if message_id == 0
+        || provider.as_str() != source.provider
+        || delivery_channel.get() != source.delivery_channel_id
+    {
         return false;
+    }
+    if historical_pinned_delivery_exists(source, message_id) {
+        return true;
     }
     let Some(owner_channel) = resolved_receipt_owner_channel(provider, delivery_channel, source)
     else {
@@ -2351,7 +2378,7 @@ fn shadow_mirror_delivered_frontier_inner(
         );
     }
     if let Some(user_msg_id) = safe_ledger_user_msg_id {
-        completed_turn_ledger::append_completed_turn(provider, delivery_channel_id, user_msg_id);
+        append_completed_turn_if_nonzero(provider, delivery_channel_id, user_msg_id);
     }
 
     // The flag controls only divergence telemetry. The confirmed frontier and

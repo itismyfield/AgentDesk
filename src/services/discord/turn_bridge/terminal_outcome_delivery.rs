@@ -35,6 +35,8 @@ use recovery_retry::{
     RecoveryRetryContext, RecoveryRetryMessage, RecoveryRetryOutcome, RecoveryRetryState,
     handle_recovery_retry,
 };
+#[cfg(unix)]
+pub(super) use stream_loop::types::PinnedTerminalTransport;
 
 mod busy_followup_retry;
 mod cancel_prompt_replace;
@@ -48,7 +50,6 @@ mod queue_retry_silence;
 mod recovery_retry;
 
 use crate::services::discord::session_banner::DiscordTurnSessionBanner;
-
 pub(super) async fn run_terminal_outcome_delivery(
     ctx: TerminalOutcomeDeliveryContext,
     state: TerminalOutcomeDeliveryState,
@@ -58,6 +59,7 @@ pub(super) async fn run_terminal_outcome_delivery(
     let (cancelled, transport_error) = (ctx.cancelled, ctx.transport_error);
     let (recovery_retry, rx_disconnected) = (ctx.recovery_retry, ctx.rx_disconnected);
     let tmux_last_offset = ctx.tmux_last_offset;
+    let codex_tui_terminal_range = ctx.codex_tui_terminal_range;
     let watcher_owner_channel_id = ctx.watcher_owner_channel_id;
     let watcher_handoff_claim_outcome = ctx.watcher_handoff_claim_outcome;
     let bridge_created_response_placeholder_msg_id = ctx.bridge_created_response_placeholder_msg_id;
@@ -101,6 +103,7 @@ pub(super) async fn run_terminal_outcome_delivery(
         state.pending_long_running_retarget_after_state_save;
     let mut long_running_placeholder_active = state.long_running_placeholder_active;
     let mut inflight_state = state.inflight_state;
+    let admitted = codex_tui_terminal_range.as_ref();
     let mut api_friction_reports = state.api_friction_reports;
     let review_dispatch_warning = state.review_dispatch_warning;
     let last_edit_text = state.last_edit_text;
@@ -399,7 +402,19 @@ pub(super) async fn run_terminal_outcome_delivery(
             )
             .format_and_prefix(response_sent_offset == 0, &delivery_response);
             if can_chain_locally {
-                if terminal_delivery_should_send_new_chunks(can_chain_locally, &delivery_response) {
+                let mut tmux_last_offset = contracts::ordered_terminal_range_end(
+                    &provider,
+                    inflight_state.runtime_kind,
+                    tmux_last_offset,
+                    admitted,
+                );
+                let long =
+                    terminal_delivery_should_send_new_chunks(can_chain_locally, &delivery_response);
+                let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
+                let mut pinned_handled = false;
+                #[cfg(unix)]
+                stream_loop::types::dispatch_pinned_terminal!(shared_owned gateway provider watcher_owner_channel_id inflight_state tmux_last_offset admitted channel_id current_msg_id delivery_response bridge_start dispatch_id adk_session_key turn_id long full_response single_message_panel_footer_mode terminal_delivery_committed terminal_body_visible response_sent_offset completion_footer_terminal_text preserve_inflight_for_cleanup_retry bridge_skip_holder_owns_inflight pinned_handled);
+                if !pinned_handled && long {
                     let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
                     let bridge_end = tmux_last_offset.unwrap_or(0);
                     if terminal_controller_cutover::bridge_long_chunks_cutover_decision(
@@ -496,7 +511,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                         )
                         .await;
                     }
-                } else {
+                } else if !pinned_handled {
                     // #3089 A5/#3998 S1-f2: route structurally eligible
                     // short-replace through the controller
                     // (`terminal_controller_cutover`).

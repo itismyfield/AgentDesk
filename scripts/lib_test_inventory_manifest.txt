@@ -1931,6 +1931,7 @@ services::codex_tui::rollout_index::tests::warm_scan_reuses_cached_header_withou
 services::codex_tui::rollout_tail::tests::always_fresh_pane_signal_reaches_hard_veto_cap_and_emits_done
 services::codex_tui::rollout_tail::tests::assistant_response_deadline_emits_timeout_done
 services::codex_tui::rollout_tail::tests::codex_stop_hook_emits_done_before_drain
+services::codex_tui::rollout_tail::tests::codex_terminal_frame_is_atomic_at_complete_boundary_5264
 services::codex_tui::rollout_tail::tests::codex_token_count_context_uses_last_usage_not_total_usage
 services::codex_tui::rollout_tail::tests::codex_token_count_total_only_keeps_context_unknown
 services::codex_tui::rollout_tail::tests::commentary_only_task_complete_does_not_duplicate_body
@@ -4032,6 +4033,7 @@ services::discord::router::message_handler::latency_spans::tests::full_span_rend
 services::discord::router::message_handler::latency_spans::tests::marks_unlock_segments_in_order
 services::discord::router::message_handler::latency_spans::tests::partial_span_renders_dashes_for_missing_marks
 services::discord::router::message_handler::latency_spans::tests::saturating_u64_clamps_overflow
+services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::codex_tui_raw_seed_requires_exact_live_marker_binding_evidence
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::managed_linked_worktree_skips_provider_reisolation_without_session_state
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::non_thread_resolution_is_unchanged
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::prelaunch_claude_tui_seed_omits_wrapper_output_but_preserves_fifo
@@ -5720,6 +5722,8 @@ services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short
 services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::bridge_short_replace_partial_failure_no_advance
 services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::bridge_short_replace_routes_edit_to_delivery_channel
 services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::bridge_terminal_lease_range_pins_cutover
+services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::pinned_codex_long_chunks_generation_flip_5264
+services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::pinned_codex_short_replace_generation_flip_5264
 services::discord::turn_bridge::terminal_delivery::relay_state_contract_refs::contract_symbols_exist
 services::discord::turn_bridge::terminal_delivery::tests::a0_characterization_tests::a0_terminal_delivery_predicate_boundary_is_strictly_greater_than_2000
 services::discord::turn_bridge::terminal_delivery::tests::a0_characterization_tests::a0_terminal_delivery_predicate_gates_on_can_chain_and_over_limit
@@ -5756,6 +5760,7 @@ services::discord::turn_bridge::terminal_delivery::tests::stopped_turn_terminal_
 services::discord::turn_bridge::terminal_delivery::tests::transport_error_dispatch_failure_requires_terminal_delivery_commit
 services::discord::turn_bridge::terminal_delivery::tests::work_dispatch_completion_requires_terminal_delivery_commit
 services::discord::turn_bridge::terminal_outcome_delivery::busy_followup_retry::tests::capped_requeue_failure_preserves_inflight_without_false_queue_claim_4888
+services::discord::turn_bridge::terminal_outcome_delivery::contracts::tests::codex_tui_terminal_range_end_is_latch_only_5264
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::terminal_delivery_epilogue_routes_identity_mismatch_to_warn
 services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::guidance::tests::completed_empty_response_explains_recovery_and_next_actions
 services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::guidance::tests::disconnected_empty_response_explains_recovery_and_next_actions
