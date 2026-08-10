@@ -2739,3 +2739,48 @@ fn extract_yields_none_entry_id_when_uuid_absent() {
     assert_eq!(prompt, "no uuid here");
     assert_eq!(entry_id, None);
 }
+
+#[test]
+fn codex_canonical_offsets_advance_atomically_or_not_at_all() {
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    reset_state();
+    let tmux = "AgentDesk-codex-canonical-offsets";
+    register_tmux_runtime_binding(
+        tmux,
+        TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::CodexTui,
+            output_path: "/tmp/raw.jsonl".to_string(),
+            relay_output_path: Some("/tmp/canonical.jsonl".to_string()),
+            input_fifo_path: None,
+            session_id: Some("thread".to_string()),
+            last_offset: 100,
+            relay_last_offset: Some(20),
+        },
+    );
+    assert!(!advance_codex_canonical_runtime_offsets(
+        tmux,
+        "/tmp/wrong.jsonl",
+        200,
+        "/tmp/canonical.jsonl",
+        40,
+    ));
+    let unchanged = runtime_binding_for_tmux_session(tmux).unwrap();
+    assert_eq!(
+        (unchanged.last_offset, unchanged.relay_last_offset),
+        (100, Some(20))
+    );
+    assert!(advance_codex_canonical_runtime_offsets(
+        tmux,
+        "/tmp/raw.jsonl",
+        200,
+        "/tmp/canonical.jsonl",
+        40,
+    ));
+    let advanced = runtime_binding_for_tmux_session(tmux).unwrap();
+    assert_eq!(
+        (advanced.last_offset, advanced.relay_last_offset),
+        (200, Some(40))
+    );
+}

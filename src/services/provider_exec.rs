@@ -188,6 +188,7 @@ pub async fn execute_structured_with_context(
                     None,
                     None,
                     false,
+                    false,
                 ),
                 ProviderExecutionAdapter::Gemini => gemini::execute_command_streaming(
                     &prompt,

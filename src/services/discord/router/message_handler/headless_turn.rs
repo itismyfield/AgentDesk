@@ -1210,6 +1210,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
                             codex_goals_override,
                             compact_token_limit_for_codex,
                             force_fresh_provider_session,
+                            false,
                         ),
                         ProviderKind::Gemini => gemini::execute_command_streaming(
                             &context_prompt,

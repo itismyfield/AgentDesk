@@ -157,6 +157,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn canonical_codex_foreground_replaces_post_restart_raw_incumbent() {
+        let watchers = TmuxWatcherRegistry::new();
+        let owner = ChannelId::new(1_485_506_232_256_168_140);
+        let tmux = "AgentDesk-codex-post-restart-canonical";
+        let incumbent = test_watcher_handle(tmux, "/tmp/raw-rollout.jsonl");
+        let incumbent_cancel = incumbent.cancel.clone();
+        assert!(try_claim_watcher(&watchers, owner, incumbent));
+
+        let outcome = claim_or_reuse_watcher(
+            &watchers,
+            owner,
+            test_watcher_handle(tmux, "/tmp/canonical-relay.jsonl"),
+            &ProviderKind::Codex,
+            "turn_start_codex_normalized",
+        );
+
+        assert_eq!(outcome.action, WatcherClaimAction::SpawnReplacedStale);
+        assert!(incumbent_cancel.load(Ordering::Relaxed));
+        assert_eq!(watchers.len(), 1);
+        assert_eq!(
+            watchers.get(&owner).unwrap().output_path,
+            "/tmp/canonical-relay.jsonl"
+        );
+    }
+
     /// #4455: a crossed-provider-turn Codex rebind must replace even a live
     /// same-session/same-output incumbent. Reuse would leave its stale
     /// `current_msg_id` render seed and converter generation in authority.

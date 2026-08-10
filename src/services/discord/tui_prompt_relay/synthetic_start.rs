@@ -46,6 +46,22 @@ pub(in crate::services::discord) fn synthetic_start_offset_carry_forward(
     relay_last_offset.max(committed_relay_offset.unwrap_or(0))
 }
 
+pub(super) fn canonical_codex_synthetic_coordinates(
+    provider: &ProviderKind,
+    binding: Option<&crate::services::tui_prompt_dedupe::TuiRuntimeBinding>,
+) -> Option<(std::path::PathBuf, u64)> {
+    binding
+        .filter(|binding| {
+            provider == &ProviderKind::Codex && binding.runtime_kind == RuntimeHandoffKind::CodexTui
+        })
+        .map(|binding| {
+            (
+                std::path::PathBuf::from(binding.relay_output_path()),
+                binding.relay_last_offset(),
+            )
+        })
+}
+
 pub(super) async fn claim_tui_direct_synthetic_turn(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -59,14 +75,23 @@ pub(super) async fn claim_tui_direct_synthetic_turn(
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name);
     let binding =
         external_input_relay_binding(provider.as_str(), tmux_session_name, channel_id, binding);
-    let output_path = external_input_relay_output_path(
-        shared,
-        provider.as_str(),
-        tmux_session_name,
-        channel_id,
-        binding.as_ref(),
-    );
-    let relay_last_offset = external_input_relay_start_offset(provider, binding.as_ref());
+    let canonical_codex_coordinates =
+        canonical_codex_synthetic_coordinates(provider, binding.as_ref());
+    let output_path = canonical_codex_coordinates
+        .as_ref()
+        .map(|(path, _)| path.clone())
+        .or_else(|| {
+            external_input_relay_output_path(
+                shared,
+                provider.as_str(),
+                tmux_session_name,
+                channel_id,
+                binding.as_ref(),
+            )
+        });
+    let relay_last_offset = canonical_codex_coordinates
+        .map(|(_, offset)| offset)
+        .unwrap_or_else(|| external_input_relay_start_offset(provider, binding.as_ref()));
     // #3358 round 2: carry the committed frontier forward, but ONLY for the
     // CURRENT wrapper generation (stale → `None` → no content skip).
     // The `tmux` module is `#[cfg(unix)]`; on non-unix targets (windows CI

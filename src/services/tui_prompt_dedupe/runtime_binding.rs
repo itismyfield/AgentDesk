@@ -756,3 +756,28 @@ pub(crate) fn advance_tmux_runtime_binding_offset(
     entry.recorded_at = Instant::now();
     true
 }
+
+/// Advance Codex's raw discovery cursor and canonical relay cursor as one
+/// in-memory state transition. A path mismatch updates neither coordinate.
+pub(crate) fn advance_codex_canonical_runtime_offsets(
+    tmux_session_name: &str,
+    raw_output_path: &str,
+    raw_offset: u64,
+    canonical_output_path: &str,
+    canonical_offset: u64,
+) -> bool {
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    let Some(entry) = state.runtime_by_tmux.get_mut(tmux_session_name.trim()) else {
+        return false;
+    };
+    if entry.value.output_path != raw_output_path
+        || entry.value.relay_output_path.as_deref() != Some(canonical_output_path)
+    {
+        return false;
+    }
+    entry.value.last_offset = raw_offset;
+    entry.value.relay_last_offset = Some(canonical_offset);
+    entry.recorded_at = Instant::now();
+    true
+}

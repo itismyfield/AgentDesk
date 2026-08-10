@@ -3680,6 +3680,8 @@ services::discord::recovery_engine::rebind_runtime::tests::claude_rebind_with_le
 services::discord::recovery_engine::rebind_runtime::tests::claude_rebind_with_selector_transcript_uses_claude_tui_output_path
 services::discord::recovery_engine::rebind_runtime::tests::claude_rebind_without_runtime_marker_does_not_promote_transcript_to_claude_tui
 services::discord::recovery_engine::rebind_runtime::tests::claude_rebind_without_transcript_candidate_uses_default_wrapper_output_path
+services::discord::recovery_engine::rebind_runtime::tests::codex_canonical_relay_durably_offsets_done_and_translates_runtime_ready
+services::discord::recovery_engine::rebind_runtime::tests::codex_canonical_relay_replays_uncommitted_suffix_without_duplicate_prefix
 services::discord::recovery_engine::rebind_runtime::tests::codex_rebind_relay_generation_fences_superseded_same_path_writer
 services::discord::recovery_engine::rebind_runtime::tests::codex_rebind_rollout_cursor_does_not_move_backward_for_same_rollout
 services::discord::recovery_engine::rebind_runtime::tests::codex_rebind_rollout_cursor_persists_explicit_monotonic_offset
@@ -5032,6 +5034,7 @@ services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::watcher_recovery_cwd_does_not_cross_channels
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::watcher_recovery_cwd_legacy_null_channel_id_not_reused
 services::discord::tmux::watcher_lifecycle::tests::tests::cancel_suppression_only_applies_before_terminal_delivery
+services::discord::tmux::watcher_lifecycle::tests::tests::canonical_codex_foreground_replaces_post_restart_raw_incumbent
 services::discord::tmux::watcher_lifecycle::tests::tests::delivered_then_idle_death_surfaces_no_lifecycle_signal
 services::discord::tmux::watcher_lifecycle::tests::tests::forced_rebind_replaces_live_same_output_incumbent
 services::discord::tmux::watcher_lifecycle::tests::tests::genuine_mid_turn_crash_triggers_restart_handoff
@@ -5314,6 +5317,7 @@ services::discord::tui_prompt_relay::tests::codex_external_input_relay_output_pa
 services::discord::tui_prompt_relay::tests::codex_idle_prompt_tails_only_new_ssh_direct_prompt
 services::discord::tui_prompt_relay::tests::codex_ownerless_external_input_undelivered_turn_needs_rollout_repair
 services::discord::tui_prompt_relay::tests::codex_rehydrate_thread_session_resolves_thread_channel_id
+services::discord::tui_prompt_relay::tests::codex_synthetic_start_uses_canonical_path_and_cursor
 services::discord::tui_prompt_relay::tests::command_message_skill_wakeup_preserves_assistant_relay_lifecycle
 services::discord::tui_prompt_relay::tests::compact_continuation_injection_skips_synthetic_and_leaves_mailbox_free
 services::discord::tui_prompt_relay::tests::confirmed_existing_session_is_not_dead_even_if_pane_probes_flake
@@ -5716,6 +5720,7 @@ services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short
 services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::bridge_short_replace_partial_failure_no_advance
 services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::bridge_short_replace_routes_edit_to_delivery_channel
 services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::bridge_terminal_lease_range_pins_cutover
+services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::codex_canonical_range_cuts_over_without_runtime_ready_dependency
 services::discord::turn_bridge::terminal_delivery::relay_state_contract_refs::contract_symbols_exist
 services::discord::turn_bridge::terminal_delivery::tests::a0_characterization_tests::a0_terminal_delivery_predicate_boundary_is_strictly_greater_than_2000
 services::discord::turn_bridge::terminal_delivery::tests::a0_characterization_tests::a0_terminal_delivery_predicate_gates_on_can_chain_and_over_limit
@@ -7157,6 +7162,7 @@ services::tui_prompt_dedupe::tests::clear_external_input_relay_lease_if_generati
 services::tui_prompt_dedupe::tests::clear_external_input_relay_lease_if_matches_preserves_newer_turn
 services::tui_prompt_dedupe::tests::clears_runtime_binding_by_tmux_session
 services::tui_prompt_dedupe::tests::codex_and_qwen_keep_claude_interrupt_text_as_user_prompt
+services::tui_prompt_dedupe::tests::codex_canonical_offsets_advance_atomically_or_not_at_all
 services::tui_prompt_dedupe::tests::codex_distinct_message_entry_ids_publish_distinct_direct_prompts
 services::tui_prompt_dedupe::tests::dedup_suppressed_candidate_does_not_record_entry_id
 services::tui_prompt_dedupe::tests::deferred_anchor_completion_is_isolated_by_provider_and_session

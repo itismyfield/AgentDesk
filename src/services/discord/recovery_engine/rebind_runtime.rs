@@ -1796,10 +1796,129 @@ mod tests {
                 replacement_generation,
             )
             .expect("write replacement generation")
+            .is_some()
         );
         let relay = std::fs::read_to_string(&relay_path).expect("read relay");
         assert!(!relay.contains("stale old response"));
         assert!(relay.contains("current response"));
+    }
+
+    #[test]
+    fn codex_canonical_relay_durably_offsets_done_and_translates_runtime_ready() {
+        let _guard = lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _root = EnvGuard::set_path("AGENTDESK_ROOT_DIR", tmp.path());
+        let tmux = "AgentDesk-codex-canonical-order";
+        let (downstream, receiver) = std::sync::mpsc::channel();
+        let relay =
+            crate::services::discord::CodexCanonicalRelay::start(tmux, downstream, true, Some(0))
+                .expect("start canonical relay");
+        let sender = relay.sender();
+        sender
+            .send(StreamMessage::Text {
+                content: "answer".to_string(),
+            })
+            .unwrap();
+        sender
+            .send(StreamMessage::Done {
+                result: "answer".to_string(),
+                session_id: Some("thread-1".to_string()),
+            })
+            .unwrap();
+        sender
+            .send(StreamMessage::RuntimeReady {
+                handoff: RuntimeHandoff::CodexTui {
+                    rollout_path: "/raw/rollout.jsonl".to_string(),
+                    thread_id: Some("thread-1".to_string()),
+                    tmux_session_name: tmux.to_string(),
+                    last_offset: 91_000,
+                },
+            })
+            .unwrap();
+        drop(sender);
+        let result = relay.finish().expect("finish canonical relay");
+        let messages = receiver.try_iter().collect::<Vec<_>>();
+        assert!(matches!(messages[0], StreamMessage::OutputOffset { .. }));
+        assert!(matches!(messages[1], StreamMessage::Text { .. }));
+        assert!(matches!(messages[2], StreamMessage::OutputOffset { .. }));
+        assert!(matches!(messages[3], StreamMessage::Done { .. }));
+        let StreamMessage::RuntimeReady { handoff } = &messages[5] else {
+            panic!("translated RuntimeReady missing");
+        };
+        let RuntimeHandoff::CodexTui {
+            rollout_path,
+            last_offset,
+            ..
+        } = handoff
+        else {
+            panic!("wrong handoff kind");
+        };
+        assert_eq!(rollout_path, &result.output_path);
+        assert_eq!(*last_offset, result.end_offset);
+        assert_eq!(result.terminal_records, 1);
+        assert_eq!(
+            std::fs::read_to_string(&result.output_path)
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn codex_canonical_relay_replays_uncommitted_suffix_without_duplicate_prefix() {
+        let _guard = lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _root = EnvGuard::set_path("AGENTDESK_ROOT_DIR", tmp.path());
+        let tmux = "AgentDesk-codex-canonical-replay";
+        let (first_downstream, first_receiver) = std::sync::mpsc::channel();
+        let first = crate::services::discord::CodexCanonicalRelay::start(
+            tmux,
+            first_downstream,
+            true,
+            Some(0),
+        )
+        .unwrap();
+        let first_sender = first.sender();
+        first_sender
+            .send(StreamMessage::Text {
+                content: "prefix".to_string(),
+            })
+            .unwrap();
+        drop(first_sender);
+        let first_result = first.finish().unwrap();
+        drop(first_receiver);
+
+        let (second_downstream, second_receiver) = std::sync::mpsc::channel();
+        let second = crate::services::discord::CodexCanonicalRelay::start(
+            tmux,
+            second_downstream,
+            false,
+            Some(0),
+        )
+        .unwrap();
+        let second_sender = second.sender();
+        second_sender
+            .send(StreamMessage::Text {
+                content: "prefix".to_string(),
+            })
+            .unwrap();
+        second_sender
+            .send(StreamMessage::Done {
+                result: "prefix".to_string(),
+                session_id: None,
+            })
+            .unwrap();
+        drop(second_sender);
+        let second_result = second.finish().unwrap();
+        assert!(second_receiver.try_iter().count() >= 4);
+        let lines = std::fs::read_to_string(&second_result.output_path)
+            .unwrap()
+            .lines()
+            .count();
+        assert_eq!(lines, 2, "replay must not append the existing prefix again");
+        assert_eq!(second_result.start_offset, 0);
+        assert!(second_result.end_offset > first_result.end_offset);
     }
 
     #[test]

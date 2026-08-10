@@ -73,6 +73,18 @@ mod sidecar_interaction;
 mod standby_relay;
 // #1074: landing zone for the future recovery-engine module split (restart / runtime / manual_rebind; see `docs/recovery-paths.md`). Named `recovery_paths` to avoid shadowing the `recovery_engine as recovery` alias until the split lands.
 mod recovery_engine;
+pub(crate) struct CodexCanonicalRelay {
+    sender: Option<std::sync::mpsc::Sender<crate::services::agent_protocol::StreamMessage>>,
+    join: Option<std::thread::JoinHandle<Result<CodexCanonicalRelayResult, String>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CodexCanonicalRelayResult {
+    pub(crate) output_path: String,
+    pub(crate) start_offset: u64,
+    pub(crate) end_offset: u64,
+    pub(crate) terminal_records: u64,
+}
 mod recovery_paths;
 mod restart_mode;
 // #1074: session identity parsing SSoT (legacy + namespaced session_key forms).

@@ -2181,6 +2181,13 @@ pub(super) async fn handle_text_message(
     // Pause the tmux-session owner watcher before writing to the provider
     // FIFO. In thread follow-ups, the watcher may be owned by the parent
     // channel rather than the requested thread channel.
+    let watcher_claim_source = if provider == ProviderKind::Codex
+        && prelaunch_runtime_kind == Some(RuntimeHandoffKind::CodexTui)
+    {
+        "turn_start_codex_normalized"
+    } else {
+        "turn_start_message"
+    };
     let _ = attach_paused_turn_watcher_for_inflight(
         shared,
         http.clone(),
@@ -2189,7 +2196,7 @@ pub(super) async fn handle_text_message(
         watcher_tmux_name,
         watcher_output_path,
         inflight_offset,
-        "turn_start_message",
+        watcher_claim_source,
         final_thread_parent.map(|(parent_channel_id, _)| parent_channel_id),
         &mut inflight_state,
     );
@@ -2319,6 +2326,7 @@ pub(super) async fn handle_text_message(
                             codex_goals_override,
                             compact_token_limit_for_codex,
                             force_fresh_provider_session,
+                            true,
                         ),
                         ProviderKind::Gemini => gemini::execute_command_streaming(
                             &context_prompt,

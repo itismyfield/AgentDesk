@@ -3189,6 +3189,26 @@ fn codex_external_input_relay_output_path_uses_rollout_not_wrapper() {
     );
 }
 
+#[test]
+fn codex_synthetic_start_uses_canonical_path_and_cursor() {
+    let binding = crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+        runtime_kind: RuntimeHandoffKind::CodexTui,
+        output_path: "/tmp/raw-rollout.jsonl".to_string(),
+        relay_output_path: Some("/tmp/canonical-relay.jsonl".to_string()),
+        input_fifo_path: None,
+        session_id: Some("thread".to_string()),
+        last_offset: 92_000,
+        relay_last_offset: Some(640),
+    };
+    assert_eq!(
+        synthetic_start::canonical_codex_synthetic_coordinates(
+            &ProviderKind::Codex,
+            Some(&binding),
+        ),
+        Some((std::path::PathBuf::from("/tmp/canonical-relay.jsonl"), 640))
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn codex_external_input_binding_refreshes_from_live_rollout_marker() {

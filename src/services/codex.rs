@@ -573,7 +573,7 @@ fn direct_tui_material_fallback_reason(options: &CodexLaunchOptions) -> Option<&
     None
 }
 
-fn register_codex_tui_idle_relay_binding(
+pub(crate) fn register_codex_tui_idle_relay_binding(
     tmux_session_name: &str,
     tail_result: &crate::services::codex_tui::rollout_tail::CodexTuiTailResult,
 ) {
@@ -1211,6 +1211,7 @@ pub fn execute_command_streaming(
     goals_enabled: Option<bool>,
     compact_token_limit: Option<u64>,
     force_fresh_provider_session: bool,
+    canonical_discord_delivery: bool,
 ) -> Result<(), String> {
     #[cfg(unix)]
     let entrypoint_supports_tui_hosting =
@@ -1328,6 +1329,7 @@ pub fn execute_command_streaming(
                     readonly_mode,
                     compact_token_limit,
                     force_fresh_provider_session,
+                    canonical_discord_delivery,
                 );
             }
             log_codex_runtime_kind(
@@ -1767,6 +1769,7 @@ fn execute_streaming_local_tui_tmux(
     readonly_mode: bool,
     compact_token_limit: Option<u64>,
     force_fresh_provider_session: bool,
+    canonical_discord_delivery: bool,
 ) -> Result<(), String> {
     let warm_followup_enabled =
         crate::services::codex_tui::warm_followup::codex_tui_warm_followup_enabled();
@@ -1835,6 +1838,7 @@ fn execute_streaming_local_tui_tmux(
             cancel_token.clone(),
             tmux_session_name,
             report_channel_id,
+            canonical_discord_delivery,
         ) {
             crate::services::codex_tui::warm_followup::CodexWarmFollowupOutcome::Terminal(
                 result,
@@ -1865,6 +1869,21 @@ fn execute_streaming_local_tui_tmux(
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
     crate::services::codex_tui::session::CodexTuiSessionFiles::for_tmux_session(tmux_session_name)
         .cleanup_best_effort();
+
+    let canonical_relay = canonical_discord_delivery
+        .then(|| {
+            crate::services::discord::CodexCanonicalRelay::start(
+                tmux_session_name,
+                sender.clone(),
+                true,
+                Some(0),
+            )
+        })
+        .transpose()?;
+    let provider_sender = canonical_relay
+        .as_ref()
+        .map(crate::services::discord::CodexCanonicalRelay::sender)
+        .unwrap_or_else(|| sender.clone());
 
     let CodexTuiLaunchScript {
         script_path,
@@ -1941,7 +1960,7 @@ fn execute_streaming_local_tui_tmux(
         resume_params,
         working_dir,
         rollout_modified_since,
-        sender.clone(),
+        provider_sender.clone(),
         cancel_token,
         tmux_session_name,
         prompt,
@@ -1957,12 +1976,29 @@ fn execute_streaming_local_tui_tmux(
         None => return Ok(()),
     };
 
+    let tail_result_for_binding = tail_result.clone();
     emit_codex_tui_post_tail_handoff(
         tail_result,
-        sender,
+        provider_sender.clone(),
         cancel_token_for_post_tail,
         tmux_session_name,
-    )
+        !canonical_discord_delivery,
+    )?;
+    drop(provider_sender);
+    if let Some(canonical_relay) = canonical_relay {
+        let canonical = canonical_relay.finish()?;
+        if canonical.terminal_records == 0 {
+            return Err("Codex canonical relay closed without a terminal record".to_string());
+        }
+        register_codex_tui_idle_relay_binding(tmux_session_name, &tail_result_for_binding);
+        debug_assert_eq!(
+            canonical.end_offset,
+            std::fs::metadata(&canonical.output_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(canonical.end_offset)
+        );
+    }
+    Ok(())
 }
 
 /// Resolve the rollout-tail result for the Codex Direct TUI launch.
@@ -2051,6 +2087,7 @@ pub(crate) fn emit_codex_tui_post_tail_handoff(
     sender: Sender<StreamMessage>,
     cancel_token_for_post_tail: Option<std::sync::Arc<CancelToken>>,
     tmux_session_name: &str,
+    register_idle_binding: bool,
 ) -> Result<(), String> {
     let cancel_observed =
         || crate::services::provider::cancel_requested(cancel_token_for_post_tail.as_deref());
@@ -2099,7 +2136,9 @@ pub(crate) fn emit_codex_tui_post_tail_handoff(
         // different: it scans Codex's rollout after the bridge has gone idle,
         // so it still needs the rollout binding even when RuntimeReady is
         // suppressed by the post-turn readiness guard.
-        register_codex_tui_idle_relay_binding(tmux_session_name, &tail_result);
+        if register_idle_binding {
+            register_codex_tui_idle_relay_binding(tmux_session_name, &tail_result);
+        }
 
         // #2325: gate the RuntimeReady handoff on the Codex TUI composer
         // actually being ready for input. RuntimeReady is the signal the
@@ -3743,6 +3782,7 @@ mod remote_dispatch_gate_tests {
             None,
             None,
             None,
+            false,
             false,
         );
 

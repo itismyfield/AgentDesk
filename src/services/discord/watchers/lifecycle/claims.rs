@@ -171,6 +171,10 @@ pub(crate) fn restore_scan_should_skip_existing_watcher(
     !cancelled && !paused && existing_output_path == restored_output_path
 }
 
+fn canonical_codex_foreground_claim(source: &str) -> bool {
+    source == "turn_start_codex_normalized"
+}
+
 /// #226/#1170: Atomically claim a tmux session for watcher creation.
 /// Returns true if the claim succeeded (caller should spawn the watcher).
 /// Returns false if a watcher already exists (caller should skip).
@@ -347,13 +351,14 @@ pub(crate) fn claim_watcher(
     {
         let turn_start_uses_provisional_output_path =
             matches!(source, "turn_start_message" | "turn_start_headless");
+        let canonical_codex_foreground = canonical_codex_foreground_claim(source);
         let output_path_changed = existing_output_path != requested_output_path;
         let replace_paused_incumbent = existing_paused && !turn_start_uses_provisional_output_path;
         // Turn admission resolves the canonical pre-handoff wrapper path. Once a
         // healthy watcher has adopted the provider-native runtime transcript,
         // that provisional path must not downgrade the live registry binding.
-        let replace_for_output_path =
-            output_path_changed && !turn_start_uses_provisional_output_path;
+        let replace_for_output_path = output_path_changed
+            && (canonical_codex_foreground || !turn_start_uses_provisional_output_path);
         let replaces_existing = force_replace_live_same_tmux
             || existing_cancelled
             || replace_paused_incumbent
@@ -386,6 +391,7 @@ pub(crate) fn claim_watcher(
                     force_replace_live_same_tmux,
                     replace_paused_incumbent,
                     output_path_changed,
+                    canonical_codex_foreground,
                     "watcher claim cancelled same-tmux incumbent before spawning replacement"
                 );
             }

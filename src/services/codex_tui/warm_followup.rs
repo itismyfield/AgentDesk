@@ -300,6 +300,7 @@ pub(crate) fn try_codex_tui_warm_followup(
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     tmux_session_name: &str,
     report_channel_id: Option<u64>,
+    canonical_discord_delivery: bool,
 ) -> CodexWarmFollowupOutcome {
     let marker = super::session::read_codex_tui_rollout_marker(tmux_session_name);
     let fingerprint = codex_tui_launch_options_fingerprint(launch_options);
@@ -401,6 +402,27 @@ pub(crate) fn try_codex_tui_warm_followup(
         crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
     }
 
+    let canonical_relay = if canonical_discord_delivery {
+        let committed_start =
+            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name)
+                .map(|binding| binding.relay_last_offset());
+        match crate::services::discord::CodexCanonicalRelay::start(
+            tmux_session_name,
+            sender.clone(),
+            false,
+            committed_start,
+        ) {
+            Ok(relay) => Some(relay),
+            Err(error) => return CodexWarmFollowupOutcome::Terminal(Err(error)),
+        }
+    } else {
+        None
+    };
+    let provider_sender = canonical_relay
+        .as_ref()
+        .map(crate::services::discord::CodexCanonicalRelay::sender)
+        .unwrap_or_else(|| sender.clone());
+
     match super::input::submit_codex_followup_prompt(
         tmux_session_name,
         prompt,
@@ -492,7 +514,7 @@ pub(crate) fn try_codex_tui_warm_followup(
         rollout_path,
         start_offset,
         session_id,
-        sender.clone(),
+        provider_sender.clone(),
         cancel_token.clone(),
         || crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name),
         tmux_session_name,
@@ -505,12 +527,40 @@ pub(crate) fn try_codex_tui_warm_followup(
         }
         Err(error) => return CodexWarmFollowupOutcome::Terminal(Err(error)),
     };
-    CodexWarmFollowupOutcome::Terminal(crate::services::codex::emit_codex_tui_post_tail_handoff(
+    let tail_result_for_binding = tail_result.clone();
+    let handoff = crate::services::codex::emit_codex_tui_post_tail_handoff(
         tail_result,
-        sender,
+        provider_sender.clone(),
         cancel_token,
         tmux_session_name,
-    ))
+        !canonical_discord_delivery,
+    );
+    drop(provider_sender);
+    if let Err(error) = handoff {
+        return CodexWarmFollowupOutcome::Terminal(Err(error));
+    }
+    if let Some(canonical_relay) = canonical_relay {
+        let canonical = match canonical_relay.finish() {
+            Ok(result) if result.terminal_records > 0 => result,
+            Ok(_) => {
+                return CodexWarmFollowupOutcome::Terminal(Err(
+                    "Codex canonical warm relay closed without a terminal record".to_string(),
+                ));
+            }
+            Err(error) => return CodexWarmFollowupOutcome::Terminal(Err(error)),
+        };
+        crate::services::codex::register_codex_tui_idle_relay_binding(
+            tmux_session_name,
+            &tail_result_for_binding,
+        );
+        debug_assert_eq!(
+            canonical.end_offset,
+            std::fs::metadata(&canonical.output_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(canonical.end_offset)
+        );
+    }
+    CodexWarmFollowupOutcome::Terminal(Ok(()))
 }
 
 #[cfg(test)]
