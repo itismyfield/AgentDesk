@@ -44,15 +44,11 @@ impl TuiPromptDedupeState {
             .filter(|(_, entry)| now.duration_since(entry.recorded_at) > SESSION_MAPPING_TTL)
             .map(|(tmux, _)| tmux.clone())
             .collect::<Vec<_>>();
-        // STATE is already held, so blocking here would invert the normal
-        // source-authority -> STATE order. Busy entries survive this purge and
-        // are rechecked by their under-authority getter/mutator.
+        // STATE -> source authority must stay nonblocking; busy entries survive.
         for tmux in expired_runtime_bindings {
-            let _ =
-                crate::services::tmux_common::try_with_tmux_source_authority(&tmux, |authority| {
-                    authority.assert_session(&tmux);
-                    self.runtime_by_tmux.remove(&tmux);
-                });
+            let _ = crate::services::tmux_common::try_with_tmux_source_authority(&tmux, |_| {
+                self.runtime_by_tmux.remove(&tmux)
+            });
         }
         // #3885 follow-up: anchors live `PROMPT_ANCHOR_SUBMIT_TTL` (4h) so a long
         // streaming turn's anchor is not purged mid-stream (see the constant). The
@@ -86,15 +82,9 @@ impl TuiPromptDedupeState {
         &mut self,
         tmux_session_name: &str,
     ) {
-        let expired = self
-            .runtime_by_tmux
-            .get(tmux_session_name)
-            .is_some_and(|entry| {
-                Instant::now().duration_since(entry.recorded_at) > SESSION_MAPPING_TTL
-            });
-        if expired {
-            self.runtime_by_tmux.remove(tmux_session_name);
-        }
+        self.runtime_by_tmux.retain(|key, entry| {
+            key != tmux_session_name || entry.recorded_at.elapsed() <= SESSION_MAPPING_TTL
+        });
     }
 
     pub(super) fn remove_provider_session_mappings_for_tmux(

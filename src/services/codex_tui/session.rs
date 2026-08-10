@@ -97,8 +97,9 @@ pub fn write_codex_tui_rollout_marker_with_start_offset(
     session_id: Option<&str>,
     rollout_start_offset: Option<u64>,
 ) -> Result<(), String> {
-    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |_| {
+    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
         write_codex_tui_rollout_marker_under_source_authority(
+            authority,
             tmux_session_name,
             rollout_path,
             session_id,
@@ -107,13 +108,15 @@ pub fn write_codex_tui_rollout_marker_with_start_offset(
     })
 }
 
-fn write_codex_tui_rollout_marker_under_source_authority(
+pub(crate) fn write_codex_tui_rollout_marker_under_source_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     tmux_session_name: &str,
     rollout_path: &Path,
     session_id: Option<&str>,
     rollout_start_offset: Option<u64>,
 ) -> Result<(), String> {
     let tmux_session_name = tmux_session_name.trim();
+    authority.assert_session(tmux_session_name);
     if tmux_session_name.is_empty() {
         return Ok(());
     }
@@ -137,22 +140,108 @@ fn write_codex_tui_rollout_marker_under_source_authority(
         .map_err(|error| format!("failed to write Codex TUI rollout marker: {error}"))
 }
 
+pub(crate) fn install_codex_tui_runtime_binding(
+    tmux_session_name: &str,
+    rollout_start_offset: Option<u64>,
+    binding: crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+) {
+    let rollout_path = PathBuf::from(&binding.output_path);
+    let session_id = binding.session_id.clone();
+    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+        if let Err(error) = write_codex_tui_rollout_marker_under_source_authority(
+            authority,
+            tmux_session_name,
+            &rollout_path,
+            session_id.as_deref(),
+            rollout_start_offset,
+        ) {
+            tracing::warn!(
+                tmux_session_name,
+                error,
+                "failed to persist Codex TUI rollout marker; runtime binding unchanged"
+            );
+            return;
+        }
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding_under_source_authority(
+            authority,
+            tmux_session_name,
+            binding,
+        );
+    });
+}
+
 pub fn advance_codex_tui_rollout_marker_start_offset(
     tmux_session_name: &str,
     rollout_path: &Path,
     rollout_start_offset: u64,
 ) -> Result<(), String> {
-    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |_| {
-        let existing_session_id = read_codex_tui_rollout_marker(tmux_session_name)
-            .filter(|marker| codex_tui_rollout_paths_same(&marker.rollout_path, rollout_path))
-            .and_then(|marker| marker.session_id);
-        write_codex_tui_rollout_marker_under_source_authority(
+    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+        advance_codex_tui_rollout_marker_start_offset_under_source_authority(
+            authority,
             tmux_session_name,
             rollout_path,
-            existing_session_id.as_deref(),
-            Some(rollout_start_offset),
+            rollout_start_offset,
         )
     })
+}
+
+pub(crate) fn advance_codex_tui_rollout_marker_start_offset_under_source_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    tmux_session_name: &str,
+    rollout_path: &Path,
+    rollout_start_offset: u64,
+) -> Result<(), String> {
+    let existing_session_id = read_codex_tui_rollout_marker(tmux_session_name)
+        .filter(|marker| codex_tui_rollout_paths_same(&marker.rollout_path, rollout_path))
+        .and_then(|marker| marker.session_id);
+    write_codex_tui_rollout_marker_under_source_authority(
+        authority,
+        tmux_session_name,
+        rollout_path,
+        existing_session_id.as_deref(),
+        Some(rollout_start_offset),
+    )
+}
+
+pub(crate) fn advance_codex_tui_runtime_binding_and_marker_offset(
+    tmux_session_name: &str,
+    rollout_path: &Path,
+    offset: u64,
+) {
+    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+        let path = rollout_path.to_str().unwrap_or_default();
+        let eligible = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
+            authority,
+            tmux_session_name,
+        )
+        .is_some_and(|binding| {
+            binding.runtime_kind
+                == crate::services::agent_protocol::RuntimeHandoffKind::CodexTui
+                && binding.output_path == path
+        });
+        if !eligible {
+            return;
+        }
+        if let Err(error) = advance_codex_tui_rollout_marker_start_offset_under_source_authority(
+            authority,
+            tmux_session_name,
+            rollout_path,
+            offset,
+        ) {
+            tracing::warn!(
+                tmux_session_name,
+                error,
+                "failed to advance Codex TUI source cursor; runtime binding unchanged"
+            );
+            return;
+        }
+        let _ = crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset_under_source_authority(
+            authority,
+            tmux_session_name,
+            path,
+            offset,
+        );
+    });
 }
 
 fn preserved_rollout_start_offset_for_marker(

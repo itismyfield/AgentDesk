@@ -8,29 +8,11 @@ fn advance_codex_tui_runtime_binding_and_marker_offset(
     rollout_path: &std::path::Path,
     offset: u64,
 ) {
-    let rollout_path_str = rollout_path.to_str().unwrap_or_default();
-    if !crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
+    crate::services::codex_tui::session::advance_codex_tui_runtime_binding_and_marker_offset(
         tmux_session_name,
-        rollout_path_str,
+        rollout_path,
         offset,
-    ) {
-        return;
-    }
-    if let Err(error) =
-        crate::services::codex_tui::session::advance_codex_tui_rollout_marker_start_offset(
-            tmux_session_name,
-            rollout_path,
-            offset,
-        )
-    {
-        tracing::warn!(
-            tmux_session_name,
-            rollout_path = %rollout_path.display(),
-            offset,
-            error,
-            "failed to advance Codex TUI rollout marker cursor"
-        );
-    }
+    );
 }
 
 #[cfg(unix)]

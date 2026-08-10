@@ -7,11 +7,35 @@ use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use crate::services::tmux_diagnostics::clear_tmux_exit_reason;
 
-// Same-pane source identity is split across marker files and the in-memory
-// runtime binding. All mutations linearize here; callers must never hold this
-// guard across an await. The dedupe lock order is source authority -> STATE.
+// Same-pane source mutations linearize here; lock order is authority -> STATE.
 static TMUX_SOURCE_AUTHORITY_LOCKS: LazyLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+thread_local! {
+    static SOURCE_AUTHORITY_CONTENTION_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&str)>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+struct SourceAuthorityContention(String);
+
+#[cfg(test)]
+pub(crate) fn source_authority_contention_key_for_tests(
+    operation: impl FnOnce(),
+) -> Option<String> {
+    SOURCE_AUTHORITY_CONTENTION_HOOK.with(|slot| {
+        slot.borrow_mut().replace(Box::new(|key| {
+            std::panic::resume_unwind(Box::new(SourceAuthorityContention(key.to_string())))
+        }));
+    });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
+    SOURCE_AUTHORITY_CONTENTION_HOOK.with(|slot| slot.borrow_mut().take());
+    match result.err()?.downcast::<SourceAuthorityContention>() {
+        Ok(contention) => Some(contention.0),
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
 
 pub(crate) struct TmuxSourceAuthority<'a>(&'a str);
 
@@ -34,35 +58,51 @@ fn source_authority_lock_for_key(key: &str) -> Arc<Mutex<()>> {
     lock
 }
 
-fn tmux_source_authority_lock(tmux_session_name: &str) -> Arc<Mutex<()>> {
-    source_authority_lock_for_key(&session_temp_prefix(tmux_session_name.trim()))
+#[cfg(test)]
+fn lock_source_authority<'a>(lock: &'a Mutex<()>, key: &str) -> std::sync::MutexGuard<'a, ()> {
+    match lock.try_lock() {
+        Ok(guard) => return guard,
+        Err(std::sync::TryLockError::Poisoned(poison)) => return poison.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => SOURCE_AUTHORITY_CONTENTION_HOOK.with(|slot| {
+            if let Some(hook) = slot.borrow_mut().take() {
+                hook(key);
+            }
+        }),
+    }
+    lock.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+fn with_source_authority_key<R>(key: &str, operation: impl FnOnce() -> R) -> R {
+    let lock = source_authority_lock_for_key(key);
+    #[cfg(test)]
+    let _guard = lock_source_authority(&lock, key);
+    #[cfg(not(test))]
+    let _guard = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+    operation()
 }
 
 pub(crate) fn with_session_temp_source_authority<R>(
     session_temp_stem: &str,
     operation: impl FnOnce() -> R,
 ) -> R {
-    // The orphan sweeper has the canonical stem rather than the tmux name. A
-    // normal caller derives this same stem in `tmux_source_authority_lock`.
-    let lock = source_authority_lock_for_key(session_temp_stem);
-    let _guard = lock.lock().unwrap_or_else(|poison| poison.into_inner());
-    operation()
+    with_source_authority_key(session_temp_stem, operation)
 }
 
 pub(crate) fn with_tmux_source_authority<R>(
     tmux_session_name: &str,
     operation: impl FnOnce(&TmuxSourceAuthority<'_>) -> R,
 ) -> R {
-    let lock = tmux_source_authority_lock(tmux_session_name);
-    let _guard = lock.lock().unwrap_or_else(|poison| poison.into_inner());
-    operation(&TmuxSourceAuthority(tmux_session_name.trim()))
+    let key = session_temp_prefix(tmux_session_name.trim());
+    with_source_authority_key(&key, || {
+        operation(&TmuxSourceAuthority(tmux_session_name.trim()))
+    })
 }
 
 pub(crate) fn try_with_tmux_source_authority<R>(
     tmux_session_name: &str,
     operation: impl FnOnce(&TmuxSourceAuthority<'_>) -> R,
 ) -> Option<R> {
-    let lock = tmux_source_authority_lock(tmux_session_name);
+    let lock = source_authority_lock_for_key(&session_temp_prefix(tmux_session_name.trim()));
     let _guard = match lock.try_lock() {
         Ok(guard) => guard,
         Err(std::sync::TryLockError::Poisoned(poison)) => poison.into_inner(),

@@ -427,6 +427,27 @@ fn refresh_runtime_binding_activity_extends_mapping_ttl_without_offset_advance()
     let binding = runtime_binding_for_tmux_session("tmux-runtime-activity")
         .expect("binding survives purge after refresh");
     assert_eq!(binding.last_offset, 123);
+
+    STATE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .runtime_by_tmux
+        .get_mut("tmux-runtime-activity")
+        .unwrap()
+        .recorded_at = Instant::now() - SESSION_MAPPING_TTL - Duration::from_secs(1);
+    let present = || {
+        STATE
+            .lock()
+            .unwrap()
+            .runtime_by_tmux
+            .contains_key("tmux-runtime-activity")
+    };
+    crate::services::tmux_common::with_tmux_source_authority("tmux-runtime-activity", |_| {
+        register_tmux_channel("purge-probe", 42);
+        assert!(present());
+    });
+    register_tmux_channel("purge-probe", 43);
+    assert!(!present());
 }
 
 #[test]

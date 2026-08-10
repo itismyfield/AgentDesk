@@ -413,14 +413,9 @@ pub(super) fn spawn_codex_tui_rebind_relay_output(
     let (relay_generation_gate, relay_generation) =
         prepare_codex_rebind_relay_generation(&relay_output_path, truncate_relay_output)?;
 
-    persist_codex_tui_rebind_rollout_cursor(
+    crate::services::codex_tui::session::install_codex_tui_runtime_binding(
         tmux_session_name,
-        std::path::Path::new(rollout_path),
-        session_id.as_deref(),
-        raw_start_offset,
-    );
-    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
-        tmux_session_name,
+        Some(raw_start_offset),
         crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
             runtime_kind: RuntimeHandoffKind::CodexTui,
             output_path: rollout_path.to_string(),
@@ -522,15 +517,9 @@ pub(super) fn spawn_codex_tui_rebind_relay_output(
                             }
                         };
                         if writer_result.is_ok() && advance_cursor {
-                            crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
-                                &tmux_session_name,
-                                rollout_path.to_str().unwrap_or_default(),
-                                final_offset,
-                            );
-                            persist_codex_tui_rebind_rollout_cursor(
+                            crate::services::codex_tui::session::advance_codex_tui_runtime_binding_and_marker_offset(
                                 &tmux_session_name,
                                 &rollout_path,
-                                session_id.as_deref(),
                                 final_offset,
                             );
                         } else if !advance_cursor {

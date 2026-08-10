@@ -890,15 +890,42 @@ mod tests {
 
     #[test]
     fn orphan_sweep_multidot_marker_uses_canonical_source_authority_key_5264() {
-        let stem = "agentdesk-deadbeef1234-host-AgentDesk-codex-5264";
-        assert_eq!(
-            source_authority_stem_for_orphan_file(&format!("{stem}.codex-tui-rollout.json")),
-            stem
-        );
-        assert_eq!(
-            source_authority_stem_for_orphan_file(&format!("{stem}.generation")),
-            stem
-        );
+        use crate::services::codex_tui::session::write_codex_tui_rollout_marker;
+
+        let (_root, _env) = isolated_runtime_root();
+        let tmux = unique_session("orphan.key.with.dots");
+        let rollout = std::path::Path::new("rollout-fixture");
+        let stem_for = |extension| {
+            let path = crate::services::tmux_common::session_temp_path(&tmux, extension);
+            let filename = std::path::Path::new(&path)
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap();
+            source_authority_stem_for_orphan_file(filename).to_string()
+        };
+        let stem = stem_for(crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT);
+        assert!(stem.ends_with(&tmux) && stem.contains('.'));
+        assert_eq!(stem_for("generation"), stem);
+        crate::services::tmux_common::with_session_temp_source_authority(&stem, || {
+            let blocked = |operation: &dyn Fn()| {
+                assert_eq!(
+                    crate::services::tmux_common::source_authority_contention_key_for_tests(
+                        operation
+                    )
+                    .as_deref(),
+                    Some(stem.as_str())
+                )
+            };
+            blocked(&|| write_codex_tui_rollout_marker(&tmux, rollout, Some("session")).unwrap());
+            blocked(&|| {
+                let _ = stamp_session_generation_marker(&tmux);
+            });
+            blocked(&|| crate::services::tmux_common::cleanup_session_temp_files(&tmux));
+            blocked(&|| {
+                crate::services::tmux_common::with_session_temp_source_authority(&stem, || ())
+            });
+        });
     }
 
     #[test]
