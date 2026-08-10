@@ -8,6 +8,7 @@ use super::super::stream_tick::{
 };
 use super::super::{streaming_edit_text::TuiErrorClassification, *};
 use super::exit_reconcile::StreamLoopOutcome;
+use crate::services::discord::inflight::CodexRange;
 
 macro_rules! refresh_expected_after_handoff {
     ($identity:expr, $baseline:expr, $state:expr, $outcome:expr) => {
@@ -51,22 +52,21 @@ macro_rules! stop_on_tool_authority_loss {
 }
 pub(super) use stop_on_tool_authority_loss;
 
-pub(super) async fn receive_next_stream_message(
-    rx: &mut StreamMessageReceiverAdapter,
-    pending: &mut VecDeque<StreamMessage>,
-    done: bool,
-    drain_until: Option<std::time::Instant>,
-) {
-    let wait = turn_bridge_stream_wait_duration(done, drain_until, std::time::Instant::now());
-    if wait.is_zero() {
-        if let Ok(message) = rx.try_recv() {
-            pending.push_back(message);
-        }
-    } else if let Ok(Some(message)) = tokio::time::timeout(wait, rx.recv()).await {
-        pending.push_back(message);
+pub(in crate::services::discord::turn_bridge) fn revalidate(
+    acquire: BridgeLeaseAcquire,
+    admitted: Option<&CodexRange>,
+    inflight: &InflightTurnState,
+) -> BridgeLeaseAcquire {
+    use BridgeLeaseAcquire::{Held, NoRange, Skip};
+    match (acquire, admitted) {
+        (acquire, None) | (acquire @ Skip, _) => acquire,
+        (acquire, Some(admitted)) => match (acquire, admitted.revalidated_range(inflight)) {
+            (Held(lease), Ok(Some(range))) if lease.range() == range => Held(lease),
+            (_, result) if CodexRange::evidence_lost(&result) => NoRange,
+            _ => Skip,
+        },
     }
 }
-
 pub(in crate::services::discord::turn_bridge) struct StreamLoopContext {
     pub(in crate::services::discord::turn_bridge) shared_owned: Arc<SharedData>,
     pub(in crate::services::discord::turn_bridge) gateway: Arc<dyn TurnGateway>,
@@ -180,7 +180,7 @@ pub(in crate::services::discord::turn_bridge) struct StreamLoopState<'a> {
 pub(in crate::services::discord::turn_bridge) struct StreamLoopOutput {
     pub(in crate::services::discord::turn_bridge) outcome: StreamLoopOutcome,
     pub(in crate::services::discord::turn_bridge) tui_error_classification: TuiErrorClassification,
-    pub(in crate::services::discord::turn_bridge) codex_tui_terminal_range_end: Option<u64>,
+    pub(in crate::services::discord::turn_bridge) codex_tui_terminal_range: Option<CodexRange>,
     pub(in crate::services::discord::turn_bridge) pending_long_running_open_after_state_save:
         PendingLongRunningOpenAfterStateSave,
     pub(in crate::services::discord::turn_bridge) pending_long_running_retarget_after_state_save:

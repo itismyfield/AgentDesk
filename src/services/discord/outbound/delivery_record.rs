@@ -2600,13 +2600,13 @@ mod tests {
             write_confirmed_delivery(&provider, channel, frontier.clone(), receipt.clone())
                 .unwrap();
         }
-        assert_eq!(
-            read_record(&provider, channel)
-                .unwrap()
-                .confirmed_deliveries
-                .len(),
-            1
-        );
+        let record = read_record(&provider, channel).unwrap();
+        assert_eq!(record.confirmed_deliveries, vec![receipt.clone()]);
+        drop(record);
+        // Re-open the sidecar rather than trusting the first decoded snapshot:
+        // the single exact receipt must itself be durable and idempotent.
+        let record = read_record(&provider, channel).unwrap();
+        assert_eq!(record.confirmed_deliveries, vec![receipt]);
     }
 
     #[test]

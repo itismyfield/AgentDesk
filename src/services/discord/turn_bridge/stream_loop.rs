@@ -25,7 +25,7 @@ mod expected_identity;
 mod expected_identity_tests;
 mod message_conversion;
 mod tool_arms;
-mod types;
+pub(super) mod types;
 pub(super) use exit_reconcile::StreamLoopOutcome;
 use exit_reconcile::{
     StreamLoopExitCandidateContext, retained_stream_retry_backoff,
@@ -36,8 +36,8 @@ use exit_reconcile::{
 use expected_identity::refresh_stream_tick_expected_identity_after_handoff;
 pub(super) use types::{StreamLoopContext, StreamLoopOutput, StreamLoopState};
 use types::{
-    receive_next_stream_message, refresh_expected_after_handoff,
-    refresh_or_retain_runtime_handoff_inner, stop_on_tool_authority_loss,
+    refresh_expected_after_handoff, refresh_or_retain_runtime_handoff_inner,
+    stop_on_tool_authority_loss,
 };
 
 pub(super) async fn run_stream_loop(
@@ -186,11 +186,9 @@ pub(super) async fn run_stream_loop(
 
     let mut pending_long_running_open_after_state_save = None;
     let mut pending_long_running_retarget_after_state_save = None;
-    let mut state_dirty = false;
-    let mut loop_outcome = StreamLoopOutcome::Completed;
-    let mut runtime_handoff_retry_retained = false;
+    let (mut state_dirty, mut loop_outcome) = (false, StreamLoopOutcome::Completed);
+    let (mut runtime_handoff_retry_retained, mut admitted_codex_terminal_range) = (false, None);
     let mut guarded_tool_frame_retry_retained = false;
-    let mut admitted_codex_terminal_range = None;
 
     'outer: while stream_loop_should_continue(
         done,
@@ -214,13 +212,22 @@ pub(super) async fn run_stream_loop(
             break 'outer;
         }
 
-        receive_next_stream_message(
-            rx,
-            &mut pending_stream_messages,
+        // #2426: timeout is only a safety wake; handoff frames wake immediately.
+        let stream_wait = turn_bridge_stream_wait_duration(
             done,
             terminal_control_drain_until,
-        )
-        .await;
+            std::time::Instant::now(),
+        );
+        if stream_wait.is_zero() {
+            if let Ok(msg) = rx.try_recv() {
+                pending_stream_messages.push_back(msg);
+            }
+        } else {
+            match tokio::time::timeout(stream_wait, rx.recv()).await {
+                Ok(Some(msg)) => pending_stream_messages.push_back(msg),
+                Ok(None) | Err(_) => {}
+            }
+        }
 
         if !done && cancel_requested(Some(cancel_token.as_ref())) {
             finalize_cancel_inner!();
@@ -300,7 +307,6 @@ pub(super) async fn run_stream_loop(
                             &stream_tick_expected_identity,
                             gateway.can_chain_locally(),
                             msg,
-                            "turn_bridge::stream_loop::codex_terminal_range",
                         );
                     if was_codex_terminal {
                         admitted_codex_terminal_range = admission;
@@ -765,9 +771,7 @@ pub(super) async fn run_stream_loop(
                                 break;
                             }
                         }
-                        StreamMessage::CodexTuiTerminalDone { .. } => {
-                            unreachable!("Codex terminal frame must be normalized before dispatch")
-                        }
+                        StreamMessage::CodexTuiTerminalDone { .. } => unreachable!(),
                     }
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
@@ -963,14 +967,10 @@ pub(super) async fn run_stream_loop(
         state,
     })
     .await;
-    let codex_tui_terminal_range_end = admitted_codex_terminal_range
-        .as_ref()
-        .and_then(|range| range.revalidated_end());
-
     StreamLoopOutput {
         outcome: loop_outcome,
         tui_error_classification,
-        codex_tui_terminal_range_end,
+        codex_tui_terminal_range: admitted_codex_terminal_range,
         pending_long_running_open_after_state_save,
         pending_long_running_retarget_after_state_save,
     }

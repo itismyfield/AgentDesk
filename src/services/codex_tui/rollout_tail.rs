@@ -879,10 +879,11 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
     let mut pane_busy_veto_started_at: Option<Instant> = None;
     let started_at = Instant::now();
     let mut hook_events = crate::services::claude_tui::hook_server::subscribe_hook_events();
-    let turn_nonce = cancel_token
-        .as_deref()
-        .and_then(CancelToken::turn_nonce)
-        .map(str::to_owned);
+    let terminal_range = (
+        seek_offset,
+        cancel_token.as_deref().and_then(CancelToken::turn_nonce),
+        terminal_range_eligible,
+    );
     // #2172 cancel boundary: wrap the raw sender so any send after the
     // shared `cancel_token` flips becomes a no-op. The producer (this
     // tail) is the relay-suppression enforcement point — once the user
@@ -917,9 +918,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                         finalize_path,
                         rollout_path,
                         current_offset,
-                        seek_offset,
-                        turn_nonce.as_deref(),
-                        terminal_range_eligible,
+                        terminal_range,
                     );
                     return Ok((
                         ReadOutputResult::Completed {
@@ -959,9 +958,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                                 RolloutFinalizePath::Heuristic,
                                 rollout_path,
                                 current_offset,
-                                seek_offset,
-                                turn_nonce.as_deref(),
-                                terminal_range_eligible,
+                                terminal_range,
                             );
                             return Ok((
                                 ReadOutputResult::Completed {
@@ -1052,9 +1049,11 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                         &state,
                         result_text,
                         rollout_path,
-                        seek_offset,
-                        turn_nonce.as_deref(),
-                        terminal_range_eligible && !tool_first,
+                        (
+                            terminal_range.0,
+                            terminal_range.1,
+                            (terminal_range.2 && !tool_first).then_some(current_offset),
+                        ),
                     );
                     return Ok((
                         ReadOutputResult::Completed {
@@ -1071,9 +1070,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                             RolloutFinalizePath::Heuristic,
                             rollout_path,
                             current_offset,
-                            seek_offset,
-                            turn_nonce.as_deref(),
-                            false,
+                            (terminal_range.0, terminal_range.1, false),
                         );
                         ReadOutputResult::Completed {
                             offset: current_offset,
@@ -1445,10 +1442,9 @@ fn emit_done(
     finalize_path: RolloutFinalizePath,
     rollout_path: &Path,
     offset: u64,
-    source_start: u64,
-    turn_nonce: Option<&str>,
-    terminal_range_eligible: bool,
+    terminal_range: (u64, Option<&str>, bool),
 ) {
+    let (source_start, turn_nonce, terminal_range_eligible) = terminal_range;
     let complete_record_end = source_start.saturating_add(state.bytes_read);
     tracing::info!(
         rollout_path = %rollout_path.display(),
@@ -1475,9 +1471,11 @@ fn emit_done(
         state,
         state.final_text.clone(),
         rollout_path,
-        source_start,
-        turn_nonce,
-        terminal_range_eligible,
+        (
+            source_start,
+            turn_nonce,
+            terminal_range_eligible.then_some(offset),
+        ),
     );
 }
 
@@ -1486,10 +1484,9 @@ fn emit_terminal_message(
     state: &RolloutParseState,
     result: String,
     rollout_path: &Path,
-    source_start: u64,
-    turn_nonce: Option<&str>,
-    terminal_range_eligible: bool,
+    terminal_range: (u64, Option<&str>, Option<u64>),
 ) {
+    let (source_start, turn_nonce, terminal_range_observed_end) = terminal_range;
     let complete_record_end = source_start.saturating_add(state.bytes_read);
     let identity = state
         .tmux_session_name
@@ -1497,9 +1494,12 @@ fn emit_terminal_message(
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .zip(turn_nonce.map(str::trim).filter(|nonce| !nonce.is_empty()));
-    if terminal_range_eligible
-        && state.saw_assistant_text
-        && complete_record_end > source_start
+    let exact_boundary = terminal_range_observed_end == Some(complete_record_end);
+    let has_answer = state.saw_assistant_text;
+    let nonempty_range = complete_record_end > source_start;
+    if exact_boundary
+        && has_answer
+        && nonempty_range
         && let Some((tmux_session_name, turn_nonce)) = identity
     {
         sender.send(StreamMessage::CodexTuiTerminalDone {
@@ -2423,31 +2423,31 @@ mod tests {
     fn codex_terminal_frame_is_atomic_at_complete_boundary_5264() {
         let (tx, rx) = mpsc::channel();
         let sender = RelaySuppressionSender::new(&tx, None);
-        let mut state = RolloutParseState {
-            saw_assistant_text: true,
-            tmux_session_name: Some("AgentDesk-codex-range".into()),
-            ..RolloutParseState::default()
-        };
+        let mut state = RolloutParseState::default();
+        state.saw_assistant_text = true;
+        state.tmux_session_name = Some("AgentDesk-codex-range".into());
         let mut complete = br#"{"type":"ignored"}"#.to_vec();
         let complete_len = complete.len() as u64;
         try_process_complete_partial_line(&mut complete, &sender, &mut state);
         let mut partial = br#"{"type":"partial""#.to_vec();
         try_process_complete_partial_line(&mut partial, &sender, &mut state);
         assert_eq!(state.bytes_read, complete_len);
-        emit_terminal_message(
-            &sender,
-            &state,
-            "answer".into(),
-            Path::new("/tmp/raw.jsonl"),
-            7,
-            Some("turn-nonce"),
-            true,
-        );
+        for observed_end in [7 + complete_len, 7 + complete_len + partial.len() as u64] {
+            emit_terminal_message(
+                &sender,
+                &state,
+                "answer".into(),
+                Path::new("/tmp/raw.jsonl"),
+                (7, Some("turn-nonce"), Some(observed_end)),
+            );
+        }
         let messages = rx.try_iter().collect::<Vec<_>>();
         assert!(
             matches!(messages.as_slice(), [StreamMessage::CodexTuiTerminalDone {
             result, turn_nonce, source_start: 7, complete_record_end, ..
-        }] if result == "answer" && turn_nonce == "turn-nonce" && *complete_record_end == 7 + complete_len)
+        }, StreamMessage::Done { result: rejected, .. }]
+            if result == "answer" && rejected == "answer" && turn_nonce == "turn-nonce"
+                && *complete_record_end == 7 + complete_len)
         );
     }
 

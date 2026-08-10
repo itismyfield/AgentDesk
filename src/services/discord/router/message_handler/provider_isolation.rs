@@ -130,27 +130,28 @@ fn prelaunch_inflight_runtime_seed_from_paths(
     prelaunch_runtime_kind: Option<RuntimeHandoffKind>,
     codex_raw_seed: Option<(String, u64)>,
 ) -> (Option<String>, Option<String>, Option<String>, u64) {
-    let (selected_output, last_offset) = match prelaunch_runtime_kind {
-        Some(RuntimeHandoffKind::ClaudeTui) => (None, 0),
-        Some(RuntimeHandoffKind::CodexTui) => codex_raw_seed
-            .map(|(path, end)| (Some(path), end))
-            .unwrap_or_else(|| (Some(output_path), 0)),
-        _ => {
-            let last_offset = session_exists
-                .then(|| {
-                    std::fs::metadata(&output_path)
-                        .map(|metadata| metadata.len())
-                        .unwrap_or(0)
-                })
-                .unwrap_or(0);
-            (Some(output_path), last_offset)
-        }
-    };
+    if prelaunch_runtime_kind == Some(RuntimeHandoffKind::CodexTui) {
+        let (output_path, last_offset) = codex_raw_seed.unwrap_or((output_path, 0));
+        return (
+            Some(tmux_name.to_string()),
+            Some(output_path),
+            Some(input_fifo_path),
+            last_offset,
+        );
+    }
+    let is_claude_tui = prelaunch_runtime_kind == Some(RuntimeHandoffKind::ClaudeTui);
+    let last_offset = (!is_claude_tui)
+        .then(|| {
+            std::fs::metadata(&output_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
     (
         Some(tmux_name.to_string()),
-        selected_output,
+        (!is_claude_tui).then_some(output_path),
         Some(input_fifo_path),
-        last_offset,
+        session_exists.then_some(last_offset).unwrap_or(0),
     )
 }
 
@@ -167,10 +168,9 @@ fn exact_codex_tui_raw_seed(
         return None;
     }
     let marker_path = std::fs::canonicalize(&marker.rollout_path).ok()?;
-    let binding_path = std::fs::canonicalize(&binding.output_path).ok()?;
     let metadata = std::fs::metadata(&marker_path).ok()?;
     let end = metadata.len();
-    (marker_path == binding_path
+    (marker_path == std::fs::canonicalize(&binding.output_path).ok()?
         && metadata.is_file()
         && binding.last_offset == end
         && marker
@@ -191,7 +191,7 @@ pub(super) fn prelaunch_inflight_runtime_seed(
     tmux_session_name: Option<&str>,
     prelaunch_runtime_kind: Option<RuntimeHandoffKind>,
 ) -> (Option<String>, Option<String>, Option<String>, u64) {
-    prelaunch_inflight_runtime_seed_with_codex_raw(
+    seed_runtime(
         provider,
         remote_profile_is_none,
         tmux_session_name,
@@ -206,7 +206,7 @@ pub(super) fn prelaunch_inflight_runtime_seed_without_codex_raw(
     tmux_session_name: Option<&str>,
     prelaunch_runtime_kind: Option<RuntimeHandoffKind>,
 ) -> (Option<String>, Option<String>, Option<String>, u64) {
-    prelaunch_inflight_runtime_seed_with_codex_raw(
+    seed_runtime(
         provider,
         remote_profile_is_none,
         tmux_session_name,
@@ -215,7 +215,7 @@ pub(super) fn prelaunch_inflight_runtime_seed_without_codex_raw(
     )
 }
 
-fn prelaunch_inflight_runtime_seed_with_codex_raw(
+fn seed_runtime(
     provider: &ProviderKind,
     remote_profile_is_none: bool,
     tmux_session_name: Option<&str>,
@@ -235,8 +235,8 @@ fn prelaunch_inflight_runtime_seed_with_codex_raw(
             let codex_raw_seed = (allow_codex_raw
                 && session_exists
                 && prelaunch_runtime_kind == Some(RuntimeHandoffKind::CodexTui))
-            .then(|| observed_codex_tui_raw_seed(tmux_name))
-            .flatten();
+            .then_some(tmux_name)
+            .and_then(observed_codex_tui_raw_seed);
             return prelaunch_inflight_runtime_seed_from_paths(
                 tmux_name,
                 output_path,

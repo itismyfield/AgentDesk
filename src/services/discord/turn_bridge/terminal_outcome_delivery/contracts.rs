@@ -1,6 +1,6 @@
+pub(super) use super::super::stream_loop::types::revalidate;
 use super::*;
-use crate::services::agent_protocol::RuntimeHandoffKind;
-
+use crate::services::{agent_protocol::RuntimeHandoffKind, discord::inflight::CodexRange};
 pub(in crate::services::discord::turn_bridge) struct TerminalOutcomeDeliveryContext {
     pub(in crate::services::discord::turn_bridge) channel_id: ChannelId,
     pub(in crate::services::discord::turn_bridge) user_msg_id: Option<MessageId>,
@@ -11,7 +11,7 @@ pub(in crate::services::discord::turn_bridge) struct TerminalOutcomeDeliveryCont
     pub(in crate::services::discord::turn_bridge) recovery_retry: bool,
     pub(in crate::services::discord::turn_bridge) rx_disconnected: bool,
     pub(in crate::services::discord::turn_bridge) tmux_last_offset: Option<u64>,
-    pub(in crate::services::discord::turn_bridge) codex_tui_terminal_range_end: Option<u64>,
+    pub(in super::super) codex_tui_terminal_range: Option<CodexRange>,
     pub(in crate::services::discord::turn_bridge) watcher_owner_channel_id: ChannelId,
     pub(in crate::services::discord::turn_bridge) watcher_handoff_claim_outcome:
         WatcherHandoffClaimOutcome,
@@ -133,27 +133,27 @@ mod tests {
 
     #[test]
     fn codex_tui_terminal_range_end_is_latch_only_5264() {
-        assert_eq!(
+        let codex_end = |range| {
             ordered_terminal_range_end(
                 &ProviderKind::Codex,
                 Some(RuntimeHandoffKind::CodexTui),
                 Some(99),
-                None,
-            ),
-            None,
-        );
-        assert_eq!(
-            ordered_terminal_range_end(
-                &ProviderKind::Codex,
-                Some(RuntimeHandoffKind::CodexTui),
-                Some(99),
-                Some(42),
-            ),
-            Some(42),
-        );
+                range,
+            )
+        };
+        assert_eq!(codex_end(None), None);
+        assert_eq!(codex_end(Some(0)), Some(0));
+        assert_eq!(codex_end(Some(42)), Some(42));
         assert_eq!(
             ordered_terminal_range_end(&ProviderKind::Claude, None, Some(99), Some(42)),
             Some(99),
         );
+        let evidence_lost = crate::services::discord::inflight::CodexRange::evidence_lost;
+        let authority_lost = Err(());
+        assert!(!evidence_lost(&authority_lost));
+        let evidence_lost_result = Ok(None);
+        assert!(evidence_lost(&evidence_lost_result));
+        let exact = Ok(Some((0, 42)));
+        assert!(!evidence_lost(&exact));
     }
 }

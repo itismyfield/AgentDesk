@@ -58,7 +58,7 @@ pub(super) async fn run_terminal_outcome_delivery(
     let (cancelled, transport_error) = (ctx.cancelled, ctx.transport_error);
     let (recovery_retry, rx_disconnected) = (ctx.recovery_retry, ctx.rx_disconnected);
     let tmux_last_offset = ctx.tmux_last_offset;
-    let codex_tui_terminal_range_end = ctx.codex_tui_terminal_range_end;
+    let admitted = ctx.codex_tui_terminal_range.as_ref();
     let watcher_owner_channel_id = ctx.watcher_owner_channel_id;
     let watcher_handoff_claim_outcome = ctx.watcher_handoff_claim_outcome;
     let bridge_created_response_placeholder_msg_id = ctx.bridge_created_response_placeholder_msg_id;
@@ -106,7 +106,7 @@ pub(super) async fn run_terminal_outcome_delivery(
         &provider,
         inflight_state.runtime_kind,
         tmux_last_offset,
-        codex_tui_terminal_range_end,
+        admitted.map(|range| range.complete_record_end),
     );
     let mut api_friction_reports = state.api_friction_reports;
     let review_dispatch_warning = state.review_dispatch_warning;
@@ -408,11 +408,10 @@ pub(super) async fn run_terminal_outcome_delivery(
             if can_chain_locally {
                 if terminal_delivery_should_send_new_chunks(can_chain_locally, &delivery_response) {
                     let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
-                    let bridge_end = terminal_range_end.unwrap_or(0);
                     if terminal_controller_cutover::bridge_long_chunks_cutover_decision(
                         can_chain_locally,
                         &delivery_response,
-                        bridge_end > bridge_start,
+                        terminal_range_end.unwrap_or(0) > bridge_start && admitted.is_none(),
                         true,
                     ) {
                         let bridge_turn = super::super::turn_finalizer::TurnKey::new(
@@ -441,7 +440,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                             full_response.len(),
                             bridge_turn,
                             bridge_start,
-                            bridge_end,
+                            terminal_range_end.unwrap_or(0),
                             single_message_panel_footer_mode,
                             dispatch_id.as_deref(),
                             adk_session_key.as_deref(),
@@ -463,13 +462,14 @@ pub(super) async fn run_terminal_outcome_delivery(
                         )
                         .await;
                     } else {
-                        let lease_acquire = bridge_delivery_lease_for_inflight(
+                        let lease = bridge_delivery_lease_for_inflight(
                             shared_owned.as_ref(),
                             watcher_owner_channel_id,
                             shared_owned.restart.current_generation,
                             &inflight_state,
                             terminal_range_end,
                         );
+                        let lease_acquire = contracts::revalidate(lease, admitted, &inflight_state);
                         terminal_controller_cutover::apply_bridge_long_chunks_legacy(
                             lease_acquire,
                             gateway.as_ref(),
@@ -516,7 +516,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                             ordered_range,
                             true,
                         );
-                    if cutover_short_replace {
+                    if cutover_short_replace && admitted.is_none() {
                         let bridge_turn = super::super::turn_finalizer::TurnKey::new(
                             watcher_owner_channel_id,
                             inflight_state.user_msg_id,
@@ -569,20 +569,20 @@ pub(super) async fn run_terminal_outcome_delivery(
                         // `watcher_owner_channel_id` BEFORE delivering so the
                         // watcher and bridge serialize. On B2 Skip the holder owns
                         // this range/turn, so do NOT deliver+advance.
-                        let lease_acquire =
-                            match terminal_controller_cutover::bridge_terminal_lease_range(
-                                Some((bridge_start, terminal_range_end.unwrap_or(0))),
-                                cutover_short_replace,
-                            ) {
-                                Some(_) => bridge_delivery_lease_for_inflight(
-                                    shared_owned.as_ref(),
-                                    watcher_owner_channel_id,
-                                    shared_owned.restart.current_generation,
-                                    &inflight_state,
-                                    terminal_range_end,
-                                ),
-                                None => BridgeLeaseAcquire::NoRange,
-                            };
+                        let lease = match terminal_controller_cutover::bridge_terminal_lease_range(
+                            Some((bridge_start, terminal_range_end.unwrap_or(0))),
+                            cutover_short_replace,
+                        ) {
+                            Some(_) => bridge_delivery_lease_for_inflight(
+                                shared_owned.as_ref(),
+                                watcher_owner_channel_id,
+                                shared_owned.restart.current_generation,
+                                &inflight_state,
+                                terminal_range_end,
+                            ),
+                            None => BridgeLeaseAcquire::NoRange,
+                        };
+                        let lease_acquire = contracts::revalidate(lease, admitted, &inflight_state);
                         if matches!(lease_acquire, BridgeLeaseAcquire::Skip) {
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::info!(
