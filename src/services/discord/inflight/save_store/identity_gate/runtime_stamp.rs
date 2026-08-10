@@ -36,6 +36,24 @@ fn binding_matches(tmux: &str, path: &Path, session: &str, offsets: [u64; 2]) ->
         },
     )
 }
+
+fn binding_matches_under_source_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    tmux: &str,
+    path: &Path,
+    session: &str,
+    offsets: [u64; 2],
+) -> bool {
+    crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
+        authority, tmux,
+    )
+    .is_some_and(|binding| {
+        binding.runtime_kind == RuntimeHandoffKind::CodexTui
+            && canonical_regular_file(&binding.output_path).is_some_and(|(bound, _)| bound == path)
+            && nonempty(binding.session_id.as_deref()) == Some(session)
+            && offsets.contains(&binding.last_offset)
+    })
+}
 impl InflightTurnState {
     #[allow(dead_code)]
     pub(in crate::services::discord) fn admit_codex_tui_terminal_frame(
@@ -182,6 +200,27 @@ impl CodexRange {
         let (start, end) = source.range;
         let tmux = &source.tmux_session_name;
         (len >= end && marker_matches(tmux, &path, &self.session_id, start)).then_some(path)
+    }
+
+    pub(in crate::services::discord) fn source_authority_is_live(
+        &self,
+        authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    ) -> bool {
+        // The caller holds `authority` through Current advance + receipt, so
+        // this marker/generation/binding tuple cannot change after the check.
+        let source = &self.source;
+        let tmux = &source.tmux_session_name;
+        let Some(path) = self.live_source_path() else {
+            return false;
+        };
+        tmux_generation_file_mtime_ns(tmux) == source.generation_mtime_ns
+            && binding_matches_under_source_authority(
+                authority,
+                tmux,
+                &path,
+                &self.session_id,
+                [source.range.1; 2],
+            )
     }
     #[allow(dead_code)]
     pub(in crate::services::discord) fn revalidated_source(

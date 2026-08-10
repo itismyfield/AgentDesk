@@ -1,5 +1,26 @@
 use super::*;
 
+fn with_runtime_binding_state_under_source_authority<R>(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    tmux_session_name: &str,
+    operation: impl FnOnce(&mut TuiPromptDedupeState) -> R,
+) -> R {
+    authority.assert_session(tmux_session_name);
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    state.purge_expired_runtime_binding_under_authority(tmux_session_name);
+    operation(&mut state)
+}
+
+fn with_runtime_binding_authority<R>(
+    tmux_session_name: &str,
+    operation: impl FnOnce(&mut TuiPromptDedupeState) -> R,
+) -> R {
+    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+        with_runtime_binding_state_under_source_authority(authority, tmux_session_name, operation)
+    })
+}
+
 pub fn subscribe_observed_prompts() -> broadcast::Receiver<ObservedTuiPrompt> {
     OBSERVED_PROMPTS.subscribe()
 }
@@ -101,15 +122,15 @@ pub(crate) fn register_tmux_runtime_binding(tmux_session_name: &str, binding: Tu
     if binding.relay_output_path().trim().is_empty() {
         return;
     }
-    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
-    state.purge_expired();
-    state.runtime_by_tmux.insert(
-        tmux_session_name.to_string(),
-        TimedValue {
-            value: binding,
-            recorded_at: Instant::now(),
-        },
-    );
+    with_runtime_binding_authority(tmux_session_name, |state| {
+        state.runtime_by_tmux.insert(
+            tmux_session_name.to_string(),
+            TimedValue {
+                value: binding,
+                recorded_at: Instant::now(),
+            },
+        );
+    });
 }
 
 pub(crate) fn register_rehydrated_tmux_runtime_binding(
@@ -128,36 +149,36 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding(
     {
         return;
     }
-    let session_id = binding.session_id.clone();
-    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
-    state.purge_expired();
-    state.runtime_by_tmux.insert(
-        tmux_session_name.to_string(),
-        TimedValue {
-            value: binding,
-            recorded_at: Instant::now(),
-        },
-    );
-    state.channel_by_tmux.insert(
-        tmux_session_name.to_string(),
-        TimedValue {
-            value: channel_id,
-            recorded_at: Instant::now(),
-        },
-    );
-    if let Some(session_id) = session_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        state.tmux_by_provider_session.insert(
-            PromptKey::new(&provider, session_id),
+    with_runtime_binding_authority(tmux_session_name, |state| {
+        let session_id = binding.session_id.clone();
+        state.runtime_by_tmux.insert(
+            tmux_session_name.to_string(),
             TimedValue {
-                value: tmux_session_name.to_string(),
+                value: binding,
                 recorded_at: Instant::now(),
             },
         );
-    }
+        state.channel_by_tmux.insert(
+            tmux_session_name.to_string(),
+            TimedValue {
+                value: channel_id,
+                recorded_at: Instant::now(),
+            },
+        );
+        if let Some(session_id) = session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            state.tmux_by_provider_session.insert(
+                PromptKey::new(&provider, session_id),
+                TimedValue {
+                    value: tmux_session_name.to_string(),
+                    recorded_at: Instant::now(),
+                },
+            );
+        }
+    });
 }
 
 /// #3018: DIAGNOSTIC / MIRROR USE ONLY.
@@ -493,12 +514,24 @@ pub(crate) fn runtime_binding_for_tmux_session(
     if tmux_session_name.is_empty() {
         return None;
     }
-    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
-    state.purge_expired();
-    state
-        .runtime_by_tmux
-        .get(tmux_session_name)
-        .map(|entry| entry.value.clone())
+    with_runtime_binding_authority(tmux_session_name, |state| {
+        state
+            .runtime_by_tmux
+            .get(tmux_session_name)
+            .map(|entry| entry.value.clone())
+    })
+}
+
+pub(crate) fn runtime_binding_for_tmux_session_under_source_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    tmux_session_name: &str,
+) -> Option<TuiRuntimeBinding> {
+    with_runtime_binding_state_under_source_authority(authority, tmux_session_name, |state| {
+        state
+            .runtime_by_tmux
+            .get(tmux_session_name)
+            .map(|entry| entry.value.clone())
+    })
 }
 
 /// Adopt the actual Claude session UUID reported inside a hook payload while
@@ -649,18 +682,18 @@ pub(crate) fn refresh_tmux_runtime_binding_activity(
     if tmux_session_name.is_empty() || output_path.is_empty() {
         return false;
     }
-    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
-    state.purge_expired();
-    let Some(entry) = state.runtime_by_tmux.get_mut(tmux_session_name) else {
-        return false;
-    };
-    if entry.value.output_path == output_path
-        || entry.value.relay_output_path.as_deref() == Some(output_path)
-    {
-        entry.recorded_at = Instant::now();
-        return true;
-    }
-    false
+    with_runtime_binding_authority(tmux_session_name, |state| {
+        let Some(entry) = state.runtime_by_tmux.get_mut(tmux_session_name) else {
+            return false;
+        };
+        if entry.value.output_path == output_path
+            || entry.value.relay_output_path.as_deref() == Some(output_path)
+        {
+            entry.recorded_at = Instant::now();
+            return true;
+        }
+        false
+    })
 }
 
 pub(crate) fn clear_tmux_runtime_binding(tmux_session_name: &str) -> bool {
@@ -668,14 +701,12 @@ pub(crate) fn clear_tmux_runtime_binding(tmux_session_name: &str) -> bool {
     if tmux_session_name.is_empty() {
         return false;
     }
-    let removed = {
-        let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
-        state.purge_expired();
+    let removed = with_runtime_binding_authority(tmux_session_name, |state| {
         let removed_runtime = state.runtime_by_tmux.remove(tmux_session_name).is_some();
         let removed_provider_sessions =
             state.remove_provider_session_mappings_for_tmux(tmux_session_name);
         removed_runtime || removed_provider_sessions
-    };
+    });
     crate::services::claude_compact_context::clear_launch_provenance_for_tmux(tmux_session_name);
     crate::services::claude_compact_trigger::clear_for_tmux(tmux_session_name);
     removed
@@ -700,15 +731,13 @@ pub(crate) fn evict_dead_tmux_mirror(tmux_session_name: &str) -> bool {
     if tmux_session_name.is_empty() {
         return false;
     }
-    let removed = {
-        let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
-        state.purge_expired();
+    let removed = with_runtime_binding_authority(tmux_session_name, |state| {
         let removed_runtime = state.runtime_by_tmux.remove(tmux_session_name).is_some();
         let removed_channel = state.channel_by_tmux.remove(tmux_session_name).is_some();
         let removed_provider_sessions =
             state.remove_provider_session_mappings_for_tmux(tmux_session_name);
         removed_runtime || removed_channel || removed_provider_sessions
-    };
+    });
     crate::services::claude_compact_context::clear_launch_provenance_for_tmux(tmux_session_name);
     crate::services::claude_compact_trigger::clear_for_tmux(tmux_session_name);
     removed
@@ -717,13 +746,23 @@ pub(crate) fn evict_dead_tmux_mirror(tmux_session_name: &str) -> bool {
 pub(crate) fn runtime_bindings_for_kind(
     runtime_kind: RuntimeHandoffKind,
 ) -> Vec<(String, TuiRuntimeBinding)> {
-    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
-    state.purge_expired();
-    state
-        .runtime_by_tmux
-        .iter()
-        .filter(|(_, entry)| entry.value.runtime_kind == runtime_kind)
-        .map(|(tmux_session_name, entry)| (tmux_session_name.clone(), entry.value.clone()))
+    let tmux_sessions = {
+        let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+        state.purge_expired();
+        state
+            .runtime_by_tmux
+            .iter()
+            .filter(|(_, entry)| entry.value.runtime_kind == runtime_kind)
+            .map(|(tmux_session_name, _)| tmux_session_name.clone())
+            .collect::<Vec<_>>()
+    };
+    tmux_sessions
+        .into_iter()
+        .filter_map(|tmux_session_name| {
+            runtime_binding_for_tmux_session(&tmux_session_name)
+                .filter(|binding| binding.runtime_kind == runtime_kind)
+                .map(|binding| (tmux_session_name, binding))
+        })
         .collect()
 }
 
@@ -736,23 +775,23 @@ pub(crate) fn advance_tmux_runtime_binding_offset(
     if tmux_session_name.is_empty() || output_path.trim().is_empty() {
         return false;
     }
-    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
-    state.purge_expired();
-    let Some(entry) = state.runtime_by_tmux.get_mut(tmux_session_name) else {
-        return false;
-    };
-    if entry.value.output_path == output_path {
-        entry.value.last_offset = last_offset;
-        if entry.value.relay_output_path.is_none() {
-            entry.value.relay_last_offset = Some(last_offset);
+    with_runtime_binding_authority(tmux_session_name, |state| {
+        let Some(entry) = state.runtime_by_tmux.get_mut(tmux_session_name) else {
+            return false;
+        };
+        if entry.value.output_path == output_path {
+            entry.value.last_offset = last_offset;
+            if entry.value.relay_output_path.is_none() {
+                entry.value.relay_last_offset = Some(last_offset);
+            }
+            entry.recorded_at = Instant::now();
+            return true;
         }
+        if entry.value.relay_output_path.as_deref() != Some(output_path) {
+            return false;
+        }
+        entry.value.relay_last_offset = Some(last_offset);
         entry.recorded_at = Instant::now();
-        return true;
-    }
-    if entry.value.relay_output_path.as_deref() != Some(output_path) {
-        return false;
-    }
-    entry.value.relay_last_offset = Some(last_offset);
-    entry.recorded_at = Instant::now();
-    true
+        true
+    })
 }

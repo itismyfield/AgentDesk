@@ -422,7 +422,8 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             // touched `.generation` mtime, the regression check classifies
             // as fresh wrapper, clears `last_relayed_offset`, and a rotated
             // jsonl re-relays surviving content.
-            preserve_mtime_after_write(
+            preserve_session_generation_mtime_after_write(
+                session_name,
                 &gen_marker_path,
                 current_gen.to_string().as_bytes(),
                 "adoption_marker_rewrite",

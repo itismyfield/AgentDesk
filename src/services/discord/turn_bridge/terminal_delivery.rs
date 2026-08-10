@@ -511,6 +511,38 @@ pub(super) enum PinnedBridgeCommit {
     Rejected,
 }
 
+#[cfg(all(test, unix))]
+#[derive(Clone, Copy)]
+enum PinnedSourceCommitTestPoint {
+    Validated,
+    Recorded,
+}
+#[cfg(all(test, unix))]
+type PinnedSourceValidatedHook =
+    std::sync::Arc<dyn Fn(PinnedSourceCommitTestPoint) + Send + Sync + 'static>;
+#[cfg(all(test, unix))]
+static PINNED_SOURCE_VALIDATED_HOOK: std::sync::LazyLock<
+    std::sync::Mutex<Option<PinnedSourceValidatedHook>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+#[cfg(all(test, unix))]
+fn run_pinned_source_validated_hook_for_tests(point: PinnedSourceCommitTestPoint) {
+    let hook = PINNED_SOURCE_VALIDATED_HOOK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    if let Some(hook) = hook {
+        hook(point);
+    }
+}
+
+#[cfg(all(test, unix))]
+fn set_pinned_source_validated_hook_for_tests(hook: Option<PinnedSourceValidatedHook>) {
+    *PINNED_SOURCE_VALIDATED_HOOK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = hook;
+}
+
 /// The result of attempting to acquire the bridge delivery lease for a terminal
 /// delivery point.
 pub(super) enum BridgeLeaseAcquire {
@@ -811,56 +843,76 @@ impl PinnedBridgeDeliveryLease {
         let source_generation = exact.generation_mtime_ns;
         let tmux = exact.tmux_session_name.clone();
         let generation_current = || dr::current_generation_mtime_ns(&tmux) == source_generation;
-        let identity = watcher_mutation::watcher_delivery_identity(
-            source_generation,
-            self.reset_incarnation,
-            None,
-        );
-        let guard =
-            watcher_mutation::begin_watcher_delivery_mutation(shared, owner, &tmux, identity);
-        if self.committed_current.is_none() {
-            let current = guard.is_some() && self.source.live_source_path().is_some();
-            let outcome = if current {
-                crate::services::discord::LeaseOutcome::Delivered
-            } else {
-                crate::services::discord::LeaseOutcome::Unknown
-            };
-            if !self.lease.commit_lease(outcome) {
-                return PinnedBridgeCommit::Rejected;
-            }
-            self.lease.release_on_drop = false;
-            self.committed_current = Some(current);
-            if current
-                && !guard.as_ref().is_some_and(|mutation| {
-                    mutation.advance(
-                        crate::services::discord::tmux::WatcherDeliveryTarget {
-                            shared,
-                            provider: &self.provider,
-                            channel_id: owner,
-                            tmux_session_name: &exact.tmux_session_name,
-                        },
-                        exact.range.1,
-                        "turn_bridge::pinned_exact_source",
-                    )
-                })
-            {
-                self.committed_current = Some(false);
-            }
-        }
         let record = dr::record_historical_pinned_delivery;
-        let disposition = if self.committed_current == Some(true) && guard.is_some() {
-            match dr::record_current_pinned_delivery(&exact, message_id) {
-                Ok(()) => Some(PinnedBridgeCommit::Current),
-                Err(_) if !generation_current() => record(&exact, message_id)
-                    .ok()
-                    .map(|_| PinnedBridgeCommit::Historical),
-                Err(_) => None,
-            }
-        } else {
-            record(&exact, message_id)
-                .ok()
-                .map(|_| PinnedBridgeCommit::Historical)
-        };
+        let disposition =
+            crate::services::tmux_common::with_tmux_source_authority(&tmux, |authority| {
+                let identity = watcher_mutation::watcher_delivery_identity(
+                    source_generation,
+                    self.reset_incarnation,
+                    None,
+                );
+                let guard = watcher_mutation::begin_watcher_delivery_mutation(
+                    shared, owner, &tmux, identity,
+                );
+                let source_is_live =
+                    guard.is_some() && self.source.source_authority_is_live(authority);
+                if self.committed_current.is_none() {
+                    #[cfg(test)]
+                    if source_is_live {
+                        run_pinned_source_validated_hook_for_tests(
+                            PinnedSourceCommitTestPoint::Validated,
+                        );
+                    }
+                    let outcome = if source_is_live {
+                        crate::services::discord::LeaseOutcome::Delivered
+                    } else {
+                        crate::services::discord::LeaseOutcome::Unknown
+                    };
+                    if !self.lease.commit_lease(outcome) {
+                        return Some(PinnedBridgeCommit::Rejected);
+                    }
+                    self.lease.release_on_drop = false;
+                    self.committed_current = Some(source_is_live);
+                    if source_is_live
+                        && !guard.as_ref().is_some_and(|mutation| {
+                            mutation.advance(
+                                crate::services::discord::tmux::WatcherDeliveryTarget {
+                                    shared,
+                                    provider: &self.provider,
+                                    channel_id: owner,
+                                    tmux_session_name: &exact.tmux_session_name,
+                                },
+                                exact.range.1,
+                                "turn_bridge::pinned_exact_source",
+                            )
+                        })
+                    {
+                        self.committed_current = Some(false);
+                    }
+                }
+                if self.committed_current == Some(true) && source_is_live {
+                    match dr::record_current_pinned_delivery(&exact, message_id) {
+                        Ok(()) => {
+                            #[cfg(test)]
+                            run_pinned_source_validated_hook_for_tests(
+                                PinnedSourceCommitTestPoint::Recorded,
+                            );
+                            Some(PinnedBridgeCommit::Current)
+                        }
+                        Err(_) if !generation_current() => record(&exact, message_id)
+                            .ok()
+                            .map(|_| PinnedBridgeCommit::Historical),
+                        Err(_) => None,
+                    }
+                } else {
+                    record(&exact, message_id)
+                        .ok()
+                        .map(|_| PinnedBridgeCommit::Historical)
+                }
+            });
+        if matches!(disposition, Some(PinnedBridgeCommit::Rejected)) {
+            return PinnedBridgeCommit::Rejected;
+        }
         let Some(disposition) = disposition else {
             return PinnedBridgeCommit::Pending(self);
         };
@@ -2094,7 +2146,10 @@ mod tests {
     mod a0_i2_advance_characterization_tests {
         use super::super::{BridgeDeliveryLease, BridgeLeaseAcquire};
         #[cfg(unix)]
-        use super::super::{CodexRange, PinnedBridgeCommit, dr};
+        use super::super::{
+            CodexRange, PinnedBridgeCommit, PinnedSourceCommitTestPoint, dr,
+            set_pinned_source_validated_hook_for_tests,
+        };
         use crate::services::discord::turn_finalizer::TurnKey;
         use crate::services::discord::{
             DeliveryLeaseKey, LeaseOutcome, make_shared_data_for_tests,
@@ -2176,6 +2231,10 @@ mod tests {
                 let root = tempfile::tempdir().unwrap();
                 #[rustfmt::skip]
                 let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
+                let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                crate::services::tui_prompt_dedupe::reset_state_for_tests();
                 let (provider, tmux) = (ProviderKind::Codex, "AgentDesk-codex-5264-pin");
                 let stamp = |seconds| {
                     let path = crate::services::tmux_common::session_temp_path(tmux, "generation");
@@ -2189,6 +2248,18 @@ mod tests {
                 let rollout = root.path().join("rollout-a.jsonl");
                 std::fs::write(&rollout, [b'x'; 64]).unwrap();
                 write_marker(tmux, &rollout, Some("raw-session"), Some(0)).unwrap();
+                crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+                    tmux,
+                    crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                        runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+                        output_path: rollout.display().to_string(),
+                        relay_output_path: None,
+                        input_fifo_path: None,
+                        session_id: Some("raw-session".into()),
+                        last_offset: 64,
+                        relay_last_offset: None,
+                    },
+                );
                 let source = ExactJsonlSourceIdentity {
                     provider: provider.as_str().into(),
                     tmux_session_name: tmux.into(),
@@ -2226,16 +2297,98 @@ mod tests {
                     assert!(held_lease(&invalid_shared, ch, 4).pin_exact_source(&invalid_shared, &provider, ch, range(invalid)).is_none());
                 }
                 let current_shared = make_shared_data_for_tests();
+                let rollout_b = root.path().join("rollout-b.jsonl");
+                std::fs::write(&rollout_b, [b'y'; 64]).unwrap();
+                let writer_finished_during_validation =
+                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let writer_finished_from_hook = writer_finished_during_validation.clone();
+                let writer_finished_before_receipt =
+                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let writer_finished_before_receipt_from_hook =
+                    writer_finished_before_receipt.clone();
+                let (writer_attempting_tx, writer_attempting_rx) = std::sync::mpsc::channel();
+                let writer_attempting_rx =
+                    std::sync::Arc::new(std::sync::Mutex::new(writer_attempting_rx));
+                let (writer_done_tx, writer_done_rx) = std::sync::mpsc::channel();
+                let writer_done_rx = std::sync::Arc::new(std::sync::Mutex::new(writer_done_rx));
+                let writer_done_from_hook = writer_done_rx.clone();
+                let writer_tmux = tmux.to_string();
+                let writer_rollout = rollout_b.clone();
+                set_pinned_source_validated_hook_for_tests(Some(std::sync::Arc::new(
+                    move |point| match point {
+                        PinnedSourceCommitTestPoint::Validated => {
+                            let writer_attempting_tx = writer_attempting_tx.clone();
+                            let writer_done_tx = writer_done_tx.clone();
+                            let writer_tmux = writer_tmux.clone();
+                            let writer_rollout = writer_rollout.clone();
+                            std::thread::spawn(move || {
+                                writer_attempting_tx.send(()).unwrap();
+                                write_marker(
+                                    &writer_tmux,
+                                    &writer_rollout,
+                                    Some("other-session"),
+                                    Some(0),
+                                )
+                                .unwrap();
+                                writer_done_tx.send(()).unwrap();
+                            });
+                            writer_attempting_rx
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner())
+                                .recv_timeout(std::time::Duration::from_millis(250))
+                                .expect("source writer must reach the fenced mutation");
+                            let raced = writer_done_from_hook
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner())
+                                .recv_timeout(std::time::Duration::from_millis(40))
+                                .is_ok();
+                            writer_finished_from_hook.store(raced, Ordering::SeqCst);
+                        }
+                        PinnedSourceCommitTestPoint::Recorded => {
+                            let raced = writer_done_from_hook
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner())
+                                .try_recv()
+                                .is_ok();
+                            writer_finished_before_receipt_from_hook.store(raced, Ordering::SeqCst);
+                        }
+                    },
+                )));
                 #[rustfmt::skip]
                 let current = held_lease(&current_shared, ch, 5).pin_exact_source(&current_shared, &provider, ch, range(source.clone())).unwrap().commit_after_send(&current_shared, 5_264_001);
+                set_pinned_source_validated_hook_for_tests(None);
+                if !writer_finished_during_validation.load(Ordering::SeqCst)
+                    && !writer_finished_before_receipt.load(Ordering::SeqCst)
+                {
+                    writer_done_rx
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .recv_timeout(std::time::Duration::from_millis(250))
+                        .expect("source writer must finish after the pinned commit releases");
+                }
+                assert!(
+                    !writer_finished_during_validation.load(Ordering::SeqCst),
+                    "same-generation source writer must not cross final validation"
+                );
+                assert!(
+                    !writer_finished_before_receipt.load(Ordering::SeqCst),
+                    "source fence must stay held through Current advance and receipt"
+                );
                 assert!(matches!(current, PinnedBridgeCommit::Current));
                 assert_eq!(current_shared.committed_relay_offset(ch), 64);
                 assert!(dr::historical_pinned_delivery_exists(&source, 5_264_001));
+                let current_frontier = dr::read_record(&provider, CH)
+                    .unwrap()
+                    .delivered_frontier
+                    .unwrap();
+                assert_eq!(
+                    (current_frontier.generation_mtime_ns, current_frontier.range),
+                    (g1, (0, 64))
+                );
+                write_marker(tmux, &rollout, Some("raw-session"), Some(0)).unwrap();
                 let swapped_shared = make_shared_data_for_tests();
                 #[rustfmt::skip]
                 let swapped = held_lease(&swapped_shared, ch, 6).pin_exact_source(&swapped_shared, &provider, ch, range(source.clone())).unwrap();
-                let rollout_b = root.path().join("rollout-b.jsonl");
-                std::fs::write(&rollout_b, [b'y'; 64]).unwrap();
                 write_marker(tmux, &rollout_b, Some("other-session"), Some(0)).unwrap();
                 #[rustfmt::skip]
                 assert!(matches!(swapped.commit_after_send(&swapped_shared, 5_264_002), PinnedBridgeCommit::Historical));
@@ -2255,11 +2408,15 @@ mod tests {
                     ..source.clone()
                 };
                 dr::record_current_pinned_delivery(&current_source, 5_264_003).unwrap();
+                let g2_frontier = dr::read_record(&provider, CH)
+                    .unwrap()
+                    .delivered_frontier
+                    .unwrap();
                 #[rustfmt::skip]
                 assert!(matches!(stale.commit_after_send(&stale_shared, 5_264_004), PinnedBridgeCommit::Historical));
                 assert_eq!(stale_shared.committed_relay_offset(ch), 0);
                 let record = dr::read_record(&provider, CH).unwrap();
-                assert_eq!(record.delivered_frontier.unwrap().generation_mtime_ns, g2);
+                assert_eq!(record.delivered_frontier, Some(g2_frontier));
                 assert!(dr::historical_pinned_delivery_exists(&source, 5_264_004));
                 #[rustfmt::skip]
                 assert!(matches!(stale_shared.delivery_lease(ch).read(), crate::services::discord::LeaseSnapshot::Unleased));

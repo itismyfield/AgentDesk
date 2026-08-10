@@ -97,6 +97,22 @@ pub fn write_codex_tui_rollout_marker_with_start_offset(
     session_id: Option<&str>,
     rollout_start_offset: Option<u64>,
 ) -> Result<(), String> {
+    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |_| {
+        write_codex_tui_rollout_marker_under_source_authority(
+            tmux_session_name,
+            rollout_path,
+            session_id,
+            rollout_start_offset,
+        )
+    })
+}
+
+fn write_codex_tui_rollout_marker_under_source_authority(
+    tmux_session_name: &str,
+    rollout_path: &Path,
+    session_id: Option<&str>,
+    rollout_start_offset: Option<u64>,
+) -> Result<(), String> {
     let tmux_session_name = tmux_session_name.trim();
     if tmux_session_name.is_empty() {
         return Ok(());
@@ -126,15 +142,17 @@ pub fn advance_codex_tui_rollout_marker_start_offset(
     rollout_path: &Path,
     rollout_start_offset: u64,
 ) -> Result<(), String> {
-    let existing_session_id = read_codex_tui_rollout_marker(tmux_session_name)
-        .filter(|marker| codex_tui_rollout_paths_same(&marker.rollout_path, rollout_path))
-        .and_then(|marker| marker.session_id);
-    write_codex_tui_rollout_marker_with_start_offset(
-        tmux_session_name,
-        rollout_path,
-        existing_session_id.as_deref(),
-        Some(rollout_start_offset),
-    )
+    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |_| {
+        let existing_session_id = read_codex_tui_rollout_marker(tmux_session_name)
+            .filter(|marker| codex_tui_rollout_paths_same(&marker.rollout_path, rollout_path))
+            .and_then(|marker| marker.session_id);
+        write_codex_tui_rollout_marker_under_source_authority(
+            tmux_session_name,
+            rollout_path,
+            existing_session_id.as_deref(),
+            Some(rollout_start_offset),
+        )
+    })
 }
 
 fn preserved_rollout_start_offset_for_marker(
