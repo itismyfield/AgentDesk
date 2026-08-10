@@ -201,6 +201,16 @@ pub enum StreamMessage {
         result: String,
         session_id: Option<String>,
     },
+    /// Codex TUI completion with one cancel-fenced raw rollout witness.
+    CodexTuiTerminalDone {
+        result: String,
+        session_id: Option<String>,
+        rollout_path: String,
+        tmux_session_name: String,
+        turn_nonce: String,
+        source_start: u64,
+        complete_record_end: u64,
+    },
     /// Error
     Error {
         message: String,

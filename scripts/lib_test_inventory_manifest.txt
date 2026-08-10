@@ -1931,6 +1931,7 @@ services::codex_tui::rollout_index::tests::warm_scan_reuses_cached_header_withou
 services::codex_tui::rollout_tail::tests::always_fresh_pane_signal_reaches_hard_veto_cap_and_emits_done
 services::codex_tui::rollout_tail::tests::assistant_response_deadline_emits_timeout_done
 services::codex_tui::rollout_tail::tests::codex_stop_hook_emits_done_before_drain
+services::codex_tui::rollout_tail::tests::codex_terminal_frame_is_atomic_at_complete_boundary_5264
 services::codex_tui::rollout_tail::tests::codex_token_count_context_uses_last_usage_not_total_usage
 services::codex_tui::rollout_tail::tests::codex_token_count_total_only_keeps_context_unknown
 services::codex_tui::rollout_tail::tests::commentary_only_task_complete_does_not_duplicate_body
@@ -2746,6 +2747,7 @@ services::discord::inflight::save_store::identity_gate::claude_e_stamp::tests::d
 services::discord::inflight::save_store::identity_gate::claude_e_stamp::tests::stale_claude_e_stamp_cannot_overwrite_newer_runtime_or_process_group
 services::discord::inflight::save_store::identity_gate::claude_e_stamp::tests::transient_claude_e_stamp_read_error_is_retryable_and_preserves_process_frame
 services::discord::inflight::save_store::identity_gate::runtime_stamp::tests::claude_tui_runtime_stamp_accepts_none_to_projects_output_path
+services::discord::inflight::save_store::identity_gate::runtime_stamp::tests::codex_terminal_range_cold_admission_and_exit_owner_5264
 services::discord::inflight::save_store::identity_gate::runtime_stamp::tests::divergent_runtime_response_is_non_retryable_and_preserves_both_snapshots
 services::discord::inflight::save_store::identity_gate::runtime_stamp::tests::runtime_first_stamp_supports_process_claude_tui_and_codex_tui
 services::discord::inflight::save_store::identity_gate::runtime_stamp::tests::runtime_stamp_accepts_same_session_restamp_and_rejects_changed_session
@@ -2974,6 +2976,7 @@ services::discord::outbound::delivery_record::tests::authority_blocks_backward_i
 services::discord::outbound::delivery_record::tests::clear_lease_preserves_frontier
 services::discord::outbound::delivery_record::tests::cleared_inflight_current_generation_persists_frontier_without_receipt_4911
 services::discord::outbound::delivery_record::tests::cleared_inflight_stale_caller_generation_rejects_frontier_4911
+services::discord::outbound::delivery_record::tests::codex_admitted_range_receipt_is_exact_and_idempotent_5264
 services::discord::outbound::delivery_record::tests::committed_floor_authority_on_does_not_oversuppress_rollover_resend_3871
 services::discord::outbound::delivery_record::tests::committed_floor_authority_on_suppresses_watchdog_rerelay_3885
 services::discord::outbound::delivery_record::tests::confirmed_receipt_write_rejects_destination_owner_and_provider_mismatch_4911
@@ -4030,6 +4033,7 @@ services::discord::router::message_handler::latency_spans::tests::full_span_rend
 services::discord::router::message_handler::latency_spans::tests::marks_unlock_segments_in_order
 services::discord::router::message_handler::latency_spans::tests::partial_span_renders_dashes_for_missing_marks
 services::discord::router::message_handler::latency_spans::tests::saturating_u64_clamps_overflow
+services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::codex_tui_raw_seed_requires_exact_live_marker_binding_evidence
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::managed_linked_worktree_skips_provider_reisolation_without_session_state
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::non_thread_resolution_is_unchanged
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::prelaunch_claude_tui_seed_omits_wrapper_output_but_preserves_fifo
@@ -5752,6 +5756,7 @@ services::discord::turn_bridge::terminal_delivery::tests::stopped_turn_terminal_
 services::discord::turn_bridge::terminal_delivery::tests::transport_error_dispatch_failure_requires_terminal_delivery_commit
 services::discord::turn_bridge::terminal_delivery::tests::work_dispatch_completion_requires_terminal_delivery_commit
 services::discord::turn_bridge::terminal_outcome_delivery::busy_followup_retry::tests::capped_requeue_failure_preserves_inflight_without_false_queue_claim_4888
+services::discord::turn_bridge::terminal_outcome_delivery::contracts::tests::codex_tui_terminal_range_end_is_latch_only_5264
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::terminal_delivery_epilogue_routes_identity_mismatch_to_warn
 services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::guidance::tests::completed_empty_response_explains_recovery_and_next_actions
 services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::guidance::tests::disconnected_empty_response_explains_recovery_and_next_actions

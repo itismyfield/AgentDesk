@@ -133,6 +133,7 @@ pub struct RolloutTailOptions {
     /// Hard wall-clock cap for the continuous `Fresh` veto interval after the
     /// pending-tool deadline. Once reached, recovery fails open to `Done`.
     pub pane_busy_veto_cap: Duration,
+    terminal_range_eligible: bool,
 }
 
 impl Default for RolloutTailOptions {
@@ -153,6 +154,7 @@ impl Default for RolloutTailOptions {
             discord_origin_prompt: None,
             pane_busy_probe: None,
             pane_busy_veto_cap: Duration::from_secs(DEFAULT_PANE_BUSY_VETO_CAP_SECS),
+            terminal_range_eligible: false,
         }
     }
 }
@@ -195,6 +197,7 @@ pub fn tail_latest_rollout_for_cwd_with_handoff_for_tmux(
 ) -> Result<CodexTuiTailResult, String> {
     let mut options = RolloutTailOptions::default();
     options.tmux_session_name = Some(tmux_session_name.to_string());
+    options.terminal_range_eligible = true;
     options.discord_origin_prompt = discord_origin_prompt.map(ToString::to_string);
     options.pane_busy_probe = Some(pane_busy_probe_for_tmux(tmux_session_name));
     tail_latest_rollout_for_cwd_with_handoff_options(
@@ -370,6 +373,7 @@ pub fn tail_warm_followup_rollout_for_tmux(
         tmux_session_name: Some(tmux_session_name.to_string()),
         discord_origin_prompt: Some(discord_origin_prompt.to_string()),
         pane_busy_probe: Some(pane_busy_probe_for_tmux(tmux_session_name)),
+        terminal_range_eligible: true,
         ..RolloutTailOptions::default()
     };
     tail_rollout_file_until_assistant_response_with_pane_busy_probe(
@@ -849,6 +853,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
         discord_origin_prompt,
         mut pane_busy_probe,
         pane_busy_veto_cap,
+        terminal_range_eligible,
         ..
     } = options;
     let mut file = std::fs::File::open(rollout_path)
@@ -874,6 +879,10 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
     let mut pane_busy_veto_started_at: Option<Instant> = None;
     let started_at = Instant::now();
     let mut hook_events = crate::services::claude_tui::hook_server::subscribe_hook_events();
+    let turn_nonce = cancel_token
+        .as_deref()
+        .and_then(CancelToken::turn_nonce)
+        .map(str::to_owned);
     // #2172 cancel boundary: wrap the raw sender so any send after the
     // shared `cancel_token` flips becomes a no-op. The producer (this
     // tail) is the relay-suppression enforcement point — once the user
@@ -888,7 +897,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                 ReadOutputResult::Cancelled {
                     offset: current_offset,
                 },
-                outcome(&state, current_offset),
+                outcome(&state, seek_offset),
             ));
         }
 
@@ -902,12 +911,21 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                 if let Some(finalize_path) =
                     explicit_finalize_path(&mut state, enable_task_complete_fast_path)
                 {
-                    emit_done(&sender, &state, finalize_path, rollout_path, current_offset);
+                    emit_done(
+                        &sender,
+                        &state,
+                        finalize_path,
+                        rollout_path,
+                        current_offset,
+                        seek_offset,
+                        turn_nonce.as_deref(),
+                        terminal_range_eligible,
+                    );
                     return Ok((
                         ReadOutputResult::Completed {
                             offset: current_offset,
                         },
-                        outcome(&state, current_offset),
+                        outcome(&state, seek_offset),
                     ));
                 }
                 // #2419: only consider the turn drainable when no tool call
@@ -941,12 +959,15 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                                 RolloutFinalizePath::Heuristic,
                                 rollout_path,
                                 current_offset,
+                                seek_offset,
+                                turn_nonce.as_deref(),
+                                terminal_range_eligible,
                             );
                             return Ok((
                                 ReadOutputResult::Completed {
                                     offset: current_offset,
                                 },
-                                outcome(&state, current_offset),
+                                outcome(&state, seek_offset),
                             ));
                         }
                         last_output_at = Some(Instant::now());
@@ -1026,15 +1047,20 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                     } else {
                         result_text.push_str(&warning);
                     }
-                    sender.send(StreamMessage::Done {
-                        result: result_text,
-                        session_id: state.session_id.clone(),
-                    });
+                    emit_terminal_message(
+                        &sender,
+                        &state,
+                        result_text,
+                        rollout_path,
+                        seek_offset,
+                        turn_nonce.as_deref(),
+                        terminal_range_eligible && !tool_first,
+                    );
                     return Ok((
                         ReadOutputResult::Completed {
                             offset: current_offset,
                         },
-                        outcome(&state, current_offset),
+                        outcome(&state, seek_offset),
                     ));
                 }
                 if !is_alive() {
@@ -1045,6 +1071,9 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                             RolloutFinalizePath::Heuristic,
                             rollout_path,
                             current_offset,
+                            seek_offset,
+                            turn_nonce.as_deref(),
+                            false,
                         );
                         ReadOutputResult::Completed {
                             offset: current_offset,
@@ -1054,7 +1083,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                             offset: current_offset,
                         }
                     };
-                    return Ok((result, outcome(&state, current_offset)));
+                    return Ok((result, outcome(&state, seek_offset)));
                 }
                 // #2182: hung-TUI guard (else the tailer lives forever, no
                 // `Done`). #3419 B: fire on IDLE, not absolute age — silence
@@ -1087,7 +1116,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                         ReadOutputResult::Completed {
                             offset: current_offset,
                         },
-                        outcome(&state, current_offset),
+                        outcome(&state, seek_offset),
                     ));
                 }
                 std::thread::sleep(Duration::from_millis(100));
@@ -1182,11 +1211,11 @@ fn try_process_complete_partial_line(
     process_rollout_line_bytes(&line, sender, state)
 }
 
-fn outcome(state: &RolloutParseState, final_offset: u64) -> RolloutTailOutcome {
+fn outcome(state: &RolloutParseState, source_start: u64) -> RolloutTailOutcome {
     RolloutTailOutcome {
         lines_read: state.lines_read,
         bytes_read: state.bytes_read,
-        final_offset,
+        final_offset: source_start.saturating_add(state.bytes_read),
         session_id: state.session_id.clone(),
     }
 }
@@ -1416,7 +1445,11 @@ fn emit_done(
     finalize_path: RolloutFinalizePath,
     rollout_path: &Path,
     offset: u64,
+    source_start: u64,
+    turn_nonce: Option<&str>,
+    terminal_range_eligible: bool,
 ) {
+    let complete_record_end = source_start.saturating_add(state.bytes_read);
     tracing::info!(
         rollout_path = %rollout_path.display(),
         offset,
@@ -1424,6 +1457,8 @@ fn emit_done(
         session_id = state.session_id.as_deref(),
         lines_read = state.lines_read,
         bytes_read = state.bytes_read,
+        source_start,
+        complete_record_end,
         saw_assistant_text = state.saw_assistant_text,
         hook_completion_seen = state.hook_completion_seen,
         composer_ready_seen = state.composer_ready_seen,
@@ -1435,10 +1470,53 @@ fn emit_done(
             .unwrap_or(0),
         "codex rollout tail emitting Done"
     );
-    sender.send(StreamMessage::Done {
-        result: state.final_text.clone(),
-        session_id: state.session_id.clone(),
-    });
+    emit_terminal_message(
+        sender,
+        state,
+        state.final_text.clone(),
+        rollout_path,
+        source_start,
+        turn_nonce,
+        terminal_range_eligible,
+    );
+}
+
+fn emit_terminal_message(
+    sender: &RelaySuppressionSender<'_>,
+    state: &RolloutParseState,
+    result: String,
+    rollout_path: &Path,
+    source_start: u64,
+    turn_nonce: Option<&str>,
+    terminal_range_eligible: bool,
+) {
+    let complete_record_end = source_start.saturating_add(state.bytes_read);
+    let identity = state
+        .tmux_session_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .zip(turn_nonce.map(str::trim).filter(|nonce| !nonce.is_empty()));
+    if terminal_range_eligible
+        && state.saw_assistant_text
+        && complete_record_end > source_start
+        && let Some((tmux_session_name, turn_nonce)) = identity
+    {
+        sender.send(StreamMessage::CodexTuiTerminalDone {
+            result,
+            session_id: state.session_id.clone(),
+            rollout_path: rollout_path.display().to_string(),
+            tmux_session_name: tmux_session_name.to_string(),
+            turn_nonce: turn_nonce.to_string(),
+            source_start,
+            complete_record_end,
+        });
+    } else {
+        sender.send(StreamMessage::Done {
+            result,
+            session_id: state.session_id.clone(),
+        });
+    }
 }
 
 #[cfg(test)]
@@ -1922,6 +2000,7 @@ mod tests {
                 discord_origin_prompt: None,
                 pane_busy_probe: None,
                 pane_busy_veto_cap: Duration::from_secs(DEFAULT_PANE_BUSY_VETO_CAP_SECS),
+                terminal_range_eligible: false,
             },
         )
         .unwrap();
@@ -1985,6 +2064,7 @@ mod tests {
                 discord_origin_prompt: None,
                 pane_busy_probe: None,
                 pane_busy_veto_cap: Duration::from_secs(DEFAULT_PANE_BUSY_VETO_CAP_SECS),
+                terminal_range_eligible: false,
             },
         )
         .unwrap();
@@ -2330,11 +2410,44 @@ mod tests {
             messages
         );
         assert!(
-            messages
-                .iter()
-                .all(|m| !matches!(m, StreamMessage::Done { .. })),
+            messages.iter().all(|m| !matches!(
+                m,
+                StreamMessage::Done { .. } | StreamMessage::CodexTuiTerminalDone { .. }
+            )),
             "post-cancel Done must NOT be relayed; got messages={:?}",
             messages
+        );
+    }
+
+    #[test]
+    fn codex_terminal_frame_is_atomic_at_complete_boundary_5264() {
+        let (tx, rx) = mpsc::channel();
+        let sender = RelaySuppressionSender::new(&tx, None);
+        let mut state = RolloutParseState {
+            saw_assistant_text: true,
+            tmux_session_name: Some("AgentDesk-codex-range".into()),
+            ..RolloutParseState::default()
+        };
+        let mut complete = br#"{"type":"ignored"}"#.to_vec();
+        let complete_len = complete.len() as u64;
+        try_process_complete_partial_line(&mut complete, &sender, &mut state);
+        let mut partial = br#"{"type":"partial""#.to_vec();
+        try_process_complete_partial_line(&mut partial, &sender, &mut state);
+        assert_eq!(state.bytes_read, complete_len);
+        emit_terminal_message(
+            &sender,
+            &state,
+            "answer".into(),
+            Path::new("/tmp/raw.jsonl"),
+            7,
+            Some("turn-nonce"),
+            true,
+        );
+        let messages = rx.try_iter().collect::<Vec<_>>();
+        assert!(
+            matches!(messages.as_slice(), [StreamMessage::CodexTuiTerminalDone {
+            result, turn_nonce, source_start: 7, complete_record_end, ..
+        }] if result == "answer" && turn_nonce == "turn-nonce" && *complete_record_end == 7 + complete_len)
         );
     }
 

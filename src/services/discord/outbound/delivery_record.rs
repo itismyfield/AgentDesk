@@ -2582,6 +2582,34 @@ mod tests {
     }
 
     #[test]
+    fn codex_admitted_range_receipt_is_exact_and_idempotent_5264() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Codex;
+        let channel = 5_264_001;
+        let generation = set_phase_a_generation("AgentDesk-codex-5264", 1_700_526_400);
+        let (frontier, receipt) = exact_delivery_fixture(
+            &provider,
+            "AgentDesk-codex-5264",
+            "turn-nonce",
+            (0, 3),
+            generation,
+            (channel, channel),
+            5_264_002,
+        );
+        for _ in 0..2 {
+            write_confirmed_delivery(&provider, channel, frontier.clone(), receipt.clone())
+                .unwrap();
+        }
+        assert_eq!(
+            read_record(&provider, channel)
+                .unwrap()
+                .confirmed_deliveries
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn ordered_jsonl_commit_is_generation_scoped_and_monotonic() {
         let _root = IsolatedRoot::new();
         let path = record_path_or_err(&ProviderKind::Claude, 2_115).expect("record path");

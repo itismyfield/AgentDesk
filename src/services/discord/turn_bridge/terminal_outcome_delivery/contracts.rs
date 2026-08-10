@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::agent_protocol::RuntimeHandoffKind;
 
 pub(in crate::services::discord::turn_bridge) struct TerminalOutcomeDeliveryContext {
     pub(in crate::services::discord::turn_bridge) channel_id: ChannelId,
@@ -10,6 +11,7 @@ pub(in crate::services::discord::turn_bridge) struct TerminalOutcomeDeliveryCont
     pub(in crate::services::discord::turn_bridge) recovery_retry: bool,
     pub(in crate::services::discord::turn_bridge) rx_disconnected: bool,
     pub(in crate::services::discord::turn_bridge) tmux_last_offset: Option<u64>,
+    pub(in crate::services::discord::turn_bridge) codex_tui_terminal_range_end: Option<u64>,
     pub(in crate::services::discord::turn_bridge) watcher_owner_channel_id: ChannelId,
     pub(in crate::services::discord::turn_bridge) watcher_handoff_claim_outcome:
         WatcherHandoffClaimOutcome,
@@ -110,4 +112,48 @@ pub(in crate::services::discord::turn_bridge) struct TerminalOutcomeDeliveryOutp
         Vec<MessageId>,
     pub(in crate::services::discord::turn_bridge) response_sent_offset: usize,
     pub(in crate::services::discord::turn_bridge) turn_start: std::time::Instant,
+}
+
+pub(super) fn ordered_terminal_range_end(
+    provider: &ProviderKind,
+    runtime_kind: Option<RuntimeHandoffKind>,
+    tmux_last_offset: Option<u64>,
+    codex_tui_terminal_range_end: Option<u64>,
+) -> Option<u64> {
+    if provider == &ProviderKind::Codex && runtime_kind == Some(RuntimeHandoffKind::CodexTui) {
+        codex_tui_terminal_range_end
+    } else {
+        tmux_last_offset
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_tui_terminal_range_end_is_latch_only_5264() {
+        assert_eq!(
+            ordered_terminal_range_end(
+                &ProviderKind::Codex,
+                Some(RuntimeHandoffKind::CodexTui),
+                Some(99),
+                None,
+            ),
+            None,
+        );
+        assert_eq!(
+            ordered_terminal_range_end(
+                &ProviderKind::Codex,
+                Some(RuntimeHandoffKind::CodexTui),
+                Some(99),
+                Some(42),
+            ),
+            Some(42),
+        );
+        assert_eq!(
+            ordered_terminal_range_end(&ProviderKind::Claude, None, Some(99), Some(42)),
+            Some(99),
+        );
+    }
 }

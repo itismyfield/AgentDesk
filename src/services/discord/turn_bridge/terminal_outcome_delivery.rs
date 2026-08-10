@@ -58,6 +58,7 @@ pub(super) async fn run_terminal_outcome_delivery(
     let (cancelled, transport_error) = (ctx.cancelled, ctx.transport_error);
     let (recovery_retry, rx_disconnected) = (ctx.recovery_retry, ctx.rx_disconnected);
     let tmux_last_offset = ctx.tmux_last_offset;
+    let codex_tui_terminal_range_end = ctx.codex_tui_terminal_range_end;
     let watcher_owner_channel_id = ctx.watcher_owner_channel_id;
     let watcher_handoff_claim_outcome = ctx.watcher_handoff_claim_outcome;
     let bridge_created_response_placeholder_msg_id = ctx.bridge_created_response_placeholder_msg_id;
@@ -101,6 +102,12 @@ pub(super) async fn run_terminal_outcome_delivery(
         state.pending_long_running_retarget_after_state_save;
     let mut long_running_placeholder_active = state.long_running_placeholder_active;
     let mut inflight_state = state.inflight_state;
+    let terminal_range_end = contracts::ordered_terminal_range_end(
+        &provider,
+        inflight_state.runtime_kind,
+        tmux_last_offset,
+        codex_tui_terminal_range_end,
+    );
     let mut api_friction_reports = state.api_friction_reports;
     let review_dispatch_warning = state.review_dispatch_warning;
     let last_edit_text = state.last_edit_text;
@@ -401,7 +408,7 @@ pub(super) async fn run_terminal_outcome_delivery(
             if can_chain_locally {
                 if terminal_delivery_should_send_new_chunks(can_chain_locally, &delivery_response) {
                     let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
-                    let bridge_end = tmux_last_offset.unwrap_or(0);
+                    let bridge_end = terminal_range_end.unwrap_or(0);
                     if terminal_controller_cutover::bridge_long_chunks_cutover_decision(
                         can_chain_locally,
                         &delivery_response,
@@ -461,7 +468,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                             watcher_owner_channel_id,
                             shared_owned.restart.current_generation,
                             &inflight_state,
-                            tmux_last_offset,
+                            terminal_range_end,
                         );
                         terminal_controller_cutover::apply_bridge_long_chunks_legacy(
                             lease_acquire,
@@ -501,7 +508,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                     // short-replace through the controller
                     // (`terminal_controller_cutover`).
                     let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
-                    let ordered_range = tmux_last_offset.is_some_and(|e| e > bridge_start);
+                    let ordered_range = terminal_range_end.is_some_and(|e| e > bridge_start);
                     let cutover_short_replace =
                         terminal_controller_cutover::bridge_short_replace_cutover_decision(
                             can_chain_locally,
@@ -536,7 +543,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                             full_response.len(),
                             bridge_turn,
                             bridge_start,
-                            tmux_last_offset.unwrap_or(0),
+                            terminal_range_end.unwrap_or(0),
                             single_message_panel_footer_mode,
                             dispatch_id.as_deref(),
                             adk_session_key.as_deref(),
@@ -564,7 +571,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                         // this range/turn, so do NOT deliver+advance.
                         let lease_acquire =
                             match terminal_controller_cutover::bridge_terminal_lease_range(
-                                Some((bridge_start, tmux_last_offset.unwrap_or(0))),
+                                Some((bridge_start, terminal_range_end.unwrap_or(0))),
                                 cutover_short_replace,
                             ) {
                                 Some(_) => bridge_delivery_lease_for_inflight(
@@ -572,7 +579,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                                     watcher_owner_channel_id,
                                     shared_owned.restart.current_generation,
                                     &inflight_state,
-                                    tmux_last_offset,
+                                    terminal_range_end,
                                 ),
                                 None => BridgeLeaseAcquire::NoRange,
                             };

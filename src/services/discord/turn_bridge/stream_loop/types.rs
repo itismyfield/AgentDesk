@@ -9,6 +9,64 @@ use super::super::stream_tick::{
 use super::super::{streaming_edit_text::TuiErrorClassification, *};
 use super::exit_reconcile::StreamLoopOutcome;
 
+macro_rules! refresh_expected_after_handoff {
+    ($identity:expr, $baseline:expr, $state:expr, $outcome:expr) => {
+        $crate::services::discord::turn_bridge::stream_loop::expected_identity::refresh_stream_tick_expected_identity_after_handoff(
+            &mut $identity,
+            &mut $baseline,
+            &$state,
+            $outcome,
+        )
+    };
+}
+pub(super) use refresh_expected_after_handoff;
+
+macro_rules! refresh_or_retain_runtime_handoff_inner {
+    ($identity:expr, $baseline:expr, $state:expr, $pending:expr, $outcome:expr, $retry_pending:ident, $retry_retained:ident) => {{
+        let outcome = $outcome;
+        refresh_expected_after_handoff!($identity, $baseline, $state, outcome.guarded_save_outcome);
+        if let Some(retry_message) = outcome.retry_message {
+            $pending.push_front(retry_message.into_stream_message());
+            $retry_pending = true;
+            $retry_retained = true;
+            true
+        } else {
+            $retry_retained = false;
+            false
+        }
+    }};
+}
+pub(super) use refresh_or_retain_runtime_handoff_inner;
+
+macro_rules! stop_on_tool_authority_loss {
+    ($outcome:expr, $loop_outcome:ident, $label:lifetime) => {
+        if matches!(
+            $outcome,
+            $crate::services::discord::turn_bridge::stream_loop::tool_arms::StreamToolArmOutcome::AuthorityLost
+        ) {
+            $loop_outcome = StreamLoopOutcome::AuthorityLost;
+            break $label;
+        }
+    };
+}
+pub(super) use stop_on_tool_authority_loss;
+
+pub(super) async fn receive_next_stream_message(
+    rx: &mut StreamMessageReceiverAdapter,
+    pending: &mut VecDeque<StreamMessage>,
+    done: bool,
+    drain_until: Option<std::time::Instant>,
+) {
+    let wait = turn_bridge_stream_wait_duration(done, drain_until, std::time::Instant::now());
+    if wait.is_zero() {
+        if let Ok(message) = rx.try_recv() {
+            pending.push_back(message);
+        }
+    } else if let Ok(Some(message)) = tokio::time::timeout(wait, rx.recv()).await {
+        pending.push_back(message);
+    }
+}
+
 pub(in crate::services::discord::turn_bridge) struct StreamLoopContext {
     pub(in crate::services::discord::turn_bridge) shared_owned: Arc<SharedData>,
     pub(in crate::services::discord::turn_bridge) gateway: Arc<dyn TurnGateway>,
@@ -122,6 +180,7 @@ pub(in crate::services::discord::turn_bridge) struct StreamLoopState<'a> {
 pub(in crate::services::discord::turn_bridge) struct StreamLoopOutput {
     pub(in crate::services::discord::turn_bridge) outcome: StreamLoopOutcome,
     pub(in crate::services::discord::turn_bridge) tui_error_classification: TuiErrorClassification,
+    pub(in crate::services::discord::turn_bridge) codex_tui_terminal_range_end: Option<u64>,
     pub(in crate::services::discord::turn_bridge) pending_long_running_open_after_state_save:
         PendingLongRunningOpenAfterStateSave,
     pub(in crate::services::discord::turn_bridge) pending_long_running_retarget_after_state_save:

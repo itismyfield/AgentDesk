@@ -714,7 +714,7 @@ pub(super) fn spawn_turn_bridge(
             stream_loop_output.pending_long_running_open_after_state_save;
         let pending_long_running_retarget_after_state_save =
             stream_loop_output.pending_long_running_retarget_after_state_save;
-
+        let codex_tui_terminal_range_end = stream_loop_output.codex_tui_terminal_range_end;
         let post_loop_finalize_output = post_loop_finalize::run_post_loop_finalize(
             post_loop_finalize::PostLoopFinalizeContext {
                 shared_owned: shared_owned.clone(),
@@ -788,7 +788,6 @@ pub(super) fn spawn_turn_bridge(
         #[cfg(unix)]
         let bridge_tui_gate_outcome_early =
             post_loop_finalize_output.bridge_tui_gate_outcome_early;
-
         let terminal_outcome_delivery_output =
             terminal_outcome_delivery::run_terminal_outcome_delivery(
                 terminal_outcome_delivery::TerminalOutcomeDeliveryContext {
@@ -801,6 +800,7 @@ pub(super) fn spawn_turn_bridge(
                     recovery_retry,
                     rx_disconnected,
                     tmux_last_offset,
+                    codex_tui_terminal_range_end,
                     watcher_owner_channel_id,
                     watcher_handoff_claim_outcome,
                     bridge_created_response_placeholder_msg_id,
