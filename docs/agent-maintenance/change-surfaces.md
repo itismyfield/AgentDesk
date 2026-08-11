@@ -8,7 +8,7 @@
 > [`docs/generated/giant-file-registry.md`](../generated/giant-file-registry.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-08-06 (against #5071 T1 S3b).
+> Last refreshed: 2026-08-12 (against #5280/#5284 near-threshold health surfaces and stable symbol references).
 >
 > — the dead-tmux tail drain in `tmux.rs`
 > (`drain_missing_inflight_dead_tmux_tail_to_eof`) now records itself in
@@ -70,11 +70,11 @@
 - `active_callsite_coverage` only applies to surfaces with a parallel canonical
   path already implemented (e.g. Discord outbound v3). For pre-migration giant
   files (no canonical replacement yet), the column is `n/a`.
-- **At-cap surfaces (#5150).** Two files sit on a hard size gate with no usable
-  headroom. The two gates measure DIFFERENT things, so check which one applies
-  before adding a line. This was previously recorded only in a comment inside
-  `scripts/audit_maintainability_config.toml`, i.e. nowhere a reader of this
-  registry would see it.
+- **At-cap and near-cap surfaces (#5150/#5280).** Four files sit on or close to
+  a hard size gate. The gates measure DIFFERENT things, so check which one
+  applies before adding a line. This was previously recorded only in a comment
+  inside `scripts/audit_maintainability_config.toml`, i.e. nowhere a reader of
+  this registry would see it.
   - `src/services/discord/turn_bridge/stream_loop.rs` — **979 raw file lines**
     against its `979` `[namespace_size_caps]` entry. That gate counts every
     line in the file (inline `#[cfg(test)]` blocks included — unlike the
@@ -91,7 +91,23 @@
     `grandfathered_baseline_paths` array is a closed baseline, so crossing the
     threshold forces a new `[[entry]]` carrying an owner, a deadline, and a
     decompose issue before CI goes green again.
-  - Both figures measured 2026-08-06 on `main` @ `9721fc70a` with the gates'
+  - `src/services/discord/health/snapshot.rs` — **999 production lines**, with
+    **1 production line of headroom** before the `>= 1000` giant threshold.
+    It is registered in neither `scripts/giant_file_registry.toml` nor the
+    generated giant inventory, so adding one production line can make CI fail
+    before a lane sees any registry warning. This figure is the `Prod` value
+    from a freshly generated `docs/generated/module-inventory.md` on 2026-08-12
+    at `main` @ `8d8111fd6`; do not infer it by visually subtracting the
+    `#[cfg(test)] mod` block. That visual count produces a different value, but
+    the generated inventory is the gate authority. Re-measure from the generated
+    inventory before editing, and extract before production growth.
+  - `src/services/discord/health/stall_liveness.rs` — **977 production lines**,
+    with **23 production lines of headroom** before the `>= 1000` giant
+    threshold, measured from the same generated inventory on 2026-08-12 at
+    `main` @ `8d8111fd6`. Re-measure from the `Prod` column and plan an
+    extraction before consuming that headroom.
+  - The `stream_loop.rs` and `gateway.rs` figures were measured 2026-08-06 on
+    `main` @ `9721fc70a` with the gates'
     own code: `audit_maintainability/checks/namespace_size_caps.count_lines`
     for the raw figure and `generate_inventory_docs.split_prod_test_lines` (the
     `Prod` column of the generated `module-inventory.md`) for the production
@@ -538,9 +554,9 @@ time for diagnostics; neither is a stored approval value.
     `계속 처리 중` streaming footer off the committed-but-unrelayed placeholder;
     +46 from #3016 option A codex R2 `pinned_finalize_user_msg_id` pure helper
     that binds the watcher normal-completion finalize id to the OUTPUT RANGE
-    (`turn_start_offset.unwrap_or(last_offset) < current_offset`, mirroring the
-    yield guard at `tmux.rs:2110-2111`) so a follow-up turn started after this
-    range is not released by stale output;
+    (`turn_start_offset.unwrap_or(last_offset) < current_offset`, mirroring
+    `tmux::watcher_should_yield_to_inflight_state`) so a follow-up turn started
+    after this range is not released by stale output;
     +143 from #3017 the no-inflight relay-dedup gate (reads `committed_relay_offset`
     + generation-aware watermark resets, suppresses a wake/idle terminal already
     committed by another relay actor) and the monitor-auto-turn synthetic-id /
@@ -689,8 +705,10 @@ time for diagnostics; neither is a stored approval value.
     session, current_offset)` (the id==0-INCLUSIVE anchor variant catches a newer
     id==0 external-input/injected panel owner the id!=0 sibling would miss; the
     OFFSET test — not `pinned == 0` — keeps an in-range id==0 watcher-direct turn
-    NON-suppressed). turn_bridge/mod.rs:2009 (BRIDGE path / #3016 core hotfile) is
-    explicitly OUT OF SCOPE and deferred to a follow-up. New test
+    NON-suppressed). The BRIDGE path through
+    `turn_bridge::complete_status_panel_v2_with_http` and its
+    `status_panel_completion_action` dispatch (#3016 core hotfile) is explicitly
+    OUT OF SCOPE and deferred to a follow-up. New test
     `status_panel_adopt_and_edit_gate_is_turn_aliasing_safe` covers stale-newer
     (incl. id==0 external/injected) NOT adopted/edited, in-range id==0
     watcher-direct STILL adopts+edits (over-suppression guard), and in-range id!=0
@@ -1763,8 +1781,9 @@ time for diagnostics; neither is a stored approval value.
 - active_callsite_coverage: retired DB compatibility history is tracked in
   `known-legacy.md`.
 - invariants:
-  - `/api/inflight/rebind` is the only synthetic inflight writer
-    (`src/server/routes/health_api.rs:684`).
+  - `/api/inflight/rebind` is the only synthetic inflight writer: its
+    `health_api::rebind_inflight_handler` delegates to
+    `health::handle_rebind_inflight` for the write.
   - Dashboard routes never write to canonical config files; they read DB
     state and emit events.
 - allowed_changes: `bugfix` only on giant routes; `new_feature` only when
