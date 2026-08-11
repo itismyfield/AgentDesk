@@ -710,10 +710,8 @@ pub(super) fn spawn_turn_bridge(
                 return;
             }
         }
-        let pending_long_running_open_after_state_save =
-            stream_loop_output.pending_long_running_open_after_state_save;
-        let pending_long_running_retarget_after_state_save =
-            stream_loop_output.pending_long_running_retarget_after_state_save;
+        #[rustfmt::skip]
+        let (pending_long_running_open_after_state_save, pending_long_running_retarget_after_state_save) = (stream_loop_output.pending_long_running_open_after_state_save, stream_loop_output.pending_long_running_retarget_after_state_save);
 
         let post_loop_finalize_output = post_loop_finalize::run_post_loop_finalize(
             post_loop_finalize::PostLoopFinalizeContext {
@@ -801,6 +799,7 @@ pub(super) fn spawn_turn_bridge(
                     recovery_retry,
                     rx_disconnected,
                     tmux_last_offset,
+                    codex_tui_terminal_range: stream_loop_output.codex_tui_terminal_range,
                     watcher_owner_channel_id,
                     watcher_handoff_claim_outcome,
                     bridge_created_response_placeholder_msg_id,

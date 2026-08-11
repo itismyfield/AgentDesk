@@ -177,6 +177,10 @@ fn admit_codex_terminal_range_in_root(
     })
 }
 impl CodexRange {
+    pub(in crate::services::discord) fn complete_record_end(&self) -> u64 {
+        self.source.range.1
+    }
+
     pub(in crate::services::discord) fn live_source_path(&self) -> Option<PathBuf> {
         let source = &self.source;
         let (path, len) = canonical_regular_file(&self.rollout_path)?;
@@ -204,7 +208,6 @@ impl CodexRange {
                     && binding.last_offset == source.range.1
             })
     }
-    #[allow(dead_code)]
     pub(in crate::services::discord) fn revalidated_source(
         &self,
         local: &InflightTurnState,

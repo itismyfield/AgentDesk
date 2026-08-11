@@ -1,12 +1,7 @@
 //! #3089 A5 turn_bridge terminal cutover to the unified turn-output controller.
 //!
-//! Sibling of `turn_bridge/terminal_delivery.rs` (which owns `BridgeDeliveryLease`,
-//! `advance_tmux_relay_confirmed_end`, and `turn_bridge_replace_outcome_committed`).
-//! This module holds the A5 cutover surface — the pure cut-over decision +
-//! `bridge_terminal_lease_range` gate, the `BridgePostHeartbeat`
-//! adapter, and the short-replace/long-chunk controller write-backs — extracted here so
-//! `terminal_delivery.rs` stays below the 1000-prod giant-file threshold (mirrors
-//! A4's `tmux_watcher/terminal_send.rs` sibling).
+//! Owns the A5 cutover decision, lease gate, heartbeat adapter, and controller
+//! write-backs so `terminal_delivery.rs` remains below its production LoC cap.
 
 use super::*;
 // #5071 T1 S4: the ONE door from this file to the `#[cfg(unix)]` journal.
@@ -23,7 +18,20 @@ use super::super::turn_finalizer::TurnKey;
 use crate::services::discord::{
     DeliveryLeaseCell, DeliveryLeaseHeartbeat, DeliveryLeaseKey, LeaseHolder, lease_now_ms,
 };
-use unix_journal::Disposition;
+use unix_journal::{
+    Disposition, begin_controller_terminal as journal_begin,
+    settle_controller_terminal as journal_settle,
+};
+#[cfg(unix)]
+#[rustfmt::skip]
+pub(super) fn begin_pinned_terminal(
+    shared: &SharedData, provider: &ProviderKind, long: bool,
+    channels: (ChannelId, ChannelId), range: (u64, u64),
+) -> impl FnOnce(Option<MessageId>, bool) {
+    let kind = if long { Disposition::LongChunks } else { Disposition::ShortReplace };
+    let mut journal = journal_begin(shared, provider, kind, channels, Some(range));
+    move |message_id, committed| drop(journal_settle(&mut journal, message_id, committed))
+}
 
 /// #3089 A5: the bridge short-replace cut-over decision, computed at the site-5
 /// lease-acquire site (mod.rs ~6134).
@@ -805,13 +813,7 @@ pub(super) async fn apply_bridge_short_replace_controller(
     );
 }
 
-/// #3089 A5: write the controller-path `DeliveryOutcome` back into the site-5
-/// send-arm locals. Split out of [`apply_bridge_short_replace_controller`] (a
-/// pure, synchronous mapping with NO gateway/transport) so the per-arm
-/// side-effects — the dual-offset fallback bump, the cleanup record, the
-/// completion-footer fork — are unit-testable WITHOUT a live gateway. Mirrors
-/// A4's `apply_watcher_short_replace_result`.
-///
+/// Maps site-5 outcomes onto footer, retry, sent-offset, and holder cleanup state.
 /// Reproduces the legacy site-5 mapping (mod.rs 6160-6245) EXACTLY:
 /// - `Delivered` (EditedOriginal): committed → `terminal_delivery_committed = true;
 ///   terminal_body_visible = true;` footer if footer-mode; `Succeeded` cleanup;
@@ -1033,6 +1035,12 @@ mod tests {
         // (mod.rs:2207-2213). The edit MUST land in the delivery channel.
         const OWNER_CH: u64 = 9_999;
 
+        #[cfg(unix)]
+        #[rustfmt::skip]
+        use super::super::super::{terminal_delivery::{BridgeDeliveryLease, BridgeLeaseAcquire, PinnedBridgeDeliveryLease}, terminal_outcome_delivery::PinnedTerminalTransport};
+        #[cfg(unix)]
+        #[rustfmt::skip]
+        use crate::services::discord::{inflight::{CodexRange, InflightTurnIdentity}, outbound::delivery_record::{self as dr, ExactJsonlSourceIdentity}};
         fn ch() -> ChannelId {
             ChannelId::new(CH)
         }
@@ -1046,6 +1054,277 @@ mod tests {
             DeliveryLeaseKey::from_turn_key(turn())
         }
 
+        #[cfg(unix)]
+        #[rustfmt::skip]
+        fn stamp(tmux: &str, seconds: i64) -> i64 {
+            let path = crate::services::tmux_common::session_temp_path(tmux, "generation");
+            std::fs::create_dir_all(std::path::Path::new(&path).parent().unwrap()).unwrap(); std::fs::write(&path, "g").unwrap();
+            filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(seconds, 1)).unwrap(); dr::current_generation_mtime_ns(tmux)
+        }
+        #[cfg(unix)]
+        #[rustfmt::skip]
+        fn pinned_parts(shared: &Arc<SharedData>, root: &std::path::Path, owner: ChannelId, user: u64) -> (BridgeLeaseAcquire, CodexRange, crate::services::discord::inflight::InflightTurnState, ExactJsonlSourceIdentity) {
+            use crate::services::codex_tui::session::write_codex_tui_rollout_marker_with_start_offset as write_marker;
+            let (tmux, rollout) = ("AgentDesk-codex-5264-barrier", root.join(format!("rollout-{user}.jsonl")));
+            std::fs::write(&rollout, [b'x'; 64]).unwrap(); write_marker(tmux, &rollout, Some("raw-session"), Some(0)).unwrap();
+            // #5264 PR-B: production never pins a source without a live CodexTui runtime
+            // binding — `CodexRange::revalidated_source` requires `binding_matches` before
+            // `prepare_bridge_lease` builds the lease. Install it so the fixture holds that
+            // precondition; without it `source_authority_is_live` is false for a reason no
+            // production caller can reach, and every sub-case below passes vacuously.
+            crate::services::codex_tui::session::install_codex_tui_runtime_binding(tmux, Some(0), crate::services::tui_prompt_dedupe::TuiRuntimeBinding { runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui, output_path: rollout.display().to_string(), relay_output_path: None, input_fifo_path: None, session_id: Some("raw-session".into()), last_offset: 64, relay_last_offset: None });
+            let source = ExactJsonlSourceIdentity { provider: "codex".into(), tmux_session_name: tmux.into(), turn_nonce: format!("nonce-{user}"), range: (0,64), generation_mtime_ns: stamp(tmux, 1_700_526_400), offset_authority_channel_id: owner.get(), delivery_channel_id: CH };
+            let range = CodexRange { identity: InflightTurnIdentity { user_msg_id: user, started_at: "now".into(), tmux_session_name: Some(tmux.into()), turn_start_offset: Some(0) }, result: "answer".into(), rollout_path: rollout.display().to_string(), session_id: "raw-session".into(), source: source.clone() };
+            // Canonicalized: `revalidated_source` compares the row's output path against
+            // the canonicalized live source path, and on macOS the tempdir resolves
+            // /var -> /private/var. A raw tempdir path makes revalidation return Ok(None)
+            // for a reason production never sees.
+            let canonical_rollout = std::fs::canonicalize(&rollout).unwrap_or_else(|_| rollout.clone());
+            let mut inflight = crate::services::discord::inflight::InflightTurnState::new(ProviderKind::Codex, CH, None, 1, user, MSG, "prompt".into(), None, Some(tmux.into()), Some(canonical_rollout.display().to_string()), None, 0);
+            inflight.started_at = "now".into(); inflight.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui); inflight.turn_nonce = Some(format!("nonce-{user}")); inflight.last_offset = 64; inflight.full_response = "answer".into(); inflight.watcher_owner_channel_id = Some(owner.get());
+            crate::services::discord::inflight::save_inflight_state(&inflight).unwrap();
+            let key = DeliveryLeaseKey::from_turn_key(TurnKey::new(owner, user, 1));
+            let acquire = BridgeDeliveryLease::acquire(shared, owner, key, 0, Some(64));
+            (acquire, range, inflight, source)
+        }
+        // The pinned lease the barrier tests use, built from the parts above so the
+        // decision-table test can observe the same fixture one step earlier.
+        #[cfg(unix)]
+        #[rustfmt::skip]
+        fn pinned(shared: &Arc<SharedData>, root: &std::path::Path, owner: ChannelId, user: u64) -> (PinnedBridgeDeliveryLease, ExactJsonlSourceIdentity) {
+            let (acquire, range, _inflight, source) = pinned_parts(shared, root, owner, user);
+            let lease = match acquire { BridgeLeaseAcquire::Held(lease) => lease, _ => panic!("held") };
+            (lease.pin_exact_source(shared, &ProviderKind::Codex, ch(), range).unwrap(), source)
+        }
+
+        // #5264 PR-B: `prepare_bridge_lease` is the ONLY production route into the pinned
+        // cutover, and nothing drove it. A build that short-circuits it to always return
+        // `Legacy` makes the entire feature inert — no CodexTui turn ever pins — and every
+        // barrier test still passes, because they construct `PinnedBridgeDeliveryLease`
+        // themselves. These assertions are the witness that the production decision still
+        // reaches the pinned arm at all.
+        #[cfg(unix)]
+        #[tokio::test(flavor = "current_thread")]
+        async fn prepare_bridge_lease_decision_table_5264() {
+            use crate::services::discord::turn_bridge::stream_loop::types::{
+                PreparedBridgeLease, prepare_bridge_lease,
+            };
+            let _lock = crate::config::shared_test_env_lock()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            crate::services::tui_prompt_dedupe::reset_state_for_tests();
+            let root = runtime_root_guard();
+
+            let shared = make_shared_data_for_tests();
+            let (acquire, range, inflight, _source) =
+                pinned_parts(&shared, root._temp.path(), ch(), 11);
+            // Stated separately so a fixture drift shows up as "revalidation rejected the
+            // source" rather than as an opaque "did not pin".
+            let revalidated = range.revalidated_source(&inflight);
+            assert!(
+                revalidated.is_ok(),
+                "the fixture must satisfy the revalidation preconditions"
+            );
+            assert!(
+                revalidated.expect("checked").is_some(),
+                "revalidation must accept the fixture's source"
+            );
+            assert!(
+                matches!(
+                    prepare_bridge_lease(
+                        acquire,
+                        Some(&range),
+                        &inflight,
+                        shared.as_ref(),
+                        &ProviderKind::Codex,
+                        ch()
+                    ),
+                    PreparedBridgeLease::Pinned(_)
+                ),
+                "an admitted frame whose source revalidates, with a held lease, must pin"
+            );
+
+            // A Skip is the one acquire outcome that means another actor really owns this
+            // turn, so it must stay a Skip rather than being pinned over.
+            let skip_shared = make_shared_data_for_tests();
+            let (_skip_acquire, skip_range, skip_inflight, _s) =
+                pinned_parts(&skip_shared, root._temp.path(), ch(), 12);
+            assert!(
+                matches!(
+                    prepare_bridge_lease(
+                        BridgeLeaseAcquire::Skip,
+                        Some(&skip_range),
+                        &skip_inflight,
+                        skip_shared.as_ref(),
+                        &ProviderKind::Codex,
+                        ch()
+                    ),
+                    PreparedBridgeLease::Legacy(BridgeLeaseAcquire::Skip)
+                ),
+                "a real Skip must survive the pinned decision untouched"
+            );
+
+            // With no admitted frame there is nothing to pin, but the held lease must not
+            // be discarded or replaced by a fabricated outcome.
+            let legacy_shared = make_shared_data_for_tests();
+            let (legacy_acquire, _range, legacy_inflight, _s) =
+                pinned_parts(&legacy_shared, root._temp.path(), ch(), 13);
+            assert!(
+                matches!(
+                    prepare_bridge_lease(
+                        legacy_acquire,
+                        None,
+                        &legacy_inflight,
+                        legacy_shared.as_ref(),
+                        &ProviderKind::Codex,
+                        ch()
+                    ),
+                    PreparedBridgeLease::Legacy(BridgeLeaseAcquire::Held(_))
+                ),
+                "no admitted frame must pass the real acquire through, not fabricate one"
+            );
+
+            // A revalidation error is not evidence that anyone else holds this turn. The
+            // caller turns a Skip into `bridge_skip_holder_owns_inflight`, so fabricating
+            // one here claims a holder that does not exist while this bridge still owns the
+            // lease it acquired.
+            let err_shared = make_shared_data_for_tests();
+            let (err_acquire, err_range, err_inflight, _s) =
+                pinned_parts(&err_shared, root._temp.path(), ch(), 14);
+            let mut committed_inflight = err_inflight;
+            committed_inflight.terminal_delivery_committed = true;
+            assert!(
+                err_range.revalidated_source(&committed_inflight).is_err(),
+                "the fixture must actually reach the revalidation error arm"
+            );
+            assert!(
+                matches!(
+                    prepare_bridge_lease(
+                        err_acquire,
+                        Some(&err_range),
+                        &committed_inflight,
+                        err_shared.as_ref(),
+                        &ProviderKind::Codex,
+                        ch()
+                    ),
+                    PreparedBridgeLease::Legacy(BridgeLeaseAcquire::Held(_))
+                ),
+                "a revalidation error must pass the real acquire through, never fabricate a \
+                 holder-owned Skip"
+            );
+
+            // Same class, one arm lower: `pin_exact_source` consumes the lease and can
+            // still refuse, leaving nobody holding the cell. Reporting Skip there would
+            // claim a holder AND mark the turn handled, so the legacy fallback would never
+            // run and the turn would go undelivered. Reached here by pinning against a
+            // delivery channel the source was not minted for.
+            let pin_shared = make_shared_data_for_tests();
+            let (pin_acquire, pin_range, pin_inflight, pin_source) =
+                pinned_parts(&pin_shared, root._temp.path(), ch(), 15);
+            assert_ne!(
+                pin_source.delivery_channel_id,
+                owner_ch().get(),
+                "the fixture must actually mismatch the pin's delivery channel"
+            );
+            assert!(
+                matches!(
+                    prepare_bridge_lease(
+                        pin_acquire,
+                        Some(&pin_range),
+                        &pin_inflight,
+                        pin_shared.as_ref(),
+                        &ProviderKind::Codex,
+                        owner_ch()
+                    ),
+                    PreparedBridgeLease::Legacy(BridgeLeaseAcquire::NoRange)
+                ),
+                "a refused pin must report NoRange so the fallback still delivers, never a \
+                 holder-owned Skip that suppresses delivery entirely"
+            );
+
+            // The third arm. A source that no longer matches is not a holder either, and
+            // this arm had no case at all: mutating it to Skip passed the whole table.
+            let stale_shared = make_shared_data_for_tests();
+            let (stale_acquire, stale_range, stale_inflight, _s) =
+                pinned_parts(&stale_shared, root._temp.path(), ch(), 16);
+            let mut drifted = stale_inflight;
+            // Persisted, not just local: `revalidated_source` compares the row it re-reads
+            // under the inflight lock, so mutating only the in-memory copy leaves the arm
+            // unreached.
+            drifted.full_response = "a different answer".into();
+            crate::services::discord::inflight::save_inflight_state(&drifted).unwrap();
+            assert!(
+                matches!(stale_range.revalidated_source(&drifted), Ok(None)),
+                "the fixture must actually reach the source-no-longer-exact arm"
+            );
+            assert!(
+                !matches!(
+                    prepare_bridge_lease(
+                        stale_acquire,
+                        Some(&stale_range),
+                        &drifted,
+                        stale_shared.as_ref(),
+                        &ProviderKind::Codex,
+                        ch()
+                    ),
+                    PreparedBridgeLease::Legacy(BridgeLeaseAcquire::Skip)
+                ),
+                "a source that no longer revalidates must not be reported as a holder-owned \
+                 Skip, which would suppress the fallback and drop the turn"
+            );
+        }
+        #[cfg(unix)]
+        #[rustfmt::skip]
+        fn flip(source: ExactJsonlSourceIdentity) -> Arc<dyn Fn() + Send + Sync> {
+            Arc::new(move || { let mut g2 = source.clone(); g2.generation_mtime_ns = stamp(&g2.tmux_session_name, 1_800_526_400); g2.turn_nonce = "g2".into(); g2.range = (0, 7); dr::record_current_pinned_delivery(&g2, 9_999).unwrap(); })
+        }
+        #[cfg(unix)]
+        #[rustfmt::skip]
+        fn pinned_transport<'a>(shared: &'a SharedData, gateway: &'a dyn TurnGateway, provider: &'a ProviderKind, owner: ChannelId) -> PinnedTerminalTransport<'a> {
+            PinnedTerminalTransport { source: (shared, gateway, provider), target: (owner, ch(), MessageId::new(MSG)), payload: (Some("AgentDesk-codex-5264-barrier"), "answer", (0, 64)), trace: (None, None, None) }
+        }
+        #[cfg(unix)]
+        #[rustfmt::skip]
+        fn assert_pinned_barrier(source: &ExactJsonlSourceIdentity, message_id: u64, user_msg_id: u64, body: &str) {
+            let record = dr::read_record(&ProviderKind::Codex, source.offset_authority_channel_id).unwrap(); let frontier = record.delivered_frontier.unwrap();
+            assert_eq!((frontier.range, frontier.generation_mtime_ns), ((0, 7), dr::current_generation_mtime_ns(&source.tmux_session_name)));
+            assert!(dr::historical_pinned_delivery_exists(source, message_id));
+            let mut wrong = source.clone(); wrong.generation_mtime_ns = frontier.generation_mtime_ns; wrong.turn_nonce = "g2".into();
+            assert!(!dr::historical_pinned_delivery_exists(&wrong, message_id));
+            // #5264 PR-B r7: seal `record_pinned_delivery_metadata`, the only new durable
+            // write this branch adds to the pinned path. Until these three assertions
+            // existed, DELETING the call outright and REVERTING the fingerprint key to
+            // `delivery_channel_id` both left `delivery_record`, `terminal_delivery`,
+            // `terminal_controller_cutover`, `5264` and `tmux_watcher` fully green — so the
+            // migration doc's (now removed) "known gap" could have been "closed" by
+            // reintroducing the real inert-fingerprint bug against a green CI.
+            // The oracle is the fingerprint's KEY SPACE, not `recent_delivered_content_matches`:
+            // both of these tests deliberately flip the generation during delivery, so the
+            // reader-side helper (which compares against the LIVE generation) can never match
+            // here by construction. That mismatch is the disclosed fail-open of a dedupe
+            // heuristic; what this seal pins is which channel the entry lands under.
+            let fingerprinted = |channel: u64| dr::read_record(&ProviderKind::Codex, channel).is_some_and(|record| {
+                record.recent_delivered_contents.iter().any(|entry| entry.channel_id == channel
+                    && entry.generation_mtime_ns == source.generation_mtime_ns
+                    && entry.content_len == body.len() as u64)
+            });
+            assert!(fingerprinted(source.offset_authority_channel_id),
+                "the delivered-content fingerprint must land under the OFFSET-AUTHORITY channel, which is where every reader (tmux_watcher/turn_identity.rs, tmux_watcher/terminal_preflight.rs) looks it up");
+            // Both barrier tests sweep `owner in [ch(), owner_ch()]`, so the split-channel
+            // half of the seal is asserted only on the iteration where they actually differ.
+            // That iteration is what kills the key reversion; the assertion above is what
+            // kills deleting the write.
+            if source.offset_authority_channel_id != source.delivery_channel_id {
+                assert!(!fingerprinted(source.delivery_channel_id),
+                    "and NOT under the delivery channel: writing it there strands the duplicate defence in exactly the split-channel case it exists for");
+            }
+            let settled = crate::services::discord::outbound::completed_turn_ledger::settled_user_msg_ids(&ProviderKind::Codex, source.delivery_channel_id);
+            assert!(settled.contains(&user_msg_id),
+                "the completed-turn ledger entry must be recorded under the DELIVERY channel {}: expected {user_msg_id}, ledger holds {settled:?}", source.delivery_channel_id);
+        }
         // A fake `TurnGateway` whose `replace_message_with_outcome` returns a fixed
         // outcome (or `Err`), counts transport calls, AND records the `channel_id`
         // it was called with (0 = never called) so a test can assert the edit was
@@ -1056,6 +1335,7 @@ mod tests {
         struct ShortReplaceFakeGateway {
             outcome: ReplaceLongMessageOutcome,
             ok: bool,
+            hook: Option<Arc<dyn Fn() + Send + Sync>>,
             replace_calls: AtomicUsize,
             replace_channel: AtomicU64,
         }
@@ -1070,6 +1350,7 @@ mod tests {
                 Box::pin(async move {
                     self.replace_calls.fetch_add(1, Ordering::SeqCst);
                     self.replace_channel.store(c.get(), Ordering::SeqCst);
+                    self.hook.iter().for_each(|hook| hook());
                     if self.ok {
                         Ok(self.outcome.clone())
                     } else {
@@ -1149,6 +1430,7 @@ mod tests {
             ShortReplaceFakeGateway {
                 outcome,
                 ok,
+                hook: None,
                 replace_calls: AtomicUsize::new(0),
                 replace_channel: AtomicU64::new(0),
             }
@@ -1271,6 +1553,7 @@ mod tests {
         struct LongChunksFakeGateway {
             send_ok: bool,
             delete_ok: bool,
+            hook: Option<Arc<dyn Fn() + Send + Sync>>,
             send_calls: AtomicUsize,
             delete_calls: AtomicUsize,
             clock: AtomicUsize,
@@ -1279,6 +1562,7 @@ mod tests {
         }
 
         impl TurnGateway for LongChunksFakeGateway {
+            #[rustfmt::skip]
             fn send_long_message_with_rollback<'a>(
                 &'a self,
                 _c: ChannelId,
@@ -1287,10 +1571,11 @@ mod tests {
             ) -> GatewayFuture<'a, Result<Vec<MessageId>, String>> {
                 Box::pin(async move {
                     self.send_calls.fetch_add(1, Ordering::SeqCst);
+                    self.hook.iter().for_each(|hook| hook());
                     self.send_step
                         .store(self.clock.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
                     if self.send_ok {
-                        Ok(vec![MessageId::new(9000), MessageId::new(9001)])
+                        Ok((self.send_step.load(Ordering::SeqCst) != usize::MAX).then_some(vec![MessageId::new(9000), MessageId::new(9001)]).unwrap_or_default())
                     } else {
                         Err("chunk send failed after rollback".to_string())
                     }
@@ -1377,12 +1662,42 @@ mod tests {
             LongChunksFakeGateway {
                 send_ok,
                 delete_ok,
+                hook: None,
                 send_calls: AtomicUsize::new(0),
                 delete_calls: AtomicUsize::new(0),
                 clock: AtomicUsize::new(1),
                 send_step: AtomicUsize::new(0),
                 delete_step: AtomicUsize::new(0),
             }
+        }
+
+        #[cfg(unix)]
+        #[tokio::test(flavor = "current_thread")]
+        #[rustfmt::skip]
+        async fn pinned_codex_short_replace_generation_flip_5264() {
+            let _lock = crate::config::shared_test_env_lock().lock().unwrap_or_else(|e| e.into_inner()); let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK.lock().unwrap_or_else(|poison| poison.into_inner()); crate::services::tui_prompt_dedupe::reset_state_for_tests(); let root = runtime_root_guard(); let provider = ProviderKind::Codex;
+            // A per-iteration runtime root: the same-channel sweep (owner == delivery) writes
+            // its fingerprint under CH, and the split-channel sweep asserts CH holds NO
+            // fingerprint. Both sweeps use one tmux session, one generation stamp and one
+            // body, so a shared root would leave the first sweep's entry indistinguishable
+            // from a mis-keyed write and the negative assertion would be unfalsifiable.
+            for owner in [ch(), owner_ch()] { let root = runtime_root_guard(); let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), owner, owner.get()); let mut gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, true); gw.hook = Some(flip(source.clone()));
+                let (committed, fallback, _) = pinned_transport(shared.as_ref(), &gw, &provider, owner).deliver(pin, false).await;
+                assert!(committed && !fallback); assert_eq!(gw.replace_calls.load(Ordering::SeqCst), 1); assert_pinned_barrier(&source, MSG, owner.get(), "answer"); assert!(matches!(shared.delivery_lease(owner).read(), LeaseSnapshot::Unleased)); }
+            let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), ch(), 3); let gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, false);
+            assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, false).await.0); assert!(!dr::historical_pinned_delivery_exists(&source, MSG)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased)); let broken = runtime_root_guard(); std::fs::create_dir_all(broken._temp.path().join("runtime")).unwrap(); std::fs::write(broken._temp.path().join("runtime/discord_delivery_records"), b"blocked").unwrap(); let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, broken._temp.path(), ch(), 6); let gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, true); assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, false).await.0); assert_eq!((gw.replace_calls.load(Ordering::SeqCst), shared.committed_relay_offset(ch())), (1, 64)); assert!(dr::read_record(&provider, CH).is_none()); assert!(!dr::historical_pinned_delivery_exists(&source, MSG)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased));
+        }
+
+        #[cfg(unix)]
+        #[tokio::test(flavor = "current_thread")]
+        #[rustfmt::skip]
+        async fn pinned_codex_long_chunks_generation_flip_5264() {
+            let _lock = crate::config::shared_test_env_lock().lock().unwrap_or_else(|e| e.into_inner()); let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK.lock().unwrap_or_else(|poison| poison.into_inner()); crate::services::tui_prompt_dedupe::reset_state_for_tests(); let root = runtime_root_guard(); let provider = ProviderKind::Codex;
+            // Per-iteration runtime root — same reason as the short-replace sweep above.
+            for owner in [ch(), owner_ch()] { let root = runtime_root_guard(); let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), owner, owner.get() + 4); let mut gw = long_gateway(true, true); gw.hook = Some(flip(source.clone())); let outcome = pinned_transport(shared.as_ref(), &gw, &provider, owner).deliver(pin, true).await;
+                assert_eq!((outcome.0, outcome.1), (true, false)); let mut inflight = crate::services::discord::inflight::load_inflight_state_read_only(&provider, CH).unwrap(); assert!(super::super::super::stream_loop::types::persist_pinned_terminal_anchor(&mut inflight, outcome.2)); let restored = crate::services::discord::inflight::load_inflight_state_read_only(&provider, CH).unwrap(); assert!(dr::confirmed_delivery_receipt_exists(&provider, ch(), restored.current_msg_id, &source)); assert_eq!(gw.send_calls.load(Ordering::SeqCst), 1); assert_pinned_barrier(&source, 9001, owner.get() + 4, "answer"); assert!(!dr::historical_pinned_delivery_exists(&source, 9000)); assert!(!dr::historical_pinned_delivery_exists(&source, MSG)); assert!(matches!(shared.delivery_lease(owner).read(), LeaseSnapshot::Unleased)); }
+            let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), ch(), 5); let gw = long_gateway(false, true);
+            assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, true).await.0); assert!(!dr::historical_pinned_delivery_exists(&source, 9001)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased)); let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), ch(), 7); let gw = long_gateway(true, true); gw.clock.store(usize::MAX, Ordering::SeqCst); assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, true).await.0); assert_eq!(gw.send_calls.load(Ordering::SeqCst), 1); assert!(!dr::historical_pinned_delivery_exists(&source, 9001)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased)); let broken = runtime_root_guard(); std::fs::create_dir_all(broken._temp.path().join("runtime")).unwrap(); std::fs::write(broken._temp.path().join("runtime/discord_delivery_records"), b"blocked").unwrap(); let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, broken._temp.path(), ch(), 8); let gw = long_gateway(true, true); assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, true).await.0); assert_eq!((gw.send_calls.load(Ordering::SeqCst), shared.committed_relay_offset(ch())), (1, 64)); assert!(dr::read_record(&provider, CH).is_none()); assert!(!dr::historical_pinned_delivery_exists(&source, 9001)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased));
         }
 
         async fn run_long_apply(

@@ -133,6 +133,7 @@ pub struct RolloutTailOptions {
     /// Hard wall-clock cap for the continuous `Fresh` veto interval after the
     /// pending-tool deadline. Once reached, recovery fails open to `Done`.
     pub pane_busy_veto_cap: Duration,
+    terminal_range_eligible: bool,
 }
 
 impl Default for RolloutTailOptions {
@@ -153,6 +154,7 @@ impl Default for RolloutTailOptions {
             discord_origin_prompt: None,
             pane_busy_probe: None,
             pane_busy_veto_cap: Duration::from_secs(DEFAULT_PANE_BUSY_VETO_CAP_SECS),
+            terminal_range_eligible: false,
         }
     }
 }
@@ -184,6 +186,27 @@ fn pane_busy_probe_for_tmux(
     Box::new(move || tracker.probe_tmux(&tmux_session_name))
 }
 
+/// The options every Discord-originated handoff tail sets, built in one place.
+///
+/// #5264 PR-B: `terminal_range_eligible` defaults to `false`, and `emit_done` gates the
+/// `CodexTuiTerminalDone` emission on it. An entry point that forgets to decide it
+/// therefore falls back to the legacy `Done`, produces no `CodexRange`, and skips the
+/// pinned terminal cutover — with no compile error and no failing assertion anywhere.
+/// The resumed entry point shipped with exactly that omission. Constructing the options
+/// once makes the omission impossible instead of merely detectable.
+fn discord_handoff_tail_options(
+    tmux_session_name: &str,
+    discord_origin_prompt: Option<&str>,
+) -> RolloutTailOptions {
+    RolloutTailOptions {
+        tmux_session_name: Some(tmux_session_name.to_string()),
+        discord_origin_prompt: discord_origin_prompt.map(ToString::to_string),
+        pane_busy_probe: Some(pane_busy_probe_for_tmux(tmux_session_name)),
+        terminal_range_eligible: discord_origin_prompt.is_some_and(|text| !text.trim().is_empty()),
+        ..RolloutTailOptions::default()
+    }
+}
+
 pub fn tail_latest_rollout_for_cwd_with_handoff_for_tmux(
     cwd: &Path,
     modified_since: SystemTime,
@@ -193,10 +216,7 @@ pub fn tail_latest_rollout_for_cwd_with_handoff_for_tmux(
     tmux_session_name: &str,
     discord_origin_prompt: Option<&str>,
 ) -> Result<CodexTuiTailResult, String> {
-    let mut options = RolloutTailOptions::default();
-    options.tmux_session_name = Some(tmux_session_name.to_string());
-    options.discord_origin_prompt = discord_origin_prompt.map(ToString::to_string);
-    options.pane_busy_probe = Some(pane_busy_probe_for_tmux(tmux_session_name));
+    let options = discord_handoff_tail_options(tmux_session_name, discord_origin_prompt);
     tail_latest_rollout_for_cwd_with_handoff_options(
         cwd,
         modified_since,
@@ -366,12 +386,7 @@ pub fn tail_warm_followup_rollout_for_tmux(
         Some(session_id),
         Some(start_offset),
     );
-    let options = RolloutTailOptions {
-        tmux_session_name: Some(tmux_session_name.to_string()),
-        discord_origin_prompt: Some(discord_origin_prompt.to_string()),
-        pane_busy_probe: Some(pane_busy_probe_for_tmux(tmux_session_name)),
-        ..RolloutTailOptions::default()
-    };
+    let options = discord_handoff_tail_options(tmux_session_name, Some(discord_origin_prompt));
     tail_rollout_file_until_assistant_response_with_pane_busy_probe(
         rollout_path,
         start_offset,
@@ -404,10 +419,11 @@ pub fn tail_resumed_rollout_for_session_with_handoff_for_tmux(
 ) -> Result<CodexTuiTailResult, String> {
     let sessions_dir = default_codex_sessions_dir()
         .ok_or_else(|| "Codex sessions directory is unavailable".to_string())?;
-    let mut options = RolloutTailOptions::default();
-    options.tmux_session_name = Some(tmux_session_name.to_string());
-    options.discord_origin_prompt = discord_origin_prompt.map(ToString::to_string);
-    options.pane_busy_probe = Some(pane_busy_probe_for_tmux(tmux_session_name));
+    // #5264 PR-B: this entry point was the one that left `terminal_range_eligible` at its
+    // default, so resumed turns kept the duplicate-replay hazard this change closes for
+    // fresh and warm ones. Its sole production caller passes `Some(prompt)`, as its two
+    // siblings do.
+    let options = discord_handoff_tail_options(tmux_session_name, discord_origin_prompt);
     tail_resumed_rollout_for_session_with_handoff_options(
         cwd,
         session_id,
@@ -849,6 +865,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
         discord_origin_prompt,
         mut pane_busy_probe,
         pane_busy_veto_cap,
+        terminal_range_eligible,
         ..
     } = options;
     let mut file = std::fs::File::open(rollout_path)
@@ -874,6 +891,11 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
     let mut pane_busy_veto_started_at: Option<Instant> = None;
     let started_at = Instant::now();
     let mut hook_events = crate::services::claude_tui::hook_server::subscribe_hook_events();
+    let terminal_range = (
+        seek_offset,
+        cancel_token.as_deref().and_then(CancelToken::turn_nonce),
+        terminal_range_eligible,
+    );
     // #2172 cancel boundary: wrap the raw sender so any send after the
     // shared `cancel_token` flips becomes a no-op. The producer (this
     // tail) is the relay-suppression enforcement point — once the user
@@ -888,7 +910,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                 ReadOutputResult::Cancelled {
                     offset: current_offset,
                 },
-                outcome(&state, current_offset),
+                outcome(&state, seek_offset),
             ));
         }
 
@@ -902,12 +924,19 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                 if let Some(finalize_path) =
                     explicit_finalize_path(&mut state, enable_task_complete_fast_path)
                 {
-                    emit_done(&sender, &state, finalize_path, rollout_path, current_offset);
+                    emit_done(
+                        &sender,
+                        &state,
+                        finalize_path,
+                        rollout_path,
+                        current_offset,
+                        terminal_range,
+                    );
                     return Ok((
                         ReadOutputResult::Completed {
                             offset: current_offset,
                         },
-                        outcome(&state, current_offset),
+                        outcome(&state, seek_offset),
                     ));
                 }
                 // #2419: only consider the turn drainable when no tool call
@@ -941,12 +970,13 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                                 RolloutFinalizePath::Heuristic,
                                 rollout_path,
                                 current_offset,
+                                terminal_range,
                             );
                             return Ok((
                                 ReadOutputResult::Completed {
                                     offset: current_offset,
                                 },
-                                outcome(&state, current_offset),
+                                outcome(&state, seek_offset),
                             ));
                         }
                         last_output_at = Some(Instant::now());
@@ -1034,7 +1064,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                         ReadOutputResult::Completed {
                             offset: current_offset,
                         },
-                        outcome(&state, current_offset),
+                        outcome(&state, seek_offset),
                     ));
                 }
                 if !is_alive() {
@@ -1045,6 +1075,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                             RolloutFinalizePath::Heuristic,
                             rollout_path,
                             current_offset,
+                            (terminal_range.0, terminal_range.1, false),
                         );
                         ReadOutputResult::Completed {
                             offset: current_offset,
@@ -1054,7 +1085,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                             offset: current_offset,
                         }
                     };
-                    return Ok((result, outcome(&state, current_offset)));
+                    return Ok((result, outcome(&state, seek_offset)));
                 }
                 // #2182: hung-TUI guard (else the tailer lives forever, no
                 // `Done`). #3419 B: fire on IDLE, not absolute age — silence
@@ -1087,7 +1118,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                         ReadOutputResult::Completed {
                             offset: current_offset,
                         },
-                        outcome(&state, current_offset),
+                        outcome(&state, seek_offset),
                     ));
                 }
                 std::thread::sleep(Duration::from_millis(100));
@@ -1182,11 +1213,29 @@ fn try_process_complete_partial_line(
     process_rollout_line_bytes(&line, sender, state)
 }
 
-fn outcome(state: &RolloutParseState, final_offset: u64) -> RolloutTailOutcome {
+/// `final_offset` is the end of the last COMPLETE record — `source_start`
+/// (where this tail seeked) plus the bytes `state.record()` accepted — NOT the
+/// raw `current_offset` the read loop consumed. The two are equal on every
+/// sealed input and diverge only when a torn write leaves the tail parked
+/// mid-record; see
+/// `codex_tui_final_offset_stops_at_the_last_complete_record_5264`.
+///
+/// #5264 PR-B — known asymmetry, unresolved: this value flows into
+/// `CodexTuiTailResult.final_offset` and from there into the durable
+/// `TuiRuntimeBinding.last_offset` / marker cursor (codex.rs:602, 2134, 2166).
+/// The rebind path in
+/// `services/discord/recovery_engine/rebind_runtime.rs:510-523` advances that
+/// SAME durable binding and marker from `ReadOutputResult`'s offset, i.e. the
+/// raw `current_offset`. Before this branch both expressions produced the same
+/// number, so the two paths now advance one cursor with two different meanings.
+/// That asymmetry was introduced here and is deliberately left alone: which of
+/// the two the rebind path should use is a separate judgement, out of scope for
+/// this change.
+fn outcome(state: &RolloutParseState, source_start: u64) -> RolloutTailOutcome {
     RolloutTailOutcome {
         lines_read: state.lines_read,
         bytes_read: state.bytes_read,
-        final_offset,
+        final_offset: source_start.saturating_add(state.bytes_read),
         session_id: state.session_id.clone(),
     }
 }
@@ -1416,7 +1465,10 @@ fn emit_done(
     finalize_path: RolloutFinalizePath,
     rollout_path: &Path,
     offset: u64,
+    terminal_range: (u64, Option<&str>, bool),
 ) {
+    let (source_start, turn_nonce, terminal_range_eligible) = terminal_range;
+    let complete_record_end = source_start.saturating_add(state.bytes_read);
     tracing::info!(
         rollout_path = %rollout_path.display(),
         offset,
@@ -1424,6 +1476,8 @@ fn emit_done(
         session_id = state.session_id.as_deref(),
         lines_read = state.lines_read,
         bytes_read = state.bytes_read,
+        source_start,
+        complete_record_end,
         saw_assistant_text = state.saw_assistant_text,
         hook_completion_seen = state.hook_completion_seen,
         composer_ready_seen = state.composer_ready_seen,
@@ -1435,10 +1489,34 @@ fn emit_done(
             .unwrap_or(0),
         "codex rollout tail emitting Done"
     );
-    sender.send(StreamMessage::Done {
-        result: state.final_text.clone(),
-        session_id: state.session_id.clone(),
-    });
+    let identity = state
+        .tmux_session_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .zip(turn_nonce.map(str::trim).filter(|value| !value.is_empty()));
+    if terminal_range_eligible
+        && finalize_path != RolloutFinalizePath::Heuristic
+        && offset == complete_record_end
+        && state.saw_assistant_text
+        && complete_record_end > source_start
+        && let Some((tmux_session_name, turn_nonce)) = identity
+    {
+        sender.send(StreamMessage::CodexTuiTerminalDone {
+            result: state.final_text.clone(),
+            session_id: state.session_id.clone(),
+            rollout_path: rollout_path.display().to_string(),
+            tmux_session_name: tmux_session_name.to_string(),
+            turn_nonce: turn_nonce.to_string(),
+            source_start,
+            complete_record_end,
+        });
+    } else {
+        sender.send(StreamMessage::Done {
+            result: state.final_text.clone(),
+            session_id: state.session_id.clone(),
+        });
+    }
 }
 
 #[cfg(test)]
@@ -1455,6 +1533,204 @@ mod tests {
         replay_rollout_file(file.path(), start_offset, &tx).unwrap();
         drop(tx);
         rx.iter().collect()
+    }
+
+    #[test]
+    fn codex_terminal_frame_is_atomic_at_complete_boundary_5264() {
+        let (tx, rx) = mpsc::channel();
+        let sender = RelaySuppressionSender::new(&tx, None);
+        let mut state = RolloutParseState {
+            saw_assistant_text: true,
+            final_text: "answer".into(),
+            tmux_session_name: Some("AgentDesk-codex-range".into()),
+            ..RolloutParseState::default()
+        };
+        state.record(9);
+        let emit = |path, offset, nonce| {
+            emit_done(
+                &sender,
+                &state,
+                path,
+                Path::new("/tmp/raw.jsonl"),
+                offset,
+                (7, nonce, true),
+            );
+        };
+        emit(RolloutFinalizePath::Envelope, 16, Some("turn-nonce"));
+        emit(RolloutFinalizePath::Envelope, 17, Some("turn-nonce"));
+        emit(RolloutFinalizePath::Heuristic, 16, Some("turn-nonce"));
+        emit(RolloutFinalizePath::Envelope, 16, None);
+        let messages = rx.try_iter().collect::<Vec<_>>();
+        assert!(
+            matches!(messages.first(), Some(StreamMessage::CodexTuiTerminalDone {
+            result, turn_nonce, source_start: 7, complete_record_end: 16, ..
+        }) if result == "answer" && turn_nonce == "turn-nonce")
+                && messages
+                    .iter()
+                    .filter(|m| matches!(m, StreamMessage::Done { .. }))
+                    .count()
+                    == 3
+        );
+    }
+
+    /// #5264 PR-B: `outcome()` reports `source_start + state.bytes_read` — the
+    /// end of the last COMPLETE rollout record — while `ReadOutputResult`
+    /// carries `current_offset`, every raw byte the loop consumed. The two are
+    /// equal on every sealed input and diverge only when a torn write leaves
+    /// the tail parked mid-record, which is why no suite noticed the
+    /// distinction until this test existed.
+    ///
+    /// The divergence is the whole point: `final_offset` is what the next tail
+    /// seeks to. Seeking to the raw offset lands inside the torn record, and
+    /// that record is then lost forever — the partial prefix never parses, so
+    /// it is never re-emitted either.
+    #[test]
+    fn codex_tui_final_offset_stops_at_the_last_complete_record_5264() {
+        const META: &str =
+            r#"{"type":"session_meta","payload":{"id":"final-offset-5264","cwd":"/tmp/repo"}}"#;
+        const FIRST: &str = r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first answer"}]}}"#;
+        const SECOND: &str = r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"second answer"}]}}"#;
+
+        // `(current_offset, final_offset)` from one tail that runs to
+        // completion. `is_alive` is false and the drain is zero, so the tail
+        // finalizes on the first EOF.
+        fn tail(body: &str, start_offset: u64) -> (u64, u64) {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), body).unwrap();
+            let (tx, _rx) = mpsc::channel();
+            let (result, outcome) = tail_rollout_file_until_assistant_response(
+                file.path(),
+                start_offset,
+                None,
+                &tx,
+                None,
+                || false,
+                Duration::ZERO,
+                None,
+                None,
+                true,
+                None,
+                true,
+                None,
+                None,
+            )
+            .unwrap();
+            let ReadOutputResult::Completed { offset } = result else {
+                panic!("rollout tail did not complete: {result:?}");
+            };
+            (offset, outcome.final_offset)
+        }
+
+        let sealed = format!("{META}\n{FIRST}\n{SECOND}\n");
+        // The same bytes, but the writer died 40 bytes into `SECOND` and never
+        // wrote its newline — the canonical torn-write shape.
+        let torn = format!("{META}\n{FIRST}\n{}", &SECOND[..40]);
+        assert!(
+            serde_json::from_str::<Value>(&SECOND[..40]).is_err(),
+            "the trailing fragment must be unparseable, or it is not a torn record"
+        );
+        let first_two_records = (META.len() + 1 + FIRST.len() + 1) as u64;
+        let all_three_records = sealed.len() as u64;
+        let torn_len = torn.len() as u64;
+
+        let sealed_tail = tail(&sealed, 0);
+        let torn_tail = tail(&torn, 0);
+        // Resuming mid-file: `final_offset` is source-absolute, not a count of
+        // bytes read on this pass.
+        let resumed_tail = tail(&torn, (META.len() + 1) as u64);
+
+        assert_eq!(
+            (sealed_tail, torn_tail, resumed_tail),
+            (
+                (all_three_records, all_three_records),
+                (torn_len, first_two_records),
+                (torn_len, first_two_records),
+            ),
+            "final_offset must be the end of the last COMPLETE record: equal to the raw \
+             consumed offset on sealed input, and strictly behind it ({first_two_records} vs \
+             {torn_len}) when a torn record trails. Handing back the raw offset instead would \
+             seek the next tail into the middle of that record and lose it permanently, since \
+             a partial line never parses and so is never re-emitted; handing back the seek \
+             offset would replay every record of this turn."
+        );
+    }
+
+    /// #5264 PR-B: the `SessionDied` exit takes the SAME `outcome()` as every
+    /// other exit from the tail loop, so its `final_offset` must likewise be the
+    /// end of the last COMPLETE record expressed SOURCE-ABSOLUTELY — not the raw
+    /// `current_offset` the read loop consumed.
+    ///
+    /// This is the exit where the wrong argument is unrecoverable. `final_offset`
+    /// flows into the durable cursor (`TuiRuntimeBinding.last_offset` and the
+    /// marker, `codex.rs:602/2134/2166`), and the next tail seeks to
+    /// `start_offset.min(file_len)`. Pass `current_offset` here and a mid-file
+    /// resume durably records `current_offset + bytes_read` — past EOF — which
+    /// the next seek clamps back to EOF, so every record between the true
+    /// frontier and the end of the file is skipped and never re-emitted.
+    ///
+    /// Reaching this arm needs a rollout with NO assistant text: that is what
+    /// carries EOF past the explicit finalizer and the heuristic drain into the
+    /// `!is_alive()` branch, and what makes it `SessionDied` rather than
+    /// `Completed`.
+    #[test]
+    fn codex_tui_session_died_final_offset_is_a_source_absolute_record_boundary_5264() {
+        const META: &str =
+            r#"{"type":"session_meta","payload":{"id":"session-died-5264","cwd":"/tmp/repo"}}"#;
+        const USER: &str = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"question"}]}}"#;
+        const TORN: &str = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"never finished"}]}}"#;
+
+        // The writer died 40 bytes into the third record and never wrote its
+        // newline — the same torn shape the sealed-input test above uses.
+        let body = format!("{META}\n{USER}\n{}", &TORN[..40]);
+        assert!(
+            serde_json::from_str::<Value>(&TORN[..40]).is_err(),
+            "the trailing fragment must be unparseable, or it is not a torn record"
+        );
+        let resume_from = (META.len() + 1) as u64;
+        let bytes_on_this_pass = (USER.len() + 1) as u64;
+        let complete_record_end = resume_from + bytes_on_this_pass;
+        let raw_consumed = body.len() as u64;
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), &body).unwrap();
+        let (tx, _rx) = mpsc::channel();
+        // Resume mid-file, at the boundary after `META`, with a dead session.
+        let (result, outcome) = tail_rollout_file_until_assistant_response(
+            file.path(),
+            resume_from,
+            None,
+            &tx,
+            None,
+            || false,
+            Duration::ZERO,
+            None,
+            None,
+            true,
+            None,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            (result, outcome.bytes_read, outcome.final_offset),
+            (
+                ReadOutputResult::SessionDied {
+                    offset: raw_consumed,
+                },
+                bytes_on_this_pass,
+                complete_record_end,
+            ),
+            "the session-died exit must report the raw consumed offset ({raw_consumed}) on \
+             `ReadOutputResult` and the last COMPLETE record boundary ({complete_record_end}) on \
+             `final_offset` — source-absolute from the resume point ({resume_from}), not a count \
+             of the {bytes_on_this_pass} bytes this pass read. Handing back `current_offset` \
+             instead would durably record {}, past the {raw_consumed}-byte file; the next tail's \
+             `start_offset.min(file_len)` seek clamps that to EOF and every record after the true \
+             frontier is lost permanently.",
+            raw_consumed + bytes_on_this_pass,
+        );
     }
 
     // #2795 — `find_rollout_by_session_id_under` must match codex rollout
@@ -1922,6 +2198,7 @@ mod tests {
                 discord_origin_prompt: None,
                 pane_busy_probe: None,
                 pane_busy_veto_cap: Duration::from_secs(DEFAULT_PANE_BUSY_VETO_CAP_SECS),
+                terminal_range_eligible: false,
             },
         )
         .unwrap();
@@ -1985,6 +2262,7 @@ mod tests {
                 discord_origin_prompt: None,
                 pane_busy_probe: None,
                 pane_busy_veto_cap: Duration::from_secs(DEFAULT_PANE_BUSY_VETO_CAP_SECS),
+                terminal_range_eligible: false,
             },
         )
         .unwrap();
@@ -4641,5 +4919,61 @@ mod tests {
             final_text.contains("보고합니다.\n\n첫째 단락입니다.\n둘째 단락입니다."),
             "records must keep their boundaries; got {final_text:?}"
         );
+    }
+
+    // #5264 PR-B: assert the decided VALUE, not that an identifier appears. The first
+    // attempt at this test was lexical — it scanned each entry point's body for the
+    // `terminal_range_eligible` token — and both independent reviews broke it with the
+    // same mutant: keep the token, set the value to `false`. That mutant survived every
+    // filter, so the guard defended against deleting a line rather than against the
+    // defect it named. These assertions kill it.
+    #[test]
+    fn discord_handoff_tail_options_decide_terminal_range_eligibility() {
+        let options = |prompt| discord_handoff_tail_options("AgentDesk-codex-opts", prompt);
+        assert!(
+            options(Some("answer this")).terminal_range_eligible,
+            "a Discord-originated turn must be eligible for terminal-range emission"
+        );
+        assert!(
+            !options(Some("   \n\t ")).terminal_range_eligible,
+            "a blank prompt carries no Discord origin"
+        );
+        assert!(!options(None).terminal_range_eligible);
+        let carried = options(Some("answer this"));
+        assert_eq!(
+            carried.discord_origin_prompt.as_deref(),
+            Some("answer this")
+        );
+        assert_eq!(
+            carried.tmux_session_name.as_deref(),
+            Some("AgentDesk-codex-opts")
+        );
+    }
+
+    // The value test above cannot see an entry point that bypasses the shared constructor
+    // altogether, which is how the resumed path originally drifted. This is a lexical
+    // check and is only meaningful alongside it.
+    #[test]
+    fn every_handoff_tail_entry_point_uses_the_shared_options_constructor() {
+        let source = include_str!("rollout_tail.rs");
+        for entry in [
+            "pub fn tail_latest_rollout_for_cwd_with_handoff_for_tmux(",
+            "pub fn tail_warm_followup_rollout_for_tmux(",
+            "pub fn tail_resumed_rollout_for_session_with_handoff_for_tmux(",
+        ] {
+            let body = source
+                .split_once(entry)
+                .unwrap_or_else(|| panic!("entry point not found: {entry}"))
+                .1;
+            let body = body
+                .split_once("\n}\n")
+                .expect("entry point body must terminate")
+                .0;
+            assert!(
+                body.contains("discord_handoff_tail_options("),
+                "{entry} builds its own options instead of the shared constructor, so it \
+                 can silently miss terminal_range_eligible"
+            );
+        }
     }
 }

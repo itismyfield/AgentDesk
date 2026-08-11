@@ -128,7 +128,31 @@ fn prelaunch_inflight_runtime_seed_from_paths(
     input_fifo_path: String,
     session_exists: bool,
     prelaunch_runtime_kind: Option<RuntimeHandoffKind>,
+    codex_raw_seed: Option<(String, u64)>,
 ) -> (Option<String>, Option<String>, Option<String>, u64) {
+    if prelaunch_runtime_kind == Some(RuntimeHandoffKind::CodexTui) {
+        // Without exact raw-seed evidence, fall back to what the general branch below
+        // would have produced for this wrapper transcript, session_exists gate included.
+        // Seeding 0 unconditionally makes an existing wrapper transcript look entirely
+        // unrelayed, which replays it to Discord. `codex_raw_seed` is absent whenever the
+        // binding lags the rollout EOF or the process-local binding map is empty, e.g.
+        // after a dcserver restart with the Codex tmux session still alive.
+        let (path, end) = match codex_raw_seed {
+            Some(seed) => seed,
+            None => {
+                let end = std::fs::metadata(&output_path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+                (output_path, session_exists.then_some(end).unwrap_or(0))
+            }
+        };
+        return (
+            Some(tmux_name.to_string()),
+            Some(path),
+            Some(input_fifo_path),
+            end,
+        );
+    }
     let is_claude_tui = prelaunch_runtime_kind == Some(RuntimeHandoffKind::ClaudeTui);
     let last_offset = (!is_claude_tui)
         .then(|| {
@@ -145,11 +169,92 @@ fn prelaunch_inflight_runtime_seed_from_paths(
     )
 }
 
+fn exact_codex_tui_raw_seed(
+    marker: &crate::services::codex_tui::session::CodexTuiRolloutMarker,
+    binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+) -> Option<(String, u64)> {
+    let session = marker.session_id.as_deref()?.trim();
+    if session.is_empty()
+        || binding.session_id.as_deref()?.trim() != session
+        || binding.runtime_kind != RuntimeHandoffKind::CodexTui
+    {
+        return None;
+    }
+    let marker_path = std::fs::canonicalize(&marker.rollout_path).ok()?;
+    let metadata = std::fs::metadata(&marker_path).ok()?;
+    let end = metadata.len();
+    let binding_path = std::fs::canonicalize(&binding.output_path).ok()?;
+    (metadata.is_file()
+        && marker_path == binding_path
+        && binding.last_offset == end
+        && marker
+            .rollout_start_offset
+            .is_some_and(|start| start <= end))
+    .then(|| (marker_path.display().to_string(), end))
+}
+
+/// #5264 PR-B: read the marker and the binding under ONE hold of the per-tmux source
+/// authority, the compound pair #5299 established.
+///
+/// What this buys, precisely: the marker, the binding, and the file length are drawn from a
+/// single install generation, so the seed can never be a mix of A's marker with B's binding
+/// or with a length taken across an atomic install. Read separately, those three could
+/// straddle a compound install performed under the authority by #5299's writers.
+///
+/// What it does NOT buy, stated because an earlier revision of this comment claimed it: the
+/// read-then-use gap is still open. The authority is released when this returns, and the
+/// caller persists the seed afterwards with no revalidation, so a writer that installs a new
+/// source after this call still leaves the turn seeded from the previous one. Closing that
+/// would require constructing and persisting the seed inside the same hold.
+fn observed_codex_tui_raw_seed(tmux_name: &str) -> Option<(String, u64)> {
+    crate::services::tmux_common::with_tmux_source_authority(tmux_name, |authority| {
+        let marker = crate::services::codex_tui::session::read_codex_tui_rollout_marker(
+            authority.session(),
+        )?;
+        let binding =
+            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
+                authority,
+            )?;
+        exact_codex_tui_raw_seed(&marker, &binding)
+    })
+}
+
 pub(super) fn prelaunch_inflight_runtime_seed(
     provider: &ProviderKind,
     remote_profile_is_none: bool,
     tmux_session_name: Option<&str>,
     prelaunch_runtime_kind: Option<RuntimeHandoffKind>,
+) -> (Option<String>, Option<String>, Option<String>, u64) {
+    seed_runtime(
+        provider,
+        remote_profile_is_none,
+        tmux_session_name,
+        prelaunch_runtime_kind,
+        true,
+    )
+}
+
+pub(super) fn prelaunch_inflight_runtime_seed_without_codex_raw(
+    provider: &ProviderKind,
+    remote_profile_is_none: bool,
+    tmux_session_name: Option<&str>,
+    prelaunch_runtime_kind: Option<RuntimeHandoffKind>,
+) -> (Option<String>, Option<String>, Option<String>, u64) {
+    seed_runtime(
+        provider,
+        remote_profile_is_none,
+        tmux_session_name,
+        prelaunch_runtime_kind,
+        false,
+    )
+}
+
+fn seed_runtime(
+    provider: &ProviderKind,
+    remote_profile_is_none: bool,
+    tmux_session_name: Option<&str>,
+    prelaunch_runtime_kind: Option<RuntimeHandoffKind>,
+    allow_codex_raw: bool,
 ) -> (Option<String>, Option<String>, Option<String>, u64) {
     #[cfg(unix)]
     {
@@ -161,12 +266,18 @@ pub(super) fn prelaunch_inflight_runtime_seed(
             let (output_path, input_fifo_path) = tmux_runtime_paths(tmux_name);
             let session_exists =
                 crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_name);
+            let codex_raw_seed = (allow_codex_raw
+                && session_exists
+                && prelaunch_runtime_kind == Some(RuntimeHandoffKind::CodexTui))
+            .then_some(tmux_name)
+            .and_then(observed_codex_tui_raw_seed);
             return prelaunch_inflight_runtime_seed_from_paths(
                 tmux_name,
                 output_path,
                 input_fifo_path,
                 session_exists,
                 prelaunch_runtime_kind,
+                codex_raw_seed,
             );
         }
     }
@@ -177,6 +288,7 @@ pub(super) fn prelaunch_inflight_runtime_seed(
             remote_profile_is_none,
             tmux_session_name,
             prelaunch_runtime_kind,
+            allow_codex_raw,
         );
     }
     (None, None, None, 0)
@@ -698,6 +810,7 @@ mod thread_role_inheritance_tests {
             "/runtime/input.fifo".to_string(),
             true,
             Some(RuntimeHandoffKind::ClaudeTui),
+            None,
         );
         assert_eq!(seed.0.as_deref(), Some("AgentDesk-claude-seed"));
         assert_eq!(
@@ -716,6 +829,7 @@ mod thread_role_inheritance_tests {
             "/runtime/input.fifo".to_string(),
             true,
             Some(RuntimeHandoffKind::ClaudeTui),
+            None,
         );
         let headless = prelaunch_inflight_runtime_seed_from_paths(
             "AgentDesk-claude-symmetric",
@@ -723,8 +837,97 @@ mod thread_role_inheritance_tests {
             "/runtime/input.fifo".to_string(),
             true,
             Some(RuntimeHandoffKind::ClaudeTui),
+            None,
         );
         assert_eq!(intake, headless);
+    }
+
+    #[test]
+    fn codex_tui_raw_seed_requires_exact_live_marker_binding_evidence() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"complete\n").unwrap();
+        let marker = crate::services::codex_tui::session::CodexTuiRolloutMarker {
+            rollout_path: file.path().to_path_buf(),
+            session_id: Some("codex-session".into()),
+            rollout_start_offset: Some(0),
+        };
+        let binding = crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::CodexTui,
+            output_path: file.path().display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some("codex-session".into()),
+            last_offset: 9,
+            relay_last_offset: None,
+        };
+        let raw = exact_codex_tui_raw_seed(&marker, &binding).expect("exact raw seed");
+        let seed = |raw| {
+            prelaunch_inflight_runtime_seed_from_paths(
+                "AgentDesk-codex-exact",
+                "/runtime/wrapper.jsonl".into(),
+                "/runtime/input".into(),
+                true,
+                Some(RuntimeHandoffKind::CodexTui),
+                raw,
+            )
+        };
+        let ordinary = seed(Some(raw));
+        let headless = seed(None);
+        assert_eq!(
+            ordinary.1.as_deref(),
+            std::fs::canonicalize(file.path()).unwrap().to_str()
+        );
+        assert_eq!(
+            (ordinary.3, headless.1.as_deref(), headless.3),
+            (9, Some("/runtime/wrapper.jsonl"), 0)
+        );
+        assert!(
+            include_str!("headless_turn.rs")
+                .contains("prelaunch_inflight_runtime_seed_without_codex_raw(")
+        );
+        for invalid in ["session", "kind", "offset", "start", "missing_start"] {
+            let (mut marker, mut binding) = (marker.clone(), binding.clone());
+            match invalid {
+                "session" => binding.session_id = Some("wrong".into()),
+                "kind" => binding.runtime_kind = RuntimeHandoffKind::LegacyTmuxWrapper,
+                "offset" => binding.last_offset += 1,
+                "start" => marker.rollout_start_offset = Some(10),
+                "missing_start" => marker.rollout_start_offset = None,
+                _ => unreachable!(),
+            }
+            assert!(
+                exact_codex_tui_raw_seed(&marker, &binding).is_none(),
+                "{invalid}"
+            );
+        }
+    }
+
+    // #5264 PR-B: absent exact raw-seed evidence, a CodexTui prelaunch must still seed the
+    // wrapper transcript's end offset under the same `session_exists` gate the general
+    // branch applies. Seeding 0 for a live session makes the whole existing transcript look
+    // unrelayed, and the watcher replays it to Discord. The sibling test above cannot catch
+    // this: it passes a path that does not exist, where both 0 and the file length agree.
+    #[test]
+    fn codex_tui_prelaunch_without_raw_seed_keeps_the_wrapper_end_offset() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"0123456789").unwrap();
+        let seed = |session_exists| {
+            prelaunch_inflight_runtime_seed_from_paths(
+                "AgentDesk-codex-fallback",
+                file.path().display().to_string(),
+                "/runtime/input".into(),
+                session_exists,
+                Some(RuntimeHandoffKind::CodexTui),
+                None,
+            )
+        };
+        let live = seed(true);
+        assert_eq!(
+            (live.1.as_deref(), live.3),
+            (Some(file.path().display().to_string().as_str()), 10),
+            "a live session must keep the wrapper end offset, not restart from 0"
+        );
+        assert_eq!(seed(false).3, 0, "no session means nothing was relayed yet");
     }
 
     #[test]

@@ -758,7 +758,6 @@ impl BridgeDeliveryLease {
 
 #[cfg(unix)]
 impl BridgeDeliveryLease {
-    #[allow(dead_code)]
     pub(super) fn pin_exact_source(
         self,
         shared: &SharedData,
@@ -792,7 +791,17 @@ impl BridgeDeliveryLease {
 }
 #[cfg(unix)]
 impl PinnedBridgeDeliveryLease {
-    #[allow(dead_code)]
+    pub(super) fn release_without_receipt(
+        mut self,
+        outcome: crate::services::discord::LeaseOutcome,
+    ) {
+        if self.committed_current.is_none() {
+            let _ = self.lease.commit_lease(outcome);
+        }
+        self.lease.release_on_drop = false;
+        let _ = self.lease.release_lease();
+    }
+
     pub(super) fn commit_after_send(
         self,
         shared: &SharedData,
@@ -887,6 +896,11 @@ impl PinnedBridgeDeliveryLease {
         let Some(disposition) = disposition else {
             return PinnedBridgeCommit::Pending(self);
         };
+        dr::record_pinned_delivery_metadata(
+            &exact,
+            &self.source.result,
+            self.source.identity.user_msg_id,
+        );
         let released = self.lease.release_lease();
         debug_assert!(
             released,
@@ -2276,10 +2290,24 @@ mod tests {
                 assert!(matches!(current, PinnedBridgeCommit::Current));
                 assert_eq!(current_shared.committed_relay_offset(ch), 64);
                 assert!(dr::historical_pinned_delivery_exists(&source, 5_264_001));
+                // Rebase union of two independent controls that landed on the same line:
+                // #5299 asserts the Current frontier identity, PR-B asserts that a reset
+                // confirmed frontier demotes the commit to Historical. Both are kept.
+                // Order matters: PR-B pins the not-yet-advanced source, so its block must
+                // run before #5299's `advance_source`, which is itself the precondition
+                // for the `swapped` assertions below.
                 #[rustfmt::skip]
                 let current_frontier = dr::read_record(&provider, CH).unwrap().delivered_frontier.unwrap();
                 #[rustfmt::skip]
                 assert_eq!((current_frontier.generation_mtime_ns, current_frontier.range), (g1, (0, 64)));
+                let reset_shared = make_shared_data_for_tests();
+                #[rustfmt::skip]
+                let reset = held_lease(&reset_shared, ch, 8).pin_exact_source(&reset_shared, &provider, ch, range(source.clone())).unwrap();
+                let reset_coord = reset_shared.tmux_relay_coord(ch);
+                #[rustfmt::skip]
+                assert!({ reset_coord.confirmed_end_offset.store(64, Ordering::Release); reset_coord.reset_confirmed_frontier(64, 0) });
+                #[rustfmt::skip]
+                assert!(matches!(reset.commit_after_send(&reset_shared, 5_264_006), PinnedBridgeCommit::Historical) && reset_shared.committed_relay_offset(ch) == 0);
                 advance_source(tmux, &rollout, 64);
                 let swapped_shared = make_shared_data_for_tests();
                 #[rustfmt::skip]

@@ -24,7 +24,7 @@ mod expected_identity;
 mod expected_identity_tests;
 mod message_conversion;
 mod tool_arms;
-mod types;
+pub(super) mod types;
 pub(super) use exit_reconcile::StreamLoopOutcome;
 use exit_reconcile::{
     StreamLoopExitCandidateContext, retained_stream_retry_backoff,
@@ -33,7 +33,6 @@ use exit_reconcile::{
 };
 use expected_identity::refresh_stream_tick_expected_identity_after_handoff;
 pub(super) use types::{StreamLoopContext, StreamLoopOutput, StreamLoopState};
-
 pub(super) async fn run_stream_loop(
     ctx: StreamLoopContext,
     state: StreamLoopState<'_>,
@@ -60,23 +59,19 @@ pub(super) async fn run_stream_loop(
     let rx = &mut *state.rx;
     let mut full_response = std::mem::take(state.full_response);
     let mut last_edit_text = std::mem::take(state.last_edit_text);
-    let mut done = *state.done;
-    let mut cancelled = *state.cancelled;
-    let mut rx_disconnected = *state.rx_disconnected;
+    #[rustfmt::skip]
+    let (mut done, mut cancelled, mut rx_disconnected) = (*state.done, *state.cancelled, *state.rx_disconnected);
     let mut current_tool_line = state.current_tool_line.take();
     let mut prev_tool_status = state.prev_tool_status.take();
     let mut last_tool_name = state.last_tool_name.take();
     let mut last_tool_summary = state.last_tool_summary.take();
     let mut accumulated_input_tokens = *state.accumulated_input_tokens;
-    let mut accumulated_cache_create_tokens = *state.accumulated_cache_create_tokens;
-    let mut accumulated_cache_read_tokens = *state.accumulated_cache_read_tokens;
-    let mut accumulated_output_tokens = *state.accumulated_output_tokens;
-    let mut spin_idx = *state.spin_idx;
-    let mut restart_followup_pending = *state.restart_followup_pending;
-    let mut any_tool_used = *state.any_tool_used;
-    let mut has_post_tool_text = *state.has_post_tool_text;
-    let mut tmux_handed_off = *state.tmux_handed_off;
-    let mut watcher_owns_assistant_relay = *state.watcher_owns_assistant_relay;
+    #[rustfmt::skip]
+    let (mut accumulated_cache_create_tokens, mut accumulated_cache_read_tokens, mut accumulated_output_tokens) = (*state.accumulated_cache_create_tokens, *state.accumulated_cache_read_tokens, *state.accumulated_output_tokens);
+    #[rustfmt::skip]
+    let (mut spin_idx, mut restart_followup_pending, mut any_tool_used) = (*state.spin_idx, *state.restart_followup_pending, *state.any_tool_used);
+    #[rustfmt::skip]
+    let (mut has_post_tool_text, mut tmux_handed_off, mut watcher_owns_assistant_relay) = (*state.has_post_tool_text, *state.tmux_handed_off, *state.watcher_owns_assistant_relay);
     let mut watcher_relay_available_for_turn = *state.watcher_relay_available_for_turn;
     let mut watcher_handoff_claim_outcome = *state.watcher_handoff_claim_outcome;
     let mut standby_relay_owns_output = *state.standby_relay_owns_output;
@@ -195,12 +190,9 @@ pub(super) async fn run_stream_loop(
         }};
     }
 
-    let mut pending_long_running_open_after_state_save = None;
-    let mut pending_long_running_retarget_after_state_save = None;
     let mut state_dirty = false;
-    let mut loop_outcome = StreamLoopOutcome::Completed;
-    let mut runtime_handoff_retry_retained = false;
-    let mut guarded_tool_frame_retry_retained = false;
+    #[rustfmt::skip]
+    let (mut pending_long_running_open_after_state_save, mut pending_long_running_retarget_after_state_save, mut loop_outcome, mut runtime_handoff_retry_retained, mut admitted_codex_terminal_range, mut guarded_tool_frame_retry_retained) = (None, None, StreamLoopOutcome::Completed, false, None, false);
 
     'outer: while stream_loop_should_continue(
         done,
@@ -313,6 +305,10 @@ pub(super) async fn run_stream_loop(
                         finalize_cancel_inner!();
                         break 'outer;
                     }
+                    #[rustfmt::skip]
+                    let (msg, admission, was_codex_terminal) = inflight_state.admit_codex_tui_terminal_frame(&mut persisted_inflight_baseline, &stream_tick_expected_identity, gateway.can_chain_locally(), msg);
+                    admitted_codex_terminal_range = admission.or(admitted_codex_terminal_range);
+                    terminal_control_ready_observed |= was_codex_terminal;
                     match msg {
                         content_message @ (StreamMessage::RetryBoundary
                         | StreamMessage::ActiveUsageSnapshot { .. }
@@ -393,6 +389,9 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
+                            if was_codex_terminal {
+                                break;
+                            }
                             match outcome {
                                 StreamContentArmOutcome::ContinueDraining => {}
                                 StreamContentArmOutcome::SkipRemainderOfDrainIteration => continue,
@@ -973,6 +972,7 @@ pub(super) async fn run_stream_loop(
     StreamLoopOutput {
         outcome: loop_outcome,
         tui_error_classification,
+        codex_tui_terminal_range: admitted_codex_terminal_range,
         pending_long_running_open_after_state_save,
         pending_long_running_retarget_after_state_save,
     }
