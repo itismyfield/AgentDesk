@@ -50,6 +50,18 @@
 # ---------------------------------------------------------------------------
 always | services::claude_command::chokepoint_guard_tests::gateway_primitives_are_confined_to_the_chokepoint | lane=non-pg-sweep | #5169 | base-red on main: claude_compact_trigger.rs references ClaudeGatewayProxyEnv and claude_gateway_proxy:: outside the chokepoint. Same surface as the OCX gateway removal, so the verdict belongs to that branch, not to this CI-coverage change.
 #
+# #5305: This test is red not because the classifier PREFIXES lacks an entry.
+# The real drift is that `render_status_panel` gives its header the `-# `
+# subtext prefix, while `is_message_still_placeholder` only calls trim_start()
+# and does not remove `-# `, making the classifier a dead branch throughout
+# the v2 panel path. Adding the prefix makes the contract test pass but has
+# measured production effect 0; it would instead open a window for a model
+# answer beginning `🔧 마지막 도구 (…)` to be mistaken for a placeholder and
+# overwritten by the sweeper. It is deliberately not added. Removing `-# `
+# would suddenly classify many panels as StillPlaceholder and broaden
+# destructive edits, so that root fix needs a separate design.
+always | services::discord::placeholder_sweeper::panel_shape::tests::renderer_activity_variants_and_panel_shape_classifier_stay_in_sync | lane=non-pg-sweep | #5305 | v2 status-panel drift tracked in #5305: render_status_panel emits a -# subtext header that the sweeper does not strip, so this direct rendered-line classifier contract is red while the production v2 route remains unreachable. Adding the last-tool prefix has measured production effect 0 and can misclassify a model answer; stripping the prefix needs a separate destructive-edit design.
+#
 # ---------------------------------------------------------------------------
 # parallel-only: pass under --test-threads=1, fail in the full parallel sweep.
 # Serialising the whole lane would hide them, so they stay listed and the lane
@@ -115,6 +127,17 @@ flaky | services::maintenance::jobs::worktree_orphan_sweep::managed_root_recursi
 flaky | services::discord::voice_barge_in::tests::pcm_harness_tests::voice_pcm_harness_unattended_e2e | lane=non-pg-sweep | #5185 | parallel-only: the harness asserts against process-global voice flight-event and TTS-playback recorders that parallel siblings write to. Passes under --test-threads=1. expires=2026-11-06
 flaky | services::discord::voice_barge_in::tests::pcm_harness_tests::voice_intake_chime_fires_before_turn_start | lane=non-pg-sweep | #5185 | parallel-only: the harness asserts against process-global voice flight-event and TTS-playback recorders that parallel siblings write to. Passes under --test-threads=1. expires=2026-11-06
 flaky | services::discord::voice_barge_in::tests::pcm_harness_tests::voice_intake_chime_fires_even_when_turn_start_fails | lane=non-pg-sweep | #5185 | parallel-only: the harness asserts against process-global voice flight-event and TTS-playback recorders that parallel siblings write to. Passes under --test-threads=1. expires=2026-11-06
+#
+# ---------------------------------------------------------------------------
+# Newly exposed Linux failures retained by #5217. The jsonl watcher source is
+# unchanged since 31465b184 and neither watcher test was reverified on Linux in
+# this round. The tmux test is not Linux-only: on darwin the hook also fails to
+# create the marker. A local rc=0 without CI is its self-skip, not pass evidence;
+# validation requires CI=1. The hook failure's root cause remains unidentified.
+# ---------------------------------------------------------------------------
+flaky | services::discord::jsonl_watcher::tests::notify_fires_when_file_modified | lane=non-pg-sweep | #5217 | newly exposed on Linux after 31465b184; jsonl_watcher code is unchanged and Linux behavior was not reverified in this round. The lost-wakeup shape remains, but no root cause is claimed or fixed here. expires=2026-11-06
+flaky | services::discord::jsonl_watcher::tests::jsonl_watcher_notifies_on_dead_marker_create | lane=non-pg-sweep | #5217 | newly exposed on Linux after 31465b184; jsonl_watcher code is unchanged and Linux behavior was not reverified in this round. It retains the same unresolved lost-wakeup shape as its sibling. expires=2026-11-06
+flaky | services::platform::tmux::live_pane_tests::dead_marker_hook_writes_marker_on_pane_exit | lane=non-pg-sweep | #5217 | newly exposed on Linux after 31465b184, but not Linux-only: on darwin the hook also creates no marker. Local rc=0 without CI is the test's self-skip; CI=1 is required and returned rc=101 in this round. Root cause remains unidentified. expires=2026-11-06
 #
 # ---------------------------------------------------------------------------
 # Cross-module memo leak. The two entries below are one defect, measured, and
