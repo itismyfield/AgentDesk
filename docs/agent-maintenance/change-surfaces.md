@@ -70,11 +70,15 @@
 - `active_callsite_coverage` only applies to surfaces with a parallel canonical
   path already implemented (e.g. Discord outbound v3). For pre-migration giant
   files (no canonical replacement yet), the column is `n/a`.
-- **At-cap and near-cap surfaces (#5150/#5280).** Four files sit on or close to
-  a hard size gate. The gates measure DIFFERENT things, so check which one
-  applies before adding a line. This was previously recorded only in a comment
-  inside `scripts/audit_maintainability_config.toml`, i.e. nowhere a reader of
-  this registry would see it.
+- **At-cap and near-cap surfaces (#5150/#5280).** The following are selected
+  examples, not an exhaustive list. The gates measure DIFFERENT things, so
+  check which one applies before adding a line. Production figures are the
+  `Prod` column in `docs/generated/module-inventory.md`; because that generated
+  file is gitignored and local copies can differ between worktrees, run `python3
+  scripts/generate_inventory_docs.py` in the worktree immediately before an
+  edit and inspect its fresh output. This was previously recorded only in a
+  comment inside `scripts/audit_maintainability_config.toml`, i.e. nowhere a
+  reader of this registry would see it.
   - `src/services/discord/turn_bridge/stream_loop.rs` — **979 raw file lines**
     against its `979` `[namespace_size_caps]` entry. That gate counts every
     line in the file (inline `#[cfg(test)]` blocks included — unlike the
@@ -85,22 +89,29 @@
     purely so its three call sites fit on one line each. Extract before adding.
   - `src/services/discord/gateway.rs` — **999 production lines** (1568 raw,
     569 test) against the `>= 1000` giant threshold. One added PRODUCTION line
-    makes it a giant; test-only lines are free. It is registered in neither
-    `scripts/giant_file_registry.toml` nor
-    `scripts/audit_maintainability_giant_baseline.toml`, and the registry's
-    `grandfathered_baseline_paths` array is a closed baseline, so crossing the
-    threshold forces a new `[[entry]]` carrying an owner, a deadline, and a
-    decompose issue before CI goes green again.
-  - `src/services/discord/health/snapshot.rs` — **999 production lines**, with
-    **1 production line of headroom** before the `>= 1000` giant threshold.
-    It is registered in neither `scripts/giant_file_registry.toml` nor the
-    generated giant inventory, so adding one production line can make CI fail
-    before a lane sees any registry warning. This figure is the `Prod` value
-    from a freshly generated `docs/generated/module-inventory.md` on 2026-08-12
-    at `main` @ `8d8111fd6`; do not infer it by visually subtracting the
-    `#[cfg(test)] mod` block. That visual count produces a different value, but
-    the generated inventory is the gate authority. Re-measure from the generated
-    inventory before editing, and extract before production growth.
+    makes it a giant; test-only lines are free. It is absent from
+    `scripts/giant_file_registry.toml`,
+    `scripts/audit_maintainability_giant_baseline.toml`, and the generated giant
+    inventory, and the registry's `grandfathered_baseline_paths` array is a
+    closed baseline, so crossing the threshold forces a new `[[entry]] carrying
+    an owner, a deadline, and a decompose issue before CI goes green again.
+  - `src/services/discord/task_notification_delivery/store/response_fence.rs`
+    — **999 production lines**, with **1 production line of headroom** before
+    the `>= 1000` giant threshold. It is absent from
+    `scripts/giant_file_registry.toml`,
+    `scripts/audit_maintainability_giant_baseline.toml`, and the generated giant
+    inventory, so one production line can require a new giant admission before
+    CI goes green. Extract before production growth.
+  - `src/services/discord/turn_bridge/terminal_controller_cutover.rs` — **998
+    production lines**, with **2 production lines of headroom** before the `>=
+    1000` giant threshold. Plan an extraction before consuming that headroom.
+  - `src/services/discord/task_notification_delivery/mod.rs` — **998 production
+    lines**, with **2 production lines of headroom** before the `>= 1000` giant
+    threshold. Plan an extraction before consuming that headroom.
+  - `src/services/discord/health/snapshot.rs` — **941 production lines**, with
+    **59 production lines of headroom** before the `>= 1000` giant threshold.
+    It is not presently a near-cap surface; re-run the inventory generator in
+    this worktree and inspect `Prod` before relying on this figure.
   - `src/services/discord/health/stall_liveness.rs` — **977 production lines**,
     with **23 production lines of headroom** before the `>= 1000` giant
     threshold, measured from the same generated inventory on 2026-08-12 at
@@ -707,8 +718,10 @@ time for diagnostics; neither is a stored approval value.
     OFFSET test — not `pinned == 0` — keeps an in-range id==0 watcher-direct turn
     NON-suppressed). The BRIDGE path through
     `turn_bridge::complete_status_panel_v2_with_http` and its
-    `status_panel_completion_action` dispatch (#3016 core hotfile) is explicitly
-    OUT OF SCOPE and deferred to a follow-up. New test
+    `status_panel_completion_action` dispatch in `turn_bridge/status_panel.rs`
+    is explicitly OUT OF SCOPE and deferred to a follow-up. #3016's
+    concurrent-edit hotfile is `turn_bridge/mod.rs`, which only re-exports the
+    symbol. New test
     `status_panel_adopt_and_edit_gate_is_turn_aliasing_safe` covers stale-newer
     (incl. id==0 external/injected) NOT adopted/edited, in-range id==0
     watcher-direct STILL adopts+edits (over-suppression guard), and in-range id!=0
