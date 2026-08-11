@@ -1054,6 +1054,12 @@ mod tests {
             use crate::services::codex_tui::session::write_codex_tui_rollout_marker_with_start_offset as write_marker;
             let (tmux, rollout) = ("AgentDesk-codex-5264-barrier", root.join(format!("rollout-{user}.jsonl")));
             std::fs::write(&rollout, [b'x'; 64]).unwrap(); write_marker(tmux, &rollout, Some("raw-session"), Some(0)).unwrap();
+            // #5264 PR-B: production never pins a source without a live CodexTui runtime
+            // binding — `CodexRange::revalidated_source` requires `binding_matches` before
+            // `prepare_bridge_lease` builds the lease. Install it so the fixture holds that
+            // precondition; without it `source_authority_is_live` is false for a reason no
+            // production caller can reach, and every sub-case below passes vacuously.
+            crate::services::codex_tui::session::install_codex_tui_runtime_binding(tmux, Some(0), crate::services::tui_prompt_dedupe::TuiRuntimeBinding { runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui, output_path: rollout.display().to_string(), relay_output_path: None, input_fifo_path: None, session_id: Some("raw-session".into()), last_offset: 64, relay_last_offset: None });
             let source = ExactJsonlSourceIdentity { provider: "codex".into(), tmux_session_name: tmux.into(), turn_nonce: format!("nonce-{user}"), range: (0,64), generation_mtime_ns: stamp(tmux, 1_700_526_400), offset_authority_channel_id: owner.get(), delivery_channel_id: CH };
             let range = CodexRange { identity: InflightTurnIdentity { user_msg_id: user, started_at: "now".into(), tmux_session_name: Some(tmux.into()), turn_start_offset: Some(0) }, result: "answer".into(), rollout_path: rollout.display().to_string(), session_id: "raw-session".into(), source: source.clone() };
             let mut inflight = crate::services::discord::inflight::InflightTurnState::new(ProviderKind::Codex, CH, None, 1, user, MSG, "prompt".into(), None, Some(tmux.into()), Some(rollout.display().to_string()), None, 0);
@@ -1432,7 +1438,7 @@ mod tests {
         #[tokio::test(flavor = "current_thread")]
         #[rustfmt::skip]
         async fn pinned_codex_short_replace_generation_flip_5264() {
-            let _lock = crate::config::shared_test_env_lock().lock().unwrap_or_else(|e| e.into_inner()); let root = runtime_root_guard(); let provider = ProviderKind::Codex;
+            let _lock = crate::config::shared_test_env_lock().lock().unwrap_or_else(|e| e.into_inner()); let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK.lock().unwrap_or_else(|poison| poison.into_inner()); crate::services::tui_prompt_dedupe::reset_state_for_tests(); let root = runtime_root_guard(); let provider = ProviderKind::Codex;
             for owner in [ch(), owner_ch()] { let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), owner, owner.get()); let mut gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, true); gw.hook = Some(flip(source.clone()));
                 let (committed, fallback, _) = pinned_transport(shared.as_ref(), &gw, &provider, owner).deliver(pin, false).await;
                 assert!(committed && !fallback); assert_eq!(gw.replace_calls.load(Ordering::SeqCst), 1); assert_pinned_barrier(&source, MSG); assert!(matches!(shared.delivery_lease(owner).read(), LeaseSnapshot::Unleased)); }
@@ -1444,7 +1450,7 @@ mod tests {
         #[tokio::test(flavor = "current_thread")]
         #[rustfmt::skip]
         async fn pinned_codex_long_chunks_generation_flip_5264() {
-            let _lock = crate::config::shared_test_env_lock().lock().unwrap_or_else(|e| e.into_inner()); let root = runtime_root_guard(); let provider = ProviderKind::Codex;
+            let _lock = crate::config::shared_test_env_lock().lock().unwrap_or_else(|e| e.into_inner()); let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK.lock().unwrap_or_else(|poison| poison.into_inner()); crate::services::tui_prompt_dedupe::reset_state_for_tests(); let root = runtime_root_guard(); let provider = ProviderKind::Codex;
             for owner in [ch(), owner_ch()] { let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), owner, owner.get() + 4); let mut gw = long_gateway(true, true); gw.hook = Some(flip(source.clone())); let outcome = pinned_transport(shared.as_ref(), &gw, &provider, owner).deliver(pin, true).await;
                 assert_eq!((outcome.0, outcome.1), (true, false)); let mut inflight = crate::services::discord::inflight::load_inflight_state_read_only(&provider, CH).unwrap(); assert!(super::super::super::stream_loop::types::persist_pinned_terminal_anchor(&mut inflight, outcome.2)); let restored = crate::services::discord::inflight::load_inflight_state_read_only(&provider, CH).unwrap(); assert!(dr::confirmed_delivery_receipt_exists(&provider, ch(), restored.current_msg_id, &source)); assert_eq!(gw.send_calls.load(Ordering::SeqCst), 1); assert_pinned_barrier(&source, 9001); assert!(!dr::historical_pinned_delivery_exists(&source, 9000)); assert!(!dr::historical_pinned_delivery_exists(&source, MSG)); assert!(matches!(shared.delivery_lease(owner).read(), LeaseSnapshot::Unleased)); }
             let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), ch(), 5); let gw = long_gateway(false, true);

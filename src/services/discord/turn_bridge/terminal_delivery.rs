@@ -2293,7 +2293,7 @@ mod tests {
                 #[rustfmt::skip]
                 assert!({ reset_coord.confirmed_end_offset.store(64, Ordering::Release); reset_coord.reset_confirmed_frontier(64, 0) });
                 #[rustfmt::skip]
-                assert!(matches!(reset.commit_after_send(&reset_shared, 5_264_005), PinnedBridgeCommit::Historical) && reset_shared.committed_relay_offset(ch) == 0);
+                assert!(matches!(reset.commit_after_send(&reset_shared, 5_264_006), PinnedBridgeCommit::Historical) && reset_shared.committed_relay_offset(ch) == 0);
                 advance_source(tmux, &rollout, 64);
                 let swapped_shared = make_shared_data_for_tests();
                 #[rustfmt::skip]
