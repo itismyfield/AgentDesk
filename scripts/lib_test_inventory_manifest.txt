@@ -1934,6 +1934,7 @@ services::codex_tui::rollout_tail::tests::codex_stop_hook_emits_done_before_drai
 services::codex_tui::rollout_tail::tests::codex_terminal_frame_is_atomic_at_complete_boundary_5264
 services::codex_tui::rollout_tail::tests::codex_token_count_context_uses_last_usage_not_total_usage
 services::codex_tui::rollout_tail::tests::codex_token_count_total_only_keeps_context_unknown
+services::codex_tui::rollout_tail::tests::codex_tui_final_offset_stops_at_the_last_complete_record_5264
 services::codex_tui::rollout_tail::tests::commentary_only_task_complete_does_not_duplicate_body
 services::codex_tui::rollout_tail::tests::commentary_phase_does_not_finalize_before_final_answer
 services::codex_tui::rollout_tail::tests::composer_ready_envelope_emits_done_before_drain

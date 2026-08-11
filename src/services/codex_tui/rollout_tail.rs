@@ -1213,6 +1213,24 @@ fn try_process_complete_partial_line(
     process_rollout_line_bytes(&line, sender, state)
 }
 
+/// `final_offset` is the end of the last COMPLETE record — `source_start`
+/// (where this tail seeked) plus the bytes `state.record()` accepted — NOT the
+/// raw `current_offset` the read loop consumed. The two are equal on every
+/// sealed input and diverge only when a torn write leaves the tail parked
+/// mid-record; see
+/// `codex_tui_final_offset_stops_at_the_last_complete_record_5264`.
+///
+/// #5264 PR-B — known asymmetry, unresolved: this value flows into
+/// `CodexTuiTailResult.final_offset` and from there into the durable
+/// `TuiRuntimeBinding.last_offset` / marker cursor (codex.rs:602, 2134, 2166).
+/// The rebind path in
+/// `services/discord/recovery_engine/rebind_runtime.rs:510-523` advances that
+/// SAME durable binding and marker from `ReadOutputResult`'s offset, i.e. the
+/// raw `current_offset`. Before this branch both expressions produced the same
+/// number, so the two paths now advance one cursor with two different meanings.
+/// That asymmetry was introduced here and is deliberately left alone: which of
+/// the two the rebind path should use is a separate judgement, out of scope for
+/// this change.
 fn outcome(state: &RolloutParseState, source_start: u64) -> RolloutTailOutcome {
     RolloutTailOutcome {
         lines_read: state.lines_read,
@@ -1552,6 +1570,88 @@ mod tests {
                     .filter(|m| matches!(m, StreamMessage::Done { .. }))
                     .count()
                     == 3
+        );
+    }
+
+    /// #5264 PR-B: `outcome()` reports `source_start + state.bytes_read` — the
+    /// end of the last COMPLETE rollout record — while `ReadOutputResult`
+    /// carries `current_offset`, every raw byte the loop consumed. The two are
+    /// equal on every sealed input and diverge only when a torn write leaves
+    /// the tail parked mid-record, which is why no suite noticed the
+    /// distinction until this test existed.
+    ///
+    /// The divergence is the whole point: `final_offset` is what the next tail
+    /// seeks to. Seeking to the raw offset lands inside the torn record, and
+    /// that record is then lost forever — the partial prefix never parses, so
+    /// it is never re-emitted either.
+    #[test]
+    fn codex_tui_final_offset_stops_at_the_last_complete_record_5264() {
+        const META: &str =
+            r#"{"type":"session_meta","payload":{"id":"final-offset-5264","cwd":"/tmp/repo"}}"#;
+        const FIRST: &str = r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first answer"}]}}"#;
+        const SECOND: &str = r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"second answer"}]}}"#;
+
+        // `(current_offset, final_offset)` from one tail that runs to
+        // completion. `is_alive` is false and the drain is zero, so the tail
+        // finalizes on the first EOF.
+        fn tail(body: &str, start_offset: u64) -> (u64, u64) {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), body).unwrap();
+            let (tx, _rx) = mpsc::channel();
+            let (result, outcome) = tail_rollout_file_until_assistant_response(
+                file.path(),
+                start_offset,
+                None,
+                &tx,
+                None,
+                || false,
+                Duration::ZERO,
+                None,
+                None,
+                true,
+                None,
+                true,
+                None,
+                None,
+            )
+            .unwrap();
+            let ReadOutputResult::Completed { offset } = result else {
+                panic!("rollout tail did not complete: {result:?}");
+            };
+            (offset, outcome.final_offset)
+        }
+
+        let sealed = format!("{META}\n{FIRST}\n{SECOND}\n");
+        // The same bytes, but the writer died 40 bytes into `SECOND` and never
+        // wrote its newline — the canonical torn-write shape.
+        let torn = format!("{META}\n{FIRST}\n{}", &SECOND[..40]);
+        assert!(
+            serde_json::from_str::<Value>(&SECOND[..40]).is_err(),
+            "the trailing fragment must be unparseable, or it is not a torn record"
+        );
+        let first_two_records = (META.len() + 1 + FIRST.len() + 1) as u64;
+        let all_three_records = sealed.len() as u64;
+        let torn_len = torn.len() as u64;
+
+        let sealed_tail = tail(&sealed, 0);
+        let torn_tail = tail(&torn, 0);
+        // Resuming mid-file: `final_offset` is source-absolute, not a count of
+        // bytes read on this pass.
+        let resumed_tail = tail(&torn, (META.len() + 1) as u64);
+
+        assert_eq!(
+            (sealed_tail, torn_tail, resumed_tail),
+            (
+                (all_three_records, all_three_records),
+                (torn_len, first_two_records),
+                (torn_len, first_two_records),
+            ),
+            "final_offset must be the end of the last COMPLETE record: equal to the raw \
+             consumed offset on sealed input, and strictly behind it ({first_two_records} vs \
+             {torn_len}) when a torn record trails. Handing back the raw offset instead would \
+             seek the next tail into the middle of that record and lose it permanently, since \
+             a partial line never parses and so is never re-emitted; handing back the seek \
+             offset would replay every record of this turn."
         );
     }
 

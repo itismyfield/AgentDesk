@@ -8,8 +8,8 @@
 //! `terminal_controller_cutover.rs`, which is a hard build break on
 //! `windows-latest` (`E0433: could not find session_relay_sink in super`).
 //! Routing the family through this module puts that boundary in ONE place
-//! instead of nine `#[cfg(unix)]` attributes scattered over the anchor file's
-//! three begins and five settles.
+//! instead of a `#[cfg(unix)]` attribute on each of the anchor file's four
+//! begins and six settles.
 //!
 //! ## On non-unix this family is UNINSTRUMENTED — that is not the same as a no-op
 //!
@@ -29,10 +29,24 @@
 //! platform makes is spelled.
 //!
 //! Both facts have to survive a reader who never opens this file, which is why
-//! the anchor imports the module under its own name instead of aliasing it:
-//! every call site reads `unix_journal::begin_controller_terminal(..)` /
-//! `unix_journal::settle_controller_terminal(..)`, so the platform bound sits in
-//! the identifier at all eight of them.
+//! the anchor was written to import the module under its own name rather than
+//! alias it: a call site that reads `unix_journal::begin_controller_terminal(..)`
+//! / `unix_journal::settle_controller_terminal(..)` carries the platform bound in
+//! the identifier, and `rg 'unix_journal::'` over the anchor enumerates the
+//! family exhaustively.
+//!
+//! #5264 PR-B broke that property in part, and it is recorded here rather than
+//! repaired because undoing it is out of that change's scope. The anchor now
+//! also carries
+//! `use unix_journal::{begin_controller_terminal as journal_begin,
+//! settle_controller_terminal as journal_settle}`, and `begin_pinned_terminal`
+//! calls through those aliases. So of the ten call sites — four begins, six
+//! settles — eight still read `unix_journal::…` and two do not. For those two
+//! the platform bound is not in the identifier; it is carried instead by the
+//! `#[cfg(unix)]` on `begin_pinned_terminal` itself, which is sound but is a
+//! different mechanism, and a grep for `unix_journal::` no longer finds them.
+//! Anything counting this family by that pattern must also match
+//! `journal_begin` / `journal_settle`.
 //!
 //! ## The family gate cannot see any of this
 //!

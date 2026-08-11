@@ -849,7 +849,6 @@ pub(in crate::services::discord) fn record_current_pinned_delivery(
     )
 }
 /// Append only the exact historical receipt; never alter the current frontier.
-#[allow(dead_code)]
 pub(in crate::services::discord) fn record_historical_pinned_delivery(
     source: &ExactJsonlSourceIdentity,
     message_id: u64,
@@ -864,7 +863,6 @@ pub(in crate::services::discord) fn record_historical_pinned_delivery(
     append_confirmed_receipt(&mut record, receipt);
     write_record_at(&path, &record)
 }
-#[allow(dead_code)]
 pub(in crate::services::discord) fn historical_pinned_delivery_exists(
     source: &ExactJsonlSourceIdentity,
     message_id: u64,
