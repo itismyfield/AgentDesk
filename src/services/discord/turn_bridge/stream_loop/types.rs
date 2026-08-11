@@ -24,7 +24,7 @@ impl PinnedTerminalTransport<'_> {
         &self,
         pinned: terminal_delivery::PinnedBridgeDeliveryLease,
         long: bool,
-    ) -> (bool, bool) {
+    ) -> (bool, bool, Option<MessageId>) {
         use crate::services::discord::formatting::ReplaceLongMessageOutcome as Replace;
         use LeaseOutcome::{NotDelivered, Unknown};
         use terminal_controller_cutover as cutover;
@@ -79,8 +79,26 @@ impl PinnedTerminalTransport<'_> {
         };
         let receipt = committed.then_some(message_id).flatten();
         settle(receipt, committed);
-        (committed, fallback)
+        (committed, fallback, receipt)
     }
+}
+
+#[cfg(unix)]
+#[rustfmt::skip]
+pub(in super::super) fn persist_pinned_terminal_anchor(
+    state: &mut InflightTurnState,
+    anchor: Option<MessageId>,
+) -> bool {
+    let Some((anchor, provider)) = anchor.zip(state.provider_kind()) else {
+        return false;
+    };
+    let expected = crate::services::discord::inflight::InflightTurnIdentity::from_state(state);
+    let authority = crate::services::discord::inflight::StreamRelayAuthority::from_state(state);
+    let (channel, current, len) = (state.channel_id, state.current_msg_id, state.current_msg_len);
+    crate::services::discord::inflight::bind_recovery_anchor_if_matches_identity(
+        &provider, channel, &expected, state.turn_start_offset, current, Some(len), anchor.get(), len,
+        Some(authority), Some(state),
+    ) == crate::services::discord::inflight::GuardedSaveOutcome::Saved
 }
 
 pub(in crate::services::discord::turn_bridge) enum PreparedBridgeLease {
@@ -156,7 +174,10 @@ macro_rules! dispatch_pinned_terminal {
                             Some($turn.as_str()),
                         ),
                     };
-                    let (did_commit, fallback) = transport.deliver(pinned, $long).await;
+                    let (mut did_commit, fallback, anchor) = transport.deliver(pinned, $long).await;
+                    if $long && did_commit {
+                        did_commit = $crate::services::discord::turn_bridge::stream_loop::types::persist_pinned_terminal_anchor(&mut $inflight, anchor);
+                    }
                     if $long {
                         if did_commit {
                             ($committed, $visible) = (true, true);
