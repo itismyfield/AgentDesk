@@ -1798,8 +1798,10 @@ time for diagnostics; neither is a stored approval value.
 - active_callsite_coverage: retired DB compatibility history is tracked in
   `known-legacy.md`.
 - invariants:
-  - `/api/inflight/rebind` is the only synthetic inflight writer: its
-    `health_api::rebind_inflight_handler` delegates to
+  - `/api/inflight/rebind` is the only synthetic inflight writer: in
+    `src/server/routes/health_api.rs` (a production giant, so keep it named
+    here — the `giant_files` hard gate resolves giants by the explicit path
+    written on this page), `health_api::rebind_inflight_handler` delegates to
     `health::handle_rebind_inflight` for the write.
   - Dashboard routes never write to canonical config files; they read DB
     state and emit events.
