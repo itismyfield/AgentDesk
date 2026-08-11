@@ -82,11 +82,10 @@ SECTIONS = ("rule1", "rule2", "rule3", "rule4")
 UNBASELINED_SECTIONS = ("rule5",)
 PR_WORKFLOW_REL = ".github/workflows/ci-pr.yml"
 CONFIGURATION_ERROR_FINDINGS = frozenset({"jobs-empty"})
-# Findings that mean "this gate could not analyse a PR job at all". They fail
-# the check rather than warning, because the alternative -- reporting nothing
-# about a job whose body was never read -- is indistinguishable from a clean
-# result, and rule5 is now the only enforcing layer.
-UNANALYZABLE_FINDINGS = frozenset({"pr-job-delegates-to-reusable-workflow"})
+# Findings that mean this gate could not fully analyse an input. They fail the
+# check rather than warning, because omitted scope is indistinguishable from a
+# clean result.
+UNANALYZABLE_FINDINGS = frozenset({"pr-job-delegates-to-reusable-workflow", "unresolved-external-test-module"})
 
 
 def _load_coverage_module(repo_root: Path):
@@ -414,9 +413,7 @@ def _inside_test_region(offset: int, ranges: Iterable[ModuleRange], external: bo
     return external or any(item.is_test and item.start < offset < item.end for item in ranges)
 
 
-def _external_test_files(
-    repo_root: Path, coverage, counter: list[int] | None = None
-) -> set[Path]:
+def _external_test_files(repo_root: Path, coverage, counter: list[int] | None = None, findings: list[Finding] | None = None) -> set[Path]:
     src_root = (repo_root / "src").resolve()
     targets: set[Path] = set()
     for path in sorted(src_root.rglob("*.rs")):
@@ -426,18 +423,24 @@ def _external_test_files(
         for match in _ATTR_MOD.finditer(clean):
             if match.group("term") != ";" or not _CFG_TEST.search(match.group("attrs")):
                 continue
-            redirect = _PATH_ATTR.search(match.group("attrs"))
+            raw_attrs = source[match.start("attrs"):match.end("attrs")]
+            redirect = _PATH_ATTR.search(raw_attrs)
             parents = _scope_at(match.start(), ranges)
             if redirect:
                 target = path.parent.joinpath(*parents, redirect.group("path"))
                 candidates = (target,)
             else:
-                base = path.parent.joinpath(*parents)
+                base = (path.parent if path.name in {"mod.rs", "lib.rs", "main.rs"} else path.with_suffix("")).joinpath(*parents)
                 name = match.group("name")
                 candidates = (base / f"{name}.rs", base / name / "mod.rs")
             target = next((candidate.resolve() for candidate in candidates if candidate.is_file()), None)
             if target and target.is_relative_to(src_root):
                 targets.add(target)
+            elif findings is not None:
+                line = source.count("\n", 0, match.start()) + 1
+                tried = ", ".join(os.path.relpath(candidate, repo_root) for candidate in candidates)
+                detail = f"mod {match.group('name')}; did not resolve inside src; tried: {tried}"
+                findings.append(Finding("unresolved-external-test-module", f"{path.relative_to(repo_root)}:{line}", detail))
     return targets
 
 
@@ -482,7 +485,8 @@ def discover_pg_inventory(
     impl (an impl is conservatively treated as one type-level item), and UFCS
     receivers containing generic, tuple, reference, or ``dyn`` type syntax. A
     real Rust parser would be required to cover those forms without broad false
-    positives.
+    positives. Inventory is limited to ``src/**/*.rs``: standalone ``tests/``
+    crates and source injected by ``include!`` are not scanned or guaranteed.
     """
     repo_root = repo_root.resolve()
     _matching_brace_cached.cache_clear()
@@ -490,7 +494,7 @@ def discover_pg_inventory(
     src_root = (repo_root / "src").resolve()
     aliases = _aliases(repo_root, coverage)
     brace_counter = [0]
-    external_tests = _external_test_files(repo_root, coverage, brace_counter)
+    external_tests = _external_test_files(repo_root, coverage, brace_counter, findings)
     declared_tests = {
         test
         for test_names in coverage.discover_test_inventory(repo_root).values()
@@ -644,7 +648,9 @@ def discover_pg_inventory(
             physical = (*physical_base, *_scope_at(match.start(), ranges), match.group("name"))
             logical = coverage._normalize_alias_path(physical, aliases)
             name = "::".join(logical)
-            if name in declared_tests:
+            # Reaching an external file through a cfg(test) declaration already
+            # proves that its direct tests are part of the library test target.
+            if name in declared_tests or external:
                 records.append((name, str(path.relative_to(repo_root)), logical[:-1], body))
 
     by_path: dict[tuple[tuple[str, ...], str], set[tuple[tuple[str, ...], str, str]]] = {}
@@ -1429,12 +1435,9 @@ def check_analysis(
         return 2
     if unanalyzable:
         print(
-            f"FAIL: {len(unanalyzable)} {PR_WORKFLOW_REL} job(s) named above "
-            "delegate to a workflow this gate does not read, so no rule can "
-            "say anything about what they run. Unanalysable is not clean: "
-            "either move the cargo-test steps back into "
-            f"{PR_WORKFLOW_REL} where the rules can see them, or teach this "
-            "gate to follow the call.",
+            f"FAIL: {len(unanalyzable)} input(s) named above could not be analysed. "
+            "Unanalysable is not clean; resolve each diagnostic before treating "
+            "the inventory as complete.",
             file=sys.stderr,
         )
         failed = True
@@ -1591,10 +1594,8 @@ def main(argv: list[str] | None = None) -> int:
                 # job whose body was never read has no state to snapshot, so
                 # regenerating under one would record silence as agreement.
                 print(
-                    f"FAIL: refusing to write snapshots while "
-                    f"{len(unanalyzable)} {PR_WORKFLOW_REL} job(s) cannot be "
-                    f"analysed. Move their steps back into that file, or "
-                    f"teach this gate to follow the call, then rerun.",
+                    f"FAIL: refusing to write snapshots while {len(unanalyzable)} "
+                    "input(s) cannot be analysed. Resolve the diagnostics, then rerun.",
                     file=sys.stderr,
                 )
                 return 1

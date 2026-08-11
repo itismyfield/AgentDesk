@@ -366,6 +366,56 @@ class DetectionMutation(FixtureCase):
             {"a::tests::case"},
         )
 
+    def test_rust_2018_sibling_external_module_is_discovered(self) -> None:
+        self.fx.write_source(
+            "src/service.rs",
+            "#[cfg(test)] mod postgres_tests;\n",
+            "mod service;\n",
+        )
+        self.fx.write_source(
+            "src/service/postgres_tests.rs",
+            "#[test] fn case() { create_test_database(); }\n",
+        )
+        self.fx.write_source(
+            "src/postgres_tests.rs",
+            "#[test] fn wrong_rust_2015_path() { create_test_database(); }\n",
+        )
+        self.assertEqual(
+            set(membership.discover_pg_inventory(self.root).tests),
+            {"service::postgres_tests::case"},
+        )
+
+    def test_path_redirect_is_read_raw_and_missing_module_fails_closed(self) -> None:
+        self.fx.write_source(
+            "src/lib.rs",
+            '#[cfg(test)]\n#[path = "db/pg_case.rs"]\nmod renamed;\n'
+            "#[cfg(test)]\nmod missing;\n",
+        )
+        self.fx.write_source(
+            "src/db/pg_case.rs",
+            "#[test] fn case() { create_test_database(); }\n",
+        )
+        analysis = self.fx.analysis()
+        self.assertEqual(
+            set(analysis.inventory.tests), {"renamed::case"},
+        )
+        unresolved = [
+            finding for finding in analysis.findings
+            if finding.kind == "unresolved-external-test-module"
+        ]
+        self.assertEqual(len(unresolved), 1)
+        self.assertEqual(unresolved[0].source, "src/lib.rs:4")
+        self.assertIn("src/missing.rs, src/missing/mod.rs", unresolved[0].detail)
+        empty = {section: set() for section in membership.SECTIONS}
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            rc = membership.check_analysis(
+                analysis, empty, empty, membership.render_manifest(analysis.inventory),
+                reference_label="fixture base", allowlist_label="fixture allowlist",
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("FAIL: [unresolved-external-test-module]", stderr.getvalue())
+
     def test_brace_ownership_excludes_adjacent_helper_body(self) -> None:
         self.fx.write_source(
             "src/service.rs",
