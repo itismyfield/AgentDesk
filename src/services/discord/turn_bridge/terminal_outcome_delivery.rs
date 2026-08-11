@@ -407,15 +407,16 @@ pub(super) async fn run_terminal_outcome_delivery(
                 // narrowing it made a non-admitted CodexTui turn shadow a real
                 // [turn_start_offset, tmux_last_offset) to None, acquire no lease, and send
                 // from the bridge while the watcher could take the same cell and range.
-                let contracts::TerminalRangeEnds {
-                    pinned: mut pinned_range_end,
-                    exclusion_lease: tmux_last_offset,
-                } = contracts::terminal_range_ends(
+                let range_ends = contracts::terminal_range_ends(
                     &provider,
                     inflight_state.runtime_kind,
                     tmux_last_offset,
                     admitted,
                 );
+                // Order matters and is enforced by the type: `into_pinned` consumes, so the
+                // exclusion-lease end must be read first. Swapping the two stops compiling.
+                let tmux_last_offset = range_ends.exclusion_lease();
+                let pinned_range_end = range_ends.into_pinned();
                 let long =
                     terminal_delivery_should_send_new_chunks(can_chain_locally, &delivery_response);
                 let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);

@@ -1050,7 +1050,7 @@ mod tests {
         }
         #[cfg(unix)]
         #[rustfmt::skip]
-        fn pinned(shared: &Arc<SharedData>, root: &std::path::Path, owner: ChannelId, user: u64) -> (PinnedBridgeDeliveryLease, ExactJsonlSourceIdentity) {
+        fn pinned_parts(shared: &Arc<SharedData>, root: &std::path::Path, owner: ChannelId, user: u64) -> (BridgeLeaseAcquire, CodexRange, crate::services::discord::inflight::InflightTurnState, ExactJsonlSourceIdentity) {
             use crate::services::codex_tui::session::write_codex_tui_rollout_marker_with_start_offset as write_marker;
             let (tmux, rollout) = ("AgentDesk-codex-5264-barrier", root.join(format!("rollout-{user}.jsonl")));
             std::fs::write(&rollout, [b'x'; 64]).unwrap(); write_marker(tmux, &rollout, Some("raw-session"), Some(0)).unwrap();
@@ -1062,12 +1062,117 @@ mod tests {
             crate::services::codex_tui::session::install_codex_tui_runtime_binding(tmux, Some(0), crate::services::tui_prompt_dedupe::TuiRuntimeBinding { runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui, output_path: rollout.display().to_string(), relay_output_path: None, input_fifo_path: None, session_id: Some("raw-session".into()), last_offset: 64, relay_last_offset: None });
             let source = ExactJsonlSourceIdentity { provider: "codex".into(), tmux_session_name: tmux.into(), turn_nonce: format!("nonce-{user}"), range: (0,64), generation_mtime_ns: stamp(tmux, 1_700_526_400), offset_authority_channel_id: owner.get(), delivery_channel_id: CH };
             let range = CodexRange { identity: InflightTurnIdentity { user_msg_id: user, started_at: "now".into(), tmux_session_name: Some(tmux.into()), turn_start_offset: Some(0) }, result: "answer".into(), rollout_path: rollout.display().to_string(), session_id: "raw-session".into(), source: source.clone() };
-            let mut inflight = crate::services::discord::inflight::InflightTurnState::new(ProviderKind::Codex, CH, None, 1, user, MSG, "prompt".into(), None, Some(tmux.into()), Some(rollout.display().to_string()), None, 0);
+            // Canonicalized: `revalidated_source` compares the row's output path against
+            // the canonicalized live source path, and on macOS the tempdir resolves
+            // /var -> /private/var. A raw tempdir path makes revalidation return Ok(None)
+            // for a reason production never sees.
+            let canonical_rollout = std::fs::canonicalize(&rollout).unwrap_or_else(|_| rollout.clone());
+            let mut inflight = crate::services::discord::inflight::InflightTurnState::new(ProviderKind::Codex, CH, None, 1, user, MSG, "prompt".into(), None, Some(tmux.into()), Some(canonical_rollout.display().to_string()), None, 0);
             inflight.started_at = "now".into(); inflight.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui); inflight.turn_nonce = Some(format!("nonce-{user}")); inflight.last_offset = 64; inflight.full_response = "answer".into(); inflight.watcher_owner_channel_id = Some(owner.get());
             crate::services::discord::inflight::save_inflight_state(&inflight).unwrap();
             let key = DeliveryLeaseKey::from_turn_key(TurnKey::new(owner, user, 1));
-            let lease = match BridgeDeliveryLease::acquire(shared, owner, key, 0, Some(64)) { BridgeLeaseAcquire::Held(lease) => lease, _ => panic!("held") };
+            let acquire = BridgeDeliveryLease::acquire(shared, owner, key, 0, Some(64));
+            (acquire, range, inflight, source)
+        }
+        // The pinned lease the barrier tests use, built from the parts above so the
+        // decision-table test can observe the same fixture one step earlier.
+        #[cfg(unix)]
+        #[rustfmt::skip]
+        fn pinned(shared: &Arc<SharedData>, root: &std::path::Path, owner: ChannelId, user: u64) -> (PinnedBridgeDeliveryLease, ExactJsonlSourceIdentity) {
+            let (acquire, range, _inflight, source) = pinned_parts(shared, root, owner, user);
+            let lease = match acquire { BridgeLeaseAcquire::Held(lease) => lease, _ => panic!("held") };
             (lease.pin_exact_source(shared, &ProviderKind::Codex, ch(), range).unwrap(), source)
+        }
+
+        // #5264 PR-B: `prepare_bridge_lease` is the ONLY production route into the pinned
+        // cutover, and nothing drove it. A build that short-circuits it to always return
+        // `Legacy` makes the entire feature inert — no CodexTui turn ever pins — and every
+        // barrier test still passes, because they construct `PinnedBridgeDeliveryLease`
+        // themselves. These assertions are the witness that the production decision still
+        // reaches the pinned arm at all.
+        #[cfg(unix)]
+        #[tokio::test(flavor = "current_thread")]
+        async fn prepare_bridge_lease_decision_table_5264() {
+            use crate::services::discord::turn_bridge::stream_loop::types::{
+                PreparedBridgeLease, prepare_bridge_lease,
+            };
+            let _lock = crate::config::shared_test_env_lock()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            crate::services::tui_prompt_dedupe::reset_state_for_tests();
+            let root = runtime_root_guard();
+
+            let shared = make_shared_data_for_tests();
+            let (acquire, range, inflight, _source) =
+                pinned_parts(&shared, root._temp.path(), ch(), 11);
+            // Stated separately so a fixture drift shows up as "revalidation rejected the
+            // source" rather than as an opaque "did not pin".
+            let revalidated = range.revalidated_source(&inflight);
+            assert!(
+                revalidated.is_ok(),
+                "the fixture must satisfy the revalidation preconditions"
+            );
+            assert!(
+                revalidated.expect("checked").is_some(),
+                "revalidation must accept the fixture's source"
+            );
+            assert!(
+                matches!(
+                    prepare_bridge_lease(
+                        acquire,
+                        Some(&range),
+                        &inflight,
+                        shared.as_ref(),
+                        &ProviderKind::Codex,
+                        ch()
+                    ),
+                    PreparedBridgeLease::Pinned(_)
+                ),
+                "an admitted frame whose source revalidates, with a held lease, must pin"
+            );
+
+            // A Skip is the one acquire outcome that means another actor really owns this
+            // turn, so it must stay a Skip rather than being pinned over.
+            let skip_shared = make_shared_data_for_tests();
+            let (_skip_acquire, skip_range, skip_inflight, _s) =
+                pinned_parts(&skip_shared, root._temp.path(), ch(), 12);
+            assert!(
+                matches!(
+                    prepare_bridge_lease(
+                        BridgeLeaseAcquire::Skip,
+                        Some(&skip_range),
+                        &skip_inflight,
+                        skip_shared.as_ref(),
+                        &ProviderKind::Codex,
+                        ch()
+                    ),
+                    PreparedBridgeLease::Legacy(BridgeLeaseAcquire::Skip)
+                ),
+                "a real Skip must survive the pinned decision untouched"
+            );
+
+            // With no admitted frame there is nothing to pin, but the held lease must not
+            // be discarded or replaced by a fabricated outcome.
+            let legacy_shared = make_shared_data_for_tests();
+            let (legacy_acquire, _range, legacy_inflight, _s) =
+                pinned_parts(&legacy_shared, root._temp.path(), ch(), 13);
+            assert!(
+                matches!(
+                    prepare_bridge_lease(
+                        legacy_acquire,
+                        None,
+                        &legacy_inflight,
+                        legacy_shared.as_ref(),
+                        &ProviderKind::Codex,
+                        ch()
+                    ),
+                    PreparedBridgeLease::Legacy(BridgeLeaseAcquire::Held(_))
+                ),
+                "no admitted frame must pass the real acquire through, not fabricate one"
+            );
         }
         #[cfg(unix)]
         #[rustfmt::skip]

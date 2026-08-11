@@ -127,9 +127,27 @@ pub(in crate::services::discord::turn_bridge) struct TerminalOutcomeDeliveryOutp
 /// while the watcher can independently acquire the same cell and range. That is the
 /// cross-actor duplicate prevention this PR exists to strengthen, so the two ends are
 /// returned separately rather than as one value two consumers reinterpret.
+/// The fields are private and the pinned accessor CONSUMES the value on purpose. The r2
+/// regression was a two-line call-site edit that fed the pinned end to the legacy
+/// fallback, and no test could see it because nothing drives that call site. With this
+/// shape the same edit stops compiling: taking `into_pinned()` first moves the value, so
+/// the later `exclusion_lease()` read fails to build. A determined edit that calls
+/// `ordered_terminal_range_end` directly at the call site is still not caught by any test.
 pub(super) struct TerminalRangeEnds {
-    pub(super) pinned: Option<u64>,
-    pub(super) exclusion_lease: Option<u64>,
+    pinned: Option<u64>,
+    exclusion_lease: Option<u64>,
+}
+
+impl TerminalRangeEnds {
+    /// The end the legacy fallback delivers and leases over. Read this BEFORE
+    /// [`Self::into_pinned`].
+    pub(super) fn exclusion_lease(&self) -> Option<u64> {
+        self.exclusion_lease
+    }
+
+    pub(super) fn into_pinned(self) -> Option<u64> {
+        self.pinned
+    }
 }
 
 pub(super) fn terminal_range_ends(

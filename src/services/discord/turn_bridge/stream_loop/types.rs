@@ -126,7 +126,13 @@ pub(in crate::services::discord::turn_bridge) fn prepare_bridge_lease(
     return PreparedBridgeLease::Legacy(acquire);
     #[cfg(unix)]
     match admitted.revalidated_source(inflight) {
-        Err(()) => PreparedBridgeLease::Legacy(Skip),
+        // #5264 PR-B: revalidation failing is not evidence that another actor holds this
+        // turn. `Err(())` covers plain I/O failures — no inflight runtime root, a failed
+        // state lock, an unreadable row — and fabricating `Skip` made the caller set
+        // `bridge_skip_holder_owns_inflight`, asserting a live holder owns the delivery
+        // and its inflight lifecycle when in fact this bridge held the lease and dropped
+        // it. Pass the real acquire outcome through, as the `admitted == None` arm does.
+        Err(()) => PreparedBridgeLease::Legacy(acquire),
         Ok(None) => PreparedBridgeLease::Legacy(NoRange),
         Ok(Some(source)) => match acquire {
             Held(lease) => lease
@@ -228,7 +234,11 @@ macro_rules! dispatch_pinned_terminal {
                     $skip_owner = true;
                     $handled = true;
                 }
-                $crate::services::discord::turn_bridge::stream_loop::types::PreparedBridgeLease::Legacy(_) => $end = None,
+                // The pinned end is not consumed after this match, and the legacy fallback
+                // deliberately reads the separate exclusion-lease end, so there is nothing
+                // to clear here. Nulling `$end` was what collapsed a non-admitted CodexTui
+                // turn's lease range to `NoRange`.
+                $crate::services::discord::turn_bridge::stream_loop::types::PreparedBridgeLease::Legacy(_) => {}
             }
         }
     }};
