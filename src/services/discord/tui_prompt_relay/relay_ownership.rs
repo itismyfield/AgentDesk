@@ -255,6 +255,10 @@ pub(super) fn resolved_codex_idle_relay_binding(
     resolved_codex_idle_relay_binding_inner(tmux_session_name, channel_id, || {})
 }
 
+// The body reads the Codex rollout marker and calls the `#[cfg(unix)]`-only
+// `codex_tui_rehydrated_binding_from_rollout_path`, so this seam carries the same
+// gate as the `resolved_codex_idle_relay_binding` it was extracted out of.
+#[cfg(unix)]
 fn resolved_codex_idle_relay_binding_inner(
     tmux_session_name: &str,
     channel_id: ChannelId,
@@ -304,7 +308,7 @@ fn resolved_codex_idle_relay_binding_inner(
     )
 }
 
-#[cfg(test)]
+#[cfg(all(unix, test))]
 pub(super) fn resolved_codex_idle_relay_binding_observing(
     tmux_session_name: &str,
     channel_id: ChannelId,

@@ -5312,6 +5312,7 @@ services::discord::tui_prompt_relay::tests::claude_rehydrate_start_offset_return
 services::discord::tui_prompt_relay::tests::claude_rehydrate_start_offset_uses_current_eof
 services::discord::tui_prompt_relay::tests::claude_rehydrate_thread_session_rejects_non_numeric_suffix
 services::discord::tui_prompt_relay::tests::claude_rehydrate_thread_session_resolves_thread_channel_id
+services::discord::tui_prompt_relay::tests::codex_external_input_binding_refresh_replaces_under_source_authority
 services::discord::tui_prompt_relay::tests::codex_external_input_binding_refreshes_from_live_rollout_marker
 services::discord::tui_prompt_relay::tests::codex_external_input_relay_output_path_uses_rollout_not_wrapper
 services::discord::tui_prompt_relay::tests::codex_idle_prompt_tails_only_new_ssh_direct_prompt
@@ -7208,6 +7209,7 @@ services::tui_prompt_dedupe::tests::provider_session_mapping_is_removed_with_run
 services::tui_prompt_dedupe::tests::provider_session_mapping_isolates_claude_and_codex_for_same_session_id
 services::tui_prompt_dedupe::tests::provider_session_mapping_survives_prompt_purge_ttl
 services::tui_prompt_dedupe::tests::publishes_unmatched_prompt
+services::tui_prompt_dedupe::tests::reconcile_holds_source_authority_across_read_decision_and_replacement
 services::tui_prompt_dedupe::tests::refresh_runtime_binding_activity_extends_mapping_ttl_without_offset_advance
 services::tui_prompt_dedupe::tests::relay_last_offset_falls_back_to_last_offset_when_unset
 services::tui_prompt_dedupe::tests::relay_lease_only_observation_does_not_create_late_prompt_anchor_signal
