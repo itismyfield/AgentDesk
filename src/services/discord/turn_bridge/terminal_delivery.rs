@@ -2202,9 +2202,8 @@ mod tests {
                 let root = tempfile::tempdir().unwrap();
                 #[rustfmt::skip]
                 let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
-                let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner());
+                #[rustfmt::skip]
+                let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
                 crate::services::tui_prompt_dedupe::reset_state_for_tests();
                 let (provider, tmux) = (ProviderKind::Codex, "AgentDesk-codex-5264-pin");
                 let stamp = |seconds| {
@@ -2277,14 +2276,10 @@ mod tests {
                 assert!(matches!(current, PinnedBridgeCommit::Current));
                 assert_eq!(current_shared.committed_relay_offset(ch), 64);
                 assert!(dr::historical_pinned_delivery_exists(&source, 5_264_001));
-                let current_frontier = dr::read_record(&provider, CH)
-                    .unwrap()
-                    .delivered_frontier
-                    .unwrap();
-                assert_eq!(
-                    (current_frontier.generation_mtime_ns, current_frontier.range),
-                    (g1, (0, 64))
-                );
+                #[rustfmt::skip]
+                let current_frontier = dr::read_record(&provider, CH).unwrap().delivered_frontier.unwrap();
+                #[rustfmt::skip]
+                assert_eq!((current_frontier.generation_mtime_ns, current_frontier.range), (g1, (0, 64)));
                 advance_source(tmux, &rollout, 64);
                 let swapped_shared = make_shared_data_for_tests();
                 #[rustfmt::skip]
@@ -2315,10 +2310,8 @@ mod tests {
                     ..source.clone()
                 };
                 dr::record_current_pinned_delivery(&current_source, 5_264_004).unwrap();
-                let g2_frontier = dr::read_record(&provider, CH)
-                    .unwrap()
-                    .delivered_frontier
-                    .unwrap();
+                #[rustfmt::skip]
+                let g2_frontier = dr::read_record(&provider, CH).unwrap().delivered_frontier.unwrap();
                 #[rustfmt::skip]
                 assert!(matches!(stale.commit_after_send(&stale_shared, 5_264_005), PinnedBridgeCommit::Historical));
                 assert_eq!(stale_shared.committed_relay_offset(ch), 0);

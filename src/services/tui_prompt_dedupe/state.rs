@@ -38,17 +38,11 @@ impl TuiPromptDedupeState {
         });
         self.channel_by_tmux
             .retain(|_, entry| now.duration_since(entry.recorded_at) <= SESSION_MAPPING_TTL);
-        let expired_runtime_bindings = self
-            .runtime_by_tmux
-            .iter()
-            .filter(|(_, entry)| now.duration_since(entry.recorded_at) > SESSION_MAPPING_TTL)
-            .map(|(tmux, _)| tmux.clone())
-            .collect::<Vec<_>>();
-        // STATE -> source authority must stay nonblocking; busy entries survive.
-        for tmux in expired_runtime_bindings {
-            let _ = crate::services::tmux_common::try_with_tmux_source_authority(&tmux, |_| {
-                self.runtime_by_tmux.remove(&tmux)
-            });
+        #[rustfmt::skip]
+        let expired = self.runtime_by_tmux.iter().filter(|(_, entry)| now.duration_since(entry.recorded_at) > SESSION_MAPPING_TTL).map(|(tmux, _)| tmux.clone()).collect::<Vec<_>>();
+        for tmux in expired {
+            #[rustfmt::skip]
+            let _ = crate::services::tmux_common::try_with_tmux_source_authority(&tmux, |_| self.runtime_by_tmux.remove(&tmux));
         }
         // #3885 follow-up: anchors live `PROMPT_ANCHOR_SUBMIT_TTL` (4h) so a long
         // streaming turn's anchor is not purged mid-stream (see the constant). The
@@ -82,9 +76,8 @@ impl TuiPromptDedupeState {
         &mut self,
         tmux_session_name: &str,
     ) {
-        self.runtime_by_tmux.retain(|key, entry| {
-            key != tmux_session_name || entry.recorded_at.elapsed() <= SESSION_MAPPING_TTL
-        });
+        #[rustfmt::skip]
+        self.runtime_by_tmux.retain(|key, entry| key != tmux_session_name || entry.recorded_at.elapsed() <= SESSION_MAPPING_TTL);
     }
 
     pub(super) fn remove_provider_session_mappings_for_tmux(

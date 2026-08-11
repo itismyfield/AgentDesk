@@ -2,10 +2,9 @@ use super::*;
 
 fn with_runtime_binding_state_under_source_authority<R>(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
-    tmux_session_name: &str,
     operation: impl FnOnce(&mut TuiPromptDedupeState) -> R,
 ) -> R {
-    authority.assert_session(tmux_session_name);
+    let tmux_session_name = authority.session();
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
     state.purge_expired_runtime_binding_under_authority(tmux_session_name);
@@ -17,7 +16,7 @@ fn with_runtime_binding_authority<R>(
     operation: impl FnOnce(&mut TuiPromptDedupeState) -> R,
 ) -> R {
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
-        with_runtime_binding_state_under_source_authority(authority, tmux_session_name, operation)
+        with_runtime_binding_state_under_source_authority(authority, operation)
     })
 }
 
@@ -116,23 +115,22 @@ pub fn register_tmux_channel(tmux_session_name: &str, channel_id: u64) {
 
 pub(crate) fn register_tmux_runtime_binding(tmux_session_name: &str, binding: TuiRuntimeBinding) {
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
-        register_tmux_runtime_binding_under_source_authority(authority, tmux_session_name, binding)
+        register_tmux_runtime_binding_under_source_authority(authority, binding)
     });
 }
 
 pub(crate) fn register_tmux_runtime_binding_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
-    tmux_session_name: &str,
     binding: TuiRuntimeBinding,
 ) {
-    let tmux_session_name = tmux_session_name.trim();
+    let tmux_session_name = authority.session();
     if tmux_session_name.is_empty() || binding.output_path.trim().is_empty() {
         return;
     }
     if binding.relay_output_path().trim().is_empty() {
         return;
     }
-    with_runtime_binding_state_under_source_authority(authority, tmux_session_name, |state| {
+    with_runtime_binding_state_under_source_authority(authority, |state| {
         state.runtime_by_tmux.insert(
             tmux_session_name.to_string(),
             TimedValue {
@@ -149,8 +147,18 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding(
     channel_id: u64,
     binding: TuiRuntimeBinding,
 ) {
+    #[rustfmt::skip]
+    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| register_rehydrated_tmux_runtime_binding_under_source_authority(authority, provider, channel_id, binding));
+}
+
+pub(crate) fn register_rehydrated_tmux_runtime_binding_under_source_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    provider: &str,
+    channel_id: u64,
+    binding: TuiRuntimeBinding,
+) {
     let provider = normalize_provider(provider);
-    let tmux_session_name = tmux_session_name.trim();
+    let tmux_session_name = authority.session();
     if provider.is_empty()
         || tmux_session_name.is_empty()
         || channel_id == 0
@@ -160,7 +168,7 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding(
         return;
     }
     let session_id = binding.session_id.clone();
-    register_tmux_runtime_binding(tmux_session_name, binding);
+    register_tmux_runtime_binding_under_source_authority(authority, binding);
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
     state.channel_by_tmux.insert(
@@ -183,6 +191,23 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding(
             },
         );
     }
+}
+
+/// Resolve and optionally replace one binding while its source authority stays held.
+#[rustfmt::skip]
+pub(crate) fn reconcile_rehydrated_tmux_runtime_binding(
+    provider: &str, tmux_session_name: &str, channel_id: u64,
+    observe_before_replace: impl FnOnce(),
+    decide: impl FnOnce(Option<TuiRuntimeBinding>) -> Option<(TuiRuntimeBinding, bool)>,
+) -> Option<TuiRuntimeBinding> {
+    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+        let (binding, replace) = decide(runtime_binding_for_tmux_session_under_source_authority(authority))?;
+        if replace {
+            observe_before_replace();
+            register_rehydrated_tmux_runtime_binding_under_source_authority(authority, provider, channel_id, binding.clone());
+        }
+        Some(binding)
+    })
 }
 
 /// #3018: DIAGNOSTIC / MIRROR USE ONLY.
@@ -528,9 +553,9 @@ pub(crate) fn runtime_binding_for_tmux_session(
 
 pub(crate) fn runtime_binding_for_tmux_session_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
-    tmux_session_name: &str,
 ) -> Option<TuiRuntimeBinding> {
-    with_runtime_binding_state_under_source_authority(authority, tmux_session_name, |state| {
+    let tmux_session_name = authority.session();
+    with_runtime_binding_state_under_source_authority(authority, |state| {
         state
             .runtime_by_tmux
             .get(tmux_session_name)
@@ -775,7 +800,6 @@ pub(crate) fn advance_tmux_runtime_binding_offset(
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
         advance_tmux_runtime_binding_offset_under_source_authority(
             authority,
-            tmux_session_name,
             output_path,
             last_offset,
         )
@@ -784,11 +808,11 @@ pub(crate) fn advance_tmux_runtime_binding_offset(
 
 pub(crate) fn advance_tmux_runtime_binding_offset_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
-    tmux_session_name: &str,
     output_path: &str,
     last_offset: u64,
 ) -> bool {
-    with_runtime_binding_state_under_source_authority(authority, tmux_session_name, |state| {
+    let tmux_session_name = authority.session();
+    with_runtime_binding_state_under_source_authority(authority, |state| {
         let Some(entry) = state.runtime_by_tmux.get_mut(tmux_session_name) else {
             return false;
         };

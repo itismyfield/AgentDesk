@@ -1,10 +1,19 @@
+use crate::services::{
+    agent_protocol::RuntimeHandoffKind,
+    provider::ProviderKind,
+    tmux_common,
+    tui_prompt_dedupe::{self as dedupe, TuiRuntimeBinding},
+};
 use poise::serenity_prelude::ChannelId;
+
+#[cfg(unix)]
+use crate::services::discord::tui_prompt_relay::rehydration::codex_tui_rehydrated_binding_from_rollout_path;
 
 #[derive(Debug)]
 pub(super) struct DirectResumeFallback {
     output_path: String,
     #[cfg(unix)]
-    binding: crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+    binding: TuiRuntimeBinding,
 }
 
 impl DirectResumeFallback {
@@ -55,13 +64,13 @@ pub(super) fn rollout_fallback_for_live_direct_resume(
 
     #[cfg(unix)]
     {
-        if *provider != crate::services::provider::ProviderKind::Codex {
+        if *provider != ProviderKind::Codex {
             return None;
         }
         let session_id = codex_resume_session_id_from_tmux_pane(tmux_session_name)?;
         let rollout =
             crate::services::codex_tui::rollout_tail::find_rollout_by_session_id(&session_id)?;
-        let binding = crate::services::discord::tui_prompt_relay::rehydration::codex_tui_rehydrated_binding_from_rollout_path(
+        let binding = codex_tui_rehydrated_binding_from_rollout_path(
             tmux_session_name,
             &rollout,
             Some(session_id),
@@ -76,27 +85,71 @@ pub(super) fn rollout_fallback_for_live_direct_resume(
 pub(super) fn commit_live_direct_resume_fallback(
     tmux_session_name: &str,
     channel_id: ChannelId,
-    fallback: DirectResumeFallback,
-) {
+    fallback: Option<DirectResumeFallback>,
+    claim_watcher: impl FnOnce() -> bool,
+) -> bool {
     #[cfg(not(unix))]
     {
         let _ = (tmux_session_name, channel_id, fallback);
+        claim_watcher()
     }
 
     #[cfg(unix)]
     {
-        crate::services::tmux_common::write_tmux_runtime_kind_marker(
-            tmux_session_name,
-            crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
-        )
-        .ok();
-        crate::services::tui_prompt_dedupe::register_rehydrated_tmux_runtime_binding(
-            crate::services::provider::ProviderKind::Codex.as_str(),
-            tmux_session_name,
-            channel_id.get(),
-            fallback.binding,
-        );
+        let Some(fallback) = fallback else {
+            return claim_watcher();
+        };
+        tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+            let Some(current) = rollout_fallback_for_live_direct_resume(
+                &ProviderKind::Codex,
+                tmux_session_name,
+                channel_id,
+            ) else {
+                return false;
+            };
+            if !codex_bindings_same_source(&fallback.binding, &current.binding) {
+                return false;
+            }
+            if crate::services::codex_tui::session::read_codex_tui_rollout_marker(tmux_session_name)
+                .is_some_and(|marker| {
+                    !crate::services::codex_tui::session::codex_tui_rollout_paths_same(
+                        std::path::Path::new(&current.binding.output_path),
+                        &marker.rollout_path,
+                    ) || marker.session_id.is_some_and(|session| {
+                        current.binding.session_id.as_deref().map(str::trim) != Some(session.trim())
+                    })
+                })
+            {
+                return false;
+            }
+            let binding =
+                match dedupe::runtime_binding_for_tmux_session_under_source_authority(authority) {
+                    Some(binding) if codex_bindings_same_source(&current.binding, &binding) => {
+                        binding
+                    }
+                    Some(_) => return false,
+                    None => current.binding,
+                };
+            if !claim_watcher() {
+                return false;
+            }
+            #[rustfmt::skip]
+            tmux_common::write_tmux_runtime_kind_marker(tmux_session_name, RuntimeHandoffKind::CodexTui).ok();
+            #[rustfmt::skip]
+            dedupe::register_rehydrated_tmux_runtime_binding_under_source_authority(
+                authority, ProviderKind::Codex.as_str(), channel_id.get(), binding,
+            );
+            true
+        })
     }
+}
+
+#[cfg(unix)]
+fn codex_bindings_same_source(left: &TuiRuntimeBinding, right: &TuiRuntimeBinding) -> bool {
+    crate::services::codex_tui::session::codex_tui_rollout_paths_same(
+        std::path::Path::new(&left.output_path),
+        std::path::Path::new(&right.output_path),
+    ) && left.session_id.as_deref().map(str::trim) == right.session_id.as_deref().map(str::trim)
 }
 
 fn codex_resume_session_id_from_tmux_pane(tmux_session_name: &str) -> Option<String> {

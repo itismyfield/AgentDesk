@@ -3225,6 +3225,15 @@ fn codex_external_input_binding_refreshes_from_live_rollout_marker() {
         relay_last_offset: None,
     };
 
+    // #5264 PR-C: the sole production caller reads this binding out of the dedupe
+    // registry before calling, so the fenced refresh re-reads the *registered*
+    // entry under source authority instead of trusting the passed-in snapshot.
+    // Register it so the fixture holds that production precondition.
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+        tmux_session_name,
+        stale_binding.clone(),
+    );
+
     let refreshed = external_input_relay_binding(
         ProviderKind::Codex.as_str(),
         tmux_session_name,

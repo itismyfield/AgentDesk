@@ -13,8 +13,7 @@ static TMUX_SOURCE_AUTHORITY_LOCKS: LazyLock<Mutex<HashMap<String, Weak<Mutex<()
 
 #[cfg(test)]
 thread_local! {
-    static SOURCE_AUTHORITY_CONTENTION_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&str)>>> =
-        std::cell::RefCell::new(None);
+    static SOURCE_AUTHORITY_CONTENTION_ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -24,13 +23,9 @@ struct SourceAuthorityContention(String);
 pub(crate) fn source_authority_contention_key_for_tests(
     operation: impl FnOnce(),
 ) -> Option<String> {
-    SOURCE_AUTHORITY_CONTENTION_HOOK.with(|slot| {
-        slot.borrow_mut().replace(Box::new(|key| {
-            std::panic::resume_unwind(Box::new(SourceAuthorityContention(key.to_string())))
-        }));
-    });
+    SOURCE_AUTHORITY_CONTENTION_ARMED.with(|armed| armed.set(true));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
-    SOURCE_AUTHORITY_CONTENTION_HOOK.with(|slot| slot.borrow_mut().take());
+    SOURCE_AUTHORITY_CONTENTION_ARMED.with(|armed| armed.set(false));
     match result.err()?.downcast::<SourceAuthorityContention>() {
         Ok(contention) => Some(contention.0),
         Err(payload) => std::panic::resume_unwind(payload),
@@ -39,9 +34,9 @@ pub(crate) fn source_authority_contention_key_for_tests(
 
 pub(crate) struct TmuxSourceAuthority<'a>(&'a str);
 
-impl TmuxSourceAuthority<'_> {
-    pub(crate) fn assert_session(&self, tmux_session_name: &str) {
-        debug_assert_eq!(self.0, tmux_session_name.trim());
+impl<'a> TmuxSourceAuthority<'a> {
+    pub(crate) fn session(&self) -> &'a str {
+        self.0
     }
 }
 
@@ -63,11 +58,13 @@ fn lock_source_authority<'a>(lock: &'a Mutex<()>, key: &str) -> std::sync::Mutex
     match lock.try_lock() {
         Ok(guard) => return guard,
         Err(std::sync::TryLockError::Poisoned(poison)) => return poison.into_inner(),
-        Err(std::sync::TryLockError::WouldBlock) => SOURCE_AUTHORITY_CONTENTION_HOOK.with(|slot| {
-            if let Some(hook) = slot.borrow_mut().take() {
-                hook(key);
-            }
-        }),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            SOURCE_AUTHORITY_CONTENTION_ARMED.with(|armed| {
+                if armed.replace(false) {
+                    std::panic::resume_unwind(Box::new(SourceAuthorityContention(key.to_string())))
+                }
+            })
+        }
     }
     lock.lock().unwrap_or_else(|poison| poison.into_inner())
 }

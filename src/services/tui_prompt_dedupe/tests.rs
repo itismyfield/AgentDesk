@@ -428,13 +428,14 @@ fn refresh_runtime_binding_activity_extends_mapping_ttl_without_offset_advance()
         .expect("binding survives purge after refresh");
     assert_eq!(binding.last_offset, 123);
 
-    STATE
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .runtime_by_tmux
-        .get_mut("tmux-runtime-activity")
-        .unwrap()
-        .recorded_at = Instant::now() - SESSION_MAPPING_TTL - Duration::from_secs(1);
+    {
+        let mut state = STATE.lock().unwrap();
+        let entry = state
+            .runtime_by_tmux
+            .get_mut("tmux-runtime-activity")
+            .unwrap();
+        entry.recorded_at = Instant::now() - SESSION_MAPPING_TTL - Duration::from_secs(1);
+    }
     let present = || {
         STATE
             .lock()

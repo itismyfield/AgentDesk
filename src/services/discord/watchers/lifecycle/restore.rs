@@ -668,26 +668,27 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             turn_delivered: turn_delivered.clone(),
             last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
         };
-        if !try_claim_watcher_with_thread_parent(
-            &shared.tmux_watchers,
+        let claimed = codex_restore::commit_live_direct_resume_fallback(
+            &pw.session_name,
             pw.channel_id,
-            handle,
-            Some(&provider),
-            pw.thread_parent,
-        ) {
+            pw.codex_direct_resume_fallback,
+            || {
+                try_claim_watcher_with_thread_parent(
+                    &shared.tmux_watchers,
+                    pw.channel_id,
+                    handle,
+                    Some(&provider),
+                    pw.thread_parent,
+                )
+            },
+        );
+        if !claimed {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
-                "  [{ts}] ⏭ watcher skip for {} — already watching (created during scan)",
+                "  [{ts}] ⏭ watcher skip for {} — already watching or source changed during scan",
                 pw.session_name
             );
             continue;
-        }
-        if let Some(fallback) = pw.codex_direct_resume_fallback {
-            codex_restore::commit_live_direct_resume_fallback(
-                &pw.session_name,
-                pw.channel_id,
-                fallback,
-            );
         }
 
         let ts = chrono::Local::now().format("%H:%M:%S");

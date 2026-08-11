@@ -100,7 +100,6 @@ pub fn write_codex_tui_rollout_marker_with_start_offset(
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
         write_codex_tui_rollout_marker_under_source_authority(
             authority,
-            tmux_session_name,
             rollout_path,
             session_id,
             rollout_start_offset,
@@ -110,13 +109,11 @@ pub fn write_codex_tui_rollout_marker_with_start_offset(
 
 pub(crate) fn write_codex_tui_rollout_marker_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
-    tmux_session_name: &str,
     rollout_path: &Path,
     session_id: Option<&str>,
     rollout_start_offset: Option<u64>,
 ) -> Result<(), String> {
-    let tmux_session_name = tmux_session_name.trim();
-    authority.assert_session(tmux_session_name);
+    let tmux_session_name = authority.session();
     if tmux_session_name.is_empty() {
         return Ok(());
     }
@@ -150,7 +147,6 @@ pub(crate) fn install_codex_tui_runtime_binding(
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
         if let Err(error) = write_codex_tui_rollout_marker_under_source_authority(
             authority,
-            tmux_session_name,
             &rollout_path,
             session_id.as_deref(),
             rollout_start_offset,
@@ -163,9 +159,7 @@ pub(crate) fn install_codex_tui_runtime_binding(
             return;
         }
         crate::services::tui_prompt_dedupe::register_tmux_runtime_binding_under_source_authority(
-            authority,
-            tmux_session_name,
-            binding,
+            authority, binding,
         );
     });
 }
@@ -178,7 +172,6 @@ pub fn advance_codex_tui_rollout_marker_start_offset(
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
         advance_codex_tui_rollout_marker_start_offset_under_source_authority(
             authority,
-            tmux_session_name,
             rollout_path,
             rollout_start_offset,
         )
@@ -187,16 +180,14 @@ pub fn advance_codex_tui_rollout_marker_start_offset(
 
 pub(crate) fn advance_codex_tui_rollout_marker_start_offset_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
-    tmux_session_name: &str,
     rollout_path: &Path,
     rollout_start_offset: u64,
 ) -> Result<(), String> {
-    let existing_session_id = read_codex_tui_rollout_marker(tmux_session_name)
+    let existing_session_id = read_codex_tui_rollout_marker(authority.session())
         .filter(|marker| codex_tui_rollout_paths_same(&marker.rollout_path, rollout_path))
         .and_then(|marker| marker.session_id);
     write_codex_tui_rollout_marker_under_source_authority(
         authority,
-        tmux_session_name,
         rollout_path,
         existing_session_id.as_deref(),
         Some(rollout_start_offset),
@@ -212,7 +203,6 @@ pub(crate) fn advance_codex_tui_runtime_binding_and_marker_offset(
         let path = rollout_path.to_str().unwrap_or_default();
         let eligible = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
             authority,
-            tmux_session_name,
         )
         .is_some_and(|binding| {
             binding.runtime_kind
@@ -224,7 +214,6 @@ pub(crate) fn advance_codex_tui_runtime_binding_and_marker_offset(
         }
         if let Err(error) = advance_codex_tui_rollout_marker_start_offset_under_source_authority(
             authority,
-            tmux_session_name,
             rollout_path,
             offset,
         ) {
@@ -237,7 +226,6 @@ pub(crate) fn advance_codex_tui_runtime_binding_and_marker_offset(
         }
         let _ = crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset_under_source_authority(
             authority,
-            tmux_session_name,
             path,
             offset,
         );
@@ -259,7 +247,7 @@ fn preserved_rollout_start_offset_for_marker(
     }
 }
 
-fn codex_tui_rollout_paths_same(left: &Path, right: &Path) -> bool {
+pub(crate) fn codex_tui_rollout_paths_same(left: &Path, right: &Path) -> bool {
     let left = std::fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
     let right = std::fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
     left == right

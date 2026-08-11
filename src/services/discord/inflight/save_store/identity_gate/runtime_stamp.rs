@@ -197,7 +197,7 @@ impl CodexRange {
             return false;
         };
         tmux_generation_file_mtime_ns(tmux) == source.generation_mtime_ns
-            && crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(authority, tmux).is_some_and(|binding| {
+            && crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(authority).is_some_and(|binding| {
                 binding.runtime_kind == RuntimeHandoffKind::CodexTui
                     && canonical_regular_file(&binding.output_path).is_some_and(|(bound, _)| bound == path)
                     && nonempty(binding.session_id.as_deref()) == Some(self.session_id.as_str())

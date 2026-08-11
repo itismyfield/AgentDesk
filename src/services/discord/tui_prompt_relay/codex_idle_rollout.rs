@@ -62,12 +62,11 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                     // #3018/#3306/#3656: registry miss ⇒ drop; Codex repair-ineligible.
                     continue;
                 };
-                let binding = resolved_codex_idle_relay_binding(
-                    &tmux_session_name,
-                    channel_id,
-                    &binding,
-                )
-                .unwrap_or(binding);
+                let Some(binding) =
+                    resolved_codex_idle_relay_binding(&tmux_session_name, channel_id)
+                else {
+                    continue;
+                };
                 let rollout_path = PathBuf::from(&binding.output_path);
                 if !rollout_path.exists() {
                     tracing::debug!(
