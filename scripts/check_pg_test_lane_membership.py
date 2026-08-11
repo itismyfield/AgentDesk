@@ -427,10 +427,12 @@ def _external_test_files(repo_root: Path, coverage, counter: list[int] | None = 
             redirect = _PATH_ATTR.search(raw_attrs)
             parents = _scope_at(match.start(), ranges)
             if redirect:
-                target = path.parent.joinpath(*parents, redirect.group("path"))
+                base = path.with_suffix("") if parents and path.name not in {"mod.rs", "lib.rs", "main.rs"} else path.parent
+                target = base.joinpath(*parents, redirect.group("path"))
                 candidates = (target,)
             else:
-                base = (path.parent if path.name in {"mod.rs", "lib.rs", "main.rs"} else path.with_suffix("")).joinpath(*parents)
+                base = path.parent if path.name in {"mod.rs", "lib.rs", "main.rs"} else path.with_suffix("")
+                base = base.joinpath(*parents)
                 name = match.group("name")
                 candidates = (base / f"{name}.rs", base / name / "mod.rs")
             target = next((candidate.resolve() for candidate in candidates if candidate.is_file()), None)
@@ -485,8 +487,9 @@ def discover_pg_inventory(
     impl (an impl is conservatively treated as one type-level item), and UFCS
     receivers containing generic, tuple, reference, or ``dyn`` type syntax. A
     real Rust parser would be required to cover those forms without broad false
-    positives. Inventory is limited to ``src/**/*.rs``: standalone ``tests/``
-    crates and source injected by ``include!`` are not scanned or guaranteed.
+    positives. It skips ``src/main.rs``, ``src/bin/**``, and attribute-free
+    external mods inside ``#[cfg(test)]`` inline modules. ``#[ignore]`` tests
+    remain selection/debt because their execution belongs to the ignore ledger.
     """
     repo_root = repo_root.resolve()
     _matching_brace_cached.cache_clear()
@@ -648,8 +651,6 @@ def discover_pg_inventory(
             physical = (*physical_base, *_scope_at(match.start(), ranges), match.group("name"))
             logical = coverage._normalize_alias_path(physical, aliases)
             name = "::".join(logical)
-            # Reaching an external file through a cfg(test) declaration already
-            # proves that its direct tests are part of the library test target.
             if name in declared_tests or external:
                 records.append((name, str(path.relative_to(repo_root)), logical[:-1], body))
 
@@ -1434,26 +1435,38 @@ def check_analysis(
     if configuration_errors:
         return 2
     if unanalyzable:
-        print(
-            f"FAIL: {len(unanalyzable)} input(s) named above could not be analysed. "
-            "Unanalysable is not clean; resolve each diagnostic before treating "
-            "the inventory as complete.",
-            file=sys.stderr,
-        )
+        if any(finding.kind == "pr-job-delegates-to-reusable-workflow" for finding in unanalyzable):
+            print(
+                f"FAIL: {len(unanalyzable)} {PR_WORKFLOW_REL} job(s) named above "
+                "delegate to a workflow this gate does not read, so no rule can "
+                "say anything about what they run. Unanalysable is not clean: "
+                "either move the cargo-test steps back into "
+                f"{PR_WORKFLOW_REL} where the rules can see them, or teach this "
+                "gate to follow the call.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"FAIL: {len(unanalyzable)} input(s) named above could not be analysed. "
+                "Unanalysable is not clean; resolve each diagnostic before treating "
+                "the inventory as complete.",
+                file=sys.stderr,
+            )
         failed = True
     expected_manifest = render_manifest(analysis.inventory)
     if actual_manifest != expected_manifest:
         print("FAIL: PG test-lane manifest drift.", file=sys.stderr)
         print(
-            "Run `python3 scripts/check_pg_test_lane_membership.py --write-snapshots` "
-            "after intentional PG test inventory changes. This rewrites BOTH the manifest "
-            "and baseline; inspect both diffs.",
+            "Run `python3 scripts/check_pg_test_lane_membership.py --write-snapshots "
+            "--manifest-only` after intentional PG test inventory changes. It rewrites "
+            "only the manifest.",
             file=sys.stderr,
         )
         print(
-            "If the change creates a new rule violation, snapshot regeneration will not "
-            "excuse it: fix the test/module/workflow, or add a narrowly scoped entry with "
-            f"an inline reason to {allowlist_label}.",
+            "`--write-snapshots` also rewrites the baseline; new live debt recorded there "
+            "then fails candidate baseline-growth checks. Fix the test/module/workflow, or "
+            f"for a proven classifier false positive add a narrowly scoped entry with an "
+            f"inline reason to {allowlist_label}.",
             file=sys.stderr,
         )
         failed = True
@@ -1573,7 +1586,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allowlist", type=Path)
     parser.add_argument("--baseline-ref", default=os.environ.get("TEST_LANE_BASELINE_REF", "HEAD"))
     parser.add_argument("--write-snapshots", action="store_true", help="rewrite the manifest and baseline from the current tree")
+    parser.add_argument(
+        "--manifest-only",
+        action="store_true",
+        help="with --write-snapshots, rewrite only the manifest and preserve the baseline",
+    )
     args = parser.parse_args(argv)
+    if args.manifest_only and not args.write_snapshots:
+        parser.error("--manifest-only requires --write-snapshots")
     root = args.repo_root.resolve()
     baseline = args.baseline.resolve() if args.baseline else root / BASELINE_REL
     manifest = args.manifest.resolve() if args.manifest else root / MANIFEST_REL
@@ -1626,8 +1646,11 @@ def main(argv: list[str] | None = None) -> int:
                 if contract_rc:
                     return contract_rc
             manifest.write_text(render_manifest(analysis.inventory), "utf-8")
-            baseline.write_text(render_baseline(analysis.debts), "utf-8")
-            print(f"wrote {manifest} and {baseline}")
+            if args.manifest_only:
+                print(f"wrote {manifest}; preserved {baseline}")
+            else:
+                baseline.write_text(render_baseline(analysis.debts), "utf-8")
+                print(f"wrote {manifest} and {baseline}")
             return 0
         return check(root, baseline, manifest, args.baseline_ref, allowlist)
     except (OSError, ValueError) as exc:

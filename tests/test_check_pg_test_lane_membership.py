@@ -415,6 +415,14 @@ class DetectionMutation(FixtureCase):
             )
         self.assertEqual(rc, 1)
         self.assertIn("FAIL: [unresolved-external-test-module]", stderr.getvalue())
+        voice = (REPO_ROOT / "src/services/discord/voice_barge_in.rs").read_text("utf-8")
+        voice = voice.replace('    #[path = "pcm_harness_tests.rs"]\n    mod pcm_harness_tests;', '    #[cfg(test)]\n    #[path = "pcm_harness_tests.rs"]\n    mod pcm_harness_tests;', 1)
+        self.fx.write_source("src/services/discord/voice_barge_in.rs", voice)
+        target = "src/services/discord/voice_barge_in/tests/pcm_harness_tests.rs"
+        self.fx.write_source(target, (REPO_ROOT / target).read_text("utf-8"))
+        findings: list[membership.Finding] = []
+        self.assertIn((self.root / target).resolve(), membership._external_test_files(self.root.resolve(), membership._load_coverage_module(self.root), findings=findings))
+        self.assertFalse([finding for finding in findings if finding.source.startswith("src/services/discord/voice_barge_in.rs:")])
 
     def test_brace_ownership_excludes_adjacent_helper_body(self) -> None:
         self.fx.write_source(
@@ -691,6 +699,9 @@ class RuleMutations(FixtureCase):
         self.assertEqual(rc, 0)
         self.assertTrue(manifest.exists())
         self.assertTrue(baseline.exists())
+        original_baseline = baseline.read_text("utf-8")
+        self.assertEqual(membership.main(["--repo-root", str(self.root), "--write-snapshots", "--manifest-only"]), 0)
+        self.assertEqual(baseline.read_text("utf-8"), original_baseline)
 
     def test_four_step_allowlist_bypass_of_rule5_is_refused(self) -> None:
         """The reviewed attack in order: mutate, allowlist, regenerate, recheck."""
@@ -1254,9 +1265,9 @@ class BaselineAndEnforcement(FixtureCase):
         empty = empty_debts()
         rc, _, error = self.run_check(self.analysis(), empty, empty, "")
         self.assertEqual(rc, 1)
-        self.assertIn("python3 scripts/check_pg_test_lane_membership.py --write-snapshots", error)
-        self.assertIn("rewrites BOTH the manifest and baseline", error)
-        self.assertIn("will not excuse", error)
+        self.assertIn("python3 scripts/check_pg_test_lane_membership.py --write-snapshots --manifest-only", error)
+        self.assertIn("only the manifest", error)
+        self.assertIn("baseline-growth", error)
 
     def test_inventory_change_passes_when_manifest_matches(self) -> None:
         empty = empty_debts()
@@ -1465,6 +1476,7 @@ class ReusableWorkflowMutations(BypassFixtureCase):
         self.assertIn("pr-job-delegates-to-reusable-workflow", stderr.getvalue())
         self.assertIn("library-sweep.yml", stderr.getvalue())
         self.assertIn("Unanalysable is not clean", stderr.getvalue())
+        self.assertIn("move the cargo-test steps back", stderr.getvalue())
 
     def test_step_level_uses_is_not_a_reusable_workflow_call(self) -> None:
         # The shape every real ci-pr.yml job has. `- uses:` is a step, and a
