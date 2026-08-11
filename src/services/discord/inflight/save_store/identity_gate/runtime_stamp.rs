@@ -208,7 +208,6 @@ impl CodexRange {
                     && binding.last_offset == source.range.1
             })
     }
-    #[allow(dead_code)]
     pub(in crate::services::discord) fn revalidated_source(
         &self,
         local: &InflightTurnState,

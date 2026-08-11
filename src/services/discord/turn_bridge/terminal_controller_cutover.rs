@@ -825,6 +825,19 @@ pub(super) async fn apply_bridge_short_replace_controller(
 ///   `preserve_inflight_for_cleanup_retry = true;` AND the dual-offset bump
 ///   `inflight_response_sent_offset = full_response_len` (mod.rs:6241); record
 ///   `failed(..)` cleanup; NO `confirmed_end` advance (released Unknown without
+///   commit); NO completion_footer.
+/// - `Unknown { fell_back: false }` (Partial / Err):
+///   `preserve_inflight_for_cleanup_retry = true;` record `failed(detail)` cleanup;
+///   NO `response_sent_offset` bump (distinguishes from the fell_back arm).
+/// - `Transient` (lost acquire / B2-skip): `preserve_inflight_for_cleanup_retry =
+///   true; bridge_skip_holder_owns_inflight = true;` no transport, no cleanup
+///   record (the legacy B2-skip arm at mod.rs:6145 records none).
+/// - `NotDelivered` (advance refused — not normally reachable: site-5's advance is
+///   unconditional on a committed replace): conservative
+///   `preserve_inflight_for_cleanup_retry = true` (no commit), record failed
+///   cleanup. Documented as the defensive default.
+/// - `Skipped` (empty body — excluded by the cutover gate; unreachable in prod):
+///   `preserve_inflight_for_cleanup_retry = true`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn apply_bridge_short_replace_outcome(
     outcome: toc::DeliveryOutcome,
@@ -1275,12 +1288,42 @@ mod tests {
         }
         #[cfg(unix)]
         #[rustfmt::skip]
-        fn assert_pinned_barrier(source: &ExactJsonlSourceIdentity, message_id: u64) {
+        fn assert_pinned_barrier(source: &ExactJsonlSourceIdentity, message_id: u64, user_msg_id: u64, body: &str) {
             let record = dr::read_record(&ProviderKind::Codex, source.offset_authority_channel_id).unwrap(); let frontier = record.delivered_frontier.unwrap();
             assert_eq!((frontier.range, frontier.generation_mtime_ns), ((0, 7), dr::current_generation_mtime_ns(&source.tmux_session_name)));
             assert!(dr::historical_pinned_delivery_exists(source, message_id));
             let mut wrong = source.clone(); wrong.generation_mtime_ns = frontier.generation_mtime_ns; wrong.turn_nonce = "g2".into();
             assert!(!dr::historical_pinned_delivery_exists(&wrong, message_id));
+            // #5264 PR-B r7: seal `record_pinned_delivery_metadata`, the only new durable
+            // write this branch adds to the pinned path. Until these three assertions
+            // existed, DELETING the call outright and REVERTING the fingerprint key to
+            // `delivery_channel_id` both left `delivery_record`, `terminal_delivery`,
+            // `terminal_controller_cutover`, `5264` and `tmux_watcher` fully green — so the
+            // migration doc's (now removed) "known gap" could have been "closed" by
+            // reintroducing the real inert-fingerprint bug against a green CI.
+            // The oracle is the fingerprint's KEY SPACE, not `recent_delivered_content_matches`:
+            // both of these tests deliberately flip the generation during delivery, so the
+            // reader-side helper (which compares against the LIVE generation) can never match
+            // here by construction. That mismatch is the disclosed fail-open of a dedupe
+            // heuristic; what this seal pins is which channel the entry lands under.
+            let fingerprinted = |channel: u64| dr::read_record(&ProviderKind::Codex, channel).is_some_and(|record| {
+                record.recent_delivered_contents.iter().any(|entry| entry.channel_id == channel
+                    && entry.generation_mtime_ns == source.generation_mtime_ns
+                    && entry.content_len == body.len() as u64)
+            });
+            assert!(fingerprinted(source.offset_authority_channel_id),
+                "the delivered-content fingerprint must land under the OFFSET-AUTHORITY channel, which is where every reader (tmux_watcher/turn_identity.rs, tmux_watcher/terminal_preflight.rs) looks it up");
+            // Both barrier tests sweep `owner in [ch(), owner_ch()]`, so the split-channel
+            // half of the seal is asserted only on the iteration where they actually differ.
+            // That iteration is what kills the key reversion; the assertion above is what
+            // kills deleting the write.
+            if source.offset_authority_channel_id != source.delivery_channel_id {
+                assert!(!fingerprinted(source.delivery_channel_id),
+                    "and NOT under the delivery channel: writing it there strands the duplicate defence in exactly the split-channel case it exists for");
+            }
+            let settled = crate::services::discord::outbound::completed_turn_ledger::settled_user_msg_ids(&ProviderKind::Codex, source.delivery_channel_id);
+            assert!(settled.contains(&user_msg_id),
+                "the completed-turn ledger entry must be recorded under the DELIVERY channel {}: expected {user_msg_id}, ledger holds {settled:?}", source.delivery_channel_id);
         }
         // A fake `TurnGateway` whose `replace_message_with_outcome` returns a fixed
         // outcome (or `Err`), counts transport calls, AND records the `channel_id`
@@ -1633,9 +1676,14 @@ mod tests {
         #[rustfmt::skip]
         async fn pinned_codex_short_replace_generation_flip_5264() {
             let _lock = crate::config::shared_test_env_lock().lock().unwrap_or_else(|e| e.into_inner()); let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK.lock().unwrap_or_else(|poison| poison.into_inner()); crate::services::tui_prompt_dedupe::reset_state_for_tests(); let root = runtime_root_guard(); let provider = ProviderKind::Codex;
-            for owner in [ch(), owner_ch()] { let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), owner, owner.get()); let mut gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, true); gw.hook = Some(flip(source.clone()));
+            // A per-iteration runtime root: the same-channel sweep (owner == delivery) writes
+            // its fingerprint under CH, and the split-channel sweep asserts CH holds NO
+            // fingerprint. Both sweeps use one tmux session, one generation stamp and one
+            // body, so a shared root would leave the first sweep's entry indistinguishable
+            // from a mis-keyed write and the negative assertion would be unfalsifiable.
+            for owner in [ch(), owner_ch()] { let root = runtime_root_guard(); let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), owner, owner.get()); let mut gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, true); gw.hook = Some(flip(source.clone()));
                 let (committed, fallback, _) = pinned_transport(shared.as_ref(), &gw, &provider, owner).deliver(pin, false).await;
-                assert!(committed && !fallback); assert_eq!(gw.replace_calls.load(Ordering::SeqCst), 1); assert_pinned_barrier(&source, MSG); assert!(matches!(shared.delivery_lease(owner).read(), LeaseSnapshot::Unleased)); }
+                assert!(committed && !fallback); assert_eq!(gw.replace_calls.load(Ordering::SeqCst), 1); assert_pinned_barrier(&source, MSG, owner.get(), "answer"); assert!(matches!(shared.delivery_lease(owner).read(), LeaseSnapshot::Unleased)); }
             let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), ch(), 3); let gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, false);
             assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, false).await.0); assert!(!dr::historical_pinned_delivery_exists(&source, MSG)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased)); let broken = runtime_root_guard(); std::fs::create_dir_all(broken._temp.path().join("runtime")).unwrap(); std::fs::write(broken._temp.path().join("runtime/discord_delivery_records"), b"blocked").unwrap(); let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, broken._temp.path(), ch(), 6); let gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, true); assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, false).await.0); assert_eq!((gw.replace_calls.load(Ordering::SeqCst), shared.committed_relay_offset(ch())), (1, 64)); assert!(dr::read_record(&provider, CH).is_none()); assert!(!dr::historical_pinned_delivery_exists(&source, MSG)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased));
         }
@@ -1645,8 +1693,9 @@ mod tests {
         #[rustfmt::skip]
         async fn pinned_codex_long_chunks_generation_flip_5264() {
             let _lock = crate::config::shared_test_env_lock().lock().unwrap_or_else(|e| e.into_inner()); let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK.lock().unwrap_or_else(|poison| poison.into_inner()); crate::services::tui_prompt_dedupe::reset_state_for_tests(); let root = runtime_root_guard(); let provider = ProviderKind::Codex;
-            for owner in [ch(), owner_ch()] { let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), owner, owner.get() + 4); let mut gw = long_gateway(true, true); gw.hook = Some(flip(source.clone())); let outcome = pinned_transport(shared.as_ref(), &gw, &provider, owner).deliver(pin, true).await;
-                assert_eq!((outcome.0, outcome.1), (true, false)); let mut inflight = crate::services::discord::inflight::load_inflight_state_read_only(&provider, CH).unwrap(); assert!(super::super::super::stream_loop::types::persist_pinned_terminal_anchor(&mut inflight, outcome.2)); let restored = crate::services::discord::inflight::load_inflight_state_read_only(&provider, CH).unwrap(); assert!(dr::confirmed_delivery_receipt_exists(&provider, ch(), restored.current_msg_id, &source)); assert_eq!(gw.send_calls.load(Ordering::SeqCst), 1); assert_pinned_barrier(&source, 9001); assert!(!dr::historical_pinned_delivery_exists(&source, 9000)); assert!(!dr::historical_pinned_delivery_exists(&source, MSG)); assert!(matches!(shared.delivery_lease(owner).read(), LeaseSnapshot::Unleased)); }
+            // Per-iteration runtime root — same reason as the short-replace sweep above.
+            for owner in [ch(), owner_ch()] { let root = runtime_root_guard(); let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), owner, owner.get() + 4); let mut gw = long_gateway(true, true); gw.hook = Some(flip(source.clone())); let outcome = pinned_transport(shared.as_ref(), &gw, &provider, owner).deliver(pin, true).await;
+                assert_eq!((outcome.0, outcome.1), (true, false)); let mut inflight = crate::services::discord::inflight::load_inflight_state_read_only(&provider, CH).unwrap(); assert!(super::super::super::stream_loop::types::persist_pinned_terminal_anchor(&mut inflight, outcome.2)); let restored = crate::services::discord::inflight::load_inflight_state_read_only(&provider, CH).unwrap(); assert!(dr::confirmed_delivery_receipt_exists(&provider, ch(), restored.current_msg_id, &source)); assert_eq!(gw.send_calls.load(Ordering::SeqCst), 1); assert_pinned_barrier(&source, 9001, owner.get() + 4, "answer"); assert!(!dr::historical_pinned_delivery_exists(&source, 9000)); assert!(!dr::historical_pinned_delivery_exists(&source, MSG)); assert!(matches!(shared.delivery_lease(owner).read(), LeaseSnapshot::Unleased)); }
             let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), ch(), 5); let gw = long_gateway(false, true);
             assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, true).await.0); assert!(!dr::historical_pinned_delivery_exists(&source, 9001)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased)); let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), ch(), 7); let gw = long_gateway(true, true); gw.clock.store(usize::MAX, Ordering::SeqCst); assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, true).await.0); assert_eq!(gw.send_calls.load(Ordering::SeqCst), 1); assert!(!dr::historical_pinned_delivery_exists(&source, 9001)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased)); let broken = runtime_root_guard(); std::fs::create_dir_all(broken._temp.path().join("runtime")).unwrap(); std::fs::write(broken._temp.path().join("runtime/discord_delivery_records"), b"blocked").unwrap(); let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, broken._temp.path(), ch(), 8); let gw = long_gateway(true, true); assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, true).await.0); assert_eq!((gw.send_calls.load(Ordering::SeqCst), shared.committed_relay_offset(ch())), (1, 64)); assert!(dr::read_record(&provider, CH).is_none()); assert!(!dr::historical_pinned_delivery_exists(&source, 9001)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased));
         }

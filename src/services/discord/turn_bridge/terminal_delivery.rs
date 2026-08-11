@@ -758,7 +758,6 @@ impl BridgeDeliveryLease {
 
 #[cfg(unix)]
 impl BridgeDeliveryLease {
-    #[allow(dead_code)]
     pub(super) fn pin_exact_source(
         self,
         shared: &SharedData,
@@ -803,7 +802,6 @@ impl PinnedBridgeDeliveryLease {
         let _ = self.lease.release_lease();
     }
 
-    #[allow(dead_code)]
     pub(super) fn commit_after_send(
         self,
         shared: &SharedData,

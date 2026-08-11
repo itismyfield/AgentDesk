@@ -2981,6 +2981,7 @@ services::discord::outbound::delivery_record::tests::cleared_inflight_stale_call
 services::discord::outbound::delivery_record::tests::codex_admitted_range_receipt_is_exact_and_idempotent_5264
 services::discord::outbound::delivery_record::tests::committed_floor_authority_on_does_not_oversuppress_rollover_resend_3871
 services::discord::outbound::delivery_record::tests::committed_floor_authority_on_suppresses_watchdog_rerelay_3885
+services::discord::outbound::delivery_record::tests::confirmed_receipt_identity_guards_gate_the_historical_fast_path_5264
 services::discord::outbound::delivery_record::tests::confirmed_receipt_write_rejects_destination_owner_and_provider_mismatch_4911
 services::discord::outbound::delivery_record::tests::confirmed_receipts_reverse_order_merge_without_frontier_regression_4911
 services::discord::outbound::delivery_record::tests::current_gen_anchor_distrusts_stale_generation

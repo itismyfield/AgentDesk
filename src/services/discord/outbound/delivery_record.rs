@@ -1885,9 +1885,12 @@ fn recent_delivered_content_matches_at(
         .is_some_and(|record| recent_content_fingerprint_matches(record, &fingerprint, now_ms))
 }
 
-// #4046 S1r-1 P3-2: module-local only — the sole callers are the two fresh-send
-// record sites in this file. Reverted from the transient `pub(in ...::outbound)`
-// widening (no caller outside this module; behavior unchanged).
+// #4046 S1r-1 P3-2: module-local only — every caller is in this file. Reverted
+// from the transient `pub(in ...::outbound)` widening (no caller outside this
+// module; behavior unchanged). #5264 PR-B: there are now three call sites —
+// `record_delivered_content_fingerprint` and `shadow_mirror_delivered_frontier_inner`
+// (the two fresh-send record sites) plus `record_pinned_delivery_metadata`, which
+// keys the pinned bridge's fingerprint by the offset-authority channel.
 fn record_delivered_content_fingerprint_for_generation(
     provider: &ProviderKind,
     channel_id: u64,
@@ -2746,6 +2749,62 @@ mod tests {
             source,
             historical.message_id
         ));
+    }
+
+    /// #5264 PR-B: the two Discord-identity guards at the top of
+    /// `confirmed_delivery_receipt_exists` now stand IN FRONT of the
+    /// `historical_pinned_delivery_exists` fast path, and that fast path keys
+    /// itself entirely off the caller-supplied `source` — it never looks at the
+    /// `provider`/`delivery_channel` the caller is actually asking about. So
+    /// deleting either guard makes the function answer "yes, this exact receipt
+    /// is confirmed" for a receipt belonging to a DIFFERENT provider or a
+    /// DIFFERENT destination channel, which is precisely the restored-seed
+    /// consumption decision the doc comment promises fails closed. Both
+    /// deletions were silent against the whole suite before this test.
+    #[test]
+    fn confirmed_receipt_identity_guards_gate_the_historical_fast_path_5264() {
+        let _root = IsolatedRoot::new();
+        let (provider, owner, delivery) = (ProviderKind::Codex, 5_264_201, 5_264_202);
+        let tmux = "AgentDesk-codex-5264-receipt-guard";
+        let generation = set_phase_a_generation(tmux, 1_700_526_402);
+        #[rustfmt::skip]
+        let (_, historical) = exact_delivery_fixture(&provider, tmux, "guard-turn", (0, 9),
+            generation, (owner, delivery), 5_264_203);
+        record_historical_pinned_delivery(&historical.source, historical.message_id)
+            .expect("seed the exact historical receipt");
+        let source = &historical.source;
+        assert!(
+            confirmed_delivery_receipt_exists(
+                &provider,
+                ChannelId::new(delivery),
+                historical.message_id,
+                source,
+            ),
+            "the matching query must still resolve, or the negatives below are vacuous"
+        );
+        assert!(
+            !confirmed_delivery_receipt_exists(
+                &ProviderKind::Claude,
+                ChannelId::new(delivery),
+                historical.message_id,
+                source,
+            ),
+            "a receipt recorded for codex must not confirm a claude consumption"
+        );
+        assert!(
+            !confirmed_delivery_receipt_exists(
+                &provider,
+                ChannelId::new(owner),
+                historical.message_id,
+                source,
+            ),
+            "a receipt whose destination was the delivery channel must not confirm a \
+             consumption asking about the offset-authority channel"
+        );
+        assert!(
+            !confirmed_delivery_receipt_exists(&provider, ChannelId::new(delivery), 0, source,),
+            "message id 0 is not a delivery"
+        );
     }
     #[test]
     fn ordered_jsonl_commit_is_generation_scoped_and_monotonic() {
