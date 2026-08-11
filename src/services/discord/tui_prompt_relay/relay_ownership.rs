@@ -240,10 +240,8 @@ pub(super) fn external_input_relay_binding(
             .trim()
             .eq_ignore_ascii_case(ProviderKind::Codex.as_str())
             && binding.runtime_kind == RuntimeHandoffKind::CodexTui
-            && let Some(fresh) =
-                resolved_codex_idle_relay_binding(tmux_session_name, channel_id, &binding)
         {
-            return Some(fresh);
+            return resolved_codex_idle_relay_binding(tmux_session_name, channel_id);
         }
     }
     Some(binding)
@@ -253,29 +251,51 @@ pub(super) fn external_input_relay_binding(
 pub(super) fn resolved_codex_idle_relay_binding(
     tmux_session_name: &str,
     channel_id: ChannelId,
-    binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
 ) -> Option<crate::services::tui_prompt_dedupe::TuiRuntimeBinding> {
-    let marker =
-        crate::services::codex_tui::session::read_codex_tui_rollout_marker(tmux_session_name);
-    if let Some(marker) = marker
-        && marker.rollout_path.exists()
-    {
-        let marker_path = std::fs::canonicalize(&marker.rollout_path)
-            .unwrap_or_else(|_| marker.rollout_path.clone());
-        let binding_path = std::fs::canonicalize(&binding.output_path)
-            .unwrap_or_else(|_| PathBuf::from(&binding.output_path));
-        if marker_path != binding_path {
+    resolved_codex_idle_relay_binding_inner(tmux_session_name, channel_id, || {})
+}
+
+// The body reads the Codex rollout marker and calls the `#[cfg(unix)]`-only
+// `codex_tui_rehydrated_binding_from_rollout_path`, so this seam carries the same
+// gate as the `resolved_codex_idle_relay_binding` it was extracted out of.
+#[cfg(unix)]
+fn resolved_codex_idle_relay_binding_inner(
+    tmux_session_name: &str,
+    channel_id: ChannelId,
+    observe_before_register: impl FnOnce(),
+) -> Option<crate::services::tui_prompt_dedupe::TuiRuntimeBinding> {
+    crate::services::tui_prompt_dedupe::reconcile_rehydrated_tmux_runtime_binding(
+        ProviderKind::Codex.as_str(),
+        tmux_session_name,
+        channel_id.get(),
+        observe_before_register,
+        |binding| {
+            let binding = binding?;
+            if binding.runtime_kind != RuntimeHandoffKind::CodexTui {
+                return None;
+            }
+            let Some(marker) = crate::services::codex_tui::session::read_codex_tui_rollout_marker(
+                tmux_session_name,
+            )
+            .filter(|marker| marker.rollout_path.exists()) else {
+                return Path::new(&binding.output_path)
+                    .exists()
+                    .then_some((binding, false));
+            };
             let fresh = codex_tui_rehydrated_binding_from_rollout_path(
                 tmux_session_name,
                 &marker.rollout_path,
                 marker.session_id,
             )?;
-            crate::services::tui_prompt_dedupe::register_rehydrated_tmux_runtime_binding(
-                ProviderKind::Codex.as_str(),
-                tmux_session_name,
-                channel_id.get(),
-                fresh.clone(),
-            );
+            if crate::services::codex_tui::session::codex_tui_rollout_paths_same(
+                &marker.rollout_path,
+                Path::new(&binding.output_path),
+            ) && fresh.session_id == binding.session_id
+            {
+                return Path::new(&binding.output_path)
+                    .exists()
+                    .then_some((binding, false));
+            }
             tracing::info!(
                 tmux_session_name = %tmux_session_name,
                 channel_id = channel_id.get(),
@@ -283,12 +303,18 @@ pub(super) fn resolved_codex_idle_relay_binding(
                 rollout_path = %fresh.output_path,
                 "refreshed Codex TUI direct relay binding from live rollout marker"
             );
-            return Some(fresh);
-        }
-    }
-    Path::new(&binding.output_path)
-        .exists()
-        .then(|| binding.clone())
+            Some((fresh, true))
+        },
+    )
+}
+
+#[cfg(all(unix, test))]
+pub(super) fn resolved_codex_idle_relay_binding_observing(
+    tmux_session_name: &str,
+    channel_id: ChannelId,
+    observe_before_register: impl FnOnce(),
+) -> Option<crate::services::tui_prompt_dedupe::TuiRuntimeBinding> {
+    resolved_codex_idle_relay_binding_inner(tmux_session_name, channel_id, observe_before_register)
 }
 
 pub(super) fn external_input_relay_output_path(

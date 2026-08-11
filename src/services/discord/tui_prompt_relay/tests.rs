@@ -3225,6 +3225,15 @@ fn codex_external_input_binding_refreshes_from_live_rollout_marker() {
         relay_last_offset: None,
     };
 
+    // #5264 PR-C: the sole production caller reads this binding out of the dedupe
+    // registry before calling, so the fenced refresh re-reads the *registered*
+    // entry under source authority instead of trusting the passed-in snapshot.
+    // Register it so the fixture holds that production precondition.
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+        tmux_session_name,
+        stale_binding.clone(),
+    );
+
     let refreshed = external_input_relay_binding(
         ProviderKind::Codex.as_str(),
         tmux_session_name,
@@ -3238,6 +3247,76 @@ fn codex_external_input_binding_refreshes_from_live_rollout_marker() {
         refreshed.session_id.as_deref(),
         Some("codex-marker-session")
     );
+}
+
+// #5264 PR-C: the production Codex supplier must install the marker-derived
+// replacement *inside* the fence, not under a second acquisition taken after the
+// decision. `try_with_tmux_source_authority` is a plain `try_lock`, so it is
+// refused while this thread already holds the authority: `false` at the seam the
+// funnel exposes immediately before the write proves the replacement is fenced.
+#[cfg(unix)]
+#[test]
+fn codex_external_input_binding_refresh_replaces_under_source_authority() {
+    let temp = tempfile::tempdir().expect("temp runtime root");
+    let _env = crate::config::set_agentdesk_root_for_test(temp.path());
+    let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    crate::services::tui_prompt_dedupe::reset_state_for_tests();
+    let tmux_session_name = "AgentDesk-codex-marker-fence";
+    let rollout_path = temp.path().join("fenced-rollout.jsonl");
+    std::fs::write(
+        &rollout_path,
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"codex-fenced-session\"}}\n",
+    )
+    .expect("write rollout");
+    crate::services::codex_tui::session::write_codex_tui_rollout_marker(
+        tmux_session_name,
+        &rollout_path,
+        Some("codex-fenced-session"),
+    )
+    .expect("write marker");
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+        tmux_session_name,
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::CodexTui,
+            output_path: temp
+                .path()
+                .join("missing-wrapper.jsonl")
+                .display()
+                .to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: None,
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+
+    let mut held_before_replace = None;
+    // Reached through its module path on purpose: `tui_prompt_relay.rs` sits under a
+    // hot-file LOC ratchet that may only decrease, so this seam adds no `use` line there.
+    let refreshed = super::relay_ownership::resolved_codex_idle_relay_binding_observing(
+        tmux_session_name,
+        ChannelId::new(44),
+        || {
+            held_before_replace = Some(
+                crate::services::tmux_common::try_with_tmux_source_authority(
+                    tmux_session_name,
+                    |_| (),
+                )
+                .is_some(),
+            );
+        },
+    )
+    .expect("binding refresh");
+
+    assert_eq!(
+        held_before_replace,
+        Some(false),
+        "the marker-derived replacement must be installed under the held fence"
+    );
+    assert_eq!(refreshed.output_path, rollout_path.display().to_string());
 }
 
 #[cfg(unix)]

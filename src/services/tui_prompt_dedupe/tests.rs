@@ -427,6 +427,28 @@ fn refresh_runtime_binding_activity_extends_mapping_ttl_without_offset_advance()
     let binding = runtime_binding_for_tmux_session("tmux-runtime-activity")
         .expect("binding survives purge after refresh");
     assert_eq!(binding.last_offset, 123);
+
+    {
+        let mut state = STATE.lock().unwrap();
+        let entry = state
+            .runtime_by_tmux
+            .get_mut("tmux-runtime-activity")
+            .unwrap();
+        entry.recorded_at = Instant::now() - SESSION_MAPPING_TTL - Duration::from_secs(1);
+    }
+    let present = || {
+        STATE
+            .lock()
+            .unwrap()
+            .runtime_by_tmux
+            .contains_key("tmux-runtime-activity")
+    };
+    crate::services::tmux_common::with_tmux_source_authority("tmux-runtime-activity", |_| {
+        register_tmux_channel("purge-probe", 42);
+        assert!(present());
+    });
+    register_tmux_channel("purge-probe", 43);
+    assert!(!present());
 }
 
 #[test]
@@ -2738,4 +2760,77 @@ fn extract_yields_none_entry_id_when_uuid_absent() {
         extract_claude_transcript_user_prompt_with_entry_id(&json).expect("user prompt");
     assert_eq!(prompt, "no uuid here");
     assert_eq!(entry_id, None);
+}
+
+// #5264 PR-C: the r2 defect was a stale registry read followed by a *separately*
+// locked binding-only write, which leaves marker C paired with binding B. So the
+// fence has to linearize the read and the decision with the replacement, not just
+// the final insert. `try_with_tmux_source_authority` is a plain `try_lock`, so it
+// is refused while this same thread already holds the authority — the probes below
+// read `false` exactly when the funnel holds the fence at that point. A build that
+// takes the authority only for the write lets the `decide` probe succeed, so this
+// test fails if the acquisition is moved after the read.
+#[test]
+fn reconcile_holds_source_authority_across_read_decision_and_replacement() {
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    reset_state();
+    let tmux_session_name = "AgentDesk-reconcile-fence";
+    let unheld = || {
+        crate::services::tmux_common::try_with_tmux_source_authority(tmux_session_name, |_| ())
+            .is_some()
+    };
+    let installed = TuiRuntimeBinding {
+        runtime_kind: RuntimeHandoffKind::CodexTui,
+        output_path: "installed.jsonl".to_string(),
+        relay_output_path: None,
+        input_fifo_path: None,
+        session_id: Some("installed".to_string()),
+        last_offset: 11,
+        relay_last_offset: None,
+    };
+    let replacement = TuiRuntimeBinding {
+        output_path: "replacement.jsonl".to_string(),
+        session_id: Some("replacement".to_string()),
+        ..installed.clone()
+    };
+    register_tmux_runtime_binding(tmux_session_name, installed.clone());
+    assert!(
+        unheld(),
+        "negative control: the probe must observe an unheld authority before the call"
+    );
+
+    let mut observed_read = None;
+    let mut held_before_replace = None;
+    let returned = reconcile_rehydrated_tmux_runtime_binding(
+        "codex",
+        tmux_session_name,
+        7,
+        || held_before_replace = Some(unheld()),
+        |read| {
+            observed_read = Some((read, unheld()));
+            Some((replacement.clone(), true))
+        },
+    );
+
+    assert_eq!(
+        observed_read,
+        Some((Some(installed), false)),
+        "decide must receive the registered entry with the fence already held"
+    );
+    assert_eq!(
+        held_before_replace,
+        Some(false),
+        "the replacement must be written under the same held authority"
+    );
+    assert_eq!(returned.as_ref(), Some(&replacement));
+    assert_eq!(
+        runtime_binding_for_tmux_session(tmux_session_name).as_ref(),
+        Some(&replacement)
+    );
+    assert!(
+        unheld(),
+        "the fence must be released once the funnel returns"
+    );
 }

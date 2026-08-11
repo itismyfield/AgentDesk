@@ -71,6 +71,12 @@ fn run_generation_stamp_before_create_hook_for_tests() {
 pub(in crate::services::discord) fn stamp_session_generation_marker(
     tmux_session_name: &str,
 ) -> Option<i64> {
+    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |_| {
+        stamp_session_generation_marker_under_source_authority(tmux_session_name)
+    })
+}
+
+fn stamp_session_generation_marker_under_source_authority(tmux_session_name: &str) -> Option<i64> {
     let generation = crate::services::discord::runtime_store::process_generation();
     let path = crate::services::tmux_common::session_temp_path(tmux_session_name, "generation");
     let tmp_path = format!(
@@ -277,7 +283,18 @@ fn run_preserve_mtime_before_rewrite_hook_for_tests() {
 /// retries the existing-fd path so adoption never joins a concurrent writer by
 /// using `create(true)`. Existing current-generation content is a no-op.
 /// Failures are logged and swallowed because adoption itself can still proceed.
-pub(super) fn preserve_mtime_after_write(path: &str, content: &[u8], context: &str) {
+pub(super) fn preserve_session_generation_mtime_after_write(
+    tmux_session_name: &str,
+    path: &str,
+    content: &[u8],
+    context: &str,
+) {
+    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |_| {
+        preserve_mtime_after_write(path, content, context)
+    });
+}
+
+fn preserve_mtime_after_write(path: &str, content: &[u8], context: &str) {
     let mut file = loop {
         match std::fs::OpenOptions::new()
             .read(true)
@@ -596,6 +613,18 @@ pub(super) fn reset_stale_local_relay_offset_if_output_regressed(
     true
 }
 
+fn source_authority_stem_for_orphan_file(filename: &str) -> &str {
+    [
+        ".codex-tui-rollout.json",
+        ".claude-tui-settings.json",
+        ".claude-tui.sh",
+    ]
+    .into_iter()
+    .find_map(|suffix| filename.strip_suffix(suffix))
+    .or_else(|| filename.rsplit_once('.').map(|(stem, _)| stem))
+    .unwrap_or(filename)
+}
+
 /// Remove jsonl/input/prompt/owner/etc files in the persistent sessions
 /// directory that no longer belong to a running tmux session. Conservative:
 /// require an owner marker (or the jsonl) to be older than
@@ -639,11 +668,8 @@ pub(super) async fn sweep_orphan_session_files() {
         if !name.starts_with("agentdesk-") {
             continue;
         }
-        // Strip extension.
-        let stem = match name.rsplit_once('.') {
-            Some((s, _)) => s.to_string(),
-            None => name.clone(),
-        };
+        // Strip the complete extension, including the multi-dot source marker.
+        let stem = source_authority_stem_for_orphan_file(&name).to_string();
         // Session name is the last token after the fourth dash — but our
         // prefix format is `agentdesk-<12hex>-<host>-<session>` and host
         // may contain dashes. The simplest robust approach: split_once on
@@ -691,13 +717,15 @@ pub(super) async fn sweep_orphan_session_files() {
         let Ok(iter) = std::fs::read_dir(&dir) else {
             continue;
         };
-        for entry in iter.flatten() {
-            if let Ok(fname) = entry.file_name().into_string() {
-                if fname.starts_with(&format!("{}.", stem)) {
-                    let _ = std::fs::remove_file(entry.path());
+        crate::services::tmux_common::with_session_temp_source_authority(&stem, || {
+            for entry in iter.flatten() {
+                if let Ok(fname) = entry.file_name().into_string() {
+                    if fname.starts_with(&format!("{}.", stem)) {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
                 }
             }
-        }
+        });
         swept += 1;
     }
     if swept > 0 {
@@ -858,6 +886,40 @@ mod tests {
         );
         // No committed delivery yet (offset 0) → None even if generations match.
         assert_eq!(committed_frontier_for_same_generation(0, 42, 42), None);
+    }
+
+    #[test]
+    fn orphan_sweep_multidot_marker_uses_canonical_source_authority_key_5264() {
+        use crate::services::codex_tui::session::write_codex_tui_rollout_marker;
+        use crate::services::tmux_common as tc;
+
+        let (_root, _env) = isolated_runtime_root();
+        let tmux = unique_session("orphan.key.with.dots");
+        let rollout = std::path::Path::new("rollout-fixture");
+        let stem_for = |extension| {
+            let path = tc::session_temp_path(&tmux, extension);
+            let filename = std::path::Path::new(&path)
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap();
+            source_authority_stem_for_orphan_file(filename).to_string()
+        };
+        let stem = stem_for(tc::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT);
+        assert!(stem.ends_with(&tmux) && stem.contains('.'));
+        assert_eq!(stem_for("generation"), stem);
+        tc::with_session_temp_source_authority(&stem, || {
+            let blocked = |operation: &dyn Fn()| {
+                let contended = tc::source_authority_contention_key_for_tests(operation);
+                assert_eq!(contended.as_deref(), Some(stem.as_str()));
+            };
+            blocked(&|| write_codex_tui_rollout_marker(&tmux, rollout, Some("session")).unwrap());
+            blocked(&|| {
+                let _ = stamp_session_generation_marker(&tmux);
+            });
+            blocked(&|| tc::cleanup_session_temp_files(&tmux));
+            blocked(&|| tc::with_session_temp_source_authority(&stem, || ()));
+        });
     }
 
     #[test]

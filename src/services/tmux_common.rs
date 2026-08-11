@@ -1,9 +1,112 @@
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use crate::services::tmux_diagnostics::clear_tmux_exit_reason;
+
+// Same-pane source mutations linearize here; lock order is authority -> STATE.
+static TMUX_SOURCE_AUTHORITY_LOCKS: LazyLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+thread_local! {
+    static SOURCE_AUTHORITY_CONTENTION_ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+struct SourceAuthorityContention(String);
+
+#[cfg(test)]
+pub(crate) fn source_authority_contention_key_for_tests(
+    operation: impl FnOnce(),
+) -> Option<String> {
+    SOURCE_AUTHORITY_CONTENTION_ARMED.with(|armed| armed.set(true));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
+    SOURCE_AUTHORITY_CONTENTION_ARMED.with(|armed| armed.set(false));
+    match result.err()?.downcast::<SourceAuthorityContention>() {
+        Ok(contention) => Some(contention.0),
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+pub(crate) struct TmuxSourceAuthority<'a>(&'a str);
+
+impl<'a> TmuxSourceAuthority<'a> {
+    pub(crate) fn session(&self) -> &'a str {
+        self.0
+    }
+}
+
+fn source_authority_lock_for_key(key: &str) -> Arc<Mutex<()>> {
+    let mut locks = TMUX_SOURCE_AUTHORITY_LOCKS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if let Some(lock) = locks.get(key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    locks.retain(|_, lock| lock.strong_count() != 0);
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(key.to_string(), Arc::downgrade(&lock));
+    lock
+}
+
+#[cfg(test)]
+fn lock_source_authority<'a>(lock: &'a Mutex<()>, key: &str) -> std::sync::MutexGuard<'a, ()> {
+    match lock.try_lock() {
+        Ok(guard) => return guard,
+        Err(std::sync::TryLockError::Poisoned(poison)) => return poison.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            SOURCE_AUTHORITY_CONTENTION_ARMED.with(|armed| {
+                if armed.replace(false) {
+                    std::panic::resume_unwind(Box::new(SourceAuthorityContention(key.to_string())))
+                }
+            })
+        }
+    }
+    lock.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+fn with_source_authority_key<R>(key: &str, operation: impl FnOnce() -> R) -> R {
+    let lock = source_authority_lock_for_key(key);
+    #[cfg(test)]
+    let _guard = lock_source_authority(&lock, key);
+    #[cfg(not(test))]
+    let _guard = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+    operation()
+}
+
+pub(crate) fn with_session_temp_source_authority<R>(
+    session_temp_stem: &str,
+    operation: impl FnOnce() -> R,
+) -> R {
+    with_source_authority_key(session_temp_stem, operation)
+}
+
+pub(crate) fn with_tmux_source_authority<R>(
+    tmux_session_name: &str,
+    operation: impl FnOnce(&TmuxSourceAuthority<'_>) -> R,
+) -> R {
+    let key = session_temp_prefix(tmux_session_name.trim());
+    with_source_authority_key(&key, || {
+        operation(&TmuxSourceAuthority(tmux_session_name.trim()))
+    })
+}
+
+pub(crate) fn try_with_tmux_source_authority<R>(
+    tmux_session_name: &str,
+    operation: impl FnOnce(&TmuxSourceAuthority<'_>) -> R,
+) -> Option<R> {
+    let lock = source_authority_lock_for_key(&session_temp_prefix(tmux_session_name.trim()));
+    let _guard = match lock.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(poison)) => poison.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return None,
+    };
+    Some(operation(&TmuxSourceAuthority(tmux_session_name.trim())))
+}
 
 const CLAUDE_TUI_READY_SCAN_LINES: usize = 12;
 pub(crate) const CLAUDE_TUI_READINESS_SCAN_LINES: usize = 36;
@@ -1106,6 +1209,12 @@ pub fn resolve_session_temp_path(session_name: &str, extension: &str) -> Option<
 /// location and the legacy `/tmp/` location so cleanup is total regardless
 /// of where the wrapper originally wrote.
 pub fn cleanup_session_temp_files(session_name: &str) {
+    with_tmux_source_authority(session_name, |_| {
+        cleanup_session_temp_files_under_source_authority(session_name)
+    });
+}
+
+fn cleanup_session_temp_files_under_source_authority(session_name: &str) {
     // All extensions we ever allocate under the session prefix.
     const EXTS: &[&str] = &[
         "jsonl",

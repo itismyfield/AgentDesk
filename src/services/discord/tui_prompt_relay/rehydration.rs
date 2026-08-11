@@ -377,9 +377,6 @@ pub(super) fn rehydrate_existing_codex_tui_bindings(shared: &Arc<SharedData>) {
             continue;
         }
 
-        let existing_binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
-            &tmux_session_name,
-        );
         let authoritative_channel =
             resolve_rehydrated_tmux_channel_id(&ProviderKind::Codex, &tmux_session_name);
         let Some(channel_id) = authoritative_channel.or_else(|| {
@@ -428,37 +425,19 @@ pub(super) fn rehydrate_existing_codex_tui_bindings(shared: &Arc<SharedData>) {
             }
         }
 
-        if let Some(existing) = existing_binding.as_ref()
-            && existing.runtime_kind == RuntimeHandoffKind::CodexTui
-            && Path::new(&existing.output_path).exists()
-        {
-            crate::services::tui_prompt_dedupe::register_tmux_channel(
-                &tmux_session_name,
-                channel_id,
-            );
-            claimed_rollout_paths.insert(canonical_rollout_claim_path(Path::new(
-                &existing.output_path,
-            )));
-            continue;
-        }
-
-        let Some(fresh) = rehydrated_codex_tui_binding_for_tmux_session(
+        let Some(fresh) = rehydrate_codex_tui_binding_transaction(
             &tmux_session_name,
+            channel_id,
             &claimed_rollout_paths,
             &rehydrate_plan.reserved_rollout_paths,
             &rehydrate_plan.duplicate_marker_paths,
             rehydrate_plan
                 .markerless_fallback_allowed_sessions
                 .contains(&tmux_session_name),
+            || {},
         ) else {
             continue;
         };
-        crate::services::tui_prompt_dedupe::register_rehydrated_tmux_runtime_binding(
-            ProviderKind::Codex.as_str(),
-            &tmux_session_name,
-            channel_id,
-            fresh.clone(),
-        );
         tracing::info!(
             tmux_session_name = %tmux_session_name,
             channel_id,
@@ -468,6 +447,44 @@ pub(super) fn rehydrate_existing_codex_tui_bindings(shared: &Arc<SharedData>) {
         );
         claimed_rollout_paths.insert(canonical_rollout_claim_path(Path::new(&fresh.output_path)));
     }
+}
+
+#[cfg(unix)]
+fn rehydrate_codex_tui_binding_transaction(
+    tmux_session_name: &str,
+    channel_id: u64,
+    claimed_rollout_paths: &HashSet<PathBuf>,
+    reserved_rollout_paths: &HashSet<PathBuf>,
+    duplicate_marker_paths: &HashSet<PathBuf>,
+    allow_markerless_cwd_fallback: bool,
+    observe_before_register: impl FnOnce(),
+) -> Option<crate::services::tui_prompt_dedupe::TuiRuntimeBinding> {
+    crate::services::tui_prompt_dedupe::reconcile_rehydrated_tmux_runtime_binding(
+        ProviderKind::Codex.as_str(),
+        tmux_session_name,
+        channel_id,
+        observe_before_register,
+        |existing| {
+            if let Some(existing) = existing
+                && existing.runtime_kind == RuntimeHandoffKind::CodexTui
+                && Path::new(&existing.output_path).exists()
+            {
+                crate::services::tui_prompt_dedupe::register_tmux_channel(
+                    tmux_session_name,
+                    channel_id,
+                );
+                return Some((existing, false));
+            }
+            rehydrated_codex_tui_binding_for_tmux_session(
+                tmux_session_name,
+                claimed_rollout_paths,
+                reserved_rollout_paths,
+                duplicate_marker_paths,
+                allow_markerless_cwd_fallback,
+            )
+            .map(|fresh| (fresh, true))
+        },
+    )
 }
 
 #[cfg(unix)]
@@ -787,9 +804,6 @@ pub(in crate::services::discord) fn rehydrated_codex_tui_binding_for_tmux_sessio
     duplicate_marker_paths: &HashSet<PathBuf>,
     allow_markerless_cwd_fallback: bool,
 ) -> Option<crate::services::tui_prompt_dedupe::TuiRuntimeBinding> {
-    if !tmux_session_is_codex_tui(tmux_session_name) {
-        return None;
-    }
     if let Some(marker) =
         crate::services::codex_tui::session::read_codex_tui_rollout_marker(tmux_session_name)
     {

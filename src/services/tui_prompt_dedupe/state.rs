@@ -38,8 +38,12 @@ impl TuiPromptDedupeState {
         });
         self.channel_by_tmux
             .retain(|_, entry| now.duration_since(entry.recorded_at) <= SESSION_MAPPING_TTL);
-        self.runtime_by_tmux
-            .retain(|_, entry| now.duration_since(entry.recorded_at) <= SESSION_MAPPING_TTL);
+        #[rustfmt::skip]
+        let expired = self.runtime_by_tmux.iter().filter(|(_, entry)| now.duration_since(entry.recorded_at) > SESSION_MAPPING_TTL).map(|(tmux, _)| tmux.clone()).collect::<Vec<_>>();
+        for tmux in expired {
+            #[rustfmt::skip]
+            let _ = crate::services::tmux_common::try_with_tmux_source_authority(&tmux, |_| self.runtime_by_tmux.remove(&tmux));
+        }
         // #3885 follow-up: anchors live `PROMPT_ANCHOR_SUBMIT_TTL` (4h) so a long
         // streaming turn's anchor is not purged mid-stream (see the constant). The
         // relayed-entry ledger below intentionally keeps the 30min
@@ -66,6 +70,14 @@ impl TuiPromptDedupeState {
             }
             !queue.is_empty()
         });
+    }
+
+    pub(super) fn purge_expired_runtime_binding_under_authority(
+        &mut self,
+        tmux_session_name: &str,
+    ) {
+        #[rustfmt::skip]
+        self.runtime_by_tmux.retain(|key, entry| key != tmux_session_name || entry.recorded_at.elapsed() <= SESSION_MAPPING_TTL);
     }
 
     pub(super) fn remove_provider_session_mappings_for_tmux(
