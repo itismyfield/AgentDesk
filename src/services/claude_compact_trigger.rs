@@ -308,12 +308,12 @@ fn record_compact_attempt_outcome(
     outcome: Result<CompactSubmitOutcome, &'static str>,
 ) {
     let rejection = match outcome {
-        Err(reason) => Some((reason, false)),
+        Err(reason) => Some(reason),
         Ok(CompactSubmitOutcome::PreMutationRefused(reason)) => {
             // No mutation happened. Re-arm so a later idle turn retries while
             // usage stays high.
             rearm_for_retry(pane, generation);
-            Some((reason, true))
+            Some(reason)
         }
         Ok(CompactSubmitOutcome::AcceptedOrQueued) => {
             tracing::info!(
@@ -341,14 +341,13 @@ fn record_compact_attempt_outcome(
         }
     };
 
-    if let Some((rejection_reason, armed_flag_restored)) = rejection {
+    if let Some(rejection_reason) = rejection {
         tracing::info!(
             tmux_session_name = %pane.tmux_session_name,
             usage_tokens,
             threshold_tokens = threshold.effective_tokens,
             window_source = window_source.as_str(),
             rejection_reason,
-            armed_flag_restored,
             "Claude auto compact refused before mutation"
         );
     }
