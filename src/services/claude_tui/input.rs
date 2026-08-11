@@ -200,7 +200,7 @@ pub struct PromptReadinessSnapshot {
 /// an error is necessarily ambiguous: a retry could enqueue a duplicate compact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompactSubmitOutcome {
-    PreMutationRefused,
+    PreMutationRefused(&'static str),
     AcceptedOrQueued,
     AmbiguousAfterMutation,
 }
@@ -451,8 +451,8 @@ fn send_prompt_with_readiness(
 /// after the first tmux mutation starts, every uncertainty stays disarmed.
 pub fn send_compact_while_busy(session_name: &str) -> CompactSubmitOutcome {
     let snapshot = prompt_readiness_snapshot(session_name);
-    if compact_steering_decision(&snapshot).is_err() {
-        return CompactSubmitOutcome::PreMutationRefused;
+    if let Err(reason) = compact_steering_decision(&snapshot) {
+        return CompactSubmitOutcome::PreMutationRefused(reason);
     }
 
     // The first call begins the mutation boundary. Even a transport/result error

@@ -274,9 +274,8 @@ fn invalidate_after_authority_rejection(
 /// compact submit — both inside a single per-pane composer critical section. The
 /// composer lock (not the leaf state lock) is the only lock held across the tmux
 /// mutation, so a queued worker may wait behind another composer mutation but
-/// never carries the leaf state lock into `submit`. `None` means the pre-send
-/// recheck bailed (stale/torn-down/below-threshold) and no mutation was
-/// attempted.
+/// never carries the leaf state lock into `submit`. `Err(reason)` means a
+/// pre-send recheck bailed and no mutation was attempted.
 fn submit_under_composer_lock(
     pane: &CompactPaneKey,
     generation: u64,
@@ -284,20 +283,75 @@ fn submit_under_composer_lock(
     expected_turn: &ManagedCompactTurnIdentity,
     live_turn_matches: impl FnOnce(&ManagedCompactTurnIdentity) -> bool,
     submit: impl FnOnce() -> CompactSubmitOutcome,
-) -> Option<CompactSubmitOutcome> {
+) -> Result<CompactSubmitOutcome, &'static str> {
     crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
         &pane.tmux_session_name,
         || {
             if !pane_still_disarmed_for_send(pane, generation, threshold) {
-                return None;
+                return Err("compact trigger state changed before mutation");
             }
             if !live_turn_matches(expected_turn) {
                 invalidate_after_authority_rejection(pane, generation, threshold);
-                return None;
+                return Err("live managed turn identity changed before mutation");
             }
-            Some(submit())
+            Ok(submit())
         },
     )
+}
+
+fn record_compact_attempt_outcome(
+    pane: &CompactPaneKey,
+    generation: u64,
+    usage_tokens: u64,
+    threshold: CompactThreshold,
+    window_source: CompactWindowSource,
+    outcome: Result<CompactSubmitOutcome, &'static str>,
+) {
+    let rejection = match outcome {
+        Err(reason) => Some((reason, false)),
+        Ok(CompactSubmitOutcome::PreMutationRefused(reason)) => {
+            // No mutation happened. Re-arm so a later idle turn retries while
+            // usage stays high.
+            rearm_for_retry(pane, generation);
+            Some((reason, true))
+        }
+        Ok(CompactSubmitOutcome::AcceptedOrQueued) => {
+            tracing::info!(
+                tmux_session_name = %pane.tmux_session_name,
+                usage_tokens,
+                threshold_tokens = threshold.effective_tokens,
+                window_source = window_source.as_str(),
+                "Claude auto compact accepted or queued"
+            );
+            None
+        }
+        Ok(CompactSubmitOutcome::AmbiguousAfterMutation) => {
+            // Observable retry (replaces the old never-re-arm rule that could
+            // permanently disable auto-compact and let context grow without
+            // bound): re-arm, then `observe_and_decide` next turn only
+            // re-injects when usage is still high AND no compaction was
+            // observed. If the ambiguous send actually landed, occupancy
+            // drops and the re-arm branch keeps it armed without re-injecting.
+            rearm_for_retry(pane, generation);
+            tracing::warn!(
+                tmux_session_name = %pane.tmux_session_name,
+                "Claude auto compact outcome ambiguous after tmux mutation; armed flag restored for observable retry next turn"
+            );
+            None
+        }
+    };
+
+    if let Some((rejection_reason, armed_flag_restored)) = rejection {
+        tracing::info!(
+            tmux_session_name = %pane.tmux_session_name,
+            usage_tokens,
+            threshold_tokens = threshold.effective_tokens,
+            window_source = window_source.as_str(),
+            rejection_reason,
+            armed_flag_restored,
+            "Claude auto compact refused before mutation"
+        );
+    }
 }
 
 fn trigger_window_for_resolution(
@@ -461,41 +515,14 @@ pub(in crate::services) fn maybe_inject_compact_with_source(
             live_managed_turn_matches,
             || crate::services::claude_tui::input::send_compact_while_busy(&pane.tmux_session_name),
         );
-        match outcome {
-            None => tracing::debug!(
-                tmux_session_name = %pane.tmux_session_name,
-                "skipping stale Claude auto compact before tmux mutation (occupancy drop re-armed, pane torn down, or fell below threshold)"
-            ),
-            Some(CompactSubmitOutcome::AcceptedOrQueued) => tracing::info!(
-                tmux_session_name = %pane.tmux_session_name,
-                usage_tokens,
-                threshold_tokens = threshold.effective_tokens,
-                window_source = window_source.as_str(),
-                "Claude auto compact accepted or queued"
-            ),
-            Some(CompactSubmitOutcome::PreMutationRefused) => {
-                // No mutation happened (pane was not in an empty-composer state).
-                // Re-arm so a later idle turn retries while usage stays high.
-                rearm_for_retry(&pane, generation);
-                tracing::debug!(
-                    tmux_session_name = %pane.tmux_session_name,
-                    "Claude auto compact refused before mutation; armed flag restored for retry"
-                );
-            }
-            Some(CompactSubmitOutcome::AmbiguousAfterMutation) => {
-                // Observable retry (replaces the old never-re-arm rule that could
-                // permanently disable auto-compact and let context grow without
-                // bound): re-arm, then `observe_and_decide` next turn only
-                // re-injects when usage is still high AND no compaction was
-                // observed. If the ambiguous send actually landed, occupancy
-                // drops and the re-arm branch keeps it armed without re-injecting.
-                rearm_for_retry(&pane, generation);
-                tracing::warn!(
-                    tmux_session_name = %pane.tmux_session_name,
-                    "Claude auto compact outcome ambiguous after tmux mutation; armed flag restored for observable retry next turn"
-                );
-            }
-        }
+        record_compact_attempt_outcome(
+            &pane,
+            generation,
+            usage_tokens,
+            threshold,
+            window_source,
+            outcome,
+        );
     });
 }
 
@@ -545,7 +572,59 @@ fn state_test_guard() -> std::sync::MutexGuard<'static, ()> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{self, Write};
+    use std::sync::Arc;
+
+    use tracing_subscriber::fmt::MakeWriter;
+
     use super::*;
+
+    #[derive(Clone)]
+    struct CapturingWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CapturingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture_info(run: impl FnOnce()) -> String {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(CapturingWriter(Arc::clone(&buffer)))
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        String::from_utf8(buffer.lock().unwrap().clone()).expect("captured logs must be UTF-8")
+    }
+
+    fn assert_single_info_with_rejection_reason(logs: &str, rejection_reason: &str) {
+        assert_eq!(
+            logs.lines().count(),
+            1,
+            "each threshold-crossing attempt must emit exactly one INFO line: {logs}"
+        );
+        assert!(logs.contains(" INFO "), "expected an INFO event: {logs}");
+        assert!(
+            logs.contains(&format!("rejection_reason=\"{rejection_reason}\"")),
+            "missing structured rejection reason {rejection_reason:?}: {logs}"
+        );
+    }
 
     fn pane() -> CompactPaneKey {
         CompactPaneKey {
@@ -951,6 +1030,130 @@ mod tests {
         assert!(!pane_still_disarmed_for_send(&pane, generation, threshold));
     }
 
+    /// Each threshold crossing that reaches the worker emits one terminal
+    /// observability line. The three pre-mutation refusal paths retain distinct,
+    /// structured reasons, while success remains one INFO without a duplicate.
+    /// Mutation guard: demoting any refusal event to DEBUG makes its line-count
+    /// assertion fail; removing `rejection_reason` makes its field assertion fail.
+    #[test]
+    fn threshold_crossing_emits_exactly_one_info_with_each_rejection_reason() {
+        let _guard = state_test_guard();
+        let pane = pane();
+        let threshold = threshold_for(1_000_000);
+        let expected_turn =
+            ManagedCompactTurnIdentity::test_fixture(pane.channel_id, &pane.tmux_session_name);
+
+        let generation = observe_and_decide(&pane, 600_000, threshold).expect("threshold crossing");
+        assert!(observe_and_decide(&pane, 400_000, threshold).is_none());
+        let outcome = submit_under_composer_lock(
+            &pane,
+            generation,
+            threshold,
+            &expected_turn,
+            |_| panic!("stale trigger state must reject before authority validation"),
+            || panic!("stale trigger state must reject before submit"),
+        );
+        let logs = capture_info(|| {
+            record_compact_attempt_outcome(
+                &pane,
+                generation,
+                600_000,
+                threshold,
+                CompactWindowSource::Proven,
+                outcome,
+            );
+        });
+        assert_single_info_with_rejection_reason(
+            &logs,
+            "compact trigger state changed before mutation",
+        );
+
+        clear_for_tmux(&pane.tmux_session_name);
+        let generation = observe_and_decide(&pane, 600_000, threshold).expect("threshold crossing");
+        let outcome = submit_under_composer_lock(
+            &pane,
+            generation,
+            threshold,
+            &expected_turn,
+            |_| false,
+            || panic!("changed live authority must reject before submit"),
+        );
+        let logs = capture_info(|| {
+            record_compact_attempt_outcome(
+                &pane,
+                generation,
+                600_000,
+                threshold,
+                CompactWindowSource::Proven,
+                outcome,
+            );
+        });
+        assert_single_info_with_rejection_reason(
+            &logs,
+            "live managed turn identity changed before mutation",
+        );
+
+        clear_for_tmux(&pane.tmux_session_name);
+        let generation = observe_and_decide(&pane, 600_000, threshold).expect("threshold crossing");
+        let steering_snapshot = crate::services::claude_tui::input::PromptReadinessSnapshot {
+            prompt_marker_detected: true,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "❯ operator draft".to_string(),
+        };
+        let steering_reason =
+            crate::services::claude_tui::input::compact_steering_decision(&steering_snapshot)
+                .expect_err("composer draft must be refused");
+        let outcome = submit_under_composer_lock(
+            &pane,
+            generation,
+            threshold,
+            &expected_turn,
+            |_| true,
+            || CompactSubmitOutcome::PreMutationRefused(steering_reason),
+        );
+        let logs = capture_info(|| {
+            record_compact_attempt_outcome(
+                &pane,
+                generation,
+                600_000,
+                threshold,
+                CompactWindowSource::Proven,
+                outcome,
+            );
+        });
+        assert_single_info_with_rejection_reason(&logs, "composer draft");
+
+        clear_for_tmux(&pane.tmux_session_name);
+        let generation = observe_and_decide(&pane, 600_000, threshold).expect("threshold crossing");
+        let outcome = submit_under_composer_lock(
+            &pane,
+            generation,
+            threshold,
+            &expected_turn,
+            |_| true,
+            || CompactSubmitOutcome::AcceptedOrQueued,
+        );
+        let logs = capture_info(|| {
+            record_compact_attempt_outcome(
+                &pane,
+                generation,
+                600_000,
+                threshold,
+                CompactWindowSource::Proven,
+                outcome,
+            );
+        });
+        assert_eq!(
+            logs.lines().count(),
+            1,
+            "a successful threshold-crossing attempt must emit exactly one INFO line: {logs}"
+        );
+        assert!(logs.contains("Claude auto compact accepted or queued"));
+        assert!(!logs.contains("rejection_reason="));
+    }
+
     /// The worker is parked behind the physical pane's composer lock. While it is
     /// parked, the live turn authority changes from the captured Managed identity
     /// to ExternalInput or ExternalAdopted. The post-lock authority recheck must
@@ -1018,7 +1221,7 @@ mod tests {
 
             assert_eq!(
                 outcome_rx.recv_timeout(Duration::from_millis(250)).unwrap(),
-                None,
+                Err("live managed turn identity changed before mutation"),
                 "{external_source:?} must reject the queued worker"
             );
             assert_eq!(
