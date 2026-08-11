@@ -1655,6 +1655,84 @@ mod tests {
         );
     }
 
+    /// #5264 PR-B: the `SessionDied` exit takes the SAME `outcome()` as every
+    /// other exit from the tail loop, so its `final_offset` must likewise be the
+    /// end of the last COMPLETE record expressed SOURCE-ABSOLUTELY — not the raw
+    /// `current_offset` the read loop consumed.
+    ///
+    /// This is the exit where the wrong argument is unrecoverable. `final_offset`
+    /// flows into the durable cursor (`TuiRuntimeBinding.last_offset` and the
+    /// marker, `codex.rs:602/2134/2166`), and the next tail seeks to
+    /// `start_offset.min(file_len)`. Pass `current_offset` here and a mid-file
+    /// resume durably records `current_offset + bytes_read` — past EOF — which
+    /// the next seek clamps back to EOF, so every record between the true
+    /// frontier and the end of the file is skipped and never re-emitted.
+    ///
+    /// Reaching this arm needs a rollout with NO assistant text: that is what
+    /// carries EOF past the explicit finalizer and the heuristic drain into the
+    /// `!is_alive()` branch, and what makes it `SessionDied` rather than
+    /// `Completed`.
+    #[test]
+    fn codex_tui_session_died_final_offset_is_a_source_absolute_record_boundary_5264() {
+        const META: &str =
+            r#"{"type":"session_meta","payload":{"id":"session-died-5264","cwd":"/tmp/repo"}}"#;
+        const USER: &str = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"question"}]}}"#;
+        const TORN: &str = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"never finished"}]}}"#;
+
+        // The writer died 40 bytes into the third record and never wrote its
+        // newline — the same torn shape the sealed-input test above uses.
+        let body = format!("{META}\n{USER}\n{}", &TORN[..40]);
+        assert!(
+            serde_json::from_str::<Value>(&TORN[..40]).is_err(),
+            "the trailing fragment must be unparseable, or it is not a torn record"
+        );
+        let resume_from = (META.len() + 1) as u64;
+        let bytes_on_this_pass = (USER.len() + 1) as u64;
+        let complete_record_end = resume_from + bytes_on_this_pass;
+        let raw_consumed = body.len() as u64;
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), &body).unwrap();
+        let (tx, _rx) = mpsc::channel();
+        // Resume mid-file, at the boundary after `META`, with a dead session.
+        let (result, outcome) = tail_rollout_file_until_assistant_response(
+            file.path(),
+            resume_from,
+            None,
+            &tx,
+            None,
+            || false,
+            Duration::ZERO,
+            None,
+            None,
+            true,
+            None,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            (result, outcome.bytes_read, outcome.final_offset),
+            (
+                ReadOutputResult::SessionDied {
+                    offset: raw_consumed,
+                },
+                bytes_on_this_pass,
+                complete_record_end,
+            ),
+            "the session-died exit must report the raw consumed offset ({raw_consumed}) on \
+             `ReadOutputResult` and the last COMPLETE record boundary ({complete_record_end}) on \
+             `final_offset` — source-absolute from the resume point ({resume_from}), not a count \
+             of the {bytes_on_this_pass} bytes this pass read. Handing back `current_offset` \
+             instead would durably record {}, past the {raw_consumed}-byte file; the next tail's \
+             `start_offset.min(file_len)` seek clamps that to EOF and every record after the true \
+             frontier is lost permanently.",
+            raw_consumed + bytes_on_this_pass,
+        );
+    }
+
     // #2795 — `find_rollout_by_session_id_under` must match codex rollout
     // filenames by their trailing `-<session_id>.jsonl` suffix so dcserver
     // recovery can re-attach to the live codex pane after a mid-turn restart
