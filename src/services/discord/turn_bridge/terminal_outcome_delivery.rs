@@ -402,7 +402,15 @@ pub(super) async fn run_terminal_outcome_delivery(
             )
             .format_and_prefix(response_sent_offset == 0, &delivery_response);
             if can_chain_locally {
-                let mut tmux_last_offset = contracts::ordered_terminal_range_end(
+                // #5264 PR-B: the admitted latch narrows the PINNED receipt/frontier end
+                // only. The legacy #3041 exclusion lease keeps the observed tmux end;
+                // narrowing it made a non-admitted CodexTui turn shadow a real
+                // [turn_start_offset, tmux_last_offset) to None, acquire no lease, and send
+                // from the bridge while the watcher could take the same cell and range.
+                let contracts::TerminalRangeEnds {
+                    pinned: mut pinned_range_end,
+                    exclusion_lease: tmux_last_offset,
+                } = contracts::terminal_range_ends(
                     &provider,
                     inflight_state.runtime_kind,
                     tmux_last_offset,
@@ -413,7 +421,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
                 let mut pinned_handled = false;
                 #[cfg(unix)]
-                stream_loop::types::dispatch_pinned_terminal!(shared_owned gateway provider watcher_owner_channel_id inflight_state tmux_last_offset admitted channel_id current_msg_id delivery_response bridge_start dispatch_id adk_session_key turn_id long full_response single_message_panel_footer_mode terminal_delivery_committed terminal_body_visible response_sent_offset completion_footer_terminal_text preserve_inflight_for_cleanup_retry bridge_skip_holder_owns_inflight pinned_handled);
+                stream_loop::types::dispatch_pinned_terminal!(shared_owned gateway provider watcher_owner_channel_id inflight_state pinned_range_end admitted channel_id current_msg_id delivery_response bridge_start dispatch_id adk_session_key turn_id long full_response single_message_panel_footer_mode terminal_delivery_committed terminal_body_visible response_sent_offset completion_footer_terminal_text preserve_inflight_for_cleanup_retry bridge_skip_holder_owns_inflight pinned_handled);
                 if !pinned_handled && long {
                     let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
                     let bridge_end = tmux_last_offset.unwrap_or(0);

@@ -186,6 +186,27 @@ fn pane_busy_probe_for_tmux(
     Box::new(move || tracker.probe_tmux(&tmux_session_name))
 }
 
+/// The options every Discord-originated handoff tail sets, built in one place.
+///
+/// #5264 PR-B: `terminal_range_eligible` defaults to `false`, and `emit_done` gates the
+/// `CodexTuiTerminalDone` emission on it. An entry point that forgets to decide it
+/// therefore falls back to the legacy `Done`, produces no `CodexRange`, and skips the
+/// pinned terminal cutover — with no compile error and no failing assertion anywhere.
+/// The resumed entry point shipped with exactly that omission. Constructing the options
+/// once makes the omission impossible instead of merely detectable.
+fn discord_handoff_tail_options(
+    tmux_session_name: &str,
+    discord_origin_prompt: Option<&str>,
+) -> RolloutTailOptions {
+    RolloutTailOptions {
+        tmux_session_name: Some(tmux_session_name.to_string()),
+        discord_origin_prompt: discord_origin_prompt.map(ToString::to_string),
+        pane_busy_probe: Some(pane_busy_probe_for_tmux(tmux_session_name)),
+        terminal_range_eligible: discord_origin_prompt.is_some_and(|text| !text.trim().is_empty()),
+        ..RolloutTailOptions::default()
+    }
+}
+
 pub fn tail_latest_rollout_for_cwd_with_handoff_for_tmux(
     cwd: &Path,
     modified_since: SystemTime,
@@ -195,12 +216,7 @@ pub fn tail_latest_rollout_for_cwd_with_handoff_for_tmux(
     tmux_session_name: &str,
     discord_origin_prompt: Option<&str>,
 ) -> Result<CodexTuiTailResult, String> {
-    let mut options = RolloutTailOptions::default();
-    options.tmux_session_name = Some(tmux_session_name.to_string());
-    options.terminal_range_eligible =
-        discord_origin_prompt.is_some_and(|text| !text.trim().is_empty());
-    options.discord_origin_prompt = discord_origin_prompt.map(ToString::to_string);
-    options.pane_busy_probe = Some(pane_busy_probe_for_tmux(tmux_session_name));
+    let options = discord_handoff_tail_options(tmux_session_name, discord_origin_prompt);
     tail_latest_rollout_for_cwd_with_handoff_options(
         cwd,
         modified_since,
@@ -370,13 +386,7 @@ pub fn tail_warm_followup_rollout_for_tmux(
         Some(session_id),
         Some(start_offset),
     );
-    let options = RolloutTailOptions {
-        tmux_session_name: Some(tmux_session_name.to_string()),
-        discord_origin_prompt: Some(discord_origin_prompt.to_string()),
-        pane_busy_probe: Some(pane_busy_probe_for_tmux(tmux_session_name)),
-        terminal_range_eligible: !discord_origin_prompt.trim().is_empty(),
-        ..RolloutTailOptions::default()
-    };
+    let options = discord_handoff_tail_options(tmux_session_name, Some(discord_origin_prompt));
     tail_rollout_file_until_assistant_response_with_pane_busy_probe(
         rollout_path,
         start_offset,
@@ -409,17 +419,11 @@ pub fn tail_resumed_rollout_for_session_with_handoff_for_tmux(
 ) -> Result<CodexTuiTailResult, String> {
     let sessions_dir = default_codex_sessions_dir()
         .ok_or_else(|| "Codex sessions directory is unavailable".to_string())?;
-    let mut options = RolloutTailOptions::default();
-    options.tmux_session_name = Some(tmux_session_name.to_string());
-    // #5264 PR-B: this was the only handoff entry point leaving the flag at its `false`
-    // default, so a resumed turn emitted the legacy `Done`, produced no `CodexRange`, and
-    // skipped `dispatch_pinned_terminal!` entirely — resumed sessions kept the exact
-    // duplicate-replay hazard this change closes for fresh and warm ones. Its sole
-    // production caller passes `Some(prompt)`, identical to its two siblings.
-    options.terminal_range_eligible =
-        discord_origin_prompt.is_some_and(|text| !text.trim().is_empty());
-    options.discord_origin_prompt = discord_origin_prompt.map(ToString::to_string);
-    options.pane_busy_probe = Some(pane_busy_probe_for_tmux(tmux_session_name));
+    // #5264 PR-B: this entry point was the one that left `terminal_range_eligible` at its
+    // default, so resumed turns kept the duplicate-replay hazard this change closes for
+    // fresh and warm ones. Its sole production caller passes `Some(prompt)`, as its two
+    // siblings do.
+    let options = discord_handoff_tail_options(tmux_session_name, discord_origin_prompt);
     tail_resumed_rollout_for_session_with_handoff_options(
         cwd,
         session_id,
@@ -4739,13 +4743,40 @@ mod tests {
         );
     }
 
-    // #5264 PR-B: `terminal_range_eligible` defaults to false, so a handoff entry point
-    // that forgets to set it silently downgrades its turns to the legacy `Done` path and
-    // skips the pinned cutover — no compile error, no failing assertion anywhere else.
-    // This is a lexical guard over the three production entry points, not proof that the
-    // flag reaches the emitter; it exists because the omission is invisible otherwise.
+    // #5264 PR-B: assert the decided VALUE, not that an identifier appears. The first
+    // attempt at this test was lexical — it scanned each entry point's body for the
+    // `terminal_range_eligible` token — and both independent reviews broke it with the
+    // same mutant: keep the token, set the value to `false`. That mutant survived every
+    // filter, so the guard defended against deleting a line rather than against the
+    // defect it named. These assertions kill it.
     #[test]
-    fn every_handoff_tail_entry_point_decides_terminal_range_eligibility() {
+    fn discord_handoff_tail_options_decide_terminal_range_eligibility() {
+        let options = |prompt| discord_handoff_tail_options("AgentDesk-codex-opts", prompt);
+        assert!(
+            options(Some("answer this")).terminal_range_eligible,
+            "a Discord-originated turn must be eligible for terminal-range emission"
+        );
+        assert!(
+            !options(Some("   \n\t ")).terminal_range_eligible,
+            "a blank prompt carries no Discord origin"
+        );
+        assert!(!options(None).terminal_range_eligible);
+        let carried = options(Some("answer this"));
+        assert_eq!(
+            carried.discord_origin_prompt.as_deref(),
+            Some("answer this")
+        );
+        assert_eq!(
+            carried.tmux_session_name.as_deref(),
+            Some("AgentDesk-codex-opts")
+        );
+    }
+
+    // The value test above cannot see an entry point that bypasses the shared constructor
+    // altogether, which is how the resumed path originally drifted. This is a lexical
+    // check and is only meaningful alongside it.
+    #[test]
+    fn every_handoff_tail_entry_point_uses_the_shared_options_constructor() {
         let source = include_str!("rollout_tail.rs");
         for entry in [
             "pub fn tail_latest_rollout_for_cwd_with_handoff_for_tmux(",
@@ -4761,9 +4792,9 @@ mod tests {
                 .expect("entry point body must terminate")
                 .0;
             assert!(
-                body.contains("terminal_range_eligible"),
-                "{entry} never decides terminal_range_eligible, so its turns silently \
-                 bypass the pinned terminal cutover"
+                body.contains("discord_handoff_tail_options("),
+                "{entry} builds its own options instead of the shared constructor, so it \
+                 can silently miss terminal_range_eligible"
             );
         }
     }

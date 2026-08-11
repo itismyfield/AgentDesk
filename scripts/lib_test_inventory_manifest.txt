@@ -1938,11 +1938,12 @@ services::codex_tui::rollout_tail::tests::commentary_only_task_complete_does_not
 services::codex_tui::rollout_tail::tests::commentary_phase_does_not_finalize_before_final_answer
 services::codex_tui::rollout_tail::tests::composer_ready_envelope_emits_done_before_drain
 services::codex_tui::rollout_tail::tests::disabling_fast_path_keeps_legacy_drain_behaviour
+services::codex_tui::rollout_tail::tests::discord_handoff_tail_options_decide_terminal_range_eligibility
 services::codex_tui::rollout_tail::tests::distinct_codex_messages_join_with_paragraph_boundary
 services::codex_tui::rollout_tail::tests::distinct_commentary_records_join_with_paragraph_boundary
 services::codex_tui::rollout_tail::tests::elapsed_only_busy_marker_changes_expire_and_emit_done
 services::codex_tui::rollout_tail::tests::empty_tool_output_refreshes_drain_clock
-services::codex_tui::rollout_tail::tests::every_handoff_tail_entry_point_decides_terminal_range_eligibility
+services::codex_tui::rollout_tail::tests::every_handoff_tail_entry_point_uses_the_shared_options_constructor
 services::codex_tui::rollout_tail::tests::expired_pane_busy_signal_allows_pending_tool_deadline_done
 services::codex_tui::rollout_tail::tests::find_rollout_by_session_id_matches_uuid_suffix
 services::codex_tui::rollout_tail::tests::find_rollout_by_session_id_rejects_empty_input
@@ -5762,6 +5763,7 @@ services::discord::turn_bridge::terminal_delivery::tests::stopped_turn_terminal_
 services::discord::turn_bridge::terminal_delivery::tests::transport_error_dispatch_failure_requires_terminal_delivery_commit
 services::discord::turn_bridge::terminal_delivery::tests::work_dispatch_completion_requires_terminal_delivery_commit
 services::discord::turn_bridge::terminal_outcome_delivery::busy_followup_retry::tests::capped_requeue_failure_preserves_inflight_without_false_queue_claim_4888
+services::discord::turn_bridge::terminal_outcome_delivery::contracts::tests::codex_tui_admitted_latch_does_not_narrow_the_exclusion_lease_5264
 services::discord::turn_bridge::terminal_outcome_delivery::contracts::tests::codex_tui_terminal_range_end_is_latch_only_5264
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::terminal_delivery_epilogue_routes_identity_mismatch_to_warn
 services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::guidance::tests::completed_empty_response_explains_recovery_and_next_actions

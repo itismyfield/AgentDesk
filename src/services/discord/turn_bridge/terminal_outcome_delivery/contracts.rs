@@ -114,6 +114,36 @@ pub(in crate::services::discord::turn_bridge) struct TerminalOutcomeDeliveryOutp
     pub(in crate::services::discord::turn_bridge) turn_start: std::time::Instant,
 }
 
+/// The two range ends a terminal delivery needs, deliberately kept apart.
+///
+/// #5264 PR-B: `pinned` is the pinned receipt/frontier authority. For a Codex TUI turn it
+/// exists only when a terminal frame was admitted, because the exact source receipt is
+/// what authorises advancing the durable frontier.
+///
+/// `exclusion_lease` is the end of the #3041 P1-2 cross-actor lease range, and the
+/// admitted latch must never narrow it. A non-admitted CodexTui turn still has a real
+/// `[turn_start_offset, tmux_last_offset)` to deliver; collapsing that end to `None` makes
+/// `BridgeDeliveryLease::acquire` return `NoRange`, so the bridge sends holding no lease
+/// while the watcher can independently acquire the same cell and range. That is the
+/// cross-actor duplicate prevention this PR exists to strengthen, so the two ends are
+/// returned separately rather than as one value two consumers reinterpret.
+pub(super) struct TerminalRangeEnds {
+    pub(super) pinned: Option<u64>,
+    pub(super) exclusion_lease: Option<u64>,
+}
+
+pub(super) fn terminal_range_ends(
+    provider: &ProviderKind,
+    runtime_kind: Option<RuntimeHandoffKind>,
+    tmux_last_offset: Option<u64>,
+    admitted: Option<&CodexRange>,
+) -> TerminalRangeEnds {
+    TerminalRangeEnds {
+        pinned: ordered_terminal_range_end(provider, runtime_kind, tmux_last_offset, admitted),
+        exclusion_lease: tmux_last_offset,
+    }
+}
+
 pub(super) fn ordered_terminal_range_end(
     provider: &ProviderKind,
     runtime_kind: Option<RuntimeHandoffKind>,
@@ -136,5 +166,34 @@ mod tests {
     fn codex_tui_terminal_range_end_is_latch_only_5264() {
         assert_eq!(ordered_terminal_range_end(&ProviderKind::Codex, Some(RuntimeHandoffKind::CodexTui), Some(99), None), None);
         assert_eq!(ordered_terminal_range_end(&ProviderKind::Claude, None, Some(99), None), Some(99));
+    }
+
+    // #5264 PR-B: the latch above is the pinned receipt/frontier authority ONLY. It must
+    // not reach the #3041 exclusion lease: a non-admitted CodexTui turn with a real
+    // observed range that acquires no lease lets the bridge send while the watcher can
+    // independently acquire the same cell. The test above pins the latch projection and
+    // says nothing about the lease, which is exactly how that regression shipped.
+    #[test]
+    fn codex_tui_admitted_latch_does_not_narrow_the_exclusion_lease_5264() {
+        let codex = terminal_range_ends(
+            &ProviderKind::Codex,
+            Some(RuntimeHandoffKind::CodexTui),
+            Some(99),
+            None,
+        );
+        assert_eq!(
+            codex.pinned, None,
+            "no admitted frame means no pinned receipt authority"
+        );
+        assert_eq!(
+            codex.exclusion_lease,
+            Some(99),
+            "the #3041 cross-actor lease must still cover the observed range"
+        );
+        let claude = terminal_range_ends(&ProviderKind::Claude, None, Some(99), None);
+        assert_eq!(
+            (claude.pinned, claude.exclusion_lease),
+            (Some(99), Some(99))
+        );
     }
 }

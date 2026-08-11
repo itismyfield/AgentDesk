@@ -469,6 +469,22 @@ static BRIDGE_DELIVERY_LEASE_SEQ: std::sync::atomic::AtomicU64 =
 ///   1. [`Self::acquire`] — `reclaim_if_expired` (self-heal a dead holder) then
 ///      `try_acquire(key, Bridge, [start,end), now+deadline)`. On success spawns
 ///      a [`crate::services::discord::DeliveryLeaseHeartbeat`] so a long chunked
+///      send (which can exceed the 15s deadline) is never reclaimed mid-flight.
+///      On FAILURE the cell is held by the watcher (or another bridge path) for
+///      this range/turn → the caller MUST take a B2-style skip (NOT deliver+
+///      advance); the live holder owns delivery.
+///   2. caller performs `replace_message_with_outcome` / chunked send.
+///   3. [`Self::commit_and_advance`] — stop the heartbeat, `commit(Bridge, key,
+///      start, end, outcome)`; on `Delivered` AND a successful commit, advance
+///      `confirmed_end_offset` (the B6 gate: the advance now ONLY happens via a
+///      successful lease commit), then `release` so the cell is free for the next
+///      turn. `NotDelivered`/`Unknown` → no advance.
+///
+/// No-deadlock: every cell op (`reclaim`/`try_acquire`/`renew`/`commit`/
+/// `release`) is a synchronous, non-blocking lock on the cell's payload mutex —
+/// none of them awaits or calls back into the other actor. The heartbeat lives on
+/// its own task and only `renew`s our OWN lease; it is `stop()`ped before commit.
+/// So the bridge never blocks on the watcher and vice-versa.
 pub(super) struct BridgeDeliveryLease {
     cell: std::sync::Arc<crate::services::discord::DeliveryLeaseCell>,
     holder: crate::services::discord::LeaseHolder,
