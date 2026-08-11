@@ -212,8 +212,8 @@ mod delivery;
 
 use self::delivery::send_channel_message_with_optional_reference;
 pub(super) use self::delivery::{
-    build_long_message_attachment, needs_multiple_messages, send_long_message_ctx,
-    send_long_message_raw, split_message,
+    build_long_message_attachment, byte_index_at_discord_message_units, discord_message_units,
+    needs_multiple_messages, send_long_message_ctx, send_long_message_raw, split_message,
 };
 #[allow(unused_imports)]
 pub(in crate::services::discord) use self::delivery::{

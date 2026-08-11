@@ -1,5 +1,7 @@
 use std::sync::OnceLock;
 
+const TRUNCATION_MARKER: &str = "-# …";
+
 /// Byte budget for the COMPLETION footer task section (#3089 S3) — the final
 /// turn message keeps a compact task summary. The LIVE streaming panel uses the
 /// larger `SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES` below.
@@ -119,14 +121,19 @@ pub(in crate::services::discord) fn compose_completion_footer_text(
     }
 
     let suffix = format!("\n\n{block}");
-    let max_len = super::DISCORD_MSG_LIMIT.saturating_sub(suffix.len());
-    let base = if body.len() > max_len {
-        let safe_end = super::formatting::floor_char_boundary(body, max_len);
-        &body[..safe_end]
+    let suffix_units = super::formatting::discord_message_units(&suffix);
+    let body_units = super::formatting::discord_message_units(body);
+    let available_body_units = super::DISCORD_MSG_LIMIT.saturating_sub(suffix_units);
+    let truncation_suffix = format!("\n{TRUNCATION_MARKER}");
+    let (base, was_truncated) = if body_units > available_body_units {
+        let retained_body_units = available_body_units
+            .saturating_sub(super::formatting::discord_message_units(&truncation_suffix));
+        let safe_end =
+            super::formatting::byte_index_at_discord_message_units(body, retained_body_units);
+        (body[..safe_end].trim_end().to_string(), true)
     } else {
-        body
-    }
-    .trim_end();
+        (body.to_string(), false)
+    };
     // #3394 round 2 (boundary-scoped repair): repair the BODY alone, THEN append
     // the footer block — never run `repair_fence_parity` over the combined string.
     // `repair_fence_parity` drops the last dangling opener THROUGH end-of-string,
@@ -145,7 +152,16 @@ pub(in crate::services::discord) fn compose_completion_footer_text(
     // emits only the context-usage line plus Tasks/Subagents slot lines (no fenced Recent
     // block lives here), so it carries zero ``` runs (an even count). balanced base
     // + balanced footer = balanced combined.
-    let base = repair_fence_parity(base);
+    let base = repair_fence_parity(&base);
+    let base = if was_truncated {
+        if base.is_empty() {
+            TRUNCATION_MARKER.to_string()
+        } else {
+            format!("{base}{truncation_suffix}")
+        }
+    } else {
+        base
+    };
     let combined = format!("{base}{suffix}");
     debug_assert_eq!(
         combined.matches("```").count() % 2,
@@ -246,7 +262,6 @@ fn clamp_footer_panel_text(panel_text: &str) -> String {
         return panel_text.to_string();
     }
 
-    const TRUNCATION_MARKER: &str = "-# …";
     if SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES <= TRUNCATION_MARKER.len() {
         let safe_end = super::formatting::floor_char_boundary(
             TRUNCATION_MARKER,
@@ -1308,6 +1323,57 @@ mod tests {
         assert!(composed.contains("```text\nclosed body\n```"));
         assert!(composed.contains("Bash Done ✓"));
         assert_eq!(composed.matches("```").count() % 2, 0);
+    }
+
+    #[test]
+    fn completion_footer_korean_body_marks_strict_discord_boundary_5177() {
+        let footer = "완료";
+        let rendered_footer = super::completion_footer_subtext(footer);
+        let suffix = format!("\n\n{rendered_footer}");
+        let body_limit =
+            DISCORD_MSG_LIMIT - super::super::formatting::discord_message_units(&suffix);
+
+        let before = "한".repeat(body_limit - 1);
+        let exact = "한".repeat(body_limit);
+        let after = "한".repeat(body_limit + 1);
+
+        assert!(before.len() > body_limit);
+        assert_eq!(
+            super::compose_completion_footer_text(&before, Some(footer)),
+            format!("{before}{suffix}")
+        );
+        assert_eq!(
+            super::compose_completion_footer_text(&exact, Some(footer)),
+            format!("{exact}{suffix}")
+        );
+
+        let truncated = super::compose_completion_footer_text(&after, Some(footer));
+        assert!(truncated.contains(&format!("\n{}\n\n", super::TRUNCATION_MARKER)));
+        assert!(super::super::formatting::discord_message_units(&truncated) <= DISCORD_MSG_LIMIT);
+        assert!(!truncated.contains(&after));
+    }
+
+    #[test]
+    fn completion_footer_trim_does_not_split_multibyte_boundary_5177() {
+        let footer = "완료";
+        let rendered_footer = super::completion_footer_subtext(footer);
+        let suffix = format!("\n\n{rendered_footer}");
+        let truncation_suffix = format!("\n{}", super::TRUNCATION_MARKER);
+        let retained_body_units = DISCORD_MSG_LIMIT
+            - super::super::formatting::discord_message_units(&suffix)
+            - super::super::formatting::discord_message_units(&truncation_suffix);
+        let retained_prefix = "한".repeat(retained_body_units);
+        let body = format!("{retained_prefix}🙂한한한한");
+
+        let composed = super::compose_completion_footer_text(&body, Some(footer));
+
+        assert!(composed.starts_with(&format!("{retained_prefix}\n{}", super::TRUNCATION_MARKER)));
+        assert!(!composed.contains('🙂'));
+        assert!(std::str::from_utf8(composed.as_bytes()).is_ok());
+        assert_eq!(
+            super::super::formatting::discord_message_units(&composed),
+            DISCORD_MSG_LIMIT
+        );
     }
 
     #[test]

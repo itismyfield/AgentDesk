@@ -464,8 +464,12 @@ pub(in crate::services::discord) fn split_message(text: &str) -> Vec<String> {
 
 /// Whether `text` exceeds what one Discord message can carry.
 ///
-/// Discord's 2000 limit counts **characters**, so this must too. Callers used
-/// to compare `text.len()` — a **byte** count — against `DISCORD_MSG_LIMIT`.
+/// Discord documents the 2000 limit as **characters** without specifying a
+/// Unicode counting model. Count UTF-16 code units: this fixes the UTF-8 byte
+/// mismatch for Korean while conservatively charging supplementary characters
+/// two units instead of assuming Discord accepts 2000 Unicode scalars. Callers
+/// used to compare `text.len()` — a **byte** count — against
+/// `DISCORD_MSG_LIMIT`.
 /// For ASCII the two agree, which is why the ASCII-only tests passed; for
 /// Korean (3 bytes per character in UTF-8) the byte comparison trips at roughly
 /// 667 characters, so a comfortably single-message answer was routed down the
@@ -538,7 +542,26 @@ pub(in crate::services::discord) fn split_message(text: &str) -> Vec<String> {
 /// body this predicate calls single-message — is known and bounded, and the
 /// #3089 A0 characterization tests pin the current answer.
 pub(in crate::services::discord) fn needs_multiple_messages(text: &str) -> bool {
-    char_count(text) > DISCORD_MSG_LIMIT
+    discord_message_units(text) > DISCORD_MSG_LIMIT
+}
+
+pub(in crate::services::discord) fn discord_message_units(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+pub(in crate::services::discord) fn byte_index_at_discord_message_units(
+    text: &str,
+    max_units: usize,
+) -> usize {
+    let mut units = 0;
+    for (index, character) in text.char_indices() {
+        let next_units = units + character.len_utf16();
+        if next_units > max_units {
+            return index;
+        }
+        units = next_units;
+    }
+    text.len()
 }
 
 /// Build an `(inline_message, attachment)` pair for content that exceeds
@@ -584,7 +607,7 @@ fn build_attachment_inline(text: &str, summary: Option<&str>) -> String {
     if let Some(summary) = trimmed_summary {
         let candidate = with_provenance(format!("{summary}{footer}"));
         // Same question, same definition: `!needs_multiple_messages(x)` is
-        // exactly `char_count(x) <= DISCORD_MSG_LIMIT`, which this used to
+        // exactly `discord_message_units(x) <= DISCORD_MSG_LIMIT`, which this used to
         // open-code. Routed through the helper so "every surface that asks
         // whether something fits one Discord message shares one definition"
         // holds without an exception list.
@@ -635,5 +658,38 @@ mod attachment_delivery_tests {
             &inline,
         ));
         assert!(inline.chars().count() <= DISCORD_MSG_LIMIT);
+    }
+}
+
+#[cfg(test)]
+mod message_length_tests {
+    use super::{discord_message_units, needs_multiple_messages};
+    use crate::services::discord::DISCORD_MSG_LIMIT;
+
+    #[test]
+    fn korean_message_boundary_uses_discord_units_not_utf8_bytes_5178() {
+        let before = "한".repeat(DISCORD_MSG_LIMIT - 1);
+        let exact = "한".repeat(DISCORD_MSG_LIMIT);
+        let after = "한".repeat(DISCORD_MSG_LIMIT + 1);
+
+        assert_eq!(discord_message_units(&before), DISCORD_MSG_LIMIT - 1);
+        assert_eq!(discord_message_units(&exact), DISCORD_MSG_LIMIT);
+        assert_eq!(discord_message_units(&after), DISCORD_MSG_LIMIT + 1);
+        assert!(before.len() > DISCORD_MSG_LIMIT);
+        assert!(!needs_multiple_messages(&before));
+        assert!(!needs_multiple_messages(&exact));
+        assert!(needs_multiple_messages(&after));
+    }
+
+    #[test]
+    fn supplementary_character_counts_as_two_discord_units_5178() {
+        let exact = format!("{}🙂", "한".repeat(DISCORD_MSG_LIMIT - 2));
+        let after = format!("{}한", exact);
+
+        assert_eq!(exact.chars().count(), DISCORD_MSG_LIMIT - 1);
+        assert_eq!(discord_message_units(&exact), DISCORD_MSG_LIMIT);
+        assert!(!needs_multiple_messages(&exact));
+        assert_eq!(discord_message_units(&after), DISCORD_MSG_LIMIT + 1);
+        assert!(needs_multiple_messages(&after));
     }
 }
