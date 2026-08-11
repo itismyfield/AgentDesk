@@ -196,13 +196,16 @@ fn exact_codex_tui_raw_seed(
 /// #5264 PR-B: read the marker and the binding under ONE hold of the per-tmux source
 /// authority, the compound pair #5299 established.
 ///
-/// The cross-checks in [`exact_codex_tui_raw_seed`] verify that the marker and the binding
-/// agree with each other; they cannot tell that both are stale. Reading them separately
-/// admits a coherent-but-old snapshot: intake reads marker+binding A and its EOF, a source
-/// writer then atomically installs marker+binding B under the authority, and intake still
-/// persists A's path and end — attaching the new turn to the previous transcript, so output
-/// on B is missed or delayed and A's bytes become the new turn's baseline. That is the
-/// stale-read-then-use shape the fence exists to remove, not a torn read that fails closed.
+/// What this buys, precisely: the marker, the binding, and the file length are drawn from a
+/// single install generation, so the seed can never be a mix of A's marker with B's binding
+/// or with a length taken across an atomic install. Read separately, those three could
+/// straddle a compound install performed under the authority by #5299's writers.
+///
+/// What it does NOT buy, stated because an earlier revision of this comment claimed it: the
+/// read-then-use gap is still open. The authority is released when this returns, and the
+/// caller persists the seed afterwards with no revalidation, so a writer that installs a new
+/// source after this call still leaves the turn seeded from the previous one. Closing that
+/// would require constructing and persisting the seed inside the same hold.
 fn observed_codex_tui_raw_seed(tmux_name: &str) -> Option<(String, u64)> {
     crate::services::tmux_common::with_tmux_source_authority(tmux_name, |authority| {
         let marker = crate::services::codex_tui::session::read_codex_tui_rollout_marker(

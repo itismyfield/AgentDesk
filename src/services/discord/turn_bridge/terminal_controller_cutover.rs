@@ -1231,6 +1231,37 @@ mod tests {
                 "a refused pin must report NoRange so the fallback still delivers, never a \
                  holder-owned Skip that suppresses delivery entirely"
             );
+
+            // The third arm. A source that no longer matches is not a holder either, and
+            // this arm had no case at all: mutating it to Skip passed the whole table.
+            let stale_shared = make_shared_data_for_tests();
+            let (stale_acquire, stale_range, stale_inflight, _s) =
+                pinned_parts(&stale_shared, root._temp.path(), ch(), 16);
+            let mut drifted = stale_inflight;
+            // Persisted, not just local: `revalidated_source` compares the row it re-reads
+            // under the inflight lock, so mutating only the in-memory copy leaves the arm
+            // unreached.
+            drifted.full_response = "a different answer".into();
+            crate::services::discord::inflight::save_inflight_state(&drifted).unwrap();
+            assert!(
+                matches!(stale_range.revalidated_source(&drifted), Ok(None)),
+                "the fixture must actually reach the source-no-longer-exact arm"
+            );
+            assert!(
+                !matches!(
+                    prepare_bridge_lease(
+                        stale_acquire,
+                        Some(&stale_range),
+                        &drifted,
+                        stale_shared.as_ref(),
+                        &ProviderKind::Codex,
+                        ch()
+                    ),
+                    PreparedBridgeLease::Legacy(BridgeLeaseAcquire::Skip)
+                ),
+                "a source that no longer revalidates must not be reported as a holder-owned \
+                 Skip, which would suppress the fallback and drop the turn"
+            );
         }
         #[cfg(unix)]
         #[rustfmt::skip]
