@@ -1173,6 +1173,64 @@ mod tests {
                 ),
                 "no admitted frame must pass the real acquire through, not fabricate one"
             );
+
+            // A revalidation error is not evidence that anyone else holds this turn. The
+            // caller turns a Skip into `bridge_skip_holder_owns_inflight`, so fabricating
+            // one here claims a holder that does not exist while this bridge still owns the
+            // lease it acquired.
+            let err_shared = make_shared_data_for_tests();
+            let (err_acquire, err_range, err_inflight, _s) =
+                pinned_parts(&err_shared, root._temp.path(), ch(), 14);
+            let mut committed_inflight = err_inflight;
+            committed_inflight.terminal_delivery_committed = true;
+            assert!(
+                err_range.revalidated_source(&committed_inflight).is_err(),
+                "the fixture must actually reach the revalidation error arm"
+            );
+            assert!(
+                matches!(
+                    prepare_bridge_lease(
+                        err_acquire,
+                        Some(&err_range),
+                        &committed_inflight,
+                        err_shared.as_ref(),
+                        &ProviderKind::Codex,
+                        ch()
+                    ),
+                    PreparedBridgeLease::Legacy(BridgeLeaseAcquire::Held(_))
+                ),
+                "a revalidation error must pass the real acquire through, never fabricate a \
+                 holder-owned Skip"
+            );
+
+            // Same class, one arm lower: `pin_exact_source` consumes the lease and can
+            // still refuse, leaving nobody holding the cell. Reporting Skip there would
+            // claim a holder AND mark the turn handled, so the legacy fallback would never
+            // run and the turn would go undelivered. Reached here by pinning against a
+            // delivery channel the source was not minted for.
+            let pin_shared = make_shared_data_for_tests();
+            let (pin_acquire, pin_range, pin_inflight, pin_source) =
+                pinned_parts(&pin_shared, root._temp.path(), ch(), 15);
+            assert_ne!(
+                pin_source.delivery_channel_id,
+                owner_ch().get(),
+                "the fixture must actually mismatch the pin's delivery channel"
+            );
+            assert!(
+                matches!(
+                    prepare_bridge_lease(
+                        pin_acquire,
+                        Some(&pin_range),
+                        &pin_inflight,
+                        pin_shared.as_ref(),
+                        &ProviderKind::Codex,
+                        owner_ch()
+                    ),
+                    PreparedBridgeLease::Legacy(BridgeLeaseAcquire::NoRange)
+                ),
+                "a refused pin must report NoRange so the fallback still delivers, never a \
+                 holder-owned Skip that suppresses delivery entirely"
+            );
         }
         #[cfg(unix)]
         #[rustfmt::skip]

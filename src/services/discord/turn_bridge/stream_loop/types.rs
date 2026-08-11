@@ -135,10 +135,19 @@ pub(in crate::services::discord::turn_bridge) fn prepare_bridge_lease(
         Err(()) => PreparedBridgeLease::Legacy(acquire),
         Ok(None) => PreparedBridgeLease::Legacy(NoRange),
         Ok(Some(source)) => match acquire {
+            // #5264 PR-B: the same holder fabrication the `Err(())` arm above dropped, and
+            // worse here. `pin_exact_source` CONSUMES the lease and can still return None —
+            // the generation can flip between revalidation and the pin, because the inflight
+            // flock revalidation holds does not cover the tmux `.generation` file — so the
+            // lease is dropped and the cell released. Reporting `Skip` then makes the caller
+            // set both `bridge_skip_holder_owns_inflight` and `handled`, so the legacy
+            // fallback never runs and the turn is not delivered at all. `NoRange` is the
+            // honest report: no range and no lease are held any more, and the fallback still
+            // delivers.
             Held(lease) => lease
                 .pin_exact_source(shared, provider, delivery_channel, source)
                 .map_or(
-                    PreparedBridgeLease::Legacy(Skip),
+                    PreparedBridgeLease::Legacy(NoRange),
                     PreparedBridgeLease::Pinned,
                 ),
             NoRange => PreparedBridgeLease::Legacy(NoRange),

@@ -5727,6 +5727,7 @@ services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short
 services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::bridge_terminal_lease_range_pins_cutover
 services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::pinned_codex_long_chunks_generation_flip_5264
 services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::pinned_codex_short_replace_generation_flip_5264
+services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::prepare_bridge_lease_decision_table_5264
 services::discord::turn_bridge::terminal_delivery::relay_state_contract_refs::contract_symbols_exist
 services::discord::turn_bridge::terminal_delivery::tests::a0_characterization_tests::a0_terminal_delivery_predicate_boundary_is_strictly_greater_than_2000
 services::discord::turn_bridge::terminal_delivery::tests::a0_characterization_tests::a0_terminal_delivery_predicate_gates_on_can_chain_and_over_limit

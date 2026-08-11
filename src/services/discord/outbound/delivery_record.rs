@@ -888,9 +888,17 @@ pub(in crate::services::discord) fn record_pinned_delivery_metadata(
     let Some(provider) = ProviderKind::from_str(&source.provider) else {
         return;
     };
+    // #5264 PR-B: the fingerprint goes under the OFFSET-AUTHORITY (watcher owner) channel
+    // and the ledger under the delivery channel, matching
+    // `shadow_mirror_delivered_frontier_inner`. Every reader of the fingerprint
+    // (`tmux_watcher/turn_identity.rs`, `tmux_watcher/terminal_preflight.rs`) looks it up
+    // under the watcher's owner channel, and the record path plus the hash are both keyed
+    // by channel, so writing it under the delivery channel strands it whenever owner and
+    // destination differ — leaving the duplicate defence inert in exactly the split-channel
+    // case it exists for.
     record_delivered_content_fingerprint_for_generation(
         &provider,
-        source.delivery_channel_id,
+        source.offset_authority_channel_id,
         body,
         source.generation_mtime_ns,
     );

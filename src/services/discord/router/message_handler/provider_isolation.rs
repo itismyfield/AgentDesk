@@ -193,10 +193,27 @@ fn exact_codex_tui_raw_seed(
     .then(|| (marker_path.display().to_string(), end))
 }
 
+/// #5264 PR-B: read the marker and the binding under ONE hold of the per-tmux source
+/// authority, the compound pair #5299 established.
+///
+/// The cross-checks in [`exact_codex_tui_raw_seed`] verify that the marker and the binding
+/// agree with each other; they cannot tell that both are stale. Reading them separately
+/// admits a coherent-but-old snapshot: intake reads marker+binding A and its EOF, a source
+/// writer then atomically installs marker+binding B under the authority, and intake still
+/// persists A's path and end — attaching the new turn to the previous transcript, so output
+/// on B is missed or delayed and A's bytes become the new turn's baseline. That is the
+/// stale-read-then-use shape the fence exists to remove, not a torn read that fails closed.
 fn observed_codex_tui_raw_seed(tmux_name: &str) -> Option<(String, u64)> {
-    let marker = crate::services::codex_tui::session::read_codex_tui_rollout_marker(tmux_name)?;
-    let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_name)?;
-    exact_codex_tui_raw_seed(&marker, &binding)
+    crate::services::tmux_common::with_tmux_source_authority(tmux_name, |authority| {
+        let marker = crate::services::codex_tui::session::read_codex_tui_rollout_marker(
+            authority.session(),
+        )?;
+        let binding =
+            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
+                authority,
+            )?;
+        exact_codex_tui_raw_seed(&marker, &binding)
+    })
 }
 
 pub(super) fn prelaunch_inflight_runtime_seed(

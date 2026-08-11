@@ -127,12 +127,22 @@ pub(in crate::services::discord::turn_bridge) struct TerminalOutcomeDeliveryOutp
 /// while the watcher can independently acquire the same cell and range. That is the
 /// cross-actor duplicate prevention this PR exists to strengthen, so the two ends are
 /// returned separately rather than as one value two consumers reinterpret.
-/// The fields are private and the pinned accessor CONSUMES the value on purpose. The r2
-/// regression was a two-line call-site edit that fed the pinned end to the legacy
-/// fallback, and no test could see it because nothing drives that call site. With this
-/// shape the same edit stops compiling: taking `into_pinned()` first moves the value, so
-/// the later `exclusion_lease()` read fails to build. A determined edit that calls
-/// `ordered_terminal_range_end` directly at the call site is still not caught by any test.
+/// The fields are private and the pinned accessor consumes, which blocks ONE mutation
+/// shape: reading `into_pinned()` before `exclusion_lease()` moves the value and fails to
+/// compile.
+///
+/// That is the whole of what the type buys, and an earlier revision of this comment
+/// overstated it. A review disproved the stronger claim with a cheaper edit that still
+/// compiles and passes every suite:
+///
+/// ```ignore
+/// let pinned_range_end = range_ends.into_pinned();
+/// let tmux_last_offset = pinned_range_end;
+/// ```
+///
+/// Nothing drives `run_terminal_outcome_delivery`, so no test observes which end the legacy
+/// fallback actually consumes. Until a driver for that call site exists, this wiring is
+/// unsealed and the type is a speed bump, not a proof.
 pub(super) struct TerminalRangeEnds {
     pinned: Option<u64>,
     exclusion_lease: Option<u64>,
