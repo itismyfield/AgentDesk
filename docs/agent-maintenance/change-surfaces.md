@@ -70,15 +70,18 @@
 - `active_callsite_coverage` only applies to surfaces with a parallel canonical
   path already implemented (e.g. Discord outbound v3). For pre-migration giant
   files (no canonical replacement yet), the column is `n/a`.
-- **At-cap and near-cap surfaces (#5150/#5280).** The following are selected
-  examples, not an exhaustive list. The gates measure DIFFERENT things, so
-  check which one applies before adding a line. Production figures are the
-  `Prod` column in `docs/generated/module-inventory.md`; because that generated
-  file is gitignored and local copies can differ between worktrees, run `python3
-  scripts/generate_inventory_docs.py` in the worktree immediately before an
-  edit and inspect its fresh output. This was previously recorded only in a
-  comment inside `scripts/audit_maintainability_config.toml`, i.e. nowhere a
-  reader of this registry would see it.
+- **At-cap and near-cap surfaces (#5150/#5280).** This issue-scoped list retains
+  #5150's two at-cap entries and #5280's audited health and giant-admission
+  surfaces; it is not a headroom ranking or an exhaustive inventory. The gates
+  measure DIFFERENT things, so check which one applies before adding a line. To
+  find every candidate, regenerate the inventory and sort its `Prod` column.
+  Production figures are the `Prod` column in
+  `docs/generated/module-inventory.md`; because that file and
+  `docs/generated/giant-file-registry.md` are gitignored checkout-local views,
+  run `python3 scripts/generate_inventory_docs.py` in your checkout immediately
+  before an edit and inspect its fresh output. This was previously recorded only
+  in a comment inside `scripts/audit_maintainability_config.toml`, i.e. nowhere
+  a reader of this registry would see it.
   - `src/services/discord/turn_bridge/stream_loop.rs` — **979 raw file lines**
     against its `979` `[namespace_size_caps]` entry. That gate counts every
     line in the file (inline `#[cfg(test)]` blocks included — unlike the
@@ -93,8 +96,9 @@
     `scripts/giant_file_registry.toml`,
     `scripts/audit_maintainability_giant_baseline.toml`, and the generated giant
     inventory, and the registry's `grandfathered_baseline_paths` array is a
-    closed baseline, so crossing the threshold forces a new `[[entry]] carrying
-    an owner, a deadline, and a decompose issue before CI goes green again.
+    closed baseline, so crossing the threshold forces a new `[[entry]]` with
+    either a `shrink` decision (owner + deadline + decompose issue) or a `keep`
+    decision (owner + keep_reason) before CI goes green again.
   - `src/services/discord/task_notification_delivery/store/response_fence.rs`
     — **999 production lines**, with **1 production line of headroom** before
     the `>= 1000` giant threshold. It is absent from
