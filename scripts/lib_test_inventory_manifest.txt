@@ -1942,6 +1942,7 @@ services::codex_tui::rollout_tail::tests::distinct_codex_messages_join_with_para
 services::codex_tui::rollout_tail::tests::distinct_commentary_records_join_with_paragraph_boundary
 services::codex_tui::rollout_tail::tests::elapsed_only_busy_marker_changes_expire_and_emit_done
 services::codex_tui::rollout_tail::tests::empty_tool_output_refreshes_drain_clock
+services::codex_tui::rollout_tail::tests::every_handoff_tail_entry_point_decides_terminal_range_eligibility
 services::codex_tui::rollout_tail::tests::expired_pane_busy_signal_allows_pending_tool_deadline_done
 services::codex_tui::rollout_tail::tests::find_rollout_by_session_id_matches_uuid_suffix
 services::codex_tui::rollout_tail::tests::find_rollout_by_session_id_rejects_empty_input
@@ -4033,6 +4034,7 @@ services::discord::router::message_handler::latency_spans::tests::full_span_rend
 services::discord::router::message_handler::latency_spans::tests::marks_unlock_segments_in_order
 services::discord::router::message_handler::latency_spans::tests::partial_span_renders_dashes_for_missing_marks
 services::discord::router::message_handler::latency_spans::tests::saturating_u64_clamps_overflow
+services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::codex_tui_prelaunch_without_raw_seed_keeps_the_wrapper_end_offset
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::codex_tui_raw_seed_requires_exact_live_marker_binding_evidence
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::managed_linked_worktree_skips_provider_reisolation_without_session_state
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::non_thread_resolution_is_unchanged

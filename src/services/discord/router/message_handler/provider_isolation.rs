@@ -131,7 +131,21 @@ fn prelaunch_inflight_runtime_seed_from_paths(
     codex_raw_seed: Option<(String, u64)>,
 ) -> (Option<String>, Option<String>, Option<String>, u64) {
     if prelaunch_runtime_kind == Some(RuntimeHandoffKind::CodexTui) {
-        let (path, end) = codex_raw_seed.unwrap_or((output_path, 0));
+        // Without exact raw-seed evidence, fall back to what the general branch below
+        // would have produced for this wrapper transcript, session_exists gate included.
+        // Seeding 0 unconditionally makes an existing wrapper transcript look entirely
+        // unrelayed, which replays it to Discord. `codex_raw_seed` is absent whenever the
+        // binding lags the rollout EOF or the process-local binding map is empty, e.g.
+        // after a dcserver restart with the Codex tmux session still alive.
+        let (path, end) = match codex_raw_seed {
+            Some(seed) => seed,
+            None => {
+                let end = std::fs::metadata(&output_path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+                (output_path, session_exists.then_some(end).unwrap_or(0))
+            }
+        };
         return (
             Some(tmux_name.to_string()),
             Some(path),
@@ -866,6 +880,34 @@ mod thread_role_inheritance_tests {
                 "{invalid}"
             );
         }
+    }
+
+    // #5264 PR-B: absent exact raw-seed evidence, a CodexTui prelaunch must still seed the
+    // wrapper transcript's end offset under the same `session_exists` gate the general
+    // branch applies. Seeding 0 for a live session makes the whole existing transcript look
+    // unrelayed, and the watcher replays it to Discord. The sibling test above cannot catch
+    // this: it passes a path that does not exist, where both 0 and the file length agree.
+    #[test]
+    fn codex_tui_prelaunch_without_raw_seed_keeps_the_wrapper_end_offset() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"0123456789").unwrap();
+        let seed = |session_exists| {
+            prelaunch_inflight_runtime_seed_from_paths(
+                "AgentDesk-codex-fallback",
+                file.path().display().to_string(),
+                "/runtime/input".into(),
+                session_exists,
+                Some(RuntimeHandoffKind::CodexTui),
+                None,
+            )
+        };
+        let live = seed(true);
+        assert_eq!(
+            (live.1.as_deref(), live.3),
+            (Some(file.path().display().to_string().as_str()), 10),
+            "a live session must keep the wrapper end offset, not restart from 0"
+        );
+        assert_eq!(seed(false).3, 0, "no session means nothing was relayed yet");
     }
 
     #[test]

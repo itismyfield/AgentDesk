@@ -411,6 +411,13 @@ pub fn tail_resumed_rollout_for_session_with_handoff_for_tmux(
         .ok_or_else(|| "Codex sessions directory is unavailable".to_string())?;
     let mut options = RolloutTailOptions::default();
     options.tmux_session_name = Some(tmux_session_name.to_string());
+    // #5264 PR-B: this was the only handoff entry point leaving the flag at its `false`
+    // default, so a resumed turn emitted the legacy `Done`, produced no `CodexRange`, and
+    // skipped `dispatch_pinned_terminal!` entirely — resumed sessions kept the exact
+    // duplicate-replay hazard this change closes for fresh and warm ones. Its sole
+    // production caller passes `Some(prompt)`, identical to its two siblings.
+    options.terminal_range_eligible =
+        discord_origin_prompt.is_some_and(|text| !text.trim().is_empty());
     options.discord_origin_prompt = discord_origin_prompt.map(ToString::to_string);
     options.pane_busy_probe = Some(pane_busy_probe_for_tmux(tmux_session_name));
     tail_resumed_rollout_for_session_with_handoff_options(
@@ -4730,5 +4737,34 @@ mod tests {
             final_text.contains("보고합니다.\n\n첫째 단락입니다.\n둘째 단락입니다."),
             "records must keep their boundaries; got {final_text:?}"
         );
+    }
+
+    // #5264 PR-B: `terminal_range_eligible` defaults to false, so a handoff entry point
+    // that forgets to set it silently downgrades its turns to the legacy `Done` path and
+    // skips the pinned cutover — no compile error, no failing assertion anywhere else.
+    // This is a lexical guard over the three production entry points, not proof that the
+    // flag reaches the emitter; it exists because the omission is invisible otherwise.
+    #[test]
+    fn every_handoff_tail_entry_point_decides_terminal_range_eligibility() {
+        let source = include_str!("rollout_tail.rs");
+        for entry in [
+            "pub fn tail_latest_rollout_for_cwd_with_handoff_for_tmux(",
+            "pub fn tail_warm_followup_rollout_for_tmux(",
+            "pub fn tail_resumed_rollout_for_session_with_handoff_for_tmux(",
+        ] {
+            let body = source
+                .split_once(entry)
+                .unwrap_or_else(|| panic!("entry point not found: {entry}"))
+                .1;
+            let body = body
+                .split_once("\n}\n")
+                .expect("entry point body must terminate")
+                .0;
+            assert!(
+                body.contains("terminal_range_eligible"),
+                "{entry} never decides terminal_range_eligible, so its turns silently \
+                 bypass the pinned terminal cutover"
+            );
+        }
     }
 }
