@@ -1,12 +1,22 @@
 # Multinode Transition
 
 ### Audited touches
+- 2026-08-13 (#5071 T2-R): intake-outbox row status now decodes through the
+  strong Rust enum, and owner-record status writes bind that enum only for the
+  intake-outbox domain. Unknown database spellings fail row decoding instead
+  of becoming a recoverable state. The stale local-route exception requires
+  every existing route-id, age, owner, and rollout condition plus exactly
+  `Some(Pending)`; `None` and every other status keep local execution fenced.
+  `None` records that route status could not be established after an insert
+  conflict and does not represent an unknown database spelling. This change
+  adds no owner, lease, migration, or cross-node execution authority.
 - 2026-08-12 (#5071 T2-M): `intake_router_hook.rs` and `owner_record.rs` extract open-status
   domain constant to prevent drift. The predicate widens to include `dispatched`, but the result
   set is unchanged while no production writer emits that status; no new ownership, fencing, or
   multinode assumption is added. Owner-fenced routes (forwarded mode with instance_id + generation)
   use the same constant pattern; caller ownership and lease assumptions are preserved. T2-W must
-  also widen the post-accept failure/SLA predicates when it activates the `dispatched` writer.
+  add its stale-`dispatched` reader because that open row occupies the route until terminalized; dispatch
+  failure remains post-accept terminal/operator-only, and T2-R does not widen accepted/spawned SLA predicates.
   The two `NOT EXISTS` retry guards in `intake_outbox.rs` have the opposite polarity from the
   other open-route reads: widening their inner set shrinks retry candidates, so T2-W must confirm
   that a `dispatched` sibling is intended to block failed-pre-accept retry.

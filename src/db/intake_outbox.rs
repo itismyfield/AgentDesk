@@ -44,7 +44,7 @@ pub(crate) struct IntakeOutboxRow {
     /// Provider of the bot that forwarded this row (#4349). Carried through
     /// `force_fail_and_retry_as_new` so a retry stays on the same bot.
     pub provider: String,
-    pub status: String,
+    pub status: IntakeOutboxStatus,
     // reason: intake-outbox row column consumed by select claim/retry routes,
     // not every compile target. See #3034.
     #[allow(dead_code)]
@@ -851,10 +851,9 @@ pub(crate) async fn list_accepted_unspawned_sla(
 #[cfg(test)]
 mod migration_pg_tests {
     use crate::db::auto_queue::test_support::TestPostgresDb;
-    use crate::db::intake_outbox_force_fail::{
-        ForceFailError, TRANSITION_12_ALLOWED, force_fail_and_retry_as_new,
-    };
+    use crate::db::intake_outbox_force_fail::{ForceFailError, force_fail_and_retry_as_new};
     use crate::db::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL;
+    use crate::db::intake_outbox_status::{IntakeOutboxStatus, OperatorRetryClass};
     use serde_json::json;
     use sqlx::Row;
 
@@ -990,7 +989,10 @@ mod migration_pg_tests {
             "post-accept row must not be misclassified as retryable pre-accept"
         );
         // It lands in a state force_fail_and_retry_as_new would otherwise accept…
-        assert!(TRANSITION_12_ALLOWED.contains(&orphan_status.as_str()));
+        assert_eq!(
+            IntakeOutboxStatus::FailedPostAccept.operator_retry(),
+            OperatorRetryClass::AlreadyTerminal
+        );
 
         // …but retrying it would insert `pending` work with provider='' that no
         // worker can claim. #4349 review r2: refuse loudly, change nothing.
@@ -1499,7 +1501,7 @@ mod postgres_tests {
         assert_eq!(row.channel_id, "ch-1");
         assert_eq!(row.user_msg_id, "msg-1");
         assert_eq!(row.attempt_no, 1);
-        assert_eq!(row.status, "pending");
+        assert_eq!(row.status, IntakeOutboxStatus::Pending);
         assert!(row.parent_outbox_id.is_none());
         assert_eq!(row.required_labels, json!(["unreal"]));
         assert_eq!(row.preserve_on_cancel, Some(false));
@@ -1643,7 +1645,7 @@ mod postgres_tests {
             .expect("claim")
             .expect("must claim something");
         assert_eq!(claimed.id, id1);
-        assert_eq!(claimed.status, "claimed");
+        assert_eq!(claimed.status, IntakeOutboxStatus::Claimed);
         assert_eq!(claimed.claim_owner.as_deref(), Some("worker-1.local"));
 
         pool.close().await;
@@ -1708,7 +1710,7 @@ mod postgres_tests {
             .await
             .expect("claim")
             .expect("row");
-        assert_eq!(claimed.status, "claimed");
+        assert_eq!(claimed.status, IntakeOutboxStatus::Claimed);
 
         let advanced = mark_accepted(&pool, claimed.id, "owner-1")
             .await
@@ -2320,7 +2322,7 @@ mod postgres_tests {
             .fetch_one(&pool)
             .await
             .expect("read row");
-        assert_eq!(row.status, "failed_pre_accept");
+        assert_eq!(row.status, IntakeOutboxStatus::FailedPreAccept);
         assert_eq!(row.retry_count, 1);
 
         pool.close().await;
@@ -2653,7 +2655,8 @@ mod postgres_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn force_fail_and_retry_as_new_refuses_pending_and_claimed_states() {
+    async fn force_fail_and_retry_as_new_refuses_pending_and_claimed_states()
+    -> Result<(), sqlx::Error> {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         seed_default_test_agent(&pool).await;
@@ -2681,8 +2684,39 @@ mod postgres_tests {
             ForceFailError::DisallowedStatus { .. }
         ));
 
+        let unknown_fixture = async {
+            sqlx::query("ALTER TABLE intake_outbox DROP CONSTRAINT intake_outbox_status_check")
+                .execute(&pool)
+                .await?;
+            sqlx::query("UPDATE intake_outbox SET status = 'future_status' WHERE id = $1")
+                .bind(claimed.id)
+                .execute(&pool)
+                .await?;
+            let unknown = force_fail_and_retry_as_new(&pool, claimed.id, "x")
+                .await
+                .expect_err("unknown strong-enum spelling must fail at row decode");
+            let unchanged: (String, i64) = sqlx::query_as(
+                "SELECT status, COUNT(*) OVER ()::BIGINT FROM intake_outbox WHERE channel_id = 'ch-p'",
+            )
+            .fetch_one(&pool)
+            .await?;
+            Ok::<_, sqlx::Error>((unknown, unchanged))
+        }
+        .await;
         pool.close().await;
         pg_db.drop().await;
+
+        let (unknown, unchanged) = unknown_fixture?;
+        assert!(
+            matches!(
+                unknown,
+                ForceFailError::Db(sqlx::Error::ColumnDecode { ref index, .. })
+                    if index.trim_matches('"') == "status"
+            ),
+            "unknown spelling must surface as status ColumnDecode: {unknown:?}"
+        );
+        assert_eq!(unchanged, ("future_status".to_string(), 1));
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

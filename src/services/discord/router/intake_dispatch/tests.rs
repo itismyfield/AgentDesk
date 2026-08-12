@@ -129,7 +129,11 @@ use super::{
     admission_for_decision, dispatch_skill_intake, dispatch_text_intake,
 };
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::cluster::intake_router_hook::{IntakeRouterDecision, ResolvedSessionOwner};
+use crate::db::intake_outbox_status::IntakeOutboxStatus;
+use crate::services::cluster::intake_router_hook::{
+    IntakeRouterContext, IntakeRouterDecision, IntakeRoutingMode, ResolvedSessionOwner,
+    try_route_intake,
+};
 use crate::services::cluster::intake_routing_config::OwnerAuthorityChannelOptIn;
 use crate::services::discord::router::message_handler::{IntakeDeps, IntakeRequest};
 use crate::services::discord::router::{TurnKind, admit_queued_intake};
@@ -299,7 +303,7 @@ fn telemetry_only_unopted_live_local_pending_open_route_runs_locally_5040() {
         IntakeRouterDecision::DeferredOpenRoute {
             target_instance_id: "mac-mini-release".to_string(),
             open_route_id: None,
-            open_route_status: "pending".to_string(),
+            open_route_status: Some(IntakeOutboxStatus::Pending),
             open_route_age_secs: Some(60),
             resolved_owner: ResolvedSessionOwner::LiveLocal,
         },
@@ -321,7 +325,7 @@ fn telemetry_only_unopted_live_local_fresh_pending_route_stays_fenced_5040() {
         IntakeRouterDecision::DeferredOpenRoute {
             target_instance_id: "mac-mini-release".to_string(),
             open_route_id: None,
-            open_route_status: "pending".to_string(),
+            open_route_status: Some(IntakeOutboxStatus::Pending),
             open_route_age_secs: Some(1),
             resolved_owner: ResolvedSessionOwner::LiveLocal,
         },
@@ -343,7 +347,7 @@ fn telemetry_only_unopted_live_foreign_owner_stays_fenced_5040() {
         IntakeRouterDecision::DeferredOpenRoute {
             target_instance_id: "foreign-instance".to_string(),
             open_route_id: None,
-            open_route_status: "pending".to_string(),
+            open_route_status: Some(IntakeOutboxStatus::Pending),
             open_route_age_secs: Some(60),
             resolved_owner: ResolvedSessionOwner::LiveForeign,
         },
@@ -370,7 +374,7 @@ fn telemetry_only_unopted_unknown_owner_authority_keeps_local_fence_5040() {
         IntakeRouterDecision::DeferredOpenRoute {
             target_instance_id: "local-instance".to_string(),
             open_route_id: None,
-            open_route_status: "pending".to_string(),
+            open_route_status: Some(IntakeOutboxStatus::Pending),
             open_route_age_secs: Some(60),
             resolved_owner: ResolvedSessionOwner::LiveLocal,
         },
@@ -394,7 +398,7 @@ fn telemetry_only_unopted_local_accepted_route_stays_fenced_5040() {
         IntakeRouterDecision::DeferredOpenRoute {
             target_instance_id: "local-instance".to_string(),
             open_route_id: None,
-            open_route_status: "accepted".to_string(),
+            open_route_status: Some(IntakeOutboxStatus::Accepted),
             open_route_age_secs: Some(60),
             resolved_owner: ResolvedSessionOwner::LiveLocal,
         },
@@ -406,6 +410,23 @@ fn telemetry_only_unopted_local_accepted_route_stays_fenced_5040() {
         IntakeAdmission::DeferredOpenRoute {
             ref target_instance_id,
         } if target_instance_id == "local-instance"
+    ));
+
+    let unavailable = admission_for_decision(
+        OwnerAuthorityChannelOptIn::NotOptedIn,
+        12,
+        IntakeRouterDecision::DeferredOpenRoute {
+            target_instance_id: "local-instance".to_string(),
+            open_route_id: None,
+            open_route_status: None,
+            open_route_age_secs: Some(60),
+            resolved_owner: ResolvedSessionOwner::LiveLocal,
+        },
+        &submission,
+    );
+    assert!(matches!(
+        unavailable,
+        IntakeAdmission::DeferredOpenRoute { .. }
     ));
 }
 
@@ -804,6 +825,107 @@ async fn distinct_open_route_requeues_queued_successor_pg() {
             .load(std::sync::atomic::Ordering::Relaxed),
         1
     );
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dispatched_open_route_never_uses_stale_local_recovery_pg() {
+    let _env = ScopedIntakeTestEnv::enforce();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let channel_id = ChannelId::new(4_350_451);
+    let channel = channel_id.get().to_string();
+    let self_instance =
+        crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
+
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider, discord_channel_id)
+         VALUES ('agent-local-dispatched', 'Local', 'claude', $1)",
+    )
+    .bind(&channel)
+    .execute(&pool)
+    .await
+    .expect("seed local agent");
+    sqlx::query(
+        "INSERT INTO sessions (session_key, agent_id, provider, channel_id,
+         instance_id, status, last_heartbeat)
+         VALUES ('claude-local-dispatched', 'agent-local-dispatched', 'claude',
+         $1, $2, 'idle', NOW())",
+    )
+    .bind(&channel)
+    .bind(&self_instance)
+    .execute(&pool)
+    .await
+    .expect("seed live local owner");
+    let route_id: i64 = sqlx::query_scalar(
+        "INSERT INTO intake_outbox (
+            target_instance_id, forwarded_by_instance_id, required_labels,
+            channel_id, user_msg_id, request_owner_id, user_text,
+            turn_kind, agent_id, provider, status, attempt_no, created_at
+         ) VALUES ($1, 'leader-1', '[]'::JSONB, $2, 'msg-dispatched', '50',
+            'prior', 'foreground', 'agent-local-dispatched', 'claude',
+            'dispatched', 1, NOW() - INTERVAL '60 seconds')
+         RETURNING id",
+    )
+    .bind(&self_instance)
+    .bind(&channel)
+    .fetch_one(&pool)
+    .await
+    .expect("seed stale dispatched route");
+
+    let submission = submission_for_admission(channel_id, 4_350_452);
+    let request_owner_id = submission.request.request_owner.get().to_string();
+    let ctx = IntakeRouterContext {
+        mode: IntakeRoutingMode::Enforce,
+        leader_instance_id: &self_instance,
+        provider: "claude",
+        channel_id: &channel,
+        user_msg_id: "4350452",
+        request_owner_id: &request_owner_id,
+        request_owner_name: Some(&submission.request.request_owner_name),
+        user_text: &submission.request.user_text,
+        reply_context: None,
+        has_reply_boundary: false,
+        dm_hint: Some(false),
+        turn_kind: "foreground",
+        merge_consecutive: false,
+        reply_to_user_message: false,
+        defer_watcher_resume: false,
+        wait_for_completion: false,
+        preserve_on_cancel: false,
+        node_override_instance_id: None,
+        has_nonportable_uploads: false,
+    };
+    let decision = try_route_intake(&pool, &ctx).await;
+    assert!(matches!(
+        &decision,
+        IntakeRouterDecision::DeferredOpenRoute {
+            open_route_id: Some(id),
+            open_route_status: Some(IntakeOutboxStatus::Dispatched),
+            resolved_owner: ResolvedSessionOwner::LiveLocal,
+            ..
+        } if *id == route_id
+    ));
+    let admission = admission_for_decision(
+        OwnerAuthorityChannelOptIn::NotOptedIn,
+        12,
+        decision,
+        &submission,
+    );
+    assert!(matches!(
+        admission,
+        IntakeAdmission::DeferredOpenRoute { .. }
+    ));
+
+    let unchanged: (String, Option<String>) =
+        sqlx::query_as("SELECT status, last_error FROM intake_outbox WHERE id = $1")
+            .bind(route_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read dispatched route after fenced admission");
+    assert_eq!(unchanged, ("dispatched".to_string(), None));
 
     pool.close().await;
     pg_db.drop().await;

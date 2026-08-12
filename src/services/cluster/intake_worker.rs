@@ -496,6 +496,7 @@ fn parse_turn_kind(raw: &str) -> Result<TurnKind, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::intake_outbox_status::IntakeOutboxStatus;
 
     fn fake_row() -> IntakeOutboxRow {
         IntakeOutboxRow {
@@ -519,7 +520,7 @@ mod tests {
             wait_for_completion: false,
             preserve_on_cancel: None,
             agent_id: "agent-x".to_string(),
-            status: "claimed".to_string(),
+            status: IntakeOutboxStatus::Claimed,
             claim_owner: Some("worker-1.local".to_string()),
             attempt_no: 1,
             parent_outbox_id: None,
