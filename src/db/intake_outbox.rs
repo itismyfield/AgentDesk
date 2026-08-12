@@ -242,10 +242,10 @@ pub(crate) async fn sweep_failed_pre_accept_once(
     let retry_after_secs = retry_authorization_secs.map(|value| value.max(1) as i64);
     let _ = local_leader;
     let mut tx = pool.begin().await?;
-    // LIMITS: both candidate queries splice the shared open-status SQL with
-    // `format!`, so their intake-outbox `failed_pre_accept` predicates retain
-    // string literals. Binding them would require separate placeholder
-    // renumbering across the two dynamic statements.
+    // LIMITS: both candidate queries retain `failed_pre_accept` literals, as do
+    // the pending claim, claimed stale sweep, and accepted SLA predicates below.
+    // Each matches a partial-index predicate that must remain a planner constant;
+    // a typed parameter can prevent generic-plan implication.
     let capable_source_sql = format!(
         r#"
         SELECT parent.*
@@ -552,7 +552,7 @@ pub(crate) async fn claim_pending_for_target(
     let candidate: Option<i64> = sqlx::query_scalar(
         "SELECT io.id FROM intake_outbox io
          WHERE io.target_instance_id = $1
-           AND io.status = $3
+           AND io.status = 'pending'
            AND io.provider = $2
          ORDER BY io.created_at ASC
          LIMIT 1
@@ -560,7 +560,6 @@ pub(crate) async fn claim_pending_for_target(
     )
     .bind(target_instance_id)
     .bind(provider)
-    .bind(IntakeOutboxStatus::Pending)
     .fetch_optional(&mut *tx)
     .await?;
 
@@ -782,12 +781,11 @@ pub(crate) async fn sweep_stale_pre_accept_claims(
          SET status = $2,
              claim_owner = NULL,
              claimed_at = NULL
-         WHERE status = $3
+         WHERE status = 'claimed'
            AND claimed_at < NOW() - ($1::BIGINT * INTERVAL '1 second')",
     )
     .bind(stale_after_secs.max(1))
     .bind(IntakeOutboxStatus::Pending)
-    .bind(IntakeOutboxStatus::Claimed)
     .execute(pool)
     .await?;
     Ok(result.rows_affected())
@@ -839,13 +837,12 @@ pub(crate) async fn list_accepted_unspawned_sla(
 ) -> Result<Vec<(i64, chrono::DateTime<chrono::Utc>)>, sqlx::Error> {
     let rows: Vec<(i64, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
         "SELECT id, accepted_at FROM intake_outbox
-         WHERE status = $2
+         WHERE status = 'accepted'
            AND accepted_at IS NOT NULL
            AND accepted_at < NOW() - ($1::BIGINT * INTERVAL '1 second')
          ORDER BY accepted_at ASC",
     )
     .bind(sla_secs.max(1))
-    .bind(IntakeOutboxStatus::Accepted)
     .fetch_all(pool)
     .await?;
     Ok(rows)
@@ -1507,14 +1504,16 @@ mod postgres_tests {
         assert_eq!(row.required_labels, json!(["unreal"]));
         assert_eq!(row.preserve_on_cancel, Some(false));
 
-        let (raw_status, typed_status): (String, IntakeOutboxStatus) =
-            sqlx::query_as("SELECT status, status FROM intake_outbox WHERE id = $1")
-                .bind(id)
-                .fetch_one(&pool)
-                .await
-                .expect("decode raw and typed status");
-        assert_eq!(raw_status, IntakeOutboxStatus::Pending.as_str());
-        assert_eq!(typed_status, IntakeOutboxStatus::Pending);
+        for status in IntakeOutboxStatus::ALL {
+            let (raw_status, typed_status): (String, IntakeOutboxStatus) =
+                sqlx::query_as("SELECT $1::TEXT, $1::TEXT")
+                    .bind(status)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("decode raw and typed status");
+            assert_eq!(raw_status, status.as_str());
+            assert_eq!(typed_status, status);
+        }
 
         pool.close().await;
         pg_db.drop().await;

@@ -6,10 +6,10 @@ use sqlx::PgPool;
 
 /// Status spellings accepted by transition 12.
 ///
-/// LIMITS: this string allowlist and the string inequality below intentionally
-/// remain until the row status becomes typed. Adding an unknown spelling here
-/// would let the inequality rewrite that row to `failed_post_accept`; R2a does
-/// not close that trap.
+/// `done` remains refused because a racing worker completion must not be
+/// rewritten and retried, which could double-emit a Discord turn.
+/// LIMITS: this string allowlist remains until the row status becomes typed;
+/// adding an unknown spelling would retain the overwrite trap R2a does not fix.
 pub(crate) const TRANSITION_12_ALLOWED: [&str; 3] = ["accepted", "spawned", "failed_post_accept"];
 
 /// Reasons `force_fail_and_retry_as_new` may refuse to operate.
@@ -41,14 +41,15 @@ pub(crate) enum ForceFailError {
 ///   empty-provider rows before either write.
 /// - Moves `accepted`/`spawned` to `failed_post_accept`, while preserving the
 ///   existing error on an already-`failed_post_accept` row.
+/// - Terminalizes before inserting the child, preserving the one-open-route
+///   unique invariant; both writes are atomic and conflicts roll both back.
 /// - Copies payload and provider, allocates the family maximum plus one, and
 ///   links the child to the source.
-/// - Commits the terminal transition and child insert atomically, so a database
-///   conflict rolls both writes back.
 ///
 /// LIMITS: direct SQL can bypass the enum, the row status is still `String`,
 /// there is no attempt ceiling or typestate proof for every transition, and
 /// the retained string guard has the unknown-status trap documented above.
+/// Pinned PG coverage remains in `intake_outbox::postgres_tests` to keep IDs.
 pub(crate) async fn force_fail_and_retry_as_new(
     pool: &PgPool,
     stuck_id: i64,
@@ -73,7 +74,7 @@ pub(crate) async fn force_fail_and_retry_as_new(
         return Err(ForceFailError::UnknownProvider { id: stuck_id });
     }
 
-    if row.status != "failed_post_accept" {
+    if row.status != IntakeOutboxStatus::FailedPostAccept.as_str() {
         sqlx::query(
             "UPDATE intake_outbox
              SET status = $3,

@@ -28,9 +28,9 @@ use std::str::FromStr;
 ///   the members (rather than the cardinality) of [`Self::ALL`] are test-backed.
 /// - The strong-enum `sqlx::Type` derive generates `Type`, `Encode`, and `Decode`
 ///   implementations, and `rename_all` determines their codec spelling.
-///   Production status writes bind this enum directly. An existing PostgreSQL
-///   test exercises enum encode and decode and pins the raw spelling against
-///   [`Self::as_str`]. Production row decode remains a later slice.
+///   Production writes in `db::intake_outbox` bind this enum directly. A pinned
+///   PostgreSQL test exercises every variant's encode and decode and pins the
+///   raw spelling against [`Self::as_str`]. Production row decode is later.
 ///
 /// LIMITS:
 /// - No gate prevents replacing an exhaustive classification arm with `_ =>`;
@@ -38,9 +38,9 @@ use std::str::FromStr;
 /// - The source-based [`Self::ALL`] membership test reads only this file and
 ///   fails closed on unsupported enum syntax, but no independent gate proves
 ///   that its defining equality assertion remains present.
-/// - The unit tests compare independent source authorities; the PostgreSQL
-///   codec test applies migrations but does not prove direct SQL cannot bypass
-///   the Rust enum.
+/// - The migration-source test pins the CHECK domain while the PostgreSQL codec
+///   test pins wire spelling. Service-layer SQL writers such as `owner_record`
+///   still bypass this enum until R2b.
 ///
 /// [open-statuses]: crate::db::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL
 #[derive(Clone, Copy, Debug, Eq, PartialEq, sqlx::Type)]
