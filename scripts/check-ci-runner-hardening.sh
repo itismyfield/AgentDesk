@@ -127,6 +127,46 @@ unless script_check_commands == ["./scripts/ci-script-checks.sh"]
   exit 1
 end
 
+# #5308: the external step runs the writer-wiring checker, its unittest, and
+# this hardening guard. The checker pins the aggregate's hardening and fast
+# wiring-unittest invocations; the aggregate hardening invocation validates the
+# external step shape, and the aggregate fast wiring unittest exercises that
+# validation. Removing only the external step or only either aggregate observer
+# therefore leaves another observer statically invoked. This static invocation
+# chain ends when one diff removes the external step together with both
+# aggregate observer invocations; branch-protection configuration is not part
+# of this contract.
+writer_wiring_steps = Array(script_checks_job["steps"]).select do |step|
+  step.is_a?(Hash) && step["name"] == "Protect writer gate aggregate wiring (#5308)"
+end
+unless writer_wiring_steps.length == 1
+  warn "#{path}: Script checks job must retain exactly one writer gate aggregate wiring step"
+  exit 1
+end
+writer_wiring_step = writer_wiring_steps.fetch(0)
+if writer_wiring_step.key?("if")
+  warn "#{path}: writer gate aggregate wiring step must not define if"
+  exit 1
+end
+if writer_wiring_step["continue-on-error"]
+  warn "#{path}: writer gate aggregate wiring step must not continue on error"
+  exit 1
+end
+writer_wiring_commands = if writer_wiring_step["run"].is_a?(String)
+  writer_wiring_step["run"].lines.map(&:strip).reject(&:empty?)
+else
+  []
+end
+expected_writer_wiring_commands = [
+  "python3 scripts/check_writer_gate_ci_wiring.py",
+  "python3 -m unittest tests.test_writer_gate_ci_wiring",
+  "scripts/check-ci-runner-hardening.sh",
+]
+unless writer_wiring_commands == expected_writer_wiring_commands
+  warn "#{path}: writer gate aggregate wiring step must retain the exact external protection command list"
+  exit 1
+end
+
 # The aggregate job is intentionally excluded from the high-churn cargo-job
 # `targets` hash below, but its inventory verifier has a hard prerequisite:
 # cargo must be available before ci-script-checks.sh starts. Pin the setup shape

@@ -436,6 +436,15 @@ class FastCheckCiWiringTests(unittest.TestCase):
             'must retain exactly one "Run script checks" step', result.stderr
         )
 
+        deleted_job = scripts_job.replace(aggregate, "", 1)
+        self.assertNotEqual(deleted_job, scripts_job)
+        deleted = workflow.replace(scripts_job, deleted_job, 1)
+        result = self.run_hardening_fixture(deleted)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            'must retain exactly one "Run script checks" step', result.stderr
+        )
+
     def test_script_checks_aggregate_must_not_define_if(self) -> None:
         hardening = (
             REPO_ROOT / "scripts/check-ci-runner-hardening.sh"
@@ -481,6 +490,10 @@ class FastCheckCiWiringTests(unittest.TestCase):
         jobs = yaml.safe_load(workflow)["jobs"]
         protected_steps = {
             "scripts": (
+                (
+                    "Protect writer gate aggregate wiring (#5308)",
+                    "must not continue on error",
+                ),
                 ("Run script checks", "must not continue on error"),
             ),
             "relay-authority-contract": (
@@ -522,6 +535,53 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     result = self.run_hardening_fixture(mutated)
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn(expected_error, result.stderr)
+
+    def test_writer_gate_wiring_step_is_direct_and_exact(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        step = (
+            "      - name: Protect writer gate aggregate wiring (#5308)\n"
+            "        timeout-minutes: 10\n"
+            "        shell: bash\n"
+            "        run: |\n"
+            "          python3 scripts/check_writer_gate_ci_wiring.py\n"
+            "          python3 -m unittest tests.test_writer_gate_ci_wiring\n"
+            "          scripts/check-ci-runner-hardening.sh\n"
+        )
+        self.assertEqual(workflow.count(step), 1)
+
+        for label, mutated_step, expected_error in (
+            (
+                "deleted",
+                "",
+                "must retain exactly one writer gate aggregate wiring step",
+            ),
+            (
+                "conditional",
+                step.replace(
+                    "        run: |\n", "        if: ${{ false }}\n        run: |\n"
+                ),
+                "writer gate aggregate wiring step must not define if",
+            ),
+            (
+                "command drift",
+                step.replace(
+                    "python3 scripts/check_writer_gate_ci_wiring.py",
+                    "python3 scripts/check_writer_gate_ci_wiring.py --help",
+                ),
+                "must retain the exact external protection command list",
+            ),
+            (
+                "hardening deleted",
+                step.replace("          scripts/check-ci-runner-hardening.sh\n", ""),
+                "must retain the exact external protection command list",
+            ),
+        ):
+            with self.subTest(mutation=label):
+                mutated = workflow.replace(step, mutated_step, 1)
+                self.assertNotEqual(mutated, workflow)
+                result = self.run_hardening_fixture(mutated)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected_error, result.stderr)
 
     def test_registered_step_continue_policy_is_typed_and_exact(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")

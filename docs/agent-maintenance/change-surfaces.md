@@ -158,6 +158,32 @@ time for diagnostics; neither is a stored approval value.
 
 ## Surface Map (by feature)
 
+### `writer_gate_ci_wiring`
+
+- canonical_modules: `scripts/check_writer_gate_ci_wiring.py` owns the exact
+  aggregate-command inventory in `REQUIRED_INVOCATIONS`; its `CI_SCRIPT`
+  constant points at `scripts/ci-script-checks.sh`. If the aggregate moves to a
+  different script, update `CI_SCRIPT` as part of the same change.
+- invariants: the seven command lines in `REQUIRED_INVOCATIONS` are pinned
+  byte-for-byte as complete, unindented lines. Intentional spelling changes
+  such as `"$PYTHON"` to `"${PYTHON}"`, line-continuation refactors, or trailing
+  comments require synchronized updates to `REQUIRED_INVOCATIONS` and
+  `tests/test_writer_gate_ci_wiring.py` fixtures. The external `Script checks`
+  protection step pins those aggregate lines. The aggregate hardening and
+  fast-wiring unittest lines inspect the external step. The static invocation
+  chain ends if one diff removes that external step and both aggregate
+  self-protection lines together; it does not extend to branch protection.
+- non_guarantees: the checker is not a shell parser. A required line kept at
+  column zero inside an `if` or function still satisfies the textual contract,
+  so unconditional execution is not established. The hardening guard also
+  does not pin `env:` on the workflow's `Run script checks` step; that surface
+  can supply a switch consumed by surrounding shell control flow.
+- tests: `tests/test_writer_gate_ci_wiring.py` builds temporary aggregate
+  fixtures and requires a nonzero process exit for deletion of each aggregate
+  self-protection line. `tests/test_fast_check_ci_wiring.py` mutation-tests the
+  external workflow-step contract.
+- related_issues: #5308.
+
 ### `ci_failure_classification`
 
 - canonical_modules: `scripts/ci/real-failure-predicate.sh` owns deterministic
