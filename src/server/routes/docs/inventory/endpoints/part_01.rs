@@ -9,7 +9,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/health",
             "health",
-            "Health check with `server_up` minimum readiness and `fully_recovered` startup recovery completion.",
+            "Health check with `server_up` minimum readiness and `fully_recovered` startup recovery completion. Release-source fields are independent only after the whole manifest parses against the expected schema; a type mismatch in any recognized field, including optional `generated_at`, conservatively rejects the whole manifest as `manifest_invalid_json` and `unobserved`.",
         )
         .with_example(
             json!({}),
@@ -17,6 +17,12 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 "status": "healthy",
                 "server_up": true,
                 "fully_recovered": true,
+                "release_source": {
+                    "observation_status": "observed",
+                    "generated_at": "2026-08-12T00:00:00Z",
+                    "deployed_repo_head": "0123456789abcdef0123456789abcdef01234567",
+                    "deployed_latest_postgres_migration": "0104_example.sql"
+                },
                 "delivery_record_rollout": {
                     "shadow_enabled": false,
                     "authority_enabled": false,
@@ -64,7 +70,23 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         .with_error_example(
             503,
             json!({}),
-            json!({"status": "unhealthy", "server_up": false, "fully_recovered": false, "db": false, "degraded": true, "degraded_reasons": ["db_unavailable"], "error": "db connection failing"}),
+            json!({
+                "status": "unhealthy",
+                "server_up": false,
+                "fully_recovered": false,
+                "release_source": {
+                    "observation_status": "unobserved",
+                    "generated_at": "2026-08-12T00:00:00Z",
+                    "observation_failures": [
+                        "repo_head_missing",
+                        "latest_postgres_migration_missing"
+                    ]
+                },
+                "db": false,
+                "degraded": true,
+                "degraded_reasons": ["db_unavailable"],
+                "error": "db connection failing"
+            }),
         )
         .with_curl("curl http://localhost:8787/api/health"),
         ep(
@@ -79,6 +101,13 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 "status": "healthy",
                 "server_up": true,
                 "fully_recovered": true,
+                "release_source": {
+                    "observation_status": "partial",
+                    "node_hostname": "mac-mini",
+                    "generated_at": "2026-08-12T00:00:00Z",
+                    "deployed_repo_head": "0123456789abcdef0123456789abcdef01234567",
+                    "observation_failures": ["latest_postgres_migration_missing"]
+                },
                 "delivery_record_rollout": {
                     "shadow_enabled": true,
                     "authority_enabled": true,

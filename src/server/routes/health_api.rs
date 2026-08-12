@@ -162,6 +162,7 @@ fn discord_send_caller_class(
 /// detail callers receive provider/config/outbox diagnostics.
 async fn health_response(state: &AppState, detailed: bool) -> Response {
     let server_up = health_diagnostics::probe_server_up(state.pg_pool_ref()).await;
+    let release_source = crate::services::release_source::health_json(detailed);
 
     // Check if dashboard dist is available
     let dashboard_ok = {
@@ -399,6 +400,7 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             ))
             .unwrap_or_else(|_| serde_json::json!({}));
         json["delivery_record_rollout"] = delivery_record_rollout_health_json();
+        json["release_source"] = release_source;
         json["intake_routing"] =
             crate::services::cluster::intake_router_hook::intake_routing_status_json();
 
@@ -511,6 +513,7 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             json["opencode"] = opencode_block;
         }
         json["delivery_record_rollout"] = delivery_record_rollout_health_json();
+        json["release_source"] = release_source;
         json["intake_routing"] =
             crate::services::cluster::intake_router_hook::intake_routing_status_json();
         let json = if detailed {
@@ -742,6 +745,7 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     let startup_degraded = json.get("startup_degraded").cloned();
     let startup_degraded_reasons = json.get("startup_degraded_reasons").cloned();
     let delivery_record_rollout = json.get("delivery_record_rollout").cloned();
+    let release_source = json.get("release_source").cloned();
     let intake_routing = json.get("intake_routing").cloned();
     // #5142: the auto-queue cleanup backlog is carried onto the public shape,
     // count-only. `dead_lettered > 0` means cleanup rows burned the attempt cap
@@ -811,6 +815,9 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     }
     if let Some(delivery_record_rollout) = delivery_record_rollout {
         public["delivery_record_rollout"] = delivery_record_rollout;
+    }
+    if let Some(release_source) = release_source {
+        public["release_source"] = release_source;
     }
     if let Some(intake_routing) = intake_routing {
         public["intake_routing"] = intake_routing;
@@ -2754,6 +2761,131 @@ mod tests {
             .await
             .expect("health body");
         serde_json::from_slice(&bytes).expect("health body is JSON")
+    }
+
+    #[test]
+    fn public_health_reads_release_source_manifest_from_runtime_root() {
+        let runtime_root = tempfile::tempdir().expect("temp runtime root");
+        let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+        let runtime_dir = runtime_root.path().join("runtime");
+        std::fs::create_dir_all(&runtime_dir).expect("create runtime directory");
+        std::fs::write(
+            runtime_dir.join("release-source.json"),
+            r#"{"generated_at":"2026-08-12T00:00:00Z","repo_head":"0123456789abcdef0123456789abcdef01234567","latest_postgres_migration":"0104_example.sql"}"#,
+        )
+        .expect("write release source manifest");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        for registry in [
+            None,
+            Some(Arc::new(
+                crate::services::discord::health::HealthRegistry::new(),
+            )),
+        ] {
+            let body = runtime.block_on(health_body("/health", registry));
+            assert_eq!(body["release_source"]["observation_status"], "observed");
+            assert_eq!(
+                body["release_source"]["generated_at"],
+                "2026-08-12T00:00:00Z"
+            );
+            assert_eq!(
+                body["release_source"]["deployed_repo_head"],
+                "0123456789abcdef0123456789abcdef01234567"
+            );
+            assert_eq!(
+                body["release_source"]["deployed_latest_postgres_migration"],
+                "0104_example.sql"
+            );
+            assert!(body["release_source"].get("node_hostname").is_none());
+        }
+
+        let detail = runtime.block_on(health_body("/health/detail", None));
+        assert!(detail["release_source"]["node_hostname"].is_string());
+    }
+
+    #[test]
+    fn public_health_keeps_each_release_source_fact_independent() {
+        let runtime_root = tempfile::tempdir().expect("temp runtime root");
+        let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+        let runtime_dir = runtime_root.path().join("runtime");
+        std::fs::create_dir_all(&runtime_dir).expect("create runtime directory");
+        let manifest = runtime_dir.join("release-source.json");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        std::fs::write(
+            &manifest,
+            r#"{"generated_at":"2026-08-12T00:00:00Z","repo_head":"unknown","latest_postgres_migration":"0104_example.sql"}"#,
+        )
+        .expect("write release source manifest");
+        let body = runtime.block_on(health_body("/health", None));
+        assert_eq!(body["release_source"]["observation_status"], "partial");
+        assert_eq!(
+            body["release_source"]["observation_failures"],
+            serde_json::json!(["repo_head_invalid"])
+        );
+        assert_eq!(
+            body["release_source"]["generated_at"],
+            "2026-08-12T00:00:00Z"
+        );
+        assert!(body["release_source"].get("deployed_repo_head").is_none());
+        assert_eq!(
+            body["release_source"]["deployed_latest_postgres_migration"],
+            "0104_example.sql"
+        );
+
+        std::fs::write(
+            &manifest,
+            r#"{"repo_head":"0123456789abcdef0123456789abcdef01234567"}"#,
+        )
+        .expect("write release source manifest");
+        let body = runtime.block_on(health_body("/health/detail", None));
+        assert_eq!(body["release_source"]["observation_status"], "partial");
+        assert_eq!(
+            body["release_source"]["observation_failures"],
+            serde_json::json!(["latest_postgres_migration_missing"])
+        );
+        assert_eq!(
+            body["release_source"]["deployed_repo_head"],
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+        assert!(
+            body["release_source"]
+                .get("deployed_latest_postgres_migration")
+                .is_none()
+        );
+
+        std::fs::write(manifest, r#"{}"#).expect("write release source manifest");
+        let body = runtime.block_on(health_body("/health", None));
+        assert_eq!(body["release_source"]["observation_status"], "unobserved");
+        assert_eq!(
+            body["release_source"]["observation_failures"],
+            serde_json::json!(["repo_head_missing", "latest_postgres_migration_missing"])
+        );
+    }
+
+    #[test]
+    fn public_health_exposes_release_source_read_failure() {
+        let runtime_root = tempfile::tempdir().expect("temp runtime root");
+        let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let body = runtime.block_on(health_body("/health", None));
+
+        assert_eq!(body["release_source"]["observation_status"], "unobserved");
+        assert_eq!(
+            body["release_source"]["observation_failures"],
+            serde_json::json!(["manifest_missing"])
+        );
+        assert!(body["release_source"].get("deployed_repo_head").is_none());
     }
 
     fn injected_backlog(

@@ -366,6 +366,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn release_source_docs_show_observed_partial_and_unobserved_shapes() {
+        let endpoints = all_endpoints();
+        let endpoint = endpoints
+            .iter()
+            .find(|endpoint| endpoint.method == "GET" && endpoint.path == "/api/health")
+            .expect("GET /api/health must be documented");
+        let observed = &endpoint
+            .example
+            .as_ref()
+            .expect("observed example")
+            .response["release_source"];
+        assert!(observed["generated_at"].is_string());
+        assert!(observed["deployed_repo_head"].is_string());
+
+        let unobserved = &endpoint
+            .error_example
+            .as_ref()
+            .expect("unobserved example")
+            .response["release_source"];
+        assert_eq!(unobserved["observation_status"], "unobserved");
+        assert_eq!(unobserved["generated_at"], "2026-08-12T00:00:00Z");
+        assert_eq!(
+            unobserved["observation_failures"],
+            json!(["repo_head_missing", "latest_postgres_migration_missing"])
+        );
+        assert!(unobserved.get("deployed_repo_head").is_none());
+        assert!(
+            unobserved
+                .get("deployed_latest_postgres_migration")
+                .is_none()
+        );
+
+        let detail = endpoints
+            .iter()
+            .find(|endpoint| endpoint.method == "GET" && endpoint.path == "/api/health/detail")
+            .expect("GET /api/health/detail must be documented");
+        let partial = &detail.example.as_ref().expect("partial example").response["release_source"];
+        assert_eq!(partial["observation_status"], "partial");
+        assert!(partial["deployed_repo_head"].is_string());
+        assert_eq!(
+            partial["observation_failures"],
+            json!(["latest_postgres_migration_missing"])
+        );
+        assert!(partial.get("deployed_latest_postgres_migration").is_none());
+    }
+
+    #[test]
     fn kanban_assign_docs_expose_assignment_and_partial_transition_results() {
         let endpoints = all_endpoints();
 
