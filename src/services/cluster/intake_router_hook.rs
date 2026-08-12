@@ -16,6 +16,7 @@
 use crate::db::intake_outbox::{
     InsertPendingPayload, IntakeInsertConflict, classify_insert_pending_error, insert_pending,
 };
+use crate::db::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL;
 use crate::services::cluster::intake_routing::{
     IntakeRouteTarget, LocalRouteReason, candidates_from_worker_nodes_json, pick_intake_target,
 };
@@ -691,19 +692,20 @@ async fn existing_open_route(
     pool: &PgPool,
     channel_id: &str,
 ) -> Result<Option<(i64, String, String, String, Option<i64>)>, sqlx::Error> {
-    sqlx::query_as(
+    let query = format!(
         "SELECT id, target_instance_id, user_msg_id, status,
                 GREATEST(0, EXTRACT(EPOCH FROM (NOW() - created_at)))::BIGINT
                    AS open_route_age_secs
            FROM intake_outbox
           WHERE channel_id = $1
-            AND status IN ('pending', 'claimed', 'accepted', 'spawned')
+            AND status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})
           ORDER BY created_at ASC
-          LIMIT 1",
-    )
-    .bind(channel_id)
-    .fetch_optional(pool)
-    .await
+          LIMIT 1"
+    );
+    sqlx::query_as(&query)
+        .bind(channel_id)
+        .fetch_optional(pool)
+        .await
 }
 
 async fn route_to_instance(

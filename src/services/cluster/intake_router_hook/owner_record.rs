@@ -21,6 +21,7 @@
 #![allow(dead_code)]
 
 use crate::db::intake_outbox::{InsertPendingPayload, IntakeOutboxRow};
+use crate::db::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL;
 use sqlx::{PgPool, Postgres, Transaction};
 use std::future::Future;
 
@@ -664,24 +665,25 @@ pub(crate) async fn insert_admission_savepoint(
     }
 }
 
-/// The single open-route row for a channel (`pending`/`claimed`/`accepted`/
-/// `spawned`), if any. The channel-only open-route unique index guarantees at
-/// most one.
+/// The single open-route row for a channel, if any. The status set is defined
+/// by [`INTAKE_OUTBOX_OPEN_STATUSES_SQL`], and the channel-only open-route
+/// unique index guarantees at most one.
 async fn existing_open_route_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     channel_id: &str,
 ) -> Result<Option<OpenRouteRow>, sqlx::Error> {
-    sqlx::query_as::<_, OpenRouteRow>(
+    let query = format!(
         "SELECT id, target_instance_id, user_msg_id
            FROM intake_outbox
           WHERE channel_id = $1
-            AND status IN ('pending', 'claimed', 'accepted', 'spawned')
+            AND status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})
           ORDER BY created_at ASC
-          LIMIT 1",
-    )
-    .bind(channel_id)
-    .fetch_optional(&mut **tx)
-    .await
+          LIMIT 1"
+    );
+    sqlx::query_as::<_, OpenRouteRow>(&query)
+        .bind(channel_id)
+        .fetch_optional(&mut **tx)
+        .await
 }
 
 async fn lookup_outbox_id_by_idempotency_in_tx(

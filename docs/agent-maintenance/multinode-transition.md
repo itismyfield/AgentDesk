@@ -1,6 +1,30 @@
 # Multinode Transition
 
 ### Audited touches
+- 2026-08-12 (#5071 T2-M): `intake_router_hook.rs` and `owner_record.rs` extract open-status
+  domain constant to prevent drift. The predicate widens to include `dispatched`, but the result
+  set is unchanged while no production writer emits that status; no new ownership, fencing, or
+  multinode assumption is added. Owner-fenced routes (forwarded mode with instance_id + generation)
+  use the same constant pattern; caller ownership and lease assumptions are preserved. T2-W must
+  also widen the post-accept failure/SLA predicates when it activates the `dispatched` writer.
+  The two `NOT EXISTS` retry guards in `intake_outbox.rs` have the opposite polarity from the
+  other open-route reads: widening their inner set shrinks retry candidates, so T2-W must confirm
+  that a `dispatched` sibling is intended to block failed-pre-accept retry.
+  Migrations 0105 and 0106 are applied by `cmd_release_migrate_postgres` (under
+  `with_startup_advisory_lock`) before `deploy-release.sh` requests restart drain. The concurrent
+  index build in 0105 runs while the existing runtime is live and keeps ordinary table reads/writes
+  available, while SQLx's 0106 transaction requests ACCESS EXCLUSIVE for the catalog-only
+  CHECK/index swap. From the time 0106's request enters the lock queue, later conflicting reads and
+  writes can also wait behind it; after acquisition, that lock blocks reads and writes through
+  commit. The acquired-lock execution interval remains catalog-only, but total traffic blocking is
+  dominated by the remaining duration of preceding transactions plus the O(1) catalog and commit
+  work. The repository config sets no `lock_timeout`, so a preceding transaction can extend
+  blocking past the 10-second pool acquire timeout; if blocked accesses exhaust the pool, later
+  acquisitions can surface `sqlx::Error::PoolTimedOut`. The old open-route index remains until that
+  swap, so there is no fence gap. Migration 0105 establishes a
+  forward-only binary floor as soon as it is recorded: binaries embedding only migrations 0104 or
+  earlier fail SQLx migration validation and must not restart or be rolled back; recover by
+  forward-fix or coordinated database/fleet rollback.
 - 2026-08-05 (#5035): `runtime_bootstrap.rs` changes only the signature of the
   bootstrap stale-queued-placeholder delete helper (it now receives `SharedData`
   so each card is re-decided by `placeholder_controller::queued_card_gate`). The

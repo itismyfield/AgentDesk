@@ -122,6 +122,7 @@ src/
 │   ├── fixture_target.rs
 │   ├── idempotency.rs
 │   ├── intake_outbox.rs
+│   ├── intake_outbox_open_status.rs
 │   ├── kanban.rs
 │   ├── meetings.rs
 │   ├── mod.rs

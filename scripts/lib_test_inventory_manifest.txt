@@ -379,6 +379,8 @@ db::idempotency::tests::pg_integration::crash_window_retry_blocks_until_expiry_t
 db::idempotency::tests::pg_integration::gc_expired_removes_only_past_due_rows
 db::intake_outbox::migration_pg_tests::agents_preferred_intake_node_labels_defaults_to_empty_array
 db::intake_outbox::migration_pg_tests::intake_outbox_attempt_no_check_rejects_zero
+db::intake_outbox::migration_pg_tests::intake_outbox_dispatched_extension_is_dormant_without_dispatched_rows
+db::intake_outbox::migration_pg_tests::intake_outbox_dispatched_is_valid_and_blocks_a_second_open_route
 db::intake_outbox::migration_pg_tests::intake_outbox_one_open_route_per_channel_blocks_second_open_row
 db::intake_outbox::migration_pg_tests::intake_outbox_parent_on_delete_set_null_preserves_child
 db::intake_outbox::migration_pg_tests::intake_outbox_status_check_rejects_unknown_value
@@ -412,6 +414,8 @@ db::intake_outbox::postgres_tests::mark_failed_post_accept_works_from_accepted_o
 db::intake_outbox::postgres_tests::mark_failed_pre_accept_records_error_and_bumps_retry_count
 db::intake_outbox::postgres_tests::preserve_on_cancel_round_trips_true_false_and_legacy_null
 db::intake_outbox::postgres_tests::sweep_stale_pre_accept_claims_resets_only_stale_rows
+db::intake_outbox_open_status::tests::intake_open_status_query_sites_do_not_reintroduce_the_legacy_literal
+db::intake_outbox_open_status::tests::intake_open_status_sql_textually_matches_migration_0105
 db::postgres::tests::agent_roster_sync_gated_to_leader_or_single_node
 db::postgres::tests::background_backpressure_disabled_when_reserve_zero
 db::postgres::tests::background_backpressure_saturating_boundaries

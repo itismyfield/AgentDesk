@@ -303,6 +303,8 @@ db::idempotency::tests::pg_integration::crash_window_retry_blocks_until_expiry_t
 db::idempotency::tests::pg_integration::gc_expired_removes_only_past_due_rows
 db::intake_outbox::migration_pg_tests::agents_preferred_intake_node_labels_defaults_to_empty_array
 db::intake_outbox::migration_pg_tests::intake_outbox_attempt_no_check_rejects_zero
+db::intake_outbox::migration_pg_tests::intake_outbox_dispatched_extension_is_dormant_without_dispatched_rows
+db::intake_outbox::migration_pg_tests::intake_outbox_dispatched_is_valid_and_blocks_a_second_open_route
 db::intake_outbox::migration_pg_tests::intake_outbox_one_open_route_per_channel_blocks_second_open_row
 db::intake_outbox::migration_pg_tests::intake_outbox_parent_on_delete_set_null_preserves_child
 db::intake_outbox::migration_pg_tests::intake_outbox_status_check_rejects_unknown_value

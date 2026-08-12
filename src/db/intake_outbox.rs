@@ -11,6 +11,7 @@
 //! global state — so they can be unit-tested with PG fixtures and reused
 //! by leader and worker code paths without coupling.
 
+use super::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL;
 use serde_json::Value;
 use sqlx::PgPool;
 
@@ -239,7 +240,7 @@ pub(crate) async fn sweep_failed_pre_accept_once(
     let retry_after_secs = retry_authorization_secs.map(|value| value.max(1) as i64);
     let _ = local_leader;
     let mut tx = pool.begin().await?;
-    let capable_source: Option<IntakeOutboxRow> = sqlx::query_as(
+    let capable_source_sql = format!(
         r#"
         SELECT parent.*
           FROM intake_outbox parent
@@ -256,7 +257,7 @@ pub(crate) async fn sweep_failed_pre_accept_once(
            AND NOT EXISTS (
                 SELECT 1 FROM intake_outbox open_row
                  WHERE open_row.channel_id = parent.channel_id
-                   AND open_row.status IN ('pending', 'claimed', 'accepted', 'spawned')
+                   AND open_row.status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})
            )
            AND EXISTS (
                 SELECT 1 FROM worker_nodes worker
@@ -272,7 +273,7 @@ pub(crate) async fn sweep_failed_pre_accept_once(
                          FROM jsonb_array_elements(worker.capabilities->'intake_worker'->'providers')
                               AS provider_entry(value)
                         WHERE jsonb_typeof(provider_entry.value) = 'string'
-                          AND lower(btrim(provider_entry.value #>> '{}')) = lower(btrim(parent.provider))
+                          AND lower(btrim(provider_entry.value #>> '{{}}')) = lower(btrim(parent.provider))
                    )
                    AND (COALESCE(parent.preserve_on_cancel, false) = false OR
                         (jsonb_typeof(worker.capabilities->'intake_worker'->'features') = 'array' AND
@@ -281,7 +282,7 @@ pub(crate) async fn sweep_failed_pre_accept_once(
                                FROM jsonb_array_elements(worker.capabilities->'intake_worker'->'features')
                                     AS feature_entry(value)
                               WHERE jsonb_typeof(feature_entry.value) = 'string'
-                                AND lower(btrim(feature_entry.value #>> '{}')) = 'preserve_on_cancel_v1'
+                                AND lower(btrim(feature_entry.value #>> '{{}}')) = 'preserve_on_cancel_v1'
                          )))
                    AND jsonb_typeof(parent.required_labels) = 'array'
                    AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(parent.required_labels) v
@@ -305,17 +306,18 @@ pub(crate) async fn sweep_failed_pre_accept_once(
          ORDER BY parent.updated_at ASC, parent.id ASC
          LIMIT 1
          FOR UPDATE OF parent SKIP LOCKED
-        "#,
-    )
-    .bind(stale_after_secs)
-    .bind(max_attempts)
-    .bind(retry_after_secs)
-    .fetch_optional(&mut *tx)
-    .await?;
+        "#
+    );
+    let capable_source: Option<IntakeOutboxRow> = sqlx::query_as(&capable_source_sql)
+        .bind(stale_after_secs)
+        .bind(max_attempts)
+        .bind(retry_after_secs)
+        .fetch_optional(&mut *tx)
+        .await?;
     let source = if capable_source.is_some() {
         capable_source
     } else {
-        sqlx::query_as(
+        let fallback_source_sql = format!(
             r#"
             SELECT parent.*
               FROM intake_outbox parent
@@ -331,16 +333,17 @@ pub(crate) async fn sweep_failed_pre_accept_once(
                AND NOT EXISTS (
                     SELECT 1 FROM intake_outbox open_row
                      WHERE open_row.channel_id = parent.channel_id
-                       AND open_row.status IN ('pending', 'claimed', 'accepted', 'spawned')
+                       AND open_row.status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})
                )
              ORDER BY parent.updated_at ASC, parent.id ASC
              LIMIT 1
              FOR UPDATE OF parent SKIP LOCKED
-            "#,
-        )
-        .bind(retry_after_secs)
-        .fetch_optional(&mut *tx)
-        .await?
+            "#
+        );
+        sqlx::query_as(&fallback_source_sql)
+            .bind(retry_after_secs)
+            .fetch_optional(&mut *tx)
+            .await?
     };
 
     let Some(source) = source else {
@@ -994,6 +997,7 @@ pub(crate) async fn list_accepted_unspawned_sla(
 #[cfg(test)]
 mod migration_pg_tests {
     use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::db::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL;
     use serde_json::json;
     use sqlx::Row;
 
@@ -1155,13 +1159,14 @@ mod migration_pg_tests {
         );
 
         // No pending row anywhere can carry an unclaimable empty provider.
-        let unclaimable: i64 = sqlx::query_scalar(
+        let unclaimable_sql = format!(
             "SELECT COUNT(*)::BIGINT FROM intake_outbox
-             WHERE provider = '' AND status IN ('pending','claimed','accepted','spawned')",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("count unclaimable open rows"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
+             WHERE provider = '' AND status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})"
+        );
+        let unclaimable: i64 = sqlx::query_scalar(&unclaimable_sql)
+            .fetch_one(&pool)
+            .await
+            .expect("count unclaimable open rows"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
         assert_eq!(
             unclaimable, 0,
             "migration must leave no open row that a worker can never claim"
@@ -1303,6 +1308,102 @@ mod migration_pg_tests {
         insert_minimal_row(&pool, "ch-open", "msg-B", 1, "pending")
             .await
             .expect("fresh OPEN row after parent terminal");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// T2-M is schema-only: before any writer produces `dispatched`, widening
+    /// the open-status predicate must select exactly the same rows as the
+    /// pre-T2-M predicate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn intake_outbox_dispatched_extension_is_dormant_without_dispatched_rows() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        for (offset, status) in [
+            "pending",
+            "claimed",
+            "accepted",
+            "spawned",
+            "done",
+            "failed_pre_accept",
+            "failed_post_accept",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            insert_minimal_row(
+                &pool,
+                &format!("ch-dormant-{offset}"),
+                &format!("msg-dormant-{offset}"),
+                1,
+                status,
+            )
+            .await
+            .expect("seed pre-dispatched lifecycle row"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
+        }
+
+        let dispatched_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE status = 'dispatched'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count dispatched rows"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
+        assert_eq!(
+            dispatched_rows, 0,
+            "fixture must prove dormancy without manufacturing dispatched behavior"
+        );
+
+        let prior_statuses = ["pending", "claimed", "accepted", "spawned"]
+            .map(|status| format!("'{status}'"))
+            .join(", ");
+        let prior_sql = format!(
+            "SELECT id FROM intake_outbox
+             WHERE status IN ({prior_statuses})
+             ORDER BY id"
+        );
+        let old_ids: Vec<i64> = sqlx::query_scalar(&prior_sql)
+            .fetch_all(&pool)
+            .await
+            .expect("select pre-T2-M open rows"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
+        let widened_sql = format!(
+            "SELECT id FROM intake_outbox
+             WHERE status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})
+             ORDER BY id"
+        );
+        let widened_ids: Vec<i64> = sqlx::query_scalar(&widened_sql)
+            .fetch_all(&pool)
+            .await
+            .expect("select T2-M open rows"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
+        assert_eq!(
+            widened_ids, old_ids,
+            "adding an unwritten dispatched status must leave query results unchanged"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// The new status is accepted by the domain constraint and remains inside
+    /// the named per-channel open-route discriminator.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn intake_outbox_dispatched_is_valid_and_blocks_a_second_open_route() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        insert_minimal_row(&pool, "ch-dispatched", "msg-A", 1, "dispatched")
+            .await
+            .expect("dispatched must satisfy intake_outbox_status_check"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
+        let error = insert_minimal_row(&pool, "ch-dispatched", "msg-B", 1, "pending")
+            .await
+            .expect_err("dispatched must retain the channel open-route fence");
+        assert!(
+            error
+                .to_string()
+                .contains("intake_outbox_one_open_route_per_channel"),
+            "expected named open-route index violation after dispatched row, got: {error}"
+        );
 
         pool.close().await;
         pg_db.drop().await;
