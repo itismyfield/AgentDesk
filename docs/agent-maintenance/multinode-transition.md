@@ -10,10 +10,13 @@
   `UnknownIntakeStatus` remains the error for unregistered spellings such as
   `future_status`. Operator retry preserves an unknown source and only appends
   a pending child; retry-as-new is an explicit operator action and does not
-  reinterpret or overwrite that unknown evidence. This schema slice adds no
-  dispatched/unknown writer, reconciler, or delivery authority. Migration 0109
-  is forward-compatible substrate; its binding writer does not exist before
-  S-W1.
+  reinterpret or overwrite that unknown evidence. Because `unknown` is terminal
+  ambiguity and delivery may already have occurred, executing that child can
+  emit twice. An operator must first audit delivery/receipt evidence and accept
+  the duplicate consequence; this is not an automated reconciler policy. This
+  schema slice adds no dispatched/unknown writer, reconciler, or delivery
+  authority. Migration 0109 is forward-compatible substrate; its binding
+  writer does not exist before S-W1.
 
   Rollout order is strict: deploy S-R1-capable binaries to the entire fleet
   before any writer can create `unknown`. Migrations 0107-0109 establish an

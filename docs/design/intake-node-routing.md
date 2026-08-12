@@ -599,7 +599,11 @@ operators can run it manually for incident response.
   existing terminal status/error and append only a pending child. Every other
   current status, including dispatched, is refused before writes. Retry-as-new
   for unknown is an explicit operator action; it preserves the unknown source
-  rather than reinterpreting or overwriting that evidence.
+  rather than reinterpreting or overwriting that evidence. Because unknown is
+  terminal ambiguity and delivery may already have occurred, executing the
+  child can emit twice. Operators must audit delivery/receipt evidence and
+  accept the duplicate consequence before retrying; this is not an automated
+  reconciler policy.
 - Existing open-route reads carry `Option<IntakeOutboxStatus>` across the
   service boundary. A decoded row is `Some(status)`; failure to establish a
   route status after a unique conflict is `None`. Only `Some(Pending)`, with
