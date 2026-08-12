@@ -607,18 +607,27 @@ operators can run it manually for incident response.
   SQL literals and writers outside the typed bind coordinates remain
   possible. `None` does not distinguish a vanished row from a failed conflict
   requery. The open set remains exactly pending/claimed/accepted/spawned/
-  dispatched, so official unknown releases the channel route.
+  dispatched, so official unknown releases the channel route. The dispatched
+  fence fixture stops at decision/admission and does not execute the outer
+  `admit_text_intake` retirement path.
 
 **S-R1 rolling floor (#5071 T2-W):** migrations 0107-0109 must reach every
-node before an unknown writer is enabled. Rolling back to a pre-S-R1 binary is
-safe only while no official unknown row has been created; after that point,
-S-R1 is the fleet floor unless status rows and constraints are coordinated
-back. Both new CHECKs are intentionally NOT VALID: they constrain new writes,
-but their mere catalog presence does not prove activation safety. A later
-capability gate must require validation or a fail-closed bad-row-absence proof,
-plus valid (`indisvalid=true`) stale-dispatched and journal-binding indexes,
-before any dispatched/unknown authority is activated. S-R1 itself adds no such
-writer or reconciler.
+node before an unknown writer is enabled. As soon as any of these migrations
+is recorded, S-R1 is an immediate forward-only binary floor: a pre-S-R1 binary
+embeds only through 0106, uses SQLx `ignore_missing=false`, and fails startup
+migration validation with `VersionMissing`. The first official `unknown` row
+creates an additional codec/data downgrade floor; a coordinated database
+downgrade must normalize those rows before removing the widened constraint.
+
+Both new CHECKs are intentionally NOT VALID and constrain new or updated rows.
+Dropping and re-adding the status CHECK in 0107 also resets any prior manual
+validation to NOT VALID. A pre-existing manually-created `dispatched` row with
+a NULL clock survives the migration, but any later UPDATE is rejected by the
+clock CHECK. Catalog presence alone therefore does not prove activation safety.
+A later capability gate must remediate bad rows and require validation, or
+prove bad-row absence fail-closed, plus require valid (`indisvalid=true`)
+stale-dispatched and journal-binding indexes before any dispatched/unknown
+authority is activated. S-R1 itself adds no such writer or reconciler.
 
 **Why a fresh row instead of in-place reset for retry**: keeps every
 attempt's `last_error`, timing, and `claim_owner` in PG for audit. A

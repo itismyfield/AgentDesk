@@ -13,7 +13,7 @@ use std::str::FromStr;
 /// - The compiler requires every added variant to be handled by those four
 ///   exhaustive matches. Renaming a variant also invalidates direct references
 ///   in [`Self::ALL`] and [`Self::from_str`].
-/// - The `[Self; 8]` type of [`Self::ALL`] makes the initializer's cardinality a
+/// - The `[Self; 9]` type of [`Self::ALL`] makes the initializer's cardinality a
 ///   compile-time check.
 /// - Unit tests check [`Self::ALL`] membership against the enum declaration,
 ///   [`Self::from_str`] against [`Self::as_str`], and [`Self::is_open`] against

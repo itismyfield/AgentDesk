@@ -13,13 +13,23 @@
   reconciler, or delivery authority.
 
   Rollout order is strict: deploy S-R1-capable binaries to the entire fleet
-  before any writer can create `unknown`. A pre-S-R1 binary rollback is safe
-  only before the first unknown row exists; afterward S-R1 is the binary floor
-  unless rows and constraints are coordinated back. Merely observing the NOT
-  VALID constraints is not a sufficient capability signal. Before authority
-  activation, a later gate must require completed validation or a fail-closed
-  proof that no bad rows exist, in addition to checking both concurrent indexes
-  are present and `indisvalid=true`.
+  before any writer can create `unknown`. Migrations 0107-0109 establish an
+  immediate forward-only binary floor as soon as they are recorded: a binary
+  embedding only 0106 or earlier uses SQLx `ignore_missing=false`, fails startup
+  migration validation with `VersionMissing`, and must not restart or be rolled
+  back. The first official `unknown` row establishes a separate codec/data
+  downgrade floor: a coordinated database downgrade must normalize those rows
+  before removing the widened constraint.
+
+  Migration 0107 drops and re-adds the status CHECK as NOT VALID, so even a
+  manually validated pre-S-R1 status CHECK becomes unvalidated again. Existing
+  manually-created `dispatched` rows with a NULL clock are preserved because
+  no validation scan runs, but a later UPDATE of such a row is rejected by the
+  new clock CHECK. Merely observing the NOT VALID constraints is therefore not
+  a sufficient capability signal. Before authority activation, a later gate
+  must remediate bad rows and require completed validation, or prove bad-row
+  absence fail-closed, in addition to checking both concurrent indexes are
+  present and `indisvalid=true`.
 - 2026-08-13 (#5071 T2-R): intake-outbox row status now decodes through the
   strong Rust enum, and owner-record status writes bind that enum only for the
   intake-outbox domain. Unknown database spellings fail row decoding instead
