@@ -38,17 +38,20 @@ class DiscordMessageUnitUsageTest(unittest.TestCase):
         )
         self.assertEqual([line for (_path, line, _source) in violations], [2, 3])
 
-    def test_limit_alias_comparison_dies(self) -> None:
+    def test_limit_and_saturating_sub_alias_comparisons_die(self) -> None:
         violations = scan_fixture(
             """
             fn probe(text: &str) -> bool {
-                let limit = DISCORD_MSG_LIMIT.saturating_sub(6);
+                let limit = DISCORD_MSG_LIMIT;
+                let max_units = DISCORD_MSG_LIMIT.saturating_sub(6);
                 text.len() > limit
+                text.chars().count() > max_units
             }
             """
         )
-        self.assertEqual(len(violations), 1)
+        self.assertEqual(len(violations), 2)
         self.assertIn("text.len() > limit", violations[0][2])
+        self.assertIn("text.chars().count() > max_units", violations[1][2])
 
     def test_utf16_helpers_and_independent_byte_budget_pass(self) -> None:
         self.assertEqual(

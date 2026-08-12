@@ -193,6 +193,7 @@ pub(crate) use self::tool_markdown::{normalize_allowed_tools, redact_sensitive_f
 #[path = "formatting/streaming_status.rs"]
 mod streaming_status;
 
+use self::streaming_status::strip_placeholder_lines;
 #[allow(unused_imports)]
 pub(super) use self::streaming_status::{
     LongRunningCloseTrigger, MonitorHandoffReason, MonitorHandoffStatus, StreamingRolloverPlan,
@@ -204,7 +205,6 @@ pub(super) use self::streaming_status::{
     is_streaming_placeholder_status_line, plan_streaming_rollover, preserve_previous_tool_status,
     resolve_raw_tool_status, streaming_split_boundary, text_ends_with_streaming_footer,
 };
-use self::streaming_status::{char_count, strip_placeholder_lines};
 
 #[path = "formatting/delivery.rs"]
 mod delivery;

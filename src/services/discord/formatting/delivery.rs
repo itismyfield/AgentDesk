@@ -477,9 +477,18 @@ pub(in crate::services::discord) fn split_message(text: &str) -> Vec<String> {
 /// The byte-count mismatch that remained in completion-panel paths could
 /// truncate Korean text at roughly 667 characters. The chunker reserves ten
 /// units for fence repair, so a message that overflows this predicate is split
-/// into unit-bounded chunks before delivery. Self-contained attachment notices
-/// use this same predicate; independent byte budgets elsewhere are explicitly
-/// named `*_BYTES` and are not Discord-limit checks.
+/// into unit-bounded chunks before delivery. This shared outbound policy does
+/// not cover every production 2000/1900 scalar check: #5304 records
+/// `outbound/decision.rs`, `server/routes/escalation.rs`,
+/// `dispatches/outbox_route.rs`, and `placeholder_live_events/status_panel.rs`.
+///
+/// There is also a known 1991..=2000-unit seam. This predicate says those
+/// bodies fit, but `replace_long_message_raw_deferred_returning_receipt` calls
+/// `split_message` unconditionally, whose `effective_limit` is
+/// `DISCORD_MSG_LIMIT - tag_overhead - 10`. On that replace path the body can
+/// therefore become an edited first chunk plus a continuation; the chunker
+/// consumes the full input, so this is an extra-message seam rather than a
+/// truncation or an over-limit send.
 pub(in crate::services::discord) fn needs_multiple_messages(text: &str) -> bool {
     discord_message_units(text) > DISCORD_MSG_LIMIT
 }

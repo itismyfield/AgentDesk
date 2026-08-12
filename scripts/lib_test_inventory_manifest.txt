@@ -4646,6 +4646,7 @@ services::discord::tmux::placeholder_suppression::placeholder_suppression_tests:
 services::discord::tmux::placeholder_suppression::placeholder_suppression_tests::task_notification_none_kind_unexposed_placeholder_deletes
 services::discord::tmux::placeholder_suppression::placeholder_suppression_tests::task_notification_subagent_kind_exposed_body_preserves
 services::discord::tmux::placeholder_suppression::placeholder_suppression_tests::task_notification_subagent_kind_unexposed_placeholder_deletes
+services::discord::tmux::placeholder_suppression::placeholder_suppression_tests::terminal_suppression_clamps_supplementary_body_by_discord_units_5178
 services::discord::tmux::placeholder_suppression::placeholder_suppression_tests::terminal_suppression_keeps_korean_body_within_discord_units_5178
 services::discord::tmux::placeholder_suppression::placeholder_suppression_tests::unknown_author_body_preserves_no_edit
 services::discord::tmux::restored_seed_discard_tests::cross_turn_watcher_reuse_discards_restored_seed_before_terminal_commit
@@ -5455,6 +5456,7 @@ services::discord::tui_task_card::tests::parses_core_fields_with_both_id_spellin
 services::discord::tui_task_card::tests::parses_tool_use_id_and_derives_kind_from_summary_prefix
 services::discord::tui_task_card::tests::single_subagent_completion_card_previews_not_dumps
 services::discord::tui_task_card::tests::task_card_clamps_many_short_headings_under_discord_limit
+services::discord::tui_task_card::tests::task_card_clamps_supplementary_content_by_discord_units_5177
 services::discord::tui_task_card::tests::task_card_footer_snapshot_uses_elapsed_icon_and_omits_tokens_4822
 services::discord::turn_bridge::bridge_entry_persist::tests::bridge_entry_failure_gate_precedes_emit_stream_and_finalize
 services::discord::turn_bridge::bridge_entry_persist::tests::bridge_entry_failure_outcomes_abort_without_arming_cleanup

@@ -12,21 +12,6 @@ pub(in crate::services::discord) fn floor_char_boundary(s: &str, index: usize) -
     }
 }
 
-pub(super) fn char_count(s: &str) -> usize {
-    s.chars().count()
-}
-
-pub(super) fn byte_index_at_char_limit(s: &str, max_chars: usize) -> usize {
-    if max_chars == 0 {
-        0
-    } else {
-        s.char_indices()
-            .nth(max_chars)
-            .map(|(idx, _)| idx)
-            .unwrap_or(s.len())
-    }
-}
-
 pub(in crate::services::discord) fn streaming_split_boundary(
     text: &str,
     max_units: usize,

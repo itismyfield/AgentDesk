@@ -7,10 +7,16 @@ The relay's conservative policy is UTF-16 code units, implemented by
 `str::len()` measures UTF-8 bytes and `chars().count()` measures Unicode
 scalars, so neither may be used to decide a `DISCORD_MSG_LIMIT` boundary.
 
-This intentionally scans production Rust only. Tests may describe byte or
-scalar fixtures, but production comparisons must use the shared helpers.
-Independently named `*_BYTES` budgets are outside this rule because they are
-not Discord message-limit checks.
+This intentionally scans production Rust only.
+
+Catches: direct `DISCORD_MSG_LIMIT` uses, `let limit = ... DISCORD_MSG_LIMIT`,
+and one-line `let NAME = DISCORD_MSG_LIMIT.saturating_sub(...)` aliases.
+Misses: const aliases; `let` names other than `limit` without that
+`saturating_sub` form; helper parameters; multiline comparisons; independent
+literals such as `2000`; code outside `src/`; and `*_tests.rs` files. Those
+known bypasses are tracked in #5304. Tests may describe byte or scalar fixtures,
+but production comparisons caught by this narrow rule must use the shared
+helpers.
 """
 
 from __future__ import annotations
@@ -27,6 +33,9 @@ RAW_COUNT = re.compile(r"(?:\.len\(\)|\.chars\(\)\.count\(\)|\bchar_count\()")
 LIMIT_NAME = re.compile(r"\b(?:super::|discord::)?DISCORD_MSG_LIMIT\b")
 LET_LIMIT = re.compile(
     r"\blet\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=.*\bDISCORD_MSG_LIMIT\b"
+)
+SATURATING_SUB_LIMIT = re.compile(
+    r"\blet\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=.*\bDISCORD_MSG_LIMIT\b.*\.saturating_sub\("
 )
 
 
@@ -86,6 +95,8 @@ def scan(root: Path = REPO_ROOT) -> list[tuple[Path, int, str]]:
                 # functions; their declaration itself is still checked.
                 if match.group("name") == "limit":
                     aliases.add("limit")
+            if match := SATURATING_SUB_LIMIT.search(line):
+                aliases.add(match.group("name"))
             mentions_limit = bool(LIMIT_NAME.search(line)) or any(
                 re.search(rf"\b{re.escape(name)}\b", line) for name in aliases
             )

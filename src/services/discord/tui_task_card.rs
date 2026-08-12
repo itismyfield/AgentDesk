@@ -20,6 +20,8 @@
 
 use serde_json::Value;
 
+use super::formatting::{byte_index_at_discord_message_units, discord_message_units};
+
 /// Preview budget for a free-form Markdown `result` body rendered into a card.
 /// Long subagent reports are truncated to keep the card scannable on mobile; the
 /// full payload remains available via the existing output/log path.
@@ -29,7 +31,6 @@ const RESULT_PREVIEW_CHARS: usize = 1400;
 /// for a free-form Markdown completion report.
 const RESULT_PREVIEW_LINES: usize = 10;
 
-const DISCORD_MESSAGE_LIMIT_CHARS: usize = super::DISCORD_MSG_LIMIT;
 const RESULT_PREVIEW_TRUNCATED_MARKER: &str = "… (truncated)";
 
 /// Structured fields extracted from a `<task-notification>` payload (#3075).
@@ -561,24 +562,23 @@ fn blockquote_preview(preview: &str, first_line_prefix: &str) -> String {
 }
 
 pub(super) fn clamp_discord_message_content(value: &str) -> String {
-    truncate_preview_at_boundary(value, DISCORD_MESSAGE_LIMIT_CHARS)
+    truncate_preview_at_boundary(value, crate::services::discord::DISCORD_MSG_LIMIT)
 }
 
-fn truncate_preview_at_boundary(value: &str, limit: usize) -> String {
-    if value.chars().count() <= limit {
+fn truncate_preview_at_boundary(value: &str, limit_units: usize) -> String {
+    if discord_message_units(value) <= limit_units {
         return value.to_string();
     }
 
-    let marker_chars = RESULT_PREVIEW_TRUNCATED_MARKER.chars().count();
-    if limit <= marker_chars {
-        return RESULT_PREVIEW_TRUNCATED_MARKER
-            .chars()
-            .take(limit)
-            .collect();
+    let marker_units = discord_message_units(RESULT_PREVIEW_TRUNCATED_MARKER);
+    if limit_units <= marker_units {
+        let end = byte_index_at_discord_message_units(RESULT_PREVIEW_TRUNCATED_MARKER, limit_units);
+        return RESULT_PREVIEW_TRUNCATED_MARKER[..end].to_string();
     }
 
-    let content_limit = limit - marker_chars;
-    let truncated = value.chars().take(content_limit).collect::<String>();
+    let content_limit = limit_units - marker_units;
+    let end = byte_index_at_discord_message_units(value, content_limit);
+    let truncated = &value[..end];
     let boundary = preview_boundary(&truncated);
     let clipped = truncated[..boundary].trim_end();
     let clipped = if clipped.is_empty() {
@@ -1011,9 +1011,10 @@ mod tests {
         // The 5000-char filler line must NOT be dumped wholesale.
         assert!(!card.contains(&"x".repeat(5000)));
         assert!(
-            card.chars().count() <= DISCORD_MESSAGE_LIMIT_CHARS,
-            "card should stay within Discord's message limit, got {} chars",
-            card.chars().count()
+            crate::services::discord::formatting::discord_message_units(&card)
+                <= crate::services::discord::DISCORD_MSG_LIMIT,
+            "card should stay within Discord's message limit, got {} units",
+            crate::services::discord::formatting::discord_message_units(&card)
         );
         assert!(
             card.lines().any(|line| line.starts_with("> ")),
@@ -1131,14 +1132,32 @@ Conclusion reached after the table.";
         let card = format_task_notification_card(&note, 1);
 
         assert!(
-            card.chars().count() <= DISCORD_MESSAGE_LIMIT_CHARS,
-            "card must be clamped to Discord's limit, got {} chars",
-            card.chars().count()
+            crate::services::discord::formatting::discord_message_units(&card)
+                <= crate::services::discord::DISCORD_MSG_LIMIT,
+            "card must be clamped to Discord's limit, got {} units",
+            crate::services::discord::formatting::discord_message_units(&card)
         );
         assert!(
             card.contains(RESULT_PREVIEW_TRUNCATED_MARKER),
             "overflowing heading preview should advertise truncation: {card}"
         );
+    }
+
+    #[test]
+    fn task_card_clamps_supplementary_content_by_discord_units_5177() {
+        let result = "😀".repeat(1_500);
+        let card = format_task_notification_card(
+            &parse_task_notification(&payload(&[("status", "completed"), ("result", &result)])),
+            1,
+        );
+
+        assert!(
+            crate::services::discord::formatting::discord_message_units(&card)
+                <= crate::services::discord::DISCORD_MSG_LIMIT,
+            "card must be bounded by Discord UTF-16 units, got {}",
+            crate::services::discord::formatting::discord_message_units(&card)
+        );
+        assert!(card.ends_with(RESULT_PREVIEW_TRUNCATED_MARKER), "{card}");
     }
 
     #[test]

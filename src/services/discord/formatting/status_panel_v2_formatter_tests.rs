@@ -13,14 +13,17 @@ const LIVENESS_FOOTER: &str = "⠸ 계속 처리 중";
 fn plan_streaming_rollover_strips_liveness_footer_from_frozen_chunk_s0() {
     let footer = format!("\n\n{LIVENESS_FOOTER}");
     let body_budget = super::DISCORD_MSG_LIMIT
-        .saturating_sub(super::char_count(&footer) + super::STREAMING_PLACEHOLDER_MARGIN)
+        .saturating_sub(super::discord_message_units(&footer) + super::STREAMING_PLACEHOLDER_MARGIN)
         .max(1);
     let current_portion = "x".repeat(body_budget + 64);
 
     let plan = plan_streaming_rollover(&current_portion, LIVENESS_FOOTER)
         .expect("current portion should roll over once footer budget is reserved");
 
-    assert_eq!(super::char_count(&plan.frozen_chunk), body_budget);
+    assert_eq!(
+        super::discord_message_units(&plan.frozen_chunk),
+        body_budget
+    );
     assert_eq!(plan.frozen_chunk, &current_portion[..plan.split_at]);
     assert!(!plan.frozen_chunk.contains(LIVENESS_FOOTER));
     assert!(plan.display_snapshot.ends_with(&footer));
@@ -37,16 +40,16 @@ fn rollover_seed_starts_as_liveness_footer_only_s0() {
 fn plan_streaming_rollover_reserves_footer_length_before_2000_char_limit_s0() {
     let footer = format!("\n\n{LIVENESS_FOOTER}");
     let body_budget = super::DISCORD_MSG_LIMIT
-        .saturating_sub(super::char_count(&footer) + super::STREAMING_PLACEHOLDER_MARGIN)
+        .saturating_sub(super::discord_message_units(&footer) + super::STREAMING_PLACEHOLDER_MARGIN)
         .max(1);
     let current_portion = "x".repeat(body_budget + 1);
-    assert!(super::char_count(&current_portion) < super::DISCORD_MSG_LIMIT);
+    assert!(super::discord_message_units(&current_portion) < super::DISCORD_MSG_LIMIT);
 
     let plan = plan_streaming_rollover(&current_portion, LIVENESS_FOOTER)
         .expect("body fits raw Discord limit but not the reserved footer budget");
 
     assert_eq!(plan.split_at, body_budget);
-    assert!(super::char_count(&plan.display_snapshot) <= super::DISCORD_MSG_LIMIT);
+    assert!(super::discord_message_units(&plan.display_snapshot) <= super::DISCORD_MSG_LIMIT);
     assert!(plan.display_snapshot.ends_with(&footer));
 }
 
@@ -57,7 +60,7 @@ fn no_rollover_body_and_footer_under_limit_stays_single_message_s0() {
 
     assert!(plan_streaming_rollover(current_portion, LIVENESS_FOOTER).is_none());
     assert_eq!(rendered, format!("{current_portion}\n\n{LIVENESS_FOOTER}"));
-    assert!(super::char_count(&rendered) < super::DISCORD_MSG_LIMIT);
+    assert!(super::discord_message_units(&rendered) < super::DISCORD_MSG_LIMIT);
 }
 
 #[test]
@@ -66,7 +69,7 @@ fn empty_body_with_near_limit_footer_stays_footer_only_s0() {
     let rendered = build_streaming_placeholder_text("", &oversized_footer);
 
     assert!(plan_streaming_rollover("", &oversized_footer).is_none());
-    assert!(super::char_count(&rendered) <= super::DISCORD_MSG_LIMIT);
+    assert!(super::discord_message_units(&rendered) <= super::DISCORD_MSG_LIMIT);
     assert!(rendered.starts_with('⠸'));
     assert!(!rendered.contains("\n\n"));
 }
@@ -431,8 +434,8 @@ mod a0_characterization_tests {
         message_split_boundary, semantic_sentence_split_boundary,
     };
     use super::super::{
-        DISCORD_MSG_LIMIT, char_count, long_message_reply_builders, plan_streaming_rollover,
-        split_message, streaming_split_boundary,
+        DISCORD_MSG_LIMIT, discord_message_units, long_message_reply_builders,
+        plan_streaming_rollover, split_message, streaming_split_boundary,
     };
 
     // -------------------------------------------------------------------
@@ -476,7 +479,7 @@ mod a0_characterization_tests {
             body.len() > DISCORD_MSG_LIMIT,
             "UTF-8 byte length reproduces the old premature split condition"
         );
-        assert_eq!(char_count(&body), 700);
+        assert_eq!(discord_message_units(&body), 700);
 
         let chunks = split_message(&body);
         assert_eq!(chunks.len(), 1, "700 Korean chars fit one Discord message");
@@ -508,7 +511,7 @@ mod a0_characterization_tests {
         assert!(
             chunks
                 .iter()
-                .all(|chunk| char_count(chunk) <= DISCORD_MSG_LIMIT),
+                .all(|chunk| discord_message_units(chunk) <= DISCORD_MSG_LIMIT),
             "every emitted chunk must fit Discord's character limit"
         );
         assert_eq!(
@@ -524,11 +527,15 @@ mod a0_characterization_tests {
         let chunks = split_message(&body);
         assert_eq!(chunks.len(), 2);
         assert_eq!(
-            char_count(&chunks[0]),
+            discord_message_units(&chunks[0]),
             1990,
             "hard split at effective_limit"
         );
-        assert_eq!(char_count(&chunks[1]), 2500 - 1990, "remainder length");
+        assert_eq!(
+            discord_message_units(&chunks[1]),
+            2500 - 1990,
+            "remainder length"
+        );
         // Order + completeness: concatenation reproduces the input.
         assert_eq!(format!("{}{}", chunks[0], chunks[1]), body);
     }
@@ -607,8 +614,8 @@ mod a0_characterization_tests {
         // the relay must not prepend chunk-index prefixes.
         assert!(!first.starts_with('['));
         assert!(!second.starts_with('['));
-        assert!(char_count(first) <= DISCORD_MSG_LIMIT);
-        assert!(char_count(second) <= DISCORD_MSG_LIMIT);
+        assert!(discord_message_units(first) <= DISCORD_MSG_LIMIT);
+        assert!(discord_message_units(second) <= DISCORD_MSG_LIMIT);
     }
 
     // -------------------------------------------------------------------
@@ -770,7 +777,7 @@ mod a0_characterization_tests {
 
     #[test]
     fn a0_plan_streaming_rollover_reserves_footer_and_margin_before_the_2000_cliff() {
-        // body_budget = 2000 - ((2 + char_count(status)) + 10). For "STATUS":
+        // body_budget = 2000 - ((2 + discord_message_units(status)) + 10). For "STATUS":
         // footer "\n\nSTATUS" = 8; body_budget = 2000 - 18 = 1982.
         let status = "STATUS";
         let body = "Z".repeat(2500);
@@ -784,7 +791,7 @@ mod a0_characterization_tests {
             "Z".repeat(1982),
             "frozen chunk is body[..split_at]"
         );
-        assert_eq!(char_count(&plan.frozen_chunk), plan.split_at);
+        assert_eq!(discord_message_units(&plan.frozen_chunk), plan.split_at);
     }
 
     #[test]
