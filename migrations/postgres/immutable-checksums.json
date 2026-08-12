@@ -538,7 +538,7 @@
     },
     {
       "path": "migrations/postgres/0105_intake_outbox_dispatched_status.sql",
-      "sha256": "24dd8548c0449930acaa2d5eba6ddc89a8a2338908a86bc1d70c3547b071960f",
+      "sha256": "246c360d9e9f5396b70db59e279e63003e9995df518b4b81f712378945ee8c0b",
       "version": 105
     }
   ],

@@ -2,9 +2,11 @@
 
 ### Audited touches
 - 2026-08-12 (#5071 T2-M): `intake_router_hook.rs` and `owner_record.rs` extract open-status
-  domain constant to prevent drift. Query logic unchanged; no new ownership, fencing, or
-  multinode assumption added. Owner-fenced routes (forwarded mode with instance_id + generation)
-  use same constant pattern; caller ownership and lease assumptions preserved.
+  domain constant to prevent drift. The predicate widens to include `dispatched`, but the result
+  set is unchanged while no production writer emits that status; no new ownership, fencing, or
+  multinode assumption is added. Owner-fenced routes (forwarded mode with instance_id + generation)
+  use the same constant pattern; caller ownership and lease assumptions are preserved. T2-W must
+  also widen the post-accept failure/SLA predicates when it activates the `dispatched` writer.
 - 2026-08-05 (#5035): `runtime_bootstrap.rs` changes only the signature of the
   bootstrap stale-queued-placeholder delete helper (it now receives `SharedData`
   so each card is re-decided by `placeholder_controller::queued_card_gate`). The
