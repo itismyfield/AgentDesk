@@ -82,11 +82,10 @@ SECTIONS = ("rule1", "rule2", "rule3", "rule4")
 UNBASELINED_SECTIONS = ("rule5",)
 PR_WORKFLOW_REL = ".github/workflows/ci-pr.yml"
 CONFIGURATION_ERROR_FINDINGS = frozenset({"jobs-empty"})
-# Findings that mean "this gate could not analyse a PR job at all". They fail
-# the check rather than warning, because the alternative -- reporting nothing
-# about a job whose body was never read -- is indistinguishable from a clean
-# result, and rule5 is now the only enforcing layer.
-UNANALYZABLE_FINDINGS = frozenset({"pr-job-delegates-to-reusable-workflow"})
+# Findings that mean this gate could not fully analyse an input. They fail the
+# check rather than warning, because omitted scope is indistinguishable from a
+# clean result.
+UNANALYZABLE_FINDINGS = frozenset({"pr-job-delegates-to-reusable-workflow", "unresolved-external-test-module"})
 
 
 def _load_coverage_module(repo_root: Path):
@@ -414,9 +413,7 @@ def _inside_test_region(offset: int, ranges: Iterable[ModuleRange], external: bo
     return external or any(item.is_test and item.start < offset < item.end for item in ranges)
 
 
-def _external_test_files(
-    repo_root: Path, coverage, counter: list[int] | None = None
-) -> set[Path]:
+def _external_test_files(repo_root: Path, coverage, counter: list[int] | None = None, findings: list[Finding] | None = None) -> set[Path]:
     src_root = (repo_root / "src").resolve()
     targets: set[Path] = set()
     for path in sorted(src_root.rglob("*.rs")):
@@ -426,18 +423,26 @@ def _external_test_files(
         for match in _ATTR_MOD.finditer(clean):
             if match.group("term") != ";" or not _CFG_TEST.search(match.group("attrs")):
                 continue
-            redirect = _PATH_ATTR.search(match.group("attrs"))
+            path_attr = re.search(r"#\s*\[\s*path\s*=", match.group("attrs"))
+            redirect = _PATH_ATTR.match(source, match.start("attrs") + path_attr.start(), match.end("attrs")) if path_attr else None
             parents = _scope_at(match.start(), ranges)
             if redirect:
-                target = path.parent.joinpath(*parents, redirect.group("path"))
+                base = path.with_suffix("") if parents and path.name not in {"mod.rs", "lib.rs", "main.rs"} else path.parent
+                target = base.joinpath(*parents, redirect.group("path"))
                 candidates = (target,)
             else:
-                base = path.parent.joinpath(*parents)
+                base = path.parent if path.name in {"mod.rs", "lib.rs", "main.rs"} else path.with_suffix("")
+                base = base.joinpath(*parents)
                 name = match.group("name")
                 candidates = (base / f"{name}.rs", base / name / "mod.rs")
             target = next((candidate.resolve() for candidate in candidates if candidate.is_file()), None)
             if target and target.is_relative_to(src_root):
                 targets.add(target)
+            elif findings is not None:
+                line = source.count("\n", 0, match.start()) + 1
+                tried = ", ".join(os.path.relpath(candidate, repo_root) for candidate in candidates)
+                detail = f"mod {match.group('name')}; did not resolve inside src; tried: {tried}"
+                findings.append(Finding("unresolved-external-test-module", f"{path.relative_to(repo_root)}:{line}", detail))
     return targets
 
 
@@ -482,7 +487,10 @@ def discover_pg_inventory(
     impl (an impl is conservatively treated as one type-level item), and UFCS
     receivers containing generic, tuple, reference, or ``dyn`` type syntax. A
     real Rust parser would be required to cover those forms without broad false
-    positives.
+    positives. It skips ``src/main.rs``, ``src/bin/**`` (the current tree has
+    no such directory), sources injected by ``include!``, and attribute-free
+    external mods inside ``#[cfg(test)]`` inline modules. ``#[ignore]`` tests
+    remain selection/debt because their execution belongs to the ignore ledger.
     """
     repo_root = repo_root.resolve()
     _matching_brace_cached.cache_clear()
@@ -490,7 +498,7 @@ def discover_pg_inventory(
     src_root = (repo_root / "src").resolve()
     aliases = _aliases(repo_root, coverage)
     brace_counter = [0]
-    external_tests = _external_test_files(repo_root, coverage, brace_counter)
+    external_tests = _external_test_files(repo_root, coverage, brace_counter, findings)
     declared_tests = {
         test
         for test_names in coverage.discover_test_inventory(repo_root).values()
@@ -644,7 +652,9 @@ def discover_pg_inventory(
             physical = (*physical_base, *_scope_at(match.start(), ranges), match.group("name"))
             logical = coverage._normalize_alias_path(physical, aliases)
             name = "::".join(logical)
-            if name in declared_tests:
+            # Reaching an external file through a cfg(test) declaration already
+            # proves that its direct tests are part of the library test target.
+            if name in declared_tests or external:
                 records.append((name, str(path.relative_to(repo_root)), logical[:-1], body))
 
     by_path: dict[tuple[tuple[str, ...], str], set[tuple[tuple[str, ...], str, str]]] = {}
@@ -1342,7 +1352,7 @@ def analyze(repo_root: Path, allowlist_path: Path | None = None) -> Analysis:
 
 
 def render_manifest(inventory: PgInventory) -> str:
-    lines = ["# Generated by scripts/check_pg_test_lane_membership.py --write-snapshots.", "[files]"]
+    lines = ["# Generated by scripts/check_pg_test_lane_membership.py --write-snapshots --manifest-only.", "[files]"]
     lines.extend(sorted(inventory.files))
     lines.append("[modules]")
     lines.extend(sorted(inventory.modules))
@@ -1428,29 +1438,38 @@ def check_analysis(
     if configuration_errors:
         return 2
     if unanalyzable:
-        print(
-            f"FAIL: {len(unanalyzable)} {PR_WORKFLOW_REL} job(s) named above "
-            "delegate to a workflow this gate does not read, so no rule can "
-            "say anything about what they run. Unanalysable is not clean: "
-            "either move the cargo-test steps back into "
-            f"{PR_WORKFLOW_REL} where the rules can see them, or teach this "
-            "gate to follow the call.",
-            file=sys.stderr,
-        )
+        if any(finding.kind == "pr-job-delegates-to-reusable-workflow" for finding in unanalyzable):
+            print(
+                f"FAIL: {len(unanalyzable)} {PR_WORKFLOW_REL} job(s) named above "
+                "delegate to a workflow this gate does not read, so no rule can "
+                "say anything about what they run. Unanalysable is not clean: "
+                "either move the cargo-test steps back into "
+                f"{PR_WORKFLOW_REL} where the rules can see them, or teach this "
+                "gate to follow the call.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"FAIL: {len(unanalyzable)} input(s) named above could not be analysed. "
+                "Unanalysable is not clean; resolve each diagnostic before treating "
+                "the inventory as complete.",
+                file=sys.stderr,
+            )
         failed = True
     expected_manifest = render_manifest(analysis.inventory)
     if actual_manifest != expected_manifest:
         print("FAIL: PG test-lane manifest drift.", file=sys.stderr)
         print(
-            "Run `python3 scripts/check_pg_test_lane_membership.py --write-snapshots` "
-            "after intentional PG test inventory changes. This rewrites BOTH the manifest "
-            "and baseline; inspect both diffs.",
+            "Run `python3 scripts/check_pg_test_lane_membership.py --write-snapshots "
+            "--manifest-only` after intentional PG test inventory changes. It rewrites "
+            "only the manifest.",
             file=sys.stderr,
         )
         print(
-            "If the change creates a new rule violation, snapshot regeneration will not "
-            "excuse it: fix the test/module/workflow, or add a narrowly scoped entry with "
-            f"an inline reason to {allowlist_label}.",
+            "`--write-snapshots` also rewrites the baseline; new live debt recorded there "
+            "then fails candidate baseline-growth checks. Fix the test/module/workflow, or "
+            f"for a proven classifier false positive add a narrowly scoped entry with an "
+            f"inline reason to {allowlist_label}.",
             file=sys.stderr,
         )
         failed = True
@@ -1569,8 +1588,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--allowlist", type=Path)
     parser.add_argument("--baseline-ref", default=os.environ.get("TEST_LANE_BASELINE_REF", "HEAD"))
-    parser.add_argument("--write-snapshots", action="store_true", help="rewrite the manifest and baseline from the current tree")
+    parser.add_argument("--write-snapshots", action="store_true", help="rewrite the manifest and baseline from the current tree; baseline growth can make the subsequent candidate check exit 1")
+    parser.add_argument(
+        "--manifest-only",
+        action="store_true",
+        help="with --write-snapshots, rewrite only the manifest and preserve the baseline",
+    )
     args = parser.parse_args(argv)
+    if args.manifest_only and not args.write_snapshots:
+        parser.error("--manifest-only requires --write-snapshots")
     root = args.repo_root.resolve()
     baseline = args.baseline.resolve() if args.baseline else root / BASELINE_REL
     manifest = args.manifest.resolve() if args.manifest else root / MANIFEST_REL
@@ -1591,10 +1617,8 @@ def main(argv: list[str] | None = None) -> int:
                 # job whose body was never read has no state to snapshot, so
                 # regenerating under one would record silence as agreement.
                 print(
-                    f"FAIL: refusing to write snapshots while "
-                    f"{len(unanalyzable)} {PR_WORKFLOW_REL} job(s) cannot be "
-                    f"analysed. Move their steps back into that file, or "
-                    f"teach this gate to follow the call, then rerun.",
+                    f"FAIL: refusing to write snapshots while {len(unanalyzable)} "
+                    "input(s) cannot be analysed. Resolve the diagnostics, then rerun.",
                     file=sys.stderr,
                 )
                 return 1
@@ -1625,8 +1649,11 @@ def main(argv: list[str] | None = None) -> int:
                 if contract_rc:
                     return contract_rc
             manifest.write_text(render_manifest(analysis.inventory), "utf-8")
-            baseline.write_text(render_baseline(analysis.debts), "utf-8")
-            print(f"wrote {manifest} and {baseline}")
+            if args.manifest_only:
+                print(f"wrote {manifest}; preserved {baseline}")
+            else:
+                baseline.write_text(render_baseline(analysis.debts), "utf-8")
+                print(f"wrote {manifest} and {baseline}")
             return 0
         return check(root, baseline, manifest, args.baseline_ref, allowlist)
     except (OSError, ValueError) as exc:
