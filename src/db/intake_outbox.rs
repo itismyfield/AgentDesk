@@ -2715,7 +2715,8 @@ mod postgres_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn force_fail_and_retry_as_new_preserves_unknown_source_and_appends_pending_attempt() {
+    async fn force_fail_and_retry_as_new_preserves_unknown_source_and_appends_pending_attempt()
+    -> Result<(), ForceFailError> {
         // Official unknown is terminal evidence, not a failure alias. Operator
         // retry appends a child but must not rewrite the source status/error.
         let pg_db = TestPostgresDb::create().await;
@@ -2741,9 +2742,15 @@ mod postgres_tests {
         .await
         .expect("settle source as official unknown"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
 
-        let new_id = force_fail_and_retry_as_new(&pool, source_id, "operator: retry approved")
-            .await
-            .expect("force-fail");
+        let new_id =
+            match force_fail_and_retry_as_new(&pool, source_id, "operator: retry approved").await {
+                Ok(new_id) => new_id,
+                Err(error) => {
+                    pool.close().await;
+                    pg_db.drop().await;
+                    return Err(error);
+                }
+            };
 
         let source: (IntakeOutboxStatus, Option<String>) =
             sqlx::query_as("SELECT status, last_error FROM intake_outbox WHERE id = $1")
@@ -2773,6 +2780,7 @@ mod postgres_tests {
 
         pool.close().await;
         pg_db.drop().await;
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
