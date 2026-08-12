@@ -242,6 +242,10 @@ pub(crate) async fn sweep_failed_pre_accept_once(
     let retry_after_secs = retry_authorization_secs.map(|value| value.max(1) as i64);
     let _ = local_leader;
     let mut tx = pool.begin().await?;
+    // LIMITS: both candidate queries splice the shared open-status SQL with
+    // `format!`, so their intake-outbox `failed_pre_accept` predicates retain
+    // string literals. Binding them would require separate placeholder
+    // renumbering across the two dynamic statements.
     let capable_source_sql = format!(
         r#"
         SELECT parent.*
