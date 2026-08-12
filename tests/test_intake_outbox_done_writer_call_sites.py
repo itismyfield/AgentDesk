@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -39,9 +42,18 @@ class SourceContractTests(unittest.TestCase):
         self.assertEqual(guard.SCAN_ROOT.as_posix(), "src")
 
     def test_ci_script_checks_runs_the_gate_and_its_tests(self):
+        """Check wiring spelling/order, not its own execution.
+
+        This test confirms that the wiring exists, but its own execution depends
+        on that wiring, so it cannot detect deletion of the wiring itself.
+        """
         wiring = (ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
         self.assertIn("scripts/check_intake_outbox_done_writer_call_sites.py", wiring)
         self.assertIn("tests.test_intake_outbox_done_writer_call_sites", wiring)
+        self.assertLess(
+            wiring.index("scripts/check_intake_outbox_done_writer_call_sites.py"),
+            wiring.index("tests.test_intake_outbox_done_writer_call_sites"),
+        )
 
     def test_allowlisted_symbol_is_imported_by_its_owner_function_file(self):
         worker = (ROOT / "src/services/cluster/intake_worker.rs").read_text(encoding="utf-8")
@@ -74,8 +86,42 @@ class DiscriminationTests(unittest.TestCase):
         ok, message = self.run_guard(self.fixture())
         self.assertTrue(ok, message)
 
+    def test_script_process_exit_code_maps_pass_and_failure(self):
+        passing = subprocess.run(
+            [sys.executable, str(SCRIPT)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(passing.returncode, 0, passing.stderr)
+
+        root = self.fixture()
+        copied_script = root / "scripts/check_intake_outbox_done_writer_call_sites.py"
+        copied_script.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(SCRIPT, copied_script)
+        write(
+            root,
+            "src/services/cluster/receipt_sink.rs",
+            "use crate::db::intake_outbox::mark_done;\n"
+            "fn receipt() { mark_done(); }\n",
+        )
+        failing = subprocess.run(
+            [sys.executable, str(copied_script)],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(failing.returncode, 0, failing.stdout + failing.stderr)
+        self.assertIn("UNLISTED call site", failing.stderr)
+
     def test_allowlist_entry_deleted_is_fail_closed(self):
         ok, message = self.run_guard(self.fixture(), {"mark_done": {}})
+        self.assertFalse(ok)
+        self.assertIn("mark_done: UNLISTED call site", message)
+
+        ok, message = self.run_guard(self.fixture(), {})
         self.assertFalse(ok)
         self.assertIn("mark_done: UNLISTED call site", message)
 
@@ -84,8 +130,8 @@ class DiscriminationTests(unittest.TestCase):
         write(
             root,
             "src/services/cluster/receipt_sink.rs",
-            "use crate::db::intake_outbox::mark_done;\n"
-            "fn receipt() { mark_done(); }\n",
+            "use crate::db::intake_outbox;\n"
+            "fn receipt() { intake_outbox::mark_done(); }\n",
         )
         ok, message = self.run_guard(root)
         self.assertFalse(ok)

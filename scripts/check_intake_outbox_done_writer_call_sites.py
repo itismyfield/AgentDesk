@@ -19,13 +19,16 @@ a call added, deleted, moved, or found in an unlisted file fails closed.
 WHAT THIS GATE DOES NOT GUARANTEE. This is a lexical scan, not Rust parsing or
 name resolution. It sees a bare `mark_done(...)` only in a file that directly
 imports it from `crate::db::intake_outbox`, plus the literal fully-qualified
-path. `use ...::mark_done as finish; finish(...)`, renamed re-exports,
-name-constructing macros, function-value indirection, trait dispatch, and a
-new direct SQL `UPDATE intake_outbox ... status = 'done'` are not seen. It also
-does not prove a call is reachable, successful, or the right lifecycle action.
-Conversely, a same-spelled free function in a file importing this writer could
-be over-counted. Comments, strings, `*_tests.rs`, and `#[cfg(test)]` regions
-are excluded, but other cfgs are counted without target evaluation. These are
+path. Glob imports, nested-brace imports, `super::intake_outbox::mark_done`
+imports, `use ...::mark_done as finish; finish(...)`, renamed re-exports,
+name-constructing macros, same-file helper indirection, function-value
+indirection, trait dispatch, and a new direct SQL `UPDATE intake_outbox ...
+status = 'done'` are not seen. It also does not prove a call is reachable,
+successful, or the right lifecycle action. Conversely, a same-spelled free
+function in a file importing this writer could be over-counted. Comments,
+strings, `*_tests.rs`, and `#[cfg(test)]` regions are excluded, but other cfgs
+are counted without target evaluation. The `ci-script-checks.sh` wiring check
+also cannot detect removal of the wiring that runs its own test. These are
 declared bounds, not silent skips: the gate only claims exact textual call-site
 counts for this writer spelling within those bounds.
 """
@@ -34,6 +37,7 @@ from __future__ import annotations
 
 import re
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 SYMBOL = "mark_done"
@@ -49,7 +53,9 @@ DIRECT_IMPORT_RE = re.compile(
     r"(?:mark_done\b|\{[^}]*\bmark_done\b)",
     re.DOTALL,
 )
-FULLY_QUALIFIED_RE = re.compile(r"\b(?:crate\s*::\s*)?db\s*::\s*intake_outbox\s*::\s*mark_done\s*\(")
+FULLY_QUALIFIED_RE = re.compile(
+    r"\b(?:(?:crate\s*::\s*)?db\s*::\s*)?intake_outbox\s*::\s*mark_done\s*\("
+)
 CFG_TEST_RE = re.compile(r"#\[\s*cfg\s*\(\s*(?:all|any)?\s*\(?\s*test\b")
 
 
@@ -162,7 +168,7 @@ def production_text(path: Path) -> str:
 
 def production_call_sites(root: Path) -> tuple[dict[str, dict[str, int]], int, int]:
     """Return ``(counts, scanned_files, skipped_test_files)`` over ``src/``."""
-    found = {symbol: {} for symbol in EXPECTED_CALL_SITES}
+    found: defaultdict[str, defaultdict[str, int]] = defaultdict(lambda: defaultdict(int))
     scanned = 0
     skipped = 0
     for path in sorted((root / SCAN_ROOT).rglob("*.rs")):
@@ -181,21 +187,24 @@ def production_call_sites(root: Path) -> tuple[dict[str, dict[str, int]], int, i
                 continue
             hits += len(CALL_RE.findall(line))
         if hits:
-            found[SYMBOL][path.relative_to(root).as_posix()] = hits
+            found[SYMBOL][path.relative_to(root).as_posix()] += hits
     return found, scanned, skipped
 
 
 LIMITS = (
-    "lexical scan, not Rust parsing or reachability proof; aliases, renamed re-exports, "
-    "name-constructing macros, value indirection, trait dispatch, and direct SQL writers are "
-    "NOT seen; same-spelled free functions may be over-counted; cfg other than cfg(test) is not evaluated"
+    "lexical scan, not Rust parsing or reachability proof; glob/nested-brace/super imports, "
+    "aliases, renamed re-exports, name-constructing macros, same-file helper/value indirection, "
+    "trait dispatch, and direct SQL writers are NOT seen; same-spelled free functions may be "
+    "over-counted; cfg other than cfg(test) is not evaluated; ci-script-checks.sh wiring cannot "
+    "protect its own execution"
 )
 
 
 def check(root: Path) -> tuple[bool, str]:
     found, scanned, skipped = production_call_sites(root)
     problems: list[str] = []
-    for symbol, expected in EXPECTED_CALL_SITES.items():
+    for symbol in sorted(set(EXPECTED_CALL_SITES) | set(found)):
+        expected = EXPECTED_CALL_SITES.get(symbol, {})
         actual = found[symbol]
         for rel in sorted(set(expected) | set(actual)):
             want = expected.get(rel, 0)

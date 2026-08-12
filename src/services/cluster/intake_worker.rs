@@ -576,8 +576,10 @@ mod tests {
         // This is a source contract because exercising `run_intake_worker_tick`
         // requires a production-shaped SharedData + Discord executor harness,
         // while this module's lane intentionally remains PG-free and synchronous.
-        // It pins the current T2 precondition: only the executor's `Ok(())`
-        // branch invokes the intake lifecycle's `mark_done` writer.
+        // It pins the current T2 precondition: the executor's `Ok(())` branch
+        // textually contains the intake lifecycle's `mark_done` call.
+        // This test does not strip comments or strings; the Python call-site
+        // gate owns that filtering layer.
         let worker_source = include_str!("intake_worker.rs");
         let tick_start = worker_source
             .find("pub(crate) async fn run_intake_worker_tick(")
@@ -601,12 +603,14 @@ mod tests {
         assert_eq!(
             result[ok_start..err_start].matches("mark_done(").count(),
             1,
-            "execute_intake_turn_core Ok(()) must call mark_done exactly once"
+            "execute_intake_turn_core Ok(()) must textually contain mark_done exactly once; \
+             for a T2 migration, update this test and the gate allowlist together"
         );
         assert_eq!(
             result[err_start..].matches("mark_done(").count(),
             0,
-            "execute_intake_turn_core Err must not call mark_done"
+            "execute_intake_turn_core Err must not textually contain mark_done; for a T2 migration, \
+             update this test and the gate allowlist together"
         );
     }
 
