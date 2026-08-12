@@ -127,13 +127,15 @@ unless script_check_commands == ["./scripts/ci-script-checks.sh"]
   exit 1
 end
 
-# #5308: this step must stay outside ci-script-checks.sh. It inspects the
-# aggregate's writer-gate command inventory, so removing an aggregate command
-# cannot also suppress the check that observes the removal. The aggregate's
-# later hardening invocation independently rejects deletion or weakening of
-# this direct step, while this step's own hardening invocation rejects deletion
-# of the aggregate step. Either survivor therefore detects deletion of the
-# other; coordinated changes to both surfaces remain a review boundary.
+# #5308: the external step runs the writer-wiring checker, its unittest, and
+# this hardening guard. The checker pins the aggregate's hardening and fast
+# wiring-unittest invocations; the aggregate hardening invocation validates the
+# external step shape, and the aggregate fast wiring unittest exercises that
+# validation. Removing only the external step or only either aggregate observer
+# therefore leaves another observer statically invoked. This static invocation
+# chain ends when one diff removes the external step together with both
+# aggregate observer invocations; branch-protection configuration is not part
+# of this contract.
 writer_wiring_steps = Array(script_checks_job["steps"]).select do |step|
   step.is_a?(Hash) && step["name"] == "Protect writer gate aggregate wiring (#5308)"
 end

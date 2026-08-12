@@ -23,7 +23,11 @@ EXPECTED_COMMANDS = (
     '"$PYTHON" -m unittest tests.test_durable_frontier_writer_call_sites',
     '"$PYTHON" scripts/check_intake_outbox_done_writer_call_sites.py',
     '"$PYTHON" -m unittest tests.test_intake_outbox_done_writer_call_sites',
+    "./scripts/check-ci-runner-hardening.sh",
+    '"$PYTHON" -m unittest tests.test_fast_check_ci_wiring',
 )
+
+AGGREGATE_SELF_PROTECTION_COMMANDS = EXPECTED_COMMANDS[-2:]
 
 
 class WriterGateCiWiringTests(unittest.TestCase):
@@ -65,6 +69,17 @@ class WriterGateCiWiringTests(unittest.TestCase):
                     errors,
                 )
 
+    def test_process_rejects_each_aggregate_self_protection_deletion(self) -> None:
+        baseline = self.fixture_text()
+        for command in AGGREGATE_SELF_PROTECTION_COMMANDS:
+            with self.subTest(command=command):
+                mutated = baseline.replace(f"{command}\n", "", 1)
+                self.assertNotEqual(mutated, baseline)
+                result = self.run_process(mutated)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(command, result.stderr)
+                self.assertIn("found 0", result.stderr)
+
     def test_comment_echo_and_indentation_do_not_count(self) -> None:
         command = EXPECTED_COMMANDS[0]
         decoys = (
@@ -98,7 +113,7 @@ class WriterGateCiWiringTests(unittest.TestCase):
     def test_process_exit_code_maps_pass_and_failure(self) -> None:
         passing = self.run_process(self.fixture_text())
         self.assertEqual(passing.returncode, 0, passing.stderr)
-        self.assertIn("5 exact aggregate invocations protected", passing.stdout)
+        self.assertIn("7 exact aggregate invocations protected", passing.stdout)
 
         command = EXPECTED_COMMANDS[4]
         failing = self.run_process(self.fixture_text().replace(f"{command}\n", "", 1))

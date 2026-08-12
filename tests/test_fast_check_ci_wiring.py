@@ -540,6 +540,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         step = (
             "      - name: Protect writer gate aggregate wiring (#5308)\n"
+            "        timeout-minutes: 10\n"
+            "        shell: bash\n"
             "        run: |\n"
             "          python3 scripts/check_writer_gate_ci_wiring.py\n"
             "          python3 -m unittest tests.test_writer_gate_ci_wiring\n"
