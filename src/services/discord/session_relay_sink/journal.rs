@@ -420,6 +420,155 @@ fn execution_id(
 #[rustfmt::skip] #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ShadowClassification { CandidateDelivered, SettledWithoutTransport, Unknown, ObservationGap }
 
+/// Consumers can observe only a verified intake binding and fail-closed state,
+/// never the stored event rows or either classifier.
+#[allow(dead_code)]
+pub(in crate::services::discord) struct ObligationWindowJudgment {
+    delivered_outbox_id: Option<i64>,
+    malformed: bool,
+}
+
+#[allow(dead_code)]
+impl ObligationWindowJudgment {
+    pub(in crate::services::discord) fn delivered_outbox_id(&self) -> Option<i64> {
+        self.delivered_outbox_id
+    }
+
+    pub(in crate::services::discord) fn malformed(&self) -> bool {
+        self.malformed
+    }
+}
+
+#[allow(dead_code)]
+pub(in crate::services::discord) async fn judge_obligation_window(
+    pool: &sqlx::PgPool,
+    obligation_id: Uuid,
+) -> Result<ObligationWindowJudgment, sqlx::Error> {
+    match pg_store::load_obligation_window(pool, obligation_id).await? {
+        pg_store::LoadedObligationWindow::Events(events) => {
+            let (delivered, binding, malformed) = exact_delivery_predicate(&events);
+            Ok(ObligationWindowJudgment {
+                delivered_outbox_id: delivered.then_some(binding).flatten(),
+                malformed,
+            })
+        }
+        pg_store::LoadedObligationWindow::Malformed => Ok(malformed_judgment()),
+    }
+}
+
+fn malformed_judgment() -> ObligationWindowJudgment {
+    ObligationWindowJudgment {
+        delivered_outbox_id: None,
+        malformed: true,
+    }
+}
+
+fn exact_delivery_predicate(events: &[JournalEvent]) -> (bool, Option<i64>, bool) {
+    let Some(first) = events.first() else {
+        return (false, None, false);
+    };
+    if events.iter().enumerate().any(|(index, event)| {
+        event.obligation_id != first.obligation_id
+            || !event_shape_is_valid(event)
+            || events[..index]
+                .iter()
+                .any(|prior| prior.kind == event.kind || prior.seq == event.seq)
+    }) {
+        return (false, None, true);
+    }
+
+    let mut intake_outbox_id = None;
+    for event in events {
+        let Some(value) = event.canonical_payload.get("intake_outbox_id") else {
+            continue;
+        };
+        let Some(value) = value.as_i64().filter(|value| *value > 0) else {
+            return (false, None, true);
+        };
+        if event.kind != "O" || intake_outbox_id.replace(value).is_some() {
+            return (false, None, true);
+        }
+    }
+
+    let mut attempt_id = None;
+    for event in events.iter().filter(|event| event.attempt_id.is_some()) {
+        if attempt_id.is_some_and(|attempt| event.attempt_id != Some(attempt)) {
+            return (false, None, true);
+        }
+        attempt_id = event.attempt_id;
+    }
+    let mut frontier = None;
+    for event in events
+        .iter()
+        .filter(|event| matches!(event.kind, "A" | "C"))
+    {
+        let Some(value) = event_frontier(event) else {
+            return (false, None, true);
+        };
+        if frontier.is_some_and(|existing| existing != value) {
+            return (false, None, true);
+        }
+        frontier = Some(value);
+    }
+    if events
+        .iter()
+        .find(|event| event.kind == "T")
+        .is_some_and(|event| !receipt_is_exact(event))
+    {
+        return (false, None, true);
+    }
+
+    let has = |kind| events.iter().any(|event| event.kind == kind);
+    let delivered = events.len() == 4
+        && ["O", "A", "T", "C"].iter().all(|kind| has(*kind))
+        && !has("S")
+        && !has("U");
+    (delivered, intake_outbox_id, false)
+}
+
+fn event_shape_is_valid(event: &JournalEvent) -> bool {
+    let (seq, attempt, receipt) = match event.kind {
+        "O" => (0, false, false),
+        "A" => (1, true, false),
+        "T" => (2, true, true),
+        "C" => (3, true, false),
+        "S" => (1, false, false),
+        "U" => (2, true, false),
+        _ => return false,
+    };
+    event.seq == seq && event.attempt_id.is_some() == attempt && event.receipt.is_some() == receipt
+}
+
+fn event_frontier(event: &JournalEvent) -> Option<(u64, u64)> {
+    let start = event.canonical_payload.get("frontier_start")?.as_u64()?;
+    let end = event.canonical_payload.get("frontier_end")?.as_u64()?;
+    (start <= end).then_some((start, end))
+}
+
+fn receipt_is_exact(event: &JournalEvent) -> bool {
+    let Some(receipt) = event.receipt.as_ref() else {
+        return false;
+    };
+    !receipt.requested_channel_id.is_empty()
+        && receipt.requested_channel_id == receipt.returned_channel_id
+        && !receipt.message_id.is_empty()
+        && event
+            .canonical_payload
+            .get("requested_channel_id")
+            .and_then(Value::as_str)
+            == Some(receipt.requested_channel_id.as_str())
+        && event
+            .canonical_payload
+            .get("returned_channel_id")
+            .and_then(Value::as_str)
+            == Some(receipt.returned_channel_id.as_str())
+        && event
+            .canonical_payload
+            .get("message_id")
+            .and_then(Value::as_str)
+            == Some(receipt.message_id.as_str())
+}
+
 /// Q3 classification for one obligation's shadow observation window.
 #[rustfmt::skip]
 pub(super) fn classify_shadow_observation(events: &[JournalEvent], grace_elapsed: bool) -> ShadowClassification {
@@ -783,6 +932,37 @@ mod tests {
         assert_eq!(classify_shadow_observation(&events, false), ShadowClassification::Unknown, "a commit without transport confirmation is not a candidate");
         let settled = vec![event(obligation_id, None, "O", 0, json!({"canonical_key_sha256":"fixture"})), event(obligation_id, None, "S", 1, json!({"reason":"suppressed"}))];
         assert_eq!(classify_shadow_observation(&settled, false), ShadowClassification::SettledWithoutTransport);
+    }
+
+    fn exact_window(binding: Option<Value>) -> Vec<JournalEvent> {
+        let (obligation, attempt) = (Uuid::from_u128(100), Uuid::from_u128(101));
+        let mut output = json!({}); if let Some(value) = binding { output["intake_outbox_id"] = value; }
+        vec![event(obligation,None,"O",0,output), event(obligation,Some(attempt),"A",1,json!({"frontier_start":10,"frontier_end":20})), transport_event(obligation,attempt,DiscordTransportReceipt{requested_channel_id:"10".into(),returned_channel_id:"10".into(),message_id:"30".into()}), event(obligation,Some(attempt),"C",3,json!({"frontier_start":10,"frontier_end":20}))]
+    }
+
+    #[test]
+    fn obligation_window_exact_delivery_predicate_is_exhaustive_and_fail_closed() {
+        let base = exact_window(Some(json!(42)));
+        assert_eq!(exact_delivery_predicate(&base), (true, Some(42), false));
+        assert_eq!(exact_delivery_predicate(&exact_window(None)), (true, None, false));
+        assert_eq!(exact_delivery_predicate(&[]), (false, None, false));
+        let assert_malformed = |name: &str, events: Vec<JournalEvent>| assert_eq!(exact_delivery_predicate(&events), (false,None,true), "{name}");
+        for value in [json!(0),json!(-1),json!(42.5),json!("42"),json!(u64::MAX)] { assert_malformed("binding", exact_window(Some(value))); }
+        for kind in ["O","A","T","C"] { let mut case=base.clone(); case.retain(|event|event.kind!=kind); let result=exact_delivery_predicate(&case); assert!(!result.0 && !result.2, "missing {kind}"); }
+        let obligation=base[0].obligation_id; let attempt=base[1].attempt_id;
+        assert_eq!(exact_delivery_predicate(&vec![base[0].clone(),event(obligation,None,"S",1,json!({}))]),(false,Some(42),false));
+        assert_eq!(exact_delivery_predicate(&vec![base[0].clone(),base[1].clone(),event(obligation,attempt,"U",2,json!({}))]),(false,Some(42),false));
+        let mut case=base.clone(); case.push(base[0].clone()); assert_malformed("duplicate kind and slot",case);
+        let mut case=base.clone(); case[3].obligation_id=Uuid::from_u128(102); assert_malformed("obligation",case);
+        let mut case=base.clone(); case[3].seq=2; assert_malformed("slot",case);
+        let mut case=base.clone(); case[0].attempt_id=attempt; assert_malformed("attempt nullability",case);
+        let mut case=base.clone(); case[2].attempt_id=Some(Uuid::from_u128(103)); assert_malformed("attempt identity",case);
+        let mut case=base.clone(); case[3].canonical_payload["frontier_end"]=json!(21); assert_malformed("frontier identity",case);
+        let mut case=base.clone(); case[1].canonical_payload=json!({"frontier_start":21,"frontier_end":20}); assert_malformed("frontier order",case);
+        let mut case=base.clone(); case[2].receipt.as_mut().unwrap().returned_channel_id="11".into(); assert_malformed("receipt channel",case);
+        let mut case=base.clone(); case[2].canonical_payload["message_id"]=json!(31); assert_malformed("receipt payload",case);
+        let mut case=base.clone(); case[1].canonical_payload["intake_outbox_id"]=json!(42); assert_malformed("binding owner",case);
+        let mut case=base.clone(); case[0].kind="future"; assert_malformed("closed kind",case);
     }
 
     #[tokio::test]

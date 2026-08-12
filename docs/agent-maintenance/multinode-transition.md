@@ -1,6 +1,17 @@
 # Multinode Transition
 
+> Last refreshed: 2026-08-13 (against #5071 T2-W S-R2a read-only facade).
+
 ### Audited touches
+- 2026-08-13 (#5071 T2-W S-R2a): the journal-owned obligation-window facade
+  reads every row in `(event_seq, event_id)` order and restores only closed
+  `O/A/T/C/S/U` events. It fails closed on malformed kinds, slots, attempts,
+  frontiers, receipts, obligation IDs, or optional positive top-level
+  `intake_outbox_id` evidence. Delivered requires exactly one `O/A/T/C`, no
+  `S/U`, one consistent attempt and frontier, and an exact same-channel receipt.
+  Only the verified outbox ID and malformed bit escape; there is no production
+  caller, reconciler, writer, transaction owner, or authority change, so runtime
+  behavior is unchanged.
 - 2026-08-13 (#5071 T2-W S-R1): migrations 0107-0109 add the nullable
   `dispatched_at` clock, the official terminal `unknown` status, two NOT VALID
   CHECKs, and valid concurrent indexes for future stale-dispatch and journal
