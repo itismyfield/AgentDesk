@@ -3,6 +3,49 @@ use serde_json::{Map, Value};
 use super::{
     RUNTIME_CONFIG_EXPLICIT_KEYS_META, explicit_runtime_config_keys, is_runtime_config_key,
 };
+use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
+
+pub(super) fn validate_runtime_config_values(values: &Map<String, Value>) -> ServiceResult<()> {
+    let compact_window = values
+        .get("claudeAutoCompactWindowTokens")
+        .map(|value| {
+            value.as_u64().ok_or_else(|| {
+                ServiceError::bad_request("claudeAutoCompactWindowTokens must be an integer")
+                    .with_code(ErrorCode::Settings)
+                    .with_operation("put_runtime_config.validate")
+            })
+        })
+        .transpose()?;
+    crate::config::validate_claude_auto_compact_window_tokens(compact_window).map_err(|error| {
+        ServiceError::bad_request(error.to_string())
+            .with_code(ErrorCode::Settings)
+            .with_operation("put_runtime_config.validate")
+    })?;
+
+    if let Some(value) = values.get("paneEnvInjections") {
+        let entries = value.as_array().ok_or_else(|| {
+            ServiceError::bad_request("paneEnvInjections must be an array of strings")
+                .with_code(ErrorCode::Settings)
+                .with_operation("put_runtime_config.validate")
+        })?;
+        let entries = entries
+            .iter()
+            .map(|entry| {
+                entry.as_str().map(str::to_string).ok_or_else(|| {
+                    ServiceError::bad_request("paneEnvInjections must be an array of strings")
+                        .with_code(ErrorCode::Settings)
+                        .with_operation("put_runtime_config.validate")
+                })
+            })
+            .collect::<ServiceResult<Vec<_>>>()?;
+        crate::config::validate_pane_env_injections(&entries).map_err(|error| {
+            ServiceError::bad_request(error.to_string())
+                .with_code(ErrorCode::Settings)
+                .with_operation("put_runtime_config.validate")
+        })?;
+    }
+    Ok(())
+}
 
 /// Normalize a PUT while keeping explicit-override authority server-owned.
 /// Supplied metadata is exact (including empty); metadata-less updates retain omitted

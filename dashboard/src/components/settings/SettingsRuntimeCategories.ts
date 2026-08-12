@@ -20,6 +20,26 @@ export const CATEGORIES: Array<{
   fields: ConfigField[];
 }> = [
   {
+    id: "paneEnvironment",
+    titleKo: "Pane 환경",
+    titleEn: "Pane Environment",
+    descriptionKo: "새 pane에 적용할 Claude 압축 정책과 환경 설정 표면입니다.",
+    descriptionEn: "Configuration surface for Claude compaction policy and new-pane environment settings.",
+    fields: [
+      {
+        key: "claudeAutoCompactWindowTokens",
+        labelKo: "Claude 자동 압축 윈도우",
+        labelEn: "Claude auto-compact window",
+        descriptionKo: "조기 압축을 막는 정책 하한이며 백엔드 오버플로 방지를 보장하지 않습니다.",
+        descriptionEn: "A policy floor that prevents early compaction; it does not guarantee backend overflow prevention.",
+        unit: "tokens",
+        min: 200000,
+        max: 1000000,
+        step: 50000,
+      },
+    ],
+  },
+  {
     id: "polling",
     titleKo: "폴링 & 타이머",
     titleEn: "Polling & Timers",

@@ -62,9 +62,9 @@ export interface RuntimeConfigResponse {
   explicit_keys?: string[];
 }
 
-export type RuntimeConfigValue = number | string | boolean;
+export type RuntimeConfigValue = number | string | boolean | string[];
 export type RuntimeConfigMap = Record<string, RuntimeConfigValue>;
-export type RuntimeConfigSaveBody = Record<string, RuntimeConfigValue | string[] | undefined>;
+export type RuntimeConfigSaveBody = Record<string, RuntimeConfigValue | undefined>;
 
 export type EscalationMode = "pm" | "user" | "scheduled";
 

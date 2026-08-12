@@ -11,7 +11,7 @@ use sqlx::Row;
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 
 mod runtime_config_put;
-use runtime_config_put::with_explicit_runtime_config_keys;
+use runtime_config_put::{validate_runtime_config_values, with_explicit_runtime_config_keys};
 
 const RETIRED_SETTINGS_JSON_KEYS: &[&str] = &[
     "autoUpdateEnabled",
@@ -33,6 +33,8 @@ const RETIRED_CONFIG_KEYS: &[&str] = &[
 ];
 
 const RUNTIME_CONFIG_KEYS: &[&str] = &[
+    "claudeAutoCompactWindowTokens",
+    "paneEnvInjections",
     "dispatchPollSec",
     "agentSyncSec",
     "githubIssueSyncSec",
@@ -441,33 +443,16 @@ impl SettingsService {
             .as_deref()
             .and_then(|raw| serde_json::from_str(raw).ok())
             .unwrap_or_else(|| json!({}));
-        let defaults = runtime_config_defaults_map(self.config.as_ref());
-
-        let mut current = defaults.clone();
-        if let Some(saved_obj) = saved.as_object() {
-            for (key, value) in saved_obj {
-                if key == RUNTIME_CONFIG_EXPLICIT_KEYS_META {
-                    continue;
-                }
-                current.insert(key.clone(), value.clone());
-            }
-        }
-        let mut explicit_keys = saved
-            .as_object()
-            .map(explicit_runtime_config_keys)
-            .unwrap_or_default()
-            .into_iter()
-            .collect::<Vec<_>>();
-        explicit_keys.sort();
-
-        Ok(RuntimeConfigResponse {
-            current,
-            defaults,
-            explicit_keys,
-        })
+        Ok(runtime_config_response_from_saved(
+            &saved,
+            self.config.as_ref(),
+        ))
     }
 
     pub async fn put_runtime_config(&self, body: Value) -> ServiceResult<SettingsOkResponse> {
+        if let Some(values) = body.as_object() {
+            validate_runtime_config_values(values)?;
+        }
         let pool = self.pg_pool("put_runtime_config.pg_pool")?;
         if let Some(values) = body.as_object() {
             let mut tx = pool.begin().await.map_err(|error| {
@@ -517,6 +502,33 @@ impl SettingsService {
             write_runtime_config_pg_async(pool, &value_str).await?;
         }
         Ok(SettingsOkResponse::ok())
+    }
+}
+
+fn runtime_config_response_from_saved(
+    saved: &Value,
+    config: &crate::config::Config,
+) -> RuntimeConfigResponse {
+    let defaults = runtime_config_defaults_map(config);
+    let mut current = defaults.clone();
+    if let Some(saved_obj) = saved.as_object() {
+        for (key, value) in saved_obj {
+            if key != RUNTIME_CONFIG_EXPLICIT_KEYS_META {
+                current.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    let mut explicit_keys = saved
+        .as_object()
+        .map(explicit_runtime_config_keys)
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<Vec<_>>();
+    explicit_keys.sort();
+    RuntimeConfigResponse {
+        current,
+        defaults,
+        explicit_keys,
     }
 }
 
@@ -824,6 +836,14 @@ fn runtime_config_yaml_overrides(config: &crate::config::Config) -> Map<String, 
     let mut overrides = Map::new();
     insert_runtime_number(
         &mut overrides,
+        "claudeAutoCompactWindowTokens",
+        config.runtime.claude_auto_compact_window_tokens,
+    );
+    if let Some(entries) = config.runtime.pane_env_injections.as_ref() {
+        overrides.insert("paneEnvInjections".to_string(), json!(entries));
+    }
+    insert_runtime_number(
+        &mut overrides,
         "dispatchPollSec",
         config.runtime.dispatch_poll_sec,
     );
@@ -926,6 +946,8 @@ fn runtime_config_yaml_overrides(config: &crate::config::Config) -> Map<String, 
 
 fn runtime_config_defaults_map(config: &crate::config::Config) -> Map<String, Value> {
     let mut defaults = json!({
+        "claudeAutoCompactWindowTokens": 500000,
+        "paneEnvInjections": [],
         "dispatchPollSec": 30,
         "agentSyncSec": 300,
         "githubIssueSyncSec": 900,
@@ -1472,11 +1494,71 @@ mod tests {
 
     #[test]
     fn runtime_config_key_lookup_exposes_only_known_value_keys() {
+        assert!(is_runtime_config_key("claudeAutoCompactWindowTokens"));
+        assert!(is_runtime_config_key("paneEnvInjections"));
         assert!(is_runtime_config_key("maxEntryRetries"));
         assert!(is_runtime_config_key("staleDispatchedRecoverNullDispatch"));
         assert!(!is_runtime_config_key("runtime-config"));
         assert!(!is_runtime_config_key(RUNTIME_CONFIG_EXPLICIT_KEYS_META));
         assert!(!is_runtime_config_key("privateBlobField"));
+    }
+
+    #[test]
+    fn env_injection_runtime_config_rejects_invalid_setting_values() {
+        let invalid_payloads = [
+            json!({"claudeAutoCompactWindowTokens": 199999}),
+            json!({"claudeAutoCompactWindowTokens": 1000001}),
+            json!({"claudeAutoCompactWindowTokens": "650000"}),
+            json!({"paneEnvInjections": "SAFE=value"}),
+            json!({"paneEnvInjections": [7]}),
+            json!({"paneEnvInjections": ["=value"]}),
+            json!({"paneEnvInjections": ["MISSING_EQUALS"]}),
+            json!({"paneEnvInjections": ["BAD-NAME=value"]}),
+            json!({"paneEnvInjections": [format!("{}=value", "A".repeat(129))]}),
+            json!({"paneEnvInjections": ["SAFE=line\nfeed"]}),
+            json!({"paneEnvInjections": ["SAFE=carriage\rreturn"]}),
+            json!({"paneEnvInjections": ["SAFE=nul\0byte"]}),
+            json!({"paneEnvInjections": [format!("SAFE={}", "x".repeat(4097))]}),
+            json!({"paneEnvInjections": ["path=/tmp/bin"]}),
+            json!({"paneEnvInjections": ["DYLD_CUSTOM=value"]}),
+        ];
+        for payload in invalid_payloads {
+            let error = validate_runtime_config_values(
+                payload
+                    .as_object()
+                    .expect("runtime-config fixture is an object"),
+            )
+            .expect_err("invalid env-injection settings must be rejected");
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn env_injection_runtime_config_round_trips_saved_values() {
+        let input = json!({
+            "claudeAutoCompactWindowTokens": 650000,
+            "paneEnvInjections": ["SAFE=value", "SHELL_TEXT=$HOME; 'quoted'"]
+        });
+        let values = input.as_object().cloned().expect("runtime-config object");
+        validate_runtime_config_values(&values).expect("valid runtime-config values");
+        let marked = with_explicit_runtime_config_keys(values, None);
+        let stored = serde_json::to_string(&Value::Object(marked)).expect("serialize stored blob");
+        let loaded: Value = serde_json::from_str(&stored).expect("read stored blob");
+        let response =
+            runtime_config_response_from_saved(&loaded, &crate::config::Config::default());
+
+        assert_eq!(
+            response.current.get("claudeAutoCompactWindowTokens"),
+            Some(&json!(650000))
+        );
+        assert_eq!(
+            response.current.get("paneEnvInjections"),
+            Some(&json!(["SAFE=value", "SHELL_TEXT=$HOME; 'quoted'"]))
+        );
+        assert_eq!(
+            response.explicit_keys,
+            vec!["claudeAutoCompactWindowTokens", "paneEnvInjections"]
+        );
     }
 
     #[test]
@@ -1513,7 +1595,9 @@ mod tests {
 
         service
             .put_runtime_config(json!({
+                "claudeAutoCompactWindowTokens": 650000,
                 "maxEntryRetries": 7,
+                "paneEnvInjections": ["SAFE=value"],
                 "staleDispatchedRecoverNullDispatch": false,
                 "staleDispatchedTerminalStatuses": ["failed", "expired"]
             }))
@@ -1522,11 +1606,15 @@ mod tests {
         assert_runtime_blob_and_no_mirrors(
             &pool,
             &json!({
+                "claudeAutoCompactWindowTokens": 650000,
                 "maxEntryRetries": 7,
+                "paneEnvInjections": ["SAFE=value"],
                 "staleDispatchedRecoverNullDispatch": false,
                 "staleDispatchedTerminalStatuses": ["failed", "expired"],
                 "__runtimeConfigExplicitKeys": [
+                    "claudeAutoCompactWindowTokens",
                     "maxEntryRetries",
+                    "paneEnvInjections",
                     "staleDispatchedRecoverNullDispatch",
                     "staleDispatchedTerminalStatuses"
                 ]
@@ -1643,6 +1731,8 @@ mod tests {
         config.runtime.max_entry_retries = Some(3);
         let service = SettingsService::new(Some(pool.clone()), Arc::new(config.clone()));
         let cli_put = crate::cli::client::runtime_config_payload(json!({
+            "claudeAutoCompactWindowTokens": 650000,
+            "paneEnvInjections": ["SAFE=value"],
             "maxEntryRetries": 7
         }))
         .expect("normalize CLI PUT body");
@@ -1672,8 +1762,23 @@ mod tests {
             .get_runtime_config()
             .await
             .expect("GET runtime config after startup seed");
+        assert_eq!(
+            seeded.current.get("claudeAutoCompactWindowTokens"),
+            Some(&json!(650000))
+        );
+        assert_eq!(
+            seeded.current.get("paneEnvInjections"),
+            Some(&json!(["SAFE=value"]))
+        );
         assert_eq!(seeded.current.get("maxEntryRetries"), Some(&json!(7)));
-        assert_eq!(seeded.explicit_keys, vec!["maxEntryRetries"]);
+        assert_eq!(
+            seeded.explicit_keys,
+            vec![
+                "claudeAutoCompactWindowTokens",
+                "maxEntryRetries",
+                "paneEnvInjections"
+            ]
+        );
 
         drop(service);
         pool.close().await;

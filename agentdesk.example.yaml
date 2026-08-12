@@ -395,6 +395,8 @@ placeholder:
   two_message_panel_enabled: false
 
 runtime:
+  claude_auto_compact_window_tokens: 500000
+  pane_env_injections: []
   requested_timeout_min: 45
   in_progress_stale_min: 120
   long_turn_alert_interval_min: 30

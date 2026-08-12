@@ -1611,6 +1611,10 @@ pub struct RuntimeSettingsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_compact_lower_bound_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_auto_compact_window_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_env_injections: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_poll_sec: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_sync_sec: Option<u64>,
@@ -1767,6 +1771,8 @@ impl RuntimeSettingsConfig {
             && self.context_compact_percent_codex.is_none()
             && self.context_compact_percent_claude.is_none()
             && self.context_compact_lower_bound_tokens.is_none()
+            && self.claude_auto_compact_window_tokens.is_none()
+            && self.pane_env_injections.is_none()
             && self.dispatch_poll_sec.is_none()
             && self.agent_sync_sec.is_none()
             && self.github_issue_sync_sec.is_none()
@@ -1870,6 +1876,91 @@ mod runtime_hook_registry_config_tests {
         assert_eq!(empty.tui_hook_buffer_ttl_secs, None);
         assert_eq!(empty.tui_unclaimed_stop_delay_ms, None);
         assert_eq!(empty.tui_hook_registry_enabled, None);
+    }
+}
+
+#[cfg(test)]
+mod pane_env_runtime_config_tests {
+    use super::*;
+
+    #[test]
+    fn env_injection_keys_round_trip_through_yaml() {
+        let yaml = "claude_auto_compact_window_tokens: 650000\n\
+                    pane_env_injections:\n\
+                      - SAFE=value\n\
+                      - SHELL_TEXT=$HOME; 'quoted'\n";
+        let parsed: RuntimeSettingsConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.claude_auto_compact_window_tokens, Some(650_000));
+        assert_eq!(
+            parsed.pane_env_injections,
+            Some(vec![
+                "SAFE=value".to_string(),
+                "SHELL_TEXT=$HOME; 'quoted'".to_string(),
+            ])
+        );
+        let reserialized = serde_yaml::to_string(&parsed).unwrap();
+        let reparsed: RuntimeSettingsConfig = serde_yaml::from_str(&reserialized).unwrap();
+        assert_eq!(reparsed, parsed);
+        assert!(!parsed.is_empty());
+    }
+
+    #[test]
+    fn yaml_validation_rejects_invalid_env_injection_settings() {
+        let cases = [
+            (Some(199_999), vec!["SAFE=value".to_string()]),
+            (Some(1_000_001), vec!["SAFE=value".to_string()]),
+            (None, vec!["=value".to_string()]),
+            (None, vec!["MISSING_EQUALS".to_string()]),
+            (None, vec!["BAD-NAME=value".to_string()]),
+            (None, vec![format!("{}=value", "A".repeat(129))]),
+            (None, vec!["SAFE=line\nfeed".to_string()]),
+            (None, vec!["SAFE=carriage\rreturn".to_string()]),
+            (None, vec!["SAFE=nul\0byte".to_string()]),
+            (None, vec![format!("SAFE={}", "x".repeat(4097))]),
+            (None, vec!["path=/tmp/bin".to_string()]),
+            (None, vec!["DYLD_CUSTOM=value".to_string()]),
+        ];
+        for (window, entries) in cases {
+            let mut config = Config::default();
+            config.runtime.claude_auto_compact_window_tokens = window;
+            config.runtime.pane_env_injections = Some(entries);
+            validate_config(&config).expect_err("invalid YAML runtime settings must be rejected");
+        }
+    }
+
+    #[test]
+    fn reserved_env_names_are_case_insensitive_and_prefix_complete() {
+        let reserved = [
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+            "DISABLE_AUTO_COMPACT",
+            "DISABLE_COMPACT",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+            "CLAUDE_CODE_DISABLE_1M_CONTEXT",
+            "ANTHROPIC_BASE_URL",
+            "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+            "PATH",
+            "LD_PRELOAD",
+            "DYLD_INSERT_LIBRARIES",
+            "DYLD_LIBRARY_PATH",
+            "IFS",
+            "BASH_ENV",
+            "ENV",
+            "SHELLOPTS",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "LD_CUSTOM",
+            "DYLD_CUSTOM",
+            "BASH_FUNC_CUSTOM",
+        ];
+        for key in reserved {
+            assert!(reserved_pane_env_name(key), "reserved key accepted: {key}");
+            assert!(
+                reserved_pane_env_name(&key.to_ascii_lowercase()),
+                "lowercase reserved key accepted: {key}"
+            );
+        }
+        assert!(!reserved_pane_env_name("SAFE_ENV_NAME"));
     }
 }
 
@@ -2802,7 +2893,82 @@ pub fn load_from_path(path: &Path) -> Result<Config> {
 }
 
 fn validate_config(config: &Config) -> Result<()> {
-    validate_escalation_schedule(&config.escalation.schedule)
+    validate_escalation_schedule(&config.escalation.schedule)?;
+    validate_claude_auto_compact_window_tokens(config.runtime.claude_auto_compact_window_tokens)?;
+    if let Some(entries) = config.runtime.pane_env_injections.as_deref() {
+        validate_pane_env_injections(entries)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_claude_auto_compact_window_tokens(value: Option<u64>) -> Result<()> {
+    if let Some(value) = value
+        && !(200_000..=1_000_000).contains(&value)
+    {
+        bail!("claude auto-compact window must be between 200000 and 1000000 tokens");
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_pane_env_injections(entries: &[String]) -> Result<()> {
+    for entry in entries {
+        let (key, value) = entry
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("pane env injection must use KEY=VALUE syntax"))?;
+        if !valid_pane_env_name(key) {
+            bail!("pane env injection key must be a valid POSIX name of at most 128 bytes");
+        }
+        if reserved_pane_env_name(key) {
+            bail!("pane env injection key is reserved: {key}");
+        }
+        if value.len() > 4096 {
+            bail!("pane env injection value must be at most 4096 bytes");
+        }
+        if value
+            .bytes()
+            .any(|byte| matches!(byte, b'\0' | b'\n' | b'\r'))
+        {
+            bail!("pane env injection value must not contain NUL or line breaks");
+        }
+    }
+    Ok(())
+}
+
+fn valid_pane_env_name(key: &str) -> bool {
+    let bytes = key.as_bytes();
+    (1..=128).contains(&bytes.len())
+        && matches!(bytes[0], b'A'..=b'Z' | b'a'..=b'z' | b'_')
+        && bytes[1..]
+            .iter()
+            .all(|byte| matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_'))
+}
+
+fn reserved_pane_env_name(key: &str) -> bool {
+    const EXACT: &[&str] = &[
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+        "DISABLE_AUTO_COMPACT",
+        "DISABLE_COMPACT",
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+        "CLAUDE_CODE_DISABLE_1M_CONTEXT",
+        "ANTHROPIC_BASE_URL",
+        "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+        "PATH",
+        "LD_PRELOAD",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "IFS",
+        "BASH_ENV",
+        "ENV",
+        "SHELLOPTS",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    ];
+    let upper = key.to_ascii_uppercase();
+    EXACT.contains(&upper.as_str())
+        || upper.starts_with("LD_")
+        || upper.starts_with("DYLD_")
+        || upper.starts_with("BASH_FUNC_")
 }
 
 fn validate_escalation_schedule(schedule: &EscalationScheduleConfig) -> Result<()> {

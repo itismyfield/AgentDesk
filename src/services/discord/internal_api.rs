@@ -239,6 +239,46 @@ pub(super) async fn get_config_entries() -> Result<Value, String> {
     request_json(Method::GET, "/api/settings/config").await
 }
 
+pub(super) async fn get_runtime_config() -> Result<serde_json::Map<String, Value>, String> {
+    runtime_config_current(request_json(Method::GET, "/api/settings/runtime-config").await?)
+}
+
+fn runtime_config_current(body: Value) -> Result<serde_json::Map<String, Value>, String> {
+    body.get("current")
+        .and_then(Value::as_object)
+        .cloned()
+        .ok_or_else(|| "runtime-config response is missing current object".to_string())
+}
+
+#[cfg(test)]
+mod runtime_config_getter_tests {
+    use super::*;
+
+    #[test]
+    fn runtime_config_getter_returns_current_values_not_defaults() {
+        let current = runtime_config_current(serde_json::json!({
+            "current": {
+                "claudeAutoCompactWindowTokens": 650000,
+                "paneEnvInjections": ["SAFE=value"]
+            },
+            "defaults": {
+                "claudeAutoCompactWindowTokens": 500000,
+                "paneEnvInjections": []
+            }
+        }))
+        .expect("extract runtime-config current values");
+
+        assert_eq!(
+            current.get("claudeAutoCompactWindowTokens"),
+            Some(&serde_json::json!(650000))
+        );
+        assert_eq!(
+            current.get("paneEnvInjections"),
+            Some(&serde_json::json!(["SAFE=value"]))
+        );
+    }
+}
+
 pub(super) async fn get_escalation_settings() -> Result<Value, String> {
     request_json(Method::GET, "/api/settings/escalation").await
 }
