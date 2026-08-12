@@ -9,8 +9,11 @@
   `IntakeOutboxStatus::Unknown` is a decoded domain value, while
   `UnknownIntakeStatus` remains the error for unregistered spellings such as
   `future_status`. Operator retry preserves an unknown source and only appends
-  a pending child. This schema slice adds no dispatched/unknown writer,
-  reconciler, or delivery authority.
+  a pending child; retry-as-new is an explicit operator action and does not
+  reinterpret or overwrite that unknown evidence. This schema slice adds no
+  dispatched/unknown writer, reconciler, or delivery authority. Migration 0109
+  is forward-compatible substrate; its binding writer does not exist before
+  S-W1.
 
   Rollout order is strict: deploy S-R1-capable binaries to the entire fleet
   before any writer can create `unknown`. Migrations 0107-0109 establish an
@@ -24,12 +27,15 @@
   Migration 0107 drops and re-adds the status CHECK as NOT VALID, so even a
   manually validated pre-S-R1 status CHECK becomes unvalidated again. Existing
   manually-created `dispatched` rows with a NULL clock are preserved because
-  no validation scan runs, but a later UPDATE of such a row is rejected by the
-  new clock CHECK. Merely observing the NOT VALID constraints is therefore not
-  a sufficient capability signal. Before authority activation, a later gate
-  must remediate bad rows and require completed validation, or prove bad-row
-  absence fail-closed, in addition to checking both concurrent indexes are
-  present and `indisvalid=true`.
+  no validation scan runs. A later UPDATE is rejected only if it leaves both
+  `status = 'dispatched'` and `dispatched_at IS NULL`; remediation may instead
+  fill the clock or move the row to a terminal status. Merely observing the NOT
+  VALID constraints is therefore not a sufficient capability signal. Before
+  authority activation, a later gate must remediate bad rows and require
+  completed validation, or prove bad-row absence fail-closed, in addition to
+  checking both concurrent indexes are present and `indisvalid=true`. Recovery
+  that records an already-applied manual migration must use the exact checksum
+  pinned in `immutable-checksums.json`.
 - 2026-08-13 (#5071 T2-R): intake-outbox row status now decodes through the
   strong Rust enum, and owner-record status writes bind that enum only for the
   intake-outbox domain. Unknown database spellings fail row decoding instead

@@ -1342,29 +1342,31 @@ mod migration_pg_tests {
                 "(event_kind = 'O'::text)",
             ),
         ] {
-            let catalog: (String, String, bool, String, String) = sqlx::query_as(
-                "SELECT n.nspname, t.relname, i.indisvalid,
+            let catalog: (String, String, String, bool, String, String) = sqlx::query_as(
+                "SELECT index_ns.nspname, table_ns.nspname, t.relname, i.indisvalid,
                         pg_get_indexdef(i.indexrelid, 1, true),
                         pg_get_expr(i.indpred, i.indrelid)
                    FROM pg_index i
                    JOIN pg_class c ON c.oid = i.indexrelid
                    JOIN pg_class t ON t.oid = i.indrelid
-                   JOIN pg_namespace n ON n.oid = t.relnamespace
-                  WHERE c.relname = $1",
+                   JOIN pg_namespace index_ns ON index_ns.oid = c.relnamespace
+                   JOIN pg_namespace table_ns ON table_ns.oid = t.relnamespace
+                  WHERE index_ns.nspname = 'public' AND c.relname = $1",
             )
             .bind(index)
             .fetch_one(&pool)
             .await
             .expect("read S-R1 concurrent index catalog contract"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
-            assert_eq!(catalog.0, "public", "{index} must live in public");
-            assert_eq!(catalog.1, table, "{index} must bind the intended table");
-            assert!(catalog.2, "fresh migration must build valid index {index}");
+            assert_eq!(catalog.0, "public", "{index} index must live in public");
+            assert_eq!(catalog.1, "public", "{index} table must live in public");
+            assert_eq!(catalog.2, table, "{index} must bind the intended table");
+            assert!(catalog.3, "fresh migration must build valid index {index}");
             assert_eq!(
-                catalog.3, column_or_expression,
+                catalog.4, column_or_expression,
                 "{index} must retain its exact indexed expression"
             );
             assert_eq!(
-                catalog.4, predicate,
+                catalog.5, predicate,
                 "{index} must retain its exact partial predicate"
             );
         }
