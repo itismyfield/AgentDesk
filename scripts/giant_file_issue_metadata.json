@@ -1,9 +1,10 @@
 {
   "schema_version": 1,
+  "refreshed_at": "2026-08-12T10:47:00Z",
   "issues": [
     {
       "number": 4710,
-      "state": "open",
+      "state": "closed",
       "title": "decompose(4519): server-runtime grandfathered giant follow-ups",
       "owners": [
         "server-runtime"
@@ -50,7 +51,7 @@
     },
     {
       "number": 4711,
-      "state": "open",
+      "state": "closed",
       "title": "decompose(4519): automation-pipeline grandfathered giant follow-ups",
       "owners": [
         "automation-pipeline"
@@ -84,7 +85,7 @@
     },
     {
       "number": 4712,
-      "state": "open",
+      "state": "closed",
       "title": "decompose(4519): discord-relay grandfathered giant follow-ups",
       "owners": [
         "discord-finalizer",
@@ -124,7 +125,7 @@
     },
     {
       "number": 4713,
-      "state": "open",
+      "state": "closed",
       "title": "decompose(4519): voice-runtime grandfathered giant follow-up",
       "owners": [
         "voice-runtime"

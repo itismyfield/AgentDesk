@@ -5,11 +5,12 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
+import os
 import re
 import sys
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, date, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Iterable
 from pathlib import Path
 
@@ -26,6 +27,10 @@ HTTP_METHODS = ("delete", "get", "head", "options", "patch", "post", "put")
 TEST_FILE_NAMES = {"integration_tests.rs", "tests.rs"}
 GIANT_FILE_REGISTRY = REPO_ROOT / "scripts" / "giant_file_registry.toml"
 GIANT_FILE_REGISTRY_DOC = GENERATED_DOCS_DIR / "giant-file-registry.md"
+GIANT_FILE_ISSUE_SNAPSHOT_MAX_AGE = timedelta(days=7)
+GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV = (
+    "GIANT_FILE_REGISTRY_ENFORCE_CLOSED_ISSUES"
+)
 
 # Only whole test *modules* count as test LoC — inline `#[cfg(test)]` guards on
 # production struct fields, conditional logic, or test-only helper fns left in
@@ -169,6 +174,12 @@ class GiantFileRegistration:
 # Kept as a module seam so registry validation has deterministic date coverage.
 def today_utc() -> date:
     return datetime.now(timezone.utc).date()
+
+
+# Kept as a separate seam so issue-snapshot freshness tests do not control the
+# deadline clock used by ``build_giant_registrations``.
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -920,13 +931,41 @@ def _is_real_decompose_issue(value: str) -> bool:
 
 
 def load_giant_file_issue_metadata() -> dict[int, dict[str, object]]:
-    """Load the checked-in, reviewable issue snapshot used by the CI registry gate."""
+    """Load and freshness-check the issue snapshot used by the offline CI gate.
+
+    The seven-day maximum age limits how long this checked-in snapshot can hide
+    a changed GitHub issue state to one weekly refresh interval without making
+    CI depend on network availability. This check guarantees only the age and
+    internal shape of the snapshot; it does not prove that GitHub still matches
+    the snapshot between manual refreshes.
+    """
     try:
         payload = json.loads(read_text(GIANT_FILE_ISSUE_METADATA))
     except (OSError, json.JSONDecodeError) as error:
         raise ParseError(f"invalid giant-file issue metadata: {error}") from error
+    if not isinstance(payload, dict):
+        raise ParseError("giant-file issue metadata must be a JSON object")
     if payload.get("schema_version") != 1 or not isinstance(payload.get("issues"), list):
         raise ParseError("giant-file issue metadata must use schema_version 1 and an issues list")
+    refreshed_at = payload.get("refreshed_at")
+    if not isinstance(refreshed_at, str):
+        raise ParseError("giant-file issue metadata must include a refreshed_at UTC timestamp")
+    try:
+        refreshed = datetime.strptime(refreshed_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError as error:
+        raise ParseError(
+            "giant-file issue metadata refreshed_at must use YYYY-MM-DDTHH:MM:SSZ"
+        ) from error
+    snapshot_age = now_utc() - refreshed
+    if snapshot_age < timedelta(0):
+        raise ParseError("giant-file issue metadata refreshed_at cannot be in the future")
+    if snapshot_age > GIANT_FILE_ISSUE_SNAPSHOT_MAX_AGE:
+        raise ParseError(
+            "giant-file issue metadata snapshot is older than 7 days; refresh it with "
+            "`python3 scripts/refresh_giant_file_issue_metadata.py`"
+        )
     issues: dict[int, dict[str, object]] = {}
     for issue in payload["issues"]:
         if not isinstance(issue, dict):
@@ -940,7 +979,8 @@ def load_giant_file_issue_metadata() -> dict[int, dict[str, object]]:
             not isinstance(number, int)
             or isinstance(number, bool)
             or number <= 0
-            or state != "open"
+            or not isinstance(state, str)
+            or state not in {"open", "closed"}
             or not isinstance(title, str)
             or not _is_real_value(title)
             or not isinstance(owners, list)
@@ -960,6 +1000,18 @@ def load_giant_file_issue_metadata() -> dict[int, dict[str, object]]:
     return issues
 
 
+def closed_issue_enforcement_enabled() -> bool:
+    """Return whether closed issue pointers are fatal for this invocation."""
+    value = os.environ.get(GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV, "0")
+    if value in {"", "0"}:
+        return False
+    if value == "1":
+        return True
+    raise ParseError(
+        f"{GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV} must be unset, 0, or 1"
+    )
+
+
 def validate_decompose_issue_metadata(
     path: str,
     owner: str,
@@ -972,7 +1024,7 @@ def validate_decompose_issue_metadata(
     number = int(match.group("number"))
     issue = issues.get(number)
     if issue is None:
-        return f"[[entry]] {path!r} decompose_issue #{number} is absent from checked-in open issue metadata"
+        return f"[[entry]] {path!r} decompose_issue #{number} is absent from checked-in issue metadata"
     owners = issue["owners"]
     if owner not in owners:
         return (
@@ -986,6 +1038,25 @@ def validate_decompose_issue_metadata(
             f"#{number} checked-in file scope"
         )
     return None
+
+
+def closed_decompose_issue_problem(
+    path: str,
+    decompose_issue: str,
+    issues: dict[int, dict[str, object]],
+) -> str | None:
+    """Name one registry entry whose checked-in issue state is closed."""
+    match = _ISSUE_RE.fullmatch(decompose_issue.strip())
+    if match is None:
+        return None
+    number = int(match.group("number"))
+    issue = issues.get(number)
+    if issue is None or issue["state"] != "closed":
+        return None
+    return (
+        f"[[entry]] {path!r} has a dead deadline: decompose_issue #{number} "
+        "is closed in the checked-in issue snapshot"
+    )
 
 
 def _markdown_table_value(value: str) -> str:
@@ -1113,6 +1184,7 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
     }
 
     problems: list[str] = []
+    closed_issue_problems: list[str] = []
     seen: set[str] = set()
 
     # Closed baseline: `grandfathered` must be a subset of the frozen
@@ -1177,6 +1249,11 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
                 )
                 if issue_problem:
                     problems.append(issue_problem)
+                closed_issue_problem = closed_decompose_issue_problem(
+                    path, decompose_issue, issue_metadata
+                )
+                if closed_issue_problem:
+                    closed_issue_problems.append(closed_issue_problem)
             if keep_reason:
                 problems.append(f"[[entry]] {path!r} shrink forbids keep_reason")
         elif decision == _DECISION_KEEP:
@@ -1249,6 +1326,23 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
             "grandfathered metadata backfill is closed; promote every remaining path "
             "to an explicit [[entry]] decision: " + ", ".join(sorted(awaiting_backfill))
         )
+
+    # #5234 slice 1 reports every dead deadline without making unrelated PRs
+    # fail while AC3 still has entry-specific disposition decisions open.
+    # AC3 is complete only when those entries have been dispositioned and the
+    # aggregate CI invocation enables GIANT_FILE_REGISTRY_ENFORCE_CLOSED_ISSUES=1.
+    if closed_issue_problems:
+        if closed_issue_enforcement_enabled():
+            problems.extend(closed_issue_problems)
+        else:
+            for problem in sorted(closed_issue_problems):
+                print(f"WARNING: giant-file registry: {problem}", file=sys.stderr)
+            print(
+                "WARNING: giant-file issue state comes from a manually refreshed "
+                "snapshot and is not a live GitHub guarantee; closed-issue "
+                f"enforcement remains non-blocking until {GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV}=1",
+                file=sys.stderr,
+            )
 
     if problems:
         raise ParseError(
