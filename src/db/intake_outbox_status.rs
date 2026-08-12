@@ -127,7 +127,7 @@ impl IntakeOutboxStatus {
 
 impl fmt::Display for IntakeOutboxStatus {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
+        formatter.pad(self.as_str())
     }
 }
 
@@ -253,7 +253,7 @@ mod tests {
     fn status_strings_round_trip() {
         for status in IntakeOutboxStatus::ALL {
             assert_eq!(status.as_str().parse(), Ok(status));
-            assert_eq!(status.to_string(), status.as_str());
+            assert_eq!(format!("{status:>20}"), format!("{:>20}", status.as_str()));
         }
     }
 

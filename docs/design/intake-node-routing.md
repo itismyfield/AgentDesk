@@ -603,9 +603,9 @@ operators can run it manually for incident response.
   use stale local recovery. Every other value forbids local execution.
 - Typed Rust rows complement rather than replace the database CHECK. Direct
   SQL literals and writers outside the typed bind coordinates remain
-  possible. `None` does not distinguish a vanished row from a failed
-  conflict requery. The later T2-W slice owns any `Unknown` variant and its
-  lifecycle behavior.
+  possible. `None` does not distinguish a vanished row from a failed conflict
+  requery. T2-W owns `Unknown`; the dispatched fence fixture stops at decision/
+  admission and does not execute the outer `admit_text_intake` retirement path.
 
 **Why a fresh row instead of in-place reset for retry**: keeps every
 attempt's `last_error`, timing, and `claim_owner` in PG for audit. A

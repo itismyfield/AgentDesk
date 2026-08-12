@@ -15,8 +15,8 @@
   set is unchanged while no production writer emits that status; no new ownership, fencing, or
   multinode assumption is added. Owner-fenced routes (forwarded mode with instance_id + generation)
   use the same constant pattern; caller ownership and lease assumptions are preserved. T2-W must
-  add its planned independent stale-`dispatched` reader when it activates that writer; the existing
-  accepted/spawned failure and SLA predicates are not widened by T2-R.
+  add its stale-`dispatched` reader because that open row occupies the route until terminalized; dispatch
+  failure remains post-accept terminal/operator-only, and T2-R does not widen accepted/spawned SLA predicates.
   The two `NOT EXISTS` retry guards in `intake_outbox.rs` have the opposite polarity from the
   other open-route reads: widening their inner set shrinks retry candidates, so T2-W must confirm
   that a `dispatched` sibling is intended to block failed-pre-accept retry.
