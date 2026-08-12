@@ -1511,6 +1511,9 @@ mod channel_binding_tests {
 
     #[test]
     fn channel_binding_round_trips_for_restart_recovery() {
+        let runtime_root = tempfile::tempdir().expect("tempdir");
+        let _root_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
+
         let session = "AgentDesk-claude-dm-4145-test";
         cleanup_session_temp_files(session);
         write_tmux_channel_binding(session, 1_479_662_682_909_966_490).unwrap();
