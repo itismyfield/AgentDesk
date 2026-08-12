@@ -316,6 +316,18 @@ class LaneFilterTests(unittest.TestCase):
 
 
 class RatchetTests(unittest.TestCase):
+    def init_git_repo(self, root: Path) -> None:
+        subprocess.run(["git", "init", "-q", "-b", "main", root], check=True)
+        for key, value in (
+            ("maintenance.auto", "false"),
+            ("gc.auto", "0"),
+            ("user.email", "tests@example.com"),
+            ("user.name", "Tests"),
+        ):
+            subprocess.run(
+                ["git", "-C", root, "config", "--local", key, value], check=True
+            )
+
     def make_repo(self, root: Path, module_name: str) -> None:
         (root / "src").mkdir()
         (root / ".github/workflows").mkdir(parents=True)
@@ -428,16 +440,7 @@ class RatchetTests(unittest.TestCase):
                 "#[cfg(test)] mod legacy_09 {}\n",
                 encoding="utf-8",
             )
-            subprocess.run(
-                ["git", "init", "-q", "-b", "main", root], check=True
-            )
-            subprocess.run(
-                ["git", "-C", root, "config", "user.email", "tests@example.com"],
-                check=True,
-            )
-            subprocess.run(
-                ["git", "-C", root, "config", "user.name", "Tests"], check=True
-            )
+            self.init_git_repo(root)
 
             baseline.write_text(
                 "".join(f"legacy_{index:02d}\n" for index in range(1, 10)),
@@ -553,16 +556,7 @@ class RatchetTests(unittest.TestCase):
             root = Path(temp)
             baseline = root / coverage.BASELINE_REL
             baseline.parent.mkdir(parents=True)
-            subprocess.run(
-                ["git", "init", "-q", "-b", "main", root], check=True
-            )
-            subprocess.run(
-                ["git", "-C", root, "config", "user.email", "tests@example.com"],
-                check=True,
-            )
-            subprocess.run(
-                ["git", "-C", root, "config", "user.name", "Tests"], check=True
-            )
+            self.init_git_repo(root)
             baseline.write_text("legacy_a\n", encoding="utf-8")
             subprocess.run(["git", "-C", root, "add", "."], check=True)
             subprocess.run(
@@ -627,14 +621,7 @@ class RatchetTests(unittest.TestCase):
             root = Path(temp)
             self.make_repo(root, "legacy_b")
             baseline = root / coverage.BASELINE_REL
-            subprocess.run(["git", "init", "-q", "-b", "main", root], check=True)
-            subprocess.run(
-                ["git", "-C", root, "config", "user.email", "tests@example.com"],
-                check=True,
-            )
-            subprocess.run(
-                ["git", "-C", root, "config", "user.name", "Tests"], check=True
-            )
+            self.init_git_repo(root)
             baseline.write_text("legacy_a\n", encoding="utf-8")
             subprocess.run(["git", "-C", root, "add", "."], check=True)
             subprocess.run(
@@ -726,16 +713,7 @@ class RatchetTests(unittest.TestCase):
     def test_reference_without_baseline_blob_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            subprocess.run(
-                ["git", "init", "-q", "-b", "main", root], check=True
-            )
-            subprocess.run(
-                ["git", "-C", root, "config", "user.email", "tests@example.com"],
-                check=True,
-            )
-            subprocess.run(
-                ["git", "-C", root, "config", "user.name", "Tests"], check=True
-            )
+            self.init_git_repo(root)
             (root / "placeholder").write_text("x", encoding="utf-8")
             subprocess.run(["git", "-C", root, "add", "."], check=True)
             subprocess.run(
