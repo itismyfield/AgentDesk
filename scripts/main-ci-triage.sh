@@ -6,6 +6,10 @@ if [[ "${TRACE-}" == "1" ]]; then
 fi
 
 SELF_NAME="$(basename "$0")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REAL_FAILURE_PREDICATE="$SCRIPT_DIR/ci/real-failure-predicate.sh"
+# shellcheck source=/dev/null
+source "$REAL_FAILURE_PREDICATE"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -168,24 +172,6 @@ log_has_infra_termination() {
   [[ -f "$log_path" ]] || return 1
   grep -E -i -q -- \
     'signal[: ]+(9|15)([^0-9]|$)|sig(term|kill)|terminated on line [0-9]+ by signal|(exit(ed)?|code|status)[^0-9]*143([^0-9]|$)|the operation was cancell?ed|runner has received a shutdown signal' \
-    "$log_path"
-}
-
-# #3996: Real-failure guard for the flaky skip filter. `log_has_infra_termination`
-# is too coarse on its own — a genuine job-level regression (e.g. a compile error
-# that never emits a `test … FAILED` line, so it hits the job-level fallback) can
-# ALSO carry SIGTERM / exit-143 noise (the runner tears down remaining steps after
-# a hard failure). Skipping that as flaky would be a false negative: real red
-# silently dropped, never promoted to ci-red. This helper detects *deterministic*
-# failure signals that unambiguously mean "the code is broken", so infra-only
-# skips can be gated on their absence. Kept deliberately narrow — only signals
-# that appear on a genuine compile/test failure, not benign `error:`/`failed`
-# chatter — to avoid re-widening into a false-positive filter.
-log_has_real_failure() {
-  local log_path="$1"
-  [[ -f "$log_path" ]] || return 1
-  grep -E -i -q -- \
-    'error\[E[0-9]|error: could not compile|test result: FAILED|panicked at|assertion .*failed' \
     "$log_path"
 }
 

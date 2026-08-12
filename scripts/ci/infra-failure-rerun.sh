@@ -5,6 +5,9 @@ SELF_NAME="$(basename "$0")"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TRIAGE_SCRIPT="$REPO_ROOT/scripts/main-ci-triage.sh"
+REAL_FAILURE_PREDICATE="$SCRIPT_DIR/real-failure-predicate.sh"
+# shellcheck source=/dev/null
+source "$REAL_FAILURE_PREDICATE"
 TMP_DIR="$(mktemp -d)"
 SUMMARY_ROWS="$TMP_DIR/summary-rows.md"
 PG_JOB_NAME="PostgreSQL tests (ubuntu-postgres)"
@@ -65,6 +68,8 @@ is_positive_integer() {
 # the API calls `failure` entered `Set up job`, so a truthful payload carries at
 # least that step. Reading `[]` as 0 would auto-rerun every failed job whose
 # steps we cannot see; `unknown` makes `job_ran_no_repo_steps` decline instead.
+# The jq program is intentionally literal shell text.
+# shellcheck disable=SC2016
 FAILED_JOB_ROWS_JQ='
     .jobs[]
     | select(.conclusion == "failure")
@@ -420,23 +425,15 @@ job_is_infra_failure() {
   job_ran_no_repo_steps "$executed_steps"
 }
 
-# Regression markers are checked across every failed job except the explicitly
-# advisory Windows lane. This remains a separate guard from the infra predicate
-# so mixed logs from required-context upstream jobs fail closed.
-log_has_regression() {
-  local log_path="$1"
-  [[ -s "$log_path" ]] || return 1
-  grep -a -E -i -q -- \
-    'test result: FAILED|error\[E|panicked at' \
-    "$log_path"
-}
-
+# Real-failure markers are checked across every failed job except the explicitly
+# advisory Windows lane. This remains separate from the infrastructure
+# predicate so mixed logs from required-context upstream jobs fail safe.
 job_log_has_blocking_regression() {
   local job_name="$1"
   local log_path="$2"
 
   [[ "$job_name" != "$WINDOWS_ADVISORY_JOB_NAME" ]] || return 1
-  log_has_regression "$log_path"
+  log_has_real_failure "$log_path"
 }
 
 # #5207 (R4): the single classification chain used by both the live loop and
@@ -453,7 +450,7 @@ classify_job() {
 
   if job_log_has_blocking_regression "$job_name" "$log_path"; then
     printf 'regression'
-  elif log_has_regression "$log_path"; then
+  elif log_has_real_failure "$log_path"; then
     printf 'advisory-regression'
   elif log_has_repo_config_fault "$log_path"; then
     # #5207 (r3, P2-1): an enumerated repo-configuration fault outranks the R1
@@ -719,10 +716,10 @@ run_self_test() {
 
   log_has_infra_failure "$infra_log" || { echo "assertion failed: shutdown must be infrastructure" >&2; exit 1; }
   log_has_infra_failure "$timeout_log" || { echo "assertion failed: action timeout must be infrastructure" >&2; exit 1; }
-  log_has_regression "$regression_log" || { echo "assertion failed: regression markers must be detected" >&2; exit 1; }
+  log_has_real_failure "$regression_log" || { echo "assertion failed: regression markers must be detected" >&2; exit 1; }
   log_has_infra_failure "$mixed_log" || { echo "assertion failed: mixed log must contain infrastructure" >&2; exit 1; }
-  log_has_regression "$mixed_log" || { echo "assertion failed: mixed log must contain regression" >&2; exit 1; }
-  log_has_regression "$run_29067936620_windows_log" || { echo "assertion failed: run 29067936620 Windows fixture must contain regression" >&2; exit 1; }
+  log_has_real_failure "$mixed_log" || { echo "assertion failed: mixed log must contain regression" >&2; exit 1; }
+  log_has_real_failure "$run_29067936620_windows_log" || { echo "assertion failed: run 29067936620 Windows fixture must contain regression" >&2; exit 1; }
   log_has_infra_failure "$run_29067936620_pg_log" || { echo "assertion failed: run 29067936620 PG fixture must contain infrastructure" >&2; exit 1; }
 
   assert_equal "would-rerun:infra" "$(decide_retry 1 1 0 0)" "infra-only rerun"
@@ -754,9 +751,71 @@ run_self_test() {
   run_zero_step_assertions
   run_upstream_abandoned_assertions
   run_regression_precedence_assertions
+  run_real_failure_assertions
+  run_real_failure_predicate_sharing_assertions
   run_termination_sync_assertions
 
   echo "self-test passed"
+}
+
+# #5210: every deterministic gate-failure form that the old three-marker
+# rerun predicate missed is paired with runner-shutdown noise. Each must win
+# before both the textual infrastructure fingerprint and the zero-step signal.
+run_real_failure_assertions() {
+  local case_name marker log_path
+
+  while IFS='|' read -r case_name marker; do
+    [[ -n "$case_name" ]] || continue
+    log_path="$TMP_DIR/selftest-real-failure-${case_name}.log"
+    printf '%s\n' \
+      'The runner has received a shutdown signal.' \
+      "$marker" \
+      >"$log_path"
+
+    log_has_infra_failure "$log_path" || {
+      echo "assertion failed (#5210 $case_name): fixture must carry infrastructure noise" >&2
+      exit 1
+    }
+    log_has_real_failure "$log_path" || {
+      echo "assertion failed (#5210 $case_name): real failure marker was missed" >&2
+      exit 1
+    }
+    assert_equal "regression" \
+      "$(classify_job "$PG_JOB_NAME" "$log_path" 0)" \
+      "#5210 $case_name outranks infrastructure and zero steps"
+  done <<'CASES'
+clippy|error: could not compile `agentdesk` (lib) due to 1 previous error
+rustfmt|Diff in /home/runner/work/AgentDesk/AgentDesk/src/main.rs:12:
+shellcheck|              ^-- SC2086 (warning): Double quote to prevent globbing and word splitting.
+python-unittest|FAILED (failures=1)
+yaml-pyyaml|yaml.scanner.ScannerError: mapping values are not allowed here
+yaml-psych|/ruby/psych.rb:455:in `parse': mapping values are not allowed (Psych::SyntaxError)
+linker|ld: cannot find -lpq: No such file or directory
+failed-assertion|assertion `left == right` failed
+rerun-only-rustc-prefix|error[Efuture]: a future rustc diagnostic shape
+CASES
+}
+
+# The semantic cases above catch a consumer that restores the old narrow
+# rerun predicate. These wiring assertions cover the opposite consumer too:
+# neither production script may regain a private log_has_real_failure body or
+# stop sourcing the shared predicate while its own fixtures happen to pass.
+run_real_failure_predicate_sharing_assertions() {
+  local rerun_script="$REPO_ROOT/scripts/ci/infra-failure-rerun.sh"
+  # This is literal source text used to audit both consumers.
+  # shellcheck disable=SC2016
+  local source_statement='source "$REAL_FAILURE_PREDICATE"'
+
+  for consumer in "$rerun_script" "$TRIAGE_SCRIPT"; do
+    grep -F -q -- "$source_statement" "$consumer" || {
+      echo "assertion failed (#5210 DRY): $consumer does not source the shared real-failure predicate" >&2
+      exit 1
+    }
+    if grep -E -q -- '^log_has_real_failure\(\)[[:space:]]*\{' "$consumer"; then
+      echo "assertion failed (#5210 DRY): $consumer has restored a private log_has_real_failure implementation" >&2
+      exit 1
+    fi
+  done
 }
 
 # #5207: smoke check for the `abandoned` upstream label; the full matrix lives
@@ -806,6 +865,8 @@ run_action_download_assertions() {
   # #5207 (r3): this is the REAL wording, copied from actions/runner#1006 — an
   # earlier revision used an invented `Error: Not Found`, which no GitHub
   # component emits. See the provenance block at REPO_CONFIG_FAULT_REGEX.
+  # The backticks are literal runner output, not command substitutions.
+  # shellcheck disable=SC2016
   printf '%s\n' \
     'Failed to resolve action download info. Error: Unable to resolve action `actions/chcekout@v2`, repository not found' \
     >"$missing_action_log"
@@ -837,6 +898,8 @@ run_action_download_assertions() {
   # assertion reaches `job_is_infra_failure`, which is what gates
   # `would-rerun:infra`. Rationale and accepted cost: see that function.
   local mixed_fault_log="$TMP_DIR/selftest-outage-plus-repo-fault.log"
+  # The backticks are literal runner output, not command substitutions.
+  # shellcheck disable=SC2016
   printf '%s\n' \
     'Failed to resolve action download info. Error: Service Unavailable' \
     'Failed to resolve action download info. Error: Unable to resolve action `acme/gone@v1`, repository not found' \
@@ -938,13 +1001,17 @@ run_termination_sync_assertions() {
     # `/}/` changes nothing when the extractor is pointed at production alone.
     # This fixture is what makes the mutation detectable; deleting it, or
     # "simplifying" `${1}` to `$1`, silently retires that coverage.
+    # These are literal source fixtures; their parameter syntax must not expand.
+    # shellcheck disable=SC2016
     printf '%s\n' 'log_has_infra_termination() {' '  local log_path="${1}"'
     printf "  grep -E -i -q -- \\\\\n    '%s' \\\\\n" "$INFRA_TERMINATION_REGEX"
+    # shellcheck disable=SC2016
     printf '%s\n' '    "$log_path"' '}'
   } >"$synced_fixture"
   {
     printf '%s\n' 'log_has_infra_termination() {'
     printf "  grep -E -i -q -- \\\\\n    '%s' \\\\\n" "sig(term|kill)"
+    # shellcheck disable=SC2016
     printf '%s\n' '    "$log_path"' '}'
   } >"$drifted_fixture"
   printf '%s\n' 'log_has_something_else() {' '  :' '}' >"$absent_fixture"
@@ -955,9 +1022,11 @@ run_termination_sync_assertions() {
   # for a file whose termination check no longer has a regex at all. F7 makes it
   # stop at the indented brace and report drift instead.
   {
+    # shellcheck disable=SC2016
     printf '%s\n' 'log_has_infra_termination() {' '  local log_path="$1"' '  }'
     printf '%s\n' 'log_has_neighbour() {'
     printf "  grep -E -i -q -- \\\\\n    '%s' \\\\\n" "$INFRA_TERMINATION_REGEX"
+    # shellcheck disable=SC2016
     printf '%s\n' '    "$log_path"' '}'
   } >"$indented_close_fixture"
 
