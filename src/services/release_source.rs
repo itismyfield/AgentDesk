@@ -1,6 +1,7 @@
 //! Preserve the distinction between confirmed release-source facts and observation failures:
-//! each fact stays typed as observed or unobserved, and missing evidence must never be simplified
-//! into a string sentinel that consumers could mistake for a confirmed value.
+//! the repository head and latest PostgreSQL migration stay typed as observed or unobserved, and
+//! missing evidence must never become a value that consumers could mistake for a confirmed fact.
+//! `generated_at` is optional metadata and does not determine the observation status.
 
 use serde::Deserialize;
 use std::path::Path;
@@ -138,7 +139,7 @@ pub(crate) fn health_json(include_node_hostname: bool) -> serde_json::Value {
             latest_postgres_migration,
         } => {
             let mut health = serde_json::json!({ "observation_status": "observed" });
-            let mut failure = None;
+            let mut failures = Vec::new();
             if let Some(value) = generated_at {
                 health["generated_at"] = serde_json::json!(value);
             }
@@ -147,7 +148,7 @@ pub(crate) fn health_json(include_node_hostname: bool) -> serde_json::Value {
                     health["deployed_repo_head"] = serde_json::json!(value);
                 }
                 Err(reason) => {
-                    failure.get_or_insert(reason);
+                    failures.push(reason.as_str());
                 }
             }
             match latest_postgres_migration {
@@ -155,18 +156,22 @@ pub(crate) fn health_json(include_node_hostname: bool) -> serde_json::Value {
                     health["deployed_latest_postgres_migration"] = serde_json::json!(value);
                 }
                 Err(reason) => {
-                    failure.get_or_insert(reason);
+                    failures.push(reason.as_str());
                 }
             }
-            if let Some(reason) = failure {
-                health["observation_status"] = serde_json::json!("unobserved");
-                health["observation_failure"] = serde_json::json!(reason.as_str());
+            if !failures.is_empty() {
+                health["observation_status"] = serde_json::json!(if failures.len() == 1 {
+                    "partial"
+                } else {
+                    "unobserved"
+                });
+                health["observation_failures"] = serde_json::json!(failures);
             }
             health
         }
         ReleaseSourceObservation::Unobserved { reason } => serde_json::json!({
             "observation_status": "unobserved",
-            "observation_failure": reason.as_str(),
+            "observation_failures": [reason.as_str()],
         }),
     };
     if include_node_hostname {
@@ -236,50 +241,6 @@ mod tests {
     }
 
     #[test]
-    fn release_source_reports_each_missing_field_without_discarding_the_other() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let missing_head = temp.path().join("missing-head.json");
-        std::fs::write(
-            &missing_head,
-            r#"{"generated_at":"2026-08-12T00:00:00Z","latest_postgres_migration":"0104_example.sql"}"#,
-        )
-        .expect("write manifest");
-        let ReleaseSourceObservation::Manifest {
-            repo_head,
-            latest_postgres_migration,
-            ..
-        } = read(&missing_head)
-        else {
-            panic!("valid manifest must retain field-level observations");
-        };
-        assert_eq!(
-            repo_head,
-            Err(ReleaseSourceUnobservedReason::RepoHeadMissing)
-        );
-        assert_eq!(latest_postgres_migration.as_deref(), Ok("0104_example.sql"));
-
-        let missing_migration = temp.path().join("missing-migration.json");
-        std::fs::write(
-            &missing_migration,
-            format!(r#"{{"generated_at":"2026-08-12T00:00:00Z","repo_head":"{REPO_HEAD}"}}"#),
-        )
-        .expect("write manifest");
-        let ReleaseSourceObservation::Manifest {
-            repo_head,
-            latest_postgres_migration,
-            ..
-        } = read(&missing_migration)
-        else {
-            panic!("valid manifest must retain field-level observations");
-        };
-        assert_eq!(repo_head.as_deref(), Ok(REPO_HEAD));
-        assert_eq!(
-            latest_postgres_migration,
-            Err(ReleaseSourceUnobservedReason::LatestPostgresMigrationMissing)
-        );
-    }
-
-    #[test]
     fn release_source_rejects_non_sha_repo_heads_without_discarding_migration() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("invalid-head.json");
@@ -334,9 +295,13 @@ mod tests {
     }
 
     #[test]
-    fn release_source_module_docs_forbid_string_sentinels() {
+    fn release_source_module_docs_define_release_fact_scope() {
         let source = include_str!("release_source.rs");
-        assert!(source.starts_with("//! Preserve the distinction"));
-        assert!(source.contains("string sentinel"));
+        assert!(source.starts_with(
+            "//! Preserve the distinction between confirmed release-source facts and observation failures:\n\
+             //! the repository head and latest PostgreSQL migration stay typed as observed or unobserved, and\n\
+             //! missing evidence must never become a value that consumers could mistake for a confirmed fact.\n\
+             //! `generated_at` is optional metadata and does not determine the observation status."
+        ));
     }
 }

@@ -76,7 +76,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 "fully_recovered": false,
                 "release_source": {
                     "observation_status": "unobserved",
-                    "observation_failure": "manifest_missing"
+                    "observation_failures": ["manifest_missing"]
                 },
                 "db": false,
                 "degraded": true,
@@ -98,11 +98,11 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 "server_up": true,
                 "fully_recovered": true,
                 "release_source": {
-                    "observation_status": "observed",
+                    "observation_status": "partial",
                     "node_hostname": "mac-mini",
                     "generated_at": "2026-08-12T00:00:00Z",
                     "deployed_repo_head": "0123456789abcdef0123456789abcdef01234567",
-                    "deployed_latest_postgres_migration": "0104_example.sql"
+                    "observation_failures": ["latest_postgres_migration_missing"]
                 },
                 "delivery_record_rollout": {
                     "shadow_enabled": true,

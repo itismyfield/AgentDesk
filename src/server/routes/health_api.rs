@@ -2824,10 +2824,10 @@ mod tests {
         )
         .expect("write release source manifest");
         let body = runtime.block_on(health_body("/health", None));
-        assert_eq!(body["release_source"]["observation_status"], "unobserved");
+        assert_eq!(body["release_source"]["observation_status"], "partial");
         assert_eq!(
-            body["release_source"]["observation_failure"],
-            "repo_head_invalid"
+            body["release_source"]["observation_failures"],
+            serde_json::json!(["repo_head_invalid"])
         );
         assert_eq!(
             body["release_source"]["generated_at"],
@@ -2840,14 +2840,15 @@ mod tests {
         );
 
         std::fs::write(
-            manifest,
+            &manifest,
             r#"{"repo_head":"0123456789abcdef0123456789abcdef01234567"}"#,
         )
         .expect("write release source manifest");
-        let body = runtime.block_on(health_body("/health", None));
+        let body = runtime.block_on(health_body("/health/detail", None));
+        assert_eq!(body["release_source"]["observation_status"], "partial");
         assert_eq!(
-            body["release_source"]["observation_failure"],
-            "latest_postgres_migration_missing"
+            body["release_source"]["observation_failures"],
+            serde_json::json!(["latest_postgres_migration_missing"])
         );
         assert_eq!(
             body["release_source"]["deployed_repo_head"],
@@ -2857,6 +2858,14 @@ mod tests {
             body["release_source"]
                 .get("deployed_latest_postgres_migration")
                 .is_none()
+        );
+
+        std::fs::write(manifest, r#"{}"#).expect("write release source manifest");
+        let body = runtime.block_on(health_body("/health", None));
+        assert_eq!(body["release_source"]["observation_status"], "unobserved");
+        assert_eq!(
+            body["release_source"]["observation_failures"],
+            serde_json::json!(["repo_head_missing", "latest_postgres_migration_missing"])
         );
     }
 
@@ -2873,8 +2882,8 @@ mod tests {
 
         assert_eq!(body["release_source"]["observation_status"], "unobserved");
         assert_eq!(
-            body["release_source"]["observation_failure"],
-            "manifest_missing"
+            body["release_source"]["observation_failures"],
+            serde_json::json!(["manifest_missing"])
         );
         assert!(body["release_source"].get("deployed_repo_head").is_none());
     }
