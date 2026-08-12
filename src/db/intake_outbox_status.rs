@@ -3,10 +3,45 @@ use std::str::FromStr;
 
 /// Stable domain statuses for intake outbox rows.
 ///
-/// String spellings and classifications are deliberately defined only by the
-/// wildcard-free exhaustive matches below. Adding a status therefore makes the
-/// required decisions compiler-visible in [`Self::as_str`],
-/// [`Self::variant_name`], [`Self::is_open`], and [`Self::operator_retry`].
+/// The outbound status spelling returned by [`Self::as_str`] and the diagnostic
+/// Rust-variant spelling returned by [`Self::variant_name`] are each defined by
+/// their respective wildcard-free exhaustive match. Classifications are defined
+/// only by the wildcard-free exhaustive matches in [`Self::is_open`] and
+/// [`Self::operator_retry`].
+///
+/// VALIDATES:
+/// - The compiler requires every added variant to be handled by those four
+///   exhaustive matches. Renaming a variant also invalidates direct references
+///   in [`Self::ALL`] and [`Self::from_str`].
+/// - The `[Self; 8]` type of [`Self::ALL`] makes the initializer's cardinality a
+///   compile-time check.
+/// - Unit tests check [`Self::ALL`] membership against the enum declaration,
+///   [`Self::from_str`] against [`Self::as_str`], and [`Self::is_open`] against
+///   [`INTAKE_OUTBOX_OPEN_STATUSES_SQL`][open-statuses]. They also check
+///   [`Self::ALL`] against the 0106 status CHECK body, [`Self::operator_retry`]
+///   against `TRANSITION_12_ALLOWED`, and that rejected input is preserved in
+///   [`UnknownIntakeStatus`].
+///
+/// DOES NOT VALIDATE:
+/// - The compiler does not require [`Self::from_str`] to gain an arm for an
+///   added variant because its match has an unknown-input arm. That coverage and
+///   the members (rather than the cardinality) of [`Self::ALL`] are test-backed.
+/// - `#[sqlx(rename_all = "snake_case")]` is currently inert: the strong-enum
+///   `sqlx::Type` derive supplies `Type<Postgres>` and `PgHasArrayType`, while
+///   `rename_all` is consumed by `sqlx::Encode` and `sqlx::Decode` derives, which
+///   this type does not have. Adding them would make `rename_all` control their
+///   spelling, which must then be reconciled with [`Self::as_str`].
+///
+/// LIMITS:
+/// - No gate prevents replacing an exhaustive classification arm with `_ =>`;
+///   preserving wildcard-free matches is a review convention.
+/// - The source-based [`Self::ALL`] membership test reads only this file and
+///   fails closed on unsupported enum syntax, but no independent gate proves
+///   that its defining equality assertion remains present.
+/// - These tests compare independent source authorities; they do not apply the
+///   migration or exercise PostgreSQL encoding and decoding.
+///
+/// [open-statuses]: crate::db::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL
 #[derive(Clone, Copy, Debug, Eq, PartialEq, sqlx::Type)]
 #[sqlx(type_name = "text", rename_all = "snake_case")]
 pub(crate) enum IntakeOutboxStatus {
@@ -117,7 +152,7 @@ impl FromStr for IntakeOutboxStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::{IntakeOutboxStatus, OperatorRetryClass};
+    use super::{IntakeOutboxStatus, OperatorRetryClass, UnknownIntakeStatus};
     use crate::db::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL;
     use std::collections::BTreeSet;
     use std::path::PathBuf;
@@ -217,6 +252,15 @@ mod tests {
             assert_eq!(status.as_str().parse(), Ok(status));
             assert_eq!(status.to_string(), status.as_str());
         }
+    }
+
+    #[test]
+    fn unknown_status_preserves_rejected_spelling() {
+        let unknown = "waiting_for_operator";
+        assert_eq!(
+            unknown.parse::<IntakeOutboxStatus>(),
+            Err(UnknownIntakeStatus(unknown.to_owned()))
+        );
     }
 
     #[test]

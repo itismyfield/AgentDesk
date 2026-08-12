@@ -421,6 +421,7 @@ db::intake_outbox_status::tests::all_exactly_matches_migration_status_check
 db::intake_outbox_status::tests::open_classification_matches_shared_sql_list
 db::intake_outbox_status::tests::operator_retry_matches_transition_12_allowed
 db::intake_outbox_status::tests::status_strings_round_trip
+db::intake_outbox_status::tests::unknown_status_preserves_rejected_spelling
 db::postgres::tests::agent_roster_sync_gated_to_leader_or_single_node
 db::postgres::tests::background_backpressure_disabled_when_reserve_zero
 db::postgres::tests::background_backpressure_saturating_boundaries
