@@ -700,8 +700,16 @@ class RuleMutations(FixtureCase):
         self.assertTrue(manifest.exists())
         self.assertTrue(baseline.exists())
         original_baseline = baseline.read_text("utf-8")
+        self.fx.write_source(
+            "src/db/service.rs",
+            "#[cfg(test)] mod tests { #[test] fn case() { create_test_database(); } }\n"
+            "#[cfg(test)] mod more_tests { #[test] fn new_case() { create_test_database(); } }\n",
+        )
         self.assertEqual(membership.main(["--repo-root", str(self.root), "--write-snapshots", "--manifest-only"]), 0)
         self.assertEqual(baseline.read_text("utf-8"), original_baseline)
+        self.assertIn("db::service::more_tests::new_case", manifest.read_text("utf-8"))
+        self.assertEqual(membership.main(["--repo-root", str(self.root), "--write-snapshots"]), 0)
+        self.assertIn("db::service::more_tests::new_case", baseline.read_text("utf-8"))
 
     def test_four_step_allowlist_bypass_of_rule5_is_refused(self) -> None:
         """The reviewed attack in order: mutate, allowlist, regenerate, recheck."""
