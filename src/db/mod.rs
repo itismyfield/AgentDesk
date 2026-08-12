@@ -15,6 +15,7 @@ mod fixture_target;
 pub mod idempotency;
 pub mod intake_outbox;
 pub(crate) mod intake_outbox_open_status;
+pub(crate) mod intake_outbox_status;
 pub mod kanban;
 pub mod kanban_cards;
 pub mod meetings;
