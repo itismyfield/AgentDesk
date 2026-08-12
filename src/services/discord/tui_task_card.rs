@@ -20,16 +20,18 @@
 
 use serde_json::Value;
 
+use super::formatting::{byte_index_at_discord_message_units, discord_message_units};
+
 /// Preview budget for a free-form Markdown `result` body rendered into a card.
 /// Long subagent reports are truncated to keep the card scannable on mobile; the
 /// full payload remains available via the existing output/log path.
-const RESULT_PREVIEW_CHARS: usize = 1400;
+const RESULT_PREVIEW_BUDGET: usize = 1400;
 
 /// Number of leading non-blank `result` lines surfaced as the card body preview
 /// for a free-form Markdown completion report.
 const RESULT_PREVIEW_LINES: usize = 10;
 
-const DISCORD_MESSAGE_LIMIT_CHARS: usize = super::DISCORD_MSG_LIMIT;
+const DISCORD_MESSAGE_LIMIT_UNITS: usize = super::DISCORD_MSG_LIMIT;
 const RESULT_PREVIEW_TRUNCATED_MARKER: &str = "… (truncated)";
 
 /// Structured fields extracted from a `<task-notification>` payload (#3075).
@@ -383,8 +385,8 @@ fn markdown_preview(result: &str) -> String {
         let line = line.text;
         let line_chars = line.chars().count();
         let separator_chars = usize::from(!collected.is_empty());
-        if collected_chars + separator_chars + line_chars > RESULT_PREVIEW_CHARS {
-            let remaining = RESULT_PREVIEW_CHARS.saturating_sub(collected_chars + separator_chars);
+        if collected_chars + separator_chars + line_chars > RESULT_PREVIEW_BUDGET {
+            let remaining = RESULT_PREVIEW_BUDGET.saturating_sub(collected_chars + separator_chars);
             let overflow_sentinel_chars = RESULT_PREVIEW_TRUNCATED_MARKER.chars().count() + 1;
             collected.push(
                 line.chars()
@@ -403,7 +405,7 @@ fn markdown_preview(result: &str) -> String {
         }
     }
     let joined = collected.join("\n");
-    truncate_preview_at_boundary(&joined, RESULT_PREVIEW_CHARS)
+    truncate_preview_at_boundary(&joined, RESULT_PREVIEW_BUDGET)
 }
 
 #[derive(Default)]
@@ -557,29 +559,28 @@ fn blockquote_preview(preview: &str, first_line_prefix: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    truncate_preview_at_boundary(&rendered, RESULT_PREVIEW_CHARS)
+    truncate_preview_at_boundary(&rendered, RESULT_PREVIEW_BUDGET)
 }
 
 pub(super) fn clamp_discord_message_content(value: &str) -> String {
-    truncate_preview_at_boundary(value, DISCORD_MESSAGE_LIMIT_CHARS)
+    truncate_preview_at_boundary(value, DISCORD_MESSAGE_LIMIT_UNITS)
 }
 
 fn truncate_preview_at_boundary(value: &str, limit: usize) -> String {
-    if value.chars().count() <= limit {
+    if discord_message_units(value) <= limit {
         return value.to_string();
     }
 
-    let marker_chars = RESULT_PREVIEW_TRUNCATED_MARKER.chars().count();
-    if limit <= marker_chars {
-        return RESULT_PREVIEW_TRUNCATED_MARKER
-            .chars()
-            .take(limit)
-            .collect();
+    let marker_units = discord_message_units(RESULT_PREVIEW_TRUNCATED_MARKER);
+    if limit <= marker_units {
+        let end = byte_index_at_discord_message_units(RESULT_PREVIEW_TRUNCATED_MARKER, limit);
+        return RESULT_PREVIEW_TRUNCATED_MARKER[..end].to_string();
     }
 
-    let content_limit = limit - marker_chars;
-    let truncated = value.chars().take(content_limit).collect::<String>();
-    let boundary = preview_boundary(&truncated);
+    let content_limit = limit - marker_units;
+    let end = byte_index_at_discord_message_units(value, content_limit);
+    let truncated = &value[..end];
+    let boundary = preview_boundary(truncated);
     let clipped = truncated[..boundary].trim_end();
     let clipped = if clipped.is_empty() {
         truncated.trim_end()
@@ -867,6 +868,20 @@ mod tests {
         assert_eq!(parsed.summary.as_deref(), Some("hi"));
     }
 
+    #[test]
+    fn direct_card_clamp_counts_supplementary_utf16_units_5177() {
+        let fixture = "😀".repeat(1_500);
+        assert_eq!(discord_message_units(&fixture), 3_000, "fixture unit count");
+
+        let clamped = clamp_discord_message_content(&fixture);
+        assert_eq!(
+            discord_message_units(&clamped),
+            1_999,
+            "clamp must reserve the marker without splitting a surrogate pair"
+        );
+        assert!(clamped.ends_with(RESULT_PREVIEW_TRUNCATED_MARKER));
+    }
+
     // #4338: unit-level guarantees for the entity decoder — single layer,
     // order-independent, numeric refs, and bare/unknown `&` passthrough.
     #[test]
@@ -1011,7 +1026,7 @@ mod tests {
         // The 5000-char filler line must NOT be dumped wholesale.
         assert!(!card.contains(&"x".repeat(5000)));
         assert!(
-            card.chars().count() <= DISCORD_MESSAGE_LIMIT_CHARS,
+            card.chars().count() <= DISCORD_MESSAGE_LIMIT_UNITS,
             "card should stay within Discord's message limit, got {} chars",
             card.chars().count()
         );
@@ -1107,7 +1122,7 @@ Conclusion reached after the table.";
             "preview should stop at the configured line budget: {preview}"
         );
         assert!(
-            preview.chars().count() <= RESULT_PREVIEW_CHARS,
+            preview.chars().count() <= RESULT_PREVIEW_BUDGET,
             "preview must respect char budget"
         );
         assert!(
@@ -1131,7 +1146,7 @@ Conclusion reached after the table.";
         let card = format_task_notification_card(&note, 1);
 
         assert!(
-            card.chars().count() <= DISCORD_MESSAGE_LIMIT_CHARS,
+            card.chars().count() <= DISCORD_MESSAGE_LIMIT_UNITS,
             "card must be clamped to Discord's limit, got {} chars",
             card.chars().count()
         );
@@ -1268,7 +1283,7 @@ fn main() {}
         let preview = markdown_preview(&result);
 
         assert!(
-            preview.chars().count() <= RESULT_PREVIEW_CHARS,
+            preview.chars().count() <= RESULT_PREVIEW_BUDGET,
             "large heading-only preview must stay char-bounded"
         );
         assert!(

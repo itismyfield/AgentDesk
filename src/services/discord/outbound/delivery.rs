@@ -10,6 +10,9 @@ use std::time::Duration;
 
 use poise::serenity_prelude::ChannelId;
 
+use crate::services::discord::formatting::{
+    byte_index_at_discord_message_units, discord_message_units,
+};
 use crate::services::dispatches::discord_delivery::{
     DispatchMessagePostError, DispatchMessagePostErrorKind,
 };
@@ -695,26 +698,23 @@ pub(crate) fn first_raw_message_id(messages: &[DeliveredMessage]) -> Option<Stri
         .map(|message| message.raw_message_id.clone())
 }
 
-/// Truncate `content` to at most `max_chars` characters, appending a truncation
+/// Truncate `content` to at most `max_units` Discord message units, appending a truncation
 /// marker on a new paragraph when truncation occurred.
-pub(crate) fn truncate_with_marker(content: &str, max_chars: usize) -> (String, bool) {
-    if content.chars().count() <= max_chars {
+pub(crate) fn truncate_with_marker(content: &str, max_units: usize) -> (String, bool) {
+    if discord_message_units(content) <= max_units {
         return (content.to_string(), false);
     }
-    if max_chars == 0 {
+    if max_units == 0 {
         return (String::new(), true);
     }
     const MARKER: &str = "\n\n[… truncated]";
-    let marker_chars = MARKER.chars().count();
-    if marker_chars >= max_chars {
-        return (MARKER.chars().take(max_chars).collect(), true);
+    let marker_units = discord_message_units(MARKER);
+    if marker_units >= max_units {
+        let end = byte_index_at_discord_message_units(MARKER, max_units);
+        return (MARKER[..end].to_string(), true);
     }
-    let content_budget = max_chars - marker_chars;
-    let boundary: usize = content
-        .char_indices()
-        .nth(content_budget)
-        .map(|(i, _)| i)
-        .unwrap_or(content.len());
+    let content_budget = max_units - marker_units;
+    let boundary = byte_index_at_discord_message_units(content, content_budget);
     let cut = content[..boundary].rfind('\n').unwrap_or(boundary);
     (format!("{}{}", &content[..cut], MARKER), true)
 }
@@ -727,7 +727,7 @@ fn split_content(content: &str, chunk_limit: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current = String::new();
     for ch in content.chars() {
-        if current.chars().count() >= chunk_limit {
+        if !current.is_empty() && discord_message_units(&current) + ch.len_utf16() > chunk_limit {
             chunks.push(std::mem::take(&mut current));
         }
         current.push(ch);
@@ -1187,6 +1187,51 @@ mod tests {
                 ("123".to_string(), "EFGH".to_string()),
                 ("123".to_string(), "IJK".to_string()),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_split_delivery_limits_supplementary_payload_chunks_by_units_5177() {
+        let client = MockClient::default();
+        let message = DiscordOutboundMessage::new(
+            "dispatch:emoji-split",
+            "dispatch:emoji-split:final",
+            "😀".repeat(1_001),
+            OutboundTarget::Channel(ChannelId::new(123)),
+            DiscordOutboundPolicy::default().without_idempotency(),
+        );
+
+        let result = deliver_outbound(&client, &OutboundDeduper::new(), message, None).await;
+
+        assert!(matches!(
+            result,
+            DeliveryResult::Fallback {
+                fallback_used: FallbackUsed::LengthSplit,
+                ..
+            }
+        ));
+        let posts = client.posts();
+        assert_eq!(
+            posts.len(),
+            2,
+            "1001 supplementary scalars must not stay inline at 2002 units"
+        );
+        let post_units = posts
+            .iter()
+            .map(|(_, content)| discord_message_units(content))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            post_units,
+            vec![1_900, 102],
+            "split chunks must use the configured 1900-unit boundary"
+        );
+        assert_eq!(
+            posts
+                .iter()
+                .map(|(_, content)| content.as_str())
+                .collect::<String>(),
+            "😀".repeat(1_001),
+            "unit-bounded splitting must preserve the payload"
         );
     }
 

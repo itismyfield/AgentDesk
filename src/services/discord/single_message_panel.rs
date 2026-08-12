@@ -118,10 +118,22 @@ pub(in crate::services::discord) fn compose_completion_footer_text(
         return clamp_footer_status_block(block);
     }
 
+    let max_block_units = super::DISCORD_MSG_LIMIT.saturating_sub(6);
+    let block = if super::formatting::discord_message_units(&block) <= max_block_units {
+        repair_fence_parity(&block)
+    } else {
+        let ellipsis = "…";
+        let body_budget =
+            max_block_units.saturating_sub(super::formatting::discord_message_units(ellipsis));
+        let safe_end = super::formatting::byte_index_at_discord_message_units(&block, body_budget);
+        repair_fence_parity(&format!("{}{}", &block[..safe_end], ellipsis))
+    };
+
     let suffix = format!("\n\n{block}");
-    let max_len = super::DISCORD_MSG_LIMIT.saturating_sub(suffix.len());
-    let base = if body.len() > max_len {
-        let safe_end = super::formatting::floor_char_boundary(body, max_len);
+    let max_units =
+        super::DISCORD_MSG_LIMIT.saturating_sub(super::formatting::discord_message_units(&suffix));
+    let base = if super::formatting::discord_message_units(body) > max_units {
+        let safe_end = super::formatting::byte_index_at_discord_message_units(body, max_units);
         &body[..safe_end]
     } else {
         body
@@ -304,19 +316,21 @@ fn clamp_footer_panel_text(panel_text: &str) -> String {
 fn clamp_footer_status_block(status_block: String) -> String {
     // #3394: this is the universal live-panel finalization sink (every
     // `compose_footer_status_block` call lands here, after the upstream 600-byte
-    // `clamp_footer_panel_text` body trim and this Discord-limit trim — either of
-    // which can chop the Recent block's closing ```). Re-balance fence parity on
-    // EVERY return path so Discord never renders a dangling fence as literal text.
-    let max_bytes = super::DISCORD_MSG_LIMIT.saturating_sub(6);
-    let clamped = if status_block.len() <= max_bytes {
+    // `clamp_footer_panel_text` body trim and this Discord-unit trim — either
+    // can chop the Recent block's closing ```). Re-balance fence parity on EVERY
+    // return path so Discord never renders a dangling fence as literal text.
+    let max_units = super::DISCORD_MSG_LIMIT.saturating_sub(6);
+    let clamped = if super::formatting::discord_message_units(&status_block) <= max_units {
         status_block
     } else {
         let ellipsis = "…";
-        let body_budget = max_bytes.saturating_sub(ellipsis.len());
+        let body_budget =
+            max_units.saturating_sub(super::formatting::discord_message_units(ellipsis));
         if body_budget == 0 {
             ellipsis.to_string()
         } else {
-            let safe_end = super::formatting::floor_char_boundary(&status_block, body_budget);
+            let safe_end =
+                super::formatting::byte_index_at_discord_message_units(&status_block, body_budget);
             format!("{}{}", &status_block[..safe_end], ellipsis)
         }
     };
@@ -1291,6 +1305,111 @@ mod tests {
     }
 
     #[test]
+    fn completion_footer_with_body_clamps_oversized_suffix_5177() {
+        let body = "본문!";
+        let completion = "한".repeat(2_497);
+        let rendered_completion = super::completion_footer_subtext(&completion);
+        assert_eq!(
+            super::super::formatting::discord_message_units(&rendered_completion),
+            2_500,
+            "rendered completion fixture unit count"
+        );
+        let unclamped = format!("{body}\n\n{rendered_completion}");
+        assert_eq!(
+            super::super::formatting::discord_message_units(&unclamped),
+            2_505,
+            "origin/main with-body payload unit count"
+        );
+
+        let composed = super::compose_completion_footer_text(body, Some(&completion));
+        assert!(
+            super::super::formatting::discord_message_units(&composed) <= DISCORD_MSG_LIMIT,
+            "final with-body payload must fit the shared limit: {}",
+            super::super::formatting::discord_message_units(&composed)
+        );
+        assert!(composed.starts_with(body));
+        assert!(composed.ends_with('…'));
+    }
+
+    #[test]
+    fn completion_footer_preserves_korean_payload_within_unit_limit_5177() {
+        let body = "본문!";
+        let completion = "한".repeat(1_990);
+        let expected = format!(
+            "{body}\n\n{}",
+            super::completion_footer_subtext(&completion)
+        );
+        assert_eq!(
+            super::super::formatting::discord_message_units(&expected),
+            1_998,
+            "fixture must fit the shared message-unit limit"
+        );
+
+        let composed = super::compose_completion_footer_text(body, Some(&completion));
+
+        assert_eq!(
+            composed, expected,
+            "in-limit Korean footer must be preserved"
+        );
+    }
+
+    #[test]
+    fn footer_only_preserves_korean_payload_within_unit_limit_5177() {
+        let completion = "한".repeat(700);
+        let expected = super::completion_footer_subtext(&completion);
+        assert_eq!(
+            super::super::formatting::discord_message_units(&expected),
+            703,
+            "rendered footer fixture unit count"
+        );
+
+        let composed = super::compose_completion_footer_text("", Some(&completion));
+
+        assert_eq!(
+            composed, expected,
+            "in-limit footer-only Korean payload must not be byte-clamped"
+        );
+    }
+
+    #[test]
+    fn streaming_placeholder_counts_supplementary_utf16_units_5178() {
+        let body = "😀".repeat(1_200);
+        assert_eq!(
+            super::super::formatting::discord_message_units(&body),
+            2_400,
+            "fixture unit count"
+        );
+        let rendered = super::super::formatting::build_streaming_placeholder_text(&body, "status");
+        assert_eq!(
+            super::super::formatting::discord_message_units(&rendered),
+            1_989,
+            "rendered placeholder uses 1981 body units plus the 8-unit footer"
+        );
+        assert!(rendered.starts_with('…'));
+    }
+
+    #[test]
+    fn streaming_rollover_limits_supplementary_frozen_chunk_units_5177() {
+        let body = "😀".repeat(1_100);
+        let plan = super::super::formatting::plan_streaming_rollover(&body, "STATUS")
+            .expect("2200 message units must roll over before delivery");
+
+        assert_eq!(
+            super::super::formatting::discord_message_units(&plan.frozen_chunk),
+            1_982,
+            "frozen body reserves the 8-unit footer and 10-unit margin"
+        );
+        assert!(
+            super::super::formatting::discord_message_units(&plan.display_snapshot)
+                <= DISCORD_MSG_LIMIT
+        );
+        assert_eq!(
+            format!("{}{}", plan.frozen_chunk, &body[plan.split_at..]),
+            body
+        );
+    }
+
+    #[test]
     fn subtext_completion_footer_is_stripped_at_terminal_reconciliation_4080() {
         let text = "Final answer\n\n-# 📦 10 / 100 (10%) · auto-compact 50%\n\n-# Tasks\n-# └ Bash Done ✓\n-# ⏱ 2m 34s";
         assert_eq!(
@@ -1374,7 +1493,6 @@ mod tests {
         let panel = panel_portion(&block);
         let panel_lines: Vec<&str> = panel.lines().collect();
 
-        assert!(std::str::from_utf8(panel.as_bytes()).is_ok());
         assert!(panel.len() <= super::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES);
         assert_eq!(panel_lines.last().copied(), Some("-# …"));
         assert_eq!(panel_lines.len(), 2);

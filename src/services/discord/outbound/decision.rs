@@ -11,6 +11,8 @@ use std::path::PathBuf;
 use poise::serenity_prelude::{ChannelId, UserId};
 use serde::{Deserialize, Serialize};
 
+use crate::services::discord::formatting::discord_message_units;
+
 use super::message::{
     DiscordOutboundMessage, OutboundAttachmentSource, OutboundDedupKey, OutboundOperation,
     OutboundTarget,
@@ -159,29 +161,31 @@ fn decide_length(
     message: &DiscordOutboundMessage,
     limits: OutboundPolicyLimits,
 ) -> LengthPolicyDecision {
-    let char_count = message.content.chars().count();
+    let message_units = discord_message_units(&message.content);
     let inline_limit = match message.policy.length_strategy {
         LengthStrategy::Compact => limits.compact_char_limit,
         LengthStrategy::Split
         | LengthStrategy::FileAttachment
         | LengthStrategy::RejectOverLimit => limits.inline_char_limit,
     };
-    if char_count <= inline_limit {
-        return LengthPolicyDecision::Inline { char_count };
+    if message_units <= inline_limit {
+        return LengthPolicyDecision::Inline {
+            char_count: message_units,
+        };
     }
 
     match message.policy.length_strategy {
         LengthStrategy::Split => {
             let chunk_limit = limits.split_chunk_char_limit.max(1);
             LengthPolicyDecision::Split {
-                char_count,
+                char_count: message_units,
                 chunk_char_limit: chunk_limit,
-                chunk_count: char_count.div_ceil(chunk_limit),
+                chunk_count: message_units.div_ceil(chunk_limit),
                 fallback_used: FallbackUsed::LengthSplit,
             }
         }
         LengthStrategy::Compact => LengthPolicyDecision::Compact {
-            char_count,
+            char_count: message_units,
             compact_char_limit: limits.compact_char_limit.max(1),
             summary_available: message.summary.is_some(),
             fallback_used: FallbackUsed::LengthCompacted,
@@ -190,7 +194,9 @@ fn decide_length(
             let mut attachments = vec![AttachmentPolicyDecision {
                 filename: DEFAULT_TEXT_ATTACHMENT_NAME.to_string(),
                 content_type: Some(TEXT_ATTACHMENT_CONTENT_TYPE.to_string()),
-                source: AttachmentSourceDecision::GeneratedTextBody { char_count },
+                source: AttachmentSourceDecision::GeneratedTextBody {
+                    char_count: message_units,
+                },
             }];
             attachments.extend(message.attachments.iter().map(|attachment| {
                 AttachmentPolicyDecision {
@@ -209,13 +215,13 @@ fn decide_length(
                 }
             }));
             LengthPolicyDecision::FileAttachment {
-                char_count,
+                char_count: message_units,
                 attachments,
                 fallback_used: FallbackUsed::FileAttachment,
             }
         }
         LengthStrategy::RejectOverLimit => LengthPolicyDecision::RejectOverLimit {
-            char_count,
+            char_count: message_units,
             inline_char_limit: limits.inline_char_limit,
         },
     }

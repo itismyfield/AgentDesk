@@ -12,7 +12,6 @@ use super::{
     rate_limit_wait,
     response_sanitizer::subagent_notification_card,
 };
-use crate::utils::format::tail_with_ellipsis;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, super::Data, Error>;
@@ -194,18 +193,21 @@ pub(crate) use self::tool_markdown::{normalize_allowed_tools, redact_sensitive_f
 #[path = "formatting/streaming_status.rs"]
 mod streaming_status;
 
+#[cfg(test)]
+use self::streaming_status::char_count;
+use self::streaming_status::strip_placeholder_lines;
 #[allow(unused_imports)]
 pub(super) use self::streaming_status::{
     LongRunningCloseTrigger, MonitorHandoffReason, MonitorHandoffStatus, StreamingRolloverPlan,
     build_monitor_handoff_placeholder, build_monitor_handoff_placeholder_with_context,
     build_monitor_handoff_placeholder_with_live_events, build_placeholder_status_block,
     build_processing_status_block, build_status_panel_streaming_edit_text,
-    build_streaming_placeholder_text, classify_long_running_tool, finalize_in_progress_tool_status,
+    build_streaming_placeholder_text, byte_index_at_discord_message_units,
+    classify_long_running_tool, discord_message_units, finalize_in_progress_tool_status,
     finalize_stale_streaming_footer, floor_char_boundary, format_for_discord, humanize_tool_status,
     is_streaming_placeholder_status_line, plan_streaming_rollover, preserve_previous_tool_status,
     resolve_raw_tool_status, streaming_split_boundary, text_ends_with_streaming_footer,
 };
-use self::streaming_status::{byte_index_at_char_limit, char_count, strip_placeholder_lines};
 
 #[path = "formatting/delivery.rs"]
 mod delivery;

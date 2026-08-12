@@ -185,6 +185,8 @@
 >
 > Last refreshed: 2026-07-05 (#4049 S4-b — direct reaction/queue-marker call remnants are removed in favor of the turn_view_reconciler single path: the dead `TurnGateway::add_reaction`/`remove_reaction` trait surface and `discord_io` raw add_reaction wrapper are deleted, `outbound/turn_output_controller.rs` sheds its direct reaction call-sites (no controller verb change, delivery arms untouched), and queue ➕/🔄 add/remove plus the three queue-exit-feedback sites route through the reconciler with an untracked best-effort remove fallback for pre-migration reactions. No delivery API shape change; the production callsite coverage map for turn-output delivery is unchanged).
 >
+> Last refreshed: 2026-08-12 (#5177 r2 — `decide_policy_with_limits` in `outbound/decision.rs` now uses `discord_message_units()` for all length gates (`decide_length`) instead of `chars().count()`, unifying the outbound policy planner on shared UTF-16 code-unit conservative policy. `outbound/delivery.rs` routes the policy decision through this unified gate unchanged; no delivery API shape, dedup semantics, or direct-send callsite coverage changed. Outbound policy coverage map and production callsite inventory below remain unchanged).
+>
 > Companion docs: [`docs/discord-outbound-remaining-producers.md`](../discord-outbound-remaining-producers.md) (#1175 closure), [`docs/source-of-truth.md`](../source-of-truth.md).
 
 This is the single source of truth for "where is each Discord outbound callsite
