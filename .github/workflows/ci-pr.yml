@@ -1314,6 +1314,15 @@ jobs:
       - name: Install shellcheck
         run: sudo apt-get install -y shellcheck
 
+      # This direct required-job step is deliberately outside the aggregate it
+      # inspects, so deleting an aggregate writer gate or its wiring test cannot
+      # also prevent the deletion check from running.
+      - name: Protect writer gate aggregate wiring (#5308)
+        run: |
+          python3 scripts/check_writer_gate_ci_wiring.py
+          python3 -m unittest tests.test_writer_gate_ci_wiring
+          scripts/check-ci-runner-hardening.sh
+
       - name: Run script checks
         run: ./scripts/ci-script-checks.sh
         env:
