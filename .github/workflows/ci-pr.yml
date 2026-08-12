@@ -918,13 +918,19 @@ jobs:
   # THIS JOB NEEDS POSTGRESQL, even though its filters are named for excluding
   # it. The canonical non-PG filter is a substring filter over test
   # ids, and PostgreSQL dependence is a property of a test *body*. The two do
-  # not coincide: `scripts/pg_test_lane_manifest.txt` classifies 477 library
-  # tests as PG-dependent and 55 of them carry none of those three substrings
-  # in their id, so this lane selects those 55. That residual was 61 until
-  # #5218 renamed `server::multinode_regression::tests` (5 ids) and the
-  # Postgres half of `server::issue_specs::tests` (1 id) into `_pg_` modules,
-  # which handed those 6 to the id-filtered `test_fast` lane; the count moves
-  # again whenever a module gains or loses a lane token.
+  # not coincide: `scripts/pg_test_lane_manifest.txt` classifies 625 library
+  # tests as PG-dependent and 68 of them carry none of those three substrings
+  # in their id, so this lane selects those 68. Both figures are what
+  # `scripts/check_pg_test_lane_membership.py` prints at this commit (the
+  # residual is its `rule2` count); rerun it rather than trusting this
+  # sentence. The residual was 61 until #5218 renamed
+  # `server::multinode_regression::tests` (5 ids) and the Postgres half of
+  # `server::issue_specs::tests` (1 id) into `_pg_` modules, which handed
+  # those 6 to the id-filtered `test_fast` lane, leaving 55; #5266 then
+  # widened *discovery* (Rust-2018 sibling module paths, and `#[test]` items
+  # that sit outside an inline `#[cfg(test)] mod`) and surfaced pre-existing
+  # tests neither figure had been counting. The count moves again whenever a
+  # module gains or loses a lane token, or whenever discovery widens.
   #
   # The two counts move independently, and #5142 is the worked example: it took
   # the PG-dependent total from 460 to 477 while leaving the residual at 55 --
