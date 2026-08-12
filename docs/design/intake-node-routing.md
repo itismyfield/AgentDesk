@@ -634,7 +634,12 @@ stale-dispatched and journal-binding indexes before any dispatched/unknown
 authority is activated. The 0109 journal-binding index is forward-compatible
 substrate; its binding writer does not exist before S-W1. S-R1 itself adds no
 such writer or reconciler. Recovery that records an already-applied manual
-migration must use the exact checksum pinned in `immutable-checksums.json`.
+migration must never copy the 64-hex SHA-256 from `immutable-checksums.json`
+into `_sqlx_migrations`; that manifest verifies exact migration file bytes
+only. `_sqlx_migrations.checksum` must be the 96-hex SHA-384 resolved from those
+bytes by the exact pinned SQLx migrator. For diagnosis and any approved guarded
+row repair, follow the
+[PostgreSQL migration checksum repair procedure](../postgres-migration-checksum-repair.md).
 
 **Why a fresh row instead of in-place reset for retry**: keeps every
 attempt's `last_error`, timing, and `claim_owner` in PG for audit. A

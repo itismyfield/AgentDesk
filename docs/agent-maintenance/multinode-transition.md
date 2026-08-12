@@ -34,8 +34,12 @@
   authority activation, a later gate must remediate bad rows and require
   completed validation, or prove bad-row absence fail-closed, in addition to
   checking both concurrent indexes are present and `indisvalid=true`. Recovery
-  that records an already-applied manual migration must use the exact checksum
-  pinned in `immutable-checksums.json`.
+  that records an already-applied manual migration must never copy the 64-hex
+  SHA-256 from `immutable-checksums.json` into `_sqlx_migrations`; that manifest
+  verifies exact migration file bytes only. `_sqlx_migrations.checksum` must be
+  the 96-hex SHA-384 resolved from those bytes by the exact pinned SQLx
+  migrator. For diagnosis and any approved guarded row repair, follow the
+  [PostgreSQL migration checksum repair procedure](../postgres-migration-checksum-repair.md).
 - 2026-08-13 (#5071 T2-R): intake-outbox row status now decodes through the
   strong Rust enum, and owner-record status writes bind that enum only for the
   intake-outbox domain. Unknown database spellings fail row decoding instead
