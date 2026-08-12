@@ -587,15 +587,17 @@ operators can run it manually for incident response.
 **Current typed status boundary (#5071 T2-R)**:
 
 - `IntakeOutboxRow.status` is `IntakeOutboxStatus`. SQLx `FromRow`
-  validates a spelling only when a query decodes that row; an unknown
-  spelling returns a column-decode error and is not converted through the
-  manual `FromStr` implementation.
+  validates a spelling only when a query decodes that row. The official
+  `unknown` spelling decodes to the terminal `IntakeOutboxStatus::Unknown`;
+  an unregistered spelling such as `future_status` returns a column-decode
+  error and is not converted through the manual `FromStr` implementation.
 - The wildcard-free `operator_retry()` classification makes every added
   Rust variant visit the operator-retry decision, although the compiler
   cannot prove that the chosen classification is semantically correct.
   It is the sole force-fail authority: accepted/spawned rows are
-  terminalized, failed-post-accept rows preserve their existing terminal
-  error, and every other current status is refused before writes.
+  terminalized, while failed-post-accept and unknown rows preserve their
+  existing terminal status/error and append only a pending child. Every other
+  current status, including dispatched, is refused before writes.
 - Existing open-route reads carry `Option<IntakeOutboxStatus>` across the
   service boundary. A decoded row is `Some(status)`; failure to establish a
   route status after a unique conflict is `None`. Only `Some(Pending)`, with
@@ -604,8 +606,19 @@ operators can run it manually for incident response.
 - Typed Rust rows complement rather than replace the database CHECK. Direct
   SQL literals and writers outside the typed bind coordinates remain
   possible. `None` does not distinguish a vanished row from a failed conflict
-  requery. T2-W owns `Unknown`; the dispatched fence fixture stops at decision/
-  admission and does not execute the outer `admit_text_intake` retirement path.
+  requery. The open set remains exactly pending/claimed/accepted/spawned/
+  dispatched, so official unknown releases the channel route.
+
+**S-R1 rolling floor (#5071 T2-W):** migrations 0107-0109 must reach every
+node before an unknown writer is enabled. Rolling back to a pre-S-R1 binary is
+safe only while no official unknown row has been created; after that point,
+S-R1 is the fleet floor unless status rows and constraints are coordinated
+back. Both new CHECKs are intentionally NOT VALID: they constrain new writes,
+but their mere catalog presence does not prove activation safety. A later
+capability gate must require validation or a fail-closed bad-row-absence proof,
+plus valid (`indisvalid=true`) stale-dispatched and journal-binding indexes,
+before any dispatched/unknown authority is activated. S-R1 itself adds no such
+writer or reconciler.
 
 **Why a fresh row instead of in-place reset for retry**: keeps every
 attempt's `last_error`, timing, and `claim_owner` in PG for audit. A

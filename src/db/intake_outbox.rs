@@ -1244,25 +1244,107 @@ mod migration_pg_tests {
         pg_db.drop().await;
     }
 
-    /// The new status is accepted by the domain constraint and remains inside
-    /// the named per-channel open-route discriminator.
+    /// S-R1 installs the official terminal `unknown` state, dispatch clock
+    /// invariant, and both reconciler-supporting indexes without changing the
+    /// five-state open-route predicate.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn intake_outbox_dispatched_is_valid_and_blocks_a_second_open_route() {
+    async fn intake_outbox_sr1_schema_enforces_unknown_clock_and_indexes_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
-        insert_minimal_row(&pool, "ch-dispatched", "msg-A", 1, "dispatched")
-            .await
-            .expect("dispatched must satisfy intake_outbox_status_check"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
+        let missing_clock =
+            insert_minimal_row(&pool, "ch-dispatched", "msg-no-clock", 1, "dispatched")
+                .await
+                .expect_err("dispatched without dispatched_at must fail closed");
+        assert!(
+            missing_clock
+                .to_string()
+                .contains("intake_outbox_dispatched_requires_clock"),
+            "expected named dispatch-clock CHECK violation, got: {missing_clock}"
+        );
+
+        sqlx::query(
+            "INSERT INTO intake_outbox (
+                target_instance_id, forwarded_by_instance_id, required_labels,
+                channel_id, user_msg_id, request_owner_id, request_owner_name,
+                user_text, turn_kind, agent_id, status, attempt_no, dispatched_at
+             ) VALUES (
+                'worker-1', 'leader-1', '[]'::JSONB,
+                'ch-dispatched', 'msg-clock', 'user-1', 'Tester',
+                'hello', 'standard', 'agent-x', 'dispatched', 1, NOW()
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("dispatched with a clock must satisfy both CHECKs"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
         let error = insert_minimal_row(&pool, "ch-dispatched", "msg-B", 1, "pending")
             .await
-            .expect_err("dispatched must retain the channel open-route fence");
+            .expect_err("clocked dispatched must retain the channel open-route fence");
         assert!(
             error
                 .to_string()
                 .contains("intake_outbox_one_open_route_per_channel"),
             "expected named open-route index violation after dispatched row, got: {error}"
         );
+
+        insert_minimal_row(&pool, "ch-unknown", "msg-unknown", 1, "unknown")
+            .await
+            .expect("official unknown must satisfy intake_outbox_status_check"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
+        let decoded: IntakeOutboxStatus = sqlx::query_scalar(
+            "SELECT status FROM intake_outbox
+             WHERE channel_id='ch-unknown' AND user_msg_id='msg-unknown'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("decode official unknown through the typed SQLx codec"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
+        assert_eq!(decoded, IntakeOutboxStatus::Unknown);
+        assert_eq!(decoded.to_string(), "unknown");
+        assert!(
+            !decoded.is_open(),
+            "official unknown must release its route"
+        );
+        insert_minimal_row(&pool, "ch-unknown", "msg-after-unknown", 1, "pending")
+            .await
+            .expect("a same-channel pending row is allowed after terminal unknown"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
+
+        let future = insert_minimal_row(&pool, "ch-future", "msg-future", 1, "future_status")
+            .await
+            .expect_err("unregistered future_status must remain rejected");
+        assert!(
+            future.to_string().contains("intake_outbox_status_check"),
+            "expected named status CHECK violation for future_status, got: {future}"
+        );
+
+        for constraint in [
+            "intake_outbox_status_check",
+            "intake_outbox_dispatched_requires_clock",
+        ] {
+            let convalidated: bool = sqlx::query_scalar(
+                "SELECT convalidated FROM pg_constraint
+                 WHERE conrelid = 'intake_outbox'::regclass AND conname = $1",
+            )
+            .bind(constraint)
+            .fetch_one(&pool)
+            .await
+            .expect("read S-R1 CHECK validation state"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
+            assert!(!convalidated, "{constraint} must remain NOT VALID in S-R1");
+        }
+        for index in [
+            "idx_intake_outbox_stale_dispatched",
+            "idx_delivery_journal_intake_binding",
+        ] {
+            let indisvalid: bool = sqlx::query_scalar(
+                "SELECT i.indisvalid
+                   FROM pg_index i
+                   JOIN pg_class c ON c.oid = i.indexrelid
+                  WHERE c.relname = $1",
+            )
+            .bind(index)
+            .fetch_one(&pool)
+            .await
+            .expect("read S-R1 concurrent index validity"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
+            assert!(indisvalid, "fresh migration must build valid index {index}");
+        }
 
         pool.close().await;
         pg_db.drop().await;
@@ -2553,52 +2635,61 @@ mod postgres_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn force_fail_and_retry_as_new_on_already_terminal_row_just_appends_attempt() {
-        // Operator hits the helper after the worker already wrote
-        // failed_post_accept (the alert path's normal flow). The
-        // helper must NOT overwrite the existing last_error and must
-        // still insert the new attempt.
+    async fn force_fail_and_retry_as_new_preserves_unknown_source_and_appends_pending_attempt() {
+        // Official unknown is terminal evidence, not a failure alias. Operator
+        // retry appends a child but must not rewrite the source status/error.
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         seed_default_test_agent(&pool).await;
 
-        insert_pending(&pool, &payload("ch-terminal", "msg-terminal"), 1, None)
-            .await
-            .expect("seed");
-        let claimed = claim_pending_for_target(&pool, "worker-1", "claude", "owner-1")
-            .await
-            .expect("claim")
-            .expect("row");
-        mark_accepted(&pool, claimed.id, "owner-1")
-            .await
-            .expect("accept");
-        mark_failed_post_accept(&pool, claimed.id, "owner-1", "original failure")
-            .await
-            .expect("fail post-accept");
+        insert_pending(
+            &pool,
+            &payload("ch-unknown-retry", "msg-unknown-retry"),
+            1,
+            None,
+        )
+        .await
+        .expect("seed"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
+        let source_id: i64 = sqlx::query_scalar(
+            "UPDATE intake_outbox
+                SET status = $1, completed_at = NOW(), last_error = 'delivery outcome unknown'
+              WHERE channel_id = 'ch-unknown-retry'
+          RETURNING id",
+        )
+        .bind(IntakeOutboxStatus::Unknown)
+        .fetch_one(&pool)
+        .await
+        .expect("settle source as official unknown"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
 
-        let new_id = force_fail_and_retry_as_new(&pool, claimed.id, "operator: retry approved")
+        let new_id = force_fail_and_retry_as_new(&pool, source_id, "operator: retry approved")
             .await
             .expect("force-fail");
 
-        let stuck_last_error: Option<String> =
-            sqlx::query_scalar("SELECT last_error FROM intake_outbox WHERE id = $1")
-                .bind(claimed.id)
+        let source: (IntakeOutboxStatus, Option<String>) =
+            sqlx::query_as("SELECT status, last_error FROM intake_outbox WHERE id = $1")
+                .bind(source_id)
                 .fetch_one(&pool)
                 .await
-                .expect("read stuck last_error");
+                .expect("read unknown source"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
+        assert_eq!(source.0, IntakeOutboxStatus::Unknown);
         assert_eq!(
-            stuck_last_error.as_deref(),
-            Some("original failure"),
-            "already-terminal row must preserve its original last_error"
+            source.1.as_deref(),
+            Some("delivery outcome unknown"),
+            "retry must preserve unknown evidence instead of collapsing it to failure"
         );
 
-        let new_attempt: i32 =
-            sqlx::query_scalar("SELECT attempt_no FROM intake_outbox WHERE id = $1")
-                .bind(new_id)
-                .fetch_one(&pool)
-                .await
-                .expect("read new attempt");
-        assert_eq!(new_attempt, 2);
+        let child: (IntakeOutboxStatus, i32, Option<i64>) = sqlx::query_as(
+            "SELECT status, attempt_no, parent_outbox_id FROM intake_outbox WHERE id = $1",
+        )
+        .bind(new_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read child attempt"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
+        assert_eq!(
+            child,
+            (IntakeOutboxStatus::Pending, 2, Some(source_id)),
+            "retry must append one pending child linked to the unchanged source"
+        );
 
         pool.close().await;
         pg_db.drop().await;

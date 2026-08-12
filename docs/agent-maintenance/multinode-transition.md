@@ -1,6 +1,25 @@
 # Multinode Transition
 
 ### Audited touches
+- 2026-08-13 (#5071 T2-W S-R1): migrations 0107-0109 add the nullable
+  `dispatched_at` clock, the official terminal `unknown` status, two NOT VALID
+  CHECKs, and valid concurrent indexes for future stale-dispatch and journal
+  binding readers. The channel-open set remains exactly `pending`, `claimed`,
+  `accepted`, `spawned`, and `dispatched`; `unknown` releases the route.
+  `IntakeOutboxStatus::Unknown` is a decoded domain value, while
+  `UnknownIntakeStatus` remains the error for unregistered spellings such as
+  `future_status`. Operator retry preserves an unknown source and only appends
+  a pending child. This schema slice adds no dispatched/unknown writer,
+  reconciler, or delivery authority.
+
+  Rollout order is strict: deploy S-R1-capable binaries to the entire fleet
+  before any writer can create `unknown`. A pre-S-R1 binary rollback is safe
+  only before the first unknown row exists; afterward S-R1 is the binary floor
+  unless rows and constraints are coordinated back. Merely observing the NOT
+  VALID constraints is not a sufficient capability signal. Before authority
+  activation, a later gate must require completed validation or a fail-closed
+  proof that no bad rows exist, in addition to checking both concurrent indexes
+  are present and `indisvalid=true`.
 - 2026-08-13 (#5071 T2-R): intake-outbox row status now decodes through the
   strong Rust enum, and owner-record status writes bind that enum only for the
   intake-outbox domain. Unknown database spellings fail row decoding instead
