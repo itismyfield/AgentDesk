@@ -113,10 +113,21 @@ pub(in crate::services::discord) fn compose_completion_footer_text(
     else {
         return body.to_string();
     };
-    let block = clamp_footer_status_block(completion_footer_subtext(block));
+    let block = completion_footer_subtext(block);
     if body.is_empty() {
         return clamp_footer_status_block(block);
     }
+
+    let max_block_units = super::DISCORD_MSG_LIMIT.saturating_sub(6);
+    let block = if super::formatting::discord_message_units(&block) <= max_block_units {
+        repair_fence_parity(&block)
+    } else {
+        let ellipsis = "…";
+        let body_budget =
+            max_block_units.saturating_sub(super::formatting::discord_message_units(ellipsis));
+        let safe_end = super::formatting::byte_index_at_discord_message_units(&block, body_budget);
+        repair_fence_parity(&format!("{}{}", &block[..safe_end], ellipsis))
+    };
 
     let suffix = format!("\n\n{block}");
     let max_units =
@@ -1315,7 +1326,29 @@ mod tests {
             super::super::formatting::discord_message_units(&composed)
         );
         assert!(composed.starts_with(body));
-        assert!(std::str::from_utf8(composed.as_bytes()).is_ok());
+        assert!(composed.ends_with('…'));
+    }
+
+    #[test]
+    fn completion_footer_preserves_korean_payload_within_unit_limit_5177() {
+        let body = "본문!";
+        let completion = "한".repeat(1_990);
+        let expected = format!(
+            "{body}\n\n{}",
+            super::completion_footer_subtext(&completion)
+        );
+        assert_eq!(
+            super::super::formatting::discord_message_units(&expected),
+            1_998,
+            "fixture must fit the shared message-unit limit"
+        );
+
+        let composed = super::compose_completion_footer_text(body, Some(&completion));
+
+        assert_eq!(
+            composed, expected,
+            "in-limit Korean footer must be preserved"
+        );
     }
 
     #[test]
@@ -1330,10 +1363,30 @@ mod tests {
         assert_eq!(
             super::super::formatting::discord_message_units(&rendered),
             1_989,
-            "ellipsis plus an even-unit emoji tail must stay within the 1990-unit body budget"
+            "rendered placeholder uses 1981 body units plus the 8-unit footer"
         );
         assert!(rendered.starts_with('…'));
-        assert!(std::str::from_utf8(rendered.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn streaming_rollover_limits_supplementary_frozen_chunk_units_5177() {
+        let body = "😀".repeat(1_100);
+        let plan = super::super::formatting::plan_streaming_rollover(&body, "STATUS")
+            .expect("2200 message units must roll over before delivery");
+
+        assert_eq!(
+            super::super::formatting::discord_message_units(&plan.frozen_chunk),
+            1_982,
+            "frozen body reserves the 8-unit footer and 10-unit margin"
+        );
+        assert!(
+            super::super::formatting::discord_message_units(&plan.display_snapshot)
+                <= DISCORD_MSG_LIMIT
+        );
+        assert_eq!(
+            format!("{}{}", plan.frozen_chunk, &body[plan.split_at..]),
+            body
+        );
     }
 
     #[test]
@@ -1420,7 +1473,6 @@ mod tests {
         let panel = panel_portion(&block);
         let panel_lines: Vec<&str> = panel.lines().collect();
 
-        assert!(std::str::from_utf8(panel.as_bytes()).is_ok());
         assert!(panel.len() <= super::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES);
         assert_eq!(panel_lines.last().copied(), Some("-# …"));
         assert_eq!(panel_lines.len(), 2);

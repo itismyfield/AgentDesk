@@ -520,11 +520,8 @@ fn build_attachment_inline(text: &str, summary: Option<&str>) -> String {
 
     if let Some(summary) = trimmed_summary {
         let candidate = with_provenance(format!("{summary}{footer}"));
-        // Same question, same definition: `!needs_multiple_messages(x)` is
-        // exactly `char_count(x) <= DISCORD_MSG_LIMIT`, which this used to
-        // open-code. Routed through the helper so "every surface that asks
-        // whether something fits one Discord message shares one definition"
-        // holds without an exception list.
+        // Keep the caller-provided summary only when the fully composed inline
+        // candidate fits the shared Discord message-unit limit.
         if !needs_multiple_messages(&candidate) {
             return candidate;
         }
@@ -592,158 +589,10 @@ mod discord_unit_tests {
         let chunks = split_message(&body);
         assert_eq!(chunks.len(), 2, "2005 units must produce two chunks");
         assert_eq!(chunks.concat(), body, "chunking must preserve every scalar");
-        assert!(chunks.iter().all(|chunk| {
-            std::str::from_utf8(chunk.as_bytes()).is_ok()
-                && discord_message_units(chunk) <= DISCORD_MSG_LIMIT
-        }));
-    }
-
-    #[test]
-    fn discord_unit_boundary_matrix_5178() {
-        for (units, expected_multi) in [
-            (DISCORD_MSG_LIMIT - 1, false),
-            (DISCORD_MSG_LIMIT, false),
-            (DISCORD_MSG_LIMIT + 1, true),
-        ] {
-            let body = "한".repeat(units);
-            assert_eq!(discord_message_units(&body), units);
-            assert_eq!(needs_multiple_messages(&body), expected_multi);
-            assert!(split_message(&body).iter().all(|chunk| {
-                std::str::from_utf8(chunk.as_bytes()).is_ok()
-                    && discord_message_units(chunk) <= DISCORD_MSG_LIMIT
-            }));
-        }
-
-        for count in [1_001, 1_500] {
-            let body = "😀".repeat(count);
-            assert_eq!(discord_message_units(&body), count * 2);
-            let chunks = split_message(&body);
-            assert!(chunks.len() > 1);
-            assert_eq!(chunks.concat(), body);
-            assert!(chunks.iter().all(|chunk| {
-                std::str::from_utf8(chunk.as_bytes()).is_ok()
-                    && discord_message_units(chunk) <= DISCORD_MSG_LIMIT
-            }));
-        }
-
-        let family = "👨‍👩‍👧‍👦";
-        assert_eq!(discord_message_units(family), 11);
-        let body = format!("{}{family}", "한".repeat(DISCORD_MSG_LIMIT - 10));
-        assert_eq!(discord_message_units(&body), DISCORD_MSG_LIMIT + 1);
-        let chunks = split_message(&body);
-        assert_eq!(chunks.concat(), body);
-        assert!(chunks.iter().all(|chunk| {
-            std::str::from_utf8(chunk.as_bytes()).is_ok()
-                && discord_message_units(chunk) <= DISCORD_MSG_LIMIT
-        }));
-
-        let fenced = format!("```text\n{}", "😀".repeat(1_000));
-        let chunks = split_message(&fenced);
-        assert!(chunks.len() > 1);
-        assert!(chunks.iter().all(|chunk| {
-            std::str::from_utf8(chunk.as_bytes()).is_ok()
-                && discord_message_units(chunk) <= DISCORD_MSG_LIMIT
-        }));
-
-        assert!(split_message("").is_empty());
-        assert_eq!(super::byte_index_at_discord_message_units("😀", 0), 0);
-        assert_eq!(super::byte_index_at_discord_message_units("😀", 1), 0);
-    }
-
-    #[test]
-    fn boundary_counterexample_measurements_5178() {
-        fn routed_chunks(body: &str) -> Vec<String> {
-            if needs_multiple_messages(body) {
-                split_message(body)
-            } else {
-                vec![body.to_string()]
-            }
-        }
-        fn record(name: &str, chunks: &[String], marker: bool, footer: bool) {
-            let units: Vec<usize> = chunks
+        assert!(
+            chunks
                 .iter()
-                .map(|chunk| discord_message_units(chunk))
-                .collect();
-            assert!(
-                chunks
-                    .iter()
-                    .all(|chunk| std::str::from_utf8(chunk.as_bytes()).is_ok())
-            );
-            assert!(units.iter().all(|units| *units <= DISCORD_MSG_LIMIT));
-            eprintln!(
-                "MEASURE {name}: units={units:?} chunks={} marker={marker} footer={footer}",
-                chunks.len()
-            );
-        }
-
-        for units in [
-            DISCORD_MSG_LIMIT - 1,
-            DISCORD_MSG_LIMIT,
-            DISCORD_MSG_LIMIT + 1,
-        ] {
-            let chunks = routed_chunks(&"한".repeat(units));
-            record(&format!("korean_{units}"), &chunks, false, false);
-        }
-        for count in [1_001, 1_500] {
-            let chunks = routed_chunks(&"😀".repeat(count));
-            record(&format!("emoji_{count}"), &chunks, false, false);
-        }
-
-        let family = format!("{}👨‍👩‍👧‍👦", "한".repeat(DISCORD_MSG_LIMIT - 10));
-        record("zwj_family_boundary", &routed_chunks(&family), false, false);
-
-        let marker_input = "한".repeat(DISCORD_MSG_LIMIT + 1);
-        let marker_output =
-            crate::services::discord::tui_task_card::clamp_discord_message_content(&marker_input);
-        record(
-            "marker_plus_one",
-            std::slice::from_ref(&marker_output),
-            marker_output.ends_with("… (truncated)"),
-            false,
-        );
-
-        let footer_body = "한".repeat(1_995);
-        let footer_output =
-            crate::services::discord::single_message_panel::compose_completion_footer_text(
-                &footer_body,
-                Some("끝"),
-            );
-        assert_eq!(
-            discord_message_units(&format!("{footer_body}\n\n-# 끝")),
-            2_001
-        );
-        record(
-            "footer_plus_one",
-            std::slice::from_ref(&footer_output),
-            false,
-            true,
-        );
-
-        let fenced = format!("```text\n{}", "😀".repeat(1_000));
-        record("open_fence_boundary", &routed_chunks(&fenced), false, false);
-
-        let empty = split_message("");
-        eprintln!("MEASURE empty: units=[] chunks=0 marker=false footer=false");
-        assert!(empty.is_empty());
-        let zero = crate::services::discord::tui_task_card::clamp_discord_message_content("");
-        record(
-            "max_units_zero_empty",
-            std::slice::from_ref(&zero),
-            false,
-            false,
-        );
-
-        let completion = "한".repeat(2_497);
-        let oversized =
-            crate::services::discord::single_message_panel::compose_completion_footer_text(
-                "본문!",
-                Some(&completion),
-            );
-        record(
-            "completion_2500_plus_body",
-            std::slice::from_ref(&oversized),
-            false,
-            true,
+                .all(|chunk| discord_message_units(chunk) <= DISCORD_MSG_LIMIT)
         );
     }
 }

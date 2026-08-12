@@ -108,7 +108,7 @@ pub(in crate::services::discord) fn plan_streaming_rollover(
     let status_block = clamp_placeholder_status_block(status_block);
     let footer = format!("\n\n{status_block}");
     let body_budget = DISCORD_MSG_LIMIT
-        .saturating_sub(discord_message_units(&footer) + STREAMING_PLACEHOLDER_MARGIN)
+        .saturating_sub(footer.chars().count() + STREAMING_PLACEHOLDER_MARGIN)
         .max(1);
     let split_at = streaming_split_boundary(current_portion, body_budget)?;
 
