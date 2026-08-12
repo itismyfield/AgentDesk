@@ -1962,8 +1962,10 @@ time for diagnostics; neither is a stored approval value.
     the giant-file threshold; bugfix only).
   - `src/db/prompt_manifests/` (directory, refactored).
   - `src/db/intake_outbox.rs` is the intake-node-routing claim/transition/sweep
-    surface; its production LoC is now below the giant-file threshold once the
-    `#[cfg(test)] mod` PG coverage is excluded (bugfix only).
+    surface, with operator force-fail isolated in
+    `src/db/intake_outbox_force_fail.rs`; both production surfaces are below the
+    giant-file threshold once `#[cfg(test)] mod` PG coverage is excluded
+    (bugfix only).
 - active_callsite_coverage: PG-only cleanup tracked per #1237/#1238/#1239 —
   see `known-legacy.md`.
 - invariants: production reads/writes go through `pg_pool_ref()`; retired DB

@@ -27,11 +27,10 @@ use std::str::FromStr;
 ///   added variant because its match has an unknown-input arm. That coverage and
 ///   the members (rather than the cardinality) of [`Self::ALL`] are test-backed.
 /// - The strong-enum `sqlx::Type` derive generates `Type`, `Encode`, and `Decode`
-///   implementations, and `rename_all` determines their codec spelling. This
-///   module has no production bind or row-decode consumer for the enum, so that
-///   spelling authority is not exercised here. The direct-bind and row-decode
-///   slices need behavior tests that pin codec spelling against [`Self::as_str`]
-///   and the database CHECK before activating those paths.
+///   implementations, and `rename_all` determines their codec spelling.
+///   Production status writes bind this enum directly. An existing PostgreSQL
+///   test exercises enum encode and decode and pins the raw spelling against
+///   [`Self::as_str`]. Production row decode remains a later slice.
 ///
 /// LIMITS:
 /// - No gate prevents replacing an exhaustive classification arm with `_ =>`;
@@ -39,8 +38,9 @@ use std::str::FromStr;
 /// - The source-based [`Self::ALL`] membership test reads only this file and
 ///   fails closed on unsupported enum syntax, but no independent gate proves
 ///   that its defining equality assertion remains present.
-/// - These tests compare independent source authorities; they do not apply the
-///   migration or exercise PostgreSQL encoding and decoding.
+/// - The unit tests compare independent source authorities; the PostgreSQL
+///   codec test applies migrations but does not prove direct SQL cannot bypass
+///   the Rust enum.
 ///
 /// [open-statuses]: crate::db::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL
 #[derive(Clone, Copy, Debug, Eq, PartialEq, sqlx::Type)]
@@ -266,10 +266,10 @@ mod tests {
 
     #[test]
     fn operator_retry_matches_transition_12_allowed() {
-        let intake_outbox = repo_source("src/db/intake_outbox.rs");
-        let allowed_source = intake_outbox
+        let force_fail = repo_source("src/db/intake_outbox_force_fail.rs");
+        let allowed_source = force_fail
             .split_once("const TRANSITION_12_ALLOWED")
-            .expect("intake_outbox must declare TRANSITION_12_ALLOWED")
+            .expect("force-fail module must declare TRANSITION_12_ALLOWED")
             .1
             .split_once('=')
             .expect("TRANSITION_12_ALLOWED must have an initializer")
