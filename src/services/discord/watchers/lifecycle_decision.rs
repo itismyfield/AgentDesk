@@ -329,6 +329,11 @@ mod tests {
 
     #[test]
     fn watcher_activity_heartbeat_uses_runtime_output_mtime() {
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        // `set_agentdesk_root_for_test` holds `shared_test_env_lock` and restores
+        // `AGENTDESK_ROOT_DIR`, keeping `runtime_root` stable between this test's
+        // `session_temp_path` write and `resolve_session_temp_path` read.
+        let _root_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
         let tmux_name = format!("AgentDesk-claude-heartbeat-{}", uuid::Uuid::new_v4());
         let output_path = std::path::PathBuf::from(
             crate::services::tmux_common::session_temp_path(&tmux_name, "jsonl"),
@@ -348,6 +353,10 @@ mod tests {
 
     #[test]
     fn watcher_activity_heartbeat_falls_back_to_now_without_runtime_output() {
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        // The same guard keeps `runtime_root` fixed while
+        // `resolve_session_temp_path` proves absence inside this test's root.
+        let _root_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
         let tmux_name = format!(
             "AgentDesk-claude-heartbeat-missing-{}",
             uuid::Uuid::new_v4()
