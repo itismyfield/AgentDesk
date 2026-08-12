@@ -13,14 +13,16 @@ use std::str::FromStr;
 /// - The compiler requires every added variant to be handled by those four
 ///   exhaustive matches. Renaming a variant also invalidates direct references
 ///   in [`Self::ALL`] and [`Self::from_str`].
-/// - The `[Self; 8]` type of [`Self::ALL`] makes the initializer's cardinality a
+/// - The `[Self; 9]` type of [`Self::ALL`] makes the initializer's cardinality a
 ///   compile-time check.
 /// - Unit tests check [`Self::ALL`] membership against the enum declaration,
 ///   [`Self::from_str`] against [`Self::as_str`], and [`Self::is_open`] against
 ///   [`INTAKE_OUTBOX_OPEN_STATUSES_SQL`][open-statuses]. They also check
-///   [`Self::ALL`] against the 0106 status CHECK body, every current
+///   [`Self::ALL`] against the 0107 status CHECK body, every current
 ///   [`Self::operator_retry`] classification, and that rejected input is
-///   preserved in [`UnknownIntakeStatus`].
+///   preserved in [`UnknownIntakeStatus`]. The `Unknown` variant is the
+///   official terminal spelling; `UnknownIntakeStatus` represents rejected,
+///   unregistered spellings such as `future_status`.
 ///
 /// DOES NOT VALIDATE:
 /// - The compiler does not require [`Self::from_str`] to gain an arm for an
@@ -53,6 +55,7 @@ pub(crate) enum IntakeOutboxStatus {
     Accepted,
     Spawned,
     Dispatched,
+    Unknown,
     Done,
     FailedPreAccept,
     FailedPostAccept,
@@ -66,12 +69,13 @@ pub(crate) enum OperatorRetryClass {
 }
 
 impl IntakeOutboxStatus {
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::Pending,
         Self::Claimed,
         Self::Accepted,
         Self::Spawned,
         Self::Dispatched,
+        Self::Unknown,
         Self::Done,
         Self::FailedPreAccept,
         Self::FailedPostAccept,
@@ -84,6 +88,7 @@ impl IntakeOutboxStatus {
             Self::Accepted => "accepted",
             Self::Spawned => "spawned",
             Self::Dispatched => "dispatched",
+            Self::Unknown => "unknown",
             Self::Done => "done",
             Self::FailedPreAccept => "failed_pre_accept",
             Self::FailedPostAccept => "failed_post_accept",
@@ -97,6 +102,7 @@ impl IntakeOutboxStatus {
             Self::Accepted => "Accepted",
             Self::Spawned => "Spawned",
             Self::Dispatched => "Dispatched",
+            Self::Unknown => "Unknown",
             Self::Done => "Done",
             Self::FailedPreAccept => "FailedPreAccept",
             Self::FailedPostAccept => "FailedPostAccept",
@@ -108,14 +114,14 @@ impl IntakeOutboxStatus {
             Self::Pending | Self::Claimed | Self::Accepted | Self::Spawned | Self::Dispatched => {
                 true
             }
-            Self::Done | Self::FailedPreAccept | Self::FailedPostAccept => false,
+            Self::Unknown | Self::Done | Self::FailedPreAccept | Self::FailedPostAccept => false,
         }
     }
 
     pub(crate) const fn operator_retry(self) -> OperatorRetryClass {
         match self {
             Self::Accepted | Self::Spawned => OperatorRetryClass::ForceTerminate,
-            Self::FailedPostAccept => OperatorRetryClass::AlreadyTerminal,
+            Self::Unknown | Self::FailedPostAccept => OperatorRetryClass::AlreadyTerminal,
             Self::Pending
             | Self::Claimed
             | Self::Dispatched
@@ -145,6 +151,7 @@ impl FromStr for IntakeOutboxStatus {
             "accepted" => Ok(Self::Accepted),
             "spawned" => Ok(Self::Spawned),
             "dispatched" => Ok(Self::Dispatched),
+            "unknown" => Ok(Self::Unknown),
             "done" => Ok(Self::Done),
             "failed_pre_accept" => Ok(Self::FailedPreAccept),
             "failed_post_accept" => Ok(Self::FailedPostAccept),
@@ -233,8 +240,7 @@ mod tests {
 
     #[test]
     fn all_exactly_matches_migration_status_check() {
-        let migration =
-            repo_source("migrations/postgres/0106_intake_outbox_dispatched_status_swap.sql");
+        let migration = repo_source("migrations/postgres/0107_intake_outbox_dispatched_clock.sql");
         let check_values = migration
             .split_once("ADD CONSTRAINT intake_outbox_status_check CHECK (status IN (")
             .expect("migration must add intake_outbox_status_check")
@@ -280,6 +286,10 @@ mod tests {
                 OperatorRetryClass::ForceTerminate,
             ),
             (IntakeOutboxStatus::Dispatched, OperatorRetryClass::Refuse),
+            (
+                IntakeOutboxStatus::Unknown,
+                OperatorRetryClass::AlreadyTerminal,
+            ),
             (IntakeOutboxStatus::Done, OperatorRetryClass::Refuse),
             (
                 IntakeOutboxStatus::FailedPreAccept,

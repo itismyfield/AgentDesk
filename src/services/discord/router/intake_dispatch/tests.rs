@@ -863,10 +863,11 @@ async fn dispatched_open_route_never_uses_stale_local_recovery_pg() {
         "INSERT INTO intake_outbox (
             target_instance_id, forwarded_by_instance_id, required_labels,
             channel_id, user_msg_id, request_owner_id, user_text,
-            turn_kind, agent_id, provider, status, attempt_no, created_at
+            turn_kind, agent_id, provider, status, attempt_no, created_at, dispatched_at
          ) VALUES ($1, 'leader-1', '[]'::JSONB, $2, 'msg-dispatched', '50',
             'prior', 'foreground', 'agent-local-dispatched', 'claude',
-            'dispatched', 1, NOW() - INTERVAL '60 seconds')
+            'dispatched', 1, NOW() - INTERVAL '60 seconds',
+            NOW() - INTERVAL '60 seconds')
          RETURNING id",
     )
     .bind(&self_instance)

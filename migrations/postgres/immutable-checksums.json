@@ -545,6 +545,21 @@
       "path": "migrations/postgres/0106_intake_outbox_dispatched_status_swap.sql",
       "sha256": "d9bb0d020f31f348433d2efeac6cf4edbbfbdb255ef4adcaa95c5244fb9c9406",
       "version": 106
+    },
+    {
+      "path": "migrations/postgres/0107_intake_outbox_dispatched_clock.sql",
+      "sha256": "688488b2f17fde64c6f6b1814a599660a23a2046d2280470fe64581849a59ce5",
+      "version": 107
+    },
+    {
+      "path": "migrations/postgres/0108_intake_outbox_stale_dispatched_index.sql",
+      "sha256": "1a1b919c2592a01797822b3fde4b3e221ef8e4afe1e9c1e0403878ba28348ffa",
+      "version": 108
+    },
+    {
+      "path": "migrations/postgres/0109_delivery_journal_intake_binding_index.sql",
+      "sha256": "30c0c161afa5c0ea8b42bdf6f839ee5482bcaf332bda3e7fffaf037eed6c24a6",
+      "version": 109
     }
   ],
   "version": 1

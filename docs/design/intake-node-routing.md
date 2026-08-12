@@ -587,15 +587,23 @@ operators can run it manually for incident response.
 **Current typed status boundary (#5071 T2-R)**:
 
 - `IntakeOutboxRow.status` is `IntakeOutboxStatus`. SQLx `FromRow`
-  validates a spelling only when a query decodes that row; an unknown
-  spelling returns a column-decode error and is not converted through the
-  manual `FromStr` implementation.
+  validates a spelling only when a query decodes that row. The official
+  `unknown` spelling decodes to the terminal `IntakeOutboxStatus::Unknown`;
+  an unregistered spelling such as `future_status` returns a column-decode
+  error and is not converted through the manual `FromStr` implementation.
 - The wildcard-free `operator_retry()` classification makes every added
   Rust variant visit the operator-retry decision, although the compiler
   cannot prove that the chosen classification is semantically correct.
   It is the sole force-fail authority: accepted/spawned rows are
-  terminalized, failed-post-accept rows preserve their existing terminal
-  error, and every other current status is refused before writes.
+  terminalized, while failed-post-accept and unknown rows preserve their
+  existing terminal status/error and append only a pending child. Every other
+  current status, including dispatched, is refused before writes. Retry-as-new
+  for unknown is an explicit operator action; it preserves the unknown source
+  rather than reinterpreting or overwriting that evidence. Because unknown is
+  terminal ambiguity and delivery may already have occurred, executing the
+  child can emit twice. Operators must audit delivery/receipt evidence and
+  accept the duplicate consequence before retrying; this is not an automated
+  reconciler policy.
 - Existing open-route reads carry `Option<IntakeOutboxStatus>` across the
   service boundary. A decoded row is `Some(status)`; failure to establish a
   route status after a unique conflict is `None`. Only `Some(Pending)`, with
@@ -604,8 +612,39 @@ operators can run it manually for incident response.
 - Typed Rust rows complement rather than replace the database CHECK. Direct
   SQL literals and writers outside the typed bind coordinates remain
   possible. `None` does not distinguish a vanished row from a failed conflict
-  requery. T2-W owns `Unknown`; the dispatched fence fixture stops at decision/
-  admission and does not execute the outer `admit_text_intake` retirement path.
+  requery. The open set remains exactly pending/claimed/accepted/spawned/
+  dispatched, so official unknown releases the channel route. The dispatched
+  fence fixture stops at decision/admission and does not execute the outer
+  `admit_text_intake` retirement path.
+
+**S-R1 rolling floor (#5071 T2-W):** migrations 0107-0109 must reach every
+node before an unknown writer is enabled. As soon as any of these migrations
+is recorded, S-R1 is an immediate forward-only binary floor: a pre-S-R1 binary
+embeds only through 0106, uses SQLx `ignore_missing=false`, and fails startup
+migration validation with `VersionMissing`. The first official `unknown` row
+creates an additional codec/data downgrade floor; a coordinated database
+downgrade must normalize those rows before removing the widened constraint.
+
+Both new CHECKs are intentionally NOT VALID and constrain new or updated rows.
+Dropping and re-adding the status CHECK in 0107 also resets any prior manual
+validation to NOT VALID. A pre-existing manually-created `dispatched` row with
+a NULL clock survives the migration. An UPDATE that leaves both
+`status = 'dispatched'` and `dispatched_at IS NULL` is rejected by the clock
+CHECK, while remediation may fill the clock or move the row to a terminal
+status. Catalog presence alone therefore does not prove activation safety.
+A later capability gate must remediate bad rows and require validation, or
+prove bad-row absence fail-closed, plus require valid (`indisvalid=true`)
+stale-dispatched and journal-binding indexes before any dispatched/unknown
+authority is activated. The 0109 journal-binding index is forward-compatible
+substrate; its binding writer does not exist before the future S-W1
+binding-writer slice. S-R1 itself adds no such writer or reconciler. Recovery
+that records an already-applied manual migration must never copy the 64-hex
+SHA-256 from `immutable-checksums.json`
+into `_sqlx_migrations`; that manifest verifies exact migration file bytes
+only. `_sqlx_migrations.checksum` must be the 96-hex SHA-384 resolved from those
+bytes by the exact pinned SQLx migrator. For diagnosis and any approved guarded
+row repair, follow the
+[PostgreSQL migration checksum repair procedure](../postgres-migration-checksum-repair.md).
 
 **Why a fresh row instead of in-place reset for retry**: keeps every
 attempt's `last_error`, timing, and `claim_owner` in PG for audit. A

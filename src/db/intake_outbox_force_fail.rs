@@ -11,7 +11,7 @@ pub(crate) enum ForceFailError {
     NotFound(i64),
     #[error(
         "intake_outbox row id={id} is in status='{status}'; force-fail is only allowed from \
-         accepted/spawned/failed_post_accept (running transition 12 from any other state could \
+         accepted/spawned/failed_post_accept/unknown (running transition 12 from any other state could \
          double-emit a Discord turn)"
     )]
     DisallowedStatus { id: i64, status: String },
@@ -32,7 +32,8 @@ pub(crate) enum ForceFailError {
 /// - Locks the source row and rejects missing, disallowed-status, and
 ///   empty-provider rows before either write.
 /// - Moves `accepted`/`spawned` to `failed_post_accept`, while preserving the
-///   existing error on an already-`failed_post_accept` row.
+///   status and existing error on already-terminal `failed_post_accept` and
+///   official `unknown` rows.
 /// - Terminalizes before inserting the child, preserving the one-open-route
 ///   unique invariant; both writes are atomic and conflicts roll both back.
 /// - Copies payload and provider, allocates the family maximum plus one, and
