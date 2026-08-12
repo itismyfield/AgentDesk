@@ -13,9 +13,15 @@
   Migrations 0105 and 0106 are applied by `cmd_release_migrate_postgres` (under
   `with_startup_advisory_lock`) before `deploy-release.sh` requests restart drain. The concurrent
   index build in 0105 runs while the existing runtime is live and keeps ordinary table reads/writes
-  available, while SQLx's short 0106 transaction takes ACCESS EXCLUSIVE for the catalog-only
-  CHECK/index swap and blocks reads and writes from lock acquisition through commit. The old
-  open-route index remains until that swap, so there is no fence gap. Migration 0105 establishes a
+  available, while SQLx's 0106 transaction requests ACCESS EXCLUSIVE for the catalog-only
+  CHECK/index swap. From the time 0106's request enters the lock queue, later conflicting reads and
+  writes can also wait behind it; after acquisition, that lock blocks reads and writes through
+  commit. The acquired-lock execution interval remains catalog-only, but total traffic blocking is
+  dominated by the remaining duration of preceding transactions plus the O(1) catalog and commit
+  work. The repository config sets no `lock_timeout`, so a preceding transaction can extend
+  blocking past the 10-second pool acquire timeout; if blocked accesses exhaust the pool, later
+  acquisitions can surface `sqlx::Error::PoolTimedOut`. The old open-route index remains until that
+  swap, so there is no fence gap. Migration 0105 establishes a
   forward-only binary floor as soon as it is recorded: binaries embedding only migrations 0104 or
   earlier fail SQLx migration validation and must not restart or be rolled back; recover by
   forward-fix or coordinated database/fleet rollback.

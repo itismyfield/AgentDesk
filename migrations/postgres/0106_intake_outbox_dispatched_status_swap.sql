@@ -1,12 +1,18 @@
 -- #5071 T2-M stage 2: atomically widen the status CHECK and install the
 -- concurrently-built open-route fence from 0105 under its stable name.
 --
+-- Do not apply this file directly with autocommit psql: atomicity depends on
+-- SQLx's transaction, and a later failure can leave the swap partially committed.
+--
 -- SQLx runs this file and its migration bookkeeping in one transaction. The
 -- first ALTER and the ordinary DROP INDEX require ACCESS EXCLUSIVE on
--- intake_outbox. Once acquired, that lock blocks reads as well as writes through
--- commit, but this interval contains only catalog changes: ADD CHECK NOT VALID
--- skips validation scanning, and 0105 completed the heap scans beforehand. Lock
--- acquisition itself can still wait for live transactions.
+-- intake_outbox. From the time 0106's request enters the lock queue, later
+-- conflicting reads and writes can also wait behind it. Once acquired, that lock
+-- blocks reads and writes through commit. The acquired-lock execution interval
+-- remains catalog-only: ADD CHECK NOT VALID skips validation scanning, and 0105
+-- completed the heap scans beforehand. Total traffic blocking is dominated by
+-- the remaining duration of preceding transactions plus the O(1) catalog and
+-- commit work.
 --
 -- Failure-state inventory across the two migrations:
 --   * 0105 fails: the old CHECK and old fence remain; an INVALID temporary index

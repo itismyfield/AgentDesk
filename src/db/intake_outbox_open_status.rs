@@ -43,7 +43,7 @@ mod tests {
         // VALIDATES (text patterns only):
         //   1. Migration opts out of SQLx's transaction for CREATE INDEX CONCURRENTLY
         //   2. Constant includes 'dispatched' in lifecycle order
-        //   3. Migration CHECK retains every pre-T2-M status and adds dispatched
+        //   3. Migration CHECK domain is exactly the eight T2-M statuses
         //   4. Index WHERE clause uses the shared constant (not legacy literal)
         //   5. Index name is preserved (needed for 23505 error classification in Rust)
         // DOES NOT VALIDATE (requires PG integration):
@@ -89,24 +89,22 @@ mod tests {
             .split_once(")) NOT VALID;")
             .expect("status CHECK must remain NOT VALID to avoid a redundant table scan")
             .0;
-        let check_statuses = quoted_statuses(check_sql);
-        for pre_t2m_status in [
+        let check_statuses = quoted_statuses(check_sql)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let expected_check_statuses = BTreeSet::from([
             "pending",
             "claimed",
             "accepted",
             "spawned",
+            "dispatched",
             "done",
             "failed_pre_accept",
             "failed_post_accept",
-        ] {
-            assert!(
-                check_statuses.contains(&pre_t2m_status),
-                "migration status CHECK must preserve pre-T2-M status {pre_t2m_status}"
-            );
-        }
-        assert!(
-            check_statuses.contains(&"dispatched"),
-            "migration status CHECK must add dispatched"
+        ]);
+        assert_eq!(
+            check_statuses, expected_check_statuses,
+            "migration status CHECK domain must exactly equal the T2-M status domain"
         );
         assert!(
             migration_0105.contains(&format!(
