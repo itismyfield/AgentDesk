@@ -25,7 +25,7 @@ use super::formatting::{byte_index_at_discord_message_units, discord_message_uni
 /// Preview budget for a free-form Markdown `result` body rendered into a card.
 /// Long subagent reports are truncated to keep the card scannable on mobile; the
 /// full payload remains available via the existing output/log path.
-const RESULT_PREVIEW_UNITS: usize = 1400;
+const RESULT_PREVIEW_BUDGET: usize = 1400;
 
 /// Number of leading non-blank `result` lines surfaced as the card body preview
 /// for a free-form Markdown completion report.
@@ -385,8 +385,8 @@ fn markdown_preview(result: &str) -> String {
         let line = line.text;
         let line_chars = line.chars().count();
         let separator_chars = usize::from(!collected.is_empty());
-        if collected_chars + separator_chars + line_chars > RESULT_PREVIEW_UNITS {
-            let remaining = RESULT_PREVIEW_UNITS.saturating_sub(collected_chars + separator_chars);
+        if collected_chars + separator_chars + line_chars > RESULT_PREVIEW_BUDGET {
+            let remaining = RESULT_PREVIEW_BUDGET.saturating_sub(collected_chars + separator_chars);
             let overflow_sentinel_chars = RESULT_PREVIEW_TRUNCATED_MARKER.chars().count() + 1;
             collected.push(
                 line.chars()
@@ -405,7 +405,7 @@ fn markdown_preview(result: &str) -> String {
         }
     }
     let joined = collected.join("\n");
-    truncate_preview_at_boundary(&joined, RESULT_PREVIEW_UNITS)
+    truncate_preview_at_boundary(&joined, RESULT_PREVIEW_BUDGET)
 }
 
 #[derive(Default)]
@@ -559,7 +559,7 @@ fn blockquote_preview(preview: &str, first_line_prefix: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    truncate_preview_at_boundary(&rendered, RESULT_PREVIEW_UNITS)
+    truncate_preview_at_boundary(&rendered, RESULT_PREVIEW_BUDGET)
 }
 
 pub(super) fn clamp_discord_message_content(value: &str) -> String {
@@ -1122,7 +1122,7 @@ Conclusion reached after the table.";
             "preview should stop at the configured line budget: {preview}"
         );
         assert!(
-            preview.chars().count() <= RESULT_PREVIEW_UNITS,
+            preview.chars().count() <= RESULT_PREVIEW_BUDGET,
             "preview must respect char budget"
         );
         assert!(
@@ -1283,7 +1283,7 @@ fn main() {}
         let preview = markdown_preview(&result);
 
         assert!(
-            preview.chars().count() <= RESULT_PREVIEW_UNITS,
+            preview.chars().count() <= RESULT_PREVIEW_BUDGET,
             "large heading-only preview must stay char-bounded"
         );
         assert!(

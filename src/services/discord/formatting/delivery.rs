@@ -319,6 +319,11 @@ pub(in crate::services::discord) fn split_message(text: &str) -> Vec<String> {
         let effective_limit = DISCORD_MSG_LIMIT
             .saturating_sub(tag_overhead)
             .saturating_sub(10);
+        // `code_block_lang` is capped when the opener is observed, so the
+        // synthetic reopen/close tags can never consume the body budget. Every
+        // Unicode scalar needs at most two UTF-16 units, hence a non-empty
+        // `remaining` always has a non-zero hard-split boundary here.
+        debug_assert!(effective_limit >= 2);
 
         if remaining_units <= effective_limit {
             let mut chunk = String::new();
@@ -365,29 +370,8 @@ pub(in crate::services::discord) fn split_message(text: &str) -> Vec<String> {
                 in_code_block,
             );
         if split_at == 0 {
-            if safe_end > 0 {
-                split_at = safe_end;
-                boundary_kind = "hard_after_leading_newline";
-            } else {
-                // safe_end is also 0 (e.g. multi-byte char straddling a
-                // 0-char effective_limit). Skip one character to guarantee
-                // forward progress and never emit an empty chunk.
-                let step = remaining
-                    .char_indices()
-                    .nth(1)
-                    .map(|(i, _)| i)
-                    .unwrap_or(remaining.len());
-                let skipped_units = discord_message_units(&remaining[..step]);
-                tracing::debug!(
-                    target: "discord::chunker",
-                    step,
-                    total_bytes,
-                    "split_message advance over zero-width boundary"
-                );
-                remaining = &remaining[step..];
-                remaining_units = remaining_units.saturating_sub(skipped_units);
-                continue;
-            }
+            split_at = safe_end;
+            boundary_kind = "hard_after_leading_newline";
         }
 
         let (raw_chunk, rest) = remaining.split_at(split_at);
@@ -411,7 +395,15 @@ pub(in crate::services::discord) fn split_message(text: &str) -> Vec<String> {
                     code_block_lang.clear();
                 } else {
                     in_code_block = true;
-                    code_block_lang = trimmed.strip_prefix("```").unwrap_or("").to_string();
+                    let full_lang = trimmed.strip_prefix("```").unwrap_or("");
+                    // Only synthetic continuation fences use this copy. Cap it
+                    // to a fraction of the message budget so continuation body
+                    // text always makes progress. An unusually long info string
+                    // can therefore lose syntax-highlighting fidelity after the
+                    // first chunk, while the original opener and body survive.
+                    let lang_end =
+                        byte_index_at_discord_message_units(full_lang, DISCORD_MSG_LIMIT / 4);
+                    code_block_lang = full_lang[..lang_end].to_string();
                 }
             }
         }
@@ -593,6 +585,34 @@ mod discord_unit_tests {
             chunks
                 .iter()
                 .all(|chunk| discord_message_units(chunk) <= DISCORD_MSG_LIMIT)
+        );
+    }
+
+    #[test]
+    fn long_supplementary_fence_info_does_not_discard_body_5177() {
+        let body = "TAIL".repeat(300);
+        let message = format!("```{}\n{}\n```", "😀".repeat(995), body);
+        assert_eq!(discord_message_units(&message), 3_198, "fixture unit count");
+
+        let chunks = split_message(&message);
+
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.matches("TAIL").count())
+                .sum::<usize>(),
+            300,
+            "every fenced body token must survive chunking"
+        );
+        assert!(
+            chunks.len() > 1,
+            "fixture must exercise continuation chunks"
+        );
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| discord_message_units(chunk) <= DISCORD_MSG_LIMIT),
+            "every continuation must fit the shared unit limit"
         );
     }
 }

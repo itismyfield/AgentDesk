@@ -2227,6 +2227,7 @@ services::discord::footer_view_reconciler::tests::generation_guard_rejects_stale
 services::discord::footer_view_reconciler::tests::tui_suppress_for_clean_mirror_forgets_target_without_write
 services::discord::footer_view_reconciler::tests::unfinished_background_refresh_schedules_registered_footer_edit
 services::discord::formatting::delivery::attachment_delivery_tests::oversize_operational_alert_attachment_inline_remains_non_turn
+services::discord::formatting::delivery::discord_unit_tests::long_supplementary_fence_info_does_not_discard_body_5177
 services::discord::formatting::delivery::discord_unit_tests::utf16_fit_predicate_and_chunker_agree_on_supplementary_overflow_5177
 services::discord::formatting::long_send_rollback::sink_direct_receipt_tests::t7_rollback_receipts_preserve_a_returned_channel_mismatch
 services::discord::formatting::relay_state_contract_refs::contract_symbols_exist
@@ -4349,6 +4350,7 @@ services::discord::single_message_panel::tests::duplicate_same_message_registrat
 services::discord::single_message_panel::tests::footer_mode_requires_both_flags
 services::discord::single_message_panel::tests::footer_mode_strip_preserves_spinner_prefixed_user_body_without_panel_timestamp
 services::discord::single_message_panel::tests::footer_only_body_strips_to_empty_for_cleanup_callers
+services::discord::single_message_panel::tests::footer_only_preserves_korean_payload_within_unit_limit_5177
 services::discord::single_message_panel::tests::footer_only_surface_recognizes_legacy_combined_time_line
 services::discord::single_message_panel::tests::footer_only_surface_recognizes_split_fixed_kst_time_lines
 services::discord::single_message_panel::tests::footer_panel_budget_shows_recent_block_over_legacy_600_3497

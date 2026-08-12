@@ -20,9 +20,14 @@ pub(super) fn char_count(s: &str) -> usize {
 /// Conservative unit policy for Discord's documented 2000-character limit.
 ///
 /// Discord does not document a Unicode counting model, and this repository has
-/// no observed-delivery evidence that establishes one. Discord-limit paths use
-/// UTF-16 code units as a conservative policy; this is not a claim about a
-/// Discord guarantee.
+/// no observed-delivery evidence that establishes one. Callers opt into this
+/// helper explicitly: `decide_length`, `split_message`, `truncate_with_marker`,
+/// `split_content`, `clamp_discord_message_content`, the streaming placeholder
+/// clamp/snapshot helpers, and `compose_completion_footer_text` use UTF-16 code
+/// units conservatively. This is not a claim about a Discord guarantee or a
+/// repository-wide invariant: `plan_streaming_rollover` budgets its footer with
+/// Unicode scalar count, and `markdown_preview` uses scalar count while
+/// collecting candidate lines before its final unit-based clamp.
 pub(in crate::services::discord) fn discord_message_units(s: &str) -> usize {
     s.encode_utf16().count()
 }

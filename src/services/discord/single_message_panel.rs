@@ -316,19 +316,21 @@ fn clamp_footer_panel_text(panel_text: &str) -> String {
 fn clamp_footer_status_block(status_block: String) -> String {
     // #3394: this is the universal live-panel finalization sink (every
     // `compose_footer_status_block` call lands here, after the upstream 600-byte
-    // `clamp_footer_panel_text` body trim and this Discord-limit trim — either of
-    // which can chop the Recent block's closing ```). Re-balance fence parity on
-    // EVERY return path so Discord never renders a dangling fence as literal text.
-    let max_bytes = super::DISCORD_MSG_LIMIT.saturating_sub(6);
-    let clamped = if status_block.len() <= max_bytes {
+    // `clamp_footer_panel_text` body trim and this Discord-unit trim — either
+    // can chop the Recent block's closing ```). Re-balance fence parity on EVERY
+    // return path so Discord never renders a dangling fence as literal text.
+    let max_units = super::DISCORD_MSG_LIMIT.saturating_sub(6);
+    let clamped = if super::formatting::discord_message_units(&status_block) <= max_units {
         status_block
     } else {
         let ellipsis = "…";
-        let body_budget = max_bytes.saturating_sub(ellipsis.len());
+        let body_budget =
+            max_units.saturating_sub(super::formatting::discord_message_units(ellipsis));
         if body_budget == 0 {
             ellipsis.to_string()
         } else {
-            let safe_end = super::formatting::floor_char_boundary(&status_block, body_budget);
+            let safe_end =
+                super::formatting::byte_index_at_discord_message_units(&status_block, body_budget);
             format!("{}{}", &status_block[..safe_end], ellipsis)
         }
     };
@@ -1348,6 +1350,24 @@ mod tests {
         assert_eq!(
             composed, expected,
             "in-limit Korean footer must be preserved"
+        );
+    }
+
+    #[test]
+    fn footer_only_preserves_korean_payload_within_unit_limit_5177() {
+        let completion = "한".repeat(700);
+        let expected = super::completion_footer_subtext(&completion);
+        assert_eq!(
+            super::super::formatting::discord_message_units(&expected),
+            703,
+            "rendered footer fixture unit count"
+        );
+
+        let composed = super::compose_completion_footer_text("", Some(&completion));
+
+        assert_eq!(
+            composed, expected,
+            "in-limit footer-only Korean payload must not be byte-clamped"
         );
     }
 
