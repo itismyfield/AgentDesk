@@ -16,7 +16,7 @@
   the duplicate consequence; this is not an automated reconciler policy. This
   schema slice adds no dispatched/unknown writer, reconciler, or delivery
   authority. Migration 0109 is forward-compatible substrate; its binding
-  writer does not exist before S-W1.
+  writer does not exist before the future S-W1 binding-writer slice.
 
   Rollout order is strict: deploy S-R1-capable binaries to the entire fleet
   before any writer can create `unknown`. Migrations 0107-0109 establish an

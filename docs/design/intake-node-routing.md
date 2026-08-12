@@ -628,7 +628,7 @@ downgrade must normalize those rows before removing the widened constraint.
 Both new CHECKs are intentionally NOT VALID and constrain new or updated rows.
 Dropping and re-adding the status CHECK in 0107 also resets any prior manual
 validation to NOT VALID. A pre-existing manually-created `dispatched` row with
-A NULL clock survives the migration. An UPDATE that leaves both
+a NULL clock survives the migration. An UPDATE that leaves both
 `status = 'dispatched'` and `dispatched_at IS NULL` is rejected by the clock
 CHECK, while remediation may fill the clock or move the row to a terminal
 status. Catalog presence alone therefore does not prove activation safety.
@@ -636,9 +636,10 @@ A later capability gate must remediate bad rows and require validation, or
 prove bad-row absence fail-closed, plus require valid (`indisvalid=true`)
 stale-dispatched and journal-binding indexes before any dispatched/unknown
 authority is activated. The 0109 journal-binding index is forward-compatible
-substrate; its binding writer does not exist before S-W1. S-R1 itself adds no
-such writer or reconciler. Recovery that records an already-applied manual
-migration must never copy the 64-hex SHA-256 from `immutable-checksums.json`
+substrate; its binding writer does not exist before the future S-W1
+binding-writer slice. S-R1 itself adds no such writer or reconciler. Recovery
+that records an already-applied manual migration must never copy the 64-hex
+SHA-256 from `immutable-checksums.json`
 into `_sqlx_migrations`; that manifest verifies exact migration file bytes
 only. `_sqlx_migrations.checksum` must be the 96-hex SHA-384 resolved from those
 bytes by the exact pinned SQLx migrator. For diagnosis and any approved guarded

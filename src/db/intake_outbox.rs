@@ -1342,8 +1342,9 @@ mod migration_pg_tests {
                 "(event_kind = 'O'::text)",
             ),
         ] {
-            let catalog: (String, String, String, bool, String, String) = sqlx::query_as(
+            let catalog: (String, String, String, bool, i16, i16, String, String) = sqlx::query_as(
                 "SELECT index_ns.nspname, table_ns.nspname, t.relname, i.indisvalid,
+                        i.indnkeyatts, i.indnatts,
                         pg_get_indexdef(i.indexrelid, 1, true),
                         pg_get_expr(i.indpred, i.indrelid)
                    FROM pg_index i
@@ -1361,12 +1362,14 @@ mod migration_pg_tests {
             assert_eq!(catalog.1, "public", "{index} table must live in public");
             assert_eq!(catalog.2, table, "{index} must bind the intended table");
             assert!(catalog.3, "fresh migration must build valid index {index}");
+            assert_eq!(catalog.4, 1, "{index} must have exactly one key attribute");
+            assert_eq!(catalog.5, 1, "{index} must not have INCLUDE attributes");
             assert_eq!(
-                catalog.4, column_or_expression,
+                catalog.6, column_or_expression,
                 "{index} must retain its exact indexed expression"
             );
             assert_eq!(
-                catalog.5, predicate,
+                catalog.7, predicate,
                 "{index} must retain its exact partial predicate"
             );
         }
