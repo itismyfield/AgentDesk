@@ -1511,6 +1511,12 @@ mod channel_binding_tests {
 
     #[test]
     fn channel_binding_round_trips_for_restart_recovery() {
+        // `set_agentdesk_root_for_test` holds `shared_test_env_lock` for the
+        // lifetime of the guard and restores `AGENTDESK_ROOT_DIR` on drop, so
+        // `runtime_root` stays fixed between the write and the read below. The
+        // held lock is what fixes this test, not the tempdir alone: a sibling
+        // that swaps the ambient root is what used to delete the path out from
+        // under it. Do not narrow this to a variant that skips the lock.
         let runtime_root = tempfile::tempdir().expect("tempdir");
         let _root_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
 
