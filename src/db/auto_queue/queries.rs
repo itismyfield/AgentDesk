@@ -19,6 +19,51 @@ fn normalized_status_filter_value(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
+/// Canonical ownership predicate for selecting a run through nullable run
+/// columns or the entries/cards shown by the auto-queue UI.
+pub(crate) const AUTO_QUEUE_RUN_SCOPE_CLAIM_PREDICATE_SQL: &str = r#"(
+             $1::TEXT IS NULL
+             OR r.repo = $1
+             OR EXISTS (
+                 SELECT 1
+                 FROM auto_queue_entries e
+                 JOIN kanban_cards kc ON kc.id = e.kanban_card_id
+                 WHERE e.run_id = r.id
+                   AND kc.repo_id = $1
+             )
+         )
+           AND (
+             $2::TEXT IS NULL
+             OR r.agent_id = $2
+             OR EXISTS (
+                 SELECT 1
+                 FROM auto_queue_entries e
+                 WHERE e.run_id = r.id
+                   AND e.agent_id = $2
+             )
+         )"#;
+
+fn find_latest_run_id_sql() -> String {
+    format!(
+        "SELECT id
+         FROM auto_queue_runs r
+         WHERE {AUTO_QUEUE_RUN_SCOPE_CLAIM_PREDICATE_SQL}
+         ORDER BY created_at DESC
+         LIMIT 1"
+    )
+}
+
+fn run_matches_scope_claim_sql() -> String {
+    format!(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM auto_queue_runs r
+             WHERE r.id = $3
+               AND {AUTO_QUEUE_RUN_SCOPE_CLAIM_PREDICATE_SQL}
+         )"
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct BacklogCardRecord {
     pub card_id: String,
@@ -107,37 +152,72 @@ pub async fn find_latest_run_id_pg(
     let repo = normalized_status_filter_value(filter.repo.as_deref());
     let agent_id = normalized_status_filter_value(filter.agent_id.as_deref());
 
-    sqlx::query_scalar::<_, String>(
-        "SELECT id
-         FROM auto_queue_runs r
-         WHERE (
-             $1::TEXT IS NULL
-             OR r.repo = $1
-             OR EXISTS (
-                 SELECT 1
-                 FROM auto_queue_entries e
-                 JOIN kanban_cards kc ON kc.id = e.kanban_card_id
-                 WHERE e.run_id = r.id
-                   AND kc.repo_id = $1
-             )
-         )
-           AND (
-             $2::TEXT IS NULL
-             OR r.agent_id = $2
-             OR EXISTS (
-                 SELECT 1
-                 FROM auto_queue_entries e
-                 WHERE e.run_id = r.id
-                   AND e.agent_id = $2
-             )
-         )
-         ORDER BY created_at DESC
-         LIMIT 1",
-    )
-    .bind(repo)
-    .bind(agent_id)
-    .fetch_optional(pool)
-    .await
+    let query = find_latest_run_id_sql();
+    sqlx::query_scalar::<_, String>(&query)
+        .bind(repo)
+        .bind(agent_id)
+        .fetch_optional(pool)
+        .await
+}
+
+pub async fn run_matches_scope_claim_pg(
+    pool: &PgPool,
+    run_id: &str,
+    filter: &StatusFilter,
+) -> Result<bool, sqlx::Error> {
+    let repo = normalized_status_filter_value(filter.repo.as_deref());
+    let agent_id = normalized_status_filter_value(filter.agent_id.as_deref());
+    let query = run_matches_scope_claim_sql();
+
+    sqlx::query_scalar::<_, bool>(&query)
+        .bind(repo)
+        .bind(agent_id)
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+}
+
+#[cfg(test)]
+mod reset_scope_claim_tests {
+    use super::*;
+
+    #[test]
+    fn reset_scope_lookup_reuses_latest_run_ownership_predicate_symbol() {
+        let latest = find_latest_run_id_sql();
+        let scoped = run_matches_scope_claim_sql();
+
+        assert!(latest.contains(AUTO_QUEUE_RUN_SCOPE_CLAIM_PREDICATE_SQL));
+        assert!(scoped.contains(AUTO_QUEUE_RUN_SCOPE_CLAIM_PREDICATE_SQL));
+    }
+
+    #[test]
+    fn reset_scope_predicate_preserves_nullable_run_entry_fallbacks() {
+        let predicate = AUTO_QUEUE_RUN_SCOPE_CLAIM_PREDICATE_SQL;
+
+        // Concrete UI selection counterexample: the nullable run columns do
+        // not own either claim directly, but the selected run's card/entry do.
+        let run_repo: Option<&str> = None;
+        let run_agent_id: Option<&str> = None;
+        let repo_claim = Some("owner/repo");
+        let agent_claim = Some("agent-from-entry");
+        let card_repo_matches = true;
+        let entry_agent_matches = true;
+        let canonical_result =
+            (repo_claim.is_none() || run_repo == repo_claim || card_repo_matches)
+                && (agent_claim.is_none() || run_agent_id == agent_claim || entry_agent_matches);
+        let simple_column_comparison = run_repo == repo_claim && run_agent_id == agent_claim;
+
+        assert!(canonical_result);
+        assert!(!simple_column_comparison);
+
+        assert!(predicate.contains("$1::TEXT IS NULL"));
+        assert!(predicate.contains("r.repo = $1"));
+        assert!(predicate.contains("JOIN kanban_cards kc ON kc.id = e.kanban_card_id"));
+        assert!(predicate.contains("kc.repo_id = $1"));
+        assert!(predicate.contains("$2::TEXT IS NULL"));
+        assert!(predicate.contains("r.agent_id = $2"));
+        assert!(predicate.contains("e.agent_id = $2"));
+    }
 }
 
 pub async fn get_run_pg(

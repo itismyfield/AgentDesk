@@ -382,6 +382,7 @@ src/
 │   │   ├── phase_gate_violations.rs
 │   │   ├── planning.rs
 │   │   ├── query.rs
+│   │   ├── reset_scope.rs
 │   │   ├── route.rs
 │   │   ├── route_generate.rs
 │   │   ├── route_request_generate.rs

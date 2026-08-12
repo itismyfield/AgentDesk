@@ -265,9 +265,24 @@ export interface AutoQueueResetScope {
   agentId: string;
 }
 
+export interface AutoQueueResetResidual {
+  live_dispatches: number;
+  entries_by_status: Record<string, number>;
+  open_cleanup_tasks: number;
+  cards_in_progress: number;
+}
+
 export async function resetAutoQueue(
   scope: AutoQueueResetScope,
-): Promise<{ ok: boolean; deleted_entries: number; completed_runs: number }> {
+): Promise<{
+  ok: boolean;
+  action: "inspected_terminal_run";
+  mutates: false;
+  run_id: string;
+  run_status: AutoQueueRun["status"] | (string & {});
+  residual: AutoQueueResetResidual;
+  hint: string;
+}> {
   return request("/api/queue/reset", {
     method: "POST",
     body: JSON.stringify({

@@ -59,6 +59,8 @@ pub mod phase_gate_violations;
 mod planning;
 #[path = "query.rs"]
 mod query;
+#[path = "reset_scope.rs"]
+mod reset_scope;
 #[path = "route_generate.rs"]
 mod route_generate;
 #[path = "route_request_generate.rs"]

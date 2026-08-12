@@ -103,8 +103,50 @@ pub struct AddRunEntryBody {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResetBody {
+    pub run_id: Option<String>,
+    pub repo: Option<String>,
     pub agent_id: Option<String>,
+}
+
+#[cfg(test)]
+mod reset_body_tests {
+    use super::ResetBody;
+
+    #[test]
+    fn reset_body_accepts_the_dashboard_scope_fields_together() {
+        let parsed = serde_json::from_value::<ResetBody>(serde_json::json!({
+            "run_id": "run-selected-by-user",
+            "repo": "owner/repo",
+            "agent_id": "agent-selected-by-user"
+        }));
+        assert!(
+            parsed.is_ok(),
+            "dashboard reset scope must remain compatible: {parsed:?}"
+        );
+        let Ok(body) = parsed else { return };
+
+        assert_eq!(body.run_id.as_deref(), Some("run-selected-by-user"));
+        assert_eq!(body.repo.as_deref(), Some("owner/repo"));
+        assert_eq!(body.agent_id.as_deref(), Some("agent-selected-by-user"));
+    }
+
+    #[test]
+    fn reset_body_rejects_unknown_fields() {
+        let parsed = serde_json::from_value::<ResetBody>(serde_json::json!({
+            "run_id": "run-selected-by-user",
+            "repo": "owner/repo",
+            "unexpected_scope": "must-not-be-silently-discarded"
+        }));
+        assert!(
+            parsed.is_err(),
+            "unknown reset fields must fail closed: {parsed:?}"
+        );
+        let Err(error) = parsed else { return };
+
+        assert!(error.to_string().contains("unknown field"));
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]

@@ -343,12 +343,57 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/queue/reset",
             "auto-queue",
-            "Reset one agent queue and clear its queue entries",
+            "Inspect one terminal run without mutation; use POST /api/queue/runs/{id}/end to end a run",
         )
-        .with_params([("agent_id", body_param("string", true, "Agent ID for the queue reset"))])
+        .with_params([
+            ("run_id", body_param("string", true, "Run ID to inspect")),
+            (
+                "repo",
+                body_param(
+                    "string",
+                    false,
+                    "Repository ownership claim; repo or agent_id is required",
+                ),
+            ),
+            (
+                "agent_id",
+                body_param(
+                    "string",
+                    false,
+                    "Agent ownership claim; repo or agent_id is required",
+                ),
+            ),
+        ])
         .with_example(
-            json!({"body": {"agent_id": "agent-1"}}),
-            json!({"ok": true, "deleted_entries": 4, "completed_runs": 1, "protected_active_runs": 0}),
+            json!({"body": {"run_id": "run-1", "repo": "owner/repo", "agent_id": "agent-1"}}),
+            json!({
+                "ok": true,
+                "action": "inspected_terminal_run",
+                "mutates": false,
+                "run_id": "run-1",
+                "run_status": "completed",
+                "residual": {
+                    "live_dispatches": 0,
+                    "entries_by_status": {"skipped": 4},
+                    "open_cleanup_tasks": 0,
+                    "cards_in_progress": 0
+                },
+                "hint": "this endpoint is read-only; use POST /api/queue/runs/{id}/end to end a run"
+            }),
+        )
+        .with_error_example(
+            409,
+            json!({"body": {"run_id": "run-1", "agent_id": "agent-1"}}),
+            json!({
+                "error": "auto-queue run is nonterminal (status=active); reset does not mutate runs",
+                "code": "auto_queue",
+                "context": {
+                    "reset_code": "reset_nonterminal_run_unsupported",
+                    "status": "active",
+                    "mutates": false,
+                    "hint": "this endpoint is read-only; use POST /api/queue/runs/{id}/end to end a run"
+                }
+            }),
         ),
         ep(
             "POST",

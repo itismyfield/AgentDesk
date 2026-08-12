@@ -251,6 +251,8 @@ db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::repair_serializes_wi
 db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::status_only_completion_uses_persisted_result_for_pass
 db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::verdict_mismatch_marks_gate_failed_and_pauses_run
 db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::whitespace_padded_check_status_is_not_inferred_as_pass
+db::auto_queue::queries::reset_scope_claim_tests::reset_scope_lookup_reuses_latest_run_ownership_predicate_symbol
+db::auto_queue::queries::reset_scope_claim_tests::reset_scope_predicate_preserves_nullable_run_entry_fallbacks
 db::auto_queue::run_status::tests::live_run_status_contract_includes_restore_window
 db::auto_queue::slot_predicate::tests::exists_form_matches_legacy_claim_exists
 db::auto_queue::slot_predicate::tests::exists_form_with_bind_params_matches_slots_and_runtime_inline
@@ -1091,6 +1093,12 @@ services::auto_queue::route::planning::failed_entry_alert_tests::production_fail
 services::auto_queue::route::planning::phase_gate_generate_validation_tests::deploy_gate_generation_is_statically_unavailable
 services::auto_queue::route::planning::phase_gate_generate_validation_tests::pr_confirm_and_legacy_default_remain_generation_compatible
 services::auto_queue::route::query::tests::reset_before_reuse_requires_reassignment_and_existing_thread_state
+services::auto_queue::route::reset_scope::tests::every_canonical_nonterminal_status_is_conflict_and_points_to_end
+services::auto_queue::route::reset_scope::tests::only_terminal_statuses_are_inspectable
+services::auto_queue::route::reset_scope::tests::reset_requires_a_nonblank_run_id_before_database_access
+services::auto_queue::route::reset_scope::tests::reset_requires_at_least_one_nonblank_scope_claim
+services::auto_queue::route::reset_scope::tests::reset_scope_module_contains_no_mutation_or_lock_path
+services::auto_queue::route::reset_scope::tests::terminal_response_reports_raw_residuals_without_summary_judgment
 services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::postgres_tests::unavailable_deploy_gate_creates_no_database_rows
 services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::unavailable_deploy_gate_is_a_typed_client_error_before_database_access
 services::auto_queue::route::route_generate::empty_generate_status_count_tests::requested_states_keep_zero_counts_and_ignore_unrequested_rows
@@ -1103,6 +1111,8 @@ services::auto_queue::route::route_request_generate::tests::validate_allowed_gat
 services::auto_queue::route::route_request_generate::tests::validate_allowed_gate_kinds_none_passthrough
 services::auto_queue::route::route_request_generate::tests::validate_allowed_gate_kinds_rejects_unavailable_deploy_gate
 services::auto_queue::route::route_request_generate::tests::validate_allowed_gate_kinds_rejects_unknown
+services::auto_queue::route::route_types::reset_body_tests::reset_body_accepts_the_dashboard_scope_fields_together
+services::auto_queue::route::route_types::reset_body_tests::reset_body_rejects_unknown_fields
 services::auto_queue::route::view::activate_next_dispatch_type_tests::absent_scope_depth_is_implementation_no_regression
 services::auto_queue::route::view::activate_next_dispatch_type_tests::completed_plan_advances_to_implementation_even_for_full
 services::auto_queue::route::view::activate_next_dispatch_type_tests::direct_is_fast_track_implementation

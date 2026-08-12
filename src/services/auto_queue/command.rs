@@ -15,36 +15,6 @@ pub(super) async fn cancel_selected_runs_with_pg(
     .await
 }
 
-pub(super) async fn reset_scoped_with_pg(
-    agent_id: &str,
-    pool: &sqlx::PgPool,
-) -> Result<serde_json::Value, String> {
-    let deleted_entries = sqlx::query("DELETE FROM auto_queue_entries WHERE agent_id = $1")
-        .bind(agent_id)
-        .execute(pool)
-        .await
-        .map_err(|error| format!("delete auto_queue_entries for agent {agent_id}: {error}"))?
-        .rows_affected() as usize;
-    let completed_runs = sqlx::query(
-        "UPDATE auto_queue_runs
-             SET status = 'completed',
-                 completed_at = NOW()
-             WHERE status IN ('generated', 'pending', 'active', 'paused')
-               AND agent_id = $1",
-    )
-    .bind(agent_id)
-    .execute(pool)
-    .await
-    .map_err(|error| format!("complete auto_queue_runs for agent {agent_id}: {error}"))?
-    .rows_affected() as usize;
-    Ok(json!({
-        "ok": true,
-        "deleted_entries": deleted_entries,
-        "completed_runs": completed_runs,
-        "protected_active_runs": 0usize,
-    }))
-}
-
 pub(super) async fn reset_global_with_pg(pool: &sqlx::PgPool) -> Result<serde_json::Value, String> {
     let protected_active_runs = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::BIGINT FROM auto_queue_runs WHERE status = 'active'",

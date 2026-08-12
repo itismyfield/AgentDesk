@@ -89,7 +89,8 @@ pub async fn reset_slot_thread(
 }
 
 /// POST /api/queue/reset
-/// Reset a single agent queue. Requires `agent_id`.
+/// Inspect one claimed run without mutating it. End nonterminal runs through
+/// `lifecycle_routes::end_run` instead.
 pub async fn reset(
     State(state): State<AppState>,
     body: Bytes,
@@ -104,31 +105,7 @@ pub async fn reset(
         }
     };
 
-    let agent_id = match body
-        .agent_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(agent_id) => agent_id,
-        None => {
-            return Err(auto_queue_json_error(
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "agent_id is required for reset"})),
-            ));
-        }
-    };
-
-    let Some(pool) = state.pg_pool_ref() else {
-        return Err(auto_queue_tuple_error(pg_unavailable_response()));
-    };
-    match reset_scoped_with_pg(agent_id, pool).await {
-        Ok(response) => Ok((StatusCode::OK, Json(response))),
-        Err(error) => Err(auto_queue_json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        )),
-    }
+    super::reset_scope::inspect_reset_scope(&state, body).await
 }
 
 /// POST /api/queue/reset-global
