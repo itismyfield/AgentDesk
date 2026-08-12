@@ -626,7 +626,7 @@ pub(crate) async fn cmd_intake_outbox_force_fail(id: i64, reason: &str) -> Resul
     let pool = state
         .pg_pool_ref()
         .ok_or_else(|| "postgres pool unavailable for intake_outbox force-fail".to_string())?;
-    let new_id = crate::db::intake_outbox::force_fail_and_retry_as_new(pool, id, reason)
+    let new_id = crate::db::intake_outbox_force_fail::force_fail_and_retry_as_new(pool, id, reason)
         .await
         .map_err(|e| format!("force_fail_and_retry_as_new(id={id}): {e}"))?;
     println!("force-failed intake_outbox row id={id}; new attempt inserted as id={new_id}");

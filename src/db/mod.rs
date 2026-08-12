@@ -14,6 +14,7 @@ pub mod dispatches;
 mod fixture_target;
 pub mod idempotency;
 pub mod intake_outbox;
+pub(crate) mod intake_outbox_force_fail;
 pub(crate) mod intake_outbox_open_status;
 pub(crate) mod intake_outbox_status;
 pub mod kanban;
