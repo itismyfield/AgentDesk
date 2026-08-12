@@ -1341,7 +1341,7 @@ mod migration_pg_tests {
                 status,
             )
             .await
-            .expect("seed pre-dispatched lifecycle row");
+            .expect("seed pre-dispatched lifecycle row"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
         }
 
         let dispatched_rows: i64 = sqlx::query_scalar(
@@ -1349,7 +1349,7 @@ mod migration_pg_tests {
         )
         .fetch_one(&pool)
         .await
-        .expect("count dispatched rows");
+        .expect("count dispatched rows"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
         assert_eq!(
             dispatched_rows, 0,
             "fixture must prove dormancy without manufacturing dispatched behavior"
@@ -1366,7 +1366,7 @@ mod migration_pg_tests {
         let old_ids: Vec<i64> = sqlx::query_scalar(&prior_sql)
             .fetch_all(&pool)
             .await
-            .expect("select pre-T2-M open rows");
+            .expect("select pre-T2-M open rows"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
         let widened_sql = format!(
             "SELECT id FROM intake_outbox
              WHERE status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})
@@ -1375,7 +1375,7 @@ mod migration_pg_tests {
         let widened_ids: Vec<i64> = sqlx::query_scalar(&widened_sql)
             .fetch_all(&pool)
             .await
-            .expect("select T2-M open rows");
+            .expect("select T2-M open rows"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
         assert_eq!(
             widened_ids, old_ids,
             "adding an unwritten dispatched status must leave query results unchanged"
@@ -1394,7 +1394,7 @@ mod migration_pg_tests {
 
         insert_minimal_row(&pool, "ch-dispatched", "msg-A", 1, "dispatched")
             .await
-            .expect("dispatched must satisfy intake_outbox_status_check");
+            .expect("dispatched must satisfy intake_outbox_status_check"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
         let error = insert_minimal_row(&pool, "ch-dispatched", "msg-B", 1, "pending")
             .await
             .expect_err("dispatched must retain the channel open-route fence");
