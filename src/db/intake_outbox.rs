@@ -1481,7 +1481,7 @@ mod postgres_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn insert_pending_round_trips_payload_and_returns_id() {
+    async fn insert_pending_round_trips_payload_and_returns_id() -> Result<(), sqlx::Error> {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         seed_default_test_agent(&pool).await;
@@ -1506,17 +1506,25 @@ mod postgres_tests {
 
         for status in IntakeOutboxStatus::ALL {
             let (raw_status, typed_status): (String, IntakeOutboxStatus) =
-                sqlx::query_as("SELECT $1::TEXT, $1::TEXT")
+                match sqlx::query_as("SELECT $1::TEXT, $1::TEXT")
                     .bind(status)
                     .fetch_one(&pool)
                     .await
-                    .expect("decode raw and typed status");
+                {
+                    Ok(decoded) => decoded,
+                    Err(error) => {
+                        pool.close().await;
+                        pg_db.drop().await;
+                        return Err(error);
+                    }
+                };
             assert_eq!(raw_status, status.as_str());
             assert_eq!(typed_status, status);
         }
 
         pool.close().await;
         pg_db.drop().await;
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
