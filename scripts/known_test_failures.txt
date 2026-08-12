@@ -48,9 +48,19 @@
 # lane -- widening is only what made them visible. #5185 isolates them so the
 # widened lane can land; each needs its own fix.
 # ---------------------------------------------------------------------------
-always | cli::args::tests::top_level_command_name_snapshot_preserves_public_cli_surface | lane=non-pg-sweep | #5185 | base-red on main: the public CLI top-level command snapshot has drifted from the real clap surface, so the oracle rejects a command list that production actually ships.
 always | services::claude_command::chokepoint_guard_tests::gateway_primitives_are_confined_to_the_chokepoint | lane=non-pg-sweep | #5169 | base-red on main: claude_compact_trigger.rs references ClaudeGatewayProxyEnv and claude_gateway_proxy:: outside the chokepoint. Same surface as the OCX gateway removal, so the verdict belongs to that branch, not to this CI-coverage change.
-always | services::discord::placeholder_sweeper::panel_shape::tests::renderer_activity_variants_and_panel_shape_classifier_stay_in_sync | lane=non-pg-sweep | #5185 | base-red on main: the rendered activity line for the empty last-tool state is classified into a different panel shape than the renderer produces, so classifier and renderer are out of sync.
+#
+# #5305: This test is red not because the classifier PREFIXES lacks an entry.
+# The real drift is that `render_status_panel` gives its header the `-# `
+# subtext prefix, while `is_message_still_placeholder` only calls trim_start()
+# and does not remove `-# `, making the classifier a dead branch throughout
+# the v2 panel path. Adding the prefix makes the contract test pass but has
+# measured production effect 0; it would instead open a window for a model
+# answer beginning `🔧 마지막 도구 (…)` to be mistaken for a placeholder and
+# overwritten by the sweeper. It is deliberately not added. Removing `-# `
+# would suddenly classify many panels as StillPlaceholder and broaden
+# destructive edits, so that root fix needs a separate design.
+always | services::discord::placeholder_sweeper::panel_shape::tests::renderer_activity_variants_and_panel_shape_classifier_stay_in_sync | lane=non-pg-sweep | #5305 | v2 status-panel drift tracked in #5305: render_status_panel emits a -# subtext header that the sweeper does not strip, so this direct rendered-line classifier contract is red while the production v2 route remains unreachable. Adding the last-tool prefix has measured production effect 0 and can misclassify a model answer; stripping the prefix needs a separate destructive-edit design.
 #
 # ---------------------------------------------------------------------------
 # parallel-only: pass under --test-threads=1, fail in the full parallel sweep.
@@ -119,50 +129,15 @@ flaky | services::discord::voice_barge_in::tests::pcm_harness_tests::voice_intak
 flaky | services::discord::voice_barge_in::tests::pcm_harness_tests::voice_intake_chime_fires_even_when_turn_start_fails | lane=non-pg-sweep | #5185 | parallel-only: the harness asserts against process-global voice flight-event and TTS-playback recorders that parallel siblings write to. Passes under --test-threads=1. expires=2026-11-06
 #
 # ---------------------------------------------------------------------------
-# Linux-only, and newly EXPOSED -- not pre-existing. The distinction is the
-# whole reason this section is separate from the base-red one above.
-#
-# These three had never executed on Linux CI at all. Verified at origin/main
-# `31465b184` (CI Main run 31135762037, conclusion SUCCESS) by grepping both
-# ubuntu jobs' full logs for each id: `Full tests (ubuntu-latest)`, 114,843
-# lines, zero occurrences; `PostgreSQL tests`, 3,399 lines, zero occurrences.
-# `Full tests` runs a curated module filter and no lane selected these ids.
-#
-# Nor does this change reach them. `git diff --name-only origin/main...HEAD`
-# contains neither `src/services/discord/jsonl_watcher.rs` nor
-# `src/services/platform/tmux.rs`. It does touch `src/services/tmux_common.rs`,
-# which the tmux test below calls -- but only inside `mod sentinel_tests`, and
-# only to replace one sibling test's hand-rolled env save/restore with guards
-# that also restore on unwind. `session_dead_marker_path` and
-# `cleanup_session_temp_files` are untouched, and the edit strictly reduces
-# cross-test env leakage. The same holds for the other adjacent files in the
-# diff: every change near this call graph is `#[cfg(test)]`.
-#
-# So the honest label is the one the `library_sweep` job was built to produce:
-# widening the lane ran tests that nothing had been running, and three of them
-# fail on Linux. Writing "pre-existing" or "base-red" here would be the same
-# species of overclaim this change exists to close -- there is no prior Linux
-# verdict for them to pre-exist.
-#
-# All three are `flaky` rather than `always`, and that is now measured rather
-# than argued. `always` asserts a deterministic verdict, and its stale check
-# turns a PASSING run into a hard lane failure. In CI Main 31138399249 the
-# second member below, jsonl_watcher_notifies_on_dead_marker_create, PASSED
-# while the other two failed again: the lane reported it as flaky-passed and
-# the run stayed on its expected shape. Held as `always`, that green would
-# have failed the lane for a stale entry instead.
-#
-# The two that have now failed twice keep `flaky` all the same, and the reason
-# is cost asymmetry rather than evidence of flakiness: two observations do not
-# establish determinism, understating with `flaky` loses nothing, and
-# overstating with `always` kills runs where nothing is wrong. What each entry
-# may NOT do is dress a guess as a cause -- see the third entry, whose
-# ubuntu-tmux-version explanation is withdrawn for exactly that. Tracked in
-# #5217, which already carries the four macOS members of this same class.
+# Newly exposed Linux failures retained by #5217. The jsonl watcher source is
+# unchanged since 31465b184 and neither watcher test was reverified on Linux in
+# this round. The tmux test is not Linux-only: on darwin the hook also fails to
+# create the marker. A local rc=0 without CI is its self-skip, not pass evidence;
+# validation requires CI=1. The hook failure's root cause remains unidentified.
 # ---------------------------------------------------------------------------
-flaky | services::discord::jsonl_watcher::tests::notify_fires_when_file_modified | lane=non-pg-sweep | #5217 | Linux-only, newly exposed by the library_sweep job rather than pre-existing: zero occurrences in either ubuntu job log at origin/main 31465b184, so it has no prior Linux verdict. Lost-wakeup shape, and the mechanism half is grounded in the source rather than guessed: the watcher fires with notify_waiters(), which this file documents at jsonl_watcher.rs:110 and which drops the wake-up entirely when no waiter is registered, while the test tokio::spawns its waiter on a current_thread runtime and then performs a blocking std::fs::write before ever awaiting, so the waiter cannot have registered when the event lands. Whether it registers in time is backend latency and that half is PRESUMED, not measured: inotify delivers promptly where the darwin backend coalesces, which would explain why darwin sweeps never saw it. Deliberately not diagnosed further here; this change tracks it rather than fixing it. expires=2026-11-06
-flaky | services::discord::jsonl_watcher::tests::jsonl_watcher_notifies_on_dead_marker_create | lane=non-pg-sweep | #5217 | Linux-only, newly exposed by the library_sweep job rather than pre-existing: zero occurrences in either ubuntu job log at origin/main 31465b184. Same lost-wakeup shape as its sibling above and in the same module, differing only in that the awaited event is the creation of a pane_dead marker rather than a modify of an existing jsonl file. The notify_waiters() drop-when-unregistered behaviour is documented in the source; the platform latency that decides whether the waiter registers first is PRESUMED and not measured. Not diagnosed further in this change. expires=2026-11-06
-flaky | services::platform::tmux::live_pane_tests::dead_marker_hook_writes_marker_on_pane_exit | lane=non-pg-sweep | #5217 | Linux-only, newly exposed by the library_sweep job rather than pre-existing: zero occurrences in either ubuntu job log at origin/main 31465b184. The test creates a real tmux session, kills it, and polls for up to ten seconds for the pane-dead marker the tmux hook should write; on the runner the marker never appeared. Its own is_available() guard returns early when tmux is absent, so tmux was present and the hook itself did not deliver. CAUSE NOT IDENTIFIED, and observed 2 of 2 on ubuntu-latest (CI Main 31135762037 and 31138399249), so flakiness has not been observed either. An earlier revision of this entry named a tmux version or hook-wiring difference between ubuntu-latest and the darwin machines as the presumed cause; that is WITHDRAWN as a cause claim, because it was never measured and because a runner-wide version difference would be deterministic on that runner, which is the opposite of the mode this entry carries. What IS in the source is an interleaving window, offered as a candidate and not as a measurement: the marker path is resolved twice from process-global environment at two different moments, once by the test at tmux.rs:1117 and again inside create_session at tmux.rs:161, which calls dead_marker_shell_command (tmux.rs:175) to bake a literal path into the tmux hook. Both resolutions read AGENTDESK_ROOT_DIR through config::runtime_root (config.rs:2427) and HOSTNAME through host_temp_namespace (tmux_common.rs:1031). The test holds config::shared_test_env_lock, but that lock only excludes the sites that take it, and the first entry in this ledger records 432 of 700 AGENTDESK_ROOT_DIR sites under src taking no lock at all; a sibling replacing either variable between the two resolutions would send the hook to a path the poll loop never checks. Nobody has instrumented that, so it stays a candidate. The mode stays flaky on cost asymmetry rather than on evidence of flakiness: two observations do not establish determinism, and always would hard-fail any run where the test passes. This lane has already paid that price once, in the sibling jsonl_watcher_notifies_on_dead_marker_create, which failed in the first run and PASSED in 31138399249. Worth recording for whoever picks up #5217: this test hand-rolls the same save-and-restore-after-the-assertions env pattern that this change replaced with unwind-safe guards one module over in tmux_common sentinel_tests, so a failure here leaks AGENTDESK_ROOT_DIR into whatever runs next. That is an observation about the test, not the cause of this failure. expires=2026-11-06
+flaky | services::discord::jsonl_watcher::tests::notify_fires_when_file_modified | lane=non-pg-sweep | #5217 | newly exposed on Linux after 31465b184; jsonl_watcher code is unchanged and Linux behavior was not reverified in this round. The lost-wakeup shape remains, but no root cause is claimed or fixed here. expires=2026-11-06
+flaky | services::discord::jsonl_watcher::tests::jsonl_watcher_notifies_on_dead_marker_create | lane=non-pg-sweep | #5217 | newly exposed on Linux after 31465b184; jsonl_watcher code is unchanged and Linux behavior was not reverified in this round. It retains the same unresolved lost-wakeup shape as its sibling. expires=2026-11-06
+flaky | services::platform::tmux::live_pane_tests::dead_marker_hook_writes_marker_on_pane_exit | lane=non-pg-sweep | #5217 | newly exposed on Linux after 31465b184, but not Linux-only: on darwin the hook also creates no marker. Local rc=0 without CI is the test's self-skip; CI=1 is required and returned rc=101 in this round. Root cause remains unidentified. expires=2026-11-06
 #
 # ---------------------------------------------------------------------------
 # Cross-module memo leak. The two entries below are one defect, measured, and

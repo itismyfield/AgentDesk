@@ -1041,6 +1041,7 @@ mod tests {
             "terminations",
             "doctor",
             "migrate",
+            "release-migrate-postgres",
             "provider-cli",
             "show",
             "health",
