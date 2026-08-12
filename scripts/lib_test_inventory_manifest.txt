@@ -844,6 +844,7 @@ server::routes::docs::tests::kanban_assign_docs_expose_assignment_and_partial_tr
 server::routes::docs::tests::kanban_response_contracts_document_stable_fields
 server::routes::docs::tests::legacy_flat_category_marks_docs_route_retirement_not_api_deprecation
 server::routes::docs::tests::prompt_manifest_retention_docs_surface_boot_snapshot_semantics
+server::routes::docs::tests::release_source_docs_show_observed_timestamp_and_unobserved_shape
 server::routes::docs::tests::session_termination_events_docs_include_filters_and_response_shape
 server::routes::e2e_control::tests::disabled_surface_is_uniformly_unmounted_for_methods_bodies_and_subpaths
 server::routes::e2e_control::tests::enabled_surface_rejects_channels_outside_boot_allowlist
@@ -885,6 +886,7 @@ server::routes::health_api::tests::public_health_json_preserves_delivery_record_
 server::routes::health_api::tests::public_health_json_preserves_intake_routing_state
 server::routes::health_api::tests::public_health_json_redacts_provider_and_mailbox_details
 server::routes::health_api::tests::public_health_json_sanitizes_provider_ids_including_colons
+server::routes::health_api::tests::public_health_keeps_each_release_source_fact_independent
 server::routes::health_api::tests::public_health_reads_release_source_manifest_from_runtime_root
 server::routes::health_api::tests::registry_purge_decision_gates_on_request_and_fully_applied_repair
 server::routes::health_api::tests::stale_mailbox_repair_applied_includes_session_only_disconnect
@@ -6670,9 +6672,11 @@ services::provider_output_guard_tests::invariant_4371_tool_wrapper_terminal_comp
 services::queue::tests::force_purge_channel_mailbox_drains_queue_without_session_key
 services::queue::tests::force_purge_reaches_queue_hydrated_by_dedup_replay
 services::qwen::qwen_provider_lifecycle_tests::live_reused_provider_session_is_preserved_when_wrapper_io_is_missing
-services::release_source::tests::release_source_health_keeps_unobserved_distinct_from_confirmed_values
+services::release_source::tests::release_source_module_docs_forbid_string_sentinels
+services::release_source::tests::release_source_read_distinguishes_observed_from_unobserved
 services::release_source::tests::release_source_reads_confirmed_identity
-services::release_source::tests::release_source_reports_each_missing_field_as_unobserved
+services::release_source::tests::release_source_rejects_non_sha_repo_heads_without_discarding_migration
+services::release_source::tests::release_source_reports_each_missing_field_without_discarding_the_other
 services::release_source::tests::release_source_reports_empty_file_as_unobserved
 services::release_source::tests::release_source_reports_invalid_json_as_unobserved
 services::release_source::tests::release_source_reports_missing_file_as_unobserved

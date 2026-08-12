@@ -2771,7 +2771,7 @@ mod tests {
         std::fs::create_dir_all(&runtime_dir).expect("create runtime directory");
         std::fs::write(
             runtime_dir.join("release-source.json"),
-            r#"{"repo_head":"0123456789abcdef0123456789abcdef01234567","latest_postgres_migration":"0104_example.sql"}"#,
+            r#"{"generated_at":"2026-08-12T00:00:00Z","repo_head":"0123456789abcdef0123456789abcdef01234567","latest_postgres_migration":"0104_example.sql"}"#,
         )
         .expect("write release source manifest");
 
@@ -2788,6 +2788,10 @@ mod tests {
             let body = runtime.block_on(health_body("/health", registry));
             assert_eq!(body["release_source"]["observation_status"], "observed");
             assert_eq!(
+                body["release_source"]["generated_at"],
+                "2026-08-12T00:00:00Z"
+            );
+            assert_eq!(
                 body["release_source"]["deployed_repo_head"],
                 "0123456789abcdef0123456789abcdef01234567"
             );
@@ -2800,6 +2804,60 @@ mod tests {
 
         let detail = runtime.block_on(health_body("/health/detail", None));
         assert!(detail["release_source"]["node_hostname"].is_string());
+    }
+
+    #[test]
+    fn public_health_keeps_each_release_source_fact_independent() {
+        let runtime_root = tempfile::tempdir().expect("temp runtime root");
+        let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+        let runtime_dir = runtime_root.path().join("runtime");
+        std::fs::create_dir_all(&runtime_dir).expect("create runtime directory");
+        let manifest = runtime_dir.join("release-source.json");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        std::fs::write(
+            &manifest,
+            r#"{"generated_at":"2026-08-12T00:00:00Z","repo_head":"unknown","latest_postgres_migration":"0104_example.sql"}"#,
+        )
+        .expect("write release source manifest");
+        let body = runtime.block_on(health_body("/health", None));
+        assert_eq!(body["release_source"]["observation_status"], "unobserved");
+        assert_eq!(
+            body["release_source"]["observation_failure"],
+            "repo_head_invalid"
+        );
+        assert_eq!(
+            body["release_source"]["generated_at"],
+            "2026-08-12T00:00:00Z"
+        );
+        assert!(body["release_source"].get("deployed_repo_head").is_none());
+        assert_eq!(
+            body["release_source"]["deployed_latest_postgres_migration"],
+            "0104_example.sql"
+        );
+
+        std::fs::write(
+            manifest,
+            r#"{"repo_head":"0123456789abcdef0123456789abcdef01234567"}"#,
+        )
+        .expect("write release source manifest");
+        let body = runtime.block_on(health_body("/health", None));
+        assert_eq!(
+            body["release_source"]["observation_failure"],
+            "latest_postgres_migration_missing"
+        );
+        assert_eq!(
+            body["release_source"]["deployed_repo_head"],
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+        assert!(
+            body["release_source"]
+                .get("deployed_latest_postgres_migration")
+                .is_none()
+        );
     }
 
     #[test]

@@ -19,6 +19,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 "fully_recovered": true,
                 "release_source": {
                     "observation_status": "observed",
+                    "generated_at": "2026-08-12T00:00:00Z",
                     "deployed_repo_head": "0123456789abcdef0123456789abcdef01234567",
                     "deployed_latest_postgres_migration": "0104_example.sql"
                 },
@@ -69,7 +70,19 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         .with_error_example(
             503,
             json!({}),
-            json!({"status": "unhealthy", "server_up": false, "fully_recovered": false, "db": false, "degraded": true, "degraded_reasons": ["db_unavailable"], "error": "db connection failing"}),
+            json!({
+                "status": "unhealthy",
+                "server_up": false,
+                "fully_recovered": false,
+                "release_source": {
+                    "observation_status": "unobserved",
+                    "observation_failure": "manifest_missing"
+                },
+                "db": false,
+                "degraded": true,
+                "degraded_reasons": ["db_unavailable"],
+                "error": "db connection failing"
+            }),
         )
         .with_curl("curl http://localhost:8787/api/health"),
         ep(
@@ -87,6 +100,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 "release_source": {
                     "observation_status": "observed",
                     "node_hostname": "mac-mini",
+                    "generated_at": "2026-08-12T00:00:00Z",
                     "deployed_repo_head": "0123456789abcdef0123456789abcdef01234567",
                     "deployed_latest_postgres_migration": "0104_example.sql"
                 },

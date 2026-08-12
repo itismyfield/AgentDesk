@@ -1,11 +1,16 @@
+//! Preserve the distinction between confirmed release-source facts and observation failures:
+//! each fact stays typed as observed or unobserved, and missing evidence must never be simplified
+//! into a string sentinel that consumers could mistake for a confirmed value.
+
 use serde::Deserialize;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReleaseSourceObservation {
-    Observed {
-        deployed_repo_head: String,
-        deployed_latest_postgres_migration: String,
+    Manifest {
+        generated_at: Option<String>,
+        repo_head: Result<String, ReleaseSourceUnobservedReason>,
+        latest_postgres_migration: Result<String, ReleaseSourceUnobservedReason>,
     },
     Unobserved {
         reason: ReleaseSourceUnobservedReason,
@@ -20,6 +25,7 @@ pub(crate) enum ReleaseSourceUnobservedReason {
     ManifestEmpty,
     ManifestInvalidJson,
     RepoHeadMissing,
+    RepoHeadInvalid,
     LatestPostgresMigrationMissing,
 }
 
@@ -32,6 +38,7 @@ impl ReleaseSourceUnobservedReason {
             Self::ManifestEmpty => "manifest_empty",
             Self::ManifestInvalidJson => "manifest_invalid_json",
             Self::RepoHeadMissing => "repo_head_missing",
+            Self::RepoHeadInvalid => "repo_head_invalid",
             Self::LatestPostgresMigrationMissing => "latest_postgres_migration_missing",
         }
     }
@@ -39,6 +46,7 @@ impl ReleaseSourceUnobservedReason {
 
 #[derive(Debug, Deserialize)]
 struct ReleaseSourceManifest {
+    generated_at: Option<String>,
     repo_head: Option<String>,
     latest_postgres_migration: Option<String>,
 }
@@ -79,20 +87,32 @@ fn read(path: impl AsRef<Path>) -> ReleaseSourceObservation {
             };
         }
     };
-    let Some(deployed_repo_head) = nonempty(manifest.repo_head) else {
-        return ReleaseSourceObservation::Unobserved {
-            reason: ReleaseSourceUnobservedReason::RepoHeadMissing,
-        };
+
+    let generated_at = nonempty(manifest.generated_at);
+    let repo_head = match nonempty(manifest.repo_head) {
+        Some(value) if is_git_object_id(&value) => Ok(value),
+        Some(_) => Err(ReleaseSourceUnobservedReason::RepoHeadInvalid),
+        None => Err(ReleaseSourceUnobservedReason::RepoHeadMissing),
     };
-    let Some(deployed_latest_postgres_migration) = nonempty(manifest.latest_postgres_migration)
-    else {
-        return ReleaseSourceObservation::Unobserved {
-            reason: ReleaseSourceUnobservedReason::LatestPostgresMigrationMissing,
-        };
+    // `_write_release_source_manifest` currently emits a basename selected by its
+    // migration glob, but this reader cannot establish filesystem provenance. Keep
+    // the filename opaque beyond non-empty trimming so future valid naming schemes
+    // are not rejected while still refusing to turn absence into a sentinel value.
+    let latest_postgres_migration = match nonempty(manifest.latest_postgres_migration) {
+        Some(value) => Ok(value),
+        None => Err(ReleaseSourceUnobservedReason::LatestPostgresMigrationMissing),
     };
-    ReleaseSourceObservation::Observed {
-        deployed_repo_head,
-        deployed_latest_postgres_migration,
+
+    ReleaseSourceObservation::Manifest {
+        // This is the manifest writer's timestamp, not proof that the manifest
+        // describes the currently executing binary. `deploy-release.sh` starts and
+        // health-checks the promoted binary before `_write_release_source_manifest`,
+        // so a health response can temporarily expose the preceding manifest even
+        // when every included fact is well formed. Consumers must judge freshness
+        // from this timestamp when that distinction matters.
+        generated_at,
+        repo_head,
+        latest_postgres_migration,
     }
 }
 
@@ -103,16 +123,47 @@ fn nonempty(value: Option<String>) -> Option<String> {
     })
 }
 
+fn is_git_object_id(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 pub(crate) fn health_json(include_node_hostname: bool) -> serde_json::Value {
     let mut health = match observe() {
-        ReleaseSourceObservation::Observed {
-            deployed_repo_head,
-            deployed_latest_postgres_migration,
-        } => serde_json::json!({
-            "observation_status": "observed",
-            "deployed_repo_head": deployed_repo_head,
-            "deployed_latest_postgres_migration": deployed_latest_postgres_migration,
-        }),
+        ReleaseSourceObservation::Manifest {
+            generated_at,
+            repo_head,
+            latest_postgres_migration,
+        } => {
+            let mut health = serde_json::json!({ "observation_status": "observed" });
+            let mut failure = None;
+            if let Some(value) = generated_at {
+                health["generated_at"] = serde_json::json!(value);
+            }
+            match repo_head {
+                Ok(value) => {
+                    health["deployed_repo_head"] = serde_json::json!(value);
+                }
+                Err(reason) => {
+                    failure.get_or_insert(reason);
+                }
+            }
+            match latest_postgres_migration {
+                Ok(value) => {
+                    health["deployed_latest_postgres_migration"] = serde_json::json!(value);
+                }
+                Err(reason) => {
+                    failure.get_or_insert(reason);
+                }
+            }
+            if let Some(reason) = failure {
+                health["observation_status"] = serde_json::json!("unobserved");
+                health["observation_failure"] = serde_json::json!(reason.as_str());
+            }
+            health
+        }
         ReleaseSourceObservation::Unobserved { reason } => serde_json::json!({
             "observation_status": "unobserved",
             "observation_failure": reason.as_str(),
@@ -128,6 +179,8 @@ pub(crate) fn health_json(include_node_hostname: bool) -> serde_json::Value {
 mod tests {
     use super::*;
 
+    const REPO_HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
+
     fn assert_unobserved(path: &Path, expected: ReleaseSourceUnobservedReason) {
         assert_eq!(
             read(path),
@@ -141,15 +194,18 @@ mod tests {
         let path = temp.path().join("manifest.json");
         std::fs::write(
             &path,
-            r#"{"repo_head":"0123456789abcdef0123456789abcdef01234567","latest_postgres_migration":"0104_example.sql"}"#,
+            format!(
+                r#"{{"generated_at":"2026-08-12T00:00:00Z","repo_head":"{REPO_HEAD}","latest_postgres_migration":"0104_example.sql"}}"#
+            ),
         )
         .expect("write manifest");
 
         assert_eq!(
             read(path),
-            ReleaseSourceObservation::Observed {
-                deployed_repo_head: "0123456789abcdef0123456789abcdef01234567".to_string(),
-                deployed_latest_postgres_migration: "0104_example.sql".to_string(),
+            ReleaseSourceObservation::Manifest {
+                generated_at: Some("2026-08-12T00:00:00Z".to_string()),
+                repo_head: Ok(REPO_HEAD.to_string()),
+                latest_postgres_migration: Ok("0104_example.sql".to_string()),
             }
         );
     }
@@ -180,48 +236,107 @@ mod tests {
     }
 
     #[test]
-    fn release_source_reports_each_missing_field_as_unobserved() {
+    fn release_source_reports_each_missing_field_without_discarding_the_other() {
         let temp = tempfile::tempdir().expect("tempdir");
         let missing_head = temp.path().join("missing-head.json");
         std::fs::write(
             &missing_head,
-            r#"{"latest_postgres_migration":"0104_example.sql"}"#,
+            r#"{"generated_at":"2026-08-12T00:00:00Z","latest_postgres_migration":"0104_example.sql"}"#,
         )
         .expect("write manifest");
-        assert_unobserved(
-            &missing_head,
-            ReleaseSourceUnobservedReason::RepoHeadMissing,
+        let ReleaseSourceObservation::Manifest {
+            repo_head,
+            latest_postgres_migration,
+            ..
+        } = read(&missing_head)
+        else {
+            panic!("valid manifest must retain field-level observations");
+        };
+        assert_eq!(
+            repo_head,
+            Err(ReleaseSourceUnobservedReason::RepoHeadMissing)
         );
+        assert_eq!(latest_postgres_migration.as_deref(), Ok("0104_example.sql"));
 
         let missing_migration = temp.path().join("missing-migration.json");
         std::fs::write(
             &missing_migration,
-            r#"{"repo_head":"0123456789abcdef0123456789abcdef01234567"}"#,
+            format!(r#"{{"generated_at":"2026-08-12T00:00:00Z","repo_head":"{REPO_HEAD}"}}"#),
         )
         .expect("write manifest");
-        assert_unobserved(
-            &missing_migration,
-            ReleaseSourceUnobservedReason::LatestPostgresMigrationMissing,
+        let ReleaseSourceObservation::Manifest {
+            repo_head,
+            latest_postgres_migration,
+            ..
+        } = read(&missing_migration)
+        else {
+            panic!("valid manifest must retain field-level observations");
+        };
+        assert_eq!(repo_head.as_deref(), Ok(REPO_HEAD));
+        assert_eq!(
+            latest_postgres_migration,
+            Err(ReleaseSourceUnobservedReason::LatestPostgresMigrationMissing)
         );
     }
 
     #[test]
-    fn release_source_health_keeps_unobserved_distinct_from_confirmed_values() {
+    fn release_source_rejects_non_sha_repo_heads_without_discarding_migration() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("invalid-head.json");
+        std::fs::write(
+            &path,
+            r#"{"repo_head":"unknown","latest_postgres_migration":"0104_example.sql"}"#,
+        )
+        .expect("write manifest");
+        let ReleaseSourceObservation::Manifest {
+            repo_head,
+            latest_postgres_migration,
+            ..
+        } = read(path)
+        else {
+            panic!("valid manifest must retain field-level observations");
+        };
+        assert_eq!(
+            repo_head,
+            Err(ReleaseSourceUnobservedReason::RepoHeadInvalid)
+        );
+        assert_eq!(latest_postgres_migration.as_deref(), Ok("0104_example.sql"));
+        assert!(!is_git_object_id("0123456789abcdef0123456789abcdef0123456"));
+        assert!(!is_git_object_id(
+            "0123456789ABCDEF0123456789ABCDEF01234567"
+        ));
+    }
+
+    #[test]
+    fn release_source_read_distinguishes_observed_from_unobserved() {
         let temp = tempfile::tempdir().expect("tempdir");
         let observed_path = temp.path().join("observed.json");
         std::fs::write(
             &observed_path,
-            r#"{"repo_head":"head","latest_postgres_migration":"migration"}"#,
+            format!(
+                r#"{{"generated_at":"2026-08-12T00:00:00Z","repo_head":"{REPO_HEAD}","latest_postgres_migration":"0104_example.sql"}}"#
+            ),
         )
         .expect("write manifest");
 
         assert!(matches!(
             read(observed_path),
-            ReleaseSourceObservation::Observed { .. }
+            ReleaseSourceObservation::Manifest {
+                repo_head: Ok(_),
+                latest_postgres_migration: Ok(_),
+                ..
+            }
         ));
         assert!(matches!(
             read(temp.path().join("absent.json")),
             ReleaseSourceObservation::Unobserved { .. }
         ));
+    }
+
+    #[test]
+    fn release_source_module_docs_forbid_string_sentinels() {
+        let source = include_str!("release_source.rs");
+        assert!(source.starts_with("//! Preserve the distinction"));
+        assert!(source.contains("string sentinel"));
     }
 }

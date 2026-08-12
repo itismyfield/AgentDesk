@@ -366,6 +366,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn release_source_docs_show_observed_timestamp_and_unobserved_shape() {
+        let endpoint = all_endpoints()
+            .into_iter()
+            .find(|endpoint| endpoint.method == "GET" && endpoint.path == "/api/health")
+            .expect("GET /api/health must be documented");
+        let observed = &endpoint.example.expect("observed example").response["release_source"];
+        assert!(observed["generated_at"].is_string());
+        assert!(observed["deployed_repo_head"].is_string());
+
+        let unobserved =
+            &endpoint.error_example.expect("unobserved example").response["release_source"];
+        assert_eq!(unobserved["observation_status"], "unobserved");
+        assert!(unobserved["observation_failure"].is_string());
+        assert!(unobserved.get("deployed_repo_head").is_none());
+    }
+
+    #[test]
     fn kanban_assign_docs_expose_assignment_and_partial_transition_results() {
         let endpoints = all_endpoints();
 
