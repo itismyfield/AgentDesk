@@ -538,8 +538,13 @@
     },
     {
       "path": "migrations/postgres/0105_intake_outbox_dispatched_status.sql",
-      "sha256": "246c360d9e9f5396b70db59e279e63003e9995df518b4b81f712378945ee8c0b",
+      "sha256": "91338d78295c3b9687c8399d45298c7e1ec5e4ee16df1a85ffdb6d832786abf1",
       "version": 105
+    },
+    {
+      "path": "migrations/postgres/0106_intake_outbox_dispatched_status_swap.sql",
+      "sha256": "dc1e8059e0c97d396d27f75093939f96c44318ca534d30c754d34745ae935e85",
+      "version": 106
     }
   ],
   "version": 1

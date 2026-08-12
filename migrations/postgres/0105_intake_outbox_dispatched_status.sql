@@ -1,42 +1,26 @@
--- #5071 T2-M: extend the intake lifecycle schema without changing writers.
--- No production path writes `dispatched` in this migration slice.
-
--- Extend the status domain to include 'dispatched' (future T2-W writer).
--- PostgreSQL requires DROP + ADD of CHECK constraint. The replacement is a strict
--- superset of the valid 0052 status domain, so every existing row is already known
--- to satisfy it. NOT VALID avoids a redundant validation scan while still enforcing
--- the replacement on every new or updated row. Validate it in a separate low-traffic
--- migration, under PostgreSQL's SHARE UPDATE EXCLUSIVE lock, before T2-W activates
--- the dispatched writer; validation is not required for correctness in this slice.
--- The transactional execution (sqlx default) means no concurrent constraint gap.
-ALTER TABLE intake_outbox
-    DROP CONSTRAINT intake_outbox_status_check;
-
-ALTER TABLE intake_outbox
-    ADD CONSTRAINT intake_outbox_status_check CHECK (status IN (
-        'pending',
-        'claimed',
-        'accepted',
-        'spawned',
-        'dispatched',
-        'done',
-        'failed_pre_accept',
-        'failed_post_accept'
-    )) NOT VALID;
-
--- sqlx 0.8+ executes this file within a single transaction unless its first line is
--- the exact `-- no-transaction` opt-out; see 0095_intake_outbox_idempotency_key_index.sql.
--- This prevents concurrent transactions from observing a state where the open-route invariant
--- (partial unique index) is missing or inconsistent with the status domain.
--- A concurrent rebuild cannot run in this transaction. Splitting only the index into a
--- `CREATE INDEX CONCURRENTLY` migration would not remove this transaction's unavoidable
--- ACCESS EXCLUSIVE ALTER lock, so the invariant-preserving replacement stays atomic here.
--- Consequently, the ACCESS EXCLUSIVE lock is held through commit and the non-concurrent
--- index build performs one full heap scan; live intake writes can block waiting for it.
--- Reusing the discriminator name 'intake_outbox_one_open_route_per_channel' keeps
--- Rust's 23505 (UNIQUE violation) classification stable in error handling (see src/db/intake_outbox.rs).
-DROP INDEX intake_outbox_one_open_route_per_channel;
-
-CREATE UNIQUE INDEX intake_outbox_one_open_route_per_channel
+-- no-transaction
+-- #5071 T2-M stage 1: build the widened open-route fence before changing
+-- the status CHECK. No production path writes `dispatched` in this slice, so
+-- the existing four-status fence remains authoritative and the new predicate is
+-- equivalent for all rows that the current CHECK admits.
+--
+-- PostgreSQL requires CONCURRENTLY to run outside a transaction block. Keep
+-- this file to this single statement: SQLx 0.8.6 sends a migration file as one
+-- Simple Query, and PostgreSQL treats multiple statements in one such message
+-- as an implicit transaction block. The build performs its heap scans without a
+-- lock that prevents ordinary SELECT, INSERT, UPDATE, or DELETE operations, but
+-- it can wait for older transactions and add CPU/I/O load.
+--
+-- Failure recovery follows 0095_intake_outbox_idempotency_key_index.sql.
+-- PostgreSQL can leave an INVALID index after a failed concurrent build, so
+-- IF NOT EXISTS is intentionally omitted: a rerun must fail closed rather than
+-- silently let 0106 swap in an incomplete fence. Inspect pg_index.indisvalid for
+-- intake_outbox_one_open_route_per_channel_t2m. If it is INVALID, run
+-- `DROP INDEX CONCURRENTLY intake_outbox_one_open_route_per_channel_t2m`
+-- (or `REINDEX INDEX CONCURRENTLY` when applicable), resolve the original
+-- failure, and rerun 0105. If it is valid because the build completed but SQLx
+-- did not record 0105, either keep it and mark 0105 applied, or drop it
+-- concurrently and rerun. Do not run 0106 until 0105 is recorded successfully.
+CREATE UNIQUE INDEX CONCURRENTLY intake_outbox_one_open_route_per_channel_t2m
     ON intake_outbox (channel_id)
     WHERE status IN ('pending', 'claimed', 'accepted', 'spawned', 'dispatched');
