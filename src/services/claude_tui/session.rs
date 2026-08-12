@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::services::claude_command::{ClaudeBinary, ClaudeLaunchEnv};
+use crate::services::claude_command::ClaudeBinary;
 use crate::services::claude_tui::hook_bundle::{HookBundleConfig, write_claude_hook_settings};
 use crate::services::process::shell_escape;
 
@@ -279,7 +279,6 @@ pub struct ClaudeTuiLaunchConfig {
     pub system_prompt: Option<String>,
     pub model: Option<String>,
     pub resume: bool,
-    pub(crate) launch_env: ClaudeLaunchEnv,
 }
 
 impl ClaudeTuiLaunchConfig {
@@ -365,13 +364,10 @@ fn write_launch_script(
     config: &ClaudeTuiLaunchConfig,
     hook_settings_path: &Path,
 ) -> Result<(), String> {
-    // This is the final pre-exec launch artifact. Registering here makes the
-    // exact effective proxy decision available before the pane can receive its
-    // first prompt, and keeps direct script-generation tests on the same path.
-    crate::services::claude_compact_context::register_launch_provenance(
-        &config.tmux_session_name,
-        config.launch_env.gateway_proxy_env(),
-    );
+    // This is the final pre-exec launch artifact. Registering here marks the
+    // pane as AgentDesk-launched before it can receive its first prompt, and
+    // keeps direct script-generation tests on the same path.
+    crate::services::claude_compact_context::register_launch_provenance(&config.tmux_session_name);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             format!("create TUI launch script dir {}: {error}", parent.display())
@@ -412,23 +408,16 @@ fn write_launch_script(
     // prompt entirely, the placeholder semantics here should be
     // revisited. Track upstream PY6 changes and reflect them in this
     // comment + the unit tests.
-    let mut gateway_exports = String::new();
-    // Chokepoint base: resolved gateway launch env (#4559).
-    config.launch_env.append_shell_env(&mut gateway_exports);
-    // Compact-window overlay (#4591 revision): interactive TUI sessions can
+    let mut env_exports = String::new();
+    // Compact-window isolation fence (#4591 revision): an interactive TUI can
     // change model after launch, so a launch-model-derived absolute window
-    // would go stale. The gateway-policy value below is model-independent —
-    // it replicates the exact env an `ocx claude` launch injects — and is the
-    // only compact safety net that reaches CLI-internal subagent loops
-    // running `[1m]`-marked routed models. Scrubbed launches still export
-    // nothing beyond the isolation fence.
-    let auto_compact_window =
-        crate::services::claude_compact_context::tui_launch_auto_compact_window(
-            config.launch_env.gateway_proxy_env(),
-        );
+    // would go stale. This launch therefore never exports an absolute window —
+    // it only unsets any value inherited from dcserver or the operator shell,
+    // leaving AgentDesk's exact-token `/compact` steering as the sole compact
+    // authority and Claude Code's own defaults underneath it.
     crate::services::claude_compact_context::append_auto_compact_window_shell_env(
-        &mut gateway_exports,
-        auto_compact_window,
+        &mut env_exports,
+        None,
     );
     let mut escaped_claude_bin = String::new();
     config
@@ -438,11 +427,11 @@ fn write_launch_script(
         "#!/bin/bash\n\
          cd {cwd}\n\
          export CLAUDE_CODE_RESUME_PROMPT=\"_\"\n\
-         {gateway_exports}\
+         {env_exports}\
          exec {claude_bin} {args}\n",
         cwd = shell_escape(&config.working_dir.display().to_string()),
         claude_bin = escaped_claude_bin,
-        gateway_exports = gateway_exports,
+        env_exports = env_exports,
         args = args,
     );
     std::fs::write(path, script)
@@ -468,7 +457,6 @@ mod tests {
             system_prompt: Some("system prompt".to_string()),
             model: Some("sonnet".to_string()),
             resume: false,
-            launch_env: ClaudeLaunchEnv::scrub_for_test(),
         }
     }
 
@@ -576,21 +564,13 @@ mod tests {
     }
 
     #[test]
-    fn launch_script_exports_gateway_policy_compact_window_and_gates_gateway_proxy() {
+    fn launch_script_fences_the_absolute_compact_window() {
         let _context_guard = context_state_guard();
         let dir = tempfile::tempdir().unwrap();
         let mut config = sample_config();
         config.model = Some("sonnet".to_string());
-        config.launch_env = ClaudeLaunchEnv::inject_for_test("http://proxy.example/it's-ready");
         let launch_script_path = dir.path().join("launch.sh");
 
-        // A fresh gateway catalog whose auto-context policy is OFF: the launch
-        // still exports only the isolation fence.
-        crate::services::claude_compact_context::put_catalog_with_auto_compact_for_test(
-            "http://proxy.example/it's-ready",
-            std::collections::HashMap::from([("gpt-x".to_string(), 372_000)]),
-            None,
-        );
         write_launch_script(
             &launch_script_path,
             &config,
@@ -602,46 +582,9 @@ mod tests {
         assert!(script.contains("unset CLAUDE_CODE_AUTO_COMPACT_WINDOW\n"));
         assert!(
             !script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW="),
-            "gateway auto-context off must leave the exact-token steering path as the sole compact authority"
+            "a TUI launch must leave the exact-token steering path as the sole compact authority"
         );
-        assert!(
-            script.contains("export ANTHROPIC_BASE_URL='http://proxy.example/it'\\''s-ready'\n")
-        );
-        assert!(script.contains("export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1\n"));
         assert!(!script.contains("CLAUDE_CODE_EXTENDED_CACHE_TTL"));
-
-        // The same gateway with auto-context ON: the launch replicates the env
-        // an `ocx claude` launch would inject.
-        crate::services::claude_compact_context::put_catalog_with_auto_compact_for_test(
-            "http://proxy.example/it's-ready",
-            std::collections::HashMap::from([("gpt-x".to_string(), 372_000)]),
-            Some(350_000),
-        );
-        write_launch_script(
-            &launch_script_path,
-            &config,
-            Path::new("/tmp/settings.json"),
-        )
-        .unwrap();
-        let armed_script = std::fs::read_to_string(&launch_script_path).unwrap();
-        assert!(armed_script.contains("unset CLAUDE_CODE_AUTO_COMPACT_WINDOW\n"));
-        assert!(
-            armed_script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW=350000\n"),
-            "gateway auto-context on must arm the CLI-internal compact safety net for [1m]-marked subagent models"
-        );
-
-        config.launch_env = ClaudeLaunchEnv::scrub_for_test();
-        write_launch_script(
-            &launch_script_path,
-            &config,
-            Path::new("/tmp/settings.json"),
-        )
-        .unwrap();
-        let disabled_script = std::fs::read_to_string(&launch_script_path).unwrap();
-        assert!(disabled_script.contains("unset CLAUDE_CODE_AUTO_COMPACT_WINDOW\n"));
-        assert!(!disabled_script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW="));
-        assert!(disabled_script.contains("unset ANTHROPIC_BASE_URL\n"));
-        assert!(disabled_script.contains("unset CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY\n"));
     }
 
     #[test]
@@ -651,8 +594,8 @@ mod tests {
         let mut config = sample_config();
         let launch_script_path = dir.path().join("launch.sh");
 
-        // Scrubbed launches use only native selectors, whose `[1m]` windows
-        // are genuinely 1M: no absolute window is ever exported.
+        // A TUI launch never derives an absolute window from its launch model,
+        // so the script exports only the isolation fence.
         write_launch_script(
             &launch_script_path,
             &config,
@@ -665,24 +608,8 @@ mod tests {
         assert!(!sonnet_script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW="));
 
         // `/model` can change the live TUI's model after this script has
-        // launched. The gateway-policy window is model-independent, so a
-        // different launch selector must produce the identical export — the
-        // value can never go stale against the session's current model.
-        crate::services::claude_compact_context::put_catalog_with_auto_compact_for_test(
-            "http://proxy.example/gateway",
-            std::collections::HashMap::from([("gpt-x".to_string(), 372_000)]),
-            Some(350_000),
-        );
-        config.launch_env = ClaudeLaunchEnv::inject_for_test("http://proxy.example/gateway");
-        write_launch_script(
-            &launch_script_path,
-            &config,
-            Path::new("/tmp/settings.json"),
-        )
-        .unwrap();
-        let sonnet_injected = std::fs::read_to_string(&launch_script_path).unwrap();
-        assert!(sonnet_injected.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW=350000\n"));
-
+        // launched, so a different launch selector must not start exporting an
+        // absolute window that the session's current model could invalidate.
         config.model = Some("opus".to_string());
         write_launch_script(
             &launch_script_path,
@@ -693,7 +620,8 @@ mod tests {
         let opus_script = std::fs::read_to_string(&launch_script_path).unwrap();
         assert!(opus_script.contains("'--model' 'opus'"));
         assert!(!opus_script.contains("'--model' 'sonnet'"));
-        assert!(opus_script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW=350000\n"));
+        assert!(opus_script.contains("unset CLAUDE_CODE_AUTO_COMPACT_WINDOW\n"));
+        assert!(!opus_script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW="));
         assert!(!opus_script.contains("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"));
     }
 

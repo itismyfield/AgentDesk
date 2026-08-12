@@ -30,9 +30,6 @@ impl<'a> CheckRunner<'a> {
             .arg("--version")
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        if self.provider != "claude" {
-            configure_version_probe_command(&mut command, self.provider);
-        }
 
         match run_command_status_with_timeout(command, SMOKE_TIMEOUT) {
             Ok(true) => SmokeCheckStatus::Ok,
@@ -65,19 +62,6 @@ impl<'a> CheckRunner<'a> {
 
     fn run_cancel(&self) -> SmokeCheckStatus {
         SmokeCheckStatus::Skipped
-    }
-}
-
-fn configure_version_probe_command(command: &mut Command, provider: &str) {
-    if provider == "claude" {
-        // `--version` never routes models or spawns subagents, so probes always
-        // run native (Scrub). The gateway policy for this launch class lives in
-        // the single chokepoint authority (`VersionProbe => Scrub`); turn
-        // launches take the `Turn` intent there.
-        crate::services::claude_command::ClaudeLaunchEnv::resolve(
-            crate::services::claude_command::ClaudeLaunchIntent::VersionProbe,
-        )
-        .apply_to_command(command);
     }
 }
 
@@ -179,49 +163,4 @@ pub fn run_smoke(
 pub fn smoke_passed(result: &SmokeResult) -> bool {
     matches!(result.checks.version, SmokeCheckStatus::Ok)
         && !matches!(result.overall_status.as_str(), "failed")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn configured_version_probe_env(provider: &str) -> HashMap<String, Option<String>> {
-        let mut command = Command::new(provider);
-        command
-            .env("ANTHROPIC_BASE_URL", "http://inherited.example:9999")
-            .env(
-                "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
-                "inherited-value",
-            );
-        configure_version_probe_command(&mut command, provider);
-        command
-            .get_envs()
-            .map(|(key, value)| {
-                (
-                    key.to_string_lossy().into_owned(),
-                    value.map(|value| value.to_string_lossy().into_owned()),
-                )
-            })
-            .collect()
-    }
-
-    #[test]
-    fn version_probe_scrubs_gateway_env_only_for_claude() {
-        let claude_env = configured_version_probe_env("claude");
-        assert_eq!(claude_env.get("ANTHROPIC_BASE_URL"), Some(&None));
-        assert_eq!(
-            claude_env.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
-            Some(&None)
-        );
-
-        let codex_env = configured_version_probe_env("codex");
-        assert_eq!(
-            codex_env.get("ANTHROPIC_BASE_URL"),
-            Some(&Some("http://inherited.example:9999".to_string()))
-        );
-        assert_eq!(
-            codex_env.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
-            Some(&Some("inherited-value".to_string()))
-        );
-    }
 }

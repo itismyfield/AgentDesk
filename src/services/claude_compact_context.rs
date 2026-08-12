@@ -1,19 +1,15 @@
 //! Launch-bound Claude context-window resolution for auto compaction.
 //!
-//! A Claude pane can outlive a live-config edit, so this module records the
-//! effective gateway decision made at launch. Completion reads are synchronous:
-//! they use only fresh entries from a bounded cache and, at most, start one
-//! background refresh per gateway URL. The watcher path never waits for OCX I/O.
+//! AgentDesk records a launch marker for every Claude pane it starts. The
+//! auto-compact trigger uses that marker to tell a managed pane (whose launch
+//! this process controlled) apart from an unmanaged one, and resolves windows
+//! from Claude's own native model table. Completion reads are synchronous and
+//! purely local, so the watcher path never performs I/O.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::process::Command;
-use std::sync::{LazyLock, Mutex, OnceLock};
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
-
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-
-use crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv;
 
 pub(crate) const DEFAULT_CONTEXT_COMPACT_LOWER_BOUND_TOKENS: u64 = 300_000;
 const COMPACT_SAFETY_RESERVE_TOKENS: u64 = 64_000;
@@ -21,81 +17,13 @@ const NATIVE_STANDARD_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 const ONE_MILLION_CONTEXT_WINDOW_TOKENS: u64 = 1_000_000;
 const CLAUDE_AUTO_COMPACT_MIN_TOKENS: u64 = 100_000;
 pub(crate) const CLAUDE_AUTO_COMPACT_MAX_TOKENS: u64 = 1_000_000;
-const CATALOG_TTL: Duration = Duration::from_secs(5 * 60);
 const LAUNCH_PROVENANCE_TTL: Duration = Duration::from_secs(4 * 60 * 60);
-const MAX_CATALOGS: usize = 32;
 const MAX_LAUNCH_PROVENANCE: usize = 512;
-const TMUX_LAUNCH_PROVENANCE_OPTION: &str = "@agentdesk_claude_compact_provenance";
 pub(crate) const CLAUDE_AUTO_COMPACT_WINDOW_ENV: &str = "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
-/// OCX's own auto-context default (`AUTO_COMPACT_WINDOW_DEFAULT` in opencodex
-/// `context-windows.ts`). Mirrored so an ADK-hosted TUI receives the exact env
-/// an `ocx claude` launch would have injected for the same gateway policy.
-const OCX_AUTO_COMPACT_WINDOW_DEFAULT_TOKENS: u64 = 350_000;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ClaudeLaunchProvenance {
-    Inject { base_url: String },
-    Scrub,
-}
-
-impl From<&ClaudeGatewayProxyEnv> for ClaudeLaunchProvenance {
-    fn from(value: &ClaudeGatewayProxyEnv) -> Self {
-        match value {
-            ClaudeGatewayProxyEnv::Inject { base_url } => Self::Inject {
-                base_url: normalize_proxy_url(base_url),
-            },
-            ClaudeGatewayProxyEnv::Scrub => Self::Scrub,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct LaunchProvenanceEntry {
-    provenance: ClaudeLaunchProvenance,
-    recorded_at: Instant,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct PersistedLaunchProvenance {
-    mode: String,
-    #[serde(default)]
-    base_url: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-struct CatalogEntry {
-    windows: HashMap<String, u64>,
-    /// The gateway's own effective `CLAUDE_CODE_AUTO_COMPACT_WINDOW` decision
-    /// (`None` when its auto-context policy is off or unreported).
-    auto_compact_window: Option<u64>,
-    refreshed_at: Instant,
-}
-
-/// One fetched snapshot of the gateway's `/api/claude-code` surface: the
-/// model-window map plus the gateway's own auto-context decision.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct GatewayCatalog {
-    pub(crate) windows: HashMap<String, u64>,
-    pub(crate) auto_compact_window: Option<u64>,
-}
-
-#[derive(Default)]
-struct CatalogState {
-    by_proxy_url: HashMap<String, CatalogEntry>,
-    refreshing: HashSet<String>,
-}
-
-static LAUNCH_PROVENANCE: LazyLock<Mutex<HashMap<String, LaunchProvenanceEntry>>> =
+/// tmux session name -> the instant this process launched that Claude pane.
+static LAUNCH_PROVENANCE: LazyLock<Mutex<HashMap<String, Instant>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-static CATALOG_STATE: LazyLock<Mutex<CatalogState>> =
-    LazyLock::new(|| Mutex::new(CatalogState::default()));
-static CONTEXT_WINDOW_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TurnWindowResolution {
-    Proven(u64),
-    UnprovenLaunchBound,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CompactThreshold {
@@ -104,13 +32,9 @@ pub(crate) struct CompactThreshold {
     pub rearm_floor_tokens: u64,
 }
 
-/// Persist the effective launch environment before the pane receives input.
-/// A same-name relaunch overwrites the old entry, rather than reading current
-/// config later and accidentally attributing a warm pane to a new proxy.
-pub(crate) fn register_launch_provenance(
-    tmux_session_name: &str,
-    gateway_proxy_env: &ClaudeGatewayProxyEnv,
-) {
+/// Mark this tmux session as an AgentDesk-launched Claude pane before it can
+/// receive its first prompt. A same-name relaunch overwrites the old entry.
+pub(crate) fn register_launch_provenance(tmux_session_name: &str) {
     let tmux_session_name = tmux_session_name.trim();
     if tmux_session_name.is_empty() {
         return;
@@ -119,40 +43,8 @@ pub(crate) fn register_launch_provenance(
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     purge_launch_provenance(&mut entries);
-    entries.insert(
-        tmux_session_name.to_string(),
-        LaunchProvenanceEntry {
-            provenance: ClaudeLaunchProvenance::from(gateway_proxy_env),
-            recorded_at: Instant::now(),
-        },
-    );
+    entries.insert(tmux_session_name.to_string(), Instant::now());
     trim_oldest_launch_provenance(&mut entries);
-}
-
-/// Persist the effective launch decision only after tmux has successfully
-/// created the pane. A dcserver restart can then rehydrate warm panes without
-/// consulting current live gateway settings.
-pub(crate) fn persist_launch_provenance_to_tmux(
-    tmux_session_name: &str,
-    gateway_proxy_env: &ClaudeGatewayProxyEnv,
-) {
-    let provenance = ClaudeLaunchProvenance::from(gateway_proxy_env);
-    let (mode, base_url) = match provenance {
-        ClaudeLaunchProvenance::Inject { base_url } => ("inject", Some(base_url)),
-        ClaudeLaunchProvenance::Scrub => ("scrub", None),
-    };
-    let payload = PersistedLaunchProvenance {
-        mode: mode.to_string(),
-        base_url,
-    };
-    let Ok(serialized) = serde_json::to_string(&payload) else {
-        return;
-    };
-    crate::services::platform::tmux::set_option(
-        tmux_session_name,
-        TMUX_LAUNCH_PROVENANCE_OPTION,
-        &serialized,
-    );
 }
 
 pub(crate) fn clear_launch_provenance_for_tmux(tmux_session_name: &str) {
@@ -162,26 +54,22 @@ pub(crate) fn clear_launch_provenance_for_tmux(tmux_session_name: &str) {
         .remove(tmux_session_name.trim());
 }
 
-/// Resolve a live interactive TUI's context window from launch-bound evidence.
-/// A fresh, unambiguous catalog hit proves the exact window. Otherwise, known
-/// launch provenance plus a non-empty model permits only the conservative
+/// Resolve the trigger window for a live interactive TUI turn.
+///
+/// A TUI pane can change model mid-session (`/model`), so its *current* model
+/// is never authoritative evidence for an exact window: a completion may have
+/// canonicalized away an explicit `[1m]` selector, and compacting a 1M session
+/// against a 200K threshold would fire far too early. Known launch provenance
+/// plus a non-empty model therefore permits only the conservative
 /// maximum-window trigger bound. `None` remains reserved for panes without
 /// managed launch provenance or usable model evidence.
 pub(crate) fn context_window_for_turn(
     tmux_session_name: &str,
     current_model: Option<&str>,
-) -> Option<TurnWindowResolution> {
-    let launch = launch_provenance_for_tmux(tmux_session_name)?;
-    let current_model = current_model.and_then(preserve_model_selector)?;
-    match launch.provenance {
-        ClaudeLaunchProvenance::Inject { base_url } => {
-            match live_catalog_context_window_for_selector(&base_url, &current_model) {
-                Some(window) => Some(TurnWindowResolution::Proven(window)),
-                None => Some(TurnWindowResolution::UnprovenLaunchBound),
-            }
-        }
-        ClaudeLaunchProvenance::Scrub => Some(TurnWindowResolution::UnprovenLaunchBound),
-    }
+) -> Option<u64> {
+    has_launch_provenance(tmux_session_name).then_some(())?;
+    current_model.and_then(preserve_model_selector)?;
+    Some(CLAUDE_AUTO_COMPACT_MAX_TOKENS)
 }
 
 /// Calculate AgentDesk's authoritative absolute trigger. The multiplication is
@@ -224,13 +112,12 @@ pub(crate) fn launch_auto_compact_window(
     launch_model: Option<&str>,
     compact_percent: u64,
     lower_bound_tokens: u64,
-    gateway_proxy_env: &ClaudeGatewayProxyEnv,
 ) -> Option<u64> {
     if compact_percent == 0 {
         return None;
     }
     let launch_model = launch_model.and_then(preserve_model_selector)?;
-    let window = immutable_launch_context_window(&launch_model, gateway_proxy_env)?;
+    let window = immutable_launch_context_window(&launch_model)?;
     let threshold = compact_threshold(window, compact_percent, lower_bound_tokens)?;
     (CLAUDE_AUTO_COMPACT_MIN_TOKENS..=CLAUDE_AUTO_COMPACT_MAX_TOKENS)
         .contains(&threshold.effective_tokens)
@@ -244,105 +131,17 @@ pub(crate) fn claude_model_from_args(args: &[String]) -> Option<&str> {
         .map(|pair| pair[1].as_str())
 }
 
-/// Register the launch-bound gateway decision before deriving Claude Code's
-/// optional absolute auto-compact setting for this process launch.
+/// Record the launch marker before deriving Claude Code's optional absolute
+/// auto-compact setting for this process launch.
 pub(crate) fn launch_auto_compact_window_for_session(
     launch_key: &str,
     model: Option<&str>,
     compact_percent: Option<u64>,
     compact_lower_bound_tokens: u64,
-    gateway_proxy_env: &ClaudeGatewayProxyEnv,
 ) -> Option<u64> {
-    register_launch_provenance(launch_key, gateway_proxy_env);
-    compact_percent.and_then(|percent| {
-        launch_auto_compact_window(
-            model,
-            percent,
-            compact_lower_bound_tokens,
-            gateway_proxy_env,
-        )
-    })
-}
-
-/// Absolute Claude Code launch knob for a mutable interactive TUI (#4591
-/// revision). Unlike the immutable headless knob above, this value is NOT
-/// derived from the launch model: it replicates the model-independent env the
-/// gateway itself injects into `ocx claude` launches, so mid-session model
-/// switches cannot make it stale. Without it, gateway-generated subagent
-/// definitions carrying a `[1m]` marker are accounted at 1M by Claude Code
-/// while the routed backend enforces a smaller real window — their internal
-/// loops overflow before compaction arms, and ADK's own compact steering can
-/// never reach a CLI-internal subagent loop. Scrubbed launches use only native
-/// selectors, whose `[1m]` windows are genuinely 1M, so they need no knob.
-pub(crate) fn tui_launch_auto_compact_window(
-    gateway_proxy_env: &ClaudeGatewayProxyEnv,
-) -> Option<u64> {
-    let ClaudeGatewayProxyEnv::Inject { base_url } = gateway_proxy_env else {
-        return None;
-    };
-    let proxy_url = normalize_proxy_url(base_url);
-    if proxy_url.is_empty() {
-        return None;
-    }
-    if let Some(decision) = cached_gateway_auto_compact_window(&proxy_url) {
-        return decision;
-    }
-    // Cold cache: a TUI pane launch is rare and not latency-critical, while a
-    // pane that misses this knob keeps the hazard for its whole lifetime. Run
-    // one bounded fetch on a dedicated thread (the HTTP client enforces its
-    // own 2s timeout) so this works from both async and blocking callers.
-    let fetch_url = proxy_url.clone();
-    let fetched = std::thread::Builder::new()
-        .name("claude-catalog-launch-fetch".to_string())
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .ok()?;
-            Some(runtime.block_on(fetch_catalog(&fetch_url)))
-        })
-        .ok()?
-        .join()
-        .ok()??;
-    match fetched {
-        Ok(catalog) if !catalog.windows.is_empty() => {
-            let decision = catalog.auto_compact_window;
-            let mut state = CATALOG_STATE
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            commit_catalog_entry(&mut state, &proxy_url, catalog);
-            decision
-        }
-        Ok(_) => {
-            tracing::warn!(
-                proxy_url,
-                "Claude launch catalog fetch returned an empty window map; TUI launches without an absolute compact window"
-            );
-            None
-        }
-        Err(error) => {
-            tracing::debug!(
-                proxy_url,
-                %error,
-                "Claude launch catalog fetch failed; TUI launches without an absolute compact window"
-            );
-            None
-        }
-    }
-}
-
-/// Fresh-cache read of the gateway's auto-compact decision. Outer `None` means
-/// the cache is cold or stale; inner `None` means a fresh gateway reported its
-/// auto-context policy as off.
-fn cached_gateway_auto_compact_window(proxy_url: &str) -> Option<Option<u64>> {
-    let state = CATALOG_STATE
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    state
-        .by_proxy_url
-        .get(proxy_url)
-        .filter(|entry| entry.refreshed_at.elapsed() < CATALOG_TTL)
-        .map(|entry| entry.auto_compact_window)
+    register_launch_provenance(launch_key);
+    compact_percent
+        .and_then(|percent| launch_auto_compact_window(model, percent, compact_lower_bound_tokens))
 }
 
 /// Render an isolation fence for shell-based launches. An inherited absolute
@@ -387,70 +186,10 @@ fn is_one_m_model_selector(model: &str) -> bool {
 }
 
 /// Resolve a launch-time model whose argv cannot change underneath this process.
-/// An injected launch still belongs to a gateway route, so every selector needs
-/// an exact fresh catalog entry. A scrubbed launch may use Claude's exact native
-/// selector table, but unknown selectors remain ambiguous and therefore disable
-/// the absolute launch knob.
-fn immutable_launch_context_window(
-    launch_model: &str,
-    gateway_proxy_env: &ClaudeGatewayProxyEnv,
-) -> Option<u64> {
-    match ClaudeLaunchProvenance::from(gateway_proxy_env) {
-        ClaudeLaunchProvenance::Scrub => native_context_window(Some(launch_model)),
-        ClaudeLaunchProvenance::Inject { base_url } => {
-            catalog_context_window_for_selector(&base_url, launch_model)
-        }
-    }
-}
-
-/// Read one exact selector from the launch gateway catalog. A populated catalog
-/// with no matching selector is still insufficient evidence; choosing its
-/// smallest window could compact a larger routed model early.
-fn catalog_context_window_for_selector(base_url: &str, model: &str) -> Option<u64> {
-    let selector = preserve_model_selector(model)?;
-    cached_catalog_and_schedule_refresh(base_url)?
-        .get(&selector)
-        .copied()
-        .filter(|window| *window > 0)
-}
-
-/// Resolve a selector reported by a mutable live TUI. Unlike immutable launch
-/// argv, a completion's base selector is ambiguous when the same fresh catalog
-/// also advertises an explicit `[1m]` sibling: the completion can have
-/// canonicalized away the selected 1M suffix. Fail closed instead of arming a
-/// smaller auto-compact threshold for that potentially 1M session.
-fn live_catalog_context_window_for_selector(base_url: &str, model: &str) -> Option<u64> {
-    let selector = preserve_model_selector(model)?;
-    let Some(catalog) = cached_catalog_and_schedule_refresh(base_url) else {
-        tracing::debug!(
-            proxy_url = base_url,
-            %selector,
-            "Claude context-window catalog is cold or stale; using launch-bound fallback"
-        );
-        return None;
-    };
-    let Some(window) = catalog.get(&selector).copied().filter(|window| *window > 0) else {
-        tracing::debug!(
-            proxy_url = base_url,
-            %selector,
-            catalog_key_count = catalog.len(),
-            "Claude context-window selector missed the live catalog; using launch-bound fallback"
-        );
-        return None;
-    };
-    if !is_one_m_model_selector(&selector)
-        && catalog
-            .get(&format!("{selector}[1m]"))
-            .is_some_and(|window| *window > 0)
-    {
-        tracing::debug!(
-            proxy_url = base_url,
-            %selector,
-            "Claude context-window selector has an ambiguous [1m] sibling; using launch-bound fallback"
-        );
-        return None;
-    }
-    Some(window)
+/// A launch resolves against Claude's exact native selector table; unknown
+/// selectors remain ambiguous and therefore disable the absolute launch knob.
+fn immutable_launch_context_window(launch_model: &str) -> Option<u64> {
+    native_context_window(Some(launch_model))
 }
 
 /// Classify only exact native selectors known to Claude Code. This deliberately
@@ -507,352 +246,32 @@ fn native_context_window(model: Option<&str>) -> Option<u64> {
     Some(NATIVE_STANDARD_CONTEXT_WINDOW_TOKENS)
 }
 
-fn launch_provenance_for_tmux(tmux_session_name: &str) -> Option<LaunchProvenanceEntry> {
+fn has_launch_provenance(tmux_session_name: &str) -> bool {
     let tmux_session_name = tmux_session_name.trim();
     if tmux_session_name.is_empty() {
-        return None;
+        return false;
     }
-    let cached = {
-        let mut entries = LAUNCH_PROVENANCE
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        purge_launch_provenance(&mut entries);
-        entries.get(tmux_session_name).cloned()
-    };
-    cached.or_else(|| rehydrate_launch_provenance_from_tmux(tmux_session_name))
-}
-
-fn rehydrate_launch_provenance_from_tmux(tmux_session_name: &str) -> Option<LaunchProvenanceEntry> {
-    let raw = crate::services::platform::tmux::get_option(
-        tmux_session_name,
-        TMUX_LAUNCH_PROVENANCE_OPTION,
-    )?;
-    let provenance = parse_persisted_launch_provenance(&raw)?;
-    let entry = LaunchProvenanceEntry {
-        provenance,
-        recorded_at: Instant::now(),
-    };
     let mut entries = LAUNCH_PROVENANCE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     purge_launch_provenance(&mut entries);
-    entries.insert(tmux_session_name.to_string(), entry.clone());
-    trim_oldest_launch_provenance(&mut entries);
-    Some(entry)
+    entries.contains_key(tmux_session_name)
 }
 
-fn parse_persisted_launch_provenance(raw: &str) -> Option<ClaudeLaunchProvenance> {
-    let payload: PersistedLaunchProvenance = serde_json::from_str(raw).ok()?;
-    let provenance = match payload.mode.as_str() {
-        "scrub" => ClaudeLaunchProvenance::Scrub,
-        "inject" => {
-            let base_url = normalize_proxy_url(payload.base_url?.as_str());
-            if base_url.is_empty() {
-                return None;
-            }
-            ClaudeLaunchProvenance::Inject { base_url }
-        }
-        _ => return None,
-    };
-    Some(provenance)
+fn purge_launch_provenance(entries: &mut HashMap<String, Instant>) {
+    entries.retain(|_, recorded_at| recorded_at.elapsed() <= LAUNCH_PROVENANCE_TTL);
 }
 
-fn normalize_proxy_url(base_url: &str) -> String {
-    base_url.trim().trim_end_matches('/').to_string()
-}
-
-fn catalog_endpoint(proxy_url: &str) -> Option<String> {
-    let proxy_url = normalize_proxy_url(proxy_url);
-    (!proxy_url.is_empty()).then(|| format!("{proxy_url}/api/claude-code"))
-}
-
-fn cached_catalog_and_schedule_refresh(proxy_url: &str) -> Option<HashMap<String, u64>> {
-    let proxy_url = normalize_proxy_url(proxy_url);
-    if proxy_url.is_empty() {
-        return None;
-    }
-    let (cached, start_refresh) = {
-        let mut state = CATALOG_STATE
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let cached = state.by_proxy_url.get(&proxy_url).cloned();
-        let fresh = cached
-            .as_ref()
-            .filter(|entry| entry.refreshed_at.elapsed() < CATALOG_TTL);
-        let stale = fresh.is_none();
-        let start_refresh = stale && state.refreshing.insert(proxy_url.clone());
-        (fresh.map(|entry| entry.windows.clone()), start_refresh)
-    };
-    if start_refresh {
-        spawn_catalog_refresh(proxy_url);
-    }
-    cached
-}
-
-fn spawn_catalog_refresh(proxy_url: String) {
-    let Ok(handle) = tokio::runtime::Handle::try_current() else {
-        CATALOG_STATE
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .refreshing
-            .remove(&proxy_url);
-        return;
-    };
-    handle.spawn(async move {
-        let result = fetch_catalog(&proxy_url).await;
-        finish_catalog_refresh(&proxy_url, result);
-    });
-}
-
-/// Commit one fetched catalog snapshot without touching the in-flight refresh
-/// marker. Shared by the background refresh path and the bounded launch fetch.
-fn commit_catalog_entry(state: &mut CatalogState, proxy_url: &str, catalog: GatewayCatalog) {
-    state.by_proxy_url.insert(
-        proxy_url.to_string(),
-        CatalogEntry {
-            windows: catalog.windows,
-            auto_compact_window: catalog.auto_compact_window,
-            refreshed_at: Instant::now(),
-        },
-    );
-    trim_oldest_catalogs(state);
-}
-
-/// Commit a catalog refresh. Failed or empty refreshes deliberately retain a
-/// stale map for diagnostics/retry, but callers can never consume that map:
-/// [`cached_catalog_and_schedule_refresh`] returns only fresh entries.
-fn finish_catalog_refresh(proxy_url: &str, result: Result<GatewayCatalog, String>) {
-    let mut state = CATALOG_STATE
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    state.refreshing.remove(proxy_url);
-    match result {
-        Ok(catalog) if !catalog.windows.is_empty() => {
-            commit_catalog_entry(&mut state, proxy_url, catalog);
-        }
-        Ok(_) => tracing::warn!(proxy_url, "Claude context-window catalog was empty"),
-        Err(error) => {
-            tracing::debug!(proxy_url, %error, "Claude context-window catalog refresh failed; stale catalog remains unusable")
-        }
-    }
-}
-
-async fn fetch_catalog(proxy_url: &str) -> Result<GatewayCatalog, String> {
-    let endpoint = catalog_endpoint(proxy_url)
-        .ok_or_else(|| "Claude context-window proxy URL is empty".to_string())?;
-    let client = CONTEXT_WINDOW_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(2))
-            .build()
-            .expect("build Claude context-window HTTP client")
-    });
-    let mut request = client.get(&endpoint);
-    if let Some(token) = local_gateway_admin_token(&endpoint) {
-        request = request.header("x-opencodex-api-key", token);
-    }
-    let response = request
-        .send()
-        .await
-        .map_err(|error| format!("GET {endpoint}: {error}"))?
-        .error_for_status()
-        .map_err(|error| format!("GET {endpoint}: {error}"))?;
-    let body = response
-        .text()
-        .await
-        .map_err(|error| format!("read {endpoint}: {error}"))?;
-    parse_gateway_catalog(&body).map_err(|error| format!("parse {endpoint}: {error}"))
-}
-
-/// Parses both OCX's `contextWindows` map and array/object compatibility
-/// entries. Keyed numeric values are accepted only inside `contextWindows`;
-/// compatibility entries must name a model and its context-window field so
-/// root response metadata cannot poison the conservative unknown-model fallback.
-pub(crate) fn parse_context_window_catalog(body: &str) -> Result<HashMap<String, u64>, String> {
-    parse_gateway_catalog(body).map(|catalog| catalog.windows)
-}
-
-/// Full gateway snapshot: the window map plus the gateway's own auto-context
-/// decision derived from the same response body.
-pub(crate) fn parse_gateway_catalog(body: &str) -> Result<GatewayCatalog, String> {
-    let value: Value = serde_json::from_str(body).map_err(|error| error.to_string())?;
-    let mut windows = HashMap::new();
-    collect_catalog_windows(&value, &mut windows);
-    Ok(GatewayCatalog {
-        windows,
-        auto_compact_window: ocx_auto_compact_window(&value),
-    })
-}
-
-/// Mirror OCX's `resolveAutoContext` (opencodex `context-windows.ts`): the
-/// gateway injects `CLAUDE_CODE_AUTO_COMPACT_WINDOW` into its own `ocx claude`
-/// launches exactly when its auto-context policy is on and the legacy
-/// `maxContextTokens` override is absent. An out-of-range or missing
-/// `autoCompactWindow` config value falls back to the 350k default, matching
-/// the gateway's own fallback. Absent policy fields fail closed.
-fn ocx_auto_compact_window(value: &Value) -> Option<u64> {
-    let object = value.as_object()?;
-    if object.get("enabled").and_then(Value::as_bool) != Some(true) {
-        return None;
-    }
-    if object.get("autoContext").and_then(Value::as_bool) != Some(true) {
-        return None;
-    }
-    if object
-        .get("maxContextTokens")
-        .and_then(Value::as_u64)
-        .is_some_and(|tokens| tokens > 0)
-    {
-        return None;
-    }
-    let window = object
-        .get("autoCompactWindow")
-        .and_then(Value::as_u64)
-        .filter(|window| {
-            (CLAUDE_AUTO_COMPACT_MIN_TOKENS..=CLAUDE_AUTO_COMPACT_MAX_TOKENS).contains(window)
-        })
-        .unwrap_or(OCX_AUTO_COMPACT_WINDOW_DEFAULT_TOKENS);
-    Some(window)
-}
-
-/// OCX gates its whole management API (`/api/*`, including the catalog
-/// endpoint) behind an admin token: `OPENCODEX_ADMIN_AUTH_TOKEN` env first,
-/// else the token file in its config dir (`$OPENCODEX_HOME`, default
-/// `~/.opencodex`). Mirror that resolution — but only for loopback endpoints:
-/// the file token is a host-local secret and must never be sent to a remote
-/// gateway. Absent token → no header (pre-auth gateways keep working).
-fn local_gateway_admin_token(endpoint: &str) -> Option<String> {
-    let host = reqwest::Url::parse(endpoint).ok()?.host_str()?.to_string();
-    if !matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1" | "[::1]") {
-        return None;
-    }
-    if let Ok(token) = std::env::var("OPENCODEX_ADMIN_AUTH_TOKEN") {
-        let token = token.trim();
-        if !token.is_empty() {
-            return Some(token.to_string());
-        }
-    }
-    let config_dir = std::env::var("OPENCODEX_HOME")
-        .ok()
-        .map(|raw| raw.trim().to_string())
-        .filter(|raw| !raw.is_empty())
-        .map(std::path::PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".opencodex")))?;
-    let path = config_dir.join("admin-api-token");
-    let metadata = std::fs::symlink_metadata(&path).ok()?;
-    // Mirror OCX's own read guard: regular file, bounded size.
-    if !metadata.is_file() || metadata.len() > 512 {
-        return None;
-    }
-    let token = std::fs::read_to_string(&path).ok()?;
-    let token = token.trim();
-    (!token.is_empty()).then(|| token.to_string())
-}
-
-fn collect_catalog_windows(value: &Value, windows: &mut HashMap<String, u64>) {
-    match value {
-        Value::Array(_) => collect_compatibility_entries(value, windows),
-        Value::Object(object) => collect_compatibility_entry(object, windows),
-        _ => {}
-    }
-}
-
-/// OCX's canonical catalog shape: `contextWindows` is a model-keyed map. This
-/// is the sole location where a key may stand in for a model selector.
-fn collect_context_window_map(value: &Value, windows: &mut HashMap<String, u64>) {
-    let Some(entries) = value.as_object() else {
-        return;
-    };
-    for (model, value) in entries {
-        if let Some(model) = preserve_model_selector(model)
-            && let Some(window) = value_context_window(value)
-        {
-            windows.insert(model, window);
-        }
-    }
-}
-
-/// Compatibility responses may contain arrays or wrapper objects under these
-/// explicit container keys. Their entries must carry their own model id/name;
-/// arbitrary object keys (such as response metadata) are never treated as
-/// model selectors.
-fn collect_compatibility_entries(value: &Value, windows: &mut HashMap<String, u64>) {
-    match value {
-        Value::Array(entries) => {
-            for entry in entries {
-                collect_compatibility_entries(entry, windows);
-            }
-        }
-        Value::Object(object) => collect_compatibility_entry(object, windows),
-        _ => {}
-    }
-}
-
-fn collect_compatibility_entry(
-    object: &serde_json::Map<String, Value>,
-    windows: &mut HashMap<String, u64>,
-) {
-    if let Some(model) = object
-        .get("model")
-        .or_else(|| object.get("id"))
-        .or_else(|| object.get("name"))
-        .and_then(Value::as_str)
-        .and_then(preserve_model_selector)
-        && let Some(window) = object_context_window(object)
-    {
-        windows.insert(model, window);
-    }
-    if let Some(context_windows) = object.get("contextWindows") {
-        collect_context_window_map(context_windows, windows);
-    }
-    for key in ["models", "data", "items"] {
-        if let Some(entries) = object.get(key) {
-            collect_compatibility_entries(entries, windows);
-        }
-    }
-}
-
-fn object_context_window(object: &serde_json::Map<String, Value>) -> Option<u64> {
-    ["contextWindow", "context_window", "contextTokens", "window"]
-        .iter()
-        .find_map(|key| object.get(*key).and_then(value_context_window))
-}
-
-fn value_context_window(value: &Value) -> Option<u64> {
-    value
-        .as_u64()
-        .or_else(|| value.as_str().and_then(|value| value.parse::<u64>().ok()))
-        .filter(|value| *value > 0)
-        .or_else(|| value.as_object().and_then(object_context_window))
-}
-
-fn purge_launch_provenance(entries: &mut HashMap<String, LaunchProvenanceEntry>) {
-    entries.retain(|_, entry| entry.recorded_at.elapsed() <= LAUNCH_PROVENANCE_TTL);
-}
-
-fn trim_oldest_launch_provenance(entries: &mut HashMap<String, LaunchProvenanceEntry>) {
+fn trim_oldest_launch_provenance(entries: &mut HashMap<String, Instant>) {
     while entries.len() > MAX_LAUNCH_PROVENANCE {
         let Some(key) = entries
             .iter()
-            .min_by_key(|(_, entry)| entry.recorded_at)
+            .min_by_key(|(_, recorded_at)| **recorded_at)
             .map(|(key, _)| key.clone())
         else {
             return;
         };
         entries.remove(&key);
-    }
-}
-
-fn trim_oldest_catalogs(state: &mut CatalogState) {
-    while state.by_proxy_url.len() > MAX_CATALOGS {
-        let Some(key) = state
-            .by_proxy_url
-            .iter()
-            .min_by_key(|(_, entry)| entry.refreshed_at)
-            .map(|(key, _)| key.clone())
-        else {
-            return;
-        };
-        state.by_proxy_url.remove(&key);
     }
 }
 
@@ -862,39 +281,10 @@ fn reset_for_test() {
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .clear();
-    *CATALOG_STATE
-        .lock()
-        .unwrap_or_else(|error| error.into_inner()) = CatalogState::default();
 }
 
-#[cfg(test)]
-pub(crate) fn put_catalog_for_test(proxy_url: &str, windows: HashMap<String, u64>) {
-    put_catalog_with_auto_compact_for_test(proxy_url, windows, None);
-}
-
-#[cfg(test)]
-pub(crate) fn put_catalog_with_auto_compact_for_test(
-    proxy_url: &str,
-    windows: HashMap<String, u64>,
-    auto_compact_window: Option<u64>,
-) {
-    CATALOG_STATE
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .by_proxy_url
-        .insert(
-            normalize_proxy_url(proxy_url),
-            CatalogEntry {
-                windows,
-                auto_compact_window,
-                refreshed_at: Instant::now(),
-            },
-        );
-}
-
-/// Context provenance and catalog fixtures are process-global. Keep every test
-/// that touches either map behind this single guard under normal parallel test
-/// execution.
+/// Launch-provenance fixtures are process-global. Keep every test that touches
+/// that map behind this single guard under normal parallel test execution.
 #[cfg(test)]
 pub(crate) static STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -958,303 +348,6 @@ mod tests {
     }
 
     #[test]
-    fn parser_accepts_catalog_maps_arrays_and_only_positive_windows() {
-        let parsed = parse_context_window_catalog(
-            r#"{"contextWindows":{"routed-sonnet":{"contextWindow":372000},"routed-sonnet[1m]":{"contextWindow":1000000},"bad":0},"models":[{"id":"claude-haiku-4-5","context_window":"200000"}]}"#,
-        )
-        .unwrap();
-        assert_eq!(parsed.get("routed-sonnet"), Some(&372_000));
-        assert_eq!(parsed.get("routed-sonnet[1m]"), Some(&1_000_000));
-        assert_eq!(parsed.get("claude-haiku-4-5"), Some(&200_000));
-        assert!(!parsed.contains_key("bad"));
-    }
-
-    #[test]
-    fn parser_rejects_root_metadata_as_context_window() {
-        let parsed = parse_context_window_catalog(
-            r#"{"port":10100,"autoCompactWindow":350000,"contextWindows":{"gpt":372000}}"#,
-        )
-        .unwrap();
-        assert_eq!(parsed, HashMap::from([("gpt".to_string(), 372_000)]));
-    }
-
-    #[test]
-    fn gateway_auto_compact_mirrors_ocx_resolve_auto_context() {
-        let decide = |body: &str| parse_gateway_catalog(body).unwrap().auto_compact_window;
-        // Policy on, explicit in-range window.
-        assert_eq!(
-            decide(
-                r#"{"enabled":true,"autoContext":true,"autoCompactWindow":700000,"contextWindows":{}}"#
-            ),
-            Some(700_000)
-        );
-        // Policy on, null/missing window falls back to OCX's 350k default.
-        assert_eq!(
-            decide(
-                r#"{"enabled":true,"autoContext":true,"autoCompactWindow":null,"contextWindows":{}}"#
-            ),
-            Some(350_000)
-        );
-        // Out-of-range config values also fall back to the default, matching
-        // OCX's own hand-edit guard.
-        assert_eq!(
-            decide(
-                r#"{"enabled":true,"autoContext":true,"autoCompactWindow":5,"contextWindows":{}}"#
-            ),
-            Some(350_000)
-        );
-        // Auto-context off, gateway disabled, or the legacy maxContextTokens
-        // override all disable the knob; absent fields fail closed.
-        assert_eq!(
-            decide(r#"{"enabled":true,"autoContext":false,"contextWindows":{}}"#),
-            None
-        );
-        assert_eq!(
-            decide(r#"{"enabled":false,"autoContext":true,"contextWindows":{}}"#),
-            None
-        );
-        assert_eq!(
-            decide(
-                r#"{"enabled":true,"autoContext":true,"maxContextTokens":180000,"contextWindows":{}}"#
-            ),
-            None
-        );
-        assert_eq!(decide(r#"{"contextWindows":{"gpt":372000}}"#), None);
-        assert_eq!(decide(r#"[{"id":"gpt","context_window":372000}]"#), None);
-    }
-
-    #[test]
-    fn tui_launch_window_uses_fresh_gateway_policy_and_scrub_stays_disarmed() {
-        let _guard = state_test_guard();
-        let proxy = "http://tui-policy.test";
-        put_catalog_with_auto_compact_for_test(
-            proxy,
-            HashMap::from([("gpt".to_string(), 372_000)]),
-            Some(350_000),
-        );
-        assert_eq!(
-            tui_launch_auto_compact_window(&ClaudeGatewayProxyEnv::Inject {
-                base_url: proxy.to_string(),
-            }),
-            Some(350_000)
-        );
-
-        put_catalog_with_auto_compact_for_test(
-            proxy,
-            HashMap::from([("gpt".to_string(), 372_000)]),
-            None,
-        );
-        assert_eq!(
-            tui_launch_auto_compact_window(&ClaudeGatewayProxyEnv::Inject {
-                base_url: proxy.to_string(),
-            }),
-            None,
-            "a fresh gateway reporting auto-context off must not arm the knob"
-        );
-
-        assert_eq!(
-            tui_launch_auto_compact_window(&ClaudeGatewayProxyEnv::Scrub),
-            None,
-            "scrubbed launches use native selectors whose [1m] windows are genuinely 1M"
-        );
-    }
-
-    #[test]
-    fn gateway_admin_token_is_never_sent_to_non_loopback_hosts() {
-        assert_eq!(
-            local_gateway_admin_token("http://10.0.0.5:10100/api/claude-code"),
-            None
-        );
-        assert_eq!(
-            local_gateway_admin_token("http://gateway.example:10100/api/claude-code"),
-            None
-        );
-        assert_eq!(local_gateway_admin_token("not a url"), None);
-    }
-
-    #[test]
-    fn tui_launch_window_cold_cache_fetch_failure_fails_closed() {
-        let _guard = state_test_guard();
-        // 127.0.0.1:9 (discard) refuses immediately; the bounded launch fetch
-        // must fail closed without arming the knob.
-        assert_eq!(
-            tui_launch_auto_compact_window(&ClaudeGatewayProxyEnv::Inject {
-                base_url: "http://127.0.0.1:9".to_string(),
-            }),
-            None
-        );
-    }
-
-    #[test]
-    fn catalog_endpoint_uses_the_ocx_claude_code_catalog_contract() {
-        assert_eq!(
-            catalog_endpoint(" http://proxy.test/ "),
-            Some("http://proxy.test/api/claude-code".to_string())
-        );
-        assert_eq!(catalog_endpoint("   "), None);
-    }
-
-    #[test]
-    fn persisted_tmux_launch_provenance_option_rehydrates_only_valid_launch_data() {
-        assert_eq!(
-            parse_persisted_launch_provenance(
-                r#"{"mode":"inject","base_url":" http://proxy.test/ ","launch_model":"routed-sonnet[1m]"}"#,
-            ),
-            Some(ClaudeLaunchProvenance::Inject {
-                base_url: "http://proxy.test".to_string(),
-            })
-        );
-        assert_eq!(
-            parse_persisted_launch_provenance(
-                r#"{"mode":"scrub","launch_model":"claude-haiku-4-5"}"#
-            ),
-            Some(ClaudeLaunchProvenance::Scrub)
-        );
-        assert_eq!(
-            parse_persisted_launch_provenance(r#"{"mode":"inject","base_url":"   "}"#),
-            None
-        );
-        assert_eq!(
-            parse_persisted_launch_provenance(r#"{"mode":"unknown"}"#),
-            None
-        );
-    }
-
-    #[test]
-    fn live_injected_tui_fails_closed_for_a_base_selector_with_a_one_million_sibling() {
-        let _guard = state_test_guard();
-        let proxy = "http://proxy.test";
-        put_catalog_for_test(
-            proxy,
-            HashMap::from([
-                ("routed-sonnet".to_string(), 372_000),
-                ("routed-sonnet[1m]".to_string(), 1_000_000),
-                ("small-route".to_string(), 128_000),
-            ]),
-        );
-        let gateway = ClaudeGatewayProxyEnv::Inject {
-            base_url: proxy.to_string(),
-        };
-        register_launch_provenance("tmux-a", &gateway);
-        assert_eq!(
-            context_window_for_turn("tmux-a", Some("routed-sonnet")),
-            Some(TurnWindowResolution::UnprovenLaunchBound),
-            "an ambiguous mutable completion must use only the maximum-window trigger bound"
-        );
-        assert_eq!(
-            context_window_for_turn("tmux-a", Some("routed-sonnet[1m]")),
-            Some(TurnWindowResolution::Proven(1_000_000)),
-            "an explicit [1m] selector must not fall through to its base route"
-        );
-        assert_eq!(
-            context_window_for_turn("tmux-a", Some("claude-sonnet-5")),
-            Some(TurnWindowResolution::UnprovenLaunchBound),
-            "a canonical completion without an exact hit must use only the launch-bound fallback"
-        );
-        assert_eq!(
-            context_window_for_turn("tmux-a", Some("unknown")),
-            Some(TurnWindowResolution::UnprovenLaunchBound),
-            "a different catalog entry must never become a falsely proven window"
-        );
-    }
-
-    /// Mutation guard: mapping an exact miss back to `None` reproduces #4678 and
-    /// fails this assertion for a proxy that advertises only suffixed route keys.
-    #[test]
-    fn suffixed_only_catalog_keeps_bare_completion_launch_bound() {
-        let _guard = state_test_guard();
-        let proxy = "http://proxy-suffixed-only.test";
-        put_catalog_for_test(
-            proxy,
-            HashMap::from([
-                ("claude-opus-4-8-hgq".to_string(), 1_000_000),
-                ("claude-opus-4-8-j97".to_string(), 1_000_000),
-            ]),
-        );
-        register_launch_provenance(
-            "tmux-suffixed-only",
-            &ClaudeGatewayProxyEnv::Inject {
-                base_url: proxy.to_string(),
-            },
-        );
-
-        assert_eq!(
-            context_window_for_turn("tmux-suffixed-only", Some("claude-opus-4-8")),
-            Some(TurnWindowResolution::UnprovenLaunchBound)
-        );
-    }
-
-    #[test]
-    fn injected_routed_alias_waits_for_a_cold_catalog_then_resolves_normally() {
-        let _guard = state_test_guard();
-        let proxy = "http://proxy-cold-catalog.test";
-        let gateway = ClaudeGatewayProxyEnv::Inject {
-            base_url: proxy.to_string(),
-        };
-        register_launch_provenance("tmux-cold-routed", &gateway);
-
-        // A dcserver restart loses the in-memory catalog but the warm pane
-        // keeps its launch provenance in tmux. Schedule a refresh and wait for
-        // a real catalog rather than using the old 100K fallback.
-        assert_eq!(
-            context_window_for_turn("tmux-cold-routed", Some("routed-sonnet")),
-            Some(TurnWindowResolution::UnprovenLaunchBound)
-        );
-
-        put_catalog_for_test(
-            proxy,
-            HashMap::from([("routed-sonnet".to_string(), 372_000)]),
-        );
-        assert_eq!(
-            context_window_for_turn("tmux-cold-routed", Some("routed-sonnet")),
-            Some(TurnWindowResolution::Proven(372_000))
-        );
-    }
-
-    #[test]
-    fn injected_launch_requires_a_fresh_exact_catalog_selector() {
-        let _guard = state_test_guard();
-        let proxy = "http://proxy-cold-native.test";
-        let gateway = ClaudeGatewayProxyEnv::Inject {
-            base_url: proxy.to_string(),
-        };
-        for selector in [
-            "claude-sonnet-4-6",
-            "sonnet",
-            "opus",
-            "haiku",
-            "opusplan",
-            "routed-sonnet",
-            "sonnet[1m]",
-            "claude-sonnet-4-6[1m]",
-            "arbitrary-route[1m]",
-        ] {
-            assert_eq!(
-                immutable_launch_context_window(selector, &gateway),
-                None,
-                "cold injected catalog must not bypass selector {selector}"
-            );
-        }
-
-        put_catalog_for_test(
-            proxy,
-            HashMap::from([
-                ("claude-sonnet-4-6".to_string(), 200_000),
-                ("claude-sonnet-4-6[1m]".to_string(), 1_000_000),
-            ]),
-        );
-        assert_eq!(
-            immutable_launch_context_window("claude-sonnet-4-6", &gateway),
-            Some(200_000)
-        );
-        assert_eq!(
-            immutable_launch_context_window("claude-sonnet-4-6[1m]", &gateway),
-            Some(1_000_000),
-            "Inject keeps [1m] as a distinct exact catalog key"
-        );
-    }
-
-    #[test]
     fn native_table_handles_exact_aliases_versions_and_one_million_suffixes() {
         for model in [
             "sonnet",
@@ -1292,79 +385,40 @@ mod tests {
     #[test]
     fn live_scrub_tui_uses_launch_bound_fallback_only_with_a_model() {
         let _guard = state_test_guard();
-        register_launch_provenance("tmux-native", &ClaudeGatewayProxyEnv::Scrub);
+        register_launch_provenance("tmux-native");
         assert_eq!(context_window_for_turn("tmux-native", None), None);
         assert_eq!(
             context_window_for_turn("tmux-native", Some("sonnet")),
-            Some(TurnWindowResolution::UnprovenLaunchBound),
+            Some(CLAUDE_AUTO_COMPACT_MAX_TOKENS),
             "a canonicalized base selector must not be falsely proven as a 200K window"
         );
         assert_eq!(
             context_window_for_turn("tmux-native", Some("claude-sonnet-4-6")),
-            Some(TurnWindowResolution::UnprovenLaunchBound),
-            "scrub provenance plus a model permits only the maximum-window trigger bound"
+            Some(CLAUDE_AUTO_COMPACT_MAX_TOKENS),
+            "launch provenance plus a model permits only the maximum-window trigger bound"
         );
     }
 
     #[test]
-    fn immutable_scrub_launch_uses_its_exact_selector_and_disables_unknown_native_models() {
+    fn immutable_launch_uses_its_exact_selector_and_disables_unknown_native_models() {
         assert_eq!(
-            immutable_launch_context_window("sonnet", &ClaudeGatewayProxyEnv::Scrub),
+            immutable_launch_context_window("sonnet"),
             Some(NATIVE_STANDARD_CONTEXT_WINDOW_TOKENS)
         );
         assert_eq!(
-            immutable_launch_context_window("sonnet[1m]", &ClaudeGatewayProxyEnv::Scrub),
+            immutable_launch_context_window("sonnet[1m]"),
             Some(1_000_000),
             "the immutable argv preserves an explicit [1m] selector"
         );
         assert_eq!(
-            immutable_launch_context_window("future-model", &ClaudeGatewayProxyEnv::Scrub),
+            immutable_launch_context_window("future-model"),
             None,
             "an unknown native selector must not invent a conservative launch window"
         );
         assert_eq!(
-            immutable_launch_context_window("future-model[1m]", &ClaudeGatewayProxyEnv::Scrub),
+            immutable_launch_context_window("future-model[1m]"),
             None,
             "an unknown native selector must not gain a 1M launch window through its suffix"
-        );
-    }
-
-    #[test]
-    fn expired_catalog_remains_unusable_after_refresh_failure() {
-        let _guard = state_test_guard();
-        let proxy = "http://proxy-expired.test";
-        put_catalog_for_test(
-            proxy,
-            HashMap::from([("routed-sonnet".to_string(), 372_000)]),
-        );
-        {
-            let mut state = CATALOG_STATE
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let entry = state
-                .by_proxy_url
-                .get_mut(proxy)
-                .expect("fresh catalog fixture");
-            entry.refreshed_at = Instant::now() - CATALOG_TTL - Duration::from_secs(1);
-            state.refreshing.insert(proxy.to_string());
-        }
-        finish_catalog_refresh(proxy, Err("network unavailable".to_string()));
-
-        assert_eq!(
-            catalog_context_window_for_selector(proxy, "routed-sonnet"),
-            None,
-            "a retained stale catalog must not become a fallback after refresh failure"
-        );
-        let state = CATALOG_STATE
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        assert!(
-            state.by_proxy_url.contains_key(proxy),
-            "failure may retain stale data for retry/diagnostics, but never for resolution"
-        );
-        assert!(
-            !state.refreshing.contains(proxy),
-            "the failed refresh releases its single-flight marker for a later retry"
         );
     }
 
@@ -1374,8 +428,7 @@ mod tests {
             launch_auto_compact_window(
                 Some("sonnet"),
                 0,
-                DEFAULT_CONTEXT_COMPACT_LOWER_BOUND_TOKENS,
-                &ClaudeGatewayProxyEnv::Scrub,
+                DEFAULT_CONTEXT_COMPACT_LOWER_BOUND_TOKENS
             ),
             None
         );
@@ -1409,31 +462,5 @@ mod tests {
         assert!(enabled_command.get_envs().any(|(key, value)| {
             key == OsStr::new(CLAUDE_AUTO_COMPACT_WINDOW_ENV) && value == Some(OsStr::new("700000"))
         }));
-    }
-
-    /// Operator diagnostic against a live local gateway; never runs in CI.
-    /// `cargo test --lib live_probe_tui_launch_window -- --ignored --nocapture`
-    /// prints the launch decision, the raw fetch result (window count +
-    /// policy), and the committed cache entry for `http://127.0.0.1:10100`.
-    #[test]
-    #[ignore = "live gateway probe: requires an opencodex gateway on 127.0.0.1:10100"]
-    fn live_probe_tui_launch_window() {
-        let _guard = state_test_guard();
-        let decision = tui_launch_auto_compact_window(&ClaudeGatewayProxyEnv::Inject {
-            base_url: "http://127.0.0.1:10100".to_string(),
-        });
-        eprintln!("LIVE_PROBE decision={decision:?}");
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let raw = runtime.block_on(fetch_catalog("http://127.0.0.1:10100"));
-        eprintln!(
-            "LIVE_PROBE raw_fetch={:?}",
-            raw.as_ref()
-                .map(|catalog| (catalog.windows.len(), catalog.auto_compact_window))
-        );
-        let cached = cached_gateway_auto_compact_window("http://127.0.0.1:10100");
-        eprintln!("LIVE_PROBE cached={cached:?}");
     }
 }

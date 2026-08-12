@@ -202,7 +202,6 @@ mod resume_launch_binding_tests {
             system_prompt: None,
             model: None,
             resume: true,
-            launch_env: crate::services::claude_command::ClaudeLaunchEnv::scrub_for_test(),
         };
         let args = crate::services::claude_tui::session::build_claude_tui_args(
             &config,

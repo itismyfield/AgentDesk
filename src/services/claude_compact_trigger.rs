@@ -41,7 +41,7 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
 use crate::services::claude_compact_context::{
-    CLAUDE_AUTO_COMPACT_MAX_TOKENS, CompactThreshold, TurnWindowResolution, compact_threshold,
+    CLAUDE_AUTO_COMPACT_MAX_TOKENS, CompactThreshold, compact_threshold,
 };
 use crate::services::claude_tui::input::CompactSubmitOutcome;
 use crate::services::discord::{ManagedCompactTurnIdentity, live_managed_turn_matches};
@@ -300,17 +300,10 @@ fn submit_under_composer_lock(
     )
 }
 
-fn trigger_window_for_resolution(
-    resolution: Option<TurnWindowResolution>,
-) -> Option<(u64, CompactWindowSource)> {
-    match resolution {
-        None => None,
-        Some(TurnWindowResolution::Proven(window)) => Some((window, CompactWindowSource::Proven)),
-        Some(TurnWindowResolution::UnprovenLaunchBound) => Some((
-            CLAUDE_AUTO_COMPACT_MAX_TOKENS,
-            CompactWindowSource::FallbackMax,
-        )),
-    }
+/// A live TUI turn can only ever be resolved to the conservative launch-bound
+/// maximum window, so a resolved turn is always a `FallbackMax` observation.
+fn trigger_window_for_resolution(resolution: Option<u64>) -> Option<(u64, CompactWindowSource)> {
+    resolution.map(|window| (window, CompactWindowSource::FallbackMax))
 }
 
 /// Validate and forward one complete active Claude usage snapshot. Missing model,
@@ -620,31 +613,15 @@ mod tests {
         ));
     }
 
-    /// Mutation guards: mapping a catalog miss back to `None` fails the active
-    /// usage assertions, while lowering the maximum fallback fires at 499K.
+    /// Mutation guards: mapping a resolved launch-bound turn back to `None`
+    /// fails the active usage assertions, while lowering the maximum fallback
+    /// fires at 499K.
     #[test]
-    fn suffixed_only_catalog_bare_model_fires_at_max_window_threshold_only() {
+    fn launch_bound_bare_model_fires_at_max_window_threshold_only() {
         let _context_guard = crate::services::claude_compact_context::state_test_guard();
         let _trigger_guard = state_test_guard();
-        let proxy = "http://proxy-4678-suffixed-only.test";
-        crate::services::claude_compact_context::put_catalog_for_test(
-            proxy,
-            HashMap::from([
-                ("claude-opus-4-8-hgq".to_string(), 1_000_000),
-                ("claude-opus-4-8-j97".to_string(), 1_000_000),
-            ]),
-        );
-        let gateway = crate::services::claude_gateway_proxy::ClaudeGatewayProxyEnv::Inject {
-            base_url: proxy.to_string(),
-        };
-        crate::services::claude_compact_context::register_launch_provenance(
-            "tmux-4678-high",
-            &gateway,
-        );
-        crate::services::claude_compact_context::register_launch_provenance(
-            "tmux-4678-low",
-            &gateway,
-        );
+        crate::services::claude_compact_context::register_launch_provenance("tmux-4678-high");
+        crate::services::claude_compact_context::register_launch_provenance("tmux-4678-low");
 
         let high_resolution = crate::services::claude_compact_context::context_window_for_turn(
             "tmux-4678-high",
@@ -684,9 +661,8 @@ mod tests {
     #[test]
     fn scrub_fallback_never_uses_a_small_native_trigger() {
         let _guard = state_test_guard();
-        let (window, source) =
-            trigger_window_for_resolution(Some(TurnWindowResolution::UnprovenLaunchBound))
-                .expect("scrub launch-bound fallback");
+        let (window, source) = trigger_window_for_resolution(Some(CLAUDE_AUTO_COMPACT_MAX_TOKENS))
+            .expect("scrub launch-bound fallback");
         let threshold = threshold_for(window);
         for (channel_id, occupied) in [(42, 199_000), (43, 350_000)] {
             let pane = CompactPaneKey {
@@ -695,21 +671,6 @@ mod tests {
             };
             assert!(observe_and_decide_with_source(&pane, occupied, threshold, source).is_none());
         }
-    }
-
-    /// Mutation guard: routing a proven exact hit through the 1M fallback makes
-    /// the 350K crossing miss its 372K-window threshold.
-    #[test]
-    fn proven_window_takes_priority_over_maximum_fallback() {
-        let _guard = state_test_guard();
-        let (window, source) =
-            trigger_window_for_resolution(Some(TurnWindowResolution::Proven(372_000)))
-                .expect("proven exact hit");
-        assert_eq!(source, CompactWindowSource::Proven);
-        assert!(
-            observe_and_decide_with_source(&pane(), 350_000, threshold_for(window), source)
-                .is_some()
-        );
     }
 
     /// Mutation guard: ignoring proof source when the numeric window remains 1M
