@@ -101,6 +101,8 @@ echo "=== Durable frontier writer per-file call-site allowlist (#5071) ==="
 "$PYTHON" -m unittest tests.test_durable_frontier_writer_call_sites
 
 echo "=== Intake-outbox done writer per-file call-site allowlist (#5071 T2) ==="
+# Pins the pre-T2 `mark_done` owner by exact per-file textual count over src/;
+# the script docstring declares the lexical forms and semantic facts it cannot see.
 "$PYTHON" scripts/check_intake_outbox_done_writer_call_sites.py
 "$PYTHON" -m unittest tests.test_intake_outbox_done_writer_call_sites
 

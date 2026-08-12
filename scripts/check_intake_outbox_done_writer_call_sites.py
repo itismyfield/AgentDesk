@@ -14,7 +14,8 @@ terminal-receipt holder drives `done`; it does not move `claimed`, `accepted`,
 or `spawned`. Pinning those other lifecycle transitions here would block T2-
 unrelated work. `EXPECTED_CALL_SITES` names the writer symbol and the owning
 function's file, never a line number. Every Rust file below `src/` is scanned:
-a call added, deleted, moved, or found in an unlisted file fails closed.
+within the bounds below, a call added, deleted, moved, or found in an unlisted
+file fails closed.
 
 WHAT THIS GATE DOES NOT GUARANTEE. This is a lexical scan, not Rust parsing or
 name resolution. It sees a bare `mark_done(...)` only in a file that directly
@@ -22,15 +23,18 @@ imports it from `crate::db::intake_outbox`, plus the literal fully-qualified
 path. Glob imports, nested-brace imports, `super::intake_outbox::mark_done`
 imports, `use ...::mark_done as finish; finish(...)`, renamed re-exports,
 name-constructing macros, same-file helper indirection, function-value
-indirection, trait dispatch, and a new direct SQL `UPDATE intake_outbox ...
-status = 'done'` are not seen. It also does not prove a call is reachable,
-successful, or the right lifecycle action. Conversely, a same-spelled free
-function in a file importing this writer could be over-counted. Comments,
-strings, `*_tests.rs`, and `#[cfg(test)]` regions are excluded, but other cfgs
-are counted without target evaluation. The `ci-script-checks.sh` wiring check
-also cannot detect removal of the wiring that runs its own test. These are
-declared bounds, not silent skips: the gate only claims exact textual call-site
-counts for this writer spelling within those bounds.
+indirection, trait dispatch, a line break between `mark_done` and `(`, and a
+new direct SQL `UPDATE intake_outbox ... status = 'done'` are not seen. The
+line-break form is rejected by the repository's enforced `cargo fmt --check`.
+It also does not prove a call is reachable, successful, or the right lifecycle
+action. Conversely, a same-spelled free function in a file importing this
+writer could be over-counted. Comments, strings, `*_tests.rs`, and
+`#[cfg(test)]` regions are excluded, but other cfgs are counted without target
+evaluation. When run independently, the wiring test detects removal of the
+gate command; it cannot protect deletion of its own unittest invocation from
+`ci-script-checks.sh`. These are declared bounds, not silent skips: the gate
+only claims exact textual call-site counts for this writer spelling within
+those bounds.
 """
 
 from __future__ import annotations
@@ -57,6 +61,10 @@ FULLY_QUALIFIED_RE = re.compile(
     r"\b(?:(?:crate\s*::\s*)?db\s*::\s*)?intake_outbox\s*::\s*mark_done\s*\("
 )
 CFG_TEST_RE = re.compile(r"#\[\s*cfg\s*\(\s*(?:all|any)?\s*\(?\s*test\b")
+
+# Char literal (so `'"'` / `'{'` cannot desync the scanner). Lifetimes (`'a`)
+# do not match and fall through harmlessly.
+_CHAR_LITERAL = re.compile(r"'(\\.|[^'\\])'")
 
 
 def is_test_file(name: str) -> bool:
@@ -123,7 +131,15 @@ def strip_source(text: str) -> str:
             block_depth = 1
             out.extend("  ")
             i += 2
-        elif char in ('"', "'"):
+        elif char == "'":
+            literal = _CHAR_LITERAL.match(text, i)
+            if literal:
+                out.extend(" " * (literal.end() - i))
+                i = literal.end()
+            else:
+                out.append(char)
+                i += 1
+        elif char == '"':
             quote = char
             out.append(" ")
             i += 1
@@ -194,9 +210,10 @@ def production_call_sites(root: Path) -> tuple[dict[str, dict[str, int]], int, i
 LIMITS = (
     "lexical scan, not Rust parsing or reachability proof; glob/nested-brace/super imports, "
     "aliases, renamed re-exports, name-constructing macros, same-file helper/value indirection, "
-    "trait dispatch, and direct SQL writers are NOT seen; same-spelled free functions may be "
-    "over-counted; cfg other than cfg(test) is not evaluated; ci-script-checks.sh wiring cannot "
-    "protect its own execution"
+    "trait dispatch, mark_done followed by a line break before `(`, and direct SQL writers are "
+    "NOT seen (cargo fmt --check rejects the line-break call form); same-spelled free functions "
+    "may be over-counted; cfg other than cfg(test) is not evaluated; the wiring test cannot "
+    "protect deletion of its own unittest invocation from ci-script-checks.sh"
 )
 
 

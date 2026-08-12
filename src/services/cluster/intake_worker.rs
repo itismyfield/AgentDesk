@@ -572,7 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_ok_branch_calls_done_writer_once_and_err_branch_never_calls_it() {
+    fn worker_ok_branch_textually_contains_done_writer_once_and_err_branch_contains_none() {
         // This is a source contract because exercising `run_intake_worker_tick`
         // requires a production-shaped SharedData + Discord executor harness,
         // while this module's lane intentionally remains PG-free and synchronous.

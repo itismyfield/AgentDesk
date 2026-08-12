@@ -44,8 +44,9 @@ class SourceContractTests(unittest.TestCase):
     def test_ci_script_checks_runs_the_gate_and_its_tests(self):
         """Check wiring spelling/order, not its own execution.
 
-        This test confirms that the wiring exists, but its own execution depends
-        on that wiring, so it cannot detect deletion of the wiring itself.
+        When this module runs independently, deletion of the gate command fails
+        below. It cannot protect deletion of its own unittest invocation from
+        ci-script-checks.sh, because that prevents this test from running there.
         """
         wiring = (ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
         self.assertIn("scripts/check_intake_outbox_done_writer_call_sites.py", wiring)
@@ -157,6 +158,20 @@ class DiscriminationTests(unittest.TestCase):
         )
         ok, message = self.run_guard(root)
         self.assertTrue(ok, message)
+
+    def test_lifetime_does_not_hide_later_fully_qualified_writer(self):
+        root = self.fixture()
+        write(
+            root,
+            "src/services/session_backend.rs",
+            "fn receipt<'a>() { crate::db::intake_outbox::mark_done(); }\n",
+        )
+        ok, message = self.run_guard(root)
+        self.assertFalse(ok)
+        self.assertIn(
+            "mark_done: UNLISTED call site in src/services/session_backend.rs (1x)",
+            message,
+        )
 
 
 if __name__ == "__main__":
