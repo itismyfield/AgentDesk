@@ -26,11 +26,12 @@ use std::str::FromStr;
 /// - The compiler does not require [`Self::from_str`] to gain an arm for an
 ///   added variant because its match has an unknown-input arm. That coverage and
 ///   the members (rather than the cardinality) of [`Self::ALL`] are test-backed.
-/// - `#[sqlx(rename_all = "snake_case")]` is currently inert: the strong-enum
-///   `sqlx::Type` derive supplies `Type<Postgres>` and `PgHasArrayType`, while
-///   `rename_all` is consumed by `sqlx::Encode` and `sqlx::Decode` derives, which
-///   this type does not have. Adding them would make `rename_all` control their
-///   spelling, which must then be reconciled with [`Self::as_str`].
+/// - The strong-enum `sqlx::Type` derive generates `Type`, `Encode`, and `Decode`
+///   implementations, and `rename_all` determines their codec spelling. This
+///   module has no production bind or row-decode consumer for the enum, so that
+///   spelling authority is not exercised here. The direct-bind and row-decode
+///   slices need behavior tests that pin codec spelling against [`Self::as_str`]
+///   and the database CHECK before activating those paths.
 ///
 /// LIMITS:
 /// - No gate prevents replacing an exhaustive classification arm with `_ =>`;
