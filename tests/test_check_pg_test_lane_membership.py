@@ -423,6 +423,17 @@ class DetectionMutation(FixtureCase):
         findings: list[membership.Finding] = []
         self.assertIn((self.root / target).resolve(), membership._external_test_files(self.root.resolve(), membership._load_coverage_module(self.root), findings=findings))
         self.assertFalse([finding for finding in findings if finding.source.startswith("src/services/discord/voice_barge_in.rs:")])
+        self.fx.write_source("src/db/mod.rs", '#[cfg(test)]\n// #[path = "moved/elsewhere_tests.rs"]\nmod frag;\n', "mod db;\n")
+        self.fx.write_source("src/db/frag.rs", "#[test] fn plain() {}\n")
+        membership._external_test_files(self.root.resolve(), membership._load_coverage_module(self.root), findings=(findings := []))
+        self.assertEqual(findings, [])
+        self.assertEqual(membership.check_analysis(analysis := self.fx.analysis(), empty, empty, membership.render_manifest(analysis.inventory), reference_label="fixture base", allowlist_label="fixture allowlist"), 0)
+
+    def test_commented_stale_path_does_not_hide_real_pg_test(self) -> None:
+        self.fx.write_source("src/db/service.rs", '#[cfg(test)]\n// #[path = "legacy_tests.rs"]\nmod frag;\n', "mod db;\n")
+        self.fx.write_source("src/db/legacy_tests.rs", "#[test] fn legacy_plain() {}\n")
+        self.fx.write_source("src/db/service/frag.rs", "#[test] fn real_pg_case() { create_test_database(); }\n")
+        self.assertEqual(set(membership.discover_pg_inventory(self.root).tests), {"db::service::frag::real_pg_case"})
 
     def test_brace_ownership_excludes_adjacent_helper_body(self) -> None:
         self.fx.write_source(

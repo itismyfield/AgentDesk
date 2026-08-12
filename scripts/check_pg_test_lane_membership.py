@@ -423,8 +423,8 @@ def _external_test_files(repo_root: Path, coverage, counter: list[int] | None = 
         for match in _ATTR_MOD.finditer(clean):
             if match.group("term") != ";" or not _CFG_TEST.search(match.group("attrs")):
                 continue
-            raw_attrs = source[match.start("attrs"):match.end("attrs")]
-            redirect = _PATH_ATTR.search(raw_attrs)
+            path_attr = re.search(r"#\s*\[\s*path\s*=", match.group("attrs"))
+            redirect = _PATH_ATTR.match(source, match.start("attrs") + path_attr.start(), match.end("attrs")) if path_attr else None
             parents = _scope_at(match.start(), ranges)
             if redirect:
                 base = path.with_suffix("") if parents and path.name not in {"mod.rs", "lib.rs", "main.rs"} else path.parent
