@@ -423,14 +423,16 @@ fn deps<'a>(
 }
 
 async fn mark_open_routes_done(pool: &sqlx::PgPool, channel_id: ChannelId) {
-    sqlx::query(
+    let query = format!(
         "UPDATE intake_outbox SET status = 'done', completed_at = NOW()
-         WHERE channel_id = $1 AND status IN ('pending', 'claimed', 'accepted', 'spawned')",
-    )
-    .bind(channel_id.get().to_string())
-    .execute(pool)
-    .await
-    .expect("finish prior open route");
+         WHERE channel_id = $1 AND status IN ({})",
+        crate::db::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL
+    );
+    sqlx::query(&query)
+        .bind(channel_id.get().to_string())
+        .execute(pool)
+        .await
+        .expect("finish prior open route");
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -535,6 +535,11 @@
       "path": "migrations/postgres/0104_auto_queue_run_cleanup_tasks.sql",
       "sha256": "658c3e35c36fcaa06f868810b264882524f1a11a1acb4181c6ded003475115d8",
       "version": 104
+    },
+    {
+      "path": "migrations/postgres/0105_intake_outbox_dispatched_status.sql",
+      "sha256": "24dd8548c0449930acaa2d5eba6ddc89a8a2338908a86bc1d70c3547b071960f",
+      "version": 105
     }
   ],
   "version": 1

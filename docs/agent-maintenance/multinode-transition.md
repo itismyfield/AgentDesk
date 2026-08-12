@@ -1,6 +1,10 @@
 # Multinode Transition
 
 ### Audited touches
+- 2026-08-12 (#5071 T2-M): `intake_router_hook.rs` and `owner_record.rs` extract open-status
+  domain constant to prevent drift. Query logic unchanged; no new ownership, fencing, or
+  multinode assumption added. Owner-fenced routes (forwarded mode with instance_id + generation)
+  use same constant pattern; caller ownership and lease assumptions preserved.
 - 2026-08-05 (#5035): `runtime_bootstrap.rs` changes only the signature of the
   bootstrap stale-queued-placeholder delete helper (it now receives `SharedData`
   so each card is re-decided by `placeholder_controller::queued_card_gate`). The
