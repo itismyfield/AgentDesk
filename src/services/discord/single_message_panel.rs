@@ -322,16 +322,18 @@ fn clamp_footer_status_block(status_block: String) -> String {
     // `clamp_footer_panel_text` body trim and this Discord-limit trim — either of
     // which can chop the Recent block's closing ```). Re-balance fence parity on
     // EVERY return path so Discord never renders a dangling fence as literal text.
-    let max_bytes = super::DISCORD_MSG_LIMIT.saturating_sub(6);
-    let clamped = if status_block.len() <= max_bytes {
+    let max_units = super::DISCORD_MSG_LIMIT.saturating_sub(6);
+    let clamped = if super::formatting::discord_message_units(&status_block) <= max_units {
         status_block
     } else {
         let ellipsis = "…";
-        let body_budget = max_bytes.saturating_sub(ellipsis.len());
+        let body_budget =
+            max_units.saturating_sub(super::formatting::discord_message_units(ellipsis));
         if body_budget == 0 {
             ellipsis.to_string()
         } else {
-            let safe_end = super::formatting::floor_char_boundary(&status_block, body_budget);
+            let safe_end =
+                super::formatting::byte_index_at_discord_message_units(&status_block, body_budget);
             format!("{}{}", &status_block[..safe_end], ellipsis)
         }
     };
@@ -1351,6 +1353,42 @@ mod tests {
         assert!(truncated.contains(&format!("\n{}\n\n", super::TRUNCATION_MARKER)));
         assert!(super::super::formatting::discord_message_units(&truncated) <= DISCORD_MSG_LIMIT);
         assert!(!truncated.contains(&after));
+    }
+
+    #[test]
+    fn completion_footer_only_korean_block_is_not_byte_clamped_5178() {
+        let completion = "한".repeat(700);
+        let rendered = super::compose_completion_footer_text("", Some(&completion));
+
+        assert!(rendered.contains(&completion));
+        assert!(!rendered.ends_with('…'));
+        assert!(
+            super::super::formatting::discord_message_units(&rendered)
+                <= DISCORD_MSG_LIMIT.saturating_sub(6)
+        );
+    }
+
+    #[test]
+    fn completion_footer_only_overflow_is_unit_clamped_5178() {
+        let completion = "한".repeat(2100);
+        let rendered = super::compose_completion_footer_text("", Some(&completion));
+
+        assert!(rendered.ends_with('…'));
+        assert!(
+            super::super::formatting::discord_message_units(&rendered)
+                <= DISCORD_MSG_LIMIT.saturating_sub(6)
+        );
+    }
+
+    #[test]
+    fn streaming_placeholder_tail_is_unit_bounded_5178() {
+        let rendered = super::super::formatting::build_streaming_placeholder_text(
+            &"😀".repeat(1200),
+            "status",
+        );
+
+        assert!(super::super::formatting::discord_message_units(&rendered) <= DISCORD_MSG_LIMIT);
+        assert!(rendered.starts_with('…'));
     }
 
     #[test]

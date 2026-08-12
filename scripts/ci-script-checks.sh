@@ -109,6 +109,10 @@ echo "=== Discord log field-key drift guard (#4218) ==="
 "$PYTHON" scripts/check_log_key_drift.py
 "$PYTHON" -m unittest tests.test_log_key_drift
 
+echo "=== Discord message-unit usage guard (#5177/#5178) ==="
+"$PYTHON" scripts/check_discord_message_unit_usage.py
+"$PYTHON" -m unittest tests.test_discord_message_unit_usage
+
 echo "=== Inflight blind-save ratchet guard (#4259) ==="
 "$PYTHON" scripts/check_inflight_blind_save_ratchet.py
 "$PYTHON" -m unittest tests.test_inflight_blind_save_ratchet

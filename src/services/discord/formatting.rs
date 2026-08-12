@@ -12,7 +12,6 @@ use super::{
     rate_limit_wait,
     response_sanitizer::subagent_notification_card,
 };
-use crate::utils::format::tail_with_ellipsis;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, super::Data, Error>;
@@ -205,7 +204,7 @@ pub(super) use self::streaming_status::{
     is_streaming_placeholder_status_line, plan_streaming_rollover, preserve_previous_tool_status,
     resolve_raw_tool_status, streaming_split_boundary, text_ends_with_streaming_footer,
 };
-use self::streaming_status::{byte_index_at_char_limit, char_count, strip_placeholder_lines};
+use self::streaming_status::{char_count, strip_placeholder_lines};
 
 #[path = "formatting/delivery.rs"]
 mod delivery;

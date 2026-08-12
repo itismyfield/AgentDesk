@@ -4,7 +4,9 @@ use serenity::MessageId;
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::provider::ProviderKind;
 
-use super::super::formatting::{build_streaming_placeholder_text, truncate_str};
+use super::super::formatting::{
+    build_streaming_placeholder_text, byte_index_at_discord_message_units, discord_message_units,
+};
 use crate::services::discord;
 
 #[cfg(test)]
@@ -70,23 +72,24 @@ pub(super) fn rewrite_placeholder_as_terminal_suppressed(
         // #1009: label itself may exceed DISCORD_MSG_LIMIT when monitor entries
         // balloon — guard here too (the with-body branch below already guards).
         let limit = discord::DISCORD_MSG_LIMIT;
-        if label.len() > limit {
-            return truncate_str(label, limit);
+        if discord_message_units(label) > limit {
+            return label[..byte_index_at_discord_message_units(label, limit)].to_string();
         }
         return label.to_string();
     }
 
     let suffix = format!("\n\n{label}");
-    let max_base_len = discord::DISCORD_MSG_LIMIT.saturating_sub(suffix.len());
-    let base = if trimmed.len() > max_base_len {
-        truncate_str(trimmed, max_base_len)
+    let max_base_units = discord::DISCORD_MSG_LIMIT.saturating_sub(discord_message_units(&suffix));
+    let base = if discord_message_units(trimmed) > max_base_units {
+        trimmed[..byte_index_at_discord_message_units(trimmed, max_base_units)].to_string()
     } else {
         trimmed.to_string()
     };
     let composed = format!("{base}{suffix}");
     // Final belt-and-suspenders guard (rare: suffix.len() ≥ DISCORD_MSG_LIMIT).
-    if composed.len() > discord::DISCORD_MSG_LIMIT {
-        truncate_str(&composed, discord::DISCORD_MSG_LIMIT)
+    if discord_message_units(&composed) > discord::DISCORD_MSG_LIMIT {
+        composed[..byte_index_at_discord_message_units(&composed, discord::DISCORD_MSG_LIMIT)]
+            .to_string()
     } else {
         composed
     }
@@ -385,6 +388,37 @@ mod placeholder_suppression_tests {
 
     fn body_with_completion_footer(body: &str) -> String {
         format!("{body}\n\n{}", completion_footer_block())
+    }
+
+    #[test]
+    fn terminal_suppression_keeps_korean_body_within_discord_units_5178() {
+        let body = "한".repeat(1200);
+        let rewritten = rewrite_placeholder_as_terminal_suppressed(
+            &body,
+            SUPPRESSED_INTERNAL_LABEL,
+            &ProviderKind::Claude,
+        );
+
+        assert!(rewritten.starts_with(&body));
+        assert!(rewritten.ends_with(SUPPRESSED_INTERNAL_LABEL));
+        assert!(discord_message_units(&rewritten) <= discord::DISCORD_MSG_LIMIT);
+    }
+
+    #[test]
+    fn terminal_suppression_clamps_supplementary_body_by_discord_units_5178() {
+        let body = "😀".repeat(1000);
+        let rewritten = rewrite_placeholder_as_terminal_suppressed(
+            &body,
+            SUPPRESSED_INTERNAL_LABEL,
+            &ProviderKind::Claude,
+        );
+
+        assert!(rewritten.ends_with(SUPPRESSED_INTERNAL_LABEL));
+        assert!(discord_message_units(&rewritten) <= discord::DISCORD_MSG_LIMIT);
+        assert!(
+            discord_message_units(&rewritten)
+                < discord_message_units(&format!("{body}\n\n{SUPPRESSED_INTERNAL_LABEL}"))
+        );
     }
 
     struct RuntimeRootEnvRestore {

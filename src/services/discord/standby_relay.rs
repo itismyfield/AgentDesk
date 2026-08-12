@@ -1391,12 +1391,8 @@ mod tests {
         ));
     }
 
-    /// Korean answers are ~3 bytes per character, so the old `text.len() >
-    /// DISCORD_MSG_LIMIT` byte check fired at ~667 characters and routed a
-    /// single-message answer down the delete-placeholder-and-POST-new-messages
-    /// path instead of the in-place edit. (It did not split the body:
-    /// `split_message` already counts characters and returns one chunk here.)
-    /// The predicate must track `split_message`, which counts characters.
+    /// A Korean scalar is one UTF-16 unit, so this remains a single-message
+    /// edit despite occupying three UTF-8 bytes.
     #[test]
     fn korean_answer_under_the_character_limit_stays_one_message() {
         let body = "한".repeat(900);
@@ -1405,6 +1401,18 @@ mod tests {
 
         let overflowing = "한".repeat(2100);
         assert!(standby_should_send_new_chunks_for_placeholder(&overflowing));
+    }
+
+    #[test]
+    fn utf16_overflow_sends_new_chunks_only_when_chunking_is_required_5177() {
+        let body = format!("{}{}", "한".repeat(1965), "📦".repeat(20));
+        assert!(standby_should_send_new_chunks_for_placeholder(&body));
+
+        let chunks = super::formatting::split_message(&body);
+        assert_eq!(chunks.len(), 2, "the true branch is justified by chunking");
+        assert!(chunks.iter().all(|chunk| {
+            super::formatting::discord_message_units(chunk) <= super::super::DISCORD_MSG_LIMIT
+        }));
     }
 
     fn with_isolated_runtime_root<F: FnOnce()>(f: F) {

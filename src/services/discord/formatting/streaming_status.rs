@@ -29,13 +29,13 @@ pub(super) fn byte_index_at_char_limit(s: &str, max_chars: usize) -> usize {
 
 pub(in crate::services::discord) fn streaming_split_boundary(
     text: &str,
-    max_len: usize,
+    max_units: usize,
 ) -> Option<usize> {
-    if max_len == 0 || char_count(text) <= max_len {
+    if max_units == 0 || discord_message_units(text) <= max_units {
         return None;
     }
 
-    let safe_end = byte_index_at_char_limit(text, max_len);
+    let safe_end = byte_index_at_discord_message_units(text, max_units);
     if safe_end == 0 {
         return None;
     }
@@ -54,8 +54,8 @@ pub(in crate::services::discord) fn streaming_split_boundary(
         .or_else(|| super::super::semantic_boundaries::semantic_sentence_split_boundary(window))
         .or(whitespace_split)
         .unwrap_or(safe_end);
-    let preferred_chars = char_count(&text[..preferred]);
-    let split_at = if preferred_chars < max_len / 2 {
+    let preferred_units = discord_message_units(&text[..preferred]);
+    let split_at = if preferred_units < max_units / 2 {
         safe_end
     } else {
         preferred
@@ -75,10 +75,10 @@ fn build_streaming_placeholder_snapshot(current_portion: &str, status_block: &st
     let status_block = clamp_placeholder_status_block(status_block);
     let footer = format!("\n\n{status_block}");
     let body_budget = DISCORD_MSG_LIMIT
-        .saturating_sub(char_count(&footer) + STREAMING_PLACEHOLDER_MARGIN)
+        .saturating_sub(discord_message_units(&footer) + STREAMING_PLACEHOLDER_MARGIN)
         .max(1);
     let normalized = normalize_empty_lines(current_portion);
-    let body = tail_with_ellipsis(&normalized, body_budget);
+    let body = tail_with_ellipsis_discord_units(&normalized, body_budget);
     format!("{}{}", body, footer)
 }
 
@@ -93,7 +93,7 @@ pub(in crate::services::discord) fn plan_streaming_rollover(
     let status_block = clamp_placeholder_status_block(status_block);
     let footer = format!("\n\n{status_block}");
     let body_budget = DISCORD_MSG_LIMIT
-        .saturating_sub(char_count(&footer) + STREAMING_PLACEHOLDER_MARGIN)
+        .saturating_sub(discord_message_units(&footer) + STREAMING_PLACEHOLDER_MARGIN)
         .max(1);
     let split_at = streaming_split_boundary(current_portion, body_budget)?;
 
@@ -826,22 +826,45 @@ fn truncate_for_status_bytes(s: &str, max_bytes: usize) -> String {
     format!("{}{}", &s[..safe_end], ellipsis)
 }
 
-fn truncate_for_status_chars(s: &str, max_chars: usize) -> String {
-    let current_chars = char_count(s);
-    if current_chars <= max_chars {
+fn truncate_for_status_discord_units(s: &str, max_units: usize) -> String {
+    if discord_message_units(s) <= max_units {
         return s.to_string();
     }
 
     let ellipsis = "…";
-    let body_budget = max_chars.saturating_sub(1);
+    let body_budget = max_units.saturating_sub(discord_message_units(ellipsis));
     if body_budget == 0 {
         return ellipsis.to_string();
     }
 
-    let safe_end = byte_index_at_char_limit(s, body_budget);
+    let safe_end = byte_index_at_discord_message_units(s, body_budget);
     format!("{}{}", &s[..safe_end], ellipsis)
 }
 
+fn tail_with_ellipsis_discord_units(text: &str, max_units: usize) -> String {
+    if discord_message_units(text) <= max_units {
+        return text.to_string();
+    }
+
+    let ellipsis = "…";
+    let body_budget = max_units.saturating_sub(discord_message_units(ellipsis));
+    if body_budget == 0 {
+        return ellipsis.to_string();
+    }
+
+    let mut units = 0;
+    let mut start = text.len();
+    for (index, character) in text.char_indices().rev() {
+        let next_units = units + character.len_utf16();
+        if next_units > body_budget {
+            break;
+        }
+        units = next_units;
+        start = index;
+    }
+    format!("{ellipsis}{}", &text[start..])
+}
+
 fn clamp_placeholder_status_block(status_block: &str) -> String {
-    truncate_for_status_chars(status_block, DISCORD_MSG_LIMIT)
+    truncate_for_status_discord_units(status_block, DISCORD_MSG_LIMIT)
 }
