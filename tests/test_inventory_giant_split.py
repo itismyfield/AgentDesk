@@ -11,10 +11,14 @@ Covers ``scripts/generate_inventory_docs.py``:
 from __future__ import annotations
 
 import importlib.util
+import io
+import os
 import subprocess
 import sys
 import textwrap
 import unittest
+from contextlib import redirect_stderr
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -692,9 +696,108 @@ class RegistryParseTest(unittest.TestCase):
         )
 
 
+class GiantFileIssueMetadataTest(unittest.TestCase):
+    def _load(self, payload: object, *, now: datetime) -> dict[int, dict[str, object]]:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "issues.json"
+            path.write_text(__import__("json").dumps(payload), encoding="utf-8")
+            original_path = GEN.GIANT_FILE_ISSUE_METADATA
+            original_now = GEN.now_utc
+            GEN.GIANT_FILE_ISSUE_METADATA = path
+            GEN.now_utc = lambda: now
+            try:
+                return GEN.load_giant_file_issue_metadata()
+            finally:
+                GEN.GIANT_FILE_ISSUE_METADATA = original_path
+                GEN.now_utc = original_now
+
+    @staticmethod
+    def _record(number: int, state: str = "open") -> dict[str, object]:
+        return {
+            "number": number,
+            "state": state,
+            "title": f"tracker {number}",
+            "owners": ["team"],
+            "files": [f"src/{number}.rs"],
+        }
+
+    def test_fresh_snapshot_accepts_open_and_closed_states(self) -> None:
+        now = datetime(2026, 8, 12, 12, tzinfo=timezone.utc)
+        issues = self._load(
+            {
+                "schema_version": 1,
+                "refreshed_at": "2026-08-12T11:00:00Z",
+                "issues": [self._record(1), self._record(2, "closed")],
+            },
+            now=now,
+        )
+        self.assertEqual(issues[1]["state"], "open")
+        self.assertEqual(issues[2]["state"], "closed")
+
+    def test_invalid_state_still_fails(self) -> None:
+        now = datetime(2026, 8, 12, 12, tzinfo=timezone.utc)
+        for state in ("merged", ["closed"]):
+            with self.subTest(state=state), self.assertRaises(GEN.ParseError):
+                self._load(
+                    {
+                        "schema_version": 1,
+                        "refreshed_at": "2026-08-12T11:00:00Z",
+                        "issues": [{**self._record(1), "state": state}],
+                    },
+                    now=now,
+                )
+
+    def test_number_title_and_duplicate_validation_remains_fatal(self) -> None:
+        now = datetime(2026, 8, 12, 12, tzinfo=timezone.utc)
+        invalid_sets = [
+            [{**self._record(1), "number": True}],
+            [{**self._record(1), "title": 7}],
+            [self._record(1), self._record(1, "closed")],
+        ]
+        for records in invalid_sets:
+            with self.subTest(records=records), self.assertRaises(GEN.ParseError):
+                self._load(
+                    {
+                        "schema_version": 1,
+                        "refreshed_at": "2026-08-12T11:00:00Z",
+                        "issues": records,
+                    },
+                    now=now,
+                )
+
+    def test_snapshot_at_seven_day_boundary_is_fresh(self) -> None:
+        refreshed = datetime(2026, 8, 5, 12, tzinfo=timezone.utc)
+        issues = self._load(
+            {
+                "schema_version": 1,
+                "refreshed_at": refreshed.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "issues": [self._record(1)],
+            },
+            now=refreshed + timedelta(days=7),
+        )
+        self.assertIn(1, issues)
+
+    def test_snapshot_older_than_seven_days_fails(self) -> None:
+        refreshed = datetime(2026, 8, 5, 12, tzinfo=timezone.utc)
+        with self.assertRaises(GEN.ParseError) as ctx:
+            self._load(
+                {
+                    "schema_version": 1,
+                    "refreshed_at": refreshed.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "issues": [self._record(1)],
+                },
+                now=refreshed + timedelta(days=7, seconds=1),
+            )
+        self.assertIn("older than 7 days", str(ctx.exception))
+        self.assertIn("refresh_giant_file_issue_metadata.py", str(ctx.exception))
+
+
 class RegistryValidationTest(unittest.TestCase):
     def setUp(self) -> None:
         self._original_issue_metadata = GEN.load_giant_file_issue_metadata
+        self._original_enforcement = os.environ.pop(
+            GEN.GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV, None
+        )
         GEN.load_giant_file_issue_metadata = lambda: {
             number: {
                 "number": number,
@@ -708,6 +811,12 @@ class RegistryValidationTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         GEN.load_giant_file_issue_metadata = self._original_issue_metadata
+        if self._original_enforcement is not None:
+            os.environ[
+                GEN.GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV
+            ] = self._original_enforcement
+        else:
+            os.environ.pop(GEN.GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV, None)
 
     def _module(self, path: str, prod: int, *, giant: bool) -> "GEN.ModuleEntry":
         flags = ("giant-file",) if giant else ()
@@ -1040,7 +1149,7 @@ class RegistryValidationTest(unittest.TestCase):
                 GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = orig
-        self.assertIn("absent from checked-in open issue metadata", str(ctx.exception))
+        self.assertIn("absent from checked-in issue metadata", str(ctx.exception))
 
     def test_shrink_rejects_issue_outside_owner_scope(self) -> None:
         modules = [self._module("src/a.rs", 1500, giant=True)]
@@ -1078,6 +1187,71 @@ class RegistryValidationTest(unittest.TestCase):
             GEN.load_giant_file_registry = orig
         self.assertIn("not an explicit candidate", str(ctx.exception))
 
+    def test_closed_issue_reports_every_entry_without_blocking_by_default(self) -> None:
+        modules = [
+            self._module("src/a.rs", 1500, giant=True),
+            self._module("src/first.rs", 1500, giant=True),
+        ]
+        entries = [
+            {
+                "file": path,
+                "owner": "team",
+                "deadline": "2026-08-31",
+                "decompose_issue": "#1",
+            }
+            for path in ("src/a.rs", "src/first.rs")
+        ]
+        GEN.load_giant_file_issue_metadata = lambda: {
+            1: {
+                "number": 1,
+                "state": "closed",
+                "title": "closed tracker",
+                "owners": ["team"],
+                "files": ["src/a.rs", "src/first.rs"],
+            }
+        }
+        original_registry = GEN.load_giant_file_registry
+        GEN.load_giant_file_registry = self._patch_registry([], entries)
+        stderr = io.StringIO()
+        try:
+            with redirect_stderr(stderr):
+                registrations = GEN.build_giant_registrations(modules)
+        finally:
+            GEN.load_giant_file_registry = original_registry
+        self.assertEqual(len(registrations), 2)
+        warning = stderr.getvalue()
+        self.assertIn("src/a.rs", warning)
+        self.assertIn("src/first.rs", warning)
+        self.assertEqual(warning.count("has a dead deadline"), 2)
+
+    def test_closed_issue_blocks_when_explicit_enforcement_is_on(self) -> None:
+        modules = [self._module("src/a.rs", 1500, giant=True)]
+        entry = {
+            "file": "src/a.rs",
+            "owner": "team",
+            "deadline": "2026-08-31",
+            "decompose_issue": "#1",
+        }
+        GEN.load_giant_file_issue_metadata = lambda: {
+            1: {
+                "number": 1,
+                "state": "closed",
+                "title": "closed tracker",
+                "owners": ["team"],
+                "files": ["src/a.rs"],
+            }
+        }
+        original_registry = GEN.load_giant_file_registry
+        GEN.load_giant_file_registry = self._patch_registry([], [entry])
+        os.environ[GEN.GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV] = "1"
+        try:
+            with self.assertRaises(GEN.ParseError) as ctx:
+                GEN.build_giant_registrations(modules)
+        finally:
+            GEN.load_giant_file_registry = original_registry
+        self.assertIn("src/a.rs", str(ctx.exception))
+        self.assertIn("#1 is closed", str(ctx.exception))
+
     def test_checked_in_issue_metadata_covers_every_shrink_entry(self) -> None:
         GEN.load_giant_file_issue_metadata = self._original_issue_metadata
         _grandfathered, entries, _baseline = GEN.load_giant_file_registry()
@@ -1090,6 +1264,28 @@ class RegistryValidationTest(unittest.TestCase):
             if entry.get("decision", "shrink") == "shrink"
         ]
         self.assertEqual([problem for problem in problems if problem], [])
+
+    def test_checked_in_closed_issue_report_covers_every_dead_deadline(self) -> None:
+        GEN.load_giant_file_issue_metadata = self._original_issue_metadata
+        _grandfathered, entries, _baseline = GEN.load_giant_file_registry()
+        issues = GEN.load_giant_file_issue_metadata()
+        expected_paths = {
+            entry["file"]
+            for entry in entries
+            if entry.get("decision", "shrink") == "shrink"
+            and issues[int(entry["decompose_issue"][1:])]["state"] == "closed"
+        }
+        reports = [
+            GEN.closed_decompose_issue_problem(
+                entry["file"], entry["decompose_issue"], issues
+            )
+            for entry in entries
+            if entry.get("decision", "shrink") == "shrink"
+        ]
+        reports = [report for report in reports if report]
+        self.assertEqual(len(reports), len(expected_paths))
+        for path in expected_paths:
+            self.assertEqual(sum(repr(path) in report for report in reports), 1)
 
     def test_valid_registry_builds_rows(self) -> None:
         modules = [
