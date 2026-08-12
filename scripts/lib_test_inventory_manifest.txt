@@ -1630,6 +1630,7 @@ services::cluster::intake_worker::tests::marker_between_loop_check_and_claim_sto
 services::cluster::intake_worker::tests::parse_turn_kind_accepts_standard_and_foreground_aliases
 services::cluster::intake_worker::tests::restart_fence_rejects_all_future_tick_admissions_after_active_tick_drains
 services::cluster::intake_worker::tests::worker_executor_forwards_restored_preservation_instead_of_literal_false
+services::cluster::intake_worker::tests::worker_ok_branch_calls_done_writer_once_and_err_branch_never_calls_it
 services::cluster::intake_worker_capabilities::tests::non_preserving_request_allows_legacy_provider_worker
 services::cluster::intake_worker_capabilities::tests::preserving_request_rejects_malformed_or_wrong_features
 services::cluster::intake_worker_capabilities::tests::preserving_request_requires_versioned_feature

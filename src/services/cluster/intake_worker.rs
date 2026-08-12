@@ -572,6 +572,45 @@ mod tests {
     }
 
     #[test]
+    fn worker_ok_branch_calls_done_writer_once_and_err_branch_never_calls_it() {
+        // This is a source contract because exercising `run_intake_worker_tick`
+        // requires a production-shaped SharedData + Discord executor harness,
+        // while this module's lane intentionally remains PG-free and synchronous.
+        // It pins the current T2 precondition: only the executor's `Ok(())`
+        // branch invokes the intake lifecycle's `mark_done` writer.
+        let worker_source = include_str!("intake_worker.rs");
+        let tick_start = worker_source
+            .find("pub(crate) async fn run_intake_worker_tick(")
+            .expect("worker tick exists");
+        let tick_end = worker_source
+            .find("\nasync fn release_cancelled_claim(")
+            .expect("worker tick has its next symbol boundary");
+        let tick = &worker_source[tick_start..tick_end];
+        let result_start = tick
+            .find("let result = execute_intake_turn_core(")
+            .expect("worker invokes the executor");
+        let result = &tick[result_start..];
+        let ok_start = result
+            .find("Ok(()) => {")
+            .expect("executor Ok branch exists");
+        let err_start = result
+            .find("Err(error) => {")
+            .expect("executor Err branch exists");
+
+        assert!(ok_start < err_start, "Ok branch must precede Err branch");
+        assert_eq!(
+            result[ok_start..err_start].matches("mark_done(").count(),
+            1,
+            "execute_intake_turn_core Ok(()) must call mark_done exactly once"
+        );
+        assert_eq!(
+            result[err_start..].matches("mark_done(").count(),
+            0,
+            "execute_intake_turn_core Err must not call mark_done"
+        );
+    }
+
+    #[test]
     fn intake_request_from_row_handles_null_request_owner_name() {
         let mut row = fake_row();
         row.request_owner_name = None;
