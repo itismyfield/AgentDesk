@@ -102,6 +102,7 @@ pub mod qwen;
 pub mod qwen_tmux_wrapper;
 // #3034: 2 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during remote_stub dead-code cleanup.
+pub(crate) mod release_source;
 #[allow(dead_code)]
 pub mod remote_stub;
 pub mod retrospectives;

@@ -17,6 +17,11 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 "status": "healthy",
                 "server_up": true,
                 "fully_recovered": true,
+                "release_source": {
+                    "observation_status": "observed",
+                    "deployed_repo_head": "0123456789abcdef0123456789abcdef01234567",
+                    "deployed_latest_postgres_migration": "0104_example.sql"
+                },
                 "delivery_record_rollout": {
                     "shadow_enabled": false,
                     "authority_enabled": false,
@@ -79,6 +84,12 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 "status": "healthy",
                 "server_up": true,
                 "fully_recovered": true,
+                "release_source": {
+                    "observation_status": "observed",
+                    "node_hostname": "mac-mini",
+                    "deployed_repo_head": "0123456789abcdef0123456789abcdef01234567",
+                    "deployed_latest_postgres_migration": "0104_example.sql"
+                },
                 "delivery_record_rollout": {
                     "shadow_enabled": true,
                     "authority_enabled": true,
