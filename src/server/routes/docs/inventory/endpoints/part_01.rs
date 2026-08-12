@@ -9,7 +9,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/health",
             "health",
-            "Health check with `server_up` minimum readiness and `fully_recovered` startup recovery completion.",
+            "Health check with `server_up` minimum readiness and `fully_recovered` startup recovery completion. Release-source fields are independent only after the whole manifest parses against the expected schema; a type mismatch in any recognized field, including optional `generated_at`, conservatively rejects the whole manifest as `manifest_invalid_json` and `unobserved`.",
         )
         .with_example(
             json!({}),
@@ -76,7 +76,11 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 "fully_recovered": false,
                 "release_source": {
                     "observation_status": "unobserved",
-                    "observation_failures": ["manifest_missing"]
+                    "generated_at": "2026-08-12T00:00:00Z",
+                    "observation_failures": [
+                        "repo_head_missing",
+                        "latest_postgres_migration_missing"
+                    ]
                 },
                 "db": false,
                 "degraded": true,

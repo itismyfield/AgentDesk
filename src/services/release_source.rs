@@ -1,6 +1,9 @@
 //! Preserve the distinction between confirmed release-source facts and observation failures:
 //! the repository head and latest PostgreSQL migration stay typed as observed or unobserved, and
 //! missing evidence must never become a value that consumers could mistake for a confirmed fact.
+//! Field independence applies only after the whole manifest parses against the expected schema.
+//! A type mismatch in any recognized field, including optional `generated_at`, intentionally
+//! rejects the whole manifest as `manifest_invalid_json` and `unobserved`. After parsing,
 //! `generated_at` is optional metadata and does not determine the observation status.
 
 use serde::Deserialize;
@@ -90,6 +93,7 @@ fn read(path: impl AsRef<Path>) -> ReleaseSourceObservation {
     };
 
     let generated_at = nonempty(manifest.generated_at);
+    // An absent value and an empty or whitespace-only string both use `repo_head_missing`.
     let repo_head = match nonempty(manifest.repo_head) {
         Some(value) if is_git_object_id(&value) => Ok(value),
         Some(_) => Err(ReleaseSourceUnobservedReason::RepoHeadInvalid),
@@ -108,9 +112,11 @@ fn read(path: impl AsRef<Path>) -> ReleaseSourceObservation {
         // This is the manifest writer's timestamp, not proof that the manifest
         // describes the currently executing binary. `deploy-release.sh` starts and
         // health-checks the promoted binary before `_write_release_source_manifest`,
-        // so a health response can temporarily expose the preceding manifest even
-        // when every included fact is well formed. Consumers must judge freshness
-        // from this timestamp when that distinction matters.
+        // so a response exposes the preceding manifest temporarily only when the
+        // later manifest replacement succeeds. Because `DEPLOY_OK` is set before
+        // that replacement, a write failure is outside the EXIT trap's rollback and
+        // can leave the preceding manifest indefinitely. This response cannot
+        // distinguish either stale case from an older successful deployment.
         generated_at,
         repo_head,
         latest_postgres_migration,
@@ -124,6 +130,8 @@ fn nonempty(value: Option<String>) -> Option<String> {
     })
 }
 
+// This accepts only the writer's 40-character lowercase SHA-1 form. Repositories
+// using Git's SHA-256 object format produce longer IDs and are not supported here.
 fn is_git_object_id(value: &str) -> bool {
     value.len() == 40
         && value
@@ -138,6 +146,8 @@ pub(crate) fn health_json(include_node_hostname: bool) -> serde_json::Value {
             repo_head,
             latest_postgres_migration,
         } => {
+            // `observed` means only that the parsed manifest supplied values accepted
+            // by this reader, not that they are proven to match repository state.
             let mut health = serde_json::json!({ "observation_status": "observed" });
             let mut failures = Vec::new();
             if let Some(value) = generated_at {
@@ -241,6 +251,21 @@ mod tests {
     }
 
     #[test]
+    fn release_source_rejects_wrong_generated_at_type_with_other_facts_intact() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("wrong-generated-at-type.json");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"generated_at":123,"repo_head":"{REPO_HEAD}","latest_postgres_migration":"0104_example.sql"}}"#
+            ),
+        )
+        .expect("write manifest");
+
+        assert_unobserved(&path, ReleaseSourceUnobservedReason::ManifestInvalidJson);
+    }
+
+    #[test]
     fn release_source_rejects_non_sha_repo_heads_without_discarding_migration() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("invalid-head.json");
@@ -269,38 +294,15 @@ mod tests {
     }
 
     #[test]
-    fn release_source_read_distinguishes_observed_from_unobserved() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let observed_path = temp.path().join("observed.json");
-        std::fs::write(
-            &observed_path,
-            format!(
-                r#"{{"generated_at":"2026-08-12T00:00:00Z","repo_head":"{REPO_HEAD}","latest_postgres_migration":"0104_example.sql"}}"#
-            ),
-        )
-        .expect("write manifest");
-
-        assert!(matches!(
-            read(observed_path),
-            ReleaseSourceObservation::Manifest {
-                repo_head: Ok(_),
-                latest_postgres_migration: Ok(_),
-                ..
-            }
-        ));
-        assert!(matches!(
-            read(temp.path().join("absent.json")),
-            ReleaseSourceObservation::Unobserved { .. }
-        ));
-    }
-
-    #[test]
     fn release_source_module_docs_define_release_fact_scope() {
         let source = include_str!("release_source.rs");
         assert!(source.starts_with(
             "//! Preserve the distinction between confirmed release-source facts and observation failures:\n\
              //! the repository head and latest PostgreSQL migration stay typed as observed or unobserved, and\n\
              //! missing evidence must never become a value that consumers could mistake for a confirmed fact.\n\
+             //! Field independence applies only after the whole manifest parses against the expected schema.\n\
+             //! A type mismatch in any recognized field, including optional `generated_at`, intentionally\n\
+             //! rejects the whole manifest as `manifest_invalid_json` and `unobserved`. After parsing,\n\
              //! `generated_at` is optional metadata and does not determine the observation status."
         ));
     }

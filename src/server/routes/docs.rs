@@ -386,11 +386,17 @@ mod tests {
             .expect("unobserved example")
             .response["release_source"];
         assert_eq!(unobserved["observation_status"], "unobserved");
+        assert_eq!(unobserved["generated_at"], "2026-08-12T00:00:00Z");
         assert_eq!(
             unobserved["observation_failures"],
-            json!(["manifest_missing"])
+            json!(["repo_head_missing", "latest_postgres_migration_missing"])
         );
         assert!(unobserved.get("deployed_repo_head").is_none());
+        assert!(
+            unobserved
+                .get("deployed_latest_postgres_migration")
+                .is_none()
+        );
 
         let detail = endpoints
             .iter()
