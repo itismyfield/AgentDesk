@@ -2227,6 +2227,9 @@ services::discord::footer_view_reconciler::tests::generation_guard_rejects_stale
 services::discord::footer_view_reconciler::tests::tui_suppress_for_clean_mirror_forgets_target_without_write
 services::discord::footer_view_reconciler::tests::unfinished_background_refresh_schedules_registered_footer_edit
 services::discord::formatting::delivery::attachment_delivery_tests::oversize_operational_alert_attachment_inline_remains_non_turn
+services::discord::formatting::delivery::discord_unit_tests::boundary_counterexample_measurements_5178
+services::discord::formatting::delivery::discord_unit_tests::discord_unit_boundary_matrix_5178
+services::discord::formatting::delivery::discord_unit_tests::utf16_fit_predicate_and_chunker_agree_on_supplementary_overflow_5177
 services::discord::formatting::long_send_rollback::sink_direct_receipt_tests::t7_rollback_receipts_preserve_a_returned_channel_mismatch
 services::discord::formatting::relay_state_contract_refs::contract_symbols_exist
 services::discord::formatting::replace_long_message_tests::completion_footer_anchor_reanchors_to_last_chunk_with_tail_text
@@ -4339,6 +4342,7 @@ services::discord::single_message_panel::tests::completion_footer_subtext_prefix
 services::discord::single_message_panel::tests::completion_footer_terminal_mark_renders_once_then_next_edit_drops_it
 services::discord::single_message_panel::tests::completion_footer_ttl_freezes_unfinished_background_bash_task
 services::discord::single_message_panel::tests::completion_footer_ttl_freezes_unfinished_entries_then_forgets_target
+services::discord::single_message_panel::tests::completion_footer_with_body_clamps_oversized_suffix_5177
 services::discord::single_message_panel::tests::compose_completion_footer_keeps_balanced_body_fence_intact_3394
 services::discord::single_message_panel::tests::compose_completion_footer_repair_scoped_to_body_keeps_footer_marks_3394
 services::discord::single_message_panel::tests::duplicate_same_message_registration_preserves_committed_noop_state_3717
@@ -4389,6 +4393,7 @@ services::discord::single_message_panel::tests::stale_owner_cannot_refresh_newer
 services::discord::single_message_panel::tests::stale_owner_cannot_register_over_newer_footer_target_3717
 services::discord::single_message_panel::tests::streaming_footer_semantic_compare_ignores_spinner_tick_only_3717
 services::discord::single_message_panel::tests::streaming_footer_semantic_compare_keeps_body_and_panel_changes_3717
+services::discord::single_message_panel::tests::streaming_placeholder_counts_supplementary_utf16_units_5178
 services::discord::single_message_panel::tests::subtext_completion_footer_is_stripped_at_terminal_reconciliation_4080
 services::discord::single_message_panel::tests::subtext_footer_only_completion_surface_is_exposed_4080
 services::discord::single_message_panel::tests::terminal_footer_replacement_keeps_completion_context_block
@@ -5394,6 +5399,7 @@ services::discord::tui_task_card::tests::card_decodes_harness_xml_escaped_prose_
 services::discord::tui_task_card::tests::card_render_is_invariant_across_streaming_edits
 services::discord::tui_task_card::tests::decode_entities_once_is_single_layer_and_order_independent
 services::discord::tui_task_card::tests::decode_entities_once_stays_correct_on_ampersand_dense_long_text
+services::discord::tui_task_card::tests::direct_card_clamp_counts_supplementary_utf16_units_5177
 services::discord::tui_task_card::tests::footer_ignores_prose_wrapped_usage_block
 services::discord::tui_task_card::tests::footer_ignores_usage_subfield_tags_in_prose
 services::discord::tui_task_card::tests::footer_renders_nested_usage_readably_not_raw_xml

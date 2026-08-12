@@ -287,7 +287,7 @@ pub(super) async fn send_channel_message_with_optional_reference(
     }
 }
 
-/// Split a message into chunks that fit within Discord's 2000 char limit.
+/// Split a message into chunks that fit within the shared Discord unit limit.
 /// Handles code block boundaries correctly. Used by stream/slash-command/recovery
 /// paths where overflow is delivered as additional inline messages. The manual
 /// `/api/discord/send` route uses the shared outbound API length policy instead.
@@ -301,7 +301,7 @@ pub(in crate::services::discord) fn split_message(text: &str) -> Vec<String> {
     let total_bytes = text.len();
     let mut chunks = Vec::new();
     let mut remaining = text;
-    let mut remaining_chars = char_count(text);
+    let mut remaining_units = discord_message_units(text);
     let mut in_code_block = false;
     let mut code_block_lang = String::new();
 
@@ -309,7 +309,10 @@ pub(in crate::services::discord) fn split_message(text: &str) -> Vec<String> {
         // Reserve space for code block tags we may need to add
         let tag_overhead = if in_code_block {
             // closing ``` + opening ```lang\n
-            3 + 3 + char_count(&code_block_lang) + 1
+            discord_message_units("```")
+                + discord_message_units("```")
+                + discord_message_units(&code_block_lang)
+                + discord_message_units("\n")
         } else {
             0
         };
@@ -317,7 +320,7 @@ pub(in crate::services::discord) fn split_message(text: &str) -> Vec<String> {
             .saturating_sub(tag_overhead)
             .saturating_sub(10);
 
-        if remaining_chars <= effective_limit {
+        if remaining_units <= effective_limit {
             let mut chunk = String::new();
             if in_code_block {
                 chunk.push_str("```");
@@ -354,7 +357,7 @@ pub(in crate::services::discord) fn split_message(text: &str) -> Vec<String> {
         // Fix: if a newline split would yield a zero-byte `raw_chunk`, fall
         // back to a hard split at `safe_end` (or skip the orphan newline when
         // `safe_end` is also 0 due to a multi-byte char on the boundary).
-        let safe_end = byte_index_at_char_limit(remaining, effective_limit);
+        let safe_end = byte_index_at_discord_message_units(remaining, effective_limit);
         let (mut split_at, mut boundary_kind) =
             super::super::semantic_boundaries::message_split_boundary(
                 remaining,
@@ -374,7 +377,7 @@ pub(in crate::services::discord) fn split_message(text: &str) -> Vec<String> {
                     .nth(1)
                     .map(|(i, _)| i)
                     .unwrap_or(remaining.len());
-                let skipped_chars = char_count(&remaining[..step]);
+                let skipped_units = discord_message_units(&remaining[..step]);
                 tracing::debug!(
                     target: "discord::chunker",
                     step,
@@ -382,14 +385,14 @@ pub(in crate::services::discord) fn split_message(text: &str) -> Vec<String> {
                     "split_message advance over zero-width boundary"
                 );
                 remaining = &remaining[step..];
-                remaining_chars = remaining_chars.saturating_sub(skipped_chars);
+                remaining_units = remaining_units.saturating_sub(skipped_units);
                 continue;
             }
         }
 
         let (raw_chunk, rest) = remaining.split_at(split_at);
-        let raw_chunk_chars = char_count(raw_chunk);
-        let stripped_boundary_chars = usize::from(rest.starts_with('\n'));
+        let raw_chunk_units = discord_message_units(raw_chunk);
+        let stripped_boundary_units = usize::from(rest.starts_with('\n'));
 
         let mut chunk = String::new();
         if in_code_block {
@@ -430,9 +433,9 @@ pub(in crate::services::discord) fn split_message(text: &str) -> Vec<String> {
                 total_bytes,
                 "split_message would have emitted an empty chunk; skipping (issue #1043 guard)"
             );
-            remaining_chars = remaining_chars
-                .saturating_sub(raw_chunk_chars)
-                .saturating_sub(stripped_boundary_chars);
+            remaining_units = remaining_units
+                .saturating_sub(raw_chunk_units)
+                .saturating_sub(stripped_boundary_units);
             remaining = rest.strip_prefix('\n').unwrap_or(rest);
             continue;
         }
@@ -446,9 +449,9 @@ pub(in crate::services::discord) fn split_message(text: &str) -> Vec<String> {
             total_bytes,
             "split_message emit"
         );
-        remaining_chars = remaining_chars
-            .saturating_sub(raw_chunk_chars)
-            .saturating_sub(stripped_boundary_chars);
+        remaining_units = remaining_units
+            .saturating_sub(raw_chunk_units)
+            .saturating_sub(stripped_boundary_units);
         remaining = rest.strip_prefix('\n').unwrap_or(rest);
     }
 
@@ -464,81 +467,15 @@ pub(in crate::services::discord) fn split_message(text: &str) -> Vec<String> {
 
 /// Whether `text` exceeds what one Discord message can carry.
 ///
-/// Discord's 2000 limit counts **characters**, so this must too. Callers used
-/// to compare `text.len()` — a **byte** count — against `DISCORD_MSG_LIMIT`.
-/// For ASCII the two agree, which is why the ASCII-only tests passed; for
-/// Korean (3 bytes per character in UTF-8) the byte comparison trips at roughly
-/// 667 characters, so a comfortably single-message answer was routed down the
-/// multi-chunk path.
+/// Discord documents the limit as characters without defining a Unicode
+/// counting model. [`discord_message_units`] records this repository's
+/// conservative UTF-16 policy and its evidentiary limitation.
 ///
-/// Over most of the affected range the mis-route does NOT split the answer
-/// body: [`split_message`] already counts characters, so a 667..=1990-character
-/// body yields exactly one chunk either way. The ceiling is 1990, not 2000 —
-/// the chunker's `effective_limit` is `DISCORD_MSG_LIMIT - tag_overhead - 10`,
-/// and the 10 characters reserved for code-fence repair apply even to text with
-/// no fence. What this predicate actually selects is HOW the answer reaches the
-/// channel — edit the placeholder in place, or delete it and POST fresh
-/// messages. Taking the second branch for a single-message answer costs the
-/// answer its channel position, its reply anchor and its message id, and moves
-/// delivery-lease ownership.
-///
-/// In 1991..=2000 this predicate and [`split_message`] genuinely disagree: this
-/// returns `false` (one message) while the chunker, asked, cuts the text into
-/// two or more chunks. Whether that disagreement is observable depends on which
-/// branch a caller's `false` leads to, and the ten call sites split into three
-/// kinds:
-///
-/// * **Direct-POST callers** — `send_long_message_ctx` (:12),
-///   `long_message_reply_builders` (:50) and
-///   `send_long_message_raw_with_reference_returning_message_ids` (:126). Their
-///   `false` branch hands `text` to Discord whole and never calls the chunker,
-///   and Discord accepts all 2000 characters. Here the disagreement really is
-///   unreachable.
-/// * **Replace callers** — the per-surface predicates that wrap this one. Their
-///   `false` branch falls through to `replace_long_message_raw_with_outcome`
-///   (verified: `standby_relay.rs:854` reaching `:900`, and
-///   `session_relay_sink.rs:980` reaching `:1049`), and both wrappers funnel
-///   into `replace_long_message_raw_deferred_returning_receipt`, which calls
-///   `split_message(text)` **unconditionally** at
-///   `formatting/replace_long_message.rs:229` — this predicate's answer never
-///   reaches it. Here the disagreement IS reachable and IS observable: a
-///   1995-character body is edited into the placeholder as chunk 0 and the
-///   remainder is POSTed as a continuation, so the answer lands as two messages
-///   even though this predicate said one.
-/// * **Attachment-inline budget checks** — `build_attachment_inline` (:587,
-///   :601) asks only whether an already-composed inline notice fits, and picks
-///   between two candidate strings; no chunker is involved on either answer, so
-///   the disagreement cannot surface there either.
-///
-/// That is still not a correctness defect, but for a narrower reason than "it
-/// cannot happen". On the replace path the split neither truncates nor
-/// over-sends. No chunk can exceed the Discord limit: a chunk is at most
-/// `tag_overhead + effective_limit + 4` characters, and since `effective_limit`
-/// is `DISCORD_MSG_LIMIT - tag_overhead - 10`, that is at most 1994 — the
-/// 10-character reserve covers the 4-character closing code fence. Nothing is
-/// dropped: the chunker's loop consumes `remaining` until it is empty, and
-/// `replace_long_message.rs` emits chunk 0 as the edit and every later chunk as
-/// a continuation POST. The only character it removes is a single newline at a
-/// boundary that begins with one (`rest.strip_prefix('\n')`), consumed as the
-/// message separator; code-fence repair only ADDS characters. So the cost of
-/// the disagreement is one extra continuation message and a line break promoted
-/// to a message break — not lost content and not a rejected send.
-///
-/// Deliberately not `split_message(text).len() > 1`. The reason is NOT that the
-/// disagreement is unreachable — on the replace path it is not. It is that
-/// 1991..=2000-character texts genuinely DO fit one Discord message, and the
-/// chunker's 1990 ceiling is a code-fence repair margin rather than a Discord
-/// constraint. Adopting the chunker as the predicate would push those texts
-/// down the multi-message path on every surface, including the three
-/// direct-POST callers that deliver them as one message today, and would cost
-/// the replace callers the placeholder's channel position, reply anchor and
-/// message id for a limit Discord does not impose. This predicate answers "does
-/// it fit at all"; [`split_message`] owns "how do I cut it once it doesn't".
-/// The residual seam — a 10-character band in which the replace path cuts a
-/// body this predicate calls single-message — is known and bounded, and the
-/// #3089 A0 characterization tests pin the current answer.
+/// The predicate uses the hard limit. [`split_message`] retains its smaller
+/// effective limit so code-fence repair has room; callers that invoke the
+/// chunker unconditionally can therefore split a hard-limit-fitting message.
 pub(in crate::services::discord) fn needs_multiple_messages(text: &str) -> bool {
-    char_count(text) > DISCORD_MSG_LIMIT
+    discord_message_units(text) > DISCORD_MSG_LIMIT
 }
 
 /// Build an `(inline_message, attachment)` pair for content that exceeds
@@ -635,5 +572,178 @@ mod attachment_delivery_tests {
             &inline,
         ));
         assert!(inline.chars().count() <= DISCORD_MSG_LIMIT);
+    }
+}
+
+#[cfg(test)]
+mod discord_unit_tests {
+    use super::{discord_message_units, needs_multiple_messages, split_message};
+    use crate::services::discord::DISCORD_MSG_LIMIT;
+
+    #[test]
+    fn utf16_fit_predicate_and_chunker_agree_on_supplementary_overflow_5177() {
+        let body = format!("{}{}", "한".repeat(1_965), "📦".repeat(20));
+        assert_eq!(discord_message_units(&body), 2_005, "fixture unit count");
+        assert!(
+            needs_multiple_messages(&body),
+            "2005 units must route multi"
+        );
+
+        let chunks = split_message(&body);
+        assert_eq!(chunks.len(), 2, "2005 units must produce two chunks");
+        assert_eq!(chunks.concat(), body, "chunking must preserve every scalar");
+        assert!(chunks.iter().all(|chunk| {
+            std::str::from_utf8(chunk.as_bytes()).is_ok()
+                && discord_message_units(chunk) <= DISCORD_MSG_LIMIT
+        }));
+    }
+
+    #[test]
+    fn discord_unit_boundary_matrix_5178() {
+        for (units, expected_multi) in [
+            (DISCORD_MSG_LIMIT - 1, false),
+            (DISCORD_MSG_LIMIT, false),
+            (DISCORD_MSG_LIMIT + 1, true),
+        ] {
+            let body = "한".repeat(units);
+            assert_eq!(discord_message_units(&body), units);
+            assert_eq!(needs_multiple_messages(&body), expected_multi);
+            assert!(split_message(&body).iter().all(|chunk| {
+                std::str::from_utf8(chunk.as_bytes()).is_ok()
+                    && discord_message_units(chunk) <= DISCORD_MSG_LIMIT
+            }));
+        }
+
+        for count in [1_001, 1_500] {
+            let body = "😀".repeat(count);
+            assert_eq!(discord_message_units(&body), count * 2);
+            let chunks = split_message(&body);
+            assert!(chunks.len() > 1);
+            assert_eq!(chunks.concat(), body);
+            assert!(chunks.iter().all(|chunk| {
+                std::str::from_utf8(chunk.as_bytes()).is_ok()
+                    && discord_message_units(chunk) <= DISCORD_MSG_LIMIT
+            }));
+        }
+
+        let family = "👨‍👩‍👧‍👦";
+        assert_eq!(discord_message_units(family), 11);
+        let body = format!("{}{family}", "한".repeat(DISCORD_MSG_LIMIT - 10));
+        assert_eq!(discord_message_units(&body), DISCORD_MSG_LIMIT + 1);
+        let chunks = split_message(&body);
+        assert_eq!(chunks.concat(), body);
+        assert!(chunks.iter().all(|chunk| {
+            std::str::from_utf8(chunk.as_bytes()).is_ok()
+                && discord_message_units(chunk) <= DISCORD_MSG_LIMIT
+        }));
+
+        let fenced = format!("```text\n{}", "😀".repeat(1_000));
+        let chunks = split_message(&fenced);
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|chunk| {
+            std::str::from_utf8(chunk.as_bytes()).is_ok()
+                && discord_message_units(chunk) <= DISCORD_MSG_LIMIT
+        }));
+
+        assert!(split_message("").is_empty());
+        assert_eq!(super::byte_index_at_discord_message_units("😀", 0), 0);
+        assert_eq!(super::byte_index_at_discord_message_units("😀", 1), 0);
+    }
+
+    #[test]
+    fn boundary_counterexample_measurements_5178() {
+        fn routed_chunks(body: &str) -> Vec<String> {
+            if needs_multiple_messages(body) {
+                split_message(body)
+            } else {
+                vec![body.to_string()]
+            }
+        }
+        fn record(name: &str, chunks: &[String], marker: bool, footer: bool) {
+            let units: Vec<usize> = chunks
+                .iter()
+                .map(|chunk| discord_message_units(chunk))
+                .collect();
+            assert!(
+                chunks
+                    .iter()
+                    .all(|chunk| std::str::from_utf8(chunk.as_bytes()).is_ok())
+            );
+            assert!(units.iter().all(|units| *units <= DISCORD_MSG_LIMIT));
+            eprintln!(
+                "MEASURE {name}: units={units:?} chunks={} marker={marker} footer={footer}",
+                chunks.len()
+            );
+        }
+
+        for units in [
+            DISCORD_MSG_LIMIT - 1,
+            DISCORD_MSG_LIMIT,
+            DISCORD_MSG_LIMIT + 1,
+        ] {
+            let chunks = routed_chunks(&"한".repeat(units));
+            record(&format!("korean_{units}"), &chunks, false, false);
+        }
+        for count in [1_001, 1_500] {
+            let chunks = routed_chunks(&"😀".repeat(count));
+            record(&format!("emoji_{count}"), &chunks, false, false);
+        }
+
+        let family = format!("{}👨‍👩‍👧‍👦", "한".repeat(DISCORD_MSG_LIMIT - 10));
+        record("zwj_family_boundary", &routed_chunks(&family), false, false);
+
+        let marker_input = "한".repeat(DISCORD_MSG_LIMIT + 1);
+        let marker_output =
+            crate::services::discord::tui_task_card::clamp_discord_message_content(&marker_input);
+        record(
+            "marker_plus_one",
+            std::slice::from_ref(&marker_output),
+            marker_output.ends_with("… (truncated)"),
+            false,
+        );
+
+        let footer_body = "한".repeat(1_995);
+        let footer_output =
+            crate::services::discord::single_message_panel::compose_completion_footer_text(
+                &footer_body,
+                Some("끝"),
+            );
+        assert_eq!(
+            discord_message_units(&format!("{footer_body}\n\n-# 끝")),
+            2_001
+        );
+        record(
+            "footer_plus_one",
+            std::slice::from_ref(&footer_output),
+            false,
+            true,
+        );
+
+        let fenced = format!("```text\n{}", "😀".repeat(1_000));
+        record("open_fence_boundary", &routed_chunks(&fenced), false, false);
+
+        let empty = split_message("");
+        eprintln!("MEASURE empty: units=[] chunks=0 marker=false footer=false");
+        assert!(empty.is_empty());
+        let zero = crate::services::discord::tui_task_card::clamp_discord_message_content("");
+        record(
+            "max_units_zero_empty",
+            std::slice::from_ref(&zero),
+            false,
+            false,
+        );
+
+        let completion = "한".repeat(2_497);
+        let oversized =
+            crate::services::discord::single_message_panel::compose_completion_footer_text(
+                "본문!",
+                Some(&completion),
+            );
+        record(
+            "completion_2500_plus_body",
+            std::slice::from_ref(&oversized),
+            false,
+            true,
+        );
     }
 }

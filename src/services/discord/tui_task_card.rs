@@ -20,6 +20,8 @@
 
 use serde_json::Value;
 
+use super::formatting::{byte_index_at_discord_message_units, discord_message_units};
+
 /// Preview budget for a free-form Markdown `result` body rendered into a card.
 /// Long subagent reports are truncated to keep the card scannable on mobile; the
 /// full payload remains available via the existing output/log path.
@@ -565,21 +567,20 @@ pub(super) fn clamp_discord_message_content(value: &str) -> String {
 }
 
 fn truncate_preview_at_boundary(value: &str, limit: usize) -> String {
-    if value.chars().count() <= limit {
+    if discord_message_units(value) <= limit {
         return value.to_string();
     }
 
-    let marker_chars = RESULT_PREVIEW_TRUNCATED_MARKER.chars().count();
-    if limit <= marker_chars {
-        return RESULT_PREVIEW_TRUNCATED_MARKER
-            .chars()
-            .take(limit)
-            .collect();
+    let marker_units = discord_message_units(RESULT_PREVIEW_TRUNCATED_MARKER);
+    if limit <= marker_units {
+        let end = byte_index_at_discord_message_units(RESULT_PREVIEW_TRUNCATED_MARKER, limit);
+        return RESULT_PREVIEW_TRUNCATED_MARKER[..end].to_string();
     }
 
-    let content_limit = limit - marker_chars;
-    let truncated = value.chars().take(content_limit).collect::<String>();
-    let boundary = preview_boundary(&truncated);
+    let content_limit = limit - marker_units;
+    let end = byte_index_at_discord_message_units(value, content_limit);
+    let truncated = &value[..end];
+    let boundary = preview_boundary(truncated);
     let clipped = truncated[..boundary].trim_end();
     let clipped = if clipped.is_empty() {
         truncated.trim_end()
@@ -865,6 +866,21 @@ mod tests {
         let parsed = parse_task_notification(raw);
         assert_eq!(parsed.status.as_deref(), Some("completed"));
         assert_eq!(parsed.summary.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn direct_card_clamp_counts_supplementary_utf16_units_5177() {
+        let fixture = "😀".repeat(1_500);
+        assert_eq!(discord_message_units(&fixture), 3_000, "fixture unit count");
+
+        let clamped = clamp_discord_message_content(&fixture);
+        assert_eq!(
+            discord_message_units(&clamped),
+            1_999,
+            "clamp must reserve the marker without splitting a surrogate pair"
+        );
+        assert!(clamped.ends_with(RESULT_PREVIEW_TRUNCATED_MARKER));
+        assert!(std::str::from_utf8(clamped.as_bytes()).is_ok());
     }
 
     // #4338: unit-level guarantees for the entity decoder — single layer,

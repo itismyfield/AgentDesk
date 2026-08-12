@@ -113,15 +113,16 @@ pub(in crate::services::discord) fn compose_completion_footer_text(
     else {
         return body.to_string();
     };
-    let block = completion_footer_subtext(block);
+    let block = clamp_footer_status_block(completion_footer_subtext(block));
     if body.is_empty() {
         return clamp_footer_status_block(block);
     }
 
     let suffix = format!("\n\n{block}");
-    let max_len = super::DISCORD_MSG_LIMIT.saturating_sub(suffix.len());
-    let base = if body.len() > max_len {
-        let safe_end = super::formatting::floor_char_boundary(body, max_len);
+    let max_units =
+        super::DISCORD_MSG_LIMIT.saturating_sub(super::formatting::discord_message_units(&suffix));
+    let base = if super::formatting::discord_message_units(body) > max_units {
+        let safe_end = super::formatting::byte_index_at_discord_message_units(body, max_units);
         &body[..safe_end]
     } else {
         body
@@ -1288,6 +1289,51 @@ mod tests {
             ),
             "-# 📦 10 / 100 (10%) · auto-compact 50%\n\n-# Tasks\n-# └ Bash Done ✓\n-# ⏱ 2m 34s"
         );
+    }
+
+    #[test]
+    fn completion_footer_with_body_clamps_oversized_suffix_5177() {
+        let body = "본문!";
+        let completion = "한".repeat(2_497);
+        let rendered_completion = super::completion_footer_subtext(&completion);
+        assert_eq!(
+            super::super::formatting::discord_message_units(&rendered_completion),
+            2_500,
+            "rendered completion fixture unit count"
+        );
+        let unclamped = format!("{body}\n\n{rendered_completion}");
+        assert_eq!(
+            super::super::formatting::discord_message_units(&unclamped),
+            2_505,
+            "origin/main with-body payload unit count"
+        );
+
+        let composed = super::compose_completion_footer_text(body, Some(&completion));
+        assert!(
+            super::super::formatting::discord_message_units(&composed) <= DISCORD_MSG_LIMIT,
+            "final with-body payload must fit the shared limit: {}",
+            super::super::formatting::discord_message_units(&composed)
+        );
+        assert!(composed.starts_with(body));
+        assert!(std::str::from_utf8(composed.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn streaming_placeholder_counts_supplementary_utf16_units_5178() {
+        let body = "😀".repeat(1_200);
+        assert_eq!(
+            super::super::formatting::discord_message_units(&body),
+            2_400,
+            "fixture unit count"
+        );
+        let rendered = super::super::formatting::build_streaming_placeholder_text(&body, "status");
+        assert_eq!(
+            super::super::formatting::discord_message_units(&rendered),
+            1_989,
+            "ellipsis plus an even-unit emoji tail must stay within the 1990-unit body budget"
+        );
+        assert!(rendered.starts_with('…'));
+        assert!(std::str::from_utf8(rendered.as_bytes()).is_ok());
     }
 
     #[test]
