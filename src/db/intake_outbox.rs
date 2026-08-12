@@ -2655,7 +2655,8 @@ mod postgres_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn force_fail_and_retry_as_new_refuses_pending_and_claimed_states() {
+    async fn force_fail_and_retry_as_new_refuses_pending_and_claimed_states()
+    -> Result<(), sqlx::Error> {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         seed_default_test_agent(&pool).await;
@@ -2683,18 +2684,29 @@ mod postgres_tests {
             ForceFailError::DisallowedStatus { .. }
         ));
 
-        sqlx::query("ALTER TABLE intake_outbox DROP CONSTRAINT intake_outbox_status_check")
-            .execute(&pool)
-            .await
-            .expect("drop status CHECK in isolated fixture");
-        sqlx::query("UPDATE intake_outbox SET status = 'future_status' WHERE id = $1")
-            .bind(claimed.id)
-            .execute(&pool)
-            .await
-            .expect("seed unknown status spelling");
-        let unknown = force_fail_and_retry_as_new(&pool, claimed.id, "x")
-            .await
-            .expect_err("unknown strong-enum spelling must fail at row decode");
+        let unknown_fixture = async {
+            sqlx::query("ALTER TABLE intake_outbox DROP CONSTRAINT intake_outbox_status_check")
+                .execute(&pool)
+                .await?;
+            sqlx::query("UPDATE intake_outbox SET status = 'future_status' WHERE id = $1")
+                .bind(claimed.id)
+                .execute(&pool)
+                .await?;
+            let unknown = force_fail_and_retry_as_new(&pool, claimed.id, "x")
+                .await
+                .expect_err("unknown strong-enum spelling must fail at row decode");
+            let unchanged: (String, i64) = sqlx::query_as(
+                "SELECT status, COUNT(*) OVER ()::BIGINT FROM intake_outbox WHERE channel_id = 'ch-p'",
+            )
+            .fetch_one(&pool)
+            .await?;
+            Ok::<_, sqlx::Error>((unknown, unchanged))
+        }
+        .await;
+        pool.close().await;
+        pg_db.drop().await;
+
+        let (unknown, unchanged) = unknown_fixture?;
         assert!(
             matches!(
                 unknown,
@@ -2703,16 +2715,8 @@ mod postgres_tests {
             ),
             "unknown spelling must surface as status ColumnDecode: {unknown:?}"
         );
-        let unchanged: (String, i64) = sqlx::query_as(
-            "SELECT status, COUNT(*) OVER ()::BIGINT FROM intake_outbox WHERE channel_id = 'ch-p'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("read unchanged unknown row family");
         assert_eq!(unchanged, ("future_status".to_string(), 1));
-
-        pool.close().await;
-        pg_db.drop().await;
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
