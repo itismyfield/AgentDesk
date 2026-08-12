@@ -158,6 +158,20 @@ time for diagnostics; neither is a stored approval value.
 
 ## Surface Map (by feature)
 
+### `ci_failure_classification`
+
+- canonical_modules: `scripts/ci/real-failure-predicate.sh` owns deterministic
+  real-failure markers shared by `scripts/ci/infra-failure-rerun.sh` and
+  `scripts/main-ci-triage.sh`; neither consumer may define a local override.
+- invariants: a real-failure marker wins over mixed runner-termination noise;
+  pure infrastructure termination remains eligible for the existing skip/rerun
+  policy. Keep the shared predicate, both consumers, and
+  `docs/ci/release-gates.md` synchronized.
+- tests: both script self-tests are wired through `scripts/ci-script-checks.sh`;
+  the rerun self-test sources triage in a separate process and exercises its
+  effective predicate to catch wiring or override drift.
+- related_issues: #3996, #5210.
+
 ### `provider_output_guard`
 
 - canonical_modules:

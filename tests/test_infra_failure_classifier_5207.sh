@@ -535,6 +535,7 @@ SYNC_REPO="$WORK_DIR/sync-repo"
 mkdir -p "$SYNC_REPO/scripts/ci"
 cp "$ROOT_DIR/scripts/main-ci-triage.sh" "$SYNC_REPO/scripts/main-ci-triage.sh"
 cp "$SCRIPT" "$SYNC_REPO/scripts/ci/infra-failure-rerun.sh"
+cp "$ROOT_DIR/scripts/ci/real-failure-predicate.sh" "$SYNC_REPO/scripts/ci/real-failure-predicate.sh"
 
 if bash "$SYNC_REPO/scripts/ci/infra-failure-rerun.sh" --self-test >/dev/null 2>&1; then
   pass "mirrored, in-sync scripts pass the self-test"

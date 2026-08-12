@@ -373,13 +373,13 @@ high_risk_recovery: # ci-pr.yml only additions
 | High-risk recovery job 자체 red (로그에서 test id 추출 실패) | `job::High-risk recovery` | `_job-level failure; see failing workflow job_` | `agent:project-agentdesk` |
 | High-risk recovery 개별 시나리오 red | `high_risk_recovery::<submod>::scenario_…` | `cargo test -p agentdesk <identifier> -- --exact --nocapture` | `agent:project-agentdesk` |
 | 인프라 종료(job-level, test id 추출 실패 + SIGTERM/signal 15/exit 143/cancel, **real-failure 신호 없음**) | **미기록 — flaky skip** | (없음, ci-red 미승격) | (없음) |
-| Job-level red + real-failure 신호(`error[E…]` / `could not compile` / `test result: FAILED` / `panicked at` / failed assertion) — SIGTERM 노이즈 혼재 여부 무관 | `job::<name>` | `_job-level failure; see failing workflow job_` | `agent:project-agentdesk` |
+| Job-level red + 공유 술어 `scripts/ci/real-failure-predicate.sh` 의 real-failure 신호 — SIGTERM 노이즈 혼재 여부 무관 | `job::<name>` | `_job-level failure; see failing workflow job_` | `agent:project-agentdesk` |
 
 ### SIGTERM / 인프라 종료 = flaky skip (ci-red 미승격) — #3991 / #3996
 
 `job::<name>` 폴백은 실패 job 로그에서 `test … FAILED` assertion 을 하나도 못 뽑았을 때만 발생한다. 이 폴백 로그가 **인프라 레벨 종료** 패턴(러너 OOM/축출로 인한 `signal 15` / `SIGTERM` / `SIGKILL`, `exit 143`, GitHub Actions `The operation was canceled` / `runner has received a shutdown signal`)을 담고 있으면, 이는 코드 회귀가 아니라 flaky 러너 압박이므로 식별자를 **기록하지 않고 skip** 한다 (`log_has_infra_termination`). 따라서 2회 연속 red 여도 ci-red 이슈로 승격되지 않는다. 이 필터는 **오직 job-level 폴백에만** 적용된다 — 실제 `test … FAILED` 가 하나라도 있으면 (SIGTERM 노이즈가 같은 로그에 섞여 있어도) 그 test 식별자는 정상적으로 ci-red 승격된다.
 
-**Real-failure 우선 규약 (#3996):** 인프라 종료 skip 은 **인프라 종료가 유일한 실패 신호일 때만** 적용된다. job-level 폴백 로그에 `log_has_real_failure` 가 잡는 **결정적 실패 신호**(rustc 컴파일 에러 코드 `error[E…]`, `error: could not compile`, `test result: FAILED`, `panicked at`, failed assertion) 가 하나라도 있으면 — 같은 로그에 SIGTERM/exit 143 노이즈가 섞여 있어도 — 그 job 은 **정상 승격**된다. 즉 skip 조건은 `log_has_infra_termination && ! log_has_real_failure` 로, real 신호가 인프라 노이즈보다 항상 우선한다. 이 가드가 없으면 `test … FAILED` 를 남기지 않는 컴파일 회귀(job-level 폴백 경로)가 SIGTERM 문자열 혼재만으로 flaky 오분류되어 조용히 묻히는 false-negative 가 발생한다 (flaky 필터의 최악 실패 모드).
+**Real-failure 우선 규약 (#3996):** 인프라 종료 skip 은 **인프라 종료가 유일한 실패 신호일 때만** 적용된다. job-level 폴백 로그에서 공유 술어 `scripts/ci/real-failure-predicate.sh` 의 `log_has_real_failure` 가 잡는 결정적 실패 신호가 하나라도 있으면 — 같은 로그에 SIGTERM/exit 143 노이즈가 섞여 있어도 — 그 job 은 **정상 승격**된다. 공유 술어가 지원 신호의 정본이며 이 문서는 닫힌 마커 목록을 중복하지 않는다. 즉 skip 조건은 `log_has_infra_termination && ! log_has_real_failure` 로, real 신호가 인프라 노이즈보다 항상 우선한다. 이 가드가 없으면 `test … FAILED` 를 남기지 않는 컴파일 회귀(job-level 폴백 경로)가 SIGTERM 문자열 혼재만으로 flaky 오분류되어 조용히 묻히는 false-negative 가 발생한다 (flaky 필터의 최악 실패 모드).
 
 PR 레벨 `Fast check` (`ci-pr.yml check_fast`) 의 signal-15 는 이 triage 대상이 아니다 (triage 는 `CI Main` on `main` 만 처리). PR 측은 재실행 또는 근본완화(러너 자원/컴파일 병렬도 캡, #3658 계열)로 커버한다.
 
@@ -396,7 +396,7 @@ Self-test (`bash scripts/main-ci-triage.sh --self-test`) 는 위 분류가 red �
 - #973 / #974: release gate B-12 도입.
 - #1011 (이 문서): path filter gap 보강 (`src/kanban/**`, `src/services/auto_queue.rs`, `src/services/message_outbox.rs`), triage classifier self-test 확장, 4 축 (live turn / watcher reattach / dispatch-outbox idempotency / queue loss) 명시.
 - #3991: job-level 폴백에서 인프라 종료(SIGTERM/signal 15/exit 143/canceled) 로그를 flaky 로 분류해 ci-red 미승격 (`log_has_infra_termination`), self-test 2건 추가.
-- #3996: flaky skip 에 real-failure 우선 가드 추가 (`log_has_real_failure`) — 인프라 종료 skip 은 `log_has_infra_termination && ! log_has_real_failure` 일 때만 적용. `error[E…]`/`could not compile`/`test result: FAILED`/`panicked at`/failed assertion 등 결정적 실패 신호가 섞이면 (SIGTERM 노이즈 무관) 정상 승격. 컴파일 회귀 job-level 폴백이 SIGTERM 혼재로 오분류되던 false-negative 차단, self-test 1건 추가 (`scenario_compile_error_with_sigterm_noise_still_creates_issue`).
+- #3996: flaky skip 에 real-failure 우선 가드 추가 (`log_has_real_failure`) — 인프라 종료 skip 은 `log_has_infra_termination && ! log_has_real_failure` 일 때만 적용. 공유 술어 `scripts/ci/real-failure-predicate.sh` 가 정본인 결정적 실패 신호가 섞이면 (SIGTERM 노이즈 무관) 정상 승격. 컴파일 회귀 job-level 폴백이 SIGTERM 혼재로 오분류되던 false-negative 차단, self-test 1건 추가 (`scenario_compile_error_with_sigterm_noise_still_creates_issue`).
 
 ## 8. Operational Post-Deploy Smoke
 

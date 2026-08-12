@@ -6,6 +6,10 @@ if [[ "${TRACE-}" == "1" ]]; then
 fi
 
 SELF_NAME="$(basename "$0")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REAL_FAILURE_PREDICATE="$SCRIPT_DIR/ci/real-failure-predicate.sh"
+# shellcheck source=/dev/null
+source "$REAL_FAILURE_PREDICATE"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -171,24 +175,6 @@ log_has_infra_termination() {
     "$log_path"
 }
 
-# #3996: Real-failure guard for the flaky skip filter. `log_has_infra_termination`
-# is too coarse on its own — a genuine job-level regression (e.g. a compile error
-# that never emits a `test … FAILED` line, so it hits the job-level fallback) can
-# ALSO carry SIGTERM / exit-143 noise (the runner tears down remaining steps after
-# a hard failure). Skipping that as flaky would be a false negative: real red
-# silently dropped, never promoted to ci-red. This helper detects *deterministic*
-# failure signals that unambiguously mean "the code is broken", so infra-only
-# skips can be gated on their absence. Kept deliberately narrow — only signals
-# that appear on a genuine compile/test failure, not benign `error:`/`failed`
-# chatter — to avoid re-widening into a false-positive filter.
-log_has_real_failure() {
-  local log_path="$1"
-  [[ -f "$log_path" ]] || return 1
-  grep -E -i -q -- \
-    'error\[E[0-9]|error: could not compile|test result: FAILED|panicked at|assertion .*failed' \
-    "$log_path"
-}
-
 record_failed_identifier() {
   local prefix="$1"
   local identifier="$2"
@@ -274,11 +260,11 @@ collect_failed_identifiers() {
       # #3991/#3996: No `test … FAILED` assertion in a failed job's log means this
       # is a job-level fallback. Skip it as flaky ONLY when an infrastructure-level
       # termination (SIGTERM / signal 15 / exit 143 / runner cancellation) is the
-      # *sole* failure signal. If the log ALSO carries a deterministic real-failure
-      # signal (compile error `error[E…]` / `could not compile`, `test result:
-      # FAILED`, `panicked at`, failed assertion), the infra noise is incidental —
-      # promote it normally so genuine red is never silently dropped (false
-      # negative). Only pure infra terminations are suppressed.
+      # *sole* failure signal. The shared `log_has_real_failure` predicate is the
+      # source of truth for deterministic gate-failure shapes. If it matches, the
+      # infra noise is incidental — promote normally so genuine red is never
+      # silently dropped (false negative). Only pure infra terminations are
+      # suppressed.
       if log_has_infra_termination "$log_path" && ! log_has_real_failure "$log_path"; then
         # #4245: don't drop the signal entirely — record it on the separate
         # `infra::job::…` track so a *persistent* streak (SIGTERM_ESCALATION_STREAK
@@ -1646,4 +1632,6 @@ main() {
   esac
 }
 
-main "${1-}"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "${1-}"
+fi
