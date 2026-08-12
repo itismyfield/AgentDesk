@@ -762,7 +762,7 @@ run_self_test() {
 # rerun predicate missed is paired with runner-shutdown noise. Each must win
 # before both the textual infrastructure fingerprint and the zero-step signal.
 run_real_failure_assertions() {
-  local case_name marker log_path
+  local case_name marker log_path nonmatch_log
 
   while IFS='|' read -r case_name marker; do
     [[ -n "$case_name" ]] || continue
@@ -786,35 +786,64 @@ run_real_failure_assertions() {
   done <<'CASES'
 clippy|error: could not compile `agentdesk` (lib) due to 1 previous error
 rustfmt|Diff in /home/runner/work/AgentDesk/AgentDesk/src/main.rs:12:
-shellcheck|              ^-- SC2086 (warning): Double quote to prevent globbing and word splitting.
+shellcheck|              ^-- SC3014 (warning): In POSIX sh, == in place of = is undefined.
 python-unittest|FAILED (failures=1)
 yaml-pyyaml|yaml.scanner.ScannerError: mapping values are not allowed here
-yaml-psych|/ruby/psych.rb:455:in `parse': mapping values are not allowed (Psych::SyntaxError)
 linker|ld: cannot find -lpq: No such file or directory
+linker-prefixed|/usr/bin/ld: cannot find -lpq: No such file or directory
 failed-assertion|assertion `left == right` failed
 rerun-only-rustc-prefix|error[Efuture]: a future rustc diagnostic shape
 CASES
+
+  nonmatch_log="$TMP_DIR/selftest-real-failure-linker-nonmatches.log"
+  printf '%s\n' \
+    'Hello world: cannot find the config file' \
+    'rebuild: cannot find cached artifact' \
+    '/ruby/psych.rb:455: mapping values are not allowed (Psych::SyntaxError)' \
+    >"$nonmatch_log"
+  if log_has_real_failure "$nonmatch_log"; then
+    echo "assertion failed (#5210 narrowness): unsupported/prose shape matched" >&2
+    exit 1
+  fi
 }
 
-# The semantic cases above catch a consumer that restores the old narrow
-# rerun predicate. These wiring assertions cover the opposite consumer too:
-# neither production script may regain a private log_has_real_failure body or
-# stop sourcing the shared predicate while its own fixtures happen to pass.
+# Execute triage as a sourced consumer in a separate Bash process. This makes
+# its effective function, including any later local override, prove the shared
+# rustfmt and Python boundaries rather than trusting source-text wiring alone.
+# The grep check remains only a structural diagnostic for an executable source
+# statement; effective predicate behavior is the regression authority.
 run_real_failure_predicate_sharing_assertions() {
   local rerun_script="$REPO_ROOT/scripts/ci/infra-failure-rerun.sh"
+  local rustfmt_log="$TMP_DIR/selftest-triage-shared-rustfmt.log"
+  local python_log="$TMP_DIR/selftest-triage-shared-python.log"
   # This is literal source text used to audit both consumers.
   # shellcheck disable=SC2016
   local source_statement='source "$REAL_FAILURE_PREDICATE"'
 
+  printf '%s\n' 'Diff in /tmp/main.rs:12:' >"$rustfmt_log"
+  printf '%s\n' 'FAILED (errors=1)' >"$python_log"
+  TRIAGE_SCRIPT="$TRIAGE_SCRIPT" bash -s -- "$rustfmt_log" "$python_log" <<'BASH'
+set -euo pipefail
+source "$TRIAGE_SCRIPT"
+if [[ "$(type -t log_has_real_failure)" != "function" ]]; then
+  echo "assertion failed (#5210 DRY behavior): triage predicate is not a function" >&2
+  exit 1
+fi
+log_has_real_failure "$1" || {
+  echo "assertion failed (#5210 DRY behavior): triage missed shared rustfmt marker" >&2
+  exit 1
+}
+log_has_real_failure "$2" || {
+  echo "assertion failed (#5210 DRY behavior): triage missed shared Python unittest marker" >&2
+  exit 1
+}
+BASH
+
   for consumer in "$rerun_script" "$TRIAGE_SCRIPT"; do
-    grep -F -q -- "$source_statement" "$consumer" || {
+    grep -E -q -- "^[[:space:]]*${source_statement//\$/\\\$}[[:space:]]*(#.*)?$" "$consumer" || {
       echo "assertion failed (#5210 DRY): $consumer does not source the shared real-failure predicate" >&2
       exit 1
     }
-    if grep -E -q -- '^log_has_real_failure\(\)[[:space:]]*\{' "$consumer"; then
-      echo "assertion failed (#5210 DRY): $consumer has restored a private log_has_real_failure implementation" >&2
-      exit 1
-    fi
   done
 }
 

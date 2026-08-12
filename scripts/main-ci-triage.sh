@@ -260,11 +260,11 @@ collect_failed_identifiers() {
       # #3991/#3996: No `test … FAILED` assertion in a failed job's log means this
       # is a job-level fallback. Skip it as flaky ONLY when an infrastructure-level
       # termination (SIGTERM / signal 15 / exit 143 / runner cancellation) is the
-      # *sole* failure signal. If the log ALSO carries a deterministic real-failure
-      # signal (compile error `error[E…]` / `could not compile`, `test result:
-      # FAILED`, `panicked at`, failed assertion), the infra noise is incidental —
-      # promote it normally so genuine red is never silently dropped (false
-      # negative). Only pure infra terminations are suppressed.
+      # *sole* failure signal. The shared `log_has_real_failure` predicate is the
+      # source of truth for deterministic gate-failure shapes. If it matches, the
+      # infra noise is incidental — promote normally so genuine red is never
+      # silently dropped (false negative). Only pure infra terminations are
+      # suppressed.
       if log_has_infra_termination "$log_path" && ! log_has_real_failure "$log_path"; then
         # #4245: don't drop the signal entirely — record it on the separate
         # `infra::job::…` track so a *persistent* streak (SIGTERM_ESCALATION_STREAK
@@ -1632,4 +1632,6 @@ main() {
   esac
 }
 
-main "${1-}"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "${1-}"
+fi

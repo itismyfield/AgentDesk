@@ -7,10 +7,18 @@
 # retry a broken gate into green. Keep this predicate in one place so those two
 # consumers cannot drift back to different safety boundaries.
 # Beyond Rust compile/test output, the markers cover this repo's rustfmt,
-# ShellCheck, Python unittest, PyYAML/Psych, and linker gate failure shapes.
-# They are intentionally unanchored because downloaded Actions logs may prefix
-# each emitted line with timestamps or job/step names.
-REAL_FAILURE_REGEX='test result: FAILED|error\[E|error: could not compile|panicked at|assertion .*failed|Diff in .*:[0-9]+:|SC[0-9]{4} \((error|warning|info|style)\):|FAILED \([^)]*(failures|errors)=[0-9]+|yaml\.(scanner|parser|composer|constructor)\.[A-Za-z]+Error:|Psych::SyntaxError|ld: cannot find '
+# ShellCheck, Python unittest, PyYAML, and linker gate failure shapes. The
+# `error[E` prefix deliberately accepts future/non-numeric rustc diagnostic
+# codes: fail-safe regression handling is safer than silently retrying them,
+# while the literal rustc diagnostic prefix keeps the match bounded.
+# Most alternatives are intentionally unanchored because downloaded Actions
+# logs may prefix each emitted line with timestamps or job/step names. The
+# linker alternative instead requires a line/start-token boundary, which still
+# accepts prefixes such as `/usr/bin/ld:` without matching ordinary prose.
+# `error: could not compile` followed by SIGKILL can be runner OOM, and linker
+# errors accompanied by `No space left on device` can be disk exhaustion. They
+# remain regressions fail-safe when mixed with those infrastructure symptoms.
+REAL_FAILURE_REGEX='test result: FAILED|error\[E|error: could not compile|panicked at|assertion .*failed|Diff in .*:[0-9]+:|SC[0-9]{4} \((error|warning|info|style)\):|FAILED \([^)]*(failures|errors)=[0-9]+|yaml\.(scanner|parser|composer|constructor)\.[A-Za-z]+Error:|(^|[[:space:]/])ld: cannot find '
 
 log_has_real_failure() {
   local log_path="$1"
