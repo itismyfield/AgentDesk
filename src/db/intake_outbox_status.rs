@@ -18,9 +18,9 @@ use std::str::FromStr;
 /// - Unit tests check [`Self::ALL`] membership against the enum declaration,
 ///   [`Self::from_str`] against [`Self::as_str`], and [`Self::is_open`] against
 ///   [`INTAKE_OUTBOX_OPEN_STATUSES_SQL`][open-statuses]. They also check
-///   [`Self::ALL`] against the 0106 status CHECK body, [`Self::operator_retry`]
-///   against `TRANSITION_12_ALLOWED`, and that rejected input is preserved in
-///   [`UnknownIntakeStatus`].
+///   [`Self::ALL`] against the 0106 status CHECK body, every current
+///   [`Self::operator_retry`] classification, and that rejected input is
+///   preserved in [`UnknownIntakeStatus`].
 ///
 /// DOES NOT VALIDATE:
 /// - The compiler does not require [`Self::from_str`] to gain an arm for an
@@ -28,9 +28,10 @@ use std::str::FromStr;
 ///   the members (rather than the cardinality) of [`Self::ALL`] are test-backed.
 /// - The strong-enum `sqlx::Type` derive generates `Type`, `Encode`, and `Decode`
 ///   implementations, and `rename_all` determines their codec spelling.
-///   Production writes in `db::intake_outbox` bind this enum directly. A pinned
-///   PostgreSQL test exercises every variant's encode and decode and pins the
-///   raw spelling against [`Self::as_str`]. Production row decode is later.
+///   Production writes bind this enum directly, and `IntakeOutboxRow` decodes
+///   its status through SQLx. A pinned PostgreSQL test exercises every
+///   variant's encode and decode and pins the raw spelling against
+///   [`Self::as_str`].
 ///
 /// LIMITS:
 /// - No gate prevents replacing an exhaustive classification arm with `_ =>`;
@@ -39,8 +40,9 @@ use std::str::FromStr;
 ///   fails closed on unsupported enum syntax, but no independent gate proves
 ///   that its defining equality assertion remains present.
 /// - The migration-source test pins the CHECK domain while the PostgreSQL codec
-///   test pins wire spelling. Service-layer SQL writers such as `owner_record`
-///   still bypass this enum until R2b.
+///   test pins wire spelling. SQL string literals and direct writers outside
+///   the typed coordinates remain possible, and typed rows do not replace the
+///   database CHECK. SQLx decoding does not call [`Self::from_str`].
 ///
 /// [open-statuses]: crate::db::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL
 #[derive(Clone, Copy, Debug, Eq, PartialEq, sqlx::Type)]
@@ -265,37 +267,32 @@ mod tests {
     }
 
     #[test]
-    fn operator_retry_matches_transition_12_allowed() {
-        let force_fail = repo_source("src/db/intake_outbox_force_fail.rs");
-        let allowed_source = force_fail
-            .split_once("const TRANSITION_12_ALLOWED")
-            .expect("force-fail module must declare TRANSITION_12_ALLOWED")
-            .1
-            .split_once('=')
-            .expect("TRANSITION_12_ALLOWED must have an initializer")
-            .1
-            .split_once(';')
-            .expect("TRANSITION_12_ALLOWED must end with a semicolon")
-            .0;
-        let allowed = allowed_source
-            .split('"')
-            .skip(1)
-            .step_by(2)
-            .collect::<BTreeSet<_>>();
-
-        for status in IntakeOutboxStatus::ALL {
-            let expected = if status == IntakeOutboxStatus::FailedPostAccept {
-                OperatorRetryClass::AlreadyTerminal
-            } else if allowed.contains(status.as_str()) {
-                OperatorRetryClass::ForceTerminate
-            } else {
-                OperatorRetryClass::Refuse
-            };
-            assert_eq!(status.operator_retry(), expected);
-            assert_eq!(
-                status.operator_retry() != OperatorRetryClass::Refuse,
-                allowed.contains(status.as_str())
-            );
+    fn operator_retry_classifies_every_status() {
+        let expected = [
+            (IntakeOutboxStatus::Pending, OperatorRetryClass::Refuse),
+            (IntakeOutboxStatus::Claimed, OperatorRetryClass::Refuse),
+            (
+                IntakeOutboxStatus::Accepted,
+                OperatorRetryClass::ForceTerminate,
+            ),
+            (
+                IntakeOutboxStatus::Spawned,
+                OperatorRetryClass::ForceTerminate,
+            ),
+            (IntakeOutboxStatus::Dispatched, OperatorRetryClass::Refuse),
+            (IntakeOutboxStatus::Done, OperatorRetryClass::Refuse),
+            (
+                IntakeOutboxStatus::FailedPreAccept,
+                OperatorRetryClass::Refuse,
+            ),
+            (
+                IntakeOutboxStatus::FailedPostAccept,
+                OperatorRetryClass::AlreadyTerminal,
+            ),
+        ];
+        assert_eq!(expected.map(|(status, _)| status), IntakeOutboxStatus::ALL);
+        for (status, class) in expected {
+            assert_eq!(status.operator_retry(), class);
         }
     }
 }

@@ -419,7 +419,7 @@ db::intake_outbox_open_status::tests::intake_open_status_sql_textually_matches_m
 db::intake_outbox_status::tests::all_exactly_matches_declared_variants
 db::intake_outbox_status::tests::all_exactly_matches_migration_status_check
 db::intake_outbox_status::tests::open_classification_matches_shared_sql_list
-db::intake_outbox_status::tests::operator_retry_matches_transition_12_allowed
+db::intake_outbox_status::tests::operator_retry_classifies_every_status
 db::intake_outbox_status::tests::status_strings_round_trip
 db::intake_outbox_status::tests::unknown_status_preserves_rejected_spelling
 db::postgres::tests::agent_roster_sync_gated_to_leader_or_single_node
@@ -3905,6 +3905,7 @@ services::discord::router::intake_dispatch::attachment::tests::local_attachment_
 services::discord::router::intake_dispatch::attachment::tests::nonlocal_attachment_admission_never_runs_local_materialization
 services::discord::router::intake_dispatch::notice::tests::intake_dispatch_invariant_blocked_notice_is_throttled_atomically
 services::discord::router::intake_dispatch::queued::tests::actual_merge_persistence_restores_canonical_retry_lineage_4888
+services::discord::router::intake_dispatch::tests::dispatched_open_route_never_uses_stale_local_recovery_pg
 services::discord::router::intake_dispatch::tests::distinct_open_route_requeues_queued_successor_pg
 services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_direct_execution_body_has_no_external_producer_callsites
 services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_enforce_without_postgres_blocks_owner_unknown

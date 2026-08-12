@@ -17,6 +17,7 @@ use crate::db::intake_outbox::{
     InsertPendingPayload, IntakeInsertConflict, classify_insert_pending_error, insert_pending,
 };
 use crate::db::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL;
+use crate::db::intake_outbox_status::IntakeOutboxStatus;
 use crate::services::cluster::intake_routing::{
     IntakeRouteTarget, LocalRouteReason, candidates_from_worker_nodes_json, pick_intake_target,
 };
@@ -82,7 +83,7 @@ pub(crate) enum IntakeRouterDecision {
     /// the narrowly scoped stale-route recovery exception.
     DeferredOpenRoute {
         target_instance_id: String,
-        open_route_status: String,
+        open_route_status: Option<IntakeOutboxStatus>,
         open_route_id: Option<i64>,
         open_route_age_secs: Option<u64>,
         resolved_owner: ResolvedSessionOwner,
@@ -335,7 +336,7 @@ pub(crate) async fn try_route_intake(
                 IntakeRouterDecision::DeferredOpenRoute {
                     target_instance_id,
                     open_route_id: Some(open_route_id),
-                    open_route_status,
+                    open_route_status: Some(open_route_status),
                     open_route_age_secs: open_route_age_secs.map(|age| age as u64),
                     resolved_owner,
                 },
@@ -691,7 +692,7 @@ fn apply_observe_mode(
 async fn existing_open_route(
     pool: &PgPool,
     channel_id: &str,
-) -> Result<Option<(i64, String, String, String, Option<i64>)>, sqlx::Error> {
+) -> Result<Option<(i64, String, String, IntakeOutboxStatus, Option<i64>)>, sqlx::Error> {
     let query = format!(
         "SELECT id, target_instance_id, user_msg_id, status,
                 GREATEST(0, EXTRACT(EPOCH FROM (NOW() - created_at)))::BIGINT
@@ -735,7 +736,7 @@ async fn route_to_instance(
                 IntakeRouterDecision::DeferredOpenRoute {
                     target_instance_id: existing_target,
                     open_route_id: Some(open_route_id),
-                    open_route_status,
+                    open_route_status: Some(open_route_status),
                     open_route_age_secs: open_route_age_secs.map(|age| age as u64),
                     resolved_owner,
                 },
@@ -807,14 +808,14 @@ async fn route_to_instance(
                     ))) => IntakeRouterDecision::DeferredOpenRoute {
                         target_instance_id: existing_target,
                         open_route_id: Some(open_route_id),
-                        open_route_status,
+                        open_route_status: Some(open_route_status),
                         open_route_age_secs: open_route_age_secs.map(|age| age as u64),
                         resolved_owner,
                     },
                     Ok(None) | Err(_) => IntakeRouterDecision::DeferredOpenRoute {
                         target_instance_id: target.to_string(),
                         open_route_id: None,
-                        open_route_status: "unknown".to_string(),
+                        open_route_status: None,
                         open_route_age_secs: None,
                         resolved_owner,
                     },
@@ -2620,7 +2621,7 @@ mod pg_tests {
                 resolved_owner,
             } => {
                 assert_eq!(target_instance_id, "worker-conflict");
-                assert_eq!(open_route_status, "pending");
+                assert_eq!(open_route_status, Some(IntakeOutboxStatus::Pending));
                 assert_eq!(resolved_owner, ResolvedSessionOwner::NoOwner);
                 assert!(
                     open_route_id.is_some(),

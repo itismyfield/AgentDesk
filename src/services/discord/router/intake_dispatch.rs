@@ -1,4 +1,5 @@
 use super::message_handler::{self, IntakeDeps, IntakeRequest};
+use crate::db::intake_outbox_status::IntakeOutboxStatus;
 use crate::services::cluster::intake_router_hook::{
     IntakeBlockedReason, IntakeRouterContext, IntakeRouterDecision, ResolvedSessionOwner,
     try_route_intake,
@@ -188,7 +189,7 @@ pub(crate) async fn admit_text_intake(
             resolved_owner: ResolvedSessionOwner::LiveLocal,
             ..
         } if matches!(authority_channel_opt_in, OwnerAuthorityChannelOptIn::NotOptedIn)
-            && open_route_status == "pending"
+            && *open_route_status == Some(IntakeOutboxStatus::Pending)
             && *age_secs as u64 >= effective_config.forward_pre_claim_timeout_secs =>
         {
             match crate::services::cluster::intake_router_hook::owner_record::
@@ -265,7 +266,7 @@ fn admission_for_decision(
             open_route_age_secs,
             resolved_owner: ResolvedSessionOwner::LiveLocal,
             ..
-        } if open_route_status == "pending"
+        } if open_route_status == Some(IntakeOutboxStatus::Pending)
             && open_route_age_secs.is_some_and(|age| age >= forward_pre_claim_timeout_secs)
             && matches!(
                 authority_channel_opt_in,
@@ -274,7 +275,7 @@ fn admission_for_decision(
         {
             tracing::warn!(
                 %target_instance_id,
-                open_route_status,
+                ?open_route_status,
                 authority_channel_opt_in = authority_channel_opt_in.as_str(),
                 "[intake_dispatch] admitted local live owner despite pending open route; stale-route recovery exception"
             );

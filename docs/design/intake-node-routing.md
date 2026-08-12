@@ -584,6 +584,29 @@ helpers in `src/db/intake_outbox/` host the parameter binding and
 typed return values. The SQL itself stays in plain query strings so
 operators can run it manually for incident response.
 
+**Current typed status boundary (#5071 T2-R)**:
+
+- `IntakeOutboxRow.status` is `IntakeOutboxStatus`. SQLx `FromRow`
+  validates a spelling only when a query decodes that row; an unknown
+  spelling returns a column-decode error and is not converted through the
+  manual `FromStr` implementation.
+- The wildcard-free `operator_retry()` classification makes every added
+  Rust variant visit the operator-retry decision, although the compiler
+  cannot prove that the chosen classification is semantically correct.
+  It is the sole force-fail authority: accepted/spawned rows are
+  terminalized, failed-post-accept rows preserve their existing terminal
+  error, and every other current status is refused before writes.
+- Existing open-route reads carry `Option<IntakeOutboxStatus>` across the
+  service boundary. A decoded row is `Some(status)`; failure to establish a
+  route status after a unique conflict is `None`. Only `Some(Pending)`, with
+  all route-id, age, live-local-owner, and rollout conditions satisfied, may
+  use stale local recovery. Every other value forbids local execution.
+- Typed Rust rows complement rather than replace the database CHECK. Direct
+  SQL literals and writers outside the typed bind coordinates remain
+  possible. `None` does not distinguish a vanished row from a failed
+  conflict requery. The later T2-W slice owns any `Unknown` variant and its
+  lifecycle behavior.
+
 **Why a fresh row instead of in-place reset for retry**: keeps every
 attempt's `last_error`, timing, and `claim_owner` in PG for audit. A
 row whose state is `failed_pre_accept` is the historical record of

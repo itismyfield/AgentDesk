@@ -1,16 +1,8 @@
 //! Operator force-fail and retry-as-new transition for intake outbox rows.
 
 use super::intake_outbox::IntakeOutboxRow;
-use super::intake_outbox_status::IntakeOutboxStatus;
+use super::intake_outbox_status::{IntakeOutboxStatus, OperatorRetryClass};
 use sqlx::PgPool;
-
-/// Status spellings accepted by transition 12.
-///
-/// `done` remains refused because a racing worker completion must not be
-/// rewritten and retried, which could double-emit a Discord turn.
-/// LIMITS: this string allowlist remains until the row status becomes typed;
-/// adding an unknown spelling would retain the overwrite trap R2a does not fix.
-pub(crate) const TRANSITION_12_ALLOWED: [&str; 3] = ["accepted", "spawned", "failed_post_accept"];
 
 /// Reasons `force_fail_and_retry_as_new` may refuse to operate.
 #[derive(Debug, thiserror::Error)]
@@ -46,9 +38,10 @@ pub(crate) enum ForceFailError {
 /// - Copies payload and provider, allocates the family maximum plus one, and
 ///   links the child to the source.
 ///
-/// LIMITS: direct SQL can bypass the enum, the row status is still `String`,
-/// there is no attempt ceiling or typestate proof for every transition, and
-/// the retained string guard has the unknown-status trap documented above.
+/// SQLx decodes the locked row into the strong status enum before any write.
+/// Unknown database spellings therefore return a column-decode error without
+/// an UPDATE or child INSERT. Direct SQL can still bypass typed writers, and
+/// there is no attempt ceiling or typestate proof for every transition.
 /// Pinned PG coverage remains in `intake_outbox::postgres_tests` to keep IDs.
 pub(crate) async fn force_fail_and_retry_as_new(
     pool: &PgPool,
@@ -64,17 +57,21 @@ pub(crate) async fn force_fail_and_retry_as_new(
             .await?;
     let row = row.ok_or(ForceFailError::NotFound(stuck_id))?;
 
-    if !TRANSITION_12_ALLOWED.contains(&row.status.as_str()) {
-        return Err(ForceFailError::DisallowedStatus {
-            id: stuck_id,
-            status: row.status.clone(),
-        });
-    }
+    let force_terminate = match row.status.operator_retry() {
+        OperatorRetryClass::ForceTerminate => true,
+        OperatorRetryClass::AlreadyTerminal => false,
+        OperatorRetryClass::Refuse => {
+            return Err(ForceFailError::DisallowedStatus {
+                id: stuck_id,
+                status: row.status.to_string(),
+            });
+        }
+    };
     if row.provider.trim().is_empty() {
         return Err(ForceFailError::UnknownProvider { id: stuck_id });
     }
 
-    if row.status != IntakeOutboxStatus::FailedPostAccept.as_str() {
+    if force_terminate {
         sqlx::query(
             "UPDATE intake_outbox
              SET status = $3,
