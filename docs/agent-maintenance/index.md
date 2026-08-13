@@ -71,6 +71,18 @@ Regenerate the docs above with:
 python3 scripts/generate_inventory_docs.py
 ```
 
+The generator reads giant-file issue state from the checked-in
+`scripts/giant_file_issue_metadata.json` snapshot. Refresh that snapshot at
+least every seven days with:
+
+```
+python3 scripts/refresh_giant_file_issue_metadata.py
+```
+
+An older snapshot emits an actionable warning while closed-issue enforcement
+is non-blocking. When `GIANT_FILE_REGISTRY_ENFORCE_CLOSED_ISSUES=1`, the same
+staleness is fatal because issue state is then part of the hard gate.
+
 Manually maintained (not emitted by `generate_inventory_docs.py`):
 
 - [`docs/generated/db-file-duplication-audit.md`](../generated/db-file-duplication-audit.md)

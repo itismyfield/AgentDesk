@@ -934,10 +934,11 @@ def load_giant_file_issue_metadata() -> dict[int, dict[str, object]]:
     """Load and freshness-check the issue snapshot used by the offline CI gate.
 
     The seven-day maximum age limits how long this checked-in snapshot can hide
-    a changed GitHub issue state to one weekly refresh interval without making
-    CI depend on network availability. This check guarantees only the age and
-    internal shape of the snapshot; it does not prove that GitHub still matches
-    the snapshot between manual refreshes.
+    a changed GitHub issue state without making CI depend on network
+    availability. Staleness is fatal when closed-issue enforcement consumes the
+    state as a hard gate; otherwise it is reported as an operator warning. The
+    check guarantees only the age and internal shape of the snapshot; it does
+    not prove that GitHub still matches the snapshot between manual refreshes.
     """
     try:
         payload = json.loads(read_text(GIANT_FILE_ISSUE_METADATA))
@@ -962,9 +963,18 @@ def load_giant_file_issue_metadata() -> dict[int, dict[str, object]]:
     if snapshot_age < timedelta(0):
         raise ParseError("giant-file issue metadata refreshed_at cannot be in the future")
     if snapshot_age > GIANT_FILE_ISSUE_SNAPSHOT_MAX_AGE:
-        raise ParseError(
-            "giant-file issue metadata snapshot is older than 7 days; refresh it with "
-            "`python3 scripts/refresh_giant_file_issue_metadata.py`"
+        fresh_through = refreshed + GIANT_FILE_ISSUE_SNAPSHOT_MAX_AGE
+        staleness_problem = (
+            "giant-file issue metadata snapshot is older than 7 days; freshness "
+            f"expired after {fresh_through.strftime('%Y-%m-%dT%H:%M:%SZ')}; "
+            "refresh it with `python3 scripts/refresh_giant_file_issue_metadata.py`"
+        )
+        if closed_issue_enforcement_enabled():
+            raise ParseError(staleness_problem)
+        print(
+            f"WARNING: {staleness_problem}; freshness enforcement remains "
+            f"non-blocking until {GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV}=1",
+            file=sys.stderr,
         )
     issues: dict[int, dict[str, object]] = {}
     for issue in payload["issues"]:

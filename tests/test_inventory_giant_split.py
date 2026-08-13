@@ -711,6 +711,49 @@ class GiantFileIssueMetadataTest(unittest.TestCase):
                 GEN.GIANT_FILE_ISSUE_METADATA = original_path
                 GEN.now_utc = original_now
 
+    def _run_generator(
+        self, payload: object, *, now: datetime, enforce: bool
+    ) -> tuple[int, str]:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "issues.json"
+            path.write_text(__import__("json").dumps(payload), encoding="utf-8")
+            original_path = GEN.GIANT_FILE_ISSUE_METADATA
+            original_now = GEN.now_utc
+            original_generated_documents = GEN.generated_documents
+            original_argv = sys.argv
+            original_enforcement = os.environ.pop(
+                GEN.GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV, None
+            )
+            if enforce:
+                os.environ[GEN.GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV] = "1"
+
+            def generated_documents() -> dict[Path, str]:
+                GEN.load_giant_file_issue_metadata()
+                return {}
+
+            GEN.GIANT_FILE_ISSUE_METADATA = path
+            GEN.now_utc = lambda: now
+            GEN.generated_documents = generated_documents
+            sys.argv = [str(SCRIPT_PATH)]
+            stderr = io.StringIO()
+            try:
+                with redirect_stderr(stderr):
+                    rc = GEN.main()
+            finally:
+                GEN.GIANT_FILE_ISSUE_METADATA = original_path
+                GEN.now_utc = original_now
+                GEN.generated_documents = original_generated_documents
+                sys.argv = original_argv
+                if original_enforcement is None:
+                    os.environ.pop(
+                        GEN.GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV, None
+                    )
+                else:
+                    os.environ[
+                        GEN.GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV
+                    ] = original_enforcement
+            return rc, stderr.getvalue()
+
     @staticmethod
     def _record(number: int, state: str = "open") -> dict[str, object]:
         return {
@@ -777,19 +820,54 @@ class GiantFileIssueMetadataTest(unittest.TestCase):
         )
         self.assertIn(1, issues)
 
-    def test_snapshot_older_than_seven_days_fails(self) -> None:
+    def test_stale_snapshot_warns_and_generator_succeeds_without_enforcement(self) -> None:
         refreshed = datetime(2026, 8, 5, 12, tzinfo=timezone.utc)
-        with self.assertRaises(GEN.ParseError) as ctx:
-            self._load(
-                {
-                    "schema_version": 1,
-                    "refreshed_at": refreshed.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "issues": [self._record(1)],
-                },
-                now=refreshed + timedelta(days=7, seconds=1),
-            )
-        self.assertIn("older than 7 days", str(ctx.exception))
-        self.assertIn("refresh_giant_file_issue_metadata.py", str(ctx.exception))
+        rc, stderr = self._run_generator(
+            {
+                "schema_version": 1,
+                "refreshed_at": refreshed.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "issues": [self._record(1)],
+            },
+            now=refreshed + timedelta(days=7, seconds=1),
+            enforce=False,
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("WARNING: giant-file issue metadata snapshot", stderr)
+        self.assertIn("2026-08-12T12:00:00Z", stderr)
+        self.assertIn("refresh_giant_file_issue_metadata.py", stderr)
+
+    def test_stale_snapshot_fails_generator_with_enforcement(self) -> None:
+        refreshed = datetime(2026, 8, 5, 12, tzinfo=timezone.utc)
+        rc, stderr = self._run_generator(
+            {
+                "schema_version": 1,
+                "refreshed_at": refreshed.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "issues": [self._record(1)],
+            },
+            now=refreshed + timedelta(days=7, seconds=1),
+            enforce=True,
+        )
+        self.assertEqual(rc, 2)
+        self.assertIn("older than 7 days", stderr)
+        self.assertIn("2026-08-12T12:00:00Z", stderr)
+        self.assertIn("refresh_giant_file_issue_metadata.py", stderr)
+
+    def test_fresh_snapshot_never_warns_for_either_enforcement_mode(self) -> None:
+        refreshed = datetime(2026, 8, 5, 12, tzinfo=timezone.utc)
+        payload = {
+            "schema_version": 1,
+            "refreshed_at": refreshed.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "issues": [self._record(1)],
+        }
+        for enforce in (False, True):
+            with self.subTest(enforce=enforce):
+                rc, stderr = self._run_generator(
+                    payload,
+                    now=refreshed + timedelta(days=7),
+                    enforce=enforce,
+                )
+                self.assertEqual(rc, 0)
+                self.assertEqual(stderr, "")
 
 
 class RegistryValidationTest(unittest.TestCase):
