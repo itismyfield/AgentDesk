@@ -778,6 +778,7 @@ src/
 │   │   │   ├── gateway_runtime.rs
 │   │   │   ├── intake.rs
 │   │   │   ├── intake_delivery_capability.rs
+│   │   │   ├── intake_delivery_reconciler.rs
 │   │   │   ├── orphan_recovery.rs
 │   │   │   ├── queued_placeholders.rs
 │   │   │   ├── recovery_flush.rs

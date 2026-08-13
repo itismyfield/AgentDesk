@@ -19,7 +19,7 @@ SPEC.loader.exec_module(guard)
 
 CURRENT_EXPECTED_CALL_SITES = {
     "mark_done": {"src/services/cluster/intake_worker.rs": 1},
-    "mark_done_from_delivery_proof": {},
+    "mark_done_from_delivery_proof": {PROOF_OWNER: 1},
 }
 
 
@@ -33,14 +33,14 @@ class SourceContractTests(unittest.TestCase):
     def test_real_tree_passes_and_reports_declared_limits(self):
         ok, message = guard.check(ROOT)
         self.assertTrue(ok, message)
-        self.assertIn("1 production sites across 2 symbols", message)
+        self.assertIn("2 production sites across 2 symbols", message)
         for limit in ("not Rust parsing", "direct SQL writers are NOT seen", "over-counted"):
             self.assertIn(limit, message)
 
     def test_conditional_pin_is_the_t2_done_writer_only(self):
         self.assertEqual(guard.PROOF_OWNER, PROOF_OWNER)
         self.assertEqual(guard.expected_call_sites(ROOT), CURRENT_EXPECTED_CALL_SITES)
-        self.assertFalse((ROOT / PROOF_OWNER).exists())
+        self.assertTrue((ROOT / PROOF_OWNER).is_file())
 
     def test_scan_root_is_all_of_src(self):
         self.assertEqual(guard.SCAN_ROOT.as_posix(), "src")

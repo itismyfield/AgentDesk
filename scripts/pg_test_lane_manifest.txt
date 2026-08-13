@@ -64,6 +64,7 @@ src/services/discord/router/intake_dispatch/tests.rs
 src/services/discord/router/message_handler/voice_announcement_route.rs
 src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs
 src/services/discord/runtime_bootstrap/intake_delivery_capability.rs
+src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs
 src/services/discord/session_runtime.rs
 src/services/discord/task_notification_delivery/tests.rs
 src/services/discord/turn_bridge/completion_guard/completion_postgres.rs
@@ -160,6 +161,7 @@ services::discord::router::intake_dispatch::tests
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
+services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests
 services::discord::task_notification_delivery::tests
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests
@@ -618,6 +620,8 @@ services::discord::router::message_handler::voice_announcement_route::voice_rout
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::gateway_orphan_reap_uses_production_query_and_right_parses_instance_id_pg
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests::capability_accepts_public_0109_under_hostile_search_path_pg
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests::capability_rejects_catalog_and_data_mutations_pg
+services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests::journal_judgment_precedes_proof_lock_pg
+services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests::reducer_is_existential_strict_transactional_and_public_pg
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::exact_owned_row_with_null_cwd_is_channel_scoped_empty_path
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::fallback_refused_when_single_row_has_different_channel
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::legacy_null_channel_id_single_row_is_reused

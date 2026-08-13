@@ -1,8 +1,37 @@
 # Multinode Transition
 
-> Last refreshed: 2026-08-13 (against #5071 T2-W S-R2a read-only facade).
+> Last refreshed: 2026-08-14 (against #5071 T2-W S-R2c B2 dormant reducer).
 
 ### Audited touches
+- 2026-08-13 (#5071 T2-W S-R2c B2): `runtime_bootstrap` now declares a
+  dormant per-row reducer at the proof-owner path. Its transaction judges until the first delivery proof (or all
+  obligations if none proves it) before locking, then attempts at most one terminal CAS only if the row remains
+  strictly stale; a refreshed row returns unchanged with no CAS. All relations are `public`-qualified and the stale
+  reader decodes only `id`. No boot, configuration, lifecycle, timer, or production call reaches the reducer, so
+  this slice grants no authority. The reducer is compiled only on Unix because its journal judgment dependency is
+  Unix-only; non-Unix builds have no reducer.
+
+  B3 retains eight constraints: (1) the `capability_accepts_public_0109_under_hostile_search_path_pg`
+  characterization reproduces the OID-continuity gap that the relookup B1 removed as inert could not close;
+  (2) false-to-`Unchanged` settlement is
+  uncharacterized; (3) tests permit split lock/CAS transactions; (4) the stale recheck must retain its B2
+  `IntakeOutboxStatus` binding; (5) cutoff still selects which rows are stale candidates, but cannot make the terminal
+  judgment sound: journal append is lossy because `JournalObserver::submit` drops a full `MAILBOX_CAPACITY` queue and
+  `delivery_journal_observer` discards a `pg_error` batch, neither with retry. No finite cutoff removes that ambiguity:
+  it can absorb delay, not loss. While the journal remains lossy, `Unknown` is terminal ambiguity from absent
+  observation, not proof of delivery failure; delivery may already have occurred, so operators must audit
+  delivery/receipt evidence and accept the duplicate consequence before retrying; (6) first-proof short-circuit means
+  not all obligations are judged; (7) the reducer's join key has no production binding writer. `reconcile_in_tx`
+  selects `event_kind = 'O'` with `canonical_payload ->> 'intake_outbox_id' = $1`, but every current production O-event
+  payload omits `intake_outbox_id`: `TuiObligationKey::payload()` emits only `canonical_key_sha256`, and the watcher,
+  controller, and recovery `obligation_payload` functions emit only their own routing/frontier fields. The only
+  executable payload reads are `exact_delivery_predicate` and `reconcile_in_tx`; other occurrences are `#[cfg(test)]`
+  fixtures or the migration 0109 index substrate and its capability checks. As `intake-node-routing.md` specifies, the
+  binding writer does not exist before the future S-W1 binding-writer slice. With today's production writers,
+  `obligations` is empty and `delivered` remains false, so activating the reducer would terminalize every stale
+  `dispatched` row as `Unknown`. B3 must not make terminal CAS reachable through configuration alone; activation
+  requires the S-W1 binding writer to have landed in code; (8) before S-W2 can create `dispatched` rows on non-Unix,
+  B3 must provide a non-Unix reduction path or those rows will form a permanent backlog.
 - 2026-08-13 (#5071 T2-W S-R2c B1): `runtime_bootstrap` declares a dormant
   capability module. If `public` names stay bound from its repeatable-read
   snapshot through both name-based `ACCESS SHARE` locks, it checks exact
@@ -10,7 +39,10 @@
   under NOT VALID checks, and required indexes. DDL committed in that interval
   can leave it validating old snapshot objects while locking replacements.
   Conflicting table DDL is blocked only after both locks; later DDL is outside
-  the result. Errors fail closed. No caller or boot wiring changes runtime behavior.
+  the result. B2 moves privilege classification before those locks, so missing
+  table `SELECT` is now `Privilege` rather than a lock error collapsed to
+  `Query`, and `probe_transaction` now owns the rollback path. Errors fail
+  closed. No caller or boot wiring changes runtime behavior.
 - 2026-08-13 (#5071 T2-W S-R2a): the journal-owned obligation-window facade
   reads every row in `(event_seq, event_id)` order and restores only closed
   `O/A/T/C/S/U` events. It fails closed on malformed kinds, slots, attempts,
@@ -1837,9 +1869,9 @@
 - #5071 S-R2c preparatory safety gate — **no runtime authority yet**: the gate
   pins both intake-outbox `done` symbols. While
   `src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs` is
-  absent, the proof writer expects zero sites and, within the gate's declared
-  lexical bounds, rejects a stray protected import or call anywhere; once
-  present, it requires one canonical call there. Wholesale
-  module removal returns the conditional gate to its preparatory state and must
-  also be caught by the later compiled integration tests. This slice adds no
-  task, configuration, lease, routing decision, or database write.
+  present, the proof writer requires exactly one canonical call there and,
+  within the gate's declared lexical bounds, rejects a stray protected import
+  or call anywhere. The source-contract test pins the present state, so module
+  removal cannot silently return the gate to its preparatory zero-site state.
+  B2 adds only a dormant reducer; it adds no task, configuration, lease, routing
+  decision, or reachable database write.

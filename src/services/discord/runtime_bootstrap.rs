@@ -8,6 +8,8 @@ mod gateway_lease_recovery_tests;
 mod gateway_runtime;
 mod intake;
 mod intake_delivery_capability;
+#[cfg(unix)]
+mod intake_delivery_reconciler;
 mod orphan_recovery;
 mod queued_placeholders;
 mod recovery_flush;

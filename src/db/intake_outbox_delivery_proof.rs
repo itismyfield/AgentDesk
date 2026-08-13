@@ -1,14 +1,20 @@
 //! Dormant delivery-proof settlement primitives for `intake_outbox`.
 //!
-//! Future actor and reconciler callers must start with `pool.begin()` and pass
-//! the same active `&mut *tx` through judgment, proof locking, strict cutoff
-//! recheck, and terminal CAS. Autocommit is forbidden because PostgreSQL would
-//! release the proof lock too early.
+//! The dormant reducer keeps judgment and proof locking in one transaction. It
+//! attempts at most one terminal CAS only after the locked row remains strictly
+//! stale; a refreshed row needs no CAS. Autocommit ends the lock at its `SELECT`.
 
-use super::intake_outbox::IntakeOutboxRow;
 use super::intake_outbox_status::IntakeOutboxStatus;
 use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool};
+
+#[derive(Clone, Copy, Debug, sqlx::FromRow)]
+pub(crate) struct StaleDispatchedRow {
+    pub(crate) id: i64,
+}
+
+const LIST_STALE_DISPATCHED_SQL: &str = "SELECT id FROM public.intake_outbox
+ WHERE status = $1 AND dispatched_at < $2 ORDER BY dispatched_at ASC, id ASC LIMIT $3";
 
 fn normalize_limit(limit: i64) -> i64 {
     limit.clamp(1, 500)
@@ -19,31 +25,28 @@ pub(crate) async fn list_stale_dispatched(
     pool: &PgPool,
     cutoff: DateTime<Utc>,
     limit: i64,
-) -> Result<Vec<IntakeOutboxRow>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT * FROM intake_outbox
-         WHERE status = $1 AND dispatched_at < $2
-         ORDER BY dispatched_at ASC, id ASC LIMIT $3",
-    )
-    .bind(IntakeOutboxStatus::Dispatched)
-    .bind(cutoff)
-    .bind(normalize_limit(limit))
-    .fetch_all(pool)
-    .await
+) -> Result<Vec<StaleDispatchedRow>, sqlx::Error> {
+    sqlx::query_as(LIST_STALE_DISPATCHED_SQL)
+        .bind(IntakeOutboxStatus::Dispatched)
+        .bind(cutoff)
+        .bind(normalize_limit(limit))
+        .fetch_all(pool)
+        .await
 }
 
 /// Tries to retain the dispatched row for a delivery-proof decision.
 ///
-/// `conn` must be the same connection inside a caller-owned active transaction
-/// that performed the judgment and will perform its terminal CAS. Autocommit is
-/// forbidden. `false` conflates absence, another state, and lock contention.
+/// `reconcile_in_tx` judges the journal before this lock, rechecks the cutoff,
+/// and attempts at most one terminal CAS only while the row remains stale. A
+/// refreshed row returns unchanged without a CAS. `false` conflates absence,
+/// another state, and lock contention.
 #[allow(dead_code)]
 pub(crate) async fn try_lock_dispatched_for_proof(
     conn: &mut PgConnection,
     outbox_id: i64,
 ) -> Result<bool, sqlx::Error> {
     let locked: Option<i64> = sqlx::query_scalar(
-        "SELECT id FROM intake_outbox
+        "SELECT id FROM public.intake_outbox
          WHERE id = $1 AND status = $2 FOR UPDATE SKIP LOCKED",
     )
     .bind(outbox_id)
@@ -64,7 +67,7 @@ pub(crate) async fn mark_done_from_delivery_proof(
     outbox_id: i64,
 ) -> Result<bool, sqlx::Error> {
     let result = sqlx::query(
-        "UPDATE intake_outbox SET status = $2, completed_at = NOW()
+        "UPDATE public.intake_outbox SET status = $2, completed_at = NOW()
          WHERE id = $1 AND status = $3",
     )
     .bind(outbox_id)
@@ -90,7 +93,7 @@ pub(crate) async fn settle_dispatched_unknown(
         return Ok(false);
     }
     let result = sqlx::query(
-        "UPDATE intake_outbox SET status = $2, completed_at = NOW()
+        "UPDATE public.intake_outbox SET status = $2, completed_at = NOW()
          WHERE id = $1 AND status = $3 AND dispatched_at < $4",
     )
     .bind(outbox_id)
@@ -117,6 +120,11 @@ mod postgres_tests {
         Option<String>,
         Option<DateTime<Utc>>,
     );
+
+    #[test]
+    fn stale_reader_projects_exactly_id() {
+        assert!(LIST_STALE_DISPATCHED_SQL.starts_with("SELECT id FROM "));
+    }
 
     fn pg_time(value: DateTime<Utc>) -> DateTime<Utc> {
         DateTime::from_timestamp_micros(value.timestamp_micros()).expect("valid PG timestamp") // agentdesk-audit: allow-unwrap — PostgreSQL test assertion
