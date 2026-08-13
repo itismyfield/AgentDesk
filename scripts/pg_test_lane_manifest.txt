@@ -105,7 +105,7 @@ db::dispatches::outbox::delivery::tests
 db::idempotency::tests::pg_integration
 db::intake_outbox::migration_pg_tests
 db::intake_outbox::postgres_tests
-db::intake_outbox_delivery_proof::tests
+db::intake_outbox_delivery_proof::postgres_tests
 db::postgres::tests
 db::prompt_manifests::tests
 db::relay_dead_letter::tests
@@ -341,10 +341,10 @@ db::intake_outbox::postgres_tests::mark_failed_post_accept_works_from_accepted_o
 db::intake_outbox::postgres_tests::mark_failed_pre_accept_records_error_and_bumps_retry_count
 db::intake_outbox::postgres_tests::preserve_on_cancel_round_trips_true_false_and_legacy_null
 db::intake_outbox::postgres_tests::sweep_stale_pre_accept_claims_resets_only_stale_rows
-db::intake_outbox_delivery_proof::tests::list_stale_dispatched_is_strict_ordered_and_bounded_pg
-db::intake_outbox_delivery_proof::tests::mark_done_from_delivery_proof_is_idempotent_and_preserves_dispatch_audit_fields_pg
-db::intake_outbox_delivery_proof::tests::proof_lock_skips_contention_and_terminal_cas_has_one_winner_pg
-db::intake_outbox_delivery_proof::tests::settle_dispatched_unknown_rechecks_cutoff_and_preserves_audit_fields_pg
+db::intake_outbox_delivery_proof::postgres_tests::list_stale_dispatched_is_strict_ordered_and_bounded_pg
+db::intake_outbox_delivery_proof::postgres_tests::mark_done_from_delivery_proof_is_idempotent_and_preserves_dispatch_audit_fields_pg
+db::intake_outbox_delivery_proof::postgres_tests::proof_lock_skips_contention_and_terminal_cas_has_one_winner_pg
+db::intake_outbox_delivery_proof::postgres_tests::settle_dispatched_unknown_rechecks_cutoff_and_preserves_audit_fields_pg
 db::postgres::tests::core_status_constraints_reject_invalid_values_and_allow_valid_states
 db::postgres::tests::deploy_gate_constraint_allows_supported_legacy_values_and_rejects_deploy_gate
 db::postgres::tests::deploy_gate_constraint_migration_blocks_existing_deploy_gate_rows
