@@ -4,12 +4,18 @@
 
 ### Audited touches
 - 2026-08-13 (#5071 T2-W S-R2c B2): `runtime_bootstrap` now declares a
-  dormant per-row reducer at the proof-owner path. Its per-row transaction
-  judges every distinct obligation before the proof lock, rechecks strict
-  staleness after locking, and applies one terminal CAS against `public`
-  relations. The stale reader decodes only `id`; owned journal reads and appends
-  are also `public`-qualified. No boot, configuration, lifecycle, timer, or
-  production call reaches the reducer in this slice, so it grants no authority.
+  dormant per-row reducer at the proof-owner path. Its transaction judges until the first delivery proof (or all
+  obligations if none proves it) before locking, then attempts at most one terminal CAS only if the row remains
+  strictly stale; a refreshed row returns unchanged with no CAS. All relations are `public`-qualified and the stale
+  reader decodes only `id`. No boot, configuration, lifecycle, timer, or production call reaches the reducer, so
+  this slice grants no authority.
+
+  B3 retains six constraints: (1) snapshot/catalog OID `40310449` vs live name-locked replacement OID `40310452`
+  reproduces the OID-continuity gap B1's inert relookup does not close; (2) false-to-`Unchanged` settlement is
+  uncharacterized; (3) tests permit split lock/CAS transactions; (4) the stale recheck must retain its B2
+  `IntakeOutboxStatus` binding; (5) cutoff must exceed maximum journal-append delay, else an append between judgment
+  and settlement can make a delivered row terminal `Unknown` because its outbox lock does not serialize appends;
+  (6) first-proof short-circuit means not all obligations are judged.
 - 2026-08-13 (#5071 T2-W S-R2c B1): `runtime_bootstrap` declares a dormant
   capability module. If `public` names stay bound from its repeatable-read
   snapshot through both name-based `ACCESS SHARE` locks, it checks exact

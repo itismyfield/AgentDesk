@@ -71,10 +71,11 @@ async fn reconcile_in_tx(
     let stale: bool = sqlx::query_scalar(
         "SELECT EXISTS(
              SELECT 1 FROM public.intake_outbox
-              WHERE id = $1 AND status = 'dispatched' AND dispatched_at < $2)",
+              WHERE id = $1 AND status = $3 AND dispatched_at < $2)",
     )
     .bind(outbox_id)
     .bind(cutoff)
+    .bind(crate::db::intake_outbox_status::IntakeOutboxStatus::Dispatched)
     .fetch_one(&mut *connection)
     .await?;
     if !stale {
@@ -95,6 +96,7 @@ mod postgres_tests {
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::db::intake_outbox_delivery_proof::list_stale_dispatched;
     use chrono::Duration;
+    use tokio::time::{Duration as TokioDuration, timeout};
 
     type Audit = (String, Option<DateTime<Utc>>, String, DateTime<Utc>);
 
@@ -172,6 +174,55 @@ mod postgres_tests {
         .fetch_one(pool)
         .await
         .expect("read outbox audit")
+    }
+
+    #[tokio::test]
+    async fn journal_judgment_precedes_proof_lock_pg() {
+        let database = TestPostgresDb::create().await;
+        let pool = database.connect_and_migrate().await;
+        let cutoff = pg_time(Utc::now());
+        let row = seed_outbox(&pool, "judgment-before-lock", cutoff - Duration::minutes(1)).await;
+        let mut blocker = pool.begin().await.expect("begin journal blocker");
+        sqlx::query("LOCK TABLE public.delivery_journal_events IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .expect("block journal judgment");
+        let mut reducer = pool.begin().await.expect("begin reducer transaction");
+        let reducing = tokio::spawn(async move {
+            let result = reconcile_in_tx(&mut reducer, row, cutoff).await;
+            reducer
+                .rollback()
+                .await
+                .expect("rollback reducer transaction");
+            result
+        });
+        timeout(TokioDuration::from_secs(5), async {
+            while !sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM pg_locks
+                 WHERE relation='public.delivery_journal_events'::regclass AND NOT granted)",
+            )
+            .fetch_one(&mut *blocker)
+            .await
+            .expect("observe blocked journal read")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("reducer reaches blocked journal judgment");
+        let mut contender = pool.begin().await.expect("begin proof-lock contender");
+        let won = try_lock_dispatched_for_proof(&mut contender, row)
+            .await
+            .expect("probe proof lock");
+        assert!(won, "proof row is not locked before judgment");
+        contender.rollback().await.expect("release proof lock");
+        blocker.rollback().await.expect("release journal blocker");
+        reducing
+            .await
+            .expect("join reducer")
+            .expect("finish reducer");
+        pool.close().await;
+        database.drop().await;
     }
 
     #[tokio::test]
