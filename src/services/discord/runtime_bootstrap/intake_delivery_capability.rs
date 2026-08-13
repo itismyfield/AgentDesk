@@ -1,9 +1,14 @@
 //! Dormant PostgreSQL capability probe for intake-delivery reconciliation.
 
 #![allow(dead_code)]
-use sqlx::{PgConnection, PgPool};
+use sqlx::{Connection, PgConnection, PgPool};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SchemaReason {
+    /// Required reconciliation terms are readable and have the expected shape.
+    ///
+    /// This is not an INSERT-success guarantee: additional NOT NULL or
+    /// generated columns, triggers, RLS, and additional CHECK constraints are
+    /// outside this probe and can still reject a future writer.
     Ready,
     Query,
     Migration,
@@ -245,11 +250,6 @@ async fn probe_inner(conn: &mut PgConnection) -> Result<SchemaReason, sqlx::Erro
     let Some((journal, intake)) = relation_oids(conn).await? else {
         return Ok(SchemaReason::Relation);
     };
-    sqlx::query(
-        "LOCK TABLE public.intake_outbox,public.delivery_journal_events IN ACCESS SHARE MODE",
-    )
-    .execute(&mut *conn)
-    .await?;
     let privileges: bool = sqlx::query_scalar(
         "SELECT has_table_privilege('public.intake_outbox','SELECT')
             AND has_table_privilege('public.intake_outbox','UPDATE')
@@ -261,18 +261,32 @@ async fn probe_inner(conn: &mut PgConnection) -> Result<SchemaReason, sqlx::Erro
     if !privileges {
         return Ok(SchemaReason::Privilege);
     }
+    sqlx::query(
+        "LOCK TABLE public.intake_outbox,public.delivery_journal_events IN ACCESS SHARE MODE",
+    )
+    .execute(&mut *conn)
+    .await?;
     catalog_shape(conn, journal, intake).await
 }
 
-pub(super) async fn probe_schema(pool: &PgPool) -> SchemaReason {
+async fn probe_transaction(conn: &mut PgConnection) -> Result<SchemaReason, sqlx::Error> {
+    let mut tx = conn.begin().await?;
     let result = async {
-        let mut tx = pool.begin().await?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             .execute(&mut *tx)
             .await?;
         let reason = probe_inner(&mut tx).await?;
-        tx.rollback().await?;
         Ok::<_, sqlx::Error>(reason)
+    }
+    .await;
+    tx.rollback().await?;
+    result
+}
+
+pub(super) async fn probe_schema(pool: &PgPool) -> SchemaReason {
+    let result = async {
+        let mut conn = pool.acquire().await?;
+        probe_transaction(&mut conn).await
     }
     .await;
     result.unwrap_or_else(|error| {
@@ -379,6 +393,64 @@ mod postgres_tests {
             0
         );
         tx.rollback().await.unwrap();
+        execute(&pool, &format!("DROP SCHEMA {schema} CASCADE")).await;
+
+        // A repeatable-read catalog re-read after a name-based lock remains on
+        // the original snapshot even when the lock resolved a replacement.
+        // Repeating `relation_oids` after the lock would therefore be inert.
+        let snapshot_schema = format!("snapshot_{}", Uuid::new_v4().simple());
+        execute(&pool, &format!("CREATE SCHEMA {snapshot_schema}")).await;
+        execute(
+            &pool,
+            &format!("CREATE TABLE {snapshot_schema}.target(id bigint)"),
+        )
+        .await;
+        let mut snapshot = pool.begin().await.unwrap();
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *snapshot)
+            .await
+            .unwrap();
+        let original_oid: i64 = sqlx::query_scalar(&format!(
+            "SELECT oid::bigint FROM pg_catalog.pg_class
+              WHERE oid='{snapshot_schema}.target'::pg_catalog.regclass"
+        ))
+        .fetch_one(&mut *snapshot)
+        .await
+        .unwrap();
+        execute(
+            &pool,
+            &format!("ALTER TABLE {snapshot_schema}.target RENAME TO target_old"),
+        )
+        .await;
+        execute(
+            &pool,
+            &format!("CREATE TABLE {snapshot_schema}.target(id bigint)"),
+        )
+        .await;
+        sqlx::query(&format!(
+            "LOCK TABLE {snapshot_schema}.target IN ACCESS SHARE MODE"
+        ))
+        .execute(&mut *snapshot)
+        .await
+        .unwrap();
+        let snapshot_oid: i64 = sqlx::query_scalar(&format!(
+            "SELECT oid::bigint FROM pg_catalog.pg_class
+              WHERE relnamespace='{snapshot_schema}'::pg_catalog.regnamespace
+                AND relname='target'"
+        ))
+        .fetch_one(&mut *snapshot)
+        .await
+        .unwrap();
+        let live_oid: i64 = sqlx::query_scalar(&format!(
+            "SELECT '{snapshot_schema}.target'::pg_catalog.regclass::oid::bigint"
+        ))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(snapshot_oid, original_oid);
+        assert_ne!(snapshot_oid, live_oid);
+        snapshot.rollback().await.unwrap();
+        execute(&pool, &format!("DROP SCHEMA {snapshot_schema} CASCADE")).await;
         finish(database, pool).await;
     }
 
@@ -436,6 +508,7 @@ mod postgres_tests {
              TYPE pg_catalog.timestamptz USING completed_at::pg_catalog.timestamptz",
         )
         .await;
+        execute(&pool, &format!("DROP SCHEMA {domain_schema} CASCADE")).await;
         execute(
             &pool,
             "ALTER TABLE public.intake_outbox ALTER COLUMN dispatched_at SET DEFAULT now()",
@@ -519,6 +592,25 @@ mod postgres_tests {
         .await
         .unwrap();
         assert_eq!(definitions.len(), 5);
+        let obligation_order = definitions
+            .iter()
+            .find(|(name, _)| name == "delivery_journal_obligation_order")
+            .map(|(_, definition)| definition.clone())
+            .unwrap();
+        execute(&pool, "DROP INDEX public.delivery_journal_obligation_order").await;
+        execute(
+            &pool,
+            "CREATE INDEX delivery_journal_obligation_order
+               ON public.delivery_journal_events(obligation_id,event_seq)
+             WHERE event_seq >= 0",
+        )
+        .await;
+        assert_eq!(probe_schema(&pool).await, SchemaReason::Index);
+        execute(&pool, "DROP INDEX public.delivery_journal_obligation_order").await;
+        sqlx::raw_sql(&obligation_order)
+            .execute(&pool)
+            .await
+            .unwrap();
         for (name, definition) in definitions {
             for bit in ["indisvalid", "indisready", "indislive"] {
                 sqlx::query(&format!(
@@ -554,21 +646,25 @@ mod postgres_tests {
         sqlx::raw_sql(&format!(
             "CREATE ROLE {role} NOLOGIN;
              GRANT USAGE ON SCHEMA public TO {role};
-             GRANT SELECT ON public._sqlx_migrations,public.intake_outbox,public.delivery_journal_events TO {role}"
+             GRANT SELECT ON public._sqlx_migrations TO {role}"
         ))
         .execute(&pool)
         .await
         .unwrap();
-        let mut limited = pool.begin().await.unwrap();
-        sqlx::query(&format!("SET LOCAL ROLE {role}"))
+        let mut limited = pool.acquire().await.unwrap();
+        sqlx::query(&format!("SET ROLE {role}"))
             .execute(&mut *limited)
             .await
             .unwrap();
         assert_eq!(
-            probe_inner(&mut limited).await.unwrap(),
+            probe_transaction(&mut limited).await.unwrap(),
             SchemaReason::Privilege
         );
-        limited.rollback().await.unwrap();
+        sqlx::query("RESET ROLE")
+            .execute(&mut *limited)
+            .await
+            .unwrap();
+        drop(limited);
         sqlx::raw_sql(&format!("DROP OWNED BY {role}; DROP ROLE {role}"))
             .execute(&pool)
             .await

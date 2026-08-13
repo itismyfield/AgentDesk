@@ -3,6 +3,13 @@
 > Last refreshed: 2026-08-13 (against #5071 T2-W S-R2a read-only facade).
 
 ### Audited touches
+- 2026-08-13 (#5071 T2-W S-R2c B2): `runtime_bootstrap` now declares a
+  dormant per-row reducer at the proof-owner path. Its per-row transaction
+  judges every distinct obligation before the proof lock, rechecks strict
+  staleness after locking, and applies one terminal CAS against `public`
+  relations. The stale reader decodes only `id`; owned journal reads and appends
+  are also `public`-qualified. No boot, configuration, lifecycle, timer, or
+  production call reaches the reducer in this slice, so it grants no authority.
 - 2026-08-13 (#5071 T2-W S-R2c B1): `runtime_bootstrap` declares a dormant
   capability module. If `public` names stay bound from its repeatable-read
   snapshot through both name-based `ACCESS SHARE` locks, it checks exact
@@ -1837,9 +1844,9 @@
 - #5071 S-R2c preparatory safety gate — **no runtime authority yet**: the gate
   pins both intake-outbox `done` symbols. While
   `src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs` is
-  absent, the proof writer expects zero sites and, within the gate's declared
-  lexical bounds, rejects a stray protected import or call anywhere; once
-  present, it requires one canonical call there. Wholesale
-  module removal returns the conditional gate to its preparatory state and must
-  also be caught by the later compiled integration tests. This slice adds no
-  task, configuration, lease, routing decision, or database write.
+  present, the proof writer requires exactly one canonical call there and,
+  within the gate's declared lexical bounds, rejects a stray protected import
+  or call anywhere. The source-contract test pins the present state, so module
+  removal cannot silently return the gate to its preparatory zero-site state.
+  B2 adds only a dormant reducer; it adds no task, configuration, lease, routing
+  decision, or reachable database write.

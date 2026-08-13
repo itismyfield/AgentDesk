@@ -5,10 +5,14 @@
 //! recheck, and terminal CAS. Autocommit is forbidden because PostgreSQL would
 //! release the proof lock too early.
 
-use super::intake_outbox::IntakeOutboxRow;
 use super::intake_outbox_status::IntakeOutboxStatus;
 use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool};
+
+#[derive(Clone, Copy, Debug, sqlx::FromRow)]
+pub(crate) struct StaleDispatchedRow {
+    pub(crate) id: i64,
+}
 
 fn normalize_limit(limit: i64) -> i64 {
     limit.clamp(1, 500)
@@ -19,9 +23,9 @@ pub(crate) async fn list_stale_dispatched(
     pool: &PgPool,
     cutoff: DateTime<Utc>,
     limit: i64,
-) -> Result<Vec<IntakeOutboxRow>, sqlx::Error> {
+) -> Result<Vec<StaleDispatchedRow>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT * FROM intake_outbox
+        "SELECT id FROM public.intake_outbox
          WHERE status = $1 AND dispatched_at < $2
          ORDER BY dispatched_at ASC, id ASC LIMIT $3",
     )
@@ -43,7 +47,7 @@ pub(crate) async fn try_lock_dispatched_for_proof(
     outbox_id: i64,
 ) -> Result<bool, sqlx::Error> {
     let locked: Option<i64> = sqlx::query_scalar(
-        "SELECT id FROM intake_outbox
+        "SELECT id FROM public.intake_outbox
          WHERE id = $1 AND status = $2 FOR UPDATE SKIP LOCKED",
     )
     .bind(outbox_id)
@@ -64,7 +68,7 @@ pub(crate) async fn mark_done_from_delivery_proof(
     outbox_id: i64,
 ) -> Result<bool, sqlx::Error> {
     let result = sqlx::query(
-        "UPDATE intake_outbox SET status = $2, completed_at = NOW()
+        "UPDATE public.intake_outbox SET status = $2, completed_at = NOW()
          WHERE id = $1 AND status = $3",
     )
     .bind(outbox_id)
@@ -90,7 +94,7 @@ pub(crate) async fn settle_dispatched_unknown(
         return Ok(false);
     }
     let result = sqlx::query(
-        "UPDATE intake_outbox SET status = $2, completed_at = NOW()
+        "UPDATE public.intake_outbox SET status = $2, completed_at = NOW()
          WHERE id = $1 AND status = $3 AND dispatched_at < $4",
     )
     .bind(outbox_id)
