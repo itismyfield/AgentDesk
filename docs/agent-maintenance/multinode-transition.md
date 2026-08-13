@@ -10,12 +10,25 @@
   reader decodes only `id`. No boot, configuration, lifecycle, timer, or production call reaches the reducer, so
   this slice grants no authority.
 
-  B3 retains six constraints: (1) snapshot/catalog OID `40310449` vs live name-locked replacement OID `40310452`
+  B3 retains seven constraints: (1) snapshot/catalog OID `40310449` vs live name-locked replacement OID `40310452`
   reproduces the OID-continuity gap B1's inert relookup does not close; (2) false-to-`Unchanged` settlement is
   uncharacterized; (3) tests permit split lock/CAS transactions; (4) the stale recheck must retain its B2
-  `IntakeOutboxStatus` binding; (5) cutoff must exceed maximum journal-append delay, else an append between judgment
-  and settlement can make a delivered row terminal `Unknown` because its outbox lock does not serialize appends;
-  (6) first-proof short-circuit means not all obligations are judged.
+  `IntakeOutboxStatus` binding; (5) cutoff still selects which rows are stale candidates, but cannot make the terminal
+  judgment sound: journal append is lossy because `JournalObserver::submit` drops a full `MAILBOX_CAPACITY` queue and
+  `delivery_journal_observer` discards a `pg_error` batch, neither with retry. No finite cutoff removes that ambiguity:
+  it can absorb delay, not loss. While the journal remains lossy, `Unknown` is terminal ambiguity from absent
+  observation, not proof of delivery failure; delivery may already have occurred, so operators must audit
+  delivery/receipt evidence and accept the duplicate consequence before retrying; (6) first-proof short-circuit means
+  not all obligations are judged; (7) the reducer's join key has no production binding writer. `reconcile_in_tx`
+  selects `event_kind = 'O'` with `canonical_payload ->> 'intake_outbox_id' = $1`, but every current production O-event
+  payload omits `intake_outbox_id`: `TuiObligationKey::payload()` emits only `canonical_key_sha256`, and the watcher,
+  controller, and recovery `obligation_payload` functions emit only their own routing/frontier fields. The only
+  executable payload reads are `exact_delivery_predicate` and `reconcile_in_tx`; other occurrences are `#[cfg(test)]`
+  fixtures or the migration 0109 index substrate and its capability checks. As `intake-node-routing.md` specifies, the
+  binding writer does not exist before the future S-W1 binding-writer slice. With today's production writers,
+  `obligations` is empty and `delivered` remains false, so activating the reducer would terminalize every stale
+  `dispatched` row as `Unknown`. B3 must not make terminal CAS reachable through configuration alone; activation
+  requires the S-W1 binding writer to have landed in code.
 - 2026-08-13 (#5071 T2-W S-R2c B1): `runtime_bootstrap` declares a dormant
   capability module. If `public` names stay bound from its repeatable-read
   snapshot through both name-based `ACCESS SHARE` locks, it checks exact
