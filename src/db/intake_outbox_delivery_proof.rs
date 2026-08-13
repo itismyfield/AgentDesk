@@ -10,6 +10,10 @@ use super::intake_outbox_status::IntakeOutboxStatus;
 use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool};
 
+fn normalize_limit(limit: i64) -> i64 {
+    limit.clamp(1, 500)
+}
+
 #[allow(dead_code)]
 pub(crate) async fn list_stale_dispatched(
     pool: &PgPool,
@@ -23,7 +27,7 @@ pub(crate) async fn list_stale_dispatched(
     )
     .bind(IntakeOutboxStatus::Dispatched)
     .bind(cutoff)
-    .bind(limit.clamp(1, 500))
+    .bind(normalize_limit(limit))
     .fetch_all(pool)
     .await
 }
@@ -150,6 +154,10 @@ mod postgres_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn list_stale_dispatched_is_strict_ordered_and_bounded_pg() {
+        assert_eq!(
+            [-1, 0, 500, i64::MAX].map(normalize_limit),
+            [1, 1, 500, 500]
+        );
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let cutoff = pg_time(Utc::now());
@@ -178,15 +186,6 @@ mod postgres_tests {
             .collect();
         assert_eq!(all_ids, vec![earliest, tied_first, tied_second]);
         assert!(!all_ids.contains(&equal), "cutoff equality is not stale");
-        for (limit, expected) in [(-1, 1), (i64::MAX, 3)] {
-            assert_eq!(
-                list_stale_dispatched(&pool, cutoff, limit)
-                    .await
-                    .expect("clamped limit") // agentdesk-audit: allow-unwrap — PostgreSQL test assertion
-                    .len(),
-                expected
-            );
-        }
         pool.close().await;
         pg_db.drop().await;
     }
