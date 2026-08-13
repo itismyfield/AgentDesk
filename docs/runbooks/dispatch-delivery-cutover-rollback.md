@@ -151,3 +151,25 @@ Only retry typed authority after all of these are true:
 
 - Author: Codex dispatch #1952, 2026-05-08
 - Reviewer: pending for the future GO cutover
+
+## Intake delivery reconciliation floor (#5071 S-R2c)
+
+This separate floor has no numeric defaults. Keep
+`delivery_journal_intake_authority: false` and leave the reconciliation period,
+stale age, and batch absent or zero until read-only forwarded-turn lifecycle and
+journal-lag evidence is recorded. Activation without that evidence is prohibited.
+
+Before activation, set all three tunables to positive values (batch `1..=500`),
+restart every intake-capable process, and confirm Running registration plus a
+fresh schema-ready result. A live setting change or removal blocks new authority;
+the already-running task retains its boot bounds so rollback drain continues.
+The probe has bounded transactional consistency but no invented timeout: a
+conflicting DDL lock can delay it, and rollout-controlled DDL is required.
+
+Rollback order is: set authority false, optionally return journal mode to Legacy,
+then wait until no `public.intake_outbox` row remains `dispatched`. Do not remove
+tunables, restart, cancel, or revert S-R2c before that drain reaches zero. Forced
+removal requires an incident-audited transaction normalizing exact dispatched
+rows to official `unknown`; never repair migration checksums. Late completion
+evidence does not reopen an `unknown` winner, and concurrent nodes promise one
+terminal CAS winner rather than done priority.

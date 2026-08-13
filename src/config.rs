@@ -1587,6 +1587,14 @@ fn is_legacy_delivery_journal_mode(mode: &DeliveryJournalMode) -> bool {
 pub struct RuntimeSettingsConfig {
     #[serde(default, skip_serializing_if = "is_legacy_delivery_journal_mode")]
     pub delivery_journal_mode: DeliveryJournalMode,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub delivery_journal_intake_authority: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_journal_intake_reconcile_period_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_journal_intake_stale_age_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_journal_intake_reconcile_batch_size: Option<u16>,
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub delivery_journal_cohort_percent: u8,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1758,6 +1766,10 @@ pub struct RuntimeSettingsConfig {
 impl RuntimeSettingsConfig {
     pub fn is_empty(&self) -> bool {
         self.delivery_journal_mode == DeliveryJournalMode::Legacy
+            && !self.delivery_journal_intake_authority
+            && self.delivery_journal_intake_reconcile_period_secs.is_none()
+            && self.delivery_journal_intake_stale_age_secs.is_none()
+            && self.delivery_journal_intake_reconcile_batch_size.is_none()
             && self.delivery_journal_cohort_percent == 0
             && self.delivery_journal_internal_channel_ids.is_empty()
             && self.requested_timeout_min.is_none()
@@ -1797,6 +1809,34 @@ impl RuntimeSettingsConfig {
             && self.dispatch_rate_limit_gate_enabled.is_none()
             && self.dispatch_rate_limit_gate_danger_pct.is_none()
             && !self.reset_overrides_on_restart
+    }
+}
+
+#[cfg(test)]
+mod intake_delivery_reconciler_config_tests {
+    use super::*;
+
+    #[test]
+    fn intake_delivery_authority_and_tunables_default_off_and_round_trip() {
+        let absent: RuntimeSettingsConfig = serde_yaml::from_str("{}").unwrap();
+        assert!(!absent.delivery_journal_intake_authority);
+        assert_eq!(absent.delivery_journal_intake_reconcile_period_secs, None);
+        assert!(absent.is_empty());
+        for yaml in [
+            "delivery_journal_intake_reconcile_period_secs: 0\n",
+            "delivery_journal_intake_authority: true\n",
+            "delivery_journal_intake_reconcile_period_secs: 2\ndelivery_journal_intake_stale_age_secs: 3\ndelivery_journal_intake_reconcile_batch_size: 4\n",
+        ] {
+            let parsed: RuntimeSettingsConfig = serde_yaml::from_str(yaml).unwrap();
+            assert!(!parsed.is_empty());
+            assert_eq!(
+                serde_yaml::from_str::<RuntimeSettingsConfig>(
+                    &serde_yaml::to_string(&parsed).unwrap()
+                )
+                .unwrap(),
+                parsed
+            );
+        }
     }
 }
 

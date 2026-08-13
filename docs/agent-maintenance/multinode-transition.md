@@ -1811,6 +1811,17 @@
   classified `Failed` (never `Standby`), so a restart never skips leader
   drain-ack on an ambiguous lease result: every incomplete/failed/missing signal
   falls back to the existing drain path (fail-closed).
+- #5071 T2-W S-R2c intake-delivery rollback floor — **worker-local singleton,
+  shared durable CAS**: every confirmed gateway or standby provider runtime
+  attempts the same process-global reconciler registration before either intake
+  worker branch. Registration is independent of cluster leadership. Only the
+  future's Running state is local capability; synchronous lease capture clears
+  Starting on cancellation before first poll, while shutdown, abort, panic, and
+  normal return clear Running. Each candidate is settled in its own PostgreSQL
+  transaction against `public` relations. Authority remains false unless the
+  default-false request, Shadow mode, unchanged non-zero boot tunables, Running
+  registration, and a fresh live schema/journal probe are all true. No lifecycle
+  evidence currently supplies numeric tunables, so deployment remains dormant.
 - #4658 scheduled-message immutable context snapshots: **PG-lease-safe /
   worker-local execution, no new leader or lease authority**. Snapshot capture
   (`services::scheduled_messages::context_snapshot::capture_snapshot_tx`) and

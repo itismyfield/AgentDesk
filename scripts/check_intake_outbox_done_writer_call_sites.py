@@ -44,22 +44,14 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-SYMBOL = "mark_done"
 SCAN_ROOT = Path("src")
 EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
-    SYMBOL: {"src/services/cluster/intake_worker.rs": 1},
+    "mark_done": {"src/services/cluster/intake_worker.rs": 1},
+    "mark_done_from_delivery_proof": {
+        "src/services/discord/intake_delivery_reconciler.rs": 1
+    },
 }
-
-CALL_RE = re.compile(r"(?<![.\w])\bmark_done\s*\(")
-DEFN_RE = re.compile(r"\bfn\s+mark_done\s*\(")
-DIRECT_IMPORT_RE = re.compile(
-    r"\buse\s+crate\s*::\s*db\s*::\s*intake_outbox\s*::\s*"
-    r"(?:mark_done\b|\{[^}]*\bmark_done\b)",
-    re.DOTALL,
-)
-FULLY_QUALIFIED_RE = re.compile(
-    r"\b(?:(?:crate\s*::\s*)?db\s*::\s*)?intake_outbox\s*::\s*mark_done\s*\("
-)
+SYMBOL_MODULES = {"mark_done": "intake_outbox", "mark_done_from_delivery_proof": "intake_outbox_delivery_proof"}
 CFG_TEST_RE = re.compile(r"#\[\s*cfg\s*\(\s*(?:all|any)?\s*\(?\s*test\b")
 
 # Char literal (so `'"'` / `'{'` cannot desync the scanner). Lifetimes (`'a`)
@@ -195,15 +187,16 @@ def production_call_sites(root: Path) -> tuple[dict[str, dict[str, int]], int, i
             continue
         scanned += 1
         code = production_text(path)
-        if not (DIRECT_IMPORT_RE.search(code) or FULLY_QUALIFIED_RE.search(code)):
-            continue
-        hits = 0
-        for line in code.splitlines():
-            if DEFN_RE.search(line):
+        for symbol, module in SYMBOL_MODULES.items():
+            call = re.compile(rf"(?<![.\w])\b{symbol}\s*\(")
+            definition = re.compile(rf"\bfn\s+{symbol}\s*\(")
+            imported = re.compile(rf"\buse\s+crate\s*::\s*db\s*::\s*{module}\s*::\s*(?:{symbol}\b|\{{[^}}]*\b{symbol}\b)", re.DOTALL)
+            qualified = re.compile(rf"\b(?:(?:crate\s*::\s*)?db\s*::\s*)?{module}\s*::\s*{symbol}\s*\(")
+            if not (imported.search(code) or qualified.search(code)):
                 continue
-            hits += len(CALL_RE.findall(line))
-        if hits:
-            found[SYMBOL][path.relative_to(root).as_posix()] += hits
+            hits = sum(len(call.findall(line)) for line in code.splitlines() if not definition.search(line))
+            if hits:
+                found[symbol][path.relative_to(root).as_posix()] += hits
     return found, scanned, skipped
 
 

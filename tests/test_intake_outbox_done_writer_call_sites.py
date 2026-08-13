@@ -18,6 +18,7 @@ SPEC.loader.exec_module(guard)
 
 EXPECTED_CALL_SITES = {
     "mark_done": {"src/services/cluster/intake_worker.rs": 1},
+    "mark_done_from_delivery_proof": {"src/services/discord/intake_delivery_reconciler.rs": 1},
 }
 
 
@@ -31,7 +32,7 @@ class SourceContractTests(unittest.TestCase):
     def test_real_tree_passes_and_reports_declared_limits(self):
         ok, message = guard.check(ROOT)
         self.assertTrue(ok, message)
-        self.assertIn("1 production sites across 1 symbol", message)
+        self.assertIn("2 production sites across 2 symbol", message)
         for limit in ("not Rust parsing", "direct SQL writers are NOT seen", "over-counted"):
             self.assertIn(limit, message)
 
@@ -73,6 +74,7 @@ class DiscriminationTests(unittest.TestCase):
             "use crate::db::intake_outbox::{mark_done, mark_spawned};\n"
             "fn run_intake_worker_tick() { mark_done(); }\n",
         )
+        write(root, "src/services/discord/intake_delivery_reconciler.rs", "use crate::db::intake_outbox_delivery_proof::mark_done_from_delivery_proof;\nfn reconcile() { mark_done_from_delivery_proof(); }\n")
         return root
 
     def run_guard(self, root: Path, expected=None) -> tuple[bool, str]:

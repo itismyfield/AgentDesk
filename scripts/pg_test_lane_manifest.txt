@@ -57,6 +57,7 @@ src/services/discord/catch_up/too_old_notice.rs
 src/services/discord/health/recovery.rs
 src/services/discord/health/recovery/stall_alert.rs
 src/services/discord/idle_recap_interaction.rs
+src/services/discord/intake_delivery_reconciler.rs
 src/services/discord/mod.rs
 src/services/discord/relay_recovery_circuit_alert_producer.rs
 src/services/discord/relay_recovery_circuit_breaker.rs
@@ -153,6 +154,7 @@ services::discord::health::recovery::stall_alert::tests
 services::discord::health::recovery::stall_watchdog_auto_heal_tests
 services::discord::idle_cleanup_selector_tests
 services::discord::idle_recap_interaction::tests
+services::discord::intake_delivery_reconciler::postgres_tests
 services::discord::relay_recovery::circuit_breaker::tests
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
 services::discord::router::intake_dispatch::tests
@@ -599,6 +601,10 @@ services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backsto
 services::discord::idle_cleanup_selector_tests::idle_cleanup_preserves_provider_selector_columns_pg
 services::discord::idle_recap_interaction::tests::concurrent_recap_compact_claim_pg_consumes_exactly_once
 services::discord::idle_recap_interaction::tests::recap_compact_claim_pg_rejects_owner_handoff_without_consuming_pointer
+services::discord::intake_delivery_reconciler::postgres_tests::capability_accepts_0109_without_completion_uuid_pg
+services::discord::intake_delivery_reconciler::postgres_tests::capability_rejects_bad_rows_constraints_and_indexes_pg
+services::discord::intake_delivery_reconciler::postgres_tests::reconciler_cutoff_status_and_rollback_are_transactional_pg
+services::discord::intake_delivery_reconciler::postgres_tests::reconciler_existential_done_and_unknown_pg
 services::discord::relay_recovery::circuit_breaker::tests::pg_alert_is_actionable_and_durably_one_shot_per_episode
 services::discord::relay_recovery::circuit_breaker::tests::progress_during_pg_stage_cancels_stale_alert_and_reopen_is_distinct
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests::activate_unknown_status_fails_safe_without_reopen_pg

@@ -28,6 +28,7 @@ mod idle_recap_interaction;
 mod idle_relay_drift;
 mod inflight;
 mod inflight_heartbeat_sweeper;
+pub(crate) mod intake_delivery_reconciler;
 pub(crate) mod internal_api;
 mod jsonl_watcher;
 mod mailbox_finish;

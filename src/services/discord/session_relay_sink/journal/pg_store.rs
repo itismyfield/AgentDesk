@@ -26,7 +26,7 @@ pub(super) async fn load_obligation_window(
     let rows = sqlx::query_as::<_, StoredJournalEvent>(
         "SELECT event_id, obligation_id, attempt_id, event_kind, event_seq,
                 idempotency_key, canonical_payload, requested_channel_id,
-                returned_channel_id, message_id FROM delivery_journal_events
+                returned_channel_id, message_id FROM public.delivery_journal_events
           WHERE obligation_id = $1 ORDER BY event_seq, event_id",
     )
     .bind(obligation_id)
@@ -90,7 +90,7 @@ pub(in crate::services::discord::session_relay_sink::journal) async fn append_de
     for event in events {
         let receipt = event.receipt.as_ref();
         let result = sqlx::query(
-            "INSERT INTO delivery_journal_events
+            "INSERT INTO public.delivery_journal_events
              (event_id, obligation_id, attempt_id, event_kind, event_seq,
               idempotency_key, canonical_payload, requested_channel_id,
               returned_channel_id, message_id)
@@ -115,7 +115,7 @@ pub(in crate::services::discord::session_relay_sink::journal) async fn append_de
         }
         let existing = sqlx::query_as::<_, (Uuid, Vec<u8>, serde_json::Value)>(
             "SELECT event_id, idempotency_key, canonical_payload
-               FROM delivery_journal_events
+               FROM public.delivery_journal_events
               WHERE obligation_id = $1 AND event_seq = $2",
         )
         .bind(event.obligation_id)

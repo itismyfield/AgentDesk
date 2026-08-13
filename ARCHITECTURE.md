@@ -1119,6 +1119,7 @@ src/
 │   │   ├── idle_relay_drift.rs
 │   │   ├── inflight.rs
 │   │   ├── inflight_heartbeat_sweeper.rs
+│   │   ├── intake_delivery_reconciler.rs
 │   │   ├── internal_api.rs
 │   │   ├── jsonl_watcher.rs
 │   │   ├── mailbox_finish.rs

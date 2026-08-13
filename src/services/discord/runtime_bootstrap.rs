@@ -252,6 +252,10 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // files remain owned by the external persistence barrier and are never
     // deleted by the respawned binary.
     record_restart_artifact_boot_instant();
+    intake_delivery_reconciler::ensure_spawned(
+        shared.pg_pool.as_ref(),
+        shared.restart.shutting_down.clone(),
+    );
 
     let gateway_lease = match gateway_outcome {
         GatewayLeaseOutcome::Proceed(lease) => lease,
@@ -319,6 +323,26 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 mod bootstrap_tests {
     use super::*;
     use std::collections::{HashMap, HashSet, VecDeque};
+
+    #[test]
+    fn intake_reconciler_registration_precedes_both_worker_branches() {
+        let source = include_str!("runtime_bootstrap.rs");
+        let production = source
+            .split_once("#[cfg(test)]\nmod bootstrap_tests")
+            .unwrap()
+            .0;
+        let registration = production
+            .find("intake_delivery_reconciler::ensure_spawned(")
+            .unwrap();
+        let branches: Vec<_> = production
+            .match_indices("run_bot_maybe_spawn_intake_worker(")
+            .map(|x| x.0)
+            .collect();
+        assert_eq!(branches.len(), 2);
+        assert!(branches.iter().all(|position| registration < *position));
+        let preceding = &production[..registration];
+        assert!(preceding.rfind("starts_provider_runtime()").is_some());
+    }
 
     fn sorted_channel_ids(channels: Vec<ChannelId>) -> Vec<u64> {
         channels
