@@ -4,12 +4,13 @@
 
 ### Audited touches
 - 2026-08-13 (#5071 T2-W S-R2c B1): `runtime_bootstrap` declares a dormant
-  intake-delivery capability module. Its live PostgreSQL probe fails closed on
-  migration, exact `public` relation and built-in type identity, privileges,
-  required columns and constraints, bad rows under NOT VALID checks, and every
-  required index dimension. The module has no production caller, task,
-  authority switch, row transition, or boot wiring, so node ownership and
-  runtime behavior are unchanged in this slice.
+  capability module. If `public` names stay bound from its repeatable-read
+  snapshot through both name-based `ACCESS SHARE` locks, it checks exact
+  relation/type OIDs, migrations, privileges, columns, constraints, bad rows
+  under NOT VALID checks, and required indexes. DDL committed in that interval
+  can leave it validating old snapshot objects while locking replacements.
+  Conflicting table DDL is blocked only after both locks; later DDL is outside
+  the result. Errors fail closed. No caller or boot wiring changes runtime behavior.
 - 2026-08-13 (#5071 T2-W S-R2a): the journal-owned obligation-window facade
   reads every row in `(event_seq, event_id)` order and restores only closed
   `O/A/T/C/S/U` events. It fails closed on malformed kinds, slots, attempts,

@@ -1,9 +1,7 @@
 //! Dormant PostgreSQL capability probe for intake-delivery reconciliation.
 
 #![allow(dead_code)]
-
 use sqlx::{PgConnection, PgPool};
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SchemaReason {
     Ready,
@@ -15,7 +13,6 @@ pub(super) enum SchemaReason {
     Constraint,
     Index,
 }
-
 fn sql_tokens(value: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut chars = value.chars().peekable();
@@ -58,7 +55,6 @@ fn sql_tokens(value: &str) -> Vec<String> {
     }
     tokens
 }
-
 const INTAKE_CHECKS: [(&str, &str); 2] = [
     (
         "intake_outbox_dispatched_requires_clock",
@@ -69,7 +65,6 @@ const INTAKE_CHECKS: [(&str, &str); 2] = [
         "CHECK (status = ANY (ARRAY['pending'::text, 'claimed'::text, 'accepted'::text, 'spawned'::text, 'dispatched'::text, 'unknown'::text, 'done'::text, 'failed_pre_accept'::text, 'failed_post_accept'::text]))",
     ),
 ];
-
 const JOURNAL_CHECKS: [(&str, &str); 5] = [
     (
         "delivery_journal_attempt_check",
@@ -92,7 +87,6 @@ const JOURNAL_CHECKS: [(&str, &str); 5] = [
         "CHECK (event_kind <> 'T'::text OR requested_channel_id IS NOT NULL AND returned_channel_id IS NOT NULL AND message_id IS NOT NULL)",
     ),
 ];
-
 async fn relation_oids(conn: &mut PgConnection) -> Result<Option<(i64, i64)>, sqlx::Error> {
     let rows: Vec<(String, i64)> = sqlx::query_as(
         "SELECT c.relname,c.oid::bigint
@@ -114,7 +108,6 @@ async fn relation_oids(conn: &mut PgConnection) -> Result<Option<(i64, i64)>, sq
         _ => None,
     })
 }
-
 async fn exact_constraints(
     conn: &mut PgConnection,
     oid: i64,
@@ -141,7 +134,6 @@ async fn exact_constraints(
         })
         .collect())
 }
-
 async fn catalog_shape(
     conn: &mut PgConnection,
     journal: i64,
@@ -173,14 +165,12 @@ async fn catalog_shape(
     if columns != (4, 11) {
         return Ok(SchemaReason::Columns);
     }
-
     let intake_checks = exact_constraints(conn, intake, &INTAKE_CHECKS).await?;
     let journal_checks = exact_constraints(conn, journal, &JOURNAL_CHECKS).await?;
     if intake_checks.len() != 2 || journal_checks.len() != 5 || journal_checks.iter().any(|v| !v.1)
     {
         return Ok(SchemaReason::Constraint);
     }
-
     for (name, validated) in intake_checks {
         if validated {
             continue;
@@ -208,13 +198,15 @@ async fn catalog_shape(
             return Ok(SchemaReason::Constraint);
         }
     }
-
+    // `pg_get_indexdef` returns empty text when the requested key number is
+    // beyond `indnkeyatts`. Exact key counts below keep that no-key sentinel
+    // distinguishable from an occupied key slot.
     let indexes: bool = sqlx::query_scalar(
         "WITH expected(name,table_oid,is_unique,key_count,key1,key2,predicate) AS (VALUES
-          ('idx_intake_outbox_stale_dispatched',$1::oid,false,1::smallint,'dispatched_at',NULL::text,'(status = ''dispatched''::text)'),
-          ('idx_delivery_journal_intake_binding',$2::oid,false,1::smallint,'(canonical_payload ->> ''intake_outbox_id''::text)',NULL::text,'(event_kind = ''O''::text)'),
+          ('idx_intake_outbox_stale_dispatched',$1::oid,false,1::smallint,'dispatched_at',''::text,'(status = ''dispatched''::text)'),
+          ('idx_delivery_journal_intake_binding',$2::oid,false,1::smallint,'(canonical_payload ->> ''intake_outbox_id''::text)',''::text,'(event_kind = ''O''::text)'),
           ('delivery_journal_single_o_a_t',$2::oid,true,2::smallint,'obligation_id','event_kind','(event_kind = ANY (ARRAY[''O''::text, ''A''::text, ''T''::text]))'),
-          ('delivery_journal_single_terminal',$2::oid,true,1::smallint,'obligation_id',NULL::text,'(event_kind = ANY (ARRAY[''C''::text, ''S''::text, ''U''::text]))'),
+          ('delivery_journal_single_terminal',$2::oid,true,1::smallint,'obligation_id',''::text,'(event_kind = ANY (ARRAY[''C''::text, ''S''::text, ''U''::text]))'),
           ('delivery_journal_obligation_order',$2::oid,false,2::smallint,'obligation_id','event_seq',NULL::text))
         SELECT count(*)=5 AND bool_and(
           am.amname='btree' AND i.indisvalid AND i.indisready AND i.indislive
@@ -239,7 +231,6 @@ async fn catalog_shape(
         SchemaReason::Index
     })
 }
-
 async fn probe_inner(conn: &mut PgConnection) -> Result<SchemaReason, sqlx::Error> {
     let migration_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM public._sqlx_migrations
@@ -251,7 +242,6 @@ async fn probe_inner(conn: &mut PgConnection) -> Result<SchemaReason, sqlx::Erro
     if migration_count != 6 {
         return Ok(SchemaReason::Migration);
     }
-
     let Some((journal, intake)) = relation_oids(conn).await? else {
         return Ok(SchemaReason::Relation);
     };
@@ -260,10 +250,6 @@ async fn probe_inner(conn: &mut PgConnection) -> Result<SchemaReason, sqlx::Erro
     )
     .execute(&mut *conn)
     .await?;
-    if relation_oids(conn).await? != Some((journal, intake)) {
-        return Ok(SchemaReason::Relation);
-    }
-
     let privileges: bool = sqlx::query_scalar(
         "SELECT has_table_privilege('public.intake_outbox','SELECT')
             AND has_table_privilege('public.intake_outbox','UPDATE')
@@ -274,11 +260,6 @@ async fn probe_inner(conn: &mut PgConnection) -> Result<SchemaReason, sqlx::Erro
     .await?;
     if !privileges {
         return Ok(SchemaReason::Privilege);
-    }
-
-    let first = catalog_shape(conn, journal, intake).await?;
-    if first != SchemaReason::Ready {
-        return Ok(first);
     }
     catalog_shape(conn, journal, intake).await
 }
@@ -350,6 +331,10 @@ mod postgres_tests {
         database.drop().await;
     }
 
+    async fn execute(pool: &PgPool, statement: &str) {
+        sqlx::query(statement).execute(pool).await.unwrap();
+    }
+
     #[tokio::test]
     async fn capability_accepts_public_0109_under_hostile_search_path_pg() {
         let (database, pool) = database().await;
@@ -377,6 +362,10 @@ mod postgres_tests {
         .await
         .unwrap();
         let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
         sqlx::query(&format!("SET LOCAL search_path={schema},public"))
             .execute(&mut *tx)
             .await
@@ -396,6 +385,24 @@ mod postgres_tests {
     #[tokio::test]
     async fn capability_rejects_catalog_and_data_mutations_pg() {
         let (database, pool) = database().await;
+        assert_eq!(probe_schema(&pool).await, SchemaReason::Ready);
+
+        for (hide, reason, restore) in [
+            (
+                "ALTER TABLE public.delivery_journal_events RENAME TO journal_hidden",
+                SchemaReason::Relation,
+                "ALTER TABLE public.journal_hidden RENAME TO delivery_journal_events",
+            ),
+            (
+                "ALTER TABLE public._sqlx_migrations RENAME TO migrations_hidden",
+                SchemaReason::Query,
+                "ALTER TABLE public.migrations_hidden RENAME TO _sqlx_migrations",
+            ),
+        ] {
+            execute(&pool, hide).await;
+            assert_eq!(probe_schema(&pool).await, reason);
+            execute(&pool, restore).await;
+        }
         assert_eq!(probe_schema(&pool).await, SchemaReason::Ready);
 
         for version in [103_i64, 105, 106, 107, 108, 109] {
@@ -423,24 +430,23 @@ mod postgres_tests {
         .await
         .unwrap();
         assert_eq!(probe_schema(&pool).await, SchemaReason::Columns);
-        sqlx::query(
+        execute(
+            &pool,
             "ALTER TABLE public.intake_outbox ALTER COLUMN completed_at
              TYPE pg_catalog.timestamptz USING completed_at::pg_catalog.timestamptz",
         )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
+        .await;
+        execute(
+            &pool,
             "ALTER TABLE public.intake_outbox ALTER COLUMN dispatched_at SET DEFAULT now()",
         )
-        .execute(&pool)
-        .await
-        .unwrap();
+        .await;
         assert_eq!(probe_schema(&pool).await, SchemaReason::Columns);
-        sqlx::query("ALTER TABLE public.intake_outbox ALTER COLUMN dispatched_at DROP DEFAULT")
-            .execute(&pool)
-            .await
-            .unwrap();
+        execute(
+            &pool,
+            "ALTER TABLE public.intake_outbox ALTER COLUMN dispatched_at DROP DEFAULT",
+        )
+        .await;
 
         sqlx::raw_sql(
             "ALTER TABLE public.intake_outbox
@@ -463,13 +469,12 @@ mod postgres_tests {
         .await
         .unwrap();
 
-        sqlx::query(
+        execute(
+            &pool,
             "ALTER TABLE public.intake_outbox
              DROP CONSTRAINT intake_outbox_dispatched_requires_clock",
         )
-        .execute(&pool)
-        .await
-        .unwrap();
+        .await;
         let bad_clock: i64 = sqlx::query_scalar(
             "INSERT INTO public.intake_outbox(
                target_instance_id,forwarded_by_instance_id,channel_id,user_msg_id,
@@ -532,10 +537,7 @@ mod postgres_tests {
                 .await
                 .unwrap();
             }
-            sqlx::query(&format!("DROP INDEX public.{name}"))
-                .execute(&pool)
-                .await
-                .unwrap();
+            execute(&pool, &format!("DROP INDEX public.{name}")).await;
             sqlx::query(&format!(
                 "CREATE INDEX {name} ON public.intake_outbox(id) WHERE status='pending'"
             ))
@@ -543,10 +545,7 @@ mod postgres_tests {
             .await
             .unwrap();
             assert_eq!(probe_schema(&pool).await, SchemaReason::Index);
-            sqlx::query(&format!("DROP INDEX public.{name}"))
-                .execute(&pool)
-                .await
-                .unwrap();
+            execute(&pool, &format!("DROP INDEX public.{name}")).await;
             sqlx::raw_sql(&definition).execute(&pool).await.unwrap();
         }
         assert_eq!(probe_schema(&pool).await, SchemaReason::Ready);
