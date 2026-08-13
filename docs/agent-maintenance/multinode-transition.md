@@ -3,6 +3,13 @@
 > Last refreshed: 2026-08-13 (against #5071 T2-W S-R2a read-only facade).
 
 ### Audited touches
+- 2026-08-13 (#5071 T2-W S-R2c B1): `runtime_bootstrap` declares a dormant
+  intake-delivery capability module. Its live PostgreSQL probe fails closed on
+  migration, exact `public` relation and built-in type identity, privileges,
+  required columns and constraints, bad rows under NOT VALID checks, and every
+  required index dimension. The module has no production caller, task,
+  authority switch, row transition, or boot wiring, so node ownership and
+  runtime behavior are unchanged in this slice.
 - 2026-08-13 (#5071 T2-W S-R2a): the journal-owned obligation-window facade
   reads every row in `(event_seq, event_id)` order and restores only closed
   `O/A/T/C/S/U` events. It fails closed on malformed kinds, slots, attempts,

@@ -777,6 +777,7 @@ src/
 │   │   │   ├── gateway_lease_tests.rs
 │   │   │   ├── gateway_runtime.rs
 │   │   │   ├── intake.rs
+│   │   │   ├── intake_delivery_capability.rs
 │   │   │   ├── orphan_recovery.rs
 │   │   │   ├── queued_placeholders.rs
 │   │   │   ├── recovery_flush.rs
