@@ -16,8 +16,9 @@ SPEC = importlib.util.spec_from_file_location("intake_outbox_done_writer_guard",
 guard = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(guard)
 
-EXPECTED_CALL_SITES = {
+CURRENT_EXPECTED_CALL_SITES = {
     "mark_done": {"src/services/cluster/intake_worker.rs": 1},
+    "mark_done_from_delivery_proof": {},
 }
 
 
@@ -31,12 +32,13 @@ class SourceContractTests(unittest.TestCase):
     def test_real_tree_passes_and_reports_declared_limits(self):
         ok, message = guard.check(ROOT)
         self.assertTrue(ok, message)
-        self.assertIn("1 production sites across 1 symbol", message)
+        self.assertIn("1 production sites across 2 symbols", message)
         for limit in ("not Rust parsing", "direct SQL writers are NOT seen", "over-counted"):
             self.assertIn(limit, message)
 
     def test_allowlist_is_the_t2_done_writer_only(self):
-        self.assertEqual(guard.EXPECTED_CALL_SITES, EXPECTED_CALL_SITES)
+        self.assertEqual(guard.expected_call_sites(ROOT), CURRENT_EXPECTED_CALL_SITES)
+        self.assertFalse((ROOT / guard.PROOF_OWNER).exists())
 
     def test_scan_root_is_all_of_src(self):
         self.assertEqual(guard.SCAN_ROOT.as_posix(), "src")
@@ -63,7 +65,7 @@ class SourceContractTests(unittest.TestCase):
 
 
 class DiscriminationTests(unittest.TestCase):
-    def fixture(self) -> Path:
+    def fixture(self, proof: bool = False) -> Path:
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
@@ -73,15 +75,17 @@ class DiscriminationTests(unittest.TestCase):
             "use crate::db::intake_outbox::{mark_done, mark_spawned};\n"
             "fn run_intake_worker_tick() { mark_done(); }\n",
         )
+        if proof:
+            write(
+                root,
+                guard.PROOF_OWNER,
+                "use crate::db::intake_outbox_delivery_proof::mark_done_from_delivery_proof;\n"
+                "fn reconcile() { mark_done_from_delivery_proof(); }\n",
+            )
         return root
 
     def run_guard(self, root: Path, expected=None) -> tuple[bool, str]:
-        original = guard.EXPECTED_CALL_SITES
-        guard.EXPECTED_CALL_SITES = expected if expected is not None else EXPECTED_CALL_SITES
-        try:
-            return guard.check(root)
-        finally:
-            guard.EXPECTED_CALL_SITES = original
+        return guard.check(root, expected)
 
     def test_baseline_fixture_is_green(self):
         ok, message = self.run_guard(self.fixture())
@@ -118,7 +122,8 @@ class DiscriminationTests(unittest.TestCase):
         self.assertIn("UNLISTED call site", failing.stderr)
 
     def test_allowlist_entry_deleted_is_fail_closed(self):
-        ok, message = self.run_guard(self.fixture(), {"mark_done": {}})
+        expected = {**CURRENT_EXPECTED_CALL_SITES, "mark_done": {}}
+        ok, message = self.run_guard(self.fixture(), expected)
         self.assertFalse(ok)
         self.assertIn("mark_done: UNLISTED call site", message)
 
@@ -172,6 +177,40 @@ class DiscriminationTests(unittest.TestCase):
             "mark_done: UNLISTED call site in src/services/session_backend.rs (1x)",
             message,
         )
+
+    def test_future_proof_writer_activates_and_mutations_fail_closed(self):
+        root = self.fixture(proof=True)
+        ok, message = self.run_guard(root)
+        self.assertTrue(ok, message)
+        self.assertIn("2 production sites across 2 symbols", message)
+
+        write(
+            root,
+            guard.PROOF_OWNER,
+            "use crate::db::intake_outbox_delivery_proof::mark_done_from_delivery_proof;\n"
+            "fn reconcile() {}\n",
+        )
+        ok, message = self.run_guard(root)
+        self.assertFalse(ok)
+        self.assertIn("mark_done_from_delivery_proof: call site GONE", message)
+
+        for body in (
+            "use crate::db::intake_outbox_delivery_proof::mark_done_from_delivery_proof; fn x(){mark_done_from_delivery_proof();}",
+            "fn x(){crate::db::intake_outbox_delivery_proof::mark_done_from_delivery_proof();}",
+        ):
+            root = self.fixture(proof=True)
+            write(root, "src/services/discord/unlisted.rs", body)
+            ok, message = self.run_guard(root)
+            self.assertFalse(ok)
+            self.assertIn("mark_done_from_delivery_proof: UNLISTED call site", message)
+
+        root = self.fixture(proof=True)
+        source = root / guard.PROOF_OWNER
+        moved = source.with_name("intake_delivery_reconciler_typo.rs")
+        source.rename(moved)
+        ok, message = self.run_guard(root)
+        self.assertFalse(ok)
+        self.assertIn("mark_done_from_delivery_proof: UNLISTED call site", message)
 
 
 if __name__ == "__main__":

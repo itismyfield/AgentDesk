@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Per-file exact-count allowlist for the intake-outbox `done` writer (#5071 T2).
+"""Per-file exact-count allowlist for intake-outbox `done` writers (#5071 T2).
 
 WHY THIS EXISTS, AND WHY IT LANDS BEFORE T2. #5071 T2 moves the `done`
 transition from the intake worker to the terminal-receipt owner. Before that
@@ -7,8 +7,9 @@ move, the current writer call location must be reviewable: a behaviour change
 with no gate underneath it protects nothing. This script changes no production
 behaviour; it records the production call sites that exist before the move.
 
-WHAT IS PINNED. The scope is deliberately only
-`crate::db::intake_outbox::mark_done`, the current `spawned -> done` writer.
+WHAT IS PINNED. The scope is deliberately the legacy
+`crate::db::intake_outbox::mark_done` writer and the future delivery-proof
+`crate::db::intake_outbox_delivery_proof::mark_done_from_delivery_proof` writer.
 EPIC #5071 says the worker's `Ok` stamp becomes `dispatched` and that only the
 terminal-receipt holder drives `done`; it does not move `claimed`, `accepted`,
 or `spawned`. Pinning those other lifecycle transitions here would block T2-
@@ -44,22 +45,12 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-SYMBOL = "mark_done"
 SCAN_ROOT = Path("src")
-EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
-    SYMBOL: {"src/services/cluster/intake_worker.rs": 1},
+PROOF_OWNER = "src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs"
+SYMBOL_MODULES = {
+    "mark_done": "intake_outbox",
+    "mark_done_from_delivery_proof": "intake_outbox_delivery_proof",
 }
-
-CALL_RE = re.compile(r"(?<![.\w])\bmark_done\s*\(")
-DEFN_RE = re.compile(r"\bfn\s+mark_done\s*\(")
-DIRECT_IMPORT_RE = re.compile(
-    r"\buse\s+crate\s*::\s*db\s*::\s*intake_outbox\s*::\s*"
-    r"(?:mark_done\b|\{[^}]*\bmark_done\b)",
-    re.DOTALL,
-)
-FULLY_QUALIFIED_RE = re.compile(
-    r"\b(?:(?:crate\s*::\s*)?db\s*::\s*)?intake_outbox\s*::\s*mark_done\s*\("
-)
 CFG_TEST_RE = re.compile(r"#\[\s*cfg\s*\(\s*(?:all|any)?\s*\(?\s*test\b")
 
 # Char literal (so `'"'` / `'{'` cannot desync the scanner). Lifetimes (`'a`)
@@ -195,36 +186,60 @@ def production_call_sites(root: Path) -> tuple[dict[str, dict[str, int]], int, i
             continue
         scanned += 1
         code = production_text(path)
-        if not (DIRECT_IMPORT_RE.search(code) or FULLY_QUALIFIED_RE.search(code)):
-            continue
-        hits = 0
-        for line in code.splitlines():
-            if DEFN_RE.search(line):
+        for symbol, module in SYMBOL_MODULES.items():
+            call = re.compile(rf"(?<![.\w])\b{symbol}\s*\(")
+            definition = re.compile(rf"\bfn\s+{symbol}\s*\(")
+            imported = re.compile(
+                rf"\buse\s+crate\s*::\s*db\s*::\s*{module}\s*::\s*"
+                rf"(?:{symbol}\b|\{{[^}}]*\b{symbol}\b)",
+                re.DOTALL,
+            )
+            qualified = re.compile(
+                rf"\b(?:(?:crate\s*::\s*)?db\s*::\s*)?{module}\s*::\s*{symbol}\s*\("
+            )
+            if not (imported.search(code) or qualified.search(code)):
                 continue
-            hits += len(CALL_RE.findall(line))
-        if hits:
-            found[SYMBOL][path.relative_to(root).as_posix()] += hits
+            hits = sum(
+                len(call.findall(line))
+                for line in code.splitlines()
+                if not definition.search(line)
+            )
+            if hits:
+                found[symbol][path.relative_to(root).as_posix()] += hits
     return found, scanned, skipped
+
+
+def expected_call_sites(root: Path) -> dict[str, dict[str, int]]:
+    """Activate the proof-writer pin only when its exact future module exists."""
+    return {
+        "mark_done": {"src/services/cluster/intake_worker.rs": 1},
+        "mark_done_from_delivery_proof": (
+            {PROOF_OWNER: 1} if (root / PROOF_OWNER).is_file() else {}
+        ),
+    }
 
 
 LIMITS = (
     "lexical scan, not Rust parsing or reachability proof; glob/nested-brace/super imports, "
     "aliases, renamed re-exports, name-constructing macros, same-file helper/value indirection, "
-    "trait dispatch, mark_done followed by a line break before `(`, and direct SQL writers are "
+    "trait dispatch, protected symbols split before `(`, and direct SQL writers are "
     "NOT seen (cargo fmt --check rejects the line-break call form); same-spelled free functions "
     "may be over-counted; cfg other than cfg(test) is not evaluated; the wiring test cannot "
     "protect deletion of its own unittest invocation from ci-script-checks.sh"
 )
 
 
-def check(root: Path) -> tuple[bool, str]:
+def check(
+    root: Path, expected: dict[str, dict[str, int]] | None = None
+) -> tuple[bool, str]:
     found, scanned, skipped = production_call_sites(root)
+    expected = expected if expected is not None else expected_call_sites(root)
     problems: list[str] = []
-    for symbol in sorted(set(EXPECTED_CALL_SITES) | set(found)):
-        expected = EXPECTED_CALL_SITES.get(symbol, {})
+    for symbol in sorted(set(expected) | set(found)):
+        expected_files = expected.get(symbol, {})
         actual = found[symbol]
-        for rel in sorted(set(expected) | set(actual)):
-            want = expected.get(rel, 0)
+        for rel in sorted(set(expected_files) | set(actual)):
+            want = expected_files.get(rel, 0)
             have = actual.get(rel, 0)
             if want != have:
                 if want == 0:
@@ -233,11 +248,11 @@ def check(root: Path) -> tuple[bool, str]:
                     problems.append(f"{symbol}: call site GONE from {rel} (expected {want}x)")
                 else:
                     problems.append(f"{symbol}: {rel} has {have}x, expected {want}x")
-    total_expected = sum(sum(files.values()) for files in EXPECTED_CALL_SITES.values())
+    total_expected = sum(sum(files.values()) for files in expected.values())
     total_actual = sum(sum(files.values()) for files in found.values())
     header = (
         f"intake-outbox done writer call sites: {total_actual} production sites across "
-        f"{len(EXPECTED_CALL_SITES)} symbol; scanned {scanned} Rust files under "
+        f"{len(expected)} symbols; scanned {scanned} Rust files under "
         f"{SCAN_ROOT.as_posix()}/, skipped {skipped} test files; ({LIMITS})"
     )
     if problems:

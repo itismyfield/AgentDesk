@@ -151,3 +151,17 @@ Only retry typed authority after all of these are true:
 
 - Author: Codex dispatch #1952, 2026-05-08
 - Reviewer: pending for the future GO cutover
+
+## Preparatory Intake Delivery Floor (#5071 S-R2c)
+
+This safety-gate slice does not activate an intake delivery reconciler. It pins
+the current legacy `done` writer and requires the later, exact reconciler module
+to own the sole delivery-proof `done` call when that module lands. Until the
+separately reviewed runtime slice is deployed, there is no new process task,
+authority setting, rollback drain, or operator action from S-R2c.
+
+The future runtime must remain default-off because no U4 lifecycle evidence
+supports invented cadence, stale-age, or batch defaults. Operators must not
+activate it with absent or zero tunables. Its activation and rollback procedure
+will be completed alongside the code that implements those controls; this
+preparatory note must not be read as evidence that they already exist.

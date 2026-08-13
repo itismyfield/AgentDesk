@@ -1826,3 +1826,10 @@
   definition state, so any node computes the identical, channel-independent key
   — the reserved turn never mutates the channel's live `sessions.session_key`
   row. No node-local timer, leader singleton, or advisory lease is introduced.
+- #5071 S-R2c preparatory safety gate — **no runtime authority yet**: the
+  repository now pins both intake-outbox `done` writer symbols. The delivery-
+  proof writer must have zero production sites while its exact reconciler module
+  is absent and exactly one site there once that later slice adds the module.
+  This commit adds no task, configuration, lease, routing decision, or database
+  write; the planned reconciler remains default-off until its separately
+  reviewed runtime slice lands.
