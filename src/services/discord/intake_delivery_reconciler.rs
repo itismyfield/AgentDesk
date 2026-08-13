@@ -502,7 +502,7 @@ async fn reconcile_row(
     for obligation in obligations {
         let judgment = judge_obligation_window(&mut tx, obligation).await?;
         let _malformed = judgment.malformed();
-        if judgment.delivered_outbox_id() == Some(row_id) {
+        if is_delivery_witness(judgment.delivered_outbox_id(), row_id) {
             delivered = true;
             break;
         }
@@ -518,6 +518,10 @@ async fn reconcile_row(
         settle_dispatched_unknown(&mut tx, row_id, cutoff).await?;
     }
     tx.commit().await
+}
+
+fn is_delivery_witness(delivered_outbox_id: Option<i64>, row_id: i64) -> bool {
+    delivered_outbox_id == Some(row_id)
 }
 
 async fn run_tick(pool: &PgPool, boot: BootFingerprint) {
@@ -715,12 +719,12 @@ mod tests {
         assert!(
             [None, Some(99), Some(row_id)]
                 .into_iter()
-                .any(|binding| binding == Some(row_id))
+                .any(|binding| is_delivery_witness(binding, row_id))
         );
         assert!(
             ![None, Some(99)]
                 .into_iter()
-                .any(|binding| binding == Some(row_id))
+                .any(|binding| is_delivery_witness(binding, row_id))
         );
     }
 
@@ -836,7 +840,7 @@ mod postgres_tests {
         let equal=outbox(&pool,"equal",cutoff).await; delivered(&pool,equal,Uuid::new_v4()).await; reconcile_row(&pool,equal,cutoff).await.unwrap(); assert_eq!(status(&pool,equal).await.0,"dispatched");
         let refreshed=outbox(&pool,"refresh",cutoff-ChronoDuration::seconds(2)).await; delivered(&pool,refreshed,Uuid::new_v4()).await; sqlx::query("UPDATE public.intake_outbox SET dispatched_at=$2 WHERE id=$1").bind(refreshed).bind(cutoff+ChronoDuration::seconds(1)).execute(&pool).await.unwrap(); reconcile_row(&pool,refreshed,cutoff).await.unwrap(); let fresh=status(&pool,refreshed).await; assert_eq!(fresh.0,"dispatched"); assert_eq!(fresh.3,cutoff+ChronoDuration::seconds(1));
         let competed=outbox(&pool,"competed",cutoff-ChronoDuration::seconds(2)).await; delivered(&pool,competed,Uuid::new_v4()).await; sqlx::query("UPDATE public.intake_outbox SET status='done',completed_at=NOW() WHERE id=$1").bind(competed).execute(&pool).await.unwrap(); reconcile_row(&pool,competed,cutoff).await.unwrap(); assert_eq!(status(&pool,competed).await.0,"done");
-        let rollback=outbox(&pool,"rollback",cutoff-ChronoDuration::seconds(2)).await; delivered(&pool,rollback,Uuid::new_v4()).await; sqlx::raw_sql("CREATE FUNCTION public.reject_proof_done() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.status='done' AND OLD.status='dispatched' THEN RAISE EXCEPTION 'forced rollback'; END IF; RETURN NEW; END $$; CREATE TRIGGER reject_proof_done BEFORE UPDATE ON public.intake_outbox FOR EACH ROW EXECUTE FUNCTION public.reject_proof_done()").execute(&pool).await.unwrap(); assert!(reconcile_row(&pool,rollback,cutoff).await.is_err()); sqlx::raw_sql("DROP TRIGGER reject_proof_done ON public.intake_outbox; DROP FUNCTION public.reject_proof_done()").execute(&pool).await.unwrap(); let rolled=status(&pool,rollback).await; assert_eq!(rolled.0,"dispatched"); assert!(rolled.1.is_none()); assert_eq!(rolled.2,"c");
+        let rollback=outbox(&pool,"rollback",cutoff-ChronoDuration::seconds(2)).await; delivered(&pool,rollback,Uuid::new_v4()).await; sqlx::raw_sql("CREATE FUNCTION public.reject_proof_done() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.status='done' AND OLD.status='dispatched' THEN RAISE EXCEPTION 'forced rollback after write'; END IF; RETURN NEW; END $$; CREATE TRIGGER reject_proof_done AFTER UPDATE ON public.intake_outbox FOR EACH ROW EXECUTE FUNCTION public.reject_proof_done()").execute(&pool).await.unwrap(); assert!(reconcile_row(&pool,rollback,cutoff).await.is_err()); sqlx::raw_sql("DROP TRIGGER reject_proof_done ON public.intake_outbox; DROP FUNCTION public.reject_proof_done()").execute(&pool).await.unwrap(); let rolled=status(&pool,rollback).await; assert_eq!(rolled.0,"dispatched"); assert!(rolled.1.is_none()); assert_eq!(rolled.2,"c");
         pool.close().await;
         db.drop().await;
     }
