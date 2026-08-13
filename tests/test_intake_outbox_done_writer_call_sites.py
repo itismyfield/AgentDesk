@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/check_intake_outbox_done_writer_call_sites.py"
+PROOF_OWNER = "src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs"
 SPEC = importlib.util.spec_from_file_location("intake_outbox_done_writer_guard", SCRIPT)
 guard = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(guard)
@@ -36,9 +37,10 @@ class SourceContractTests(unittest.TestCase):
         for limit in ("not Rust parsing", "direct SQL writers are NOT seen", "over-counted"):
             self.assertIn(limit, message)
 
-    def test_allowlist_is_the_t2_done_writer_only(self):
+    def test_conditional_pin_is_the_t2_done_writer_only(self):
+        self.assertEqual(guard.PROOF_OWNER, PROOF_OWNER)
         self.assertEqual(guard.expected_call_sites(ROOT), CURRENT_EXPECTED_CALL_SITES)
-        self.assertFalse((ROOT / guard.PROOF_OWNER).exists())
+        self.assertFalse((ROOT / PROOF_OWNER).exists())
 
     def test_scan_root_is_all_of_src(self):
         self.assertEqual(guard.SCAN_ROOT.as_posix(), "src")
@@ -78,7 +80,7 @@ class DiscriminationTests(unittest.TestCase):
         if proof:
             write(
                 root,
-                guard.PROOF_OWNER,
+                PROOF_OWNER,
                 "use crate::db::intake_outbox_delivery_proof::mark_done_from_delivery_proof;\n"
                 "fn reconcile() { mark_done_from_delivery_proof(); }\n",
             )
@@ -158,11 +160,22 @@ class DiscriminationTests(unittest.TestCase):
         write(
             root,
             "src/services/cluster/test_only.rs",
-            "use crate::db::intake_outbox::mark_done;\n"
-            "#[cfg(test)]\nmod tests { fn probe() { mark_done(); } }\n",
+            "#[cfg(test)]\nmod tests { fn probe() { crate::db::intake_outbox::mark_done(); } }\n"
+            "#[cfg(all(test, unix))]\nfn probe_all() { crate::db::intake_outbox::mark_done(); }\n",
         )
         ok, message = self.run_guard(root)
         self.assertTrue(ok, message)
+
+    def test_production_possible_cfg_forms_are_scanned(self):
+        for body in (
+            "#[cfg(any(test, unix))] fn x(){crate::db::intake_outbox_delivery_proof::mark_done_from_delivery_proof();}",
+            "#[cfg_attr(test, allow(dead_code))] fn x(){crate::db::intake_outbox_delivery_proof::mark_done_from_delivery_proof();}",
+        ):
+            root = self.fixture()
+            write(root, "src/services/discord/cfg_writer.rs", body)
+            ok, message = self.run_guard(root)
+            self.assertFalse(ok)
+            self.assertIn("mark_done_from_delivery_proof: UNLISTED call site", message)
 
     def test_lifetime_does_not_hide_later_fully_qualified_writer(self):
         root = self.fixture()
@@ -186,7 +199,7 @@ class DiscriminationTests(unittest.TestCase):
 
         write(
             root,
-            guard.PROOF_OWNER,
+            PROOF_OWNER,
             "use crate::db::intake_outbox_delivery_proof::mark_done_from_delivery_proof;\n"
             "fn reconcile() {}\n",
         )
@@ -205,12 +218,53 @@ class DiscriminationTests(unittest.TestCase):
             self.assertIn("mark_done_from_delivery_proof: UNLISTED call site", message)
 
         root = self.fixture(proof=True)
-        source = root / guard.PROOF_OWNER
+        source = root / PROOF_OWNER
         moved = source.with_name("intake_delivery_reconciler_typo.rs")
         source.rename(moved)
         ok, message = self.run_guard(root)
         self.assertFalse(ok)
         self.assertIn("mark_done_from_delivery_proof: UNLISTED call site", message)
+
+    def test_proof_import_without_call_and_aliases_fail_closed(self):
+        for body, problem in (
+            (
+                "use crate::db::intake_outbox_delivery_proof::mark_done_from_delivery_proof; fn x(){}",
+                "UNLISTED protected import",
+            ),
+            (
+                "use crate::db::intake_outbox_delivery_proof::mark_done_from_delivery_proof as finish; fn x(){finish();}",
+                "ALIASED protected import",
+            ),
+        ):
+            root = self.fixture()
+            write(root, "src/services/discord/unlisted.rs", body)
+            ok, message = self.run_guard(root)
+            self.assertFalse(ok)
+            self.assertIn(problem, message)
+
+        root = self.fixture(proof=True)
+        write(
+            root,
+            PROOF_OWNER,
+            "use crate::db::intake_outbox_delivery_proof::mark_done_from_delivery_proof as finish; fn x(){finish();}",
+        )
+        ok, message = self.run_guard(root)
+        self.assertFalse(ok)
+        self.assertIn("ALIASED protected import", message)
+
+    def test_proof_owner_constant_mutation_is_not_followed_by_fixture(self):
+        root = self.fixture(proof=True)
+        original = guard.PROOF_OWNER
+        guard.PROOF_OWNER = "src/services/discord/runtime_bootstrap/alternate_absent.rs"
+        try:
+            ok, message = self.run_guard(root)
+        finally:
+            guard.PROOF_OWNER = original
+        self.assertFalse(ok)
+        self.assertIn(
+            f"mark_done_from_delivery_proof: UNLISTED protected import in {PROOF_OWNER}",
+            message,
+        )
 
 
 if __name__ == "__main__":

@@ -14,9 +14,10 @@ EPIC #5071 says the worker's `Ok` stamp becomes `dispatched` and that only the
 terminal-receipt holder drives `done`; it does not move `claimed`, `accepted`,
 or `spawned`. Pinning those other lifecycle transitions here would block T2-
 unrelated work. `EXPECTED_CALL_SITES` names the writer symbol and the owning
-function's file, never a line number. Every Rust file below `src/` is scanned:
-within the bounds below, a call added, deleted, moved, or found in an unlisted
-file fails closed.
+function's file, never a line number. The proof writer expects zero sites until
+its exact future owner exists, then exactly one there. Every Rust file below
+`src/` is scanned: within the bounds below, a protected direct import or call
+added, deleted, moved, aliased, or found in an unlisted file fails closed.
 
 WHAT THIS GATE DOES NOT GUARANTEE. This is a lexical scan, not Rust parsing or
 name resolution. It sees a bare `mark_done(...)` only in a file that directly
@@ -51,7 +52,9 @@ SYMBOL_MODULES = {
     "mark_done": "intake_outbox",
     "mark_done_from_delivery_proof": "intake_outbox_delivery_proof",
 }
-CFG_TEST_RE = re.compile(r"#\[\s*cfg\s*\(\s*(?:all|any)?\s*\(?\s*test\b")
+CFG_EXCLUSIVELY_TEST_RE = re.compile(
+    r"#\[\s*cfg\s*\(\s*(?:test\s*\)|all\s*\(\s*test\s*(?:,|\)))"
+)
 
 # Char literal (so `'"'` / `'{'` cannot desync the scanner). Lifetimes (`'a`)
 # do not match and fall through harmlessly.
@@ -151,10 +154,10 @@ def strip_source(text: str) -> str:
 
 
 def production_text(path: Path) -> str:
-    """Return stripped source with balanced `#[cfg(test)]` items blanked."""
+    """Return stripped source with exclusively-test cfg items blanked."""
     code = strip_source(path.read_text(encoding="utf-8"))
     chars = list(code)
-    for match in list(CFG_TEST_RE.finditer(code)):
+    for match in list(CFG_EXCLUSIVELY_TEST_RE.finditer(code)):
         start = code.find("{", match.end())
         semicolon = code.find(";", match.end())
         if start == -1 or (semicolon != -1 and semicolon < start):
@@ -173,9 +176,12 @@ def production_text(path: Path) -> str:
     return "".join(chars)
 
 
-def production_call_sites(root: Path) -> tuple[dict[str, dict[str, int]], int, int]:
-    """Return ``(counts, scanned_files, skipped_test_files)`` over ``src/``."""
+def production_call_sites(
+    root: Path, expected: dict[str, dict[str, int]]
+) -> tuple[dict[str, dict[str, int]], list[str], int, int]:
+    """Return call counts, import violations, and scan totals over ``src/``."""
     found: defaultdict[str, defaultdict[str, int]] = defaultdict(lambda: defaultdict(int))
+    violations: list[str] = []
     scanned = 0
     skipped = 0
     for path in sorted((root / SCAN_ROOT).rglob("*.rs")):
@@ -186,18 +192,27 @@ def production_call_sites(root: Path) -> tuple[dict[str, dict[str, int]], int, i
             continue
         scanned += 1
         code = production_text(path)
+        rel = path.relative_to(root).as_posix()
         for symbol, module in SYMBOL_MODULES.items():
             call = re.compile(rf"(?<![.\w])\b{symbol}\s*\(")
             definition = re.compile(rf"\bfn\s+{symbol}\s*\(")
-            imported = re.compile(
-                rf"\buse\s+crate\s*::\s*db\s*::\s*{module}\s*::\s*"
-                rf"(?:{symbol}\b|\{{[^}}]*\b{symbol}\b)",
+            import_stmt = re.compile(
+                rf"\buse\s+crate\s*::\s*db\s*::\s*{module}\s*::\s*(?P<body>[^;]+);",
                 re.DOTALL,
             )
+            imports = [
+                match.group("body")
+                for match in import_stmt.finditer(code)
+                if re.search(rf"\b{symbol}\b", match.group("body"))
+            ]
+            if any(re.search(rf"\b{symbol}\s+as\s+\w+", body) for body in imports):
+                violations.append(f"{symbol}: ALIASED protected import in {rel}")
+            elif imports and rel not in expected.get(symbol, {}):
+                violations.append(f"{symbol}: UNLISTED protected import in {rel}")
             qualified = re.compile(
                 rf"\b(?:(?:crate\s*::\s*)?db\s*::\s*)?{module}\s*::\s*{symbol}\s*\("
             )
-            if not (imported.search(code) or qualified.search(code)):
+            if not (imports or qualified.search(code)):
                 continue
             hits = sum(
                 len(call.findall(line))
@@ -205,8 +220,8 @@ def production_call_sites(root: Path) -> tuple[dict[str, dict[str, int]], int, i
                 if not definition.search(line)
             )
             if hits:
-                found[symbol][path.relative_to(root).as_posix()] += hits
-    return found, scanned, skipped
+                found[symbol][rel] += hits
+    return found, violations, scanned, skipped
 
 
 def expected_call_sites(root: Path) -> dict[str, dict[str, int]]:
@@ -221,20 +236,21 @@ def expected_call_sites(root: Path) -> dict[str, dict[str, int]]:
 
 LIMITS = (
     "lexical scan, not Rust parsing or reachability proof; glob/nested-brace/super imports, "
-    "aliases, renamed re-exports, name-constructing macros, same-file helper/value indirection, "
-    "trait dispatch, protected symbols split before `(`, and direct SQL writers are "
+    "renamed re-exports, name-constructing macros, same-file helper/value indirection, trait "
+    "dispatch, protected symbols split before `(`, and direct SQL writers are "
     "NOT seen (cargo fmt --check rejects the line-break call form); same-spelled free functions "
-    "may be over-counted; cfg other than cfg(test) is not evaluated; the wiring test cannot "
-    "protect deletion of its own unittest invocation from ci-script-checks.sh"
+    "may be over-counted; direct protected-symbol aliases are rejected; only braced cfg(test) "
+    "and cfg(all(test,...)) items are stripped, while other cfg/cfg_attr forms remain scanned; the "
+    "wiring test cannot protect deletion of its own unittest invocation from ci-script-checks.sh"
 )
 
 
 def check(
     root: Path, expected: dict[str, dict[str, int]] | None = None
 ) -> tuple[bool, str]:
-    found, scanned, skipped = production_call_sites(root)
     expected = expected if expected is not None else expected_call_sites(root)
-    problems: list[str] = []
+    found, import_problems, scanned, skipped = production_call_sites(root, expected)
+    problems = list(import_problems)
     for symbol in sorted(set(expected) | set(found)):
         expected_files = expected.get(symbol, {})
         actual = found[symbol]
@@ -260,8 +276,8 @@ def check(
             f"FAIL: intake-outbox done writer call sites moved (expected {total_expected}, "
             f"found {total_actual}).\n  "
             + "\n  ".join(problems)
-            + "\nUpdate EXPECTED_CALL_SITES in scripts/check_intake_outbox_done_writer_call_sites.py "
-            "in the same commit, and say in the commit message which site moved and why.\n"
+            + "\nUpdate expected_call_sites/SYMBOL_MODULES in this checker in the same commit, "
+            "and say which protected site moved and why.\n"
             f"({LIMITS})"
         )
     return True, f"OK: {header}"

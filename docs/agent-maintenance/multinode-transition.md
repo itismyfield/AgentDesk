@@ -1826,10 +1826,12 @@
   definition state, so any node computes the identical, channel-independent key
   — the reserved turn never mutates the channel's live `sessions.session_key`
   row. No node-local timer, leader singleton, or advisory lease is introduced.
-- #5071 S-R2c preparatory safety gate — **no runtime authority yet**: the
-  repository now pins both intake-outbox `done` writer symbols. The delivery-
-  proof writer must have zero production sites while its exact reconciler module
-  is absent and exactly one site there once that later slice adds the module.
-  This commit adds no task, configuration, lease, routing decision, or database
-  write; the planned reconciler remains default-off until its separately
-  reviewed runtime slice lands.
+- #5071 S-R2c preparatory safety gate — **no runtime authority yet**: the gate
+  pins both intake-outbox `done` symbols. While
+  `src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs` is
+  absent, the proof writer expects zero sites and, within the gate's declared
+  lexical bounds, rejects a stray protected import or call anywhere; once
+  present, it requires one canonical call there. Wholesale
+  module removal returns the conditional gate to its preparatory state and must
+  also be caught by the later compiled integration tests. This slice adds no
+  task, configuration, lease, routing decision, or database write.
