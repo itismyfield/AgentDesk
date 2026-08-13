@@ -3,6 +3,14 @@
 > Last refreshed: 2026-08-13 (against #5071 T2-W S-R2a read-only facade).
 
 ### Audited touches
+- 2026-08-13 (#5071 T2-W S-R2c B1): `runtime_bootstrap` declares a dormant
+  capability module. If `public` names stay bound from its repeatable-read
+  snapshot through both name-based `ACCESS SHARE` locks, it checks exact
+  relation/type OIDs, migrations, privileges, columns, constraints, bad rows
+  under NOT VALID checks, and required indexes. DDL committed in that interval
+  can leave it validating old snapshot objects while locking replacements.
+  Conflicting table DDL is blocked only after both locks; later DDL is outside
+  the result. Errors fail closed. No caller or boot wiring changes runtime behavior.
 - 2026-08-13 (#5071 T2-W S-R2a): the journal-owned obligation-window facade
   reads every row in `(event_seq, event_id)` order and restores only closed
   `O/A/T/C/S/U` events. It fails closed on malformed kinds, slots, attempts,
