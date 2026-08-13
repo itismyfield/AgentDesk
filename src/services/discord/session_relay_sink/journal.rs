@@ -441,10 +441,10 @@ impl ObligationWindowJudgment {
 
 #[allow(dead_code)]
 pub(in crate::services::discord) async fn judge_obligation_window(
-    pool: &sqlx::PgPool,
+    connection: &mut sqlx::PgConnection,
     obligation_id: Uuid,
 ) -> Result<ObligationWindowJudgment, sqlx::Error> {
-    match pg_store::load_obligation_window(pool, obligation_id).await? {
+    match pg_store::load_obligation_window(connection, obligation_id).await? {
         pg_store::LoadedObligationWindow::Events(events) => {
             let (delivered, binding, malformed) = exact_delivery_predicate(&events);
             Ok(ObligationWindowJudgment {
@@ -470,6 +470,7 @@ fn exact_delivery_predicate(events: &[JournalEvent]) -> (bool, Option<i64>, bool
     if events.iter().enumerate().any(|(index, event)| {
         event.obligation_id != first.obligation_id
             || !event_shape_is_valid(event)
+            || index > 0 && events[index - 1].seq >= event.seq
             || events[..index]
                 .iter()
                 .any(|prior| prior.kind == event.kind || prior.seq == event.seq)

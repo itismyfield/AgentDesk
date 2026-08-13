@@ -20,7 +20,7 @@ struct StoredJournalEvent {
 }
 
 pub(super) async fn load_obligation_window(
-    pool: &sqlx::PgPool,
+    connection: &mut sqlx::PgConnection,
     obligation_id: Uuid,
 ) -> Result<LoadedObligationWindow, sqlx::Error> {
     let rows = sqlx::query_as::<_, StoredJournalEvent>(
@@ -30,7 +30,7 @@ pub(super) async fn load_obligation_window(
           WHERE obligation_id = $1 ORDER BY event_seq, event_id",
     )
     .bind(obligation_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
     Ok(match rows.into_iter().map(restore_stored_event).collect() {
         Ok(events) => LoadedObligationWindow::Events(events),
@@ -80,7 +80,7 @@ fn restore_stored_event(row: StoredJournalEvent) -> Result<JournalEvent, ()> {
     })
 }
 
-/// The only raw PostgreSQL append entry point for the delivery journal.
+/// The only production raw PostgreSQL append entry point for the delivery journal.
 pub(in crate::services::discord::session_relay_sink::journal) async fn append_delivery_journal_batch(
     pool: &sqlx::PgPool,
     events: &[JournalEvent],
