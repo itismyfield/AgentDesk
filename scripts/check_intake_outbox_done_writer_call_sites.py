@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Per-file exact-count allowlist for the intake-outbox `done` writer (#5071 T2).
+"""Per-file exact-count allowlist for both intake-outbox `done` writers (#5071 T2).
 
-WHY THIS EXISTS, AND WHY IT LANDS BEFORE T2. #5071 T2 moves the `done`
-transition from the intake worker to the terminal-receipt owner. Before that
-move, the current writer call location must be reviewable: a behaviour change
-with no gate underneath it protects nothing. This script changes no production
-behaviour; it records the production call sites that exist before the move.
+WHY THIS EXISTS. #5071 T2 moves `done` authority from the intake worker toward
+journal-proven reconciliation. The legacy spawned writer and the proof writer
+must both remain reviewable during that transition.
 
-WHAT IS PINNED. The scope is deliberately only
-`crate::db::intake_outbox::mark_done`, the current `spawned -> done` writer.
+WHAT IS PINNED. The scope is deliberately the legacy
+`crate::db::intake_outbox::mark_done` writer and the proof-only
+`crate::db::intake_outbox_delivery_proof::mark_done_from_delivery_proof` writer.
 EPIC #5071 says the worker's `Ok` stamp becomes `dispatched` and that only the
 terminal-receipt holder drives `done`; it does not move `claimed`, `accepted`,
 or `spawned`. Pinning those other lifecycle transitions here would block T2-
@@ -51,7 +50,10 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
         "src/services/discord/intake_delivery_reconciler.rs": 1
     },
 }
-SYMBOL_MODULES = {"mark_done": "intake_outbox", "mark_done_from_delivery_proof": "intake_outbox_delivery_proof"}
+SYMBOL_MODULES = {
+    "mark_done": "intake_outbox",
+    "mark_done_from_delivery_proof": "intake_outbox_delivery_proof",
+}
 CFG_TEST_RE = re.compile(r"#\[\s*cfg\s*\(\s*(?:all|any)?\s*\(?\s*test\b")
 
 # Char literal (so `'"'` / `'{'` cannot desync the scanner). Lifetimes (`'a`)
@@ -230,7 +232,7 @@ def check(root: Path) -> tuple[bool, str]:
     total_actual = sum(sum(files.values()) for files in found.values())
     header = (
         f"intake-outbox done writer call sites: {total_actual} production sites across "
-        f"{len(EXPECTED_CALL_SITES)} symbol; scanned {scanned} Rust files under "
+        f"{len(EXPECTED_CALL_SITES)} symbols; scanned {scanned} Rust files under "
         f"{SCAN_ROOT.as_posix()}/, skipped {skipped} test files; ({LIMITS})"
     )
     if problems:

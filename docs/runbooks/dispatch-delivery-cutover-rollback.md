@@ -163,8 +163,12 @@ Before activation, set all three tunables to positive values (batch `1..=500`),
 restart every intake-capable process, and confirm Running registration plus a
 fresh schema-ready result. A live setting change or removal blocks new authority;
 the already-running task retains its boot bounds so rollback drain continues.
+The hot-reload response does not currently list these fields as
+restart-required, so operators must treat any tunable change that way explicitly.
 The probe has bounded transactional consistency but no invented timeout: a
 conflicting DDL lock can delay it, and rollout-controlled DDL is required.
+S-R2c SQL is fixed to `public`, but legacy intake writers outside this slice
+remain search-path-resolved; keep their database role's `public` path intact.
 
 Rollback order is: set authority false, optionally return journal mode to Legacy,
 then wait until no `public.intake_outbox` row remains `dispatched`. Do not remove

@@ -252,10 +252,15 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // files remain owned by the external persistence barrier and are never
     // deleted by the respawned binary.
     record_restart_artifact_boot_instant();
-    intake_delivery_reconciler::ensure_spawned(
-        shared.pg_pool.as_ref(),
-        shared.restart.shutting_down.clone(),
-    );
+    // The HTTP task installs LIVE independently. Resolve the validated boot
+    // runtime synchronously so provider scheduling cannot make registration
+    // miss its only opportunity.
+    let reconciler_runtime = crate::config_live_reload::current()
+        .map(|config| config.runtime.clone())
+        .or_else(|| crate::config::load().ok().map(|config| config.runtime));
+    if let Some(runtime) = reconciler_runtime.as_ref() {
+        intake_delivery_reconciler::ensure_spawned(shared.pg_pool.as_ref(), runtime);
+    }
 
     let gateway_lease = match gateway_outcome {
         GatewayLeaseOutcome::Proceed(lease) => lease,
@@ -342,6 +347,17 @@ mod bootstrap_tests {
         assert!(branches.iter().all(|position| registration < *position));
         let preceding = &production[..registration];
         assert!(preceding.rfind("starts_provider_runtime()").is_some());
+        let install = &production[preceding.rfind("let reconciler_runtime").unwrap()..registration];
+        assert!(install.contains("config_live_reload::current()"));
+        assert!(install.contains("config::load()"));
+        assert!(!install.contains("cluster"));
+        assert!(!install.contains("leader"));
+        assert_eq!(
+            production
+                .matches("intake_delivery_reconciler::ensure_spawned(")
+                .count(),
+            1
+        );
     }
 
     fn sorted_channel_ids(channels: Vec<ChannelId>) -> Vec<u64> {

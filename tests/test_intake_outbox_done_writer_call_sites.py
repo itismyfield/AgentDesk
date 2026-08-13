@@ -32,7 +32,7 @@ class SourceContractTests(unittest.TestCase):
     def test_real_tree_passes_and_reports_declared_limits(self):
         ok, message = guard.check(ROOT)
         self.assertTrue(ok, message)
-        self.assertIn("2 production sites across 2 symbol", message)
+        self.assertIn("2 production sites across 2 symbols", message)
         for limit in ("not Rust parsing", "direct SQL writers are NOT seen", "over-counted"):
             self.assertIn(limit, message)
 
@@ -61,6 +61,11 @@ class SourceContractTests(unittest.TestCase):
         worker = (ROOT / "src/services/cluster/intake_worker.rs").read_text(encoding="utf-8")
         self.assertIn("pub(crate) async fn run_intake_worker_tick(", worker)
         self.assertIn("mark_done(pool, row.id, claim_owner)", worker)
+        reconciler = (ROOT / "src/services/discord/intake_delivery_reconciler.rs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("async fn reconcile_row(", reconciler)
+        self.assertIn("mark_done_from_delivery_proof(&mut tx, row_id)", reconciler)
 
 
 class DiscriminationTests(unittest.TestCase):
@@ -149,6 +154,57 @@ class DiscriminationTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("call site GONE from src/services/cluster/intake_wroker.rs", message)
         self.assertIn("UNLISTED call site in src/services/cluster/intake_worker.rs", message)
+
+    def test_proof_writer_removal_unlisted_path_and_qualified_forms_fail_closed(self):
+        root = self.fixture()
+        write(root, "src/services/discord/intake_delivery_reconciler.rs", "fn reconcile() {}\n")
+        ok, message = self.run_guard(root)
+        self.assertFalse(ok)
+        self.assertIn("mark_done_from_delivery_proof: call site GONE", message)
+
+        root = self.fixture()
+        write(
+            root,
+            "src/services/discord/other.rs",
+            "use crate::db::intake_outbox_delivery_proof::mark_done_from_delivery_proof;\n"
+            "fn proof() { mark_done_from_delivery_proof(); }\n",
+        )
+        ok, message = self.run_guard(root)
+        self.assertFalse(ok)
+        self.assertIn("mark_done_from_delivery_proof: UNLISTED call site", message)
+
+        root = self.fixture()
+        write(
+            root,
+            "src/services/discord/qualified.rs",
+            "fn proof() { crate::db::intake_outbox_delivery_proof::"
+            "mark_done_from_delivery_proof(); }\n",
+        )
+        ok, message = self.run_guard(root)
+        self.assertFalse(ok)
+        self.assertIn("mark_done_from_delivery_proof: UNLISTED call site", message)
+
+        typo = {
+            **EXPECTED_CALL_SITES,
+            "mark_done_from_delivery_proof": {
+                "src/services/discord/intake_delivery_reconcile.rs": 1
+            },
+        }
+        ok, message = self.run_guard(self.fixture(), typo)
+        self.assertFalse(ok)
+        self.assertIn("intake_delivery_reconcile.rs", message)
+
+    def test_cfg_test_with_adjacent_attribute_is_not_a_production_site(self):
+        root = self.fixture()
+        write(
+            root,
+            "src/services/discord/test_only.rs",
+            "use crate::db::intake_outbox_delivery_proof::mark_done_from_delivery_proof;\n"
+            "#[cfg(test)] #[rustfmt::skip]\n"
+            "mod tests { fn probe() { mark_done_from_delivery_proof(); } }\n",
+        )
+        ok, message = self.run_guard(root)
+        self.assertTrue(ok, message)
 
     def test_cfg_test_writer_call_is_not_a_production_site(self):
         root = self.fixture()

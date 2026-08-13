@@ -2904,7 +2904,9 @@ services::discord::intake_delivery_reconciler::postgres_tests::reconciler_cutoff
 services::discord::intake_delivery_reconciler::postgres_tests::reconciler_existential_done_and_unknown_pg
 services::discord::intake_delivery_reconciler::tests::authority_requires_every_live_term
 services::discord::intake_delivery_reconciler::tests::existential_reduction_continues_after_first_gap
+services::discord::intake_delivery_reconciler::tests::oversized_tunables_disable_without_panicking
 services::discord::intake_delivery_reconciler::tests::singleton_registration_clears_on_abort_and_rejects_duplicate_spawn
+services::discord::intake_delivery_reconciler::tests::sql_tokenizer_preserves_literal_whitespace_and_quoted_escapes
 services::discord::intake_delivery_reconciler::tests::tick_gate_ignores_authority_and_mode_for_rollback_drain
 services::discord::jsonl_watcher::tests::jsonl_watcher_notifies_on_dead_marker_create
 services::discord::jsonl_watcher::tests::notify_fires_when_file_modified
