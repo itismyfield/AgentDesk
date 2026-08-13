@@ -151,3 +151,27 @@ Only retry typed authority after all of these are true:
 
 - Author: Codex dispatch #1952, 2026-05-08
 - Reviewer: pending for the future GO cutover
+
+## Intake Delivery Rollback Floor (#5071 S-R2c)
+
+This is separate from `dispatch_delivery_events`. S-R2c ships dormant: keep
+`delivery_journal_intake_authority: false` and leave all three reconcile
+tunables absent or zero until read-only lifecycle and journal-lag evidence
+supports explicit period, stale-age, and batch values. Enabling or changing the
+tunables requires process restart; hot reload does not announce that restart.
+
+Activation requires Shadow mode, explicit unchanged tunables, a live local
+singleton, and a fresh capability probe of the exact `public` relations. First
+set authority false during rollback, optionally return to Legacy, and leave the
+boot-configured reconciler running until no `public.intake_outbox` row remains
+`dispatched`. Only then revert S-R2c. Forced removal requires an incident-audited
+transaction normalizing remaining rows to official `unknown`; never repair
+migration checksums and never add a completion UUID.
+
+The probe is fail closed but has no invented statement or lock timeout, so a
+conflicting DDL lock can delay it. DDL immediately after a successful probe is
+also a small rollout-controlled race. Legacy intake SQL outside this slice may
+still follow `search_path`; S-R2c's probe, journal reads, stale list, proof lock,
+and terminal writes are explicitly `public`-qualified. Multi-node races have
+one CAS winner with no done priority, and late delivery proof does not reopen an
+already terminal `unknown` row.

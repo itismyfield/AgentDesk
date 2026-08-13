@@ -1826,3 +1826,13 @@
   definition state, so any node computes the identical, channel-independent key
   — the reserved turn never mutates the channel's live `sessions.session_key`
   row. No node-local timer, leader singleton, or advisory lease is introduced.
+- #5071 S-R2c intake delivery reconciler: **process-local rollback floor,
+  dormant by default**. Each intake-capable process passes its already validated
+  boot runtime into a topology-independent singleton before either standby or
+  gateway intake workers start. Authority additionally requires the default-off
+  request, Shadow mode, unchanged explicit boot tunables, a live local task, and
+  a fresh public-schema capability probe. The resident task ignores request/mode
+  while draining, so rollback disables new authority before waiting for every
+  `dispatched` row to terminalize. One row transaction and CAS chooses one
+  terminal winner; there is no done priority and late evidence does not reopen
+  `unknown`.

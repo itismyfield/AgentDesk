@@ -1591,6 +1591,14 @@ pub struct RuntimeSettingsConfig {
     pub delivery_journal_cohort_percent: u8,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delivery_journal_internal_channel_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub delivery_journal_intake_authority: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_journal_intake_reconcile_period_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_journal_intake_stale_age_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_journal_intake_reconcile_batch_size: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_timeout_min: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1760,6 +1768,10 @@ impl RuntimeSettingsConfig {
         self.delivery_journal_mode == DeliveryJournalMode::Legacy
             && self.delivery_journal_cohort_percent == 0
             && self.delivery_journal_internal_channel_ids.is_empty()
+            && !self.delivery_journal_intake_authority
+            && self.delivery_journal_intake_reconcile_period_secs.is_none()
+            && self.delivery_journal_intake_stale_age_secs.is_none()
+            && self.delivery_journal_intake_reconcile_batch_size.is_none()
             && self.requested_timeout_min.is_none()
             && self.in_progress_stale_min.is_none()
             && self.long_turn_alert_interval_min.is_none()
@@ -1797,6 +1809,42 @@ impl RuntimeSettingsConfig {
             && self.dispatch_rate_limit_gate_enabled.is_none()
             && self.dispatch_rate_limit_gate_danger_pct.is_none()
             && !self.reset_overrides_on_restart
+    }
+}
+
+#[cfg(test)]
+mod intake_delivery_reconciler_config_tests {
+    use super::*;
+
+    #[test]
+    fn intake_delivery_authority_and_tunables_default_off_and_round_trip() {
+        let absent: RuntimeSettingsConfig = serde_yaml::from_str("{}").unwrap();
+        assert!(!absent.delivery_journal_intake_authority);
+        assert!(
+            absent
+                .delivery_journal_intake_reconcile_period_secs
+                .is_none()
+        );
+        assert!(absent.is_empty());
+        let configured: RuntimeSettingsConfig = serde_yaml::from_str(
+            "delivery_journal_intake_authority: true\ndelivery_journal_intake_reconcile_period_secs: 2\ndelivery_journal_intake_stale_age_secs: 3\ndelivery_journal_intake_reconcile_batch_size: 4\n",
+        ).unwrap();
+        assert!(configured.delivery_journal_intake_authority);
+        assert_eq!(
+            configured.delivery_journal_intake_reconcile_period_secs,
+            Some(2)
+        );
+        assert_eq!(configured.delivery_journal_intake_stale_age_secs, Some(3));
+        assert_eq!(
+            configured.delivery_journal_intake_reconcile_batch_size,
+            Some(4)
+        );
+        assert!(!configured.is_empty());
+        let yaml = serde_yaml::to_string(&configured).unwrap();
+        assert_eq!(
+            serde_yaml::from_str::<RuntimeSettingsConfig>(&yaml).unwrap(),
+            configured
+        );
     }
 }
 

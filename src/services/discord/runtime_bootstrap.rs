@@ -7,6 +7,7 @@ mod gateway_lease_recovery;
 mod gateway_lease_recovery_tests;
 mod gateway_runtime;
 mod intake;
+pub(super) mod intake_delivery_reconciler;
 mod orphan_recovery;
 mod queued_placeholders;
 mod recovery_flush;
@@ -54,6 +55,7 @@ pub(crate) struct RunBotContext {
     pub(crate) api_port: u16,
     pub(crate) pg_pool: Option<sqlx::PgPool>,
     pub(crate) engine: Option<crate::engine::PolicyEngine>,
+    pub(crate) boot_runtime: crate::config::RuntimeSettingsConfig,
     pub(crate) placeholder_live_events_enabled: bool,
     pub(crate) status_panel_v2_enabled: bool,
     /// #3805 P2: two-message panel rollout gate (default OFF). Scaffolding —
@@ -81,6 +83,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         api_port,
         pg_pool,
         engine,
+        boot_runtime,
         placeholder_live_events_enabled,
         status_panel_v2_enabled,
         two_message_panel_enabled,
@@ -252,6 +255,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // files remain owned by the external persistence barrier and are never
     // deleted by the respawned binary.
     record_restart_artifact_boot_instant();
+    intake_delivery_reconciler::ensure_spawned(shared.pg_pool.as_ref(), &boot_runtime);
 
     let gateway_lease = match gateway_outcome {
         GatewayLeaseOutcome::Proceed(lease) => lease,
@@ -325,6 +329,48 @@ mod bootstrap_tests {
             .into_iter()
             .map(|channel_id| channel_id.get())
             .collect()
+    }
+
+    #[test]
+    fn intake_reconciler_registration_precedes_both_worker_branches() {
+        let source = include_str!("runtime_bootstrap.rs");
+        let run_bot = source
+            .split("pub(crate) async fn run_bot")
+            .nth(1)
+            .unwrap()
+            .split("// ── run_bot startup-phase helpers")
+            .next()
+            .unwrap();
+        let confirmed = run_bot
+            .find("if !gateway_outcome.starts_provider_runtime()")
+            .unwrap();
+        let registration = run_bot.find("intake_delivery_reconciler::ensure_spawned(shared.pg_pool.as_ref(), &boot_runtime)").unwrap();
+        let branch = run_bot
+            .find("let gateway_lease = match gateway_outcome")
+            .unwrap();
+        assert!(confirmed < registration && registration < branch);
+        assert_eq!(
+            run_bot
+                .matches("intake_delivery_reconciler::ensure_spawned(")
+                .count(),
+            1
+        );
+        let registration_block = &run_bot[run_bot[confirmed..]
+            .find("record_restart_artifact_boot_instant")
+            .unwrap()
+            + confirmed..registration];
+        assert!(!registration_block.contains("cluster"));
+        assert!(!registration_block.contains("leader"));
+        assert!(!registration_block.contains("config_live_reload"));
+        assert!(!registration_block.contains("config::load"));
+        assert_eq!(
+            run_bot.matches("run_bot_maybe_spawn_intake_worker").count(),
+            2
+        );
+        let callers = include_str!("../../cli/dcserver.rs");
+        assert!(callers.contains("boot_runtime: ad_config.runtime.clone()"));
+        assert!(callers.contains("let boot_runtime = ad_config.runtime.clone()"));
+        assert!(callers.contains("boot_runtime,"));
     }
 
     fn sorted_placeholder_pairs(

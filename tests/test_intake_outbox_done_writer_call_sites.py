@@ -18,6 +18,9 @@ SPEC.loader.exec_module(guard)
 
 EXPECTED_CALL_SITES = {
     "mark_done": {"src/services/cluster/intake_worker.rs": 1},
+    "mark_done_from_delivery_proof": {
+        "src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs": 1,
+    },
 }
 
 
@@ -31,7 +34,7 @@ class SourceContractTests(unittest.TestCase):
     def test_real_tree_passes_and_reports_declared_limits(self):
         ok, message = guard.check(ROOT)
         self.assertTrue(ok, message)
-        self.assertIn("1 production sites across 1 symbol", message)
+        self.assertIn("2 production sites across 2 symbols", message)
         for limit in ("not Rust parsing", "direct SQL writers are NOT seen", "over-counted"):
             self.assertIn(limit, message)
 
@@ -60,6 +63,8 @@ class SourceContractTests(unittest.TestCase):
         worker = (ROOT / "src/services/cluster/intake_worker.rs").read_text(encoding="utf-8")
         self.assertIn("pub(crate) async fn run_intake_worker_tick(", worker)
         self.assertIn("mark_done(pool, row.id, claim_owner)", worker)
+        reconciler = (ROOT / "src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs").read_text(encoding="utf-8")
+        self.assertIn("mark_done_from_delivery_proof(&mut *conn, row)", reconciler)
 
 
 class DiscriminationTests(unittest.TestCase):
@@ -72,6 +77,12 @@ class DiscriminationTests(unittest.TestCase):
             "src/services/cluster/intake_worker.rs",
             "use crate::db::intake_outbox::{mark_done, mark_spawned};\n"
             "fn run_intake_worker_tick() { mark_done(); }\n",
+        )
+        write(
+            root,
+            "src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs",
+            "use crate::db::intake_outbox_delivery_proof::{mark_done_from_delivery_proof};\n"
+            "fn reconcile() { mark_done_from_delivery_proof(); }\n",
         )
         return root
 
@@ -118,11 +129,12 @@ class DiscriminationTests(unittest.TestCase):
         self.assertIn("UNLISTED call site", failing.stderr)
 
     def test_allowlist_entry_deleted_is_fail_closed(self):
-        ok, message = self.run_guard(self.fixture(), {"mark_done": {}})
+        expected = {**EXPECTED_CALL_SITES, "mark_done": {}}
+        ok, message = self.run_guard(self.fixture(), expected)
         self.assertFalse(ok)
         self.assertIn("mark_done: UNLISTED call site", message)
 
-        ok, message = self.run_guard(self.fixture(), {})
+        ok, message = self.run_guard(self.fixture(), {"mark_done_from_delivery_proof": EXPECTED_CALL_SITES["mark_done_from_delivery_proof"]})
         self.assertFalse(ok)
         self.assertIn("mark_done: UNLISTED call site", message)
 
@@ -172,6 +184,30 @@ class DiscriminationTests(unittest.TestCase):
             "mark_done: UNLISTED call site in src/services/session_backend.rs (1x)",
             message,
         )
+
+    def test_proof_writer_removal_unlisted_path_and_qualified_forms_fail_closed(self):
+        proof = "src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs"
+        root = self.fixture()
+        (root / proof).unlink()
+        ok, message = self.run_guard(root)
+        self.assertFalse(ok)
+        self.assertIn("mark_done_from_delivery_proof: call site GONE", message)
+
+        for body in [
+            "use crate::db::intake_outbox_delivery_proof::mark_done_from_delivery_proof; fn x(){mark_done_from_delivery_proof();}",
+            "fn x(){crate::db::intake_outbox_delivery_proof::mark_done_from_delivery_proof();}",
+        ]:
+            root = self.fixture()
+            write(root, "src/services/discord/other.rs", body)
+            ok, message = self.run_guard(root)
+            self.assertFalse(ok)
+            self.assertIn("mark_done_from_delivery_proof: UNLISTED call site", message)
+
+        root = self.fixture()
+        typo = {**EXPECTED_CALL_SITES, "mark_done_from_delivery_proof": {proof.replace("reconciler", "reconciler_typo"): 1}}
+        ok, message = self.run_guard(root, typo)
+        self.assertFalse(ok)
+        self.assertIn("call site GONE", message)
 
 
 if __name__ == "__main__":

@@ -1560,6 +1560,7 @@ pub fn handle_dcserver(token: Option<String>) {
                         api_port,
                         pg_pool: Some(discord_pg_pool),
                         engine: discord_engine,
+                        boot_runtime: ad_config.runtime.clone(),
                         placeholder_live_events_enabled,
                         status_panel_v2_enabled,
                         two_message_panel_enabled,
@@ -1640,6 +1641,7 @@ pub fn handle_dcserver(token: Option<String>) {
                     let port = api_port;
                     let pg_pool_clone = Some(discord_pg_pool.clone());
                     let engine_clone = discord_engine.clone();
+                    let boot_runtime = ad_config.runtime.clone();
                     let live_events_enabled = placeholder_live_events_enabled;
                     let status_panel_v2 = status_panel_v2_enabled;
                     let two_message_panel = two_message_panel_enabled;
@@ -1657,6 +1659,7 @@ pub fn handle_dcserver(token: Option<String>) {
                                 api_port: port,
                                 pg_pool: pg_pool_clone,
                                 engine: engine_clone,
+                                boot_runtime,
                                 placeholder_live_events_enabled: live_events_enabled,
                                 status_panel_v2_enabled: status_panel_v2,
                                 two_message_panel_enabled: two_message_panel,
