@@ -199,7 +199,8 @@ mod postgres_tests {
         timeout(TokioDuration::from_secs(5), async {
             while !sqlx::query_scalar::<_, bool>(
                 "SELECT EXISTS(SELECT 1 FROM pg_locks
-                 WHERE relation='public.delivery_journal_events'::regclass AND NOT granted)",
+                 WHERE datid=(SELECT oid FROM pg_catalog.pg_database WHERE datname=current_database())
+                   AND relation='public.delivery_journal_events'::regclass AND NOT granted)",
             )
             .fetch_one(&mut *blocker)
             .await

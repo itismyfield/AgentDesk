@@ -1,6 +1,6 @@
 # Multinode Transition
 
-> Last refreshed: 2026-08-13 (against #5071 T2-W S-R2a read-only facade).
+> Last refreshed: 2026-08-14 (against #5071 T2-W S-R2c B2 dormant reducer).
 
 ### Audited touches
 - 2026-08-13 (#5071 T2-W S-R2c B2): `runtime_bootstrap` now declares a
@@ -8,10 +8,12 @@
   obligations if none proves it) before locking, then attempts at most one terminal CAS only if the row remains
   strictly stale; a refreshed row returns unchanged with no CAS. All relations are `public`-qualified and the stale
   reader decodes only `id`. No boot, configuration, lifecycle, timer, or production call reaches the reducer, so
-  this slice grants no authority.
+  this slice grants no authority. The reducer is compiled only on Unix because its journal judgment dependency is
+  Unix-only; non-Unix builds have no reducer.
 
-  B3 retains seven constraints: (1) snapshot/catalog OID `40310449` vs live name-locked replacement OID `40310452`
-  reproduces the OID-continuity gap B1's inert relookup does not close; (2) false-to-`Unchanged` settlement is
+  B3 retains eight constraints: (1) the `capability_accepts_public_0109_under_hostile_search_path_pg`
+  characterization reproduces the OID-continuity gap that the relookup B1 removed as inert could not close;
+  (2) false-to-`Unchanged` settlement is
   uncharacterized; (3) tests permit split lock/CAS transactions; (4) the stale recheck must retain its B2
   `IntakeOutboxStatus` binding; (5) cutoff still selects which rows are stale candidates, but cannot make the terminal
   judgment sound: journal append is lossy because `JournalObserver::submit` drops a full `MAILBOX_CAPACITY` queue and
@@ -28,7 +30,8 @@
   binding writer does not exist before the future S-W1 binding-writer slice. With today's production writers,
   `obligations` is empty and `delivered` remains false, so activating the reducer would terminalize every stale
   `dispatched` row as `Unknown`. B3 must not make terminal CAS reachable through configuration alone; activation
-  requires the S-W1 binding writer to have landed in code.
+  requires the S-W1 binding writer to have landed in code; (8) before S-W2 can create `dispatched` rows on non-Unix,
+  B3 must provide a non-Unix reduction path or those rows will form a permanent backlog.
 - 2026-08-13 (#5071 T2-W S-R2c B1): `runtime_bootstrap` declares a dormant
   capability module. If `public` names stay bound from its repeatable-read
   snapshot through both name-based `ACCESS SHARE` locks, it checks exact
@@ -36,7 +39,10 @@
   under NOT VALID checks, and required indexes. DDL committed in that interval
   can leave it validating old snapshot objects while locking replacements.
   Conflicting table DDL is blocked only after both locks; later DDL is outside
-  the result. Errors fail closed. No caller or boot wiring changes runtime behavior.
+  the result. B2 moves privilege classification before those locks, so missing
+  table `SELECT` is now `Privilege` rather than a lock error collapsed to
+  `Query`, and `probe_transaction` now owns the rollback path. Errors fail
+  closed. No caller or boot wiring changes runtime behavior.
 - 2026-08-13 (#5071 T2-W S-R2a): the journal-owned obligation-window facade
   reads every row in `(event_seq, event_id)` order and restores only closed
   `O/A/T/C/S/U` events. It fails closed on malformed kinds, slots, attempts,
