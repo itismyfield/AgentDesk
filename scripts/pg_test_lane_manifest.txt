@@ -600,6 +600,8 @@ services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests:
 services::discord::router::intake_dispatch::tests::dispatched_open_route_never_uses_stale_local_recovery_pg
 services::discord::router::intake_dispatch::tests::distinct_open_route_requeues_queued_successor_pg
 services::discord::router::intake_dispatch::tests::live_and_skill_producers_forward_to_foreign_owner_pg
+services::discord::router::intake_dispatch::tests::obligation_window_facade_rejects_unknown_kind_pg
+services::discord::router::intake_dispatch::tests::obligation_window_facade_restores_sequence_and_receipt_pg
 services::discord::router::intake_dispatch::tests::queued_foreign_attachment_is_rejected_without_requeue_pg
 services::discord::router::intake_dispatch::tests::queued_foreign_owner_forwards_without_local_body_pg
 services::discord::router::intake_dispatch::tests::raw_attachment_foreign_owner_blocks_before_outbox_or_local_state_pg

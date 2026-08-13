@@ -931,3 +931,43 @@ async fn dispatched_open_route_never_uses_stale_local_recovery_pg() {
     pool.close().await;
     pg_db.drop().await;
 }
+
+#[cfg(unix)]
+#[rustfmt::skip]
+async fn insert_raw_delivery_journal_row(connection: &mut sqlx::PgConnection, obligation: uuid::Uuid, attempt: Option<uuid::Uuid>, kind: &str, seq: i16, payload: serde_json::Value, receipt: [Option<&str>; 3]) {
+    sqlx::query(
+        "INSERT INTO delivery_journal_events
+         (event_id,obligation_id,attempt_id,event_kind,event_seq,idempotency_key,canonical_payload,
+          requested_channel_id,returned_channel_id,message_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+    ).bind(uuid::Uuid::new_v4()).bind(obligation).bind(attempt).bind(kind).bind(seq)
+        .bind(vec![seq as u8]).bind(payload).bind(receipt[0]).bind(receipt[1]).bind(receipt[2])
+        .execute(&mut *connection).await.expect("seed raw journal row");
+}
+
+#[cfg(unix)]
+#[rustfmt::skip]
+#[tokio::test(flavor = "current_thread")]
+async fn obligation_window_facade_restores_sequence_and_receipt_pg() {
+    let db=TestPostgresDb::create().await; let pool=db.connect_and_migrate().await; let mut transaction=pool.begin().await.expect("begin caller transaction");
+    let obligation=uuid::Uuid::new_v4(); let attempt=uuid::Uuid::new_v4();
+    insert_raw_delivery_journal_row(&mut transaction,obligation,Some(attempt),"C",3,serde_json::json!({"frontier_start":10,"frontier_end":20}),[None,None,None]).await;
+    insert_raw_delivery_journal_row(&mut transaction,obligation,None,"O",0,serde_json::json!({"intake_outbox_id":42}),[None,None,None]).await;
+    insert_raw_delivery_journal_row(&mut transaction,obligation,Some(attempt),"T",2,serde_json::json!({"requested_channel_id":"10","returned_channel_id":"10","message_id":"20"}),[Some("10"),Some("10"),Some("20")]).await;
+    insert_raw_delivery_journal_row(&mut transaction,obligation,Some(attempt),"A",1,serde_json::json!({"frontier_start":10,"frontier_end":20}),[None,None,None]).await;
+    let judgment=crate::services::discord::session_relay_sink::journal::judge_obligation_window(&mut transaction,obligation).await.expect("read uncommitted raw window");
+    assert_eq!(judgment.delivered_outbox_id(),Some(42)); assert!(!judgment.malformed());
+    transaction.rollback().await.expect("rollback caller transaction"); pool.close().await; db.drop().await;
+}
+
+#[cfg(unix)]
+#[rustfmt::skip]
+#[tokio::test(flavor = "current_thread")]
+async fn obligation_window_facade_rejects_unknown_kind_pg() {
+    let db=TestPostgresDb::create().await; let pool=db.connect_and_migrate().await; let mut connection=pool.acquire().await.expect("acquire fixture connection");
+    sqlx::query("ALTER TABLE delivery_journal_events DROP CONSTRAINT delivery_journal_kind_check, DROP CONSTRAINT delivery_journal_slot_check, DROP CONSTRAINT delivery_journal_attempt_check").execute(&pool).await.expect("permit unknown-kind raw fixture");
+    let obligation=uuid::Uuid::new_v4();
+    insert_raw_delivery_journal_row(&mut connection,obligation,None,"future",9,serde_json::json!({}),[None,None,None]).await;
+    let judgment=crate::services::discord::session_relay_sink::journal::judge_obligation_window(&mut connection,obligation).await.expect("read unknown-kind window");
+    assert_eq!(judgment.delivered_outbox_id(),None); assert!(judgment.malformed());
+    drop(connection); pool.close().await; db.drop().await;
+}

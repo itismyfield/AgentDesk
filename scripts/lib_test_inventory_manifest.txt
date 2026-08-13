@@ -3913,6 +3913,8 @@ services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_enf
 services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_queued_entrypoints_promote_markers_after_admission_before_finish
 services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_worker_post_claim_is_the_only_router_bypass
 services::discord::router::intake_dispatch::tests::live_and_skill_producers_forward_to_foreign_owner_pg
+services::discord::router::intake_dispatch::tests::obligation_window_facade_rejects_unknown_kind_pg
+services::discord::router::intake_dispatch::tests::obligation_window_facade_restores_sequence_and_receipt_pg
 services::discord::router::intake_dispatch::tests::queued_foreign_attachment_is_rejected_without_requeue_pg
 services::discord::router::intake_dispatch::tests::queued_foreign_owner_forwards_without_local_body_pg
 services::discord::router::intake_dispatch::tests::raw_attachment_foreign_owner_blocks_before_outbox_or_local_state_pg
@@ -4188,6 +4190,7 @@ services::discord::session_relay_sink::journal::controller::controller_terminal_
 services::discord::session_relay_sink::journal::controller::controller_terminal_semantics_tests::c3_only_a_real_range_under_a_known_generation_is_an_obligation
 services::discord::session_relay_sink::journal::controller::controller_terminal_semantics_tests::c4_settle_selects_the_terminal_event_and_is_single_use
 services::discord::session_relay_sink::journal::controller::controller_terminal_semantics_tests::c5_controller_family_never_classifies_as_delivered
+services::discord::session_relay_sink::journal::pg_store::tests::stored_journal_event_mapping_is_closed_and_fail_closed
 services::discord::session_relay_sink::journal::recovery::recovery_terminal_semantics_tests::r1_recovery_obligation_identity_covers_every_coordinate
 services::discord::session_relay_sink::journal::recovery::recovery_terminal_semantics_tests::r2_recovery_and_controller_obligations_never_coincide
 services::discord::session_relay_sink::journal::recovery::recovery_terminal_semantics_tests::r3_only_a_real_range_is_an_obligation_and_generation_zero_still_opens
@@ -4203,6 +4206,7 @@ services::discord::session_relay_sink::journal::tests::absent_file_id_has_one_ca
 services::discord::session_relay_sink::journal::tests::delivery_journal_defaults_to_legacy
 services::discord::session_relay_sink::journal::tests::execution_id_changes_for_each_canonical_component
 services::discord::session_relay_sink::journal::tests::finish_fresh_emits_transport_and_commit_as_one_batch
+services::discord::session_relay_sink::journal::tests::obligation_window_exact_delivery_predicate_is_exhaustive_and_fail_closed
 services::discord::session_relay_sink::journal::tests::shadow_candidate_delivered_requires_transport_confirmed
 services::discord::session_relay_sink::journal::tests::shadow_receipt_uses_returned_channel
 services::discord::session_relay_sink::journal::watcher::watcher_terminal_semantics_tests::w10_terminal_obligation_identity_covers_every_coordinate
