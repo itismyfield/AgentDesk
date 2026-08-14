@@ -213,7 +213,7 @@ fn compose_completion_footer_text_without_warning_with_limit(
     // #3391: body-only repair prevents `repair_fence_parity` from consuming the rendered footer.
     // Its ids were computed earlier, so the inline block clamp can still cut a reported mark (#5348).
     //
-    // Append the separately repaired body to the rendered footer. The assertion
+    // Append the rendered footer to the separately repaired body. The assertion
     // below checks the renderer's current even fence parity; the runtime branch
     // repairs the suffix separately if that assumption stops holding, without
     // reaching back across the body/footer boundary.
