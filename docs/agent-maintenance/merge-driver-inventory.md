@@ -97,8 +97,9 @@ partially-generated content.
 ## Correctness backstops (authoritative vs convenience)
 
 - **Authoritative, server-side — generation plus focused tracked diff.**
-  `scripts/ci-script-checks.sh` (run by the required *Script checks* job in
-  `.github/workflows/ci-pr.yml`) first runs `python3
+  `scripts/ci-script-checks.sh` (run by the `Script checks runner` job in
+  `.github/workflows/ci-pr.yml`; the required *Script checks* context is
+  published separately by its fail-closed result mirror) first runs `python3
   scripts/generate_inventory_docs.py`. Generation hard-fails source-of-truth
   violations such as an unregistered giant or invalid registry metadata. CI
   then runs `git diff --exit-code` for `ARCHITECTURE.md`, route inventory, and

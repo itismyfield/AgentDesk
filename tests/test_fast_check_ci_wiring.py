@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
 import subprocess
 import tempfile
@@ -12,6 +14,12 @@ import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+REQUIRED_CHECK_MIRROR_SHA256 = (
+    "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
+)
+CI_RUNNER_HARDENING_SHA256 = (
+    "9be327684586ffccd0ccd5ac99db81cf4af45e6425bd4deab402fb9eb8f27a56"
+)
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
 NIGHTLY_WORKFLOW = REPO_ROOT / ".github/workflows/ci-nightly.yml"
@@ -128,6 +136,24 @@ def job_block(workflow: str, job_name: str) -> str:
         workflow, match.end()
     )
     return workflow[match.start() : next_job.start() if next_job else len(workflow)]
+
+
+def step_block(job: str, step_name: str) -> str:
+    marker = re.compile(rf"^      - name: {re.escape(step_name)}\n", re.MULTILINE)
+    match = marker.search(job)
+    if match is None:
+        raise AssertionError(f"missing workflow step: {step_name}")
+    next_step = re.compile(r"^      - (?:name:|uses:)", re.MULTILINE).search(
+        job, match.end()
+    )
+    return job[match.start() : next_step.start() if next_step else len(job)]
+
+
+def replace_last(source: str, old: str, new: str) -> str:
+    head, separator, tail = source.rpartition(old)
+    if not separator:
+        raise AssertionError(f"missing text for final replacement: {old!r}")
+    return head + new + tail
 
 
 def workflow_paths(root: Path = REPO_ROOT) -> tuple[Path, ...]:
@@ -409,6 +435,32 @@ class FastCheckCiWiringTests(unittest.TestCase):
             r"        run: bash scripts/run_relay_authority_mutations\.sh$",
         )
 
+    def test_required_relay_job_backstops_mirror_content_hash(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        self.assertEqual(
+            hashlib.sha256(
+                (REPO_ROOT / "scripts/check-ci-runner-hardening.sh").read_bytes()
+            ).hexdigest(),
+            CI_RUNNER_HARDENING_SHA256,
+        )
+        relay_job = yaml.safe_load(workflow)["jobs"]["relay-authority-contract"]
+        self.assertNotIn("if", relay_job)
+        pin_steps = {
+            step["name"]: step
+            for step in relay_job["steps"]
+            if isinstance(step, dict) and step.get("name", "").endswith("(#5321)")
+        }
+        self.assertEqual(set(pin_steps), {"Pin required-check mirror content (#5321)"})
+        pin = pin_steps["Pin required-check mirror content (#5321)"]
+        self.assertEqual(pin["shell"], "bash")
+        self.assertEqual(pin["timeout-minutes"], 10)
+        self.assertEqual(pin["env"]["BASH_ENV"], "/dev/null")
+        self.assertIn('sha256sum "$helper_path"', pin["run"])
+        self.assertIn(REQUIRED_CHECK_MIRROR_SHA256, pin["run"])
+        self.assertIn('sha256sum "$gate_path"', pin["run"])
+        self.assertIn(CI_RUNNER_HARDENING_SHA256, pin["run"])
+        self.assertTrue(pin["run"].endswith("scripts/check-ci-runner-hardening.sh\n"))
+
     def test_script_checks_aggregate_is_exactly_one_step(self) -> None:
         hardening = (
             REPO_ROOT / "scripts/check-ci-runner-hardening.sh"
@@ -419,15 +471,22 @@ class FastCheckCiWiringTests(unittest.TestCase):
         )
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         scripts_job = job_block(workflow, "scripts")
-        aggregate = (
-            "      - name: Run script checks\n"
-            "        run: ./scripts/ci-script-checks.sh\n"
-            "        env:\n"
-            "          # Required Script checks only run on protected PR candidates. Their\n"
-            "          # synthetic merge first parent is the exact immutable base snapshot.\n"
-            "          TEST_LANE_BASELINE_REF: HEAD^1\n"
+        aggregate = step_block(scripts_job, "Run script checks")
+        parsed_steps = yaml.safe_load(workflow)["jobs"]["scripts"]["steps"]
+        parsed_aggregate = [
+            step for step in parsed_steps if step.get("name") == "Run script checks"
+        ]
+        self.assertEqual(len(parsed_aggregate), 1)
+        self.assertEqual(parsed_aggregate[0]["shell"], "bash")
+        self.assertEqual(parsed_aggregate[0]["run"], "./scripts/ci-script-checks.sh")
+        self.assertEqual(
+            parsed_aggregate[0]["env"],
+            {
+                "BASH_ENV": "/dev/null",
+                "PYTHON": "python3",
+                "TEST_LANE_BASELINE_REF": "HEAD^1",
+            },
         )
-        self.assertIn(aggregate, scripts_job)
         mutated_job = scripts_job.replace(aggregate, aggregate + aggregate, 1)
         mutated = workflow.replace(scripts_job, mutated_job, 1)
         result = self.run_hardening_fixture(mutated)
@@ -484,6 +543,575 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertIn(
             "must run exactly ./scripts/ci-script-checks.sh", result.stderr
         )
+
+    def test_script_checks_effective_execution_contract_covers_all_yaml_scopes(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        root_env = "env:\n  CARGO_TERM_COLOR: always\n"
+        scripts_marker = "  scripts:\n    name: Script checks runner\n"
+
+        mutations = {
+            "step shell": workflow.replace(
+                "      - name: Run script checks\n        shell: bash\n",
+                "      - name: Run script checks\n        shell: bash -n {0}\n",
+                1,
+            ),
+            "step working-directory": workflow.replace(
+                "      - name: Run script checks\n        shell: bash\n",
+                "      - name: Run script checks\n"
+                "        working-directory: /tmp\n"
+                "        shell: bash\n",
+                1,
+            ),
+            "step env": workflow.replace(
+                "          PYTHON: python3\n",
+                "          PYTHON: /bin/true\n",
+                1,
+            ),
+            "job defaults shell": workflow.replace(
+                scripts_marker,
+                scripts_marker + "    defaults:\n      run:\n        shell: bash -n {0}\n",
+                1,
+            ),
+            "job defaults working-directory": workflow.replace(
+                scripts_marker,
+                scripts_marker
+                + "    defaults:\n      run:\n        working-directory: /tmp\n",
+                1,
+            ),
+            "job env": workflow.replace(
+                scripts_marker,
+                scripts_marker + "    env:\n      PYTHON: /bin/true\n",
+                1,
+            ),
+            "workflow defaults shell": workflow.replace(
+                root_env,
+                "defaults:\n  run:\n    shell: bash -n {0}\n\n" + root_env,
+                1,
+            ),
+            "workflow defaults working-directory": workflow.replace(
+                root_env,
+                "defaults:\n  run:\n    working-directory: /tmp\n\n" + root_env,
+                1,
+            ),
+            "workflow env": workflow.replace(
+                root_env,
+                "env:\n  PYTHON: /bin/true\n  CARGO_TERM_COLOR: always\n",
+                1,
+            ),
+            "previous GITHUB_ENV write": workflow.replace(
+                "      - name: Install shellcheck\n"
+                "        run: sudo apt-get install -y shellcheck\n",
+                "      - name: Install shellcheck\n"
+                "        run: echo \"PYTHON=/bin/true\" >> \"$GITHUB_ENV\"\n",
+                1,
+            ),
+            "previous GITHUB_PATH write": workflow.replace(
+                "      - name: Install shellcheck\n"
+                "        run: sudo apt-get install -y shellcheck\n",
+                "      - name: Install shellcheck\n"
+                "        run: echo \"/tmp/injected\" >> \"$GITHUB_PATH\"\n",
+                1,
+            ),
+            "runs-on": workflow.replace(
+                "  scripts:\n    name: Script checks runner\n    needs: changes\n    runs-on: ubuntu-latest\n",
+                "  scripts:\n    name: Script checks runner\n    needs: changes\n    runs-on: macos-latest\n",
+                1,
+            ),
+        }
+
+        for label, mutated in mutations.items():
+            with self.subTest(mutation=label):
+                self.assertNotEqual(mutated, workflow)
+                result = self.run_hardening_fixture(mutated)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn("effective execution changed", result.stderr)
+                if label == "previous GITHUB_ENV write":
+                    self.assertIn('"key":"PYTHON"', result.stderr)
+                elif label == "previous GITHUB_PATH write":
+                    self.assertIn('"path":"/tmp/injected"', result.stderr)
+
+        passing = self.run_hardening_fixture(workflow)
+        self.assertEqual(passing.returncode, 0, passing.stderr)
+
+    def test_script_checks_protected_step_inventory_is_pinned(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        hardening = (
+            REPO_ROOT / "scripts/check-ci-runner-hardening.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            '"protected_step_inventory" => protected_step_inventory(steps)',
+            hardening,
+        )
+        insertion = (
+            "      - name: Run script checks\n"
+            "        shell: bash\n"
+            "        run: ./scripts/ci-script-checks.sh\n"
+        )
+        scripts = job_block(workflow, "scripts")
+        cases = {
+            "interstitial step": workflow.replace(
+                insertion,
+                "      - name: Unregistered interstitial check\n"
+                "        run: true\n\n"
+                + insertion,
+                1,
+            ),
+            "pre-pair aggregate overwrite": workflow.replace(
+                scripts,
+                scripts.replace(
+                    "      - name: Protect writer gate aggregate wiring (#5308)\n",
+                    "      - name: Replace aggregate before protection\n"
+                    "        run: printf '#!/usr/bin/env bash\\nexit 0\\n' > scripts/ci-script-checks.sh\n\n"
+                    "      - name: Protect writer gate aggregate wiring (#5308)\n",
+                    1,
+                ),
+                1,
+            ),
+        }
+        for label, mutated in cases.items():
+            with self.subTest(mutation=label):
+                self.assertNotEqual(mutated, workflow)
+                result = self.run_hardening_fixture(mutated)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "protected step inventory changed; expected indices [8, 9]",
+                    result.stderr,
+                )
+
+    def test_script_checks_required_context_mirror_is_pinned_fail_closed(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        mirror = job_block(workflow, "scripts_required_context")
+        job = yaml.safe_load(workflow)["jobs"]["scripts_required_context"]
+        self.assertEqual(job["name"], "Script checks")
+        self.assertEqual(job["needs"], ["changes", "scripts"])
+        self.assertEqual(job["if"], "always()")
+        self.assertNotIn("continue-on-error", job)
+        self.assertEqual(job["runs-on"], "ubuntu-latest")
+        self.assertEqual(len(job["steps"]), 3)
+        self.assertEqual(job["steps"][0], {"uses": "actions/checkout@v4"})
+
+        contract, result = job["steps"][1:]
+        self.assertEqual(contract["name"], "Verify Script checks mirror contract (#5321)")
+        self.assertEqual(contract["env"], {"BASH_ENV": "/dev/null"})
+        self.assertEqual(contract["shell"], "bash")
+        self.assertEqual(contract["timeout-minutes"], 10)
+        self.assertIn(f"expected={REQUIRED_CHECK_MIRROR_SHA256}", contract["run"])
+        self.assertIn(f"expected={CI_RUNNER_HARDENING_SHA256}", contract["run"])
+        self.assertIn("scripts/check-ci-runner-hardening.sh", contract["run"])
+        self.assertEqual(result["name"], "Mirror script checks result for branch protection")
+        self.assertEqual(result["run"], "./scripts/required-check-mirror.sh")
+        self.assertEqual(result["env"]["UPSTREAM_JOB_NAME"], "scripts")
+        self.assertEqual(result["env"]["UPSTREAM_RESULT"], "${{ needs.scripts.result }}")
+
+        mutations = {
+            "job deleted": "",
+            "changes dependency deleted": mirror.replace("      - changes\n", "", 1),
+            "job if weakened": mirror.replace(
+                "    if: always()\n",
+                "    if: ${{ github.event_name == 'push' }}\n",
+                1,
+            ),
+            "job continue-on-error injected": mirror.replace(
+                "    runs-on: ubuntu-latest\n",
+                "    continue-on-error: true\n    runs-on: ubuntu-latest\n",
+                1,
+            ),
+            "checkout provenance": mirror.replace(
+                "      - uses: actions/checkout@v4\n",
+                "      - uses: actions/checkout@v4\n"
+                "        with:\n"
+                "          repository: attacker/green-mirror\n",
+                1,
+            ),
+            "extra step": mirror.replace(
+                "      - uses: actions/checkout@v4\n",
+                "      - uses: actions/checkout@v4\n"
+                "      - run: printf 'exit 0\\n' > scripts/required-check-mirror.sh\n",
+                1,
+            ),
+            "mirror weakened": mirror.replace(
+                "        run: ./scripts/required-check-mirror.sh\n",
+                "        run: 'true'\n",
+                1,
+            ),
+        }
+        for field, value in {
+            "defaults": "defaults:\n      run:\n        shell: bash -n {0}",
+            "env": "env:\n      PYTHON: /bin/true",
+            "environment": "environment: never-approved",
+            "strategy": "strategy:\n      matrix:\n        shard: [only]",
+            "container": "container: ubuntu:latest",
+        }.items():
+            mutations[field] = mirror.replace(
+                "    runs-on: ubuntu-latest\n",
+                "    runs-on: ubuntu-latest\n"
+                + "\n".join(f"    {line}" for line in value.splitlines())
+                + "\n",
+                1,
+            )
+
+        for label, mutated_mirror in mutations.items():
+            with self.subTest(mutation=label):
+                mutated = workflow.replace(mirror, mutated_mirror, 1)
+                result = self.run_hardening_fixture(mutated)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+
+    def test_script_checks_publisher_rejects_missing_always_condition(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        mirror = job_block(workflow, "scripts_required_context")
+        mutated_mirror = mirror.replace("    if: always()\n", "", 1)
+        self.assertNotEqual(mutated_mirror, mirror)
+        mutated = workflow.replace(mirror, mutated_mirror, 1)
+        result = self.run_hardening_fixture(mutated)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(
+            "publisher must carry `if: always()` so upstream failure still "
+            "runs the fail-closed mirror",
+            result.stderr,
+        )
+
+    def test_script_checks_publisher_rejects_conditional_if(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        mirror = job_block(workflow, "scripts_required_context")
+        mutations = {
+            "success": mirror.replace(
+                "    if: always()\n", "    if: success()\n", 1
+            ),
+            "event condition": mirror.replace(
+                "    if: always()\n",
+                "    if: ${{ github.event_name == 'push' }}\n",
+                1,
+            ),
+        }
+        for label, mutated_mirror in mutations.items():
+            with self.subTest(condition=label):
+                self.assertNotEqual(mutated_mirror, mirror)
+                mutated = workflow.replace(mirror, mutated_mirror, 1)
+                result = self.run_hardening_fixture(mutated)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(
+                    "publisher must carry `if: always()` so upstream failure "
+                    "still runs the fail-closed mirror",
+                    result.stderr,
+                )
+
+    def test_relay_authority_publisher_rejects_job_condition(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        relay = job_block(workflow, "relay-authority-contract")
+        mutated_relay = relay.replace(
+            "    name: relay-authority-contract\n",
+            "    name: relay-authority-contract\n    if: always()\n",
+            1,
+        )
+        self.assertNotEqual(mutated_relay, relay)
+        mutated = workflow.replace(relay, mutated_relay, 1)
+        result = self.run_hardening_fixture(mutated)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(
+            "relay-authority-contract must not define an if key so the "
+            "independent publisher always runs",
+            result.stderr,
+        )
+
+    def test_required_job_needs_closure_has_role_specific_scheduling_policy(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        jobs = yaml.safe_load(workflow)["jobs"]
+        expected_closure = {
+            "changes",
+            "scripts",
+            "scripts_required_context",
+            "relay-authority-contract",
+        }
+        closure: set[str] = set()
+        frontier = ["scripts_required_context", "relay-authority-contract"]
+        while frontier:
+            job_id = frontier.pop()
+            if job_id in closure:
+                continue
+            closure.add(job_id)
+            needs = jobs[job_id].get("needs", [])
+            frontier.extend([needs] if isinstance(needs, str) else needs)
+        self.assertEqual(closure, expected_closure)
+
+        self.assertEqual(jobs["scripts_required_context"]["if"], "always()")
+        for job_id in ("relay-authority-contract", "changes", "scripts"):
+            self.assertNotIn("if", jobs[job_id])
+
+        for job_id in sorted(expected_closure):
+            job = job_block(workflow, job_id)
+            marker = f"    name: {jobs[job_id]['name']}\n"
+            self.assertIn(marker, job)
+            with self.subTest(job=job_id, key="continue-on-error"):
+                mutated_job = job.replace(
+                    marker,
+                    f"{marker}    continue-on-error: true\n",
+                    1,
+                )
+                mutated = workflow.replace(job, mutated_job, 1)
+                result = self.run_hardening_fixture(mutated)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+
+        for job_id in ("relay-authority-contract", "changes", "scripts"):
+            job = job_block(workflow, job_id)
+            marker = f"    name: {jobs[job_id]['name']}\n"
+            with self.subTest(job=job_id, key="if"):
+                mutated_job = job.replace(
+                    marker,
+                    f"{marker}    if: ${{{{ github.event_name == 'push' }}}}\n",
+                    1,
+                )
+                mutated = workflow.replace(job, mutated_job, 1)
+                result = self.run_hardening_fixture(mutated)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+
+    def test_duplicate_required_job_id_is_rejected_before_last_wins_resolution(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        mirror = job_block(workflow, "scripts_required_context")
+        malicious_last = mirror.replace(
+            "FILTER_OUTPUT: true",
+            "FILTER_OUTPUT: !!binary dHJ1ZQ==",
+            1,
+        )
+        mutated = workflow.replace(
+            "  relay-authority-contract:\n",
+            malicious_last + "  relay-authority-contract:\n",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        result = self.run_hardening_fixture(mutated)
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "duplicate job IDs are forbidden: scripts_required_context",
+            result.stderr,
+        )
+
+    def test_script_checks_mirror_fails_closed_on_skipped_upstream_results(self) -> None:
+        mirror_script = REPO_ROOT / "scripts/required-check-mirror.sh"
+        base_env = {
+            **os.environ,
+            "GITHUB_ACTIONS": "true",
+            "FILTER_NAME": "scripts",
+            "FILTER_OUTPUT": "true",
+            "UPSTREAM_JOB_NAME": "scripts",
+        }
+        for changed_paths_result, upstream_result in (
+            ("skipped", "skipped"),
+            ("success", "skipped"),
+            ("success", "failure"),
+            ("success", "cancelled"),
+        ):
+            with self.subTest(
+                changed_paths_result=changed_paths_result,
+                upstream_result=upstream_result,
+            ):
+                env = {
+                    **base_env,
+                    "CHANGED_PATHS_RESULT": changed_paths_result,
+                    "UPSTREAM_RESULT": upstream_result,
+                }
+                result = subprocess.run(
+                    ["bash", str(mirror_script)],
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("::error::", result.stderr)
+
+        success = subprocess.run(
+            ["bash", str(mirror_script)],
+            env={
+                **base_env,
+                "CHANGED_PATHS_RESULT": "success",
+                "UPSTREAM_RESULT": "success",
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(success.returncode, 0, success.stderr)
+
+    def test_helper_content_pin_kills_all_prior_mutation_classes(self) -> None:
+        helper = (REPO_ROOT / "scripts/required-check-mirror.sh").read_text(
+            encoding="utf-8"
+        )
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        mutations = {
+            "environment conditional": helper.replace(
+                "set -euo pipefail\n",
+                "set -euo pipefail\n\n"
+                'if [ "${GITHUB_ACTIONS:-}" = "true" ] && '
+                '[ "${UPSTREAM_JOB_NAME:-}" = "scripts" ]; then exit 0; fi\n',
+                1,
+            ),
+            "step-instance conditional": helper.replace(
+                "set -euo pipefail\n",
+                'set -euo pipefail\n[ "${GITHUB_ACTION:-}" = "__run_2" ] && exit 0\n',
+                1,
+            ),
+            "argv0 conditional": helper.replace(
+                "set -euo pipefail\n",
+                'set -euo pipefail\ncase "$0" in ./scripts/*) exit 0;; esac\n',
+                1,
+            ),
+            "unconditional exit zero": helper.replace(
+                "set -euo pipefail\n", "set -euo pipefail\nexit 0\n", 1
+            ),
+        }
+        for label, mutated_helper in mutations.items():
+            with self.subTest(mutation=label):
+                result = self.run_hardening_fixture(
+                    workflow, mirror_helper=mutated_helper
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("content hash mismatch", result.stderr)
+
+    def test_required_jobs_hash_backstops_reject_helper_and_gate_mutations(self) -> None:
+        workflow = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))
+        jobs = workflow["jobs"]
+        runs = (
+            jobs["scripts_required_context"]["steps"][1]["run"],
+            next(
+                step["run"]
+                for step in jobs["relay-authority-contract"]["steps"]
+                if step.get("name") == "Pin required-check mirror content (#5321)"
+            ),
+        )
+        helper = (REPO_ROOT / "scripts/required-check-mirror.sh").read_text(
+            encoding="utf-8"
+        )
+        gate = (REPO_ROOT / "scripts/check-ci-runner-hardening.sh").read_text(
+            encoding="utf-8"
+        )
+        cases = (
+            ("one-byte helper mutation", helper + "#", gate, None),
+            ("helper pin mutation", helper, gate, REQUIRED_CHECK_MIRROR_SHA256),
+            ("one-byte gate mutation", helper, gate + "#", None),
+            ("gate pin mutation", helper, gate, CI_RUNNER_HARDENING_SHA256),
+        )
+        for label, helper_candidate, gate_candidate, pin_to_corrupt in cases:
+            for index, run in enumerate(runs):
+                with self.subTest(case=label, backstop=index), tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp)
+                    (root / "scripts").mkdir()
+                    (root / "scripts/required-check-mirror.sh").write_text(
+                        helper_candidate, encoding="utf-8"
+                    )
+                    (root / "scripts/check-ci-runner-hardening.sh").write_text(
+                        gate_candidate, encoding="utf-8"
+                    )
+                    pin_only = run.rsplit("\nscripts/check-ci-runner-hardening.sh\n", 1)[0]
+                    if pin_to_corrupt is not None:
+                        pin_only = pin_only.replace(
+                            pin_to_corrupt,
+                            "0" * 64,
+                            1,
+                        )
+                    result = subprocess.run(
+                        ["bash", "-c", pin_only],
+                        cwd=root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("content hash mismatch", result.stdout + result.stderr)
+
+        mutated_gate = gate + "# reviewed gate edit\n"
+        repinned_gate_sha256 = hashlib.sha256(mutated_gate.encode()).hexdigest()
+        for index, run in enumerate(runs):
+            with self.subTest(case="gate repin roundtrip", backstop=index), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                (root / "scripts").mkdir()
+                (root / "scripts/required-check-mirror.sh").write_text(
+                    helper, encoding="utf-8"
+                )
+                (root / "scripts/check-ci-runner-hardening.sh").write_text(
+                    mutated_gate, encoding="utf-8"
+                )
+                pin_only = run.rsplit("\nscripts/check-ci-runner-hardening.sh\n", 1)[0]
+                pin_only = pin_only.replace(
+                    CI_RUNNER_HARDENING_SHA256,
+                    repinned_gate_sha256,
+                    1,
+                )
+                result = subprocess.run(
+                    ["bash", "-c", pin_only],
+                    cwd=root,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_documented_harmless_surface_edits_are_not_overblocked(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        scripts = job_block(workflow, "scripts")
+        cases = {
+            "step after protected pair": workflow.replace(
+                scripts,
+                scripts.replace(
+                    "      - name: Hotfile LOC ratchet (always, #3565)\n",
+                    "      - name: Harmless post-protection setup\n"
+                    "        run: true\n\n"
+                    "      - name: Hotfile LOC ratchet (always, #3565)\n",
+                    1,
+                ),
+                1,
+            ),
+            "GITHUB_ENV prose without redirection": workflow.replace(
+                "      - name: Install shellcheck\n"
+                "        run: sudo apt-get install -y shellcheck\n",
+                "      - name: Install shellcheck\n"
+                "        # This prose mentions GITHUB_ENV but performs no write.\n"
+                "        run: sudo apt-get install -y shellcheck\n",
+                1,
+            ),
+            "aggregate timeout": workflow.replace(
+                "      - name: Run script checks\n        shell: bash\n",
+                "      - name: Run script checks\n"
+                "        timeout-minutes: 30\n"
+                "        shell: bash\n",
+                1,
+            ),
+        }
+        for label, mutated in cases.items():
+            with self.subTest(edit=label):
+                result = self.run_hardening_fixture(mutated)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_unregistered_target_step_forbidden_runtime_env_is_rejected(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        relay_job = job_block(workflow, "relay-authority-contract")
+        mutated_relay_job = relay_job.replace(
+            "      - uses: actions/checkout@v4\n\n",
+            "      - uses: actions/checkout@v4\n\n"
+            "      - name: Unregistered forbidden env\n"
+            "        env:\n"
+            '          CARGO_PROFILE_DEV_DEBUG: "1"\n'
+            "        run: true\n\n",
+            1,
+        )
+        mutated_workflow = workflow.replace(relay_job, mutated_relay_job, 1)
+        self.assertNotEqual(mutated_workflow, workflow)
+
+        hardening = (
+            REPO_ROOT / "scripts/check-ci-runner-hardening.sh"
+        ).read_text(encoding="utf-8")
+        repinned_hardening = self._repin_job_hash(
+            hardening, mutated_workflow, "relay-authority-contract"
+        )
+        repinned_gate_sha256 = hashlib.sha256(repinned_hardening.encode()).hexdigest()
+        mutated_workflow = mutated_workflow.replace(
+            CI_RUNNER_HARDENING_SHA256,
+            repinned_gate_sha256,
+        )
+        result = self.run_hardening_fixture(
+            mutated_workflow, hardening_script=repinned_hardening
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must not set CARGO_PROFILE_DEV_DEBUG", result.stderr)
 
     def test_required_pr_steps_cannot_be_silently_disabled(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
@@ -714,7 +1342,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertIn("pull_request:", pr_workflow)
         self.assertNotIn("workflow_dispatch:", pr_workflow)
         self.assertNotRegex(pr_workflow, r"(?m)^  push:")
-        self.assertEqual(pr_workflow.count("name: Script checks"), 1)
+        self.assertEqual(pr_workflow.count("name: Script checks\n"), 1)
         self.assertRegex(
             job_block(pr_workflow, "scripts"),
             r"(?m)^          TEST_LANE_BASELINE_REF: HEAD\^1$",
@@ -733,11 +1361,82 @@ class FastCheckCiWiringTests(unittest.TestCase):
             (REPO_ROOT / ".github/workflows/test-lane-baseline-main.yml").exists()
         )
 
+    def _repin_job_hash(
+        self, hardening: str, workflow: str, job_id: str
+    ) -> str:
+        ruby = r"""
+require "yaml"
+require "json"
+require "digest"
+
+def canonical_yaml(value)
+  case value
+  when Hash
+    value.keys.sort_by(&:to_s).each_with_object({}) do |key, canonical|
+      item = value[key]
+      next if key.to_s == "continue-on-error" && (item.nil? || item == false)
+
+      canonical[key.to_s] = canonical_yaml(item)
+    end
+  when Array
+    value.map { |item| canonical_yaml(item) }
+  else
+    value
+  end
+end
+
+def normalize_required_check_pin(value)
+  case value
+  when Hash
+    value.transform_values { |item| normalize_required_check_pin(item) }
+  when Array
+    value.map { |item| normalize_required_check_pin(item) }
+  when String
+    value.gsub(/expected=[0-9a-f]{64}/, "expected=<required-check-pin-sha256>")
+  else
+    value
+  end
+end
+
+workflow, job_id = ARGV
+document = YAML.load_file(workflow)
+job = document.fetch("jobs").fetch(job_id)
+canonical = canonical_yaml(job)
+canonical = normalize_required_check_pin(canonical) if job_id == "relay-authority-contract"
+puts Digest::SHA256.hexdigest(JSON.generate(canonical))
+"""
+        with tempfile.TemporaryDirectory() as temp:
+            workflow_path = Path(temp) / "ci-pr.yml"
+            workflow_path.write_text(workflow, encoding="utf-8")
+            digest = subprocess.run(
+                ["ruby", "-e", ruby, str(workflow_path), job_id],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(digest.returncode, 0, digest.stderr)
+        job_match = re.search(
+            rf'("{re.escape(job_id)}" => \{{.*?"job_sha256" => ")'
+            r"[0-9a-f]{64}",
+            hardening,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(job_match)
+        assert job_match is not None
+        return (
+            hardening[: job_match.start()]
+            + job_match.group(1)
+            + digest.stdout.strip()
+            + hardening[job_match.end() :]
+        )
+
     def run_hardening_fixture(
         self,
         pr_workflow: str,
         extra_workflows: dict[str, str] | None = None,
         workflow_symlinks: dict[str, str] | None = None,
+        hardening_script: str | None = None,
+        mirror_helper: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -755,11 +1454,17 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 (workflows / name).write_text(content, encoding="utf-8")
             for name, target in (workflow_symlinks or {}).items():
                 (workflows / name).symlink_to(target)
-            script = (REPO_ROOT / "scripts/check-ci-runner-hardening.sh").read_text(
-                encoding="utf-8"
-            )
+            script = hardening_script or (
+                REPO_ROOT / "scripts/check-ci-runner-hardening.sh"
+            ).read_text(encoding="utf-8")
             (root / "scripts/check-ci-runner-hardening.sh").write_text(
                 script, encoding="utf-8"
+            )
+            helper = mirror_helper or (
+                REPO_ROOT / "scripts/required-check-mirror.sh"
+            ).read_text(encoding="utf-8")
+            (root / "scripts/required-check-mirror.sh").write_text(
+                helper, encoding="utf-8"
             )
             return subprocess.run(
                 ["bash", "scripts/check-ci-runner-hardening.sh"],
@@ -947,6 +1652,142 @@ jobs:
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("cannot parse YAML", result.stderr)
         self.assertIn("aliased.yaml", result.stderr)
+
+    def test_hardening_rejects_non_string_yaml_job_keys(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        collision = (
+            "  yes:\n"
+            "    name: Script checks\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: true\n\n"
+            "  on:\n"
+            "    name: harmless schema-collision decoy\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: true\n\n"
+        )
+        mutated = workflow.replace(
+            "  scripts_required_context:\n",
+            collision + "  scripts_required_context:\n",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        result = self.run_hardening_fixture(mutated)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("job IDs must be strings", result.stderr)
+        self.assertIn("non-string YAML job keys", result.stderr)
+
+    def test_hardening_rejects_yaml_11_booleanish_plain_job_keys(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        for key in ("yes", "no", "on", "off", "true", "false", "y", "n"):
+            with self.subTest(key=key):
+                probe = (
+                    f"  {key}:\n"
+                    "    name: harmless key probe\n"
+                    "    runs-on: ubuntu-latest\n"
+                    "    steps:\n"
+                    "      - run: true\n\n"
+                )
+                mutated = workflow.replace(
+                    "  scripts_required_context:\n",
+                    probe + "  scripts_required_context:\n",
+                    1,
+                )
+                result = self.run_hardening_fixture(mutated)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertRegex(
+                    result.stderr,
+                    r"(?:non-string YAML job keys|ambiguous YAML plain job keys)",
+                )
+        quoted = workflow.replace(
+            "  scripts_required_context:\n",
+            '  "yes":\n    name: quoted-key probe\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n\n  scripts_required_context:\n',
+            1,
+        )
+        self.assertEqual(self.run_hardening_fixture(quoted).returncode, 0)
+
+    def test_fixed_surfaces_use_raw_github_scalar_values(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        mirror = job_block(workflow, "scripts_required_context")
+        relay = job_block(workflow, "relay-authority-contract")
+        relay_pin = step_block(relay, "Pin required-check mirror content (#5321)")
+        cases = (
+            (
+                "plain yes is not the true string",
+                workflow.replace(
+                    mirror,
+                    mirror.replace("FILTER_OUTPUT: true", "FILTER_OUTPUT: yes", 1),
+                    1,
+                ),
+                1,
+            ),
+            (
+                "plain on is not the true string",
+                workflow.replace(
+                    mirror,
+                    mirror.replace("FILTER_OUTPUT: true", "FILTER_OUTPUT: on", 1),
+                    1,
+                ),
+                1,
+            ),
+            (
+                "quoted true changes the pinned scalar style",
+                workflow.replace(
+                    mirror,
+                    mirror.replace(
+                        "FILTER_OUTPUT: true", 'FILTER_OUTPUT: "true"', 1
+                    ),
+                    1,
+                ),
+                1,
+            ),
+            (
+                "explicit binary tag is not discarded",
+                workflow.replace(
+                    mirror,
+                    mirror.replace(
+                        "FILTER_OUTPUT: true",
+                        "FILTER_OUTPUT: !!binary dHJ1ZQ==",
+                        1,
+                    ),
+                    1,
+                ),
+                1,
+            ),
+            (
+                "backstop timeout leading zero is not decimal 10",
+                workflow.replace(
+                    relay,
+                    relay.replace(
+                        relay_pin,
+                        relay_pin.replace(
+                            "        timeout-minutes: 10\n",
+                            "        timeout-minutes: 012\n",
+                            1,
+                        ),
+                        1,
+                    ),
+                    1,
+                ),
+                1,
+            ),
+            (
+                "job timeout leading zero is not decimal 30",
+                workflow.replace(
+                    relay,
+                    relay.replace(
+                        "    timeout-minutes: 30", "    timeout-minutes: 036", 1
+                    ),
+                    1,
+                ),
+                1,
+            ),
+        )
+        for label, mutated, expected_rc in cases:
+            with self.subTest(case=label):
+                result = self.run_hardening_fixture(mutated)
+                self.assertEqual(result.returncode, expected_rc, result.stderr)
 
     def test_hardening_rejects_workflow_symlink(self) -> None:
         result = self.run_hardening_fixture(

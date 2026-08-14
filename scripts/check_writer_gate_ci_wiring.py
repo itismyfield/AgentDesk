@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Protect writer call-site gate wiring outside ``ci-script-checks.sh``.
 
-The PR ``Script checks`` job invokes this checker directly.  Keeping
+The PR ``Script checks`` runner job invokes this checker directly.  Keeping
 the checker outside the aggregate script means removal of an aggregate writer
 gate or of either tested gate's unittest command is observable even when that
 removal would otherwise stop the corresponding wiring test from running.  It
@@ -12,9 +12,10 @@ to the external step.
 This is an exact shell-command contract, not a shell parser.  Only a complete,
 unindented executable line counts; comments, echoes, command suffixes, and
 duplicates fail closed.  Presence does not prove unconditional execution: a
-matching column-zero line can still be nested in shell control flow, and this
-checker does not constrain environment variables on the workflow step that
-runs the aggregate.
+matching column-zero line can still be nested in shell control flow. The
+hardening guard owns the parsed effective-execution contract; this checker pins
+the guard's aggregate and external-step assertions so either observer cannot
+be removed independently.
 """
 
 from __future__ import annotations
@@ -65,6 +66,21 @@ REQUIRED_INVOCATIONS = (
     ),
 )
 
+REQUIRED_HARDENING_SNIPPETS = (
+    '''unless execution_contract(script_check_execution, expected_script_check_execution)
+  expected = JSON.generate(canonical_yaml(expected_script_check_execution))
+  found = JSON.generate(canonical_yaml(script_check_execution))
+  warn "#{path}: Script checks aggregate effective execution changed; expected #{expected}; found #{found}"
+  exit 1
+end''',
+    '''unless execution_contract(writer_wiring_execution, expected_writer_wiring_execution)
+  expected = JSON.generate(canonical_yaml(expected_writer_wiring_execution))
+  found = JSON.generate(canonical_yaml(writer_wiring_execution))
+  warn "#{path}: writer gate aggregate wiring effective execution changed; expected #{expected}; found #{found}"
+  exit 1
+end''',
+)
+
 
 def check_text(text: str) -> list[str]:
     """Return contract violations for an aggregate-script snapshot."""
@@ -94,13 +110,34 @@ def check_text(text: str) -> list[str]:
     return errors
 
 
+def check_hardening_text(text: str) -> list[str]:
+    """Return contract violations for effective-execution assertions."""
+    errors: list[str] = []
+    for snippet in REQUIRED_HARDENING_SNIPPETS:
+        count = text.count(snippet)
+        if count != 1:
+            errors.append(
+                "Script checks effective-execution contract: expected exactly one "
+                f"hardening snippet {snippet!r}, found {count}"
+            )
+    return errors
+
+
 def check(repo_root: Path) -> list[str]:
     path = repo_root / CI_SCRIPT
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as error:
         return [f"cannot read {CI_SCRIPT}: {error}"]
-    return check_text(text)
+    errors = check_text(text)
+    hardening_path = repo_root / Path("scripts/check-ci-runner-hardening.sh")
+    try:
+        hardening_text = hardening_path.read_text(encoding="utf-8")
+    except OSError as error:
+        errors.append(f"cannot read scripts/check-ci-runner-hardening.sh: {error}")
+    else:
+        errors.extend(check_hardening_text(hardening_text))
+    return errors
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -121,7 +158,8 @@ def main(argv: list[str] | None = None) -> int:
 
     print(
         "writer gate CI wiring check passed: "
-        f"{len(REQUIRED_INVOCATIONS)} exact aggregate invocations protected"
+        f"{len(REQUIRED_INVOCATIONS)} exact aggregate invocations and "
+        f"{len(REQUIRED_HARDENING_SNIPPETS)} effective-execution assertions protected"
     )
     return 0
 

@@ -326,7 +326,10 @@ echo "=== Shell test suites (tests/*.sh) ==="
 # while every required check stayed green. Run them here, in the job that already
 # owns script-level gates.
 SHELL_TESTS_FAILED=0
-required_shell_suites=(tests/test_deploy_smoke_wedge_coverage_5244.sh)
+required_shell_suites=(
+  tests/test_deploy_smoke_wedge_coverage_5244.sh
+  tests/test_required_check_mirror.sh
+)
 for required_suite in "${required_shell_suites[@]}"; do
   [ -f "$required_suite" ] || { echo "✗ required shell suite missing: $required_suite" >&2; SHELL_TESTS_FAILED=1; }
 done
