@@ -908,9 +908,26 @@ def _validated_orphan_stranded_since(
 
 
 def _store_orphan_stranded_since(
-    channel_state: dict[str, Any], stranded: Mapping[str, float]
+    channel_state: dict[str, Any], stranded: Mapping[str, Any]
 ) -> None:
-    bounded = dict(sorted(stranded.items())[:MAX_ORPHAN_STRANDED_PATHS])
+    # Entries without a finite nonnegative timestamp provide no reliable age
+    # for eviction, so discard them instead of letting them consume the bounded
+    # marker budget. Keep the newest valid markers: if a just-opened marker is
+    # dropped, this tick may suppress its alert while a later tick has no marker
+    # from which to satisfy `orphan_matured`, leaving a quiet persistent gap
+    # that is harder to observe than the alerting form.
+    valid = [
+        (path, float(since))
+        for path, since in stranded.items()
+        if isinstance(path, str)
+        and path
+        and _is_finite_nonnegative_number(since)
+    ]
+    bounded = dict(
+        sorted(valid, key=lambda item: (-item[1], item[0]))[
+            :MAX_ORPHAN_STRANDED_PATHS
+        ]
+    )
     if bounded:
         channel_state[ORPHAN_STRANDED_SINCE_KEY] = bounded
     else:
@@ -922,14 +939,15 @@ def _release_pending_authority(
     remaining_pending: list[str],
     pending_failures: dict[str, int],
     pending_since: dict[str, float],
+    stranded_since: dict[str, float],
     released: set[str],
-) -> tuple[list[str], dict[str, int], dict[str, float]]:
-    """Drop paths from every pending-authority map in one step (#5190).
+) -> tuple[list[str], dict[str, int], dict[str, float], dict[str, float]]:
+    """Drop released paths from pending and stranded authority in one step.
 
-    The three maps are one fact recorded three ways, so releasing a path from
-    only some of them leaves a half-retired authority behind. Callers that must
-    release atomically with an external side effect (a retirement notice that
-    actually left the box) need a single call they can place after it.
+    The pending maps and stranded marker are related lifecycle records, so a
+    partial release can leave retired authority occupying a bounded store.
+    Callers that couple release to an external side effect (a retirement notice
+    that actually left the box) can place this single state transition after it.
     """
     remaining_pending = [
         path for path in remaining_pending if path not in released
@@ -944,6 +962,11 @@ def _release_pending_authority(
         for path, since in pending_since.items()
         if path not in released
     }
+    stranded_since = {
+        path: since
+        for path, since in stranded_since.items()
+        if path not in released
+    }
     channel_state[PENDING_TRANSCRIPTS_KEY] = remaining_pending
     if pending_failures:
         channel_state[PENDING_TRANSCRIPT_FAILURES_KEY] = pending_failures
@@ -953,7 +976,8 @@ def _release_pending_authority(
         channel_state[PENDING_TRANSCRIPT_SINCE_KEY] = pending_since
     else:
         channel_state.pop(PENDING_TRANSCRIPT_SINCE_KEY, None)
-    return remaining_pending, pending_failures, pending_since
+    _store_orphan_stranded_since(channel_state, stranded_since)
+    return remaining_pending, pending_failures, pending_since, stranded_since
 
 
 def _orphan_authority_matured(
@@ -5010,6 +5034,7 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         )
     )
     superseded_gap_owners: list[str] = []
+    stranded_since = _validated_orphan_stranded_since(chs)
     if (
         selected_path
         and selected_verdict is not None
@@ -5030,12 +5055,18 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             superseded = set(superseded_gap_owners)
             _store_retired_transcripts(chs, retired_transcripts)
             retired_pending_paths.extend(superseded_gap_owners)
-            remaining_pending, pending_failures, pending_since = (
+            (
+                remaining_pending,
+                pending_failures,
+                pending_since,
+                stranded_since,
+            ) = (
                 _release_pending_authority(
                     chs,
                     remaining_pending,
                     pending_failures,
                     pending_since,
+                    stranded_since,
                     superseded,
                 )
             )
@@ -5064,7 +5095,6 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     # floor, and — decisively — another transcript on the same channel is
     # delivering right now. A relay that is actually down produces none of that
     # last part, so nothing below can silence a real outage.
-    stranded_since = _validated_orphan_stranded_since(chs)
     orphan_unattributable_paths: set[str] = set()
     # Paths whose stranded finding is re-corroborated on THIS tick, and so the
     # only ones a matured marker may actually close out (#5190 R3 P2-A).
@@ -5243,15 +5273,20 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             candidate = candidate_by_path.get(path)
             if candidate is not None:
                 retired_transcripts[path] = (candidate.size, now)
-            stranded_since.pop(path, None)
         _store_retired_transcripts(chs, retired_transcripts)
         # Released only now, downstream of a notice that provably left the box.
-        remaining_pending, pending_failures, pending_since = (
+        (
+            remaining_pending,
+            pending_failures,
+            pending_since,
+            stranded_since,
+        ) = (
             _release_pending_authority(
                 chs,
                 remaining_pending,
                 pending_failures,
                 pending_since,
+                stranded_since,
                 retired_orphans,
             )
         )

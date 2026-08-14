@@ -5214,6 +5214,69 @@ class TickChannelTests(unittest.TestCase):
         tick_channel(rt, TICK_CHANNEL, state, retire_at)
         return retire_at
 
+    def test_5206_release_prunes_stranded_marker_with_pending_authority(self):
+        released = "/tmp/released.jsonl"
+        retained = "/tmp/retained.jsonl"
+        chs = {
+            relay_watchdog.PENDING_TRANSCRIPTS_KEY: [released, retained],
+            relay_watchdog.PENDING_TRANSCRIPT_FAILURES_KEY: {
+                released: 2,
+                retained: 1,
+            },
+            relay_watchdog.PENDING_TRANSCRIPT_SINCE_KEY: {
+                released: self.now - 20,
+                retained: self.now - 10,
+            },
+            self.ORPHAN_STRANDED_KEY: {
+                released: self.now - 20,
+                retained: self.now - 10,
+            },
+        }
+
+        pending, failures, pending_since, stranded_since = (
+            relay_watchdog._release_pending_authority(
+                chs,
+                [released, retained],
+                {released: 2, retained: 1},
+                {released: self.now - 20, retained: self.now - 10},
+                {released: self.now - 20, retained: self.now - 10},
+                {released},
+            )
+        )
+
+        self.assertEqual(pending, [retained])
+        self.assertEqual(failures, {retained: 1})
+        self.assertEqual(pending_since, {retained: self.now - 10})
+        self.assertEqual(stranded_since, {retained: self.now - 10})
+        self.assertEqual(
+            chs[self.ORPHAN_STRANDED_KEY], {retained: self.now - 10}
+        )
+
+    def test_5206_stranded_cap_keeps_new_marker_and_evicts_oldest(self):
+        cap = relay_watchdog.MAX_ORPHAN_STRANDED_PATHS
+        oldest = "/tmp/orphan-oldest.jsonl"
+        newest = "/tmp/orphan-newest.jsonl"
+        stranded = {
+            oldest: self.now,
+            **{
+                f"/tmp/orphan-{index:02d}.jsonl": self.now + index
+                for index in range(1, cap)
+            },
+            newest: self.now + cap,
+            "/tmp/orphan-missing-timestamp.jsonl": None,
+            "/tmp/orphan-unparseable-timestamp.jsonl": "not-a-timestamp",
+        }
+        chs: dict = {}
+
+        relay_watchdog._store_orphan_stranded_since(chs, stranded)
+
+        stored = chs[self.ORPHAN_STRANDED_KEY]
+        self.assertEqual(len(stored), cap)
+        self.assertIn(newest, stored)
+        self.assertNotIn(oldest, stored)
+        self.assertNotIn("/tmp/orphan-missing-timestamp.jsonl", stored)
+        self.assertNotIn("/tmp/orphan-unparseable-timestamp.jsonl", stored)
+
     def test_5190_frozen_orphan_stops_pinning_a_delivering_channel_in_gap(self):
         rt, state, live, orphan = self._5190_live_channel()
         chs = state["999"]
