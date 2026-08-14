@@ -222,7 +222,11 @@ time for diagnostics; neither is a stored approval value.
   `scripts/check-ci-runner-hardening.sh` and
   `python3 -m unittest tests.test_fast_check_ci_wiring`. A digest-only edit
   with unchanged helper bytes is red; changing the helper first is red until
-  all three reviewed pins agree.
+  all three reviewed pins agree. Separately, the gate pins a source-range
+  digest of the `scripts_required_context` mirror job itself (a fourth literal
+  in `check-ci-runner-hardening.sh`); any edit inside that job — comments
+  included — is red until that literal is re-pinned to the hash the failure
+  message prints.
 - tests: permanent fixtures cover the historical environment, `GITHUB_ACTION`,
   argv0, and unconditional-`exit 0` attacks; one-byte helper
   and digest-only mutations; mirror defaults/env/environment/strategy/container
