@@ -1,8 +1,7 @@
 # Runbook — auditing dispatched intake-outbox rows
 
 Use this procedure to inventory `intake_outbox` rows whose status is
-`dispatched`. It gathers facts only; it does not change a row or release the
-row's channel route.
+`dispatched`.
 
 ## Run the audit
 
@@ -67,11 +66,11 @@ channel would violate the same index while only the dispatched row appears here.
 ## Scope and limits
 
 The command uses no explicit multi-statement transaction, row lock, or advisory
-lock. Each SELECT runs in an implicit transaction and takes an ordinary ACCESS
-SHARE relation lock; that lock is compatible with DML but can delay ACCESS
-EXCLUSIVE DDL for the duration of the query. Do not run the audit during a
-migration or deployment: it can delay DDL, and queued ACCESS EXCLUSIVE DDL can
-in turn make later readers wait.
+lock. The `list_dispatched_audit` query's `SELECT ... FROM public.intake_outbox`
+takes an ordinary ACCESS SHARE relation lock in its implicit transaction. That
+lock is compatible with DML but can delay ACCESS EXCLUSIVE DDL for the duration
+of the query. Do not run the audit during a migration or deployment: it can
+delay DDL, and queued ACCESS EXCLUSIVE DDL can in turn make later readers wait.
 
 The single statement reads a consistent MVCC snapshot, so it cannot see half
 of an in-progress transaction. Rows committed after statement start are absent,
