@@ -432,6 +432,7 @@ pub(super) enum ShadowClassification { CandidateDelivered, SettledWithoutTranspo
 
 /// Consumers can observe only a verified intake binding and fail-closed state,
 /// never the stored event rows or either classifier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(in crate::services::discord) struct ObligationWindowJudgment {
     delivered_outbox_id: Option<i64>,
@@ -960,7 +961,9 @@ mod tests {
         assert!(runtime.delivery_journal_internal_channel_ids.is_empty());
     }
     #[test]
-    fn authority_admission_matches_shadow_observation_pair() {
+    fn authority_and_shadow_observation_event_builder_shapes_match() {
+        // This pins the shared O+A event builder only; it does not exercise `admit`'s
+        // mode, pool, cohort, or internal-channel gates.
         let expected = vec!["O", "A"];
         for mode in [DeliveryJournalMode::Shadow, DeliveryJournalMode::Authority] {
             let events = admission_events(
@@ -973,7 +976,7 @@ mod tests {
             assert_eq!(
                 mode.records_shadow_observations().then_some(kinds),
                 Some(expected.clone()),
-                "Authority admit must retain Shadow's O+A observation path"
+                "both rollout modes must retain the shared O+A observation shape"
             );
         }
     }
@@ -1000,6 +1003,16 @@ mod tests {
             pg_store::LoadedObligationWindow::Events(exact_window(Some(json!(42)))),
         )
         .is_none());
+
+        let fallback = malformed_judgment();
+        assert_eq!(
+            select_reconcile_judgment(DeliveryJournalMode::Legacy, None, Some(fallback)),
+            Some(fallback)
+        );
+        assert_eq!(
+            select_reconcile_judgment(DeliveryJournalMode::Shadow, None, Some(fallback)),
+            Some(fallback)
+        );
     }
     #[test]
     fn absent_file_id_has_one_canonical_sentinel_byte() {

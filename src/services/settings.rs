@@ -1481,12 +1481,16 @@ mod tests {
 
     #[test]
     fn delivery_journal_mode_stays_yaml_only() {
-        for key in ["delivery_journal_mode", "deliveryJournalMode"] {
-            assert!(
-                !RUNTIME_CONFIG_KEYS.contains(&key),
-                "delivery-journal mode is YAML-only; if this key enters RUNTIME_CONFIG_KEYS, update the Authority contract comment and cutover design together"
-            );
-        }
+        assert!(
+            !RUNTIME_CONFIG_KEYS.contains(&"delivery_journal_mode"),
+            "delivery-journal mode is YAML-only; if this key enters RUNTIME_CONFIG_KEYS, update the Authority contract comment and cutover design together"
+        );
+        assert!(
+            RUNTIME_CONFIG_KEYS
+                .iter()
+                .all(|key| !key.starts_with("deliveryJournal")),
+            "all deliveryJournal* keys are YAML-only; keep cohort and internal-channel gates out of runtime-config"
+        );
     }
 
     #[test]

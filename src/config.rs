@@ -1585,13 +1585,22 @@ pub enum DeliveryJournalMode {
     /// key. A value placed there through the runtime-config API is stored and echoed by that API,
     /// but the journal consumers ignore it.
     ///
-    /// Activation is not safe by itself. A direct `Legacy` to `Authority` transition can leave
-    /// an in-flight delivery permanently absent: Legacy admits with no observation, then an
+    /// Activation is not safe by itself. The fence risk belongs to any transition that exits
+    /// `Legacy`, not to `Authority` alone: a direct `Legacy` to `Authority` transition, or a
+    /// `Legacy` to `Shadow` transition before its admission scope is warmed, can leave an
+    /// in-flight delivery permanently absent. Legacy admits with no observation, then a later
     /// Authority settle sees `None` and is a no-op. `JournalObserver::submit` also uses bounded
     /// `try_send`, so a full mailbox drops an observation. Cutover therefore requires Shadow
     /// warm-up and an in-flight drain/fence; this dormant slice does not provide either one.
-    /// `Shadow` to `Authority` does capture the observation at admit time, so that transition
-    /// does not create the same half-recorded delivery.
+    ///
+    /// `Shadow` to `Authority` prevents that same half-recorded delivery only for deliveries
+    /// actually admitted under `Shadow`. Admission is additionally gated by the cohort and
+    /// internal-channel settings (`cohort_bucket(id) < delivery_journal_cohort_percent.min(100)` unless
+    /// the channel is internal). The shipped defaults are cohort `0` and an empty internal
+    /// channel list, so the admitted scope is empty: no observation is captured, and this
+    /// transition is equivalent to `Legacy` to `Authority` (the reconciler reaches
+    /// `settle_dispatched_unknown`). Cutover requires **the entire target scope to be admitted;
+    /// cohort warm-up complete**, in addition to the drain/fence above.
     Authority,
 }
 
@@ -1843,7 +1852,7 @@ mod runtime_hook_registry_config_tests {
     // (otherwise the `skip_serializing_if = "RuntimeSettingsConfig::is_empty"`
     // on the parent would drop the operator's override on a round-trip).
     #[test]
-    fn hook_registry_keys_count_toward_is_empty() {
+    fn hook_registry_keys_count_toward_is_empty_and_pin_authority_serde_contract() {
         assert!(RuntimeSettingsConfig::default().is_empty());
 
         // The DESERIALIZED empty section must also report empty, not just the

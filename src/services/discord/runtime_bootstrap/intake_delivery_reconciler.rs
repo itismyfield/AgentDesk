@@ -67,7 +67,13 @@ async fn reconcile_in_tx(
         };
         let judgment =
             select_reconcile_judgment(journal_mode, authority_judgment, fallback_judgment)
-                .expect("one journal reader must produce a judgment");
+                .unwrap_or_else(|| {
+                    // The caller's `authority.is_none()` guard makes the fallback present exactly when
+                    // the authority result is absent. That invariant is non-local to this selector and
+                    // must remain true while this code runs inside the open PG transaction; violating
+                    // the caller contract is unreachable rather than a recoverable judgment.
+                    unreachable!("one journal reader must produce a judgment")
+                });
         if judgment.delivered_outbox_id() == Some(outbox_id) {
             delivered = true;
             break;
