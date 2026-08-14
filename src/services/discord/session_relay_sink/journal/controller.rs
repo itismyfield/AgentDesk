@@ -6,11 +6,10 @@
 //! pre-cutover long-chunk arm (both via `record_long_chunk_terminal_delivery`).
 //! This module is the only way those sites reach the journal.
 //!
-//! Shadow only: nothing here is read back by live delivery, and a row exists
-//! only when a PG pool, `DeliveryJournalMode::Shadow` and the cohort selection
-//! all agree. If this observation ever changes what production delivers, that is
-//! a bug — the facade reads process state, never mutates it (see
-//! [`confirmed_end_generation_mtime_ns`]).
+//! Journal observation writes are admitted in `Shadow` and `Authority` when a
+//! PG pool and the cohort selection agree. `Authority` prepares a journal read
+//! path elsewhere; this module keeps the existing writer in place and still
+//! reads process state without mutating it (see [`confirmed_end_generation_mtime_ns`]).
 //!
 //! ## The receipt ceiling: this family can never be `CandidateDelivered`
 //!

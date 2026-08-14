@@ -37,8 +37,9 @@ pub(super) fn process_observer() -> &'static JournalObserver {
     &PROCESS_OBSERVER
 }
 
-/// Shadow admission — mode, pool, cohort — in the same order and with the same
-/// meaning as the sink's `begin_fresh`.
+/// Journal admission — mode, pool, cohort — in the same order and with the same
+/// meaning as the sink's `begin_fresh`. `Shadow` and `Authority` both retain
+/// observation writes; `Legacy` leaves the delivery path unchanged.
 ///
 /// It lived in `journal::watcher` while the watcher was the only family that
 /// could not reach `begin_fresh`; #5071 T1 S4 adds the controller family, which
@@ -51,7 +52,7 @@ pub(super) fn admit(
     obligation_id: Uuid,
 ) -> Option<sqlx::PgPool> {
     let runtime = crate::config_live_reload::current()?.runtime.clone();
-    if runtime.delivery_journal_mode != DeliveryJournalMode::Shadow {
+    if !runtime.delivery_journal_mode.records_shadow_observations() {
         return None;
     }
     let pool = shared.pg_pool.clone()?;
@@ -126,7 +127,7 @@ impl JournalObserver {
         delivery: &super::SessionRelayDelivery,
     ) -> Option<AttemptObservation> {
         let runtime = crate::config_live_reload::current()?.runtime.clone();
-        if runtime.delivery_journal_mode != DeliveryJournalMode::Shadow {
+        if !runtime.delivery_journal_mode.records_shadow_observations() {
             return None;
         }
         let pool = shared.pg_pool.clone()?;
@@ -150,20 +151,7 @@ impl JournalObserver {
         };
         self.submit(AppendCommand {
             pool,
-            events: vec![
-                event(obligation_id, None, "O", 0, key.payload()),
-                event(
-                    obligation_id,
-                    Some(attempt_id),
-                    "A",
-                    1,
-                    json!({
-                        "attempt": 0,
-                        "frontier_start": key.frontier.0,
-                        "frontier_end": key.frontier.1,
-                    }),
-                ),
-            ],
+            events: admission_events(obligation_id, attempt_id, key.payload(), key.frontier),
         });
         Some(observation)
     }
@@ -400,6 +388,28 @@ fn push_field(bytes: &mut Vec<u8>, value: &str) {
     bytes.extend_from_slice(value.as_bytes());
 }
 
+fn admission_events(
+    obligation_id: Uuid,
+    attempt_id: Uuid,
+    canonical_payload: Value,
+    frontier: (u64, u64),
+) -> Vec<JournalEvent> {
+    vec![
+        event(obligation_id, None, "O", 0, canonical_payload),
+        event(
+            obligation_id,
+            Some(attempt_id),
+            "A",
+            1,
+            json!({
+                "attempt": 0,
+                "frontier_start": frontier.0,
+                "frontier_end": frontier.1,
+            }),
+        ),
+    ]
+}
+
 fn execution_id(
     session: &str,
     generation: i64,
@@ -422,6 +432,7 @@ pub(super) enum ShadowClassification { CandidateDelivered, SettledWithoutTranspo
 
 /// Consumers can observe only a verified intake binding and fail-closed state,
 /// never the stored event rows or either classifier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(in crate::services::discord) struct ObligationWindowJudgment {
     delivered_outbox_id: Option<i64>,
@@ -439,20 +450,72 @@ impl ObligationWindowJudgment {
     }
 }
 
+/// Read one obligation from the journal only when `Authority` is selected.
+/// Returning `None` leaves the legacy/shadow reader available to callers that
+/// have not crossed the authority handoff yet; no writer is changed here.
+/// `mode` is captured by the caller at transaction start so a live-config reload
+/// cannot mix journal readers inside one reconciliation.
+pub(in crate::services::discord) async fn read_authority_obligation_window(
+    connection: &mut sqlx::PgConnection,
+    obligation_id: Uuid,
+    mode: DeliveryJournalMode,
+) -> Result<Option<ObligationWindowJudgment>, sqlx::Error> {
+    if !mode.reads_as_authority() {
+        return Ok(None);
+    }
+    let loaded = pg_store::load_obligation_window(connection, obligation_id).await?;
+    Ok(authority_obligation_window_from_loaded(mode, loaded))
+}
+
 #[allow(dead_code)]
 pub(in crate::services::discord) async fn judge_obligation_window(
     connection: &mut sqlx::PgConnection,
     obligation_id: Uuid,
 ) -> Result<ObligationWindowJudgment, sqlx::Error> {
-    match pg_store::load_obligation_window(connection, obligation_id).await? {
+    let loaded = pg_store::load_obligation_window(connection, obligation_id).await?;
+    Ok(judge_loaded_obligation_window(loaded))
+}
+
+/// PG-free loaded-window half of `read_authority_obligation_window`; keeping
+/// this branch pure lets unit tests pin the Authority result without opening a
+/// PostgreSQL connection.
+fn authority_obligation_window_from_loaded(
+    mode: DeliveryJournalMode,
+    loaded: pg_store::LoadedObligationWindow,
+) -> Option<ObligationWindowJudgment> {
+    if !mode.reads_as_authority() {
+        return None;
+    }
+    Some(judge_loaded_obligation_window(loaded))
+}
+
+fn judge_loaded_obligation_window(
+    loaded: pg_store::LoadedObligationWindow,
+) -> ObligationWindowJudgment {
+    match loaded {
         pg_store::LoadedObligationWindow::Events(events) => {
             let (delivered, binding, malformed) = exact_delivery_predicate(&events);
-            Ok(ObligationWindowJudgment {
+            ObligationWindowJudgment {
                 delivered_outbox_id: delivered.then_some(binding).flatten(),
                 malformed,
-            })
+            }
         }
-        pg_store::LoadedObligationWindow::Malformed => Ok(malformed_judgment()),
+        pg_store::LoadedObligationWindow::Malformed => malformed_judgment(),
+    }
+}
+
+/// Choose the reader result for one obligation after the transaction's mode
+/// snapshot has been captured. The fallback remains available for dormant
+/// Legacy/Shadow operation and for a defensive Authority read miss.
+pub(in crate::services::discord) fn select_reconcile_judgment(
+    mode: DeliveryJournalMode,
+    authority: Option<ObligationWindowJudgment>,
+    fallback: Option<ObligationWindowJudgment>,
+) -> Option<ObligationWindowJudgment> {
+    if mode.reads_as_authority() {
+        authority.or(fallback)
+    } else {
+        fallback.or(authority)
     }
 }
 
@@ -892,8 +955,64 @@ mod tests {
     fn delivery_journal_defaults_to_legacy() {
         let runtime = crate::config::RuntimeSettingsConfig::default();
         assert_eq!(runtime.delivery_journal_mode, DeliveryJournalMode::Legacy);
+        assert!(!runtime.delivery_journal_mode.records_shadow_observations());
+        assert!(!runtime.delivery_journal_mode.reads_as_authority());
         assert_eq!(runtime.delivery_journal_cohort_percent, 0);
         assert!(runtime.delivery_journal_internal_channel_ids.is_empty());
+    }
+    #[test]
+    fn authority_and_shadow_observation_event_builder_shapes_match() {
+        // This pins the shared O+A event builder only; it does not exercise `admit`'s
+        // mode, pool, cohort, or internal-channel gates.
+        let expected = vec!["O", "A"];
+        for mode in [DeliveryJournalMode::Shadow, DeliveryJournalMode::Authority] {
+            let events = admission_events(
+                Uuid::from_u128(200),
+                Uuid::from_u128(201),
+                json!({"canonical_key_sha256":"fixture"}),
+                (10, 20),
+            );
+            let kinds = events.iter().map(|event| event.kind).collect::<Vec<_>>();
+            assert_eq!(
+                mode.records_shadow_observations().then_some(kinds),
+                Some(expected.clone()),
+                "both rollout modes must retain the shared O+A observation shape"
+            );
+        }
+    }
+    #[test]
+    fn p2_1_authority_reader_returns_real_judgment_and_reconcile_selects_it() {
+        let authority = authority_obligation_window_from_loaded(
+            DeliveryJournalMode::Authority,
+            pg_store::LoadedObligationWindow::Events(exact_window(Some(json!(42)))),
+        )
+        .expect("Authority must return a journal judgment");
+        assert_eq!(authority.delivered_outbox_id(), Some(42));
+        assert!(!authority.malformed());
+
+        let selected = select_reconcile_judgment(
+            DeliveryJournalMode::Authority,
+            Some(authority),
+            Some(malformed_judgment()),
+        )
+        .expect("Authority selection must produce a judgment");
+        assert_eq!(selected.delivered_outbox_id(), Some(42));
+        assert!(!selected.malformed());
+        assert!(authority_obligation_window_from_loaded(
+            DeliveryJournalMode::Shadow,
+            pg_store::LoadedObligationWindow::Events(exact_window(Some(json!(42)))),
+        )
+        .is_none());
+
+        let fallback = malformed_judgment();
+        assert_eq!(
+            select_reconcile_judgment(DeliveryJournalMode::Legacy, None, Some(fallback)),
+            Some(fallback)
+        );
+        assert_eq!(
+            select_reconcile_judgment(DeliveryJournalMode::Shadow, None, Some(fallback)),
+            Some(fallback)
+        );
     }
     #[test]
     fn absent_file_id_has_one_canonical_sentinel_byte() {

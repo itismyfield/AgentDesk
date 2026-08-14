@@ -7,7 +7,8 @@
 //! no attempt and no receipt: they emit `O`+`S` only, and Q3 is explicit that
 //! `SettledWithoutTransport` is NOT counted as Delivered.
 //!
-//! Shadow only: nothing here is read back by live delivery.
+//! `Shadow` and `Authority` record observations; `Authority`'s read handoff is
+//! wired separately, so this observer does not revoke an existing writer.
 
 use std::sync::Arc;
 
@@ -129,8 +130,8 @@ pub(super) fn settlement_events(
 }
 
 /// Observe a frontier advance that transported nothing. Returns what it emitted
-/// so a test can assert on it; an empty return means shadow mode was off, there
-/// was no pool, or the cohort did not select this channel.
+/// so a test can assert on it; an empty return means journal observation mode
+/// was off, there was no pool, or the cohort did not select this channel.
 pub(in crate::services::discord) fn settle_without_transport(
     shared: &SharedData,
     coordinates: WatcherObligationCoordinates<'_>,

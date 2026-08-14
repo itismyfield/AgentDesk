@@ -5,10 +5,13 @@
 
 #![allow(dead_code)]
 
+use crate::config::DeliveryJournalMode;
 use crate::db::intake_outbox_delivery_proof::{
     mark_done_from_delivery_proof, settle_dispatched_unknown, try_lock_dispatched_for_proof,
 };
-use crate::services::discord::session_relay_sink::journal::judge_obligation_window;
+use crate::services::discord::session_relay_sink::journal::{
+    judge_obligation_window, read_authority_obligation_window, select_reconcile_judgment,
+};
 use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
@@ -36,6 +39,10 @@ async fn reconcile_in_tx(
     outbox_id: i64,
     cutoff: DateTime<Utc>,
 ) -> Result<ReconcileOutcome, sqlx::Error> {
+    // Capture the mode once so a YAML reload cannot mix readers in this transaction.
+    let journal_mode = crate::config_live_reload::current()
+        .map(|config| config.runtime.delivery_journal_mode)
+        .unwrap_or(DeliveryJournalMode::Legacy);
     let obligations: Vec<Uuid> = sqlx::query_scalar(
         "SELECT DISTINCT obligation_id
            FROM public.delivery_journal_events
@@ -49,7 +56,24 @@ async fn reconcile_in_tx(
 
     let mut delivered = false;
     for obligation_id in obligations {
-        let judgment = judge_obligation_window(&mut *connection, obligation_id).await?;
+        // Authority selects the journal read path; Legacy and Shadow retain the
+        // reducer's pre-handoff facade until a later writer cutover.
+        let authority_judgment =
+            read_authority_obligation_window(&mut *connection, obligation_id, journal_mode).await?;
+        let fallback_judgment = if authority_judgment.is_none() {
+            Some(judge_obligation_window(&mut *connection, obligation_id).await?)
+        } else {
+            None
+        };
+        let judgment =
+            select_reconcile_judgment(journal_mode, authority_judgment, fallback_judgment)
+                .unwrap_or_else(|| {
+                    // The caller's `authority.is_none()` guard makes the fallback present exactly when
+                    // the authority result is absent. That invariant is non-local to this selector and
+                    // must remain true while this code runs inside the open PG transaction; violating
+                    // the caller contract is unreachable rather than a recoverable judgment.
+                    unreachable!("one journal reader must produce a judgment")
+                });
         if judgment.delivered_outbox_id() == Some(outbox_id) {
             delivered = true;
             break;
