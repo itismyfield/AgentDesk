@@ -4464,6 +4464,9 @@ class TickChannelTests(unittest.TestCase):
         self.assertEqual(
             state["999"]["pending_transcript_failures"][str(torn)], 1
         )
+        state["999"][relay_watchdog.ORPHAN_STRANDED_SINCE_KEY] = {
+            str(torn): self.now + 2
+        }
 
         with mock.patch.object(
             relay_watchdog, "transcript_candidates", return_value=[]
@@ -4483,6 +4486,10 @@ class TickChannelTests(unittest.TestCase):
         )
         self.assertIn(str(torn), state["999"]["retired_transcripts"])
         self.assertNotIn(str(torn), state["999"]["pending_transcripts"])
+        self.assertNotIn(
+            str(torn),
+            state["999"].get(relay_watchdog.ORPHAN_STRANDED_SINCE_KEY, {}),
+        )
 
     def test_invariant_4435_corrupt_pending_escalates_once_then_unwedges(self):
         current = self.proj_dir / "current.jsonl"
@@ -4969,6 +4976,9 @@ class TickChannelTests(unittest.TestCase):
         self.assertTrue(chs.get("alerting"))
         self.assertIn(str(owner), chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY])
         chs["issue_url"] = "https://example.test/issues/4715"
+        chs[relay_watchdog.ORPHAN_STRANDED_SINCE_KEY] = {
+            str(owner): self.now
+        }
 
         successor_at = self.now + rt.cfg.idle_quiet_secs + 1
         successor.write_text(
@@ -4992,6 +5002,10 @@ class TickChannelTests(unittest.TestCase):
         self.assertNotIn(relay_watchdog.GAP_TRANSCRIPT_KEY, chs)
         self.assertNotIn(relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY, chs)
         self.assertIn(str(owner), chs[relay_watchdog.RETIRED_TRANSCRIPTS_KEY])
+        self.assertNotIn(
+            str(owner),
+            chs.get(relay_watchdog.ORPHAN_STRANDED_SINCE_KEY, {}),
+        )
         self.assertFalse(any("릴레이 갭 해소" in body for body, _ in rt.alerts))
         self.assertTrue(
             any("historical-gap-owner-retired" in line for line in rt.log_lines)
@@ -5254,12 +5268,15 @@ class TickChannelTests(unittest.TestCase):
 
     def test_5206_stranded_cap_keeps_new_marker_and_evicts_oldest(self):
         cap = relay_watchdog.MAX_ORPHAN_STRANDED_PATHS
-        oldest = "/tmp/orphan-oldest.jsonl"
-        newest = "/tmp/orphan-newest.jsonl"
+        # Path order is intentionally the reverse of the eviction decision:
+        # the broken `dict(sorted(stranded.items())[:cap])` keeps `oldest` and
+        # drops `newest`, while timestamp order must do the opposite.
+        oldest = "/tmp/orphan-aaa-oldest.jsonl"
+        newest = "/tmp/orphan-zzz-newest.jsonl"
         stranded = {
             oldest: self.now,
             **{
-                f"/tmp/orphan-{index:02d}.jsonl": self.now + index
+                f"/tmp/orphan-mid-{index:02d}.jsonl": self.now + index
                 for index in range(1, cap)
             },
             newest: self.now + cap,
@@ -5276,6 +5293,35 @@ class TickChannelTests(unittest.TestCase):
         self.assertNotIn(oldest, stored)
         self.assertNotIn("/tmp/orphan-missing-timestamp.jsonl", stored)
         self.assertNotIn("/tmp/orphan-unparseable-timestamp.jsonl", stored)
+
+    def test_5206_idle_expiry_prunes_an_uncorroborated_stranded_marker(self):
+        """Reproduce the review's marker leak after orphan retirement defers."""
+        rt, state, live, orphan = self._5190_live_channel()
+        chs = state["999"]
+        marker_at = self.now + rt.cfg.orphan_abandon_secs + 600
+        self._5190_strand_orphan(orphan, self.now)
+        self._5190_live_delivery(rt, live, marker_at, "live marker opener")
+        tick_channel(rt, TICK_CHANNEL, state, marker_at)
+        self.assertIn(str(orphan), chs[self.ORPHAN_STRANDED_KEY])
+
+        # No sibling block newer than marker_at is delivered, so orphan close
+        # lacks fresh corroboration. Two-hour pending expiry retires the path
+        # before evaluation; there is no later marker-cleared opportunity.
+        expiry = marker_at + rt.cfg.idle_quiet_secs + 1
+        tick_channel(rt, TICK_CHANNEL, state, expiry)
+
+        self.assertIn(
+            str(orphan), chs[relay_watchdog.RETIRED_TRANSCRIPTS_KEY]
+        )
+        self.assertNotIn(
+            str(orphan), chs.get(relay_watchdog.PENDING_TRANSCRIPTS_KEY, [])
+        )
+        self.assertNotIn(
+            str(orphan), chs.get(relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY, [])
+        )
+        self.assertNotIn(
+            str(orphan), chs.get(self.ORPHAN_STRANDED_KEY, {})
+        )
 
     def test_5190_frozen_orphan_stops_pinning_a_delivering_channel_in_gap(self):
         rt, state, live, orphan = self._5190_live_channel()
@@ -6732,6 +6778,9 @@ class TickChannelTests(unittest.TestCase):
                 DELIVERED_WATERMARKS_KEY: {
                     path: {"delivered_ts": anchor, "updated_at": self.now}
                 },
+                relay_watchdog.ORPHAN_STRANDED_SINCE_KEY: {
+                    path: self.now
+                },
             }
         }
         state_path = self.root / "absence-lifecycle.json"
@@ -6766,6 +6815,9 @@ class TickChannelTests(unittest.TestCase):
         )
         self.assertEqual(delivered_watermark_for_path(chs, path), 0.0)
         self.assertNotIn(path, chs.get(relay_watchdog.TRANSCRIPT_SIZES_KEY, {}))
+        self.assertNotIn(
+            path, chs.get(relay_watchdog.ORPHAN_STRANDED_SINCE_KEY, {})
+        )
         self.assertTrue(
             any("recovered-gap-guard-reclaimed" in line for line in rt.log_lines)
         )
@@ -8949,6 +9001,9 @@ class DeadWorktreeRetirementTests(unittest.TestCase):
             str(self.transcript),
             chs.get(relay_watchdog.DEAD_WORKTREE_ABSENT_SINCE_KEY, {}),
         )
+        chs[relay_watchdog.ORPHAN_STRANDED_SINCE_KEY] = {
+            str(self.transcript): self.now
+        }
 
         self.tick(
             rt, state, self.now + relay_watchdog.DEAD_WORKTREE_CONFIRM_SECS + 1
@@ -8961,6 +9016,10 @@ class DeadWorktreeRetirementTests(unittest.TestCase):
         self.assertNotIn(relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY, chs)
         self.assertIn(
             str(self.transcript), chs[relay_watchdog.RETIRED_TRANSCRIPTS_KEY]
+        )
+        self.assertNotIn(
+            str(self.transcript),
+            chs.get(relay_watchdog.ORPHAN_STRANDED_SINCE_KEY, {}),
         )
         self.assertTrue(
             any(
