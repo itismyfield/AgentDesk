@@ -18,7 +18,10 @@ its runtime output. A gate that hides its holes is worse than no gate.
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,6 +31,12 @@ SCRIPT = ROOT / "scripts/check_durable_frontier_writer_call_sites.py"
 SPEC = importlib.util.spec_from_file_location("durable_frontier_writer_guard", SCRIPT)
 guard = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(guard)
+INTAKE_SCRIPT = ROOT / "scripts/check_intake_outbox_done_writer_call_sites.py"
+INTAKE_SPEC = importlib.util.spec_from_file_location(
+    "intake_outbox_done_writer_guard_for_skip_tests", INTAKE_SCRIPT
+)
+intake_guard = importlib.util.module_from_spec(INTAKE_SPEC)
+INTAKE_SPEC.loader.exec_module(intake_guard)
 
 # Measured on 0bde0675b, the base S7' branched from, then re-measured on this
 # slice: #5071 T1 S7 moved five counts for a net 42 -> 41 over 23 -> 24 symbols.
@@ -104,6 +113,36 @@ class SourceContractTests(unittest.TestCase):
         # path: a reader who only ever sees green must still learn the limits.
         for limit in ("use .. as x", "not Rust parsing", "not proof of reachability"):
             self.assertIn(limit, message)
+        pinned_count = len(guard.PINNED_TEST_ONLY_MODULE_FILES)
+        self.assertIn(f"skipped {pinned_count} test files", message)
+
+    def test_shared_skip_pin_is_the_only_path_and_count_source(self):
+        self.assertIs(
+            guard.PINNED_TEST_ONLY_MODULE_FILES,
+            guard._SKIP_PIN.PINNED_TEST_ONLY_MODULE_FILES,
+        )
+        self.assertEqual(
+            guard.PINNED_TEST_ONLY_MODULE_FILES,
+            guard._SKIP_PIN.PINNED_BASENAME_TEST_FILES
+            | guard._SKIP_PIN.PINNED_RESOLVER_TEST_ONLY_FILES,
+        )
+
+    def test_pin_groups_match_their_live_classifiers(self):
+        all_files, skips = guard._SKIP_PIN.validated_scan_files(
+            ROOT,
+            guard.SCAN_ROOT,
+            guard.is_test_file,
+        )
+        basename = {
+            path.relative_to(ROOT).as_posix()
+            for path in all_files
+            if guard.is_test_file(path.name)
+        }
+        resolver = {
+            path.relative_to(ROOT).as_posix() for path in skips
+        } - basename
+        self.assertEqual(basename, guard._SKIP_PIN.PINNED_BASENAME_TEST_FILES)
+        self.assertEqual(resolver, guard._SKIP_PIN.PINNED_RESOLVER_TEST_ONLY_FILES)
 
     def test_expected_map_totals_are_pinned_independently_of_the_map(self):
         """A shrunk map plus a shrunk tree would agree with itself; this does not."""
@@ -255,9 +294,296 @@ class DiscriminationTests(unittest.TestCase):
         original = guard.EXPECTED_CALL_SITES
         guard.EXPECTED_CALL_SITES = expected if expected is not None else self.expected()
         try:
-            return guard.check(root)
+            return guard.check(root, pinned_test_only_files=frozenset())
         finally:
             guard.EXPECTED_CALL_SITES = original
+
+    def run_both_skip_gates(
+        self, root: Path, pinned: frozenset[str] | set[str]
+    ) -> tuple[tuple[bool, str], tuple[bool, str]]:
+        original = guard.EXPECTED_CALL_SITES
+        guard.EXPECTED_CALL_SITES = {
+            symbol: {} for symbol in guard.EXPECTED_CALL_SITES
+        }
+        try:
+            durable = guard.check(root, pinned_test_only_files=pinned)
+            intake = intake_guard.check(
+                root, {}, pinned_test_only_files=pinned
+            )
+        finally:
+            guard.EXPECTED_CALL_SITES = original
+        return durable, intake
+
+    def rustc(self, root: Path, main: Path, *cfg: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "rustc",
+                "--edition=2021",
+                *cfg,
+                str(main),
+                "-o",
+                str(root / "fixture-bin"),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_pin_mutations_report_both_directions(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        write(root, "src/main.rs", "fn main() {}\n")
+        removed_path = "src/hidden_tests.rs"
+        write(root, removed_path, "")
+        canonical = frozenset({removed_path})
+        mutations = {
+            "remove": (
+                canonical - {removed_path},
+                "scan-only (newly skipped)",
+            ),
+            "add": (
+                canonical | {"src/does_not_exist.rs"},
+                "pin-only (no longer skipped)",
+            ),
+            "case": (
+                (canonical - {removed_path}) | {removed_path.swapcase()},
+                "scan-only (newly skipped)",
+            ),
+        }
+        for name, (pin, needle) in mutations.items():
+            with self.subTest(mutation=name):
+                for ok, message in self.run_both_skip_gates(root, pin):
+                    self.assertFalse(ok, message)
+                    self.assertIn(needle, message)
+                    if name == "case":
+                        self.assertIn("pin-only (no longer skipped)", message)
+                    self.assertIn("scripts/test_only_module_skip_pin.py", message)
+
+    def test_census_survives_pin_comparison_bypass(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        write(root, "src/main.rs", "fn main() {}\n")
+        write(root, "src/new_tests.rs", "")
+        original = guard._SKIP_PIN.skip_pin_drift
+        guard._SKIP_PIN.skip_pin_drift = lambda *_args, **_kwargs: None
+        try:
+            with self.assertRaisesRegex(RuntimeError, "skipped census differs"):
+                guard._SKIP_PIN.validated_scan_files(
+                    root, guard.SCAN_ROOT, guard.is_test_file, pinned_paths=set()
+                )
+        finally:
+            guard._SKIP_PIN.skip_pin_drift = original
+
+    def test_empty_production_input_reports_the_resolver_guard_not_a_fallback_path(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        write(root, "src/only_tests.rs", "")
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "production file list is empty.*empty-input fallback",
+        ) as raised:
+            guard._SKIP_PIN.validated_scan_files(
+                root,
+                guard.SCAN_ROOT,
+                guard.is_test_file,
+                pinned_paths={"src/only_tests.rs"},
+            )
+        self.assertNotIn("outside lexical src/ enumeration", str(raised.exception))
+
+    def test_four_resolver_holes_and_basename_bypass_fail_both_gates(self):
+        prelude = (
+            "pub fn write_delivered_frontier() {}\n"
+            "pub mod db { pub mod intake_outbox { pub fn mark_done() {} } }\n"
+        )
+        shared = (
+            "pub fn run() { crate::write_delivered_frontier(); "
+            "crate::db::intake_outbox::mark_done(); }\n"
+        )
+        scenarios = {
+            "path_mod_comment": (
+                '#[path="shared.rs"]\n// trivia\nmod production_shared;\n'
+                '#[cfg(test)]\n#[path="shared.rs"]\nmod test_alias;\n',
+                (),
+                "src/shared.rs",
+            ),
+            "macro_generated_mod": (
+                "macro_rules! m { ($n:ident) => { mod $n; } }\n"
+                "m!(shared);\n#[cfg(test)]\n#[path=\"shared.rs\"]\nmod test_alias;\n",
+                (),
+                "src/shared.rs",
+            ),
+            "cfg_not_test_include": (
+                '#[cfg(not(test))]\nmod production_shared { include!("shared.rs"); }\n'
+                '#[cfg(test)]\n#[path="shared.rs"]\nmod test_alias;\n',
+                (),
+                "src/shared.rs",
+            ),
+            "cfg_any_feature_include": (
+                '#[cfg(any(test, feature="x"))]\n'
+                'mod production_shared { include!("shared.rs"); }\n'
+                '#[cfg(test)]\n#[path="shared.rs"]\nmod test_alias;\n',
+                ("--cfg", 'feature="x"'),
+                "src/shared.rs",
+            ),
+            "basename_production_mod": (
+                '#[path="pin_bypass_tests.rs"]\nmod production_shared;\n',
+                (),
+                "src/pin_bypass_tests.rs",
+            ),
+        }
+        for name, (declaration, cfg, child) in scenarios.items():
+            with self.subTest(form=name):
+                temp = tempfile.TemporaryDirectory()
+                self.addCleanup(temp.cleanup)
+                root = Path(temp.name)
+                main = root / "src/main.rs"
+                write(
+                    root,
+                    "src/main.rs",
+                    prelude + declaration + "fn main(){ production_shared::run(); }\n"
+                    if name != "macro_generated_mod"
+                    else prelude + declaration + "fn main(){ shared::run(); }\n",
+                )
+                write(root, child, shared)
+                built = self.rustc(root, main, *cfg)
+                self.assertEqual(built.returncode, 0, built.stderr)
+                for ok, message in self.run_both_skip_gates(root, frozenset()):
+                    self.assertFalse(ok, message)
+                    self.assertIn(f"scan-only (newly skipped): {child}", message)
+
+    def test_non_rs_path_variants_are_enumerated_and_rejected_by_both_gates(self):
+        prelude = (
+            "pub fn write_delivered_frontier() {}\n"
+            "pub mod db { pub mod intake_outbox { pub fn mark_done() {} } }\n"
+        )
+        shared = (
+            "pub fn run() { crate::write_delivered_frontier(); "
+            "crate::db::intake_outbox::mark_done(); }\n"
+        )
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        main = root / "src/main.rs"
+        declarations = (
+            '#[path="gate_escape.rś"]\nmod escape_unicode;\n'
+            '#[path="gate_escape.txt"]\nmod escape_suffix;\n'
+            '#[path="gate_escape"]\nmod escape_none;\n'
+        )
+        write(
+            root,
+            "src/main.rs",
+            prelude
+            + declarations
+            + "fn main() { escape_unicode::run(); escape_suffix::run(); "
+            "escape_none::run(); }\n",
+        )
+        for rel in ("src/gate_escape.rś", "src/gate_escape.txt", "src/gate_escape"):
+            write(root, rel, shared)
+
+        built = self.rustc(root, main)
+        self.assertEqual(built.returncode, 0, built.stderr)
+        for ok, message in self.run_both_skip_gates(root, frozenset()):
+            self.assertFalse(ok, message)
+            self.assertIn("reject non-.rs regular files", message)
+            for rel in ("src/gate_escape.rś", "src/gate_escape.txt", "src/gate_escape"):
+                self.assertIn(rel, message)
+
+    def test_file_and_directory_symlinks_are_rejected_by_both_gates(self):
+        prelude = (
+            "pub fn write_delivered_frontier() {}\n"
+            "pub mod db { pub mod intake_outbox { pub fn mark_done() {} } }\n"
+        )
+        shared = (
+            "pub fn run() { crate::write_delivered_frontier(); "
+            "crate::db::intake_outbox::mark_done(); }\n"
+        )
+        for kind in ("file", "directory"):
+            with self.subTest(kind=kind):
+                temp = tempfile.TemporaryDirectory()
+                self.addCleanup(temp.cleanup)
+                root = Path(temp.name)
+                if kind == "file":
+                    write(root, "src/canonical.rs", shared)
+                    os.symlink("canonical.rs", root / "src/alias_tests.rs")
+                    target = "alias_tests.rs"
+                else:
+                    write(root, "outside/writer.rs", shared)
+                    (root / "src").mkdir(parents=True, exist_ok=True)
+                    os.symlink("../outside", root / "src/linked")
+                    target = "linked/writer.rs"
+                main = root / "src/main.rs"
+                write(
+                    root,
+                    "src/main.rs",
+                    prelude
+                    + f'#[path="{target}"]\nmod production_shared;\n'
+                    + "fn main(){ production_shared::run(); }\n",
+                )
+                built = self.rustc(root, main)
+                self.assertEqual(built.returncode, 0, built.stderr)
+                for ok, message in self.run_both_skip_gates(root, frozenset()):
+                    self.assertFalse(ok, message)
+                    self.assertIn("reject file or directory symlinks", message)
+                    self.assertIn(
+                        "do not add it to the writer-gate skip pin", message
+                    )
+                    self.assertNotIn(
+                        "Review basename and resolver classification", message
+                    )
+
+    def test_legal_test_only_round_trip_updates_only_the_pin(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        write(root, "src/main.rs", "#[cfg(test)]\nmod helper;\nfn main() {}\n")
+        write(
+            root,
+            "src/helper.rs",
+            "fn probe() { crate::write_delivered_frontier(); "
+            "crate::db::intake_outbox::mark_done(); }\n",
+        )
+        rel = "src/helper.rs"
+        before = {
+            path.relative_to(root).as_posix(): path.read_bytes()
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+        for ok, message in self.run_both_skip_gates(root, frozenset()):
+            self.assertFalse(ok, message)
+            self.assertIn(f"scan-only (newly skipped): {rel}", message)
+        for ok, message in self.run_both_skip_gates(root, {rel}):
+            self.assertTrue(ok, message)
+        after = {
+            path.relative_to(root).as_posix(): path.read_bytes()
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(before, after)
+        (root / rel).unlink()
+        (root / "src/main.rs").write_text("fn main() {}\n", encoding="utf-8")
+        for ok, message in self.run_both_skip_gates(root, {rel}):
+            self.assertFalse(ok, message)
+            self.assertIn(f"pin-only (no longer skipped): {rel}", message)
+        for ok, message in self.run_both_skip_gates(root, frozenset()):
+            self.assertTrue(ok, message)
+
+    def test_test_only_writers_do_not_move_counts_but_production_writers_fail(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        write(root, "src/main.rs", "fn main() {}\n")
+        body = (
+            "fn probe() { crate::write_delivered_frontier(); "
+            "crate::db::intake_outbox::mark_done(); }\n"
+        )
+        write(root, "src/hidden_tests.rs", body)
+        for ok, message in self.run_both_skip_gates(root, {"src/hidden_tests.rs"}):
+            self.assertTrue(ok, message)
+        write(root, "src/production.rs", body)
+        for ok, message in self.run_both_skip_gates(root, {"src/hidden_tests.rs"}):
+            self.assertFalse(ok, message)
+            self.assertIn("UNLISTED", message)
 
     # --- baseline -----------------------------------------------------------
 
@@ -510,7 +836,17 @@ class DiscriminationTests(unittest.TestCase):
             "src/services/discord/outbound/inline_tested_fn.rs",
             "#[cfg(all(test, unix))]\nfn probe() { clear_lease(); }\n",
         )
-        ok, message = self.run_guard(root)
+        original = guard.EXPECTED_CALL_SITES
+        guard.EXPECTED_CALL_SITES = self.expected()
+        try:
+            ok, message = guard.check(
+                root,
+                pinned_test_only_files={
+                    "src/services/discord/outbound/delivery_record_tests.rs"
+                },
+            )
+        finally:
+            guard.EXPECTED_CALL_SITES = original
         self.assertTrue(ok, message)
 
     def test_cfg_test_struct_field_does_not_swallow_the_next_impl_block(self):

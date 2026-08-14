@@ -36,6 +36,16 @@ class SourceContractTests(unittest.TestCase):
         self.assertIn("2 production sites across 2 symbols", message)
         for limit in ("not Rust parsing", "direct SQL writers are NOT seen", "over-counted"):
             self.assertIn(limit, message)
+        self.assertIn(
+            f"skipped {len(guard.PINNED_TEST_ONLY_MODULE_FILES)} test files",
+            message,
+        )
+
+    def test_shared_skip_pin_is_the_only_path_and_count_source(self):
+        self.assertIs(
+            guard.PINNED_TEST_ONLY_MODULE_FILES,
+            guard._SKIP_PIN.PINNED_TEST_ONLY_MODULE_FILES,
+        )
 
     def test_conditional_pin_is_the_t2_done_writer_only(self):
         self.assertEqual(guard.PROOF_OWNER, PROOF_OWNER)
@@ -87,7 +97,7 @@ class DiscriminationTests(unittest.TestCase):
         return root
 
     def run_guard(self, root: Path, expected=None) -> tuple[bool, str]:
-        return guard.check(root, expected)
+        return guard.check(root, expected, pinned_test_only_files=frozenset())
 
     def test_baseline_fixture_is_green(self):
         ok, message = self.run_guard(self.fixture())
@@ -107,6 +117,22 @@ class DiscriminationTests(unittest.TestCase):
         copied_script = root / "scripts/check_intake_outbox_done_writer_call_sites.py"
         copied_script.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(SCRIPT, copied_script)
+        shutil.copy2(
+            ROOT / "scripts/test_only_module_skip_pin.py",
+            root / "scripts/test_only_module_skip_pin.py",
+        )
+        shutil.copy2(
+            ROOT / "scripts/generate_inventory_docs.py",
+            root / "scripts/generate_inventory_docs.py",
+        )
+        declarations = []
+        for index, rel in enumerate(sorted(guard.PINNED_TEST_ONLY_MODULE_FILES)):
+            write(root, rel, "")
+            declarations.append(
+                f'#[cfg(test)]\n#[path = "{rel.removeprefix("src/")}"]\n'
+                f"mod pinned_skip_{index};"
+            )
+        write(root, "src/pinned_skip_owner.rs", "\n".join(declarations))
         write(
             root,
             "src/services/cluster/receipt_sink.rs",
