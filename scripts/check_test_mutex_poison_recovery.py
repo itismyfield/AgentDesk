@@ -113,25 +113,6 @@ TOKIO_MUTEX = re.compile(r"\btokio\s*::\s*sync\s*::")
 # unrelated tests. Only the singleton wrappers are in scope.
 NOT_A_SINGLETON = re.compile(r"\b(?:Arc|Box|DashMap|HashMap|BTreeMap|Vec|RwLock)\b|,")
 
-# How far after `.lock()` a recovery may legitimately sit. The longest recovering
-# form in the tree is the `match`/`Err(poisoned) => poisoned.into_inner()` shape.
-RECOVERY_WINDOW = 160
-
-PROPAGATING = (
-    (re.compile(r"^\s*\.\s*unwrap\s*\(\s*\)"), "unwrap()"),
-    (re.compile(r"^\s*\.\s*expect\s*\("), "expect(..)"),
-    (re.compile(r"^\s*\?"), "?"),
-)
-
-# `unwrap_or_else` is the recovering spelling only when the handler actually
-# calls `into_inner`; `unwrap_or_else(|_| panic!(..))` is `unwrap()` in disguise.
-FAKE_RECOVERY = re.compile(r"^\s*\.\s*unwrap_or_else\s*\(")
-
-# Both the closure form `|poison| poison.into_inner()` and the path form
-# `std::sync::PoisonError::into_inner` count as recovery.
-RECOVERY = re.compile(r"\binto_inner\b")
-
-
 @dataclass(frozen=True)
 class RustToken:
     text: str
@@ -352,6 +333,27 @@ def _discarding_consumer(
     return f"{tokens[kind].text} let Ok(..)"
 
 
+def _forward_consumer(
+    tokens: list[RustToken], pairs: dict[int, int], lock_end: int
+) -> str | None:
+    consumer = lock_end + 1
+    if consumer >= len(tokens):
+        return None
+    prefix = tuple(token.text for token in tokens[consumer : consumer + 4])
+    if prefix[:1] == ("?",):
+        return "?"
+    if prefix[:3] == (".", "expect", "("):
+        return "expect(..)"
+    if prefix[:4] == (".", "unwrap", "(", ")"):
+        return "unwrap()"
+    if prefix[:3] != (".", "unwrap_or_else", "("):
+        return None
+    opening = consumer + 2
+    end = pairs.get(opening, len(tokens))
+    if any(token.text == "into_inner" for token in tokens[opening + 1 : end]):
+        return None
+    return "unwrap_or_else(..) without into_inner"
+
 @dataclass(frozen=True)
 class Violation:
     path: str
@@ -420,13 +422,10 @@ def scan_file(repo_root: Path, path: Path, names: frozenset[str]) -> list[Violat
                     f"token at lock receiver offset {match.start()} is "
                     f"{tokens[receiver].text!r}, not {match.group('name')!r}"
                 )
-            tail = text[match.end(): match.end() + RECOVERY_WINDOW]
-            label = next(
-                (label for propagator, label in PROPAGATING if propagator.match(tail)),
-                None,
-            )
-            if label is None and FAKE_RECOVERY.match(tail) and not RECOVERY.search(tail):
-                label = "unwrap_or_else(..) without into_inner"
+            lock_end = token_by_start.get(match.end() - 1)
+            if lock_end is None or tokens[lock_end].text != ")":
+                raise LexerMismatch(f"no lock-close token at offset {match.end()}")
+            label = _forward_consumer(tokens, pairs, lock_end)
             if label is None:
                 label = _discarding_consumer(tokens, pairs, token_by_start, match)
         except LexerMismatch as error:
