@@ -3,13 +3,16 @@
 > Last refreshed: 2026-08-14 (against #5071 T2-W B3a-1 dispatched audit).
 
 ### Audited touches
-- 2026-08-14 (#5071 T2-W B3a-1): the operator CLI adds a read-only
-  `intake-outbox dispatched-audit` inventory. Its PostgreSQL path connects
-  without migration or reseed and uses no explicit multi-statement transaction,
-  row lock, or advisory lock. Each SELECT runs in an implicit transaction and
-  takes an ordinary ACCESS SHARE relation lock; that lock is compatible with
-  DML but can delay ACCESS EXCLUSIVE DDL for the duration of the query. The
-  command lists every dispatched row, including a legacy NULL clock.
+- 2026-08-14 (#5071 T2-W B3a-1): the operator CLI adds a DB-row-read-only
+  `intake-outbox dispatched-audit` inventory. `cmd_dispatched_audit` calls
+  `config::load`, which may harden secret-bearing config-file permissions via
+  `utils::secret_file::audit_or_harden_secret_file` and create `config.data.dir`.
+  Its PostgreSQL path connects without migration or reseed and uses no explicit
+  multi-statement transaction, row lock, or advisory lock. Each SELECT runs in
+  an implicit transaction and takes an ordinary ACCESS SHARE relation lock;
+  that lock is compatible with DML but can delay ACCESS EXCLUSIVE DDL for the
+  duration of the query. The command lists every dispatched row, including a
+  legacy NULL clock.
   `provider_nonempty` reuses the exact force-fail provider guard but is not a
   worker-readiness verdict; dispatched remains refused by the operator-retry
   classifier. This slice adds no writer, periodic job, capability wiring, or

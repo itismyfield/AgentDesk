@@ -10,12 +10,14 @@ This command requires migration `0107_intake_outbox_dispatched_clock.sql` to
 be applied to the target database. Confirm it with:
 
 ```sql
-SELECT version, success FROM _sqlx_migrations WHERE version = 107;
+SELECT version, success FROM public._sqlx_migrations WHERE version = 107;
 ```
 
 On a normally SQLx-managed database, the prerequisite is satisfied only when
-this returns exactly one row with `success = true`. If that ledger row is
-absent, the CLI exits with this complete stderr:
+this returns exactly one row with `success = true`. If migrations 0052–0106
+were normally applied, migration 0107 was not applied, and `config::load`,
+`db::postgres::connect`, and its `SELECT 1` health check all succeed, the CLI
+exits with this complete stderr:
 
 ```text
 Error: list dispatched intake_outbox rows: error returned from database: column "dispatched_at" does not exist

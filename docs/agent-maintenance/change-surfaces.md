@@ -1870,9 +1870,12 @@ time for diagnostics; neither is a stored approval value.
 - invariants: LaunchAgent plist and runtime layout are generated only — see
   the matrix in `docs/source-of-truth.md`.
 - allowed_changes: `bugfix` only, except per #5071 T2-W B3a-1,
-  `src/cli/intake_outbox.rs` may host the read-only `dispatched-audit` feature
-  and `src/cli/args.rs`, `src/cli/run.rs`, and `src/cli/mod.rs` may contain its
-  purely mechanical clap registration, dispatch arm, and module registration.
+  `src/cli/intake_outbox.rs` may host the DB-row-read-only `dispatched-audit`
+  feature and `src/cli/args.rs`, `src/cli/run.rs`, and `src/cli/mod.rs` may
+  contain its purely mechanical clap registration, dispatch arm, and module
+  registration. `config::load` may harden secret-bearing config-file permissions
+  via `utils::secret_file::audit_or_harden_secret_file` and create
+  `config.data.dir`.
   That exception does not permit feature growth in any giant on this surface;
   the PG-cutover retention plan remains owned by #1239.
 
@@ -1969,12 +1972,16 @@ time for diagnostics; neither is a stored approval value.
     surface, with operator force-fail isolated in
     `src/db/intake_outbox_force_fail.rs`; both production surfaces are below the
     giant-file threshold once `#[cfg(test)] mod` PG coverage is excluded
-    (bugfix only; +5 from #5071 T2-W B3a-1 mechanically extracting the provider
+    (bugfix only; +4 from #5071 T2-W B3a-1 mechanically extracting the provider
     guard for audit reuse, non-behavioral).
 - active_callsite_coverage: PG-only cleanup tracked per #1237/#1238/#1239 —
   see `known-legacy.md`.
-- invariants: production reads/writes go through `pg_pool_ref()`; retired DB
-  compatibility handles must not be reintroduced as live route fallbacks.
+- invariants: production reads/writes go through `AppState::pg_pool_ref()`,
+  except per #5071 T2-W B3a-1: the one-shot, migration/reseed-free
+  `cmd_dispatched_audit` path uses `db::postgres::connect` directly before
+  `list_dispatched_audit`, because `build_app_state` would run migration and
+  reseed. Retired DB compatibility handles must not be reintroduced as live
+  route fallbacks.
 - allowed_changes: `bugfix` on existing path; `new_feature` MUST use PG.
 - tests: `src/integration_tests/postgres_only/*`.
 - related_issues: #843 epic, #1237, #1238, #1239.
