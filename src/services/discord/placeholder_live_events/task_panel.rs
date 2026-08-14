@@ -101,9 +101,12 @@ pub(super) struct TaskToolSlot {
     pub(super) status: Option<String>,
     pub(super) tool_use_id: Option<String>,
     pub(super) background: bool,
-    /// #3391: monotonic per-channel-entry slot id assigned at creation and never
-    /// reused. Backs slot-identity eviction so two slots that render the same
-    /// terminal line stay distinct (string-identity eviction collided them).
+    /// #3391: per-channel-entry slot id assigned at creation from the monotonic
+    /// counter in `take_slot_ordinal`. Backs slot-identity eviction as the
+    /// fallback handle for slots lacking a `tool_use_id`/`task_id`; two such
+    /// slots receive distinct ordinals except at counter saturation, where the
+    /// shared `u64::MAX` ordinal can collide their eviction identity (see
+    /// `take_slot_ordinal`).
     pub(super) ordinal: u64,
     /// #3473: monotonic creation instant, set at upsert. The turn-boundary
     /// reconciliation force-aborts a background slot older than
@@ -190,9 +193,15 @@ pub(super) fn upsert_background_task_tool_slot(
     trim_task_tool_slots(slots);
 }
 
-/// #3391: hands out the next never-reused per-channel-entry slot ordinal. The
-/// counter only ever advances, so a trimmed/evicted slot's ordinal cannot be
-/// minted again within the same channel entry.
+/// #3391: hands out the next per-channel-entry slot ordinal from a
+/// monotonically advancing counter. Each call returns the current value and
+/// then increments, so distinct id-less slots normally receive distinct
+/// ordinals within a channel entry.
+///
+/// Not guaranteed at saturation: the increment is `saturating_add`, so once the
+/// counter reaches `u64::MAX` it stops advancing and every later id-less slot
+/// receives that same `u64::MAX` ordinal. Reaching that bound is not defended
+/// against here.
 pub(super) fn take_slot_ordinal(next_ordinal: &mut u64) -> u64 {
     let ordinal = *next_ordinal;
     *next_ordinal = next_ordinal.saturating_add(1);
@@ -373,9 +382,11 @@ pub(super) fn render_live_tasks_section(tasks: &[TaskToolSlot]) -> Option<String
 
 /// #3391: stable slot identity for delivered-terminal eviction. Background
 /// tasks key on their `tool_use_id`, Task-tool slots on their `task_id`, and
-/// any slot lacking both falls back to the never-reused `ordinal`. The ordinal
-/// alone is unique within a channel entry, so the id/task_id preference only
-/// reflects the slot's primary handle without weakening uniqueness.
+/// any slot lacking both falls back to the monotonic `ordinal` from
+/// `take_slot_ordinal`. That ordinal is the fallback handle; distinct id-less
+/// slots receive distinct ordinals except at counter saturation (see
+/// `take_slot_ordinal`), so the id/task_id preference reflects the slot's
+/// primary handle rather than establishing a uniqueness guarantee.
 pub(super) fn task_tool_slot_identity(slot: &TaskToolSlot) -> super::completion_footer::SlotKey {
     use super::completion_footer::SlotKey;
     if let Some(tool_use_id) = slot.tool_use_id.as_deref() {
