@@ -14,9 +14,12 @@ least these seven measured Rust forms: a comment between ``#[path]`` and
 This pin guarantees membership, not compiler-backed reachability.  In
 particular, a content change can make an already pinned file production-
 reachable without changing the pinned path set.  Compiler-backed reachability
-is follow-up slice work.  Symlink rejection is lexical rather than atomic: a
-post-enumeration filesystem replacement is outside the guarantee; CI assumes a
-static checkout while a gate runs.
+is follow-up slice work.  The lexical scan root is ``src/``; call sites in files
+reached by ``#[path]``/``include!`` targets resolving outside ``src/`` are not
+seen.  Fail-closed handling for that boundary is follow-up slice work.  Symlink
+rejection is lexical rather than atomic: a post-enumeration filesystem
+replacement is outside the guarantee; CI assumes a static checkout while a
+gate runs.
 """
 
 from __future__ import annotations
@@ -200,6 +203,11 @@ def _lexical_rust_files(root: Path, scan_root: Path) -> list[Path]:
             for name in sorted(filenames):
                 path = directory_path / name
                 if path.is_symlink() or not path.is_file():
+                    # The ``not path.is_file()`` half is this enumerator's sole
+                    # non-fail-closed branch: git checkouts cannot carry a FIFO,
+                    # while the old read-text path would block on one. Symlinks
+                    # were recorded above and still fail closed; only this
+                    # non-regular case is silently omitted here.
                     continue
                 files.append(path)
                 if not name.endswith(".rs"):

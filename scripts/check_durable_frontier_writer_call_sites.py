@@ -276,9 +276,12 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
 }
 
 # Scanning `src/` from the filesystem rather than `git ls-files` is deliberate:
-# an untracked new module is still a new call site. Every regular `.rs` file is
-# enumerated; a regular non-`.rs` file is rejected before any skip/resolver
-# classification, so no regular source file gets to be invisible.
+# an untracked new module is still a new call site. Every regular `.rs` file
+# under `src/` is enumerated; a regular non-`.rs` file is rejected before any
+# skip/resolver classification, so no regular source file under `src/` gets to
+# be invisible. Call sites in files reached by `#[path]`/`include!` targets
+# resolving outside `src/` are not seen; fail-closed handling for that boundary
+# is follow-up slice work.
 SCAN_ROOT = Path("src")
 
 
@@ -528,7 +531,10 @@ LIMITS = (
     "evaluated; non-.rs regular files fail closed before classification; whole-file "
     "skips use one lexical pin, reject src symlinks, and check "
     "the skipped census; symlink rejection is non-atomic outside a static CI "
-    "checkout; at least seven resolver forms are not guaranteed (path/mod comment, "
+    "checkout; the scan root is `src/`; call sites in files reached by "
+    "`#[path]`/`include!` targets resolving outside `src/` are not seen; "
+    "fail-closed handling for that boundary is follow-up work; at least seven "
+    "resolver forms are not guaranteed (path/mod comment, "
     "macro mod, two cfg/include forms, cfg_attr path, raw path, ungated include); pin "
     "membership cannot detect production reachability changes inside pinned files; "
     "compiler-backed reachability is follow-up work; textual occurrences are counted "

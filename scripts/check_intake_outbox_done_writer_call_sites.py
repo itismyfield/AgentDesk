@@ -17,7 +17,8 @@ unrelated work. `EXPECTED_CALL_SITES` names the writer symbol and the owning
 function's file, never a line number. The proof writer expects zero sites until
 its exact future owner exists, then exactly one there. Every regular `.rs` file
 under `src/` is scanned: within the bounds below, a protected direct import or
-call added, deleted, moved, aliased, or found in an unlisted file fails closed.
+call added, deleted, moved within the scanned `src/` tree, aliased, or found in
+an unlisted file fails closed.
 
 WHAT THIS GATE DOES NOT GUARANTEE. This is a lexical scan, not Rust parsing or
 name resolution. It sees a bare `mark_done(...)` only in a file that directly
@@ -282,7 +283,9 @@ LIMITS = (
     "and cfg(all(test,...)) items are stripped, while other cfg/cfg_attr forms remain scanned; the "
     "whole-file skips use one lexical pin, reject src symlinks, and check their census; "
     "non-.rs regular files fail closed before classification; symlink rejection is "
-    "non-atomic outside a static CI checkout; at least seven resolver forms are not "
+    "non-atomic outside a static CI checkout; the scan root is `src/`; call sites in files "
+    "reached by `#[path]`/`include!` targets resolving outside `src/` are not seen; "
+    "fail-closed handling for that boundary is follow-up work; at least seven resolver forms are not "
     "guaranteed (path/mod comment, macro mod, two cfg/include "
     "forms, cfg_attr path, raw path, ungated include); pin membership cannot detect "
     "production reachability changes inside pinned files and compiler-backed reachability "
