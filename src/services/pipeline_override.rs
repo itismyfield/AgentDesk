@@ -345,12 +345,25 @@ mod pipeline_override_pg_tests {
     impl TestPostgresDb {
         async fn create() -> Option<Self> {
             let lifecycle = crate::db::postgres::lock_test_lifecycle();
-            let admin_url = postgres_admin_url();
+            let Some(base) = crate::db::postgres::postgres_test_database_url_base() else {
+                drop(lifecycle);
+                return None;
+            };
+            let admin_url = if let Ok(url) = std::env::var("POSTGRES_TEST_ADMIN_URL") {
+                let trimmed = url.trim();
+                if trimmed.is_empty() {
+                    format!("{base}/postgres")
+                } else {
+                    trimmed.to_string()
+                }
+            } else {
+                format!("{base}/postgres")
+            };
             let database_name = format!(
                 "agentdesk_pipeline_override_{}",
                 uuid::Uuid::new_v4().simple()
             );
-            let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
+            let database_url = format!("{base}/{database_name}");
             if let Err(error) = crate::db::postgres::create_test_database(
                 &admin_url,
                 &database_name,
@@ -403,50 +416,6 @@ mod pipeline_override_pg_tests {
             )
             .await;
         }
-    }
-
-    fn postgres_base_database_url() -> String {
-        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
-            let trimmed = base.trim();
-            if !trimmed.is_empty() {
-                return trimmed.trim_end_matches('/').to_string();
-            }
-        }
-        let user = std::env::var("PGUSER")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| {
-                std::env::var("USER")
-                    .ok()
-                    .filter(|value| !value.trim().is_empty())
-            })
-            .unwrap_or_else(|| "postgres".to_string());
-        let password = std::env::var("PGPASSWORD")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
-        let host = std::env::var("PGHOST")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "127.0.0.1".to_string());
-        let port = std::env::var("PGPORT")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "5432".to_string());
-
-        match password {
-            Some(password) => format!("postgres://{user}:{password}@{host}:{port}"),
-            None => format!("postgres://{user}@{host}:{port}"),
-        }
-    }
-
-    fn postgres_admin_url() -> String {
-        if let Ok(url) = std::env::var("POSTGRES_TEST_ADMIN_URL") {
-            let trimmed = url.trim();
-            if !trimmed.is_empty() {
-                return trimmed.to_string();
-            }
-        }
-        format!("{}/postgres", postgres_base_database_url())
     }
 
     async fn create_minimal_pipeline_override_schema(pool: &PgPool) -> Result<(), sqlx::Error> {

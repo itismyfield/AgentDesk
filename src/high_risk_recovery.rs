@@ -22,9 +22,17 @@ struct PgRecoveryTestDatabase {
 impl PgRecoveryTestDatabase {
     async fn create() -> Option<Self> {
         let lifecycle = crate::db::postgres::lock_test_lifecycle();
-        let admin_url = pg_test_admin_database_url();
+        let Some(base) = crate::db::postgres::postgres_test_database_url_base() else {
+            drop(lifecycle);
+            return None;
+        };
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        let admin_url = format!("{base}/{admin_db}");
         let database_name = format!("agentdesk_pg_recovery_{}", uuid::Uuid::new_v4().simple());
-        let database_url = format!("{}/{}", pg_test_base_database_url(), database_name);
+        let database_url = format!("{base}/{database_name}");
         if let Err(error) = crate::db::postgres::create_test_database(
             &admin_url,
             &database_name,
@@ -151,49 +159,6 @@ fn cross_channel_tmux_claim_observability_distinguishes_thread_follow_up_4984() 
         intended.payload["details"]["intention_basis"],
         "requesting thread parent matches the existing watcher owner"
     );
-}
-
-fn pg_test_base_database_url() -> String {
-    if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
-        let trimmed = base.trim();
-        if !trimmed.is_empty() {
-            return trimmed.trim_end_matches('/').to_string();
-        }
-    }
-
-    let user = std::env::var("PGUSER")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            std::env::var("USER")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        })
-        .unwrap_or_else(|| "postgres".to_string());
-    let password = std::env::var("PGPASSWORD")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
-    let host = std::env::var("PGHOST")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "localhost".to_string());
-    let port = std::env::var("PGPORT")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "5432".to_string());
-
-    match password {
-        Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
-        None => format!("postgresql://{user}@{host}:{port}"),
-    }
-}
-
-fn pg_test_admin_database_url() -> String {
-    let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "postgres".to_string());
-    format!("{}/{}", pg_test_base_database_url(), admin_db)
 }
 
 fn test_engine_with_pg(pg_pool: sqlx::PgPool) -> PolicyEngine {

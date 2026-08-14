@@ -37,6 +37,76 @@ mod tests {
         ),
     ];
 
+    /// Every in-tree fixture constructor that used to assemble a URL from
+    /// `PGHOST`/`PGPORT`. Keep this inventory explicit: a new fixture source
+    /// must be added here before it can create a database. The tunnel test and
+    /// `db::fixture_target` are intentionally out of scope: they test the
+    /// environment contract itself rather than selecting a test fixture.
+    const PG_FIXTURE_SOURCES: &[(&str, &str)] = &[
+        (
+            "db::auto_queue::test_support",
+            include_str!("../db/auto_queue/test_support.rs"),
+        ),
+        (
+            "db::dispatched_sessions",
+            include_str!("../db/dispatched_sessions.rs"),
+        ),
+        (
+            "db::dispatches::delivery_events",
+            include_str!("../db/dispatches/delivery_events.rs"),
+        ),
+        (
+            "dispatch::test_support",
+            include_str!("../dispatch/test_support.rs"),
+        ),
+        (
+            "engine::ops::db_ops",
+            include_str!("../engine/ops/db_ops.rs"),
+        ),
+        (
+            "high_risk_recovery",
+            include_str!("../high_risk_recovery.rs"),
+        ),
+        ("reconcile", include_str!("../reconcile.rs")),
+        (
+            "server::routes::dispatches::crud",
+            include_str!("routes/dispatches/crud.rs"),
+        ),
+        (
+            "server::routes::escalation",
+            include_str!("routes/escalation.rs"),
+        ),
+        (
+            "services::discord",
+            include_str!("../services/discord/mod.rs"),
+        ),
+        (
+            "services::discord::runtime_bootstrap::gateway_lease_recovery_tests",
+            include_str!("../services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs"),
+        ),
+        (
+            "services::dispatches::outbox_claiming",
+            include_str!("../services/dispatches/outbox_claiming.rs"),
+        ),
+        (
+            "services::dispatches::wait_queue",
+            include_str!("../services/dispatches/wait_queue.rs"),
+        ),
+        (
+            "services::observability::recovery_audit",
+            include_str!("../services/observability/recovery_audit.rs"),
+        ),
+        (
+            "services::observability::turn_lifecycle",
+            include_str!("../services/observability/turn_lifecycle.rs"),
+        ),
+        (
+            "services::pipeline_override",
+            include_str!("../services/pipeline_override.rs"),
+        ),
+        ("voice::turn_link", include_str!("../voice/turn_link.rs")),
+    ];
+
     /// Assembled at runtime so this file does not itself contain the literal it
     /// forbids; a plain grep for the address stays a reliable audit.
     fn forbidden_address() -> String {
@@ -98,6 +168,47 @@ mod tests {
                 !source.contains(&needle),
                 "{module} hardcodes {needle}; a fixture must never name a server \
                  the lane did not configure (#5218)"
+            );
+        }
+    }
+
+    /// The guard is deliberately lexical. It rejects every literal
+    /// `PGHOST`/`PGPORT` token in the enumerated fixture sources and in the
+    /// shared helper body, so changing `var` to `var_os`, hiding the read
+    /// behind a constant, or reformatting the fallback cannot evade it. It
+    /// does not claim to cover a fixture file omitted from `PG_FIXTURE_SOURCES`,
+    /// an imported helper in another file, a fallback using a different
+    /// environment key or literal address, or an environment key assembled
+    /// dynamically (for example, `format!("PG{}", "HOST")`); those require
+    /// inventory review and a behavioural test rather than a source-token
+    /// assertion.
+    #[test]
+    fn fixture_sources_never_read_process_host_or_port() {
+        let helper = shared_helper_body();
+        for variable in ["PGHOST", "PGPORT"] {
+            assert!(
+                !helper.contains(variable),
+                "db::postgres::postgres_test_database_url_base contains `{variable}`; \
+                 the canonical authority must not read process host/port defaults (#5229)"
+            );
+        }
+        for (module, source) in PG_FIXTURE_SOURCES {
+            for variable in ["PGHOST", "PGPORT"] {
+                assert!(
+                    !source.contains(variable),
+                    "{module} contains `{variable}`; fixture URLs must come only from \
+                     db::postgres::postgres_test_database_url_base() (#5229)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fixture_sources_use_the_shared_base_authority() {
+        for (module, source) in PG_FIXTURE_SOURCES {
+            assert!(
+                source.contains("postgres_test_database_url_base()"),
+                "{module} no longer calls the shared fixture-base authority (#5229)"
             );
         }
     }

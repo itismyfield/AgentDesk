@@ -398,31 +398,16 @@ fn orphan_reap_requires_named_stale_matching_worker() {
     }
 }
 
-fn pg_test_base_database_url() -> String {
-    std::env::var("POSTGRES_TEST_DATABASE_URL_BASE")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| value.trim_end_matches('/').to_string())
-        .unwrap_or_else(|| {
-            let user = std::env::var("PGUSER")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .or_else(|| std::env::var("USER").ok())
-                .unwrap_or_else(|| "postgres".to_string());
-            let host = std::env::var("PGHOST").unwrap_or_else(|_| "localhost".to_string());
-            let port = std::env::var("PGPORT").unwrap_or_else(|_| "5432".to_string());
-            format!("postgresql://{user}@{host}:{port}")
-        })
-}
-
 #[tokio::test]
 async fn gateway_orphan_reap_uses_production_query_and_right_parses_instance_id_pg() {
     let _lifecycle = crate::db::postgres::lock_test_lifecycle();
+    let Some(base) = crate::db::postgres::postgres_test_database_url_base() else {
+        return;
+    };
     let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "postgres".to_string());
-    let base = pg_test_base_database_url();
     let admin_url = format!("{base}/{admin_db}");
     let database_name = format!("agentdesk_gateway_reap_{}", uuid::Uuid::new_v4().simple());
     if let Err(error) = crate::db::postgres::create_test_database(
