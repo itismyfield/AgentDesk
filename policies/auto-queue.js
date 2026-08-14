@@ -511,7 +511,7 @@ var autoQueue = {
     var finishedRuns = agentdesk.db.query(
       "SELECT r.id " +
       "FROM auto_queue_runs r " +
-      "WHERE r.status IN ('active', 'paused') " +
+      "WHERE r.status IN ('active', 'paused', 'generated', 'pending') " +
       "AND NOT EXISTS (" +
       "  SELECT 1 FROM auto_queue_entries e " +
       "  WHERE e.run_id = r.id AND e.status IN ('pending', 'dispatched', 'user_cancelled')" +

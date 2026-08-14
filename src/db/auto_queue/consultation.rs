@@ -4,6 +4,7 @@ use thiserror::Error;
 use super::entries::{
     ENTRY_STATUS_DISPATCHED, EntryStatusUpdateOptions, update_entry_status_on_pg_tx,
 };
+use super::runs::acquire_run_advisory_xact_lock_on_pg_tx;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsultationDispatchRecordResult {
@@ -56,6 +57,22 @@ pub async fn record_consultation_dispatch_on_pg(
         .begin()
         .await
         .map_err(|error| format!("begin postgres consultation dispatch transaction: {error}"))?;
+    let run_id = sqlx::query_scalar::<_, String>(
+        "SELECT run_id
+         FROM auto_queue_entries
+         WHERE id = $1",
+    )
+    .bind(entry_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|error| format!("load consultation auto-queue run for entry {entry_id}: {error}"))?;
+
+    // `terminalize_selected_runs_with_pg` takes the run token before entry and
+    // card rows, including the card unlink reached through dispatch cleanup.
+    // Take the same token before the metadata UPDATE so consultation never
+    // contributes the inverse card -> run-token wait order.
+    acquire_run_advisory_xact_lock_on_pg_tx(&mut tx, &run_id).await?;
+
     let mut metadata = consultation_metadata_object(base_metadata_json);
     metadata.insert(
         "consultation_status".to_string(),

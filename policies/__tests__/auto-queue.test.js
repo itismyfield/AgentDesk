@@ -561,7 +561,18 @@ test("auto-queue onTick1min honors stale dispatched runtime config", () => {
         result: []
       },
       {
-        match: "FROM auto_queue_runs r WHERE r.status IN ('active', 'paused')",
+        // This policy harness cannot create PostgreSQL advisory-lock contention.
+        // Pinning the executed recovery SQL is the available lane: it verifies
+        // that every status accepted by the Rust finalizer remains tick-visible,
+        // but does not prove an end-to-end generated-run retry.
+        match(sql) {
+          if (!sql.includes("FROM auto_queue_runs r WHERE r.status IN")) return false;
+          assert.match(
+            sql,
+            /WHERE r\.status IN \('active', 'paused', 'generated', 'pending'\)/
+          );
+          return true;
+        },
         result: []
       },
       {
