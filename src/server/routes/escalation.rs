@@ -1428,9 +1428,20 @@ mod manual_decision_gate_tests {
     impl EscalationPgDatabase {
         async fn create() -> Self {
             let lifecycle = crate::db::postgres::lock_test_lifecycle();
-            let admin_url = pg_test_admin_database_url();
+            let base = crate::db::postgres::postgres_test_database_url_base()
+                .expect("POSTGRES_TEST_DATABASE_URL_BASE required for escalation handler PG tests"); // agentdesk-audit: allow-unwrap — test-only fixture constructor requires an explicitly configured shared base
+            let admin_url = if let Ok(url) = std::env::var("POSTGRES_TEST_ADMIN_URL") {
+                let trimmed = url.trim();
+                if trimmed.is_empty() {
+                    format!("{base}/postgres")
+                } else {
+                    trimmed.to_string()
+                }
+            } else {
+                format!("{base}/postgres")
+            };
             let database_name = format!("agentdesk_escalation_{}", uuid::Uuid::new_v4().simple());
-            let database_url = format!("{}/{}", pg_test_base_database_url(), database_name);
+            let database_url = format!("{base}/{database_name}");
             crate::db::postgres::create_test_database(
                 &admin_url,
                 &database_name,
@@ -1465,43 +1476,6 @@ mod manual_decision_gate_tests {
             .await
             .expect("drop escalation postgres test db");
         }
-    }
-
-    fn pg_test_base_database_url() -> String {
-        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
-            let trimmed = base.trim();
-            if !trimmed.is_empty() {
-                return trimmed.trim_end_matches('/').to_string();
-            }
-        }
-        let user = std::env::var("PGUSER")
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .or_else(|| std::env::var("USER").ok().filter(|v| !v.trim().is_empty()))
-            .unwrap_or_else(|| "postgres".to_string());
-        let password = std::env::var("PGPASSWORD")
-            .ok()
-            .filter(|v| !v.trim().is_empty());
-        let host = std::env::var("PGHOST")
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .unwrap_or_else(|| "localhost".to_string());
-        let port = std::env::var("PGPORT")
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .unwrap_or_else(|| "5432".to_string());
-        match password {
-            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
-            None => format!("postgresql://{user}@{host}:{port}"),
-        }
-    }
-
-    fn pg_test_admin_database_url() -> String {
-        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .unwrap_or_else(|| "postgres".to_string());
-        format!("{}/{}", pg_test_base_database_url(), admin_db)
     }
 
     #[tokio::test]

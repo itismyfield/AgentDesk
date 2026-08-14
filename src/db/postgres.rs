@@ -1151,10 +1151,9 @@ fn database_url_override() -> Option<String> {
 
 #[cfg(test)]
 /// Read the shared PG fixture base; required PG lanes must not silently turn
-/// a missing base into a soft-skip. This is intentionally wired only through
-/// the settings, prompt-manifest, and canonical-identity fixtures; the other
-/// PG fixture constructors still read environment variables directly and are
-/// deferred to the S3 follow-up.
+/// a missing base into a soft-skip. Every fixture that creates a database must
+/// use this authority; callers that can skip return `None`, while required
+/// lanes still get the hard failure below when `AGENTDESK_REQUIRE_PG=1`.
 pub(crate) fn postgres_test_database_url_base() -> Option<String> {
     let override_value = FIXTURE_BASE_OVERRIDE.with(|slot| slot.borrow().clone());
     let base = override_value.unwrap_or_else(|| {

@@ -522,13 +522,17 @@ mod request_body_tests {
     impl MemoryApiPostgresDb {
         async fn try_create() -> Option<Self> {
             let lock = crate::db::postgres::lock_test_lifecycle();
-            let admin_url = crate::dispatch::test_support::postgres_admin_database_url();
+            let Some(base) = crate::db::postgres::postgres_test_database_url_base() else {
+                drop(lock);
+                return None;
+            };
+            let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "postgres".to_string());
+            let admin_url = format!("{base}/{admin_db}");
             let database_name = format!("agentdesk_memory_api_{}", uuid::Uuid::new_v4().simple());
-            let database_url = format!(
-                "{}/{}",
-                crate::dispatch::test_support::postgres_base_database_url(),
-                database_name
-            );
+            let database_url = format!("{base}/{database_name}");
             if let Err(error) =
                 crate::db::postgres::create_test_database(&admin_url, &database_name, PG_TEST_LABEL)
                     .await
