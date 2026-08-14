@@ -1573,9 +1573,27 @@ fn default_prompt_max_bytes_user_derived() -> u64 {
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryJournalMode {
+    /// Keep the legacy delivery writer and do not emit delivery-journal rows.
     #[default]
     Legacy,
+    /// Emit delivery-journal observations while the legacy writer remains authoritative.
     Shadow,
+    /// Keep emitting observations, and let explicitly wired readers treat the journal as
+    /// authoritative. Existing delivery writers remain in place until the hot-file handoff.
+    Authority,
+}
+
+impl DeliveryJournalMode {
+    /// Both rollout modes need observations in the journal. `Authority` does not revoke an
+    /// existing writer; that handoff belongs to a later slice.
+    pub const fn records_shadow_observations(self) -> bool {
+        matches!(self, Self::Shadow | Self::Authority)
+    }
+
+    /// Only the explicit authority mode changes a reader's source of truth.
+    pub const fn reads_as_authority(self) -> bool {
+        matches!(self, Self::Authority)
+    }
 }
 
 fn is_legacy_delivery_journal_mode(mode: &DeliveryJournalMode) -> bool {
@@ -1826,7 +1844,33 @@ mod runtime_hook_registry_config_tests {
         // direction catches it — the negative assertions below never can.
         // This assertion preserves coverage of the serde-deserialization path.
         let absent: RuntimeSettingsConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(absent.delivery_journal_mode, DeliveryJournalMode::Legacy);
+        assert_eq!(absent.delivery_journal_cohort_percent, 0);
+        assert!(!absent.delivery_journal_mode.records_shadow_observations());
+        assert!(!absent.delivery_journal_mode.reads_as_authority());
         assert!(absent.is_empty());
+
+        let authority: RuntimeSettingsConfig =
+            serde_yaml::from_str("delivery_journal_mode: authority\n").unwrap();
+        assert_eq!(
+            authority.delivery_journal_mode,
+            DeliveryJournalMode::Authority
+        );
+        assert_eq!(authority.delivery_journal_cohort_percent, 0);
+        assert!(
+            authority
+                .delivery_journal_mode
+                .records_shadow_observations()
+        );
+        assert!(authority.delivery_journal_mode.reads_as_authority());
+        assert!(!authority.is_empty());
+        assert_eq!(
+            serde_yaml::from_str::<RuntimeSettingsConfig>(
+                &serde_yaml::to_string(&authority).unwrap()
+            )
+            .unwrap(),
+            authority
+        );
 
         let ttl_only = RuntimeSettingsConfig {
             tui_hook_buffer_ttl_secs: Some(45),

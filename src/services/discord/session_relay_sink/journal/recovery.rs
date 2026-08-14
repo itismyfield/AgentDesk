@@ -17,11 +17,10 @@
 //! `expected_gone_anchor` inside it; the ledger append is the funnel's, after
 //! the frontier persists.
 //!
-//! Shadow only: nothing here is read back by live delivery, and a row exists only
-//! when a PG pool, `DeliveryJournalMode::Shadow` and the cohort selection all
-//! agree. If this observation ever changes what production delivers, that is a
-//! bug — the facade reads process state (one extra generation-marker stat), never
-//! mutates it.
+//! Journal observation writes are admitted in `Shadow` and `Authority` when a
+//! PG pool and the cohort selection agree. `Authority` prepares a journal read
+//! path elsewhere; this module keeps the existing writer in place and the
+//! facade reads process state (one extra generation-marker stat) without mutating it.
 //!
 //! ## This family's obligation opens AFTER transport — the sink/watcher/controller
 //! families' does not

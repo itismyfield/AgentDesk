@@ -37,8 +37,9 @@ pub(super) fn process_observer() -> &'static JournalObserver {
     &PROCESS_OBSERVER
 }
 
-/// Shadow admission — mode, pool, cohort — in the same order and with the same
-/// meaning as the sink's `begin_fresh`.
+/// Journal admission — mode, pool, cohort — in the same order and with the same
+/// meaning as the sink's `begin_fresh`. `Shadow` and `Authority` both retain
+/// observation writes; `Legacy` leaves the delivery path unchanged.
 ///
 /// It lived in `journal::watcher` while the watcher was the only family that
 /// could not reach `begin_fresh`; #5071 T1 S4 adds the controller family, which
@@ -51,7 +52,7 @@ pub(super) fn admit(
     obligation_id: Uuid,
 ) -> Option<sqlx::PgPool> {
     let runtime = crate::config_live_reload::current()?.runtime.clone();
-    if runtime.delivery_journal_mode != DeliveryJournalMode::Shadow {
+    if !runtime.delivery_journal_mode.records_shadow_observations() {
         return None;
     }
     let pool = shared.pg_pool.clone()?;
@@ -126,7 +127,7 @@ impl JournalObserver {
         delivery: &super::SessionRelayDelivery,
     ) -> Option<AttemptObservation> {
         let runtime = crate::config_live_reload::current()?.runtime.clone();
-        if runtime.delivery_journal_mode != DeliveryJournalMode::Shadow {
+        if !runtime.delivery_journal_mode.records_shadow_observations() {
             return None;
         }
         let pool = shared.pg_pool.clone()?;
@@ -437,6 +438,24 @@ impl ObligationWindowJudgment {
     pub(in crate::services::discord) fn malformed(&self) -> bool {
         self.malformed
     }
+}
+
+/// Read one obligation from the journal only when `Authority` is selected.
+/// Returning `None` leaves the legacy/shadow reader available to callers that
+/// have not crossed the authority handoff yet; no writer is changed here.
+pub(in crate::services::discord) async fn read_authority_obligation_window(
+    connection: &mut sqlx::PgConnection,
+    obligation_id: Uuid,
+) -> Result<Option<ObligationWindowJudgment>, sqlx::Error> {
+    let mode = crate::config_live_reload::current()
+        .map(|config| config.runtime.delivery_journal_mode)
+        .unwrap_or(DeliveryJournalMode::Legacy);
+    if !mode.reads_as_authority() {
+        return Ok(None);
+    }
+    Ok(Some(
+        judge_obligation_window(connection, obligation_id).await?,
+    ))
 }
 
 #[allow(dead_code)]
@@ -892,6 +911,8 @@ mod tests {
     fn delivery_journal_defaults_to_legacy() {
         let runtime = crate::config::RuntimeSettingsConfig::default();
         assert_eq!(runtime.delivery_journal_mode, DeliveryJournalMode::Legacy);
+        assert!(!runtime.delivery_journal_mode.records_shadow_observations());
+        assert!(!runtime.delivery_journal_mode.reads_as_authority());
         assert_eq!(runtime.delivery_journal_cohort_percent, 0);
         assert!(runtime.delivery_journal_internal_channel_ids.is_empty());
     }

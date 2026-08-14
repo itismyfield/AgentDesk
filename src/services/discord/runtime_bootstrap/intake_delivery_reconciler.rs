@@ -8,7 +8,9 @@
 use crate::db::intake_outbox_delivery_proof::{
     mark_done_from_delivery_proof, settle_dispatched_unknown, try_lock_dispatched_for_proof,
 };
-use crate::services::discord::session_relay_sink::journal::judge_obligation_window;
+use crate::services::discord::session_relay_sink::journal::{
+    judge_obligation_window, read_authority_obligation_window,
+};
 use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
@@ -49,7 +51,13 @@ async fn reconcile_in_tx(
 
     let mut delivered = false;
     for obligation_id in obligations {
-        let judgment = judge_obligation_window(&mut *connection, obligation_id).await?;
+        // Authority selects the journal read path; Legacy and Shadow retain the
+        // reducer's pre-handoff facade until a later writer cutover.
+        let judgment =
+            match read_authority_obligation_window(&mut *connection, obligation_id).await? {
+                Some(judgment) => judgment,
+                None => judge_obligation_window(&mut *connection, obligation_id).await?,
+            };
         if judgment.delivered_outbox_id() == Some(outbox_id) {
             delivered = true;
             break;
