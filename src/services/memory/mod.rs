@@ -12,8 +12,6 @@ use crate::services::discord::DispatchProfile;
 use crate::services::discord::settings::{MemoryBackendKind, ResolvedMemorySettings, RoleBinding};
 use crate::services::provider::ProviderKind;
 
-// `RecallMode` is exposed in this module's public surface via the struct field;
-// keep the type itself crate-visible so callers can build `RecallRequest`s.
 pub(crate) use local::LocalMemoryBackend;
 pub(crate) use memento::{
     MementoBackend, MementoRememberRequest, MementoToolFeedbackRequest, resolve_memento_agent_id,
@@ -45,15 +43,6 @@ impl TokenUsage {
     }
 }
 
-/// Controls how much memento payload the backend should fetch and emit.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum RecallMode {
-    /// Full memento context payload — identity, working memory, ranked
-    /// memories, anchors, etc.
-    #[default]
-    Full,
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct RecallRequest {
     // reason: populated by all discord recall constructors for parity with
@@ -68,9 +57,6 @@ pub(crate) struct RecallRequest {
     pub session_id: String,
     pub dispatch_profile: DispatchProfile,
     pub user_text: String,
-    /// #1083: how much memento context to fetch. Defaults to `Full` so legacy
-    /// callers retain their existing behaviour.
-    pub mode: RecallMode,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

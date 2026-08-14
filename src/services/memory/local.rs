@@ -47,7 +47,6 @@ impl MemoryBackend for LocalMemoryBackend {
 mod tests {
     use super::*;
     use crate::services::discord::DispatchProfile;
-    use crate::services::memory::RecallMode;
     use crate::services::provider::ProviderKind;
 
     fn recall_request(role_id: &str) -> RecallRequest {
@@ -59,7 +58,6 @@ mod tests {
             session_id: "session".to_string(),
             dispatch_profile: DispatchProfile::Full,
             user_text: "hello".to_string(),
-            mode: RecallMode::Full,
         }
     }
 
