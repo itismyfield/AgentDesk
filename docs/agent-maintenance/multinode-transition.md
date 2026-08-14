@@ -3,6 +3,13 @@
 > Last refreshed: 2026-08-14 (against #5071 T2-W S-R2c B2 dormant reducer).
 
 ### Audited touches
+- 2026-08-14 (#5071 T2-W B3a-1): the operator CLI adds a read-only
+  `intake-outbox dispatched-audit` inventory. Its PostgreSQL path connects
+  without migration, reseed, transaction, or advisory lock and lists every
+  dispatched row, including a legacy NULL clock. `provider_nonempty` reuses
+  the exact force-fail provider guard but is not a worker-readiness verdict;
+  dispatched remains refused by the operator-retry classifier. This slice adds
+  no writer, periodic job, capability wiring, or settlement authority.
 - 2026-08-13 (#5071 T2-W S-R2c B2): `runtime_bootstrap` now declares a
   dormant per-row reducer at the proof-owner path. Its transaction judges until the first delivery proof (or all
   obligations if none proves it) before locking, then attempts at most one terminal CAS only if the row remains

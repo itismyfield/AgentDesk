@@ -12,6 +12,7 @@ src/db/dispatches/outbox/delivery.rs
 src/db/idempotency.rs
 src/db/intake_outbox.rs
 src/db/intake_outbox_delivery_proof.rs
+src/db/intake_outbox_dispatched_audit.rs
 src/db/postgres.rs
 src/db/prompt_manifests/tests.rs
 src/db/relay_dead_letter.rs
@@ -108,6 +109,7 @@ db::idempotency::tests::pg_integration
 db::intake_outbox::migration_pg_tests
 db::intake_outbox::postgres_tests
 db::intake_outbox_delivery_proof::postgres_tests
+db::intake_outbox_dispatched_audit::postgres_tests
 db::postgres::tests
 db::prompt_manifests::tests
 db::relay_dead_letter::tests
@@ -349,6 +351,10 @@ db::intake_outbox_delivery_proof::postgres_tests::list_stale_dispatched_is_stric
 db::intake_outbox_delivery_proof::postgres_tests::mark_done_from_delivery_proof_is_idempotent_and_preserves_dispatch_audit_fields_pg
 db::intake_outbox_delivery_proof::postgres_tests::proof_lock_skips_contention_and_terminal_cas_has_one_winner_pg
 db::intake_outbox_delivery_proof::postgres_tests::settle_dispatched_unknown_rechecks_cutoff_and_preserves_audit_fields_pg
+db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_includes_null_clock_rows_pg
+db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_marks_empty_provider_false_pg
+db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_returns_empty_when_no_rows_pg
+db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_returns_only_dispatched_rows_pg
 db::postgres::tests::core_status_constraints_reject_invalid_values_and_allow_valid_states
 db::postgres::tests::deploy_gate_constraint_allows_supported_legacy_values_and_rejects_deploy_gate
 db::postgres::tests::deploy_gate_constraint_migration_blocks_existing_deploy_gate_rows

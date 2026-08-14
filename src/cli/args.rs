@@ -660,6 +660,8 @@ pub(crate) enum DispatchAction {
 
 #[derive(Subcommand)]
 pub(crate) enum IntakeOutboxAction {
+    /// List dispatched rows and their recorded audit facts without changing them.
+    DispatchedAudit,
     /// Show recent intake_outbox rows (newest first).
     Status {
         /// Filter to a single Discord channel id.

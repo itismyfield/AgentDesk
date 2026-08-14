@@ -26,6 +26,10 @@ pub(crate) enum ForceFailError {
     Db(#[from] sqlx::Error),
 }
 
+pub(crate) fn force_fail_provider_ready(provider: &str) -> bool {
+    !provider.trim().is_empty()
+}
+
 /// Atomically force-terminates an eligible row and inserts its next attempt.
 ///
 /// VALIDATES:
@@ -68,7 +72,7 @@ pub(crate) async fn force_fail_and_retry_as_new(
             });
         }
     };
-    if row.provider.trim().is_empty() {
+    if !force_fail_provider_ready(&row.provider) {
         return Err(ForceFailError::UnknownProvider { id: stuck_id });
     }
 

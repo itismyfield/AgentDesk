@@ -1869,8 +1869,10 @@ time for diagnostics; neither is a stored approval value.
 - active_callsite_coverage: n/a.
 - invariants: LaunchAgent plist and runtime layout are generated only — see
   the matrix in `docs/source-of-truth.md`.
-- allowed_changes: `bugfix` only; PG-cutover retention plan is owned by
-  #1239.
+- allowed_changes: `bugfix` only, except the sub-1000-line
+  `src/cli/intake_outbox.rs` may host the read-only `dispatched-audit` feature.
+  That exception does not permit feature growth in `src/cli/direct.rs`; the
+  PG-cutover retention plan remains owned by #1239.
 
 ### `runtime_core`
 
