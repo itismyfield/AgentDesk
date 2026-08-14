@@ -9,6 +9,7 @@ pub(crate) mod discord_thread_create;
 pub(crate) mod discord_thread_create_lock;
 pub(crate) mod doctor;
 pub(crate) mod init;
+pub(crate) mod intake_outbox;
 pub(crate) mod json_output;
 pub(crate) mod migrate;
 pub(crate) mod monitoring;

@@ -46,6 +46,7 @@ src/
 │   ├── discord_thread_create_lock.rs
 │   ├── doctor.rs
 │   ├── init.rs
+│   ├── intake_outbox.rs
 │   ├── json_output.rs
 │   ├── migrate.rs
 │   ├── mod.rs
@@ -123,6 +124,7 @@ src/
 │   ├── idempotency.rs
 │   ├── intake_outbox.rs
 │   ├── intake_outbox_delivery_proof.rs
+│   ├── intake_outbox_dispatched_audit.rs
 │   ├── intake_outbox_force_fail.rs
 │   ├── intake_outbox_open_status.rs
 │   ├── intake_outbox_status.rs
