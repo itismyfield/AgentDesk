@@ -908,13 +908,49 @@ def _validated_orphan_stranded_since(
 
 
 def _store_orphan_stranded_since(
-    channel_state: dict[str, Any], stranded: Mapping[str, float]
-) -> None:
-    bounded = dict(sorted(stranded.items())[:MAX_ORPHAN_STRANDED_PATHS])
+    channel_state: dict[str, Any],
+    stranded: Mapping[str, Any],
+    *,
+    released: set[str] | None = None,
+) -> dict[str, float]:
+    """Persist the retained stranded-marker set through its deletion gate.
+
+    The currently enumerated marker exits (authority retirement and a marker
+    finding being voided) supply `released` here; cap eviction and malformed
+    entry cleanup also happen here.  This is a convention, not structural
+    encapsulation: `channel_state` remains a mutable dict, so a future direct
+    writer can bypass the gate.  Audits must therefore continue to enumerate
+    writes to `ORPHAN_STRANDED_SINCE_KEY` and calls to this helper.
+
+    Equal timestamps are retained by ascending path.  Consequently, if more
+    than the cap open on the same tick, lexicographically larger paths (often
+    larger UUIDs) lose the tie even when one of them is the actual orphan.
+    """
+    released = released or set()
+    # Entries without a finite nonnegative timestamp provide no reliable age
+    # for eviction, so discard them instead of letting them consume the bounded
+    # marker budget. Keep the newest valid markers: if a just-opened marker is
+    # dropped, this tick may suppress its alert while a later tick has no marker
+    # from which to satisfy `orphan_matured`, leaving a quiet persistent gap
+    # that is harder to observe than the alerting form.
+    valid = [
+        (path, float(since))
+        for path, since in stranded.items()
+        if isinstance(path, str)
+        and path
+        and path not in released
+        and _is_finite_nonnegative_number(since)
+    ]
+    bounded = dict(
+        sorted(valid, key=lambda item: (-item[1], item[0]))[
+            :MAX_ORPHAN_STRANDED_PATHS
+        ]
+    )
     if bounded:
         channel_state[ORPHAN_STRANDED_SINCE_KEY] = bounded
     else:
         channel_state.pop(ORPHAN_STRANDED_SINCE_KEY, None)
+    return bounded
 
 
 def _release_pending_authority(
@@ -922,14 +958,20 @@ def _release_pending_authority(
     remaining_pending: list[str],
     pending_failures: dict[str, int],
     pending_since: dict[str, float],
+    stranded_since: dict[str, float],
     released: set[str],
-) -> tuple[list[str], dict[str, int], dict[str, float]]:
-    """Drop paths from every pending-authority map in one step (#5190).
+) -> tuple[list[str], dict[str, int], dict[str, float], dict[str, float]]:
+    """Drop released paths from pending and stranded authority in one step.
 
-    The three maps are one fact recorded three ways, so releasing a path from
-    only some of them leaves a half-retired authority behind. Callers that must
-    release atomically with an external side effect (a retirement notice that
-    actually left the box) need a single call they can place after it.
+    The pending maps and stranded marker are related lifecycle records, so a
+    partial release can leave retired authority occupying a bounded store.
+    Callers that couple release to an external side effect (a retirement notice
+    that actually left the box) can place this single state transition after it.
+
+    Besides removing `released`, this validates the entire retained stranded
+    map, orders it newest-first with a path tie-break, applies its cap, and
+    persists that bounded result.  The returned stranded map is exactly the
+    persisted retained map, not merely the caller's input minus `released`.
     """
     remaining_pending = [
         path for path in remaining_pending if path not in released
@@ -953,7 +995,10 @@ def _release_pending_authority(
         channel_state[PENDING_TRANSCRIPT_SINCE_KEY] = pending_since
     else:
         channel_state.pop(PENDING_TRANSCRIPT_SINCE_KEY, None)
-    return remaining_pending, pending_failures, pending_since
+    stranded_since = _store_orphan_stranded_since(
+        channel_state, stranded_since, released=released
+    )
+    return remaining_pending, pending_failures, pending_since, stranded_since
 
 
 def _orphan_authority_matured(
@@ -2747,10 +2792,22 @@ def _forget_reclaimed_recovered_gap_lifecycles(
     *,
     loss_state_corrupted: bool,
 ) -> None:
-    """Drop all replay identity for guards proven absent for one full TTL."""
+    """Drop the replay records enumerated below after one full absent TTL."""
     reclaimed = set(paths)
     if not reclaimed:
         return
+
+    pending = _validated_pending_transcripts(channel_state)
+    raw_failures = channel_state.get(PENDING_TRANSCRIPT_FAILURES_KEY, {})
+    raw_since = channel_state.get(PENDING_TRANSCRIPT_SINCE_KEY, {})
+    _release_pending_authority(
+        channel_state,
+        pending,
+        dict(raw_failures) if isinstance(raw_failures, dict) else {},
+        dict(raw_since) if isinstance(raw_since, dict) else {},
+        _validated_orphan_stranded_since(channel_state),
+        reclaimed,
+    )
 
     selected = channel_state.get(SELECTED_TRANSCRIPT_KEY)
     if isinstance(selected, str) and selected in reclaimed:
@@ -2760,8 +2817,6 @@ def _forget_reclaimed_recovered_gap_lifecycles(
         TRANSCRIPT_SIZES_KEY,
         TRANSCRIPT_SEEN_AT_KEY,
         TRANSCRIPT_KNOWN_AT_KEY,
-        PENDING_TRANSCRIPT_FAILURES_KEY,
-        PENDING_TRANSCRIPT_SINCE_KEY,
         RETIRED_TRANSCRIPTS_KEY,
         DEAD_WORKTREE_ABSENT_SINCE_KEY,
     ):
@@ -2773,14 +2828,6 @@ def _forget_reclaimed_recovered_gap_lifecycles(
             channel_state[key] = retained
         else:
             channel_state.pop(key, None)
-
-    raw_pending = channel_state.get(PENDING_TRANSCRIPTS_KEY)
-    if isinstance(raw_pending, list):
-        retained_pending = [path for path in raw_pending if path not in reclaimed]
-        if retained_pending:
-            channel_state[PENDING_TRANSCRIPTS_KEY] = retained_pending
-        else:
-            channel_state.pop(PENDING_TRANSCRIPTS_KEY, None)
 
     watermarks = {
         path: entry
@@ -4045,23 +4092,17 @@ def _retire_dead_worktree_authorities(
         retired_transcripts[path] = (size, now)
     _store_retired_transcripts(chs, retired_transcripts)
 
-    remaining_pending = [
-        path
-        for path in _validated_pending_transcripts(chs)
-        if path not in dead_set
-    ]
-    chs[PENDING_TRANSCRIPTS_KEY] = remaining_pending
-    for key in (PENDING_TRANSCRIPT_FAILURES_KEY, PENDING_TRANSCRIPT_SINCE_KEY):
-        raw = chs.get(key)
-        if not isinstance(raw, dict):
-            continue
-        pruned = {
-            entry: value for entry, value in raw.items() if entry not in dead_set
-        }
-        if pruned:
-            chs[key] = pruned
-        else:
-            chs.pop(key, None)
+    remaining_pending = _validated_pending_transcripts(chs)
+    raw_failures = chs.get(PENDING_TRANSCRIPT_FAILURES_KEY, {})
+    raw_since = chs.get(PENDING_TRANSCRIPT_SINCE_KEY, {})
+    _release_pending_authority(
+        chs,
+        remaining_pending,
+        dict(raw_failures) if isinstance(raw_failures, dict) else {},
+        dict(raw_since) if isinstance(raw_since, dict) else {},
+        _validated_orphan_stranded_since(chs),
+        dead_set,
+    )
     if chs.get(SELECTED_TRANSCRIPT_KEY) in dead_set:
         chs.pop(SELECTED_TRANSCRIPT_KEY, None)
     if chs.get(SELECTOR_DIVERGED_TRANSCRIPT_KEY) in dead_set:
@@ -4147,6 +4188,7 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     pending_paths = _validated_pending_transcripts(chs)
     pending_failures = _validated_pending_failures(chs, pending_paths)
     pending_since = _validated_pending_since(chs, pending_paths, now)
+    stranded_since = _validated_orphan_stranded_since(chs)
     retired_transcripts = _validated_retired_transcripts(chs)
     read_cache: dict[str, TranscriptReadResult] = {}
 
@@ -4522,26 +4564,19 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
                 retired_transcripts[path] = (size, now)
         _store_retired_transcripts(chs, retired_transcripts)
-        pending_paths = [path for path in pending_paths if path not in expired]
-        pending_failures = {
-            path: failures
-            for path, failures in pending_failures.items()
-            if path not in expired
-        }
-        pending_since = {
-            path: since
-            for path, since in pending_since.items()
-            if path not in expired
-        }
-        chs[PENDING_TRANSCRIPTS_KEY] = pending_paths
-        if pending_failures:
-            chs[PENDING_TRANSCRIPT_FAILURES_KEY] = pending_failures
-        else:
-            chs.pop(PENDING_TRANSCRIPT_FAILURES_KEY, None)
-        if pending_since:
-            chs[PENDING_TRANSCRIPT_SINCE_KEY] = pending_since
-        else:
-            chs.pop(PENDING_TRANSCRIPT_SINCE_KEY, None)
+        (
+            pending_paths,
+            pending_failures,
+            pending_since,
+            stranded_since,
+        ) = _release_pending_authority(
+            chs,
+            pending_paths,
+            pending_failures,
+            pending_since,
+            stranded_since,
+            expired,
+        )
         rt.log(
             f"[{cid}] transcript-pending-expired count={len(expired_pending_paths)}"
         )
@@ -4950,6 +4985,19 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
                 retired_transcripts[path] = (size, now)
         _store_retired_transcripts(chs, retired_transcripts)
+        (
+            remaining_pending,
+            pending_failures,
+            pending_since,
+            stranded_since,
+        ) = _release_pending_authority(
+            chs,
+            remaining_pending,
+            pending_failures,
+            pending_since,
+            stranded_since,
+            escalated,
+        )
         rt.log(
             f"[{cid}] transcript-pending-escalated "
             f"count={len(escalated_pending_paths)}"
@@ -5030,12 +5078,18 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             superseded = set(superseded_gap_owners)
             _store_retired_transcripts(chs, retired_transcripts)
             retired_pending_paths.extend(superseded_gap_owners)
-            remaining_pending, pending_failures, pending_since = (
+            (
+                remaining_pending,
+                pending_failures,
+                pending_since,
+                stranded_since,
+            ) = (
                 _release_pending_authority(
                     chs,
                     remaining_pending,
                     pending_failures,
                     pending_since,
+                    stranded_since,
                     superseded,
                 )
             )
@@ -5064,7 +5118,6 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     # floor, and — decisively — another transcript on the same channel is
     # delivering right now. A relay that is actually down produces none of that
     # last part, so nothing below can silence a real outage.
-    stranded_since = _validated_orphan_stranded_since(chs)
     orphan_unattributable_paths: set[str] = set()
     # Paths whose stranded finding is re-corroborated on THIS tick, and so the
     # only ones a matured marker may actually close out (#5190 R3 P2-A).
@@ -5125,7 +5178,10 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         if not eligible:
             # Resurrection, recovery, or promotion to the active session voids
             # the marker: this path is back under ordinary judgment.
-            if stranded_since.pop(path, None) is not None:
+            if path in stranded_since:
+                stranded_since = _store_orphan_stranded_since(
+                    chs, stranded_since, released={path}
+                )
                 rt.log(f"[{cid}] orphan-stranded-marker-cleared path={path}")
             continue
         # #5190 R3 P2-A: the marker records a finding made on ONE earlier tick,
@@ -5243,15 +5299,20 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             candidate = candidate_by_path.get(path)
             if candidate is not None:
                 retired_transcripts[path] = (candidate.size, now)
-            stranded_since.pop(path, None)
         _store_retired_transcripts(chs, retired_transcripts)
         # Released only now, downstream of a notice that provably left the box.
-        remaining_pending, pending_failures, pending_since = (
+        (
+            remaining_pending,
+            pending_failures,
+            pending_since,
+            stranded_since,
+        ) = (
             _release_pending_authority(
                 chs,
                 remaining_pending,
                 pending_failures,
                 pending_since,
+                stranded_since,
                 retired_orphans,
             )
         )
