@@ -42,10 +42,10 @@ pub(super) struct SubagentSlot {
     // #4367: read by the extracted `subagent_panel::render_subagent_slot`.
     pub(super) summary: Option<SubagentSummary>,
     /// `true` when launched with `run_in_background`: an ack-only `SubagentEnd`
-    /// must NOT mark it ✓ (only a genuine completion finalizes it).
+    /// leaves it running; terminal events and timeout reconciliation may finalize it.
     background: bool,
-    /// #3391: monotonic, never-reused per-entry slot id (mirrors
-    /// `TaskToolSlot::ordinal`) backing slot-identity subagent eviction.
+    /// #3391: value from the shared saturating slot counter (mirrors
+    /// `TaskToolSlot::ordinal`) used for id-less subagent eviction identity.
     // #4396: read by `subagent_panel::log_idless_terminal_fallback`.
     pub(super) ordinal: u64,
     /// #4177: monotonic creation instant, refreshed on observed slot activity
@@ -80,7 +80,7 @@ pub(super) struct StatusPanelState {
     // matcher, carried across the turn reset. See `SubagentKeyTombstones`.
     pub(super) recently_evicted_subagent_keys: SubagentKeyTombstones,
     pub(super) workflows: Vec<WorkflowSlot>,
-    next_slot_ordinal: u64, // #3391: advancing, never-reused task/subagent ordinals.
+    next_slot_ordinal: u64, // #3391: saturating task/subagent ordinal counter.
     // #3477 item 3: instant the turn entered `Completed` (None until then); vs the
     // store's `last_recent_event_at` it gates the late-batch 🖥️ Recent freshness.
     pub(super) completed_at: Option<std::time::Instant>,
@@ -103,7 +103,7 @@ impl StatusPanelState {
         self.todos.clear();
         self.tasks.clear();
         // #4396 r3: the cleared subagents leave the state — tombstone their keys
-        // so a late end cannot close a same-key slot of the NEXT session.
+        // so fallback matching retains the ownership conflict after session reset.
         let now = std::time::Instant::now();
         for slot in &self.subagents {
             self.recently_evicted_subagent_keys
@@ -194,7 +194,7 @@ impl StatusPanelState {
                 &mut self.recently_evicted_subagent_keys,
             ),
             background_agent_pending: self.background_agent_pending,
-            // #3391: carry the counter so a residual ordinal is never reissued.
+            // #3391: carry the ordinal counter across the state rebuild.
             next_slot_ordinal: self.next_slot_ordinal,
             request_user_msg_id: self.request_user_msg_id, // #3811: survive turn reset
             // #4451: this claim is session-scoped, not turn-scoped. The health
@@ -705,22 +705,25 @@ fn join_status_panel_sections(sections: &[String]) -> String {
     sections.join("\n\n")
 }
 
-/// #3394: section-wise degradation. A char cut of the JOINED panel chops a
-/// trailing fenced section's ``` (rendered as literal text), so on overflow DROP
-/// whole trailing sections; a lone overflowing section is fence-safe-truncated and
-/// `repair_fence_parity` re-balances every return path.
+/// #3394: on overflow, drop whole trailing sections; a lone overflowing section is unit-truncated, then fence-rebalanced, then gets a visible `...` marker appended after the rebalance.
 pub(super) fn truncate_status_panel_sections(mut sections: Vec<String>) -> String {
-    use crate::services::discord::single_message_panel::repair_fence_parity;
+    use super::super::{formatting as fmt, single_message_panel::repair_fence_parity};
     while sections.len() > 1
-        && join_status_panel_sections(&sections).chars().count() > STATUS_PANEL_MAX_CHARS
+        && fmt::discord_message_units(&join_status_panel_sections(&sections))
+            > STATUS_PANEL_MAX_CHARS
     {
         sections.pop();
     }
     let joined = join_status_panel_sections(&sections);
-    if joined.chars().count() <= STATUS_PANEL_MAX_CHARS {
+    if fmt::discord_message_units(&joined) <= STATUS_PANEL_MAX_CHARS {
         return repair_fence_parity(&joined);
     }
-    repair_fence_parity(&truncate_chars(&joined, STATUS_PANEL_MAX_CHARS))
+    let marker = "..."; // Preserve the visible degradation marker.
+    let safe_end = fmt::byte_index_at_discord_message_units(
+        &joined,
+        STATUS_PANEL_MAX_CHARS.saturating_sub(fmt::discord_message_units(marker)),
+    );
+    format!("{}{marker}", repair_fence_parity(&joined[..safe_end]))
 }
 
 impl SubagentSlot {
@@ -748,11 +751,11 @@ impl SubagentSlot {
 }
 
 /// #4177: force any background subagent slot that is still unfinished AND silent
-/// longer than `STUCK_BACKGROUND_TASK_TTL` to terminal failed. Its terminal
-/// notification never arrived, so it would otherwise survive every
-/// residual-preserving reset as a ghost running entry. Runs at turn boundaries
-/// and (#4396 point 2) on the periodic panel render tick, so a long single turn
-/// bounds a stuck slot by the TTL instead of by turn length. Returns the number
+/// longer than `STUCK_BACKGROUND_TASK_TTL` to terminal failed. Without this
+/// sweep, such a slot can survive residual-preserving resets as a ghost running
+/// entry. Runs at turn boundaries and (#4396 point 2) on the periodic panel
+/// render tick, so a long single turn bounds a stuck slot by the TTL instead of
+/// by turn length. The return value is the number of slots
 /// swept.
 pub(super) fn force_abort_stuck_subagent_slots(
     slots: &mut [SubagentSlot],

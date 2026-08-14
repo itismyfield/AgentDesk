@@ -20,14 +20,20 @@ pub(super) fn char_count(s: &str) -> usize {
 /// Conservative unit policy for Discord's documented 2000-character limit.
 ///
 /// Discord does not document a Unicode counting model, and this repository has
-/// no observed-delivery evidence that establishes one. Callers opt into this
-/// helper explicitly: `decide_length`, `split_message`, `truncate_with_marker`,
-/// `split_content`, `clamp_discord_message_content`, the streaming placeholder
-/// clamp/snapshot helpers, and `compose_completion_footer_text` use UTF-16 code
-/// units conservatively. This is not a claim about a Discord guarantee or a
-/// repository-wide invariant: `plan_streaming_rollover` budgets its footer with
-/// Unicode scalar count, and `markdown_preview` uses scalar count while
-/// collecting candidate lines before its final unit-based clamp.
+/// no observed-delivery evidence that establishes one. The production-call
+/// inventory is: `formatting::delivery::{split_message, needs_multiple_messages}`;
+/// the streaming split, snapshot, and status truncation helpers in this module;
+/// `outbound::decision::decide_length`;
+/// `outbound::delivery::{truncate_with_marker, split_content}`;
+/// `single_message_panel::{compose_completion_footer_text,
+/// clamp_footer_status_block}`; `placeholder_live_events::status_panel`;
+/// `turn_end_wip_warning`'s bounded merge helpers;
+/// `tui_task_card::truncate_preview_at_boundary`; and
+/// `http::discord_content_or_zwsp`. This is a caller index, not a claim about a
+/// Discord guarantee or a repository-wide invariant: `plan_streaming_rollover`
+/// still budgets its footer with Unicode scalar count, and `markdown_preview`
+/// uses scalar count while collecting candidate lines before its final
+/// unit-based clamp.
 pub(in crate::services::discord) fn discord_message_units(s: &str) -> usize {
     s.encode_utf16().count()
 }

@@ -1,8 +1,8 @@
 //! Turn-end WIP warning completion-surface merge (#3792, #4217).
 //!
 //! This module bridges the generic git detector in `utils::wip_detect` to the
-//! Discord completion helpers. A per-inflight reservation ensures that the
-//! bridge, watcher, and footer reconciler cannot render duplicate warnings.
+//! Discord completion helpers. A per-inflight reservation coordinates duplicate
+//! warning suppression across the bridge, watcher, and footer reconciler.
 
 use std::collections::{HashSet, VecDeque};
 use std::path::Path;
@@ -113,7 +113,7 @@ fn format_turn_end_wip_warning(warning: &WipWarning) -> String {
          작업공간: `{}`\n\
          파일 수: 스테이징됨 {}개 · 스테이징 안 됨 {}개 · 추적되지 않음 {}개\n\
          턴을 끝내기 전에 변경사항을 커밋하거나 명시적으로 폐기하세요.",
-        warning.workspace.display(),
+        warning.workspace.display().to_string().replace('`', "\\`"),
         warning.staged.len(),
         warning.unstaged.len(),
         warning.untracked.len()
@@ -172,12 +172,76 @@ pub(in crate::services::discord) fn merge_turn_end_wip_warning(
     let Some(warning) = reservation.map(TurnEndWipWarningReservation::text) else {
         return completion_surface;
     };
+    merge_bounded_turn_end_wip_warning(completion_surface, warning)
+}
+
+/// Appends the WIP warning within the Discord bound, trimming completion first.
+///
+/// Warning-only overflow keeps an unmarked prefix and may lose inline-backtick closure or details.
+/// Escaping makes each backtick byte two UTF-16 units, so existing Darwin/Linux paths can reach it; the result stays bounded.
+pub(in crate::services::discord) fn merge_bounded_turn_end_wip_warning(
+    completion_surface: String,
+    warning: &str,
+) -> String {
+    use super::formatting::{byte_index_at_discord_message_units, discord_message_units};
+
     let completion_surface = completion_surface.trim_end();
-    if completion_surface.is_empty() {
+    let warning = warning.trim_end();
+    if warning.is_empty() {
+        return completion_surface.to_string();
+    }
+    let merged = if completion_surface.is_empty() {
         warning.to_string()
     } else {
         format!("{completion_surface}\n\n{warning}")
+    };
+    if discord_message_units(&merged) <= super::DISCORD_MSG_LIMIT {
+        return merged;
     }
+
+    let warning = bounded_turn_end_wip_warning(warning, super::DISCORD_MSG_LIMIT);
+    let separator = "\n\n";
+    let body_budget = super::DISCORD_MSG_LIMIT.saturating_sub(
+        discord_message_units(&warning).saturating_add(discord_message_units(separator)),
+    );
+    let body_end = byte_index_at_discord_message_units(completion_surface, body_budget);
+    let completion_surface =
+        super::single_message_panel::repair_fence_parity(&completion_surface[..body_end]);
+    let completion_surface = completion_surface.trim_end();
+    if completion_surface.is_empty() {
+        warning
+    } else {
+        format!("{completion_surface}{separator}{warning}")
+    }
+}
+
+/// Longest `max_units` prefix; repairs only triple fences, adds no marker, and may lose inline closure/details.
+pub(in crate::services::discord) fn bounded_turn_end_wip_warning(
+    warning: &str,
+    max_units: usize,
+) -> String {
+    let warning = warning.trim_end();
+    let end = super::formatting::byte_index_at_discord_message_units(warning, max_units);
+    super::single_message_panel::repair_fence_parity(&warning[..end])
+}
+
+/// Separates warning for final-wire budgeting; post-warning metadata moves before it, reversing prior wire order.
+pub(in crate::services::discord) fn split_merged_turn_end_wip_warning(
+    completion_block: &str,
+) -> Option<(String, String)> {
+    const METADATA_BOUNDARY: &str = "\n\n\u{2063}\n";
+
+    let (completion_block, warning_tail) = completion_block.split_once(WIP_WARNING_MARKER)?;
+    let (warning_tail, metadata_suffix) = warning_tail
+        .rfind(METADATA_BOUNDARY)
+        .map(|index| warning_tail.split_at(index))
+        .unwrap_or((warning_tail, ""));
+    let mut completion_without_warning = completion_block.trim_end().to_string();
+    completion_without_warning.push_str(metadata_suffix);
+    Some((
+        completion_without_warning,
+        format!("{WIP_WARNING_MARKER}{}", warning_tail.trim_end()),
+    ))
 }
 
 pub(in crate::services::discord) fn preserve_merged_turn_end_wip_warning(
@@ -187,8 +251,10 @@ pub(in crate::services::discord) fn preserve_merged_turn_end_wip_warning(
     let Some((_, warning)) = previous_surface.split_once(WIP_WARNING_MARKER) else {
         return completion_surface;
     };
-    let completion_surface = completion_surface.trim_end();
-    format!("{completion_surface}\n\n{WIP_WARNING_MARKER}{warning}")
+    merge_bounded_turn_end_wip_warning(
+        completion_surface,
+        &format!("{WIP_WARNING_MARKER}{warning}"),
+    )
 }
 
 #[cfg(test)]
@@ -199,6 +265,86 @@ mod tests {
 
     use super::*;
     use crate::services::git::GitCommand;
+
+    fn warning_for_workspace(workspace: std::path::PathBuf) -> String {
+        format_turn_end_wip_warning(&WipWarning {
+            workspace,
+            staged: vec!["staged.txt".to_string()],
+            unstaged: Vec::new(),
+            untracked: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn final_wire_reserves_normal_warning_after_full_panel_and_metadata_5325() {
+        let warning = warning_for_workspace("/tmp/agentdesk-worktree".into());
+        let panel = "x".repeat(crate::services::discord::DISCORD_MSG_LIMIT);
+        let merged = merge_bounded_turn_end_wip_warning(panel, &warning);
+        assert_eq!(
+            crate::services::discord::formatting::discord_message_units(&merged),
+            crate::services::discord::DISCORD_MSG_LIMIT
+        );
+        assert!(merged.ends_with(&warning));
+        let completion_block = format!("{merged}\n\n\u{2063}\n⏱ 1s");
+        let wire = crate::services::discord::single_message_panel::compose_completion_footer_text(
+            "terminal body",
+            Some(&completion_block),
+        );
+        let rendered_warning =
+            crate::services::discord::single_message_panel::completion_footer_subtext(&warning);
+
+        assert!(wire.ends_with(&rendered_warning));
+        let ordered_completion = format!("panel\n\n{warning}\n\n\u{2063}\n⏱ 1s");
+        let ordered_wire =
+            crate::services::discord::single_message_panel::compose_completion_footer_text(
+                "terminal body",
+                Some(&ordered_completion),
+            );
+        let metadata_position = ordered_wire
+            .find("-# ⏱ 1s")
+            .expect("in-budget metadata must survive");
+        let warning_position = ordered_wire
+            .find(&rendered_warning)
+            .expect("reserved warning must survive");
+
+        assert!(metadata_position < warning_position);
+        assert!(
+            crate::services::discord::formatting::discord_message_units(&wire)
+                <= crate::services::discord::DISCORD_MSG_LIMIT
+        );
+        assert!(crate::services::discord::http::discord_content_or_zwsp(&wire).is_ok());
+    }
+
+    #[test]
+    fn final_wire_bounds_oversized_worktree_warning_5325() {
+        let mut workspace = std::path::PathBuf::from("/worktrees");
+        for _ in 0..9 {
+            workspace.push("w".repeat(240));
+        }
+        let warning = warning_for_workspace(workspace);
+        assert!(
+            crate::services::discord::formatting::discord_message_units(&warning)
+                > crate::services::discord::DISCORD_MSG_LIMIT
+        );
+
+        let merged = merge_bounded_turn_end_wip_warning("panel".to_string(), &warning);
+        let wire = crate::services::discord::single_message_panel::compose_completion_footer_text(
+            "terminal body",
+            Some(&merged),
+        );
+
+        assert!(wire.contains(WIP_WARNING_MARKER));
+        assert!(wire.contains("작업공간: `"));
+        assert_eq!(wire.matches('`').count() % 2, 1);
+        assert!(!wire.contains("파일 수:"));
+        assert!(!wire.contains("커밋하거나 명시적으로 폐기하세요"));
+        assert!(!wire.contains("..."));
+        assert!(
+            crate::services::discord::formatting::discord_message_units(&wire)
+                <= crate::services::discord::DISCORD_MSG_LIMIT
+        );
+        assert!(crate::services::discord::http::discord_content_or_zwsp(&wire).is_ok());
+    }
 
     struct RuntimeRootGuard {
         previous: Option<std::ffi::OsString>,

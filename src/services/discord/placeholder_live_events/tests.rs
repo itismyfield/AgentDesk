@@ -666,11 +666,22 @@ fn status_panel_codex_active_omits_processing_tail_after_recent_block() {
 
 #[test]
 fn status_panel_truncates_long_body_without_processing_tail() {
-    let sections = vec!["x".repeat(STATUS_PANEL_MAX_CHARS + 100)];
+    assert_eq!(STATUS_PANEL_MAX_CHARS, super::super::DISCORD_MSG_LIMIT);
+    let astral_overflow = format!("😀{}", "x".repeat(STATUS_PANEL_MAX_CHARS - 1));
+    assert_eq!(
+        super::super::formatting::discord_message_units(&astral_overflow),
+        STATUS_PANEL_MAX_CHARS + 1
+    );
 
-    let rendered = truncate_status_panel_sections(sections);
+    let rendered = truncate_status_panel_sections(vec![astral_overflow]);
 
-    assert!(rendered.chars().count() <= STATUS_PANEL_MAX_CHARS);
+    assert_eq!(
+        super::super::formatting::discord_message_units(&rendered),
+        STATUS_PANEL_MAX_CHARS
+    );
+    assert_eq!(rendered.chars().count(), STATUS_PANEL_MAX_CHARS - 1);
+    assert!(rendered.ends_with("..."));
+    assert!(super::super::http::discord_content_or_zwsp(&rendered).is_ok());
     assert!(!rendered.contains("계속 처리 중"));
 }
 
@@ -680,7 +691,10 @@ fn status_panel_subtext_exactly_fits_discord_character_limit_4848() {
     let second = "y".repeat(STATUS_PANEL_MAX_CHARS - 1_000 - 1 - "-# ".chars().count());
     let rendered = format_and_truncate_status_panel_sections(vec![format!("{first}\n{second}")]);
 
-    assert_eq!(rendered.chars().count(), STATUS_PANEL_MAX_CHARS);
+    assert_eq!(
+        super::super::formatting::discord_message_units(&rendered),
+        STATUS_PANEL_MAX_CHARS
+    );
     assert!(
         rendered
             .lines()
@@ -3260,9 +3274,8 @@ fn completion_footer_terminal_lines_clamped_out_of_budget_are_not_delivered() {
 
     events.evict_delivered_terminal_footer_tasks(channel_id, &first_delivered);
 
-    // The clamped-out (undelivered) slots are still terminal and re-render with
-    // their marks; the delivered ones are gone, so their identities cannot
-    // reappear in a later render's delivered set.
+    // Slots omitted from the section-clamped candidate set stay terminal and
+    // re-render; evicted candidates are gone, so their ids cannot reappear.
     let second = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
     second
         .block
@@ -3278,7 +3291,7 @@ fn completion_footer_terminal_lines_clamped_out_of_budget_are_not_delivered() {
 
 // #3391 Finding 1(a) collision pin: two slots render the IDENTICAL terminal
 // line but only ONE survives the 600B clamp. Slot-identity eviction must drop
-// EXACTLY the delivered slot; the clamped-out duplicate keeps its ✓ and
+// EXACTLY the render-reported candidate; the clamped-out duplicate keeps its ✓ and
 // re-renders. The old line-string eviction dropped BOTH (matched the shared
 // line), permanently swallowing the clamped-out mark, so this FAILS on HEAD.
 #[test]
@@ -3312,7 +3325,7 @@ fn completion_footer_identical_terminal_lines_evict_only_the_delivered_slot() {
         first_block.contains(&dup_line),
         "the surviving duplicate's line should render: {first_block}"
     );
-    // dup_b survives the clamp and is delivered; dup_a was clamped out.
+    // dup_b survives into the render-local candidate set; dup_a is clamped out.
     assert!(
         first
             .delivered_terminal_ids
@@ -3327,7 +3340,7 @@ fn completion_footer_identical_terminal_lines_evict_only_the_delivered_slot() {
 
     events.evict_delivered_terminal_footer_tasks(channel_id, &first.delivered_terminal_ids);
 
-    // After eviction, dup_a (never delivered) is still terminal and re-renders
+    // After eviction, non-candidate dup_a is still terminal and re-renders
     // its identical ✓ line. With the old line-string eviction both vanished.
     let second = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
     let second_block = second.block.expect("clamped-out duplicate must re-render");
@@ -3349,9 +3362,9 @@ fn completion_footer_identical_terminal_lines_evict_only_the_delivered_slot() {
 }
 
 // #3391 Finding 1(b) race pin: a running slot turns terminal AFTER its render
-// snapshot but BEFORE ack, and the delivered mark belonged to a DIFFERENT slot
+// snapshot but BEFORE ack, and the reported mark belonged to a DIFFERENT slot
 // whose line is identical. The newly-terminal slot must NOT be evicted — its
-// own mark was never shown. The old line-string eviction matched the shared
+// own mark was absent from that source block. The old line-string eviction matched the shared
 // line and dropped it, so this FAILS on HEAD.
 #[test]
 fn completion_footer_slot_turning_terminal_before_ack_is_not_evicted_on_twin_line() {
@@ -3359,27 +3372,27 @@ fn completion_footer_slot_turning_terminal_before_ack_is_not_evicted_on_twin_lin
     let channel_id = ChannelId::new(3_391_202);
     const TWIN_SUMMARY: &str = "Bash Wait until CI settles";
 
-    // delivered: completed twin whose mark IS in this render.
+    // Candidate: completed twin whose mark is in this renderer's source block.
     push_background_bash_task(&events, channel_id, TWIN_SUMMARY, "toolu_delivered");
     complete_background_bash_task(&events, channel_id, "toolu_delivered");
     // racing: identical summary, still RUNNING at render time.
     push_background_bash_task(&events, channel_id, TWIN_SUMMARY, "toolu_racing");
 
     let delivered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
-    // Only the completed twin's id is delivered; the running slot is in-flight.
+    // Only the completed twin's id is reported; the running slot is in-flight.
     assert_eq!(
         delivered.delivered_terminal_ids,
         vec![bg_task_id("toolu_delivered")]
     );
 
     // The edit is in flight; before the ack lands the racing slot completes and
-    // now renders the IDENTICAL terminal line as the delivered twin.
+    // now renders the IDENTICAL terminal line as the reported twin.
     complete_background_bash_task(&events, channel_id, "toolu_racing");
 
     events.evict_delivered_terminal_footer_tasks(channel_id, &delivered.delivered_terminal_ids);
 
-    // The racing slot's ✓ was never delivered, so it must still render and be
-    // reportable on the next pass; only the delivered twin is gone.
+    // The racing slot's ✓ was absent from the acknowledged source block, so it
+    // must still render next time; only the reported twin is gone.
     let next = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
     next.block.expect("racing slot's mark must still render");
     assert_eq!(
@@ -3389,8 +3402,8 @@ fn completion_footer_slot_turning_terminal_before_ack_is_not_evicted_on_twin_lin
     );
 }
 
-// #3391 Finding 2: terminal SUBAGENT slots must evict on confirmed delivery,
-// in-flight subagents are untouched, and the migration carry-over filters
+// #3391 Finding 2: reported terminal SUBAGENT candidates evict after caller ack,
+// in-flight subagents stay untouched, and the migration carry-over filters
 // evicted subagents. On HEAD eviction only retained over `tasks`, so subagents
 // accumulated and this FAILS for the eviction part.
 #[test]
@@ -3463,7 +3476,7 @@ fn footer_line_containing<'a>(block: &'a str, needle: &str) -> &'a str {
 // #3391 round 3 review P2: degenerate budgets must never exceed `max_chars`.
 // `truncate_chars` emits up to 3 chars ("...") below its budget, so budgets
 // under marker_reserve+3 degrade to a hard clamp (marker may be lost there —
-// the delivered-ID honesty gate then keeps the slot un-evicted).
+// the render-local id gate then keeps the slot un-evicted).
 #[test]
 fn truncate_chars_with_marker_never_exceeds_max_chars_on_degenerate_budgets() {
     for max_chars in [0usize, 1, 2, 3, 4, 5] {
@@ -3553,8 +3566,8 @@ fn completion_footer_long_subagent_line_ends_with_check_mark() {
 }
 
 // #3391 round 3 finding 2/3 (honesty): a terminal slot whose mark would (pre-fix)
-// be truncated off its line must, post-fix, show the mark AND be reported in the
-// delivered set — the two are pinned together. On HEAD the ✓ is chopped, so the
+// be truncated off its source line must, post-fix, show the mark AND be reported
+// in the candidate set. On HEAD the ✓ is chopped, so the
 // `ends_with('✓')` assertion FAILS; post-fix the mark survives and the id ships.
 #[test]
 fn completion_footer_long_task_visible_mark_and_id_reported_together() {
@@ -3571,9 +3584,8 @@ fn completion_footer_long_task_visible_mark_and_id_reported_together() {
     let id_reported = rendered
         .delivered_terminal_ids
         .contains(&bg_task_id("toolu_3391_honesty"));
-    // Mark visibility and delivered-id reporting must agree: the honesty gate
-    // never reports an id whose mark the user cannot see, and fix 1 keeps the
-    // mark visible, so both are true together.
+    // Source-line mark presence and id reporting must agree at this render stage.
+    // The downstream final-wire clamp is outside this test (#5348).
     assert!(
         mark_visible,
         "post-fix the ✓ must survive truncation: {line:?}"
@@ -3591,7 +3603,7 @@ fn completion_footer_long_task_visible_mark_and_id_reported_together() {
 
 // #3391 Finding 2 migration filter: the #3386 carry-over (clear-preserving
 // residuals) must drop an EVICTED terminal subagent. A background subagent that
-// completed and was evicted on delivery must not re-appear in the carried
+// completed and was evicted from the reported candidate set must not re-appear in the carried
 // footer; an in-flight background subagent does carry over.
 #[test]
 fn completion_footer_evicted_subagent_does_not_survive_migration_carry_over() {
@@ -7870,7 +7882,7 @@ fn idless_end_with_agent_id_shared_by_finished_slot_never_closes_the_live_slot()
 
 // #4396 r3 (codex review repro): the r2 finished-slot conflict guard only holds
 // while the finished slot is still IN the state. Here A is TTL-forced ✗ by the
-// render-tick sweep, the completion footer delivers it and the #3391 eviction
+// render-tick sweep, the completion footer reports it and the #3391 eviction
 // REMOVES it from the state, a same-desc B respawns live, and A's real
 // completion finally arrives (id-less, desc-keyed). Without the tombstone the
 // evicted A is invisible and B becomes the unique live match → wrong-kill. The
@@ -7910,7 +7922,7 @@ fn idless_end_after_finished_slot_eviction_never_closes_the_live_respawn() {
     }
     let _ = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
 
-    // Footer delivery evicts terminal A — it leaves the state entirely (#3391).
+    // Evicting terminal A's reported candidate removes it from state (#3391).
     events.evict_delivered_terminal_footer_tasks(
         channel_id,
         &[TerminalSlotId::Subagent(SlotKey::ToolUseId(
@@ -8441,6 +8453,7 @@ fn truncate_panel_fence_safe_when_single_section_overflows() {
 
     assert!(rendered.chars().count() <= STATUS_PANEL_MAX_CHARS);
     assert_eq!(fence_count(&rendered) % 2, 0, "odd fence count: {rendered}");
+    assert!(rendered.ends_with("..."));
 }
 
 /// #3394 (3): parity helper — balanced/odd, exact boundary, and the Discord
@@ -8478,6 +8491,60 @@ fn repair_fence_parity_treats_inner_fence_as_closer() {
     let four = "```\nouter\n```\n```\nsecond\n```";
     assert_eq!(repair_fence_parity(four), four);
     assert_eq!(fence_count(four) % 2, 0);
+}
+
+#[test]
+fn worktree_warning_preserves_literal_fence_path_and_suffix_5325() {
+    use crate::services::discord::inflight::InflightTurnState;
+    use crate::services::git::GitCommand;
+
+    if GitCommand::new().arg("--version").run_output().is_err() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("literal-fence worktree root");
+    let workspace = temp.path().join("```").join("repo");
+    std::fs::create_dir_all(&workspace).expect("literal-fence worktree");
+    GitCommand::new()
+        .repo(&workspace)
+        .arg("init")
+        .run_output()
+        .expect("git init");
+    std::fs::write(workspace.join("untracked.txt"), "dirty\n").expect("dirty fixture");
+    let mut state = InflightTurnState::new(
+        ProviderKind::Claude,
+        42,
+        None,
+        1,
+        2,
+        3,
+        "test".into(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    state.worktree_path = Some(workspace.display().to_string());
+
+    let warning =
+        crate::services::discord::turn_end_wip_warning::turn_end_wip_warning_text(Some(&state))
+            .expect("dirty worktree warning");
+    let escaped_path = workspace.display().to_string().replace('`', "\\`");
+    assert!(warning.contains(&format!("작업공간: `{escaped_path}`")));
+    assert!(warning.contains("파일 수:"));
+    assert!(warning.contains("커밋하거나 명시적으로 폐기하세요"));
+    assert!(
+        super::super::formatting::discord_message_units(&warning) < super::super::DISCORD_MSG_LIMIT
+    );
+
+    let merged = crate::services::discord::turn_end_wip_warning::merge_bounded_turn_end_wip_warning(
+        "x".repeat(2_000),
+        &warning,
+    );
+    assert!(
+        merged.ends_with(&warning),
+        "warning suffix was altered: {merged}"
+    );
 }
 
 /// #3394 (3): the in-turn LIVE panel routes through the protected truncation
@@ -8725,7 +8792,7 @@ fn rehydration_end_after_rehydrate_flips_check_and_evicts() {
         delivered.delivered_terminal_ids
     );
 
-    // #3391 eviction works on rehydrated slots: after delivered-once, they drop.
+    // #3391 eviction works on rehydrated slots: after report-and-ack, they drop.
     events.evict_delivered_terminal_footer_tasks(channel_id, &delivered.delivered_terminal_ids);
     let after = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
     assert!(
@@ -8949,9 +9016,9 @@ fn live_panel_hides_completed_subagents_keeping_running_and_header() {
 
 // #3404 SAFETY (still holds after #4093 + #4367): the live path must NEVER mutate
 // slot state — hiding a completed slot from the live RENDER must leave it in state
-// so the Ok-gated completion-footer eviction (#3391) stays authoritative and no ✓
-// is lost unseen. After a live render that hides every completed slot, the
-// completion footer still sees and can deliver every one of them.
+// so the Ok-gated completion-footer eviction (#3391) stays authoritative. After
+// a live render that hides every completed slot, the completion renderer still
+// sees and reports each as a candidate; final-wire visibility is tracked by #5348.
 #[test]
 fn live_panel_render_preserves_state_for_footer_eviction() {
     let events = PlaceholderLiveEvents::default();
@@ -8968,8 +9035,8 @@ fn live_panel_render_preserves_state_for_footer_eviction() {
     // The live render hides the completed slots but must not touch state.
     let _ = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
 
-    // The completion footer (separate render) still reports EVERY completed slot
-    // as deliverable — none were silently evicted by the live render.
+    // The completion footer still reports EVERY completed slot as a render-local
+    // candidate — none were silently evicted by the live render.
     let footer = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
     assert_eq!(
         footer.delivered_terminal_ids.len(),

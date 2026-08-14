@@ -5,6 +5,9 @@ use serenity::{
 };
 
 const DISCORD_EMPTY_MESSAGE_SENTINEL: &str = "\u{200b}";
+const DISCORD_CONTENT_HARD_CAP_UNITS: usize = super::DISCORD_MSG_LIMIT;
+const DISCORD_CONTENT_LIMIT_ERROR: &str =
+    "Invalid Form Body (content: BASE_TYPE_MAX_LENGTH Must be 2000 or fewer in length)";
 
 #[derive(Debug, thiserror::Error)]
 pub(in crate::services::discord) enum RequiredReferenceSendError {
@@ -47,21 +50,36 @@ fn classify_required_reference_error(error: serenity::Error) -> RequiredReferenc
     }
 }
 
-fn discord_content_or_zwsp(content: &str) -> &str {
-    if content.is_empty() {
+pub(in crate::services::discord) fn discord_content_or_zwsp(
+    content: &str,
+) -> serenity::Result<&str> {
+    let content = if content.is_empty() {
         DISCORD_EMPTY_MESSAGE_SENTINEL
     } else {
         content
+    };
+    let content_units = super::formatting::discord_message_units(content);
+    if content_units > DISCORD_CONTENT_HARD_CAP_UNITS {
+        tracing::error!(
+            content_units,
+            hard_cap_units = DISCORD_CONTENT_HARD_CAP_UNITS,
+            "Discord outbound content rejected before dispatch: internal length cap exceeded"
+        );
+        return Err(serenity::Error::Other(DISCORD_CONTENT_LIMIT_ERROR));
     }
+    Ok(content)
 }
+
+// This guard covers only the Serenity send/edit builders in this module.
+// The outbound-v3 `DiscordGateway` transport does not pass through it.
 
 fn channel_message_builder(
     content: &str,
     reference: Option<(ChannelId, MessageId)>,
     nonce: Option<&str>,
-) -> CreateMessage {
+) -> serenity::Result<CreateMessage> {
     let mut message = CreateMessage::new()
-        .content(discord_content_or_zwsp(content))
+        .content(discord_content_or_zwsp(content)?)
         .allowed_mentions(relay_allowed_mentions());
     if let Some((reference_channel_id, reference_message_id)) = reference {
         message = message.reference_message((reference_channel_id, reference_message_id));
@@ -71,16 +89,21 @@ fn channel_message_builder(
             .nonce(serenity::model::channel::Nonce::String(nonce.to_string()))
             .enforce_nonce(true);
     }
-    message
+    Ok(message)
 }
 
-/// #2839 (relay-stability): mention policy applied to EVERY relay send/edit.
+/// #2839 (relay-stability): mention policy applied wherever a Serenity request
+/// builder calls this helper — this module's builders plus the outbound-v3
+/// `gateway`, `outbound::transport`, and `outbound::serenity_reference` paths.
+/// Call sites that build a request without it are not covered; grep this
+/// function's callers rather than assuming a module boundary.
 ///
 /// Relayed agent output regularly contains `@everyone`/`@here` or role mentions
 /// (an agent literally echoing "@everyone" in its answer) that must NEVER ping
 /// — a single such relay would alert the entire server. With no
 /// `allowed_mentions` set, Discord parses and fires ALL mentions in the content
-/// by default, so this was a live mass-ping hole on every relay message.
+/// by default, so a builder skipping this helper carries a mass-ping hole when
+/// the content contains them.
 ///
 /// Suppress @everyone/@here and ALL role mentions unconditionally, while still
 /// allowing user mentions so the bot's own intentional requester pings
@@ -99,9 +122,8 @@ pub(in crate::services::discord) async fn send_channel_message(
     channel_id: ChannelId,
     content: &str,
 ) -> serenity::Result<Message> {
-    channel_id
-        .send_message(http, channel_message_builder(content, None, None))
-        .await
+    let message = channel_message_builder(content, None, None)?;
+    channel_id.send_message(http, message).await
 }
 
 /// Send an idempotent create. With `enforce_nonce`, Discord returns the
@@ -113,9 +135,8 @@ pub(in crate::services::discord) async fn send_channel_message_with_nonce(
     content: &str,
     nonce: &str,
 ) -> serenity::Result<Message> {
-    channel_id
-        .send_message(http, channel_message_builder(content, None, Some(nonce)))
-        .await
+    let message = channel_message_builder(content, None, Some(nonce))?;
+    channel_id.send_message(http, message).await
 }
 
 pub(in crate::services::discord) async fn send_channel_message_with_reference(
@@ -125,16 +146,12 @@ pub(in crate::services::discord) async fn send_channel_message_with_reference(
     reference_channel_id: ChannelId,
     reference_message_id: MessageId,
 ) -> serenity::Result<Message> {
-    channel_id
-        .send_message(
-            http,
-            channel_message_builder(
-                content,
-                Some((reference_channel_id, reference_message_id)),
-                None,
-            ),
-        )
-        .await
+    let message = channel_message_builder(
+        content,
+        Some((reference_channel_id, reference_message_id)),
+        None,
+    )?;
+    channel_id.send_message(http, message).await
 }
 
 pub(in crate::services::discord) async fn send_channel_message_with_reference_and_nonce(
@@ -145,16 +162,12 @@ pub(in crate::services::discord) async fn send_channel_message_with_reference_an
     reference_message_id: MessageId,
     nonce: &str,
 ) -> serenity::Result<Message> {
-    channel_id
-        .send_message(
-            http,
-            channel_message_builder(
-                content,
-                Some((reference_channel_id, reference_message_id)),
-                Some(nonce),
-            ),
-        )
-        .await
+    let message = channel_message_builder(
+        content,
+        Some((reference_channel_id, reference_message_id)),
+        Some(nonce),
+    )?;
+    channel_id.send_message(http, message).await
 }
 
 pub(in crate::services::discord) async fn send_channel_message_with_required_reference(
@@ -209,7 +222,7 @@ pub(in crate::services::discord) async fn send_channel_message_with_components(
         .send_message(
             http,
             CreateMessage::new()
-                .content(discord_content_or_zwsp(content))
+                .content(discord_content_or_zwsp(content)?)
                 .components(components)
                 .allowed_mentions(relay_allowed_mentions()),
         )
@@ -229,7 +242,7 @@ pub(in crate::services::discord) async fn edit_channel_message_with_components(
             http,
             message_id,
             EditMessage::new()
-                .content(discord_content_or_zwsp(content))
+                .content(discord_content_or_zwsp(content)?)
                 .components(components)
                 .allowed_mentions(relay_allowed_mentions()),
         )
@@ -247,7 +260,7 @@ pub(in crate::services::discord) async fn edit_channel_message(
             http,
             message_id,
             EditMessage::new()
-                .content(discord_content_or_zwsp(content))
+                .content(discord_content_or_zwsp(content)?)
                 .allowed_mentions(relay_allowed_mentions()),
         )
         .await
@@ -267,15 +280,30 @@ pub(in crate::services::discord) async fn delete_channel_message(
 #[cfg(test)]
 mod tests {
     use super::{
-        DISCORD_EMPTY_MESSAGE_SENTINEL, channel_message_builder, discord_content_or_zwsp,
-        is_unknown_required_reference_response, relay_allowed_mentions,
+        DISCORD_CONTENT_HARD_CAP_UNITS, DISCORD_EMPTY_MESSAGE_SENTINEL, channel_message_builder,
+        discord_content_or_zwsp, is_unknown_required_reference_response, relay_allowed_mentions,
     };
+    use crate::services::discord::DISCORD_MSG_LIMIT;
+    use crate::services::discord::formatting::{discord_message_units, needs_multiple_messages};
     use poise::serenity_prelude::{ChannelId, MessageId};
 
     #[test]
     fn discord_content_or_zwsp_replaces_empty_content() {
-        assert_eq!(discord_content_or_zwsp(""), DISCORD_EMPTY_MESSAGE_SENTINEL);
-        assert_eq!(discord_content_or_zwsp("hello"), "hello");
+        assert_eq!(
+            discord_content_or_zwsp("").unwrap(),
+            DISCORD_EMPTY_MESSAGE_SENTINEL
+        );
+        assert_eq!(discord_content_or_zwsp("hello").unwrap(), "hello");
+        assert_eq!(DISCORD_CONTENT_HARD_CAP_UNITS, DISCORD_MSG_LIMIT);
+
+        let exact = "x".repeat(DISCORD_MSG_LIMIT);
+        let overflow = format!("{exact}x");
+        assert_eq!(discord_message_units(&exact), DISCORD_MSG_LIMIT);
+        assert_eq!(discord_message_units(&overflow), DISCORD_MSG_LIMIT + 1);
+        assert!(channel_message_builder(&exact, None, None).is_ok());
+        assert!(channel_message_builder(&overflow, None, None).is_err());
+        assert!(!needs_multiple_messages(&exact));
+        assert!(needs_multiple_messages(&overflow));
     }
 
     #[test]
@@ -336,11 +364,14 @@ mod tests {
     fn required_reference_nonce_builder_enforces_discord_reconciliation() {
         let channel = ChannelId::new(4_055);
         let reference = MessageId::new(90_062);
-        let value = serde_json::to_value(channel_message_builder(
-            "reply",
-            Some((channel, reference)),
-            Some("adktr01234567890123456789"),
-        ))
+        let value = serde_json::to_value(
+            channel_message_builder(
+                "reply",
+                Some((channel, reference)),
+                Some("adktr01234567890123456789"),
+            )
+            .expect("reply builder"),
+        )
         .expect("serialize create-message payload");
         assert_eq!(
             value.get("nonce").and_then(serde_json::Value::as_str),

@@ -106,20 +106,79 @@ pub(in crate::services::discord) fn compose_completion_footer_text(
     body: &str,
     completion_block: Option<&str>,
 ) -> String {
+    if let Some(completion_block) = completion_block
+        && let Some((completion_without_warning, warning)) =
+            super::turn_end_wip_warning::split_merged_turn_end_wip_warning(completion_block)
+    {
+        let completion_without_warning =
+            (!completion_without_warning.trim().is_empty()).then_some(completion_without_warning);
+        let warning = completion_footer_subtext(&warning);
+        let separator_units = super::formatting::discord_message_units("\n\n");
+        // Subtracting a byte budget from a UTF-16-unit limit is conservative because UTF-8 bytes
+        // are never fewer than UTF-16 units. It reserves that many rendered non-warning units but
+        // not a whole source section: `completion_footer_subtext` adds three units per non-empty line.
+        let warning_budget = super::DISCORD_MSG_LIMIT.saturating_sub(
+            SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES
+                .saturating_add(6)
+                .saturating_add(separator_units),
+        );
+        let warning =
+            super::turn_end_wip_warning::bounded_turn_end_wip_warning(&warning, warning_budget);
+        let content_limit = super::DISCORD_MSG_LIMIT.saturating_sub(
+            super::formatting::discord_message_units(&warning).saturating_add(separator_units),
+        );
+        let composed = compose_completion_footer_text_without_warning_with_limit(
+            body,
+            completion_without_warning.as_deref(),
+            content_limit,
+            true,
+        );
+        return if composed.trim().is_empty() {
+            warning
+        } else {
+            format!("{composed}\n\n{warning}")
+        };
+    }
+    compose_completion_footer_text_without_warning(body, completion_block)
+}
+
+fn compose_completion_footer_text_without_warning(
+    body: &str,
+    completion_block: Option<&str>,
+) -> String {
+    compose_completion_footer_text_without_warning_with_limit(
+        body,
+        completion_block,
+        super::DISCORD_MSG_LIMIT,
+        false,
+    )
+}
+
+fn compose_completion_footer_text_without_warning_with_limit(
+    body: &str,
+    completion_block: Option<&str>,
+    message_limit: usize,
+    clamp_unadorned_body: bool,
+) -> String {
     let body = body.trim_end();
     let Some(block) = completion_block
         .map(str::trim)
         .filter(|block| !block.is_empty())
     else {
-        return body.to_string();
+        return if clamp_unadorned_body {
+            let safe_end =
+                super::formatting::byte_index_at_discord_message_units(body, message_limit);
+            repair_fence_parity(&body[..safe_end])
+        } else {
+            body.to_string()
+        };
     };
     let block = completion_footer_subtext(block);
-    if body.is_empty() {
-        return clamp_footer_status_block(block);
-    }
 
-    let max_block_units = super::DISCORD_MSG_LIMIT.saturating_sub(6);
-    let block = if super::formatting::discord_message_units(&block) <= max_block_units {
+    let max_block_units = message_limit.saturating_sub(6);
+    let block = if max_block_units == 0 {
+        String::new()
+    } else if super::formatting::discord_message_units(&block) <= max_block_units {
         repair_fence_parity(&block)
     } else {
         let ellipsis = "…";
@@ -128,10 +187,16 @@ pub(in crate::services::discord) fn compose_completion_footer_text(
         let safe_end = super::formatting::byte_index_at_discord_message_units(&block, body_budget);
         repair_fence_parity(&format!("{}{}", &block[..safe_end], ellipsis))
     };
+    if block.is_empty() {
+        let safe_end = super::formatting::byte_index_at_discord_message_units(body, message_limit);
+        return repair_fence_parity(&body[..safe_end]);
+    }
+    if body.is_empty() {
+        return block;
+    }
 
     let suffix = format!("\n\n{block}");
-    let max_units =
-        super::DISCORD_MSG_LIMIT.saturating_sub(super::formatting::discord_message_units(&suffix));
+    let max_units = message_limit.saturating_sub(super::formatting::discord_message_units(&suffix));
     let base = if super::formatting::discord_message_units(body) > max_units {
         let safe_end = super::formatting::byte_index_at_discord_message_units(body, max_units);
         &body[..safe_end]
@@ -145,18 +210,13 @@ pub(in crate::services::discord) fn compose_completion_footer_text(
     // so a body whose fence was chopped by the Discord-limit trim above would, on
     // the combined `{base}{suffix}`, take the appended footer down with it.
     //
-    // #3391 delivered-ID honesty invariant: `delivered_terminal_ids` for this
-    // footer were already computed from the footer block (completion_footer.rs:202)
-    // and are evicted once this edit returns Ok. If repair ate the footer, the
-    // ✓/✗ marks would vanish from the delivered text yet their slots would still
-    // be evicted — reporting marks the user never saw. Repairing only the body
-    // keeps every footer mark in the delivered text, so whenever this edit
-    // succeeds every reported terminal slot's mark was actually present.
+    // #3391: body-only repair prevents `repair_fence_parity` from consuming the rendered footer.
+    // Its ids were computed earlier, so the inline block clamp can still cut a reported mark (#5348).
     //
-    // The footer block is fence-balanced by construction: `render_completion_footer`
-    // emits only the context-usage line plus Tasks/Subagents slot lines (no fenced Recent
-    // block lives here), so it carries zero ``` runs (an even count). balanced base
-    // + balanced footer = balanced combined.
+    // Append the rendered footer to the separately repaired body. The assertion
+    // below checks the renderer's current even fence parity; the runtime branch
+    // repairs the suffix separately if that assumption stops holding, without
+    // reaching back across the body/footer boundary.
     let base = repair_fence_parity(base);
     let combined = format!("{base}{suffix}");
     debug_assert_eq!(
@@ -1238,12 +1298,10 @@ mod tests {
         );
     }
 
-    /// #3394 round 2 (P1): the registered-refresh composition site
-    /// (`completion_footer_edit_for_registered_target_at`, ~258) shares the
-    /// `compose_completion_footer_text` pattern. A registered body carrying an
-    /// unterminated fence must still emit the rendered footer's terminal ✓ in the
-    /// delivered edit text, with even combined parity — so the #3391 eviction that
-    /// follows a successful edit only drops marks the user actually saw.
+    /// #3394 round 2 (P1): `completion_footer_edit_for_registered_target_at`
+    /// uses `compose_completion_footer_text`. This test pins the registered path:
+    /// body repair leaves the rendered footer's terminal ✓ in the edit text and
+    /// the combined fence parity is even. Later clamp/eviction risk remains #5348.
     #[test]
     fn registered_refresh_repair_scoped_to_body_keeps_footer_marks_3394() {
         let channel_id = ChannelId::new(3_394_201);
