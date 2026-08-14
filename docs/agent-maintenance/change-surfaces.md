@@ -190,10 +190,12 @@ time for diagnostics; neither is a stored approval value.
   pins the calculated execution surface of the `jobs.scripts`
   writer-protection/aggregate pair, and verifies the SHA-256 of
   `scripts/required-check-mirror.sh`. The required `Script checks` publisher
-  and the unconditional required `relay-authority-contract` job independently
-  compare both the helper digest and the digest of
-  `scripts/check-ci-runner-hardening.sh` immediately after checkout, then run
-  only that verified gate. The publisher-side copy is intentional and
+  compares both the helper digest and the digest of
+  `scripts/check-ci-runner-hardening.sh` immediately after checkout; the
+  unconditional required `relay-authority-contract` job repeats the same two
+  comparisons before its own gate run (they sit after its toolchain and
+  relay-contract steps, and any earlier step failure already turns that
+  required job red), and each job then runs only its verified gate copy. The publisher-side copy is intentional and
   symmetric: it catches a skipped/altered relay job, while the relay copy
   catches a skipped/altered publisher. The helper's
   behavior tests remain useful regressions, but byte identity is primary:
@@ -242,8 +244,12 @@ time for diagnostics; neither is a stored approval value.
   affected in-gate semantic/source-range digest, run
   `shasum -a 256 scripts/check-ci-runner-hardening.sh`, replace the gate digest
   in the `Script checks` contract step and the `relay-authority-contract`
-  backstop (two gate pins), and rerun the gate to complete the red-to-green
-  round trip. Do not copy a pre-edit digest or update only one backstop.
+  backstop (two workflow gate pins), sync the fixture's expected gate digest
+  (`CI_RUNNER_HARDENING_SHA256` in `tests/test_fast_check_ci_wiring.py`), then
+  rerun the gate and `python3 -m unittest tests.test_fast_check_ci_wiring` to
+  complete the red-to-green round trip; the wiring fixture is wired into the
+  required aggregate, so skipping that sync leaves the required context red.
+  Do not copy a pre-edit digest or update only one backstop.
 - tests: permanent fixtures cover the historical environment, `GITHUB_ACTION`,
   argv0, and unconditional-`exit 0` attacks; one-byte helper
   and digest-only mutations; mirror defaults/env/environment/strategy/container
@@ -254,8 +260,10 @@ time for diagnostics; neither is a stored approval value.
   from the source-range pin. `actionlint` also diagnoses duplicate keys when
   run, but it is not invoked by the required `Script checks` path, so it is a
   supplemental check rather than the authority for this property. The
-  aggregate explicitly requires `tests/test_required_check_mirror.sh`; skipped,
-  failed, and cancelled helper inputs remain covered by that shell suite.
+  aggregate explicitly requires `tests/test_required_check_mirror.sh`; skipped
+  and failed helper inputs remain covered by that shell suite, while the
+  cancelled input is exercised by the `("success", "cancelled")` case in
+  `tests/test_fast_check_ci_wiring.py`, which runs the real helper.
 - threat model — covered: any helper tamper whose bytes differ from the reviewed
   digest, including conditionally activated code; changes to the fixed
   publisher surface; the registered relay job surface; and the enumerated
@@ -275,7 +283,14 @@ time for diagnostics; neither is a stored approval value.
   The result mirror detects skipped/failed/cancelled upstream jobs; it cannot
   prove that an upstream success used the intended semantics.
   More fundamentally, a single PR that consistently rewrites every guard and
-  every pin can pass this in-repository gate system. That is an inherent limit
+  every pin can pass this in-repository gate system. A cheaper edit in the same
+  class: GitHub treats a condition-skipped required check as satisfied, so one
+  PR that stops both required jobs from running (skip conditions on the
+  `Script checks` publisher and `relay-authority-contract` together, or on
+  `relay-authority-contract` plus a `needs` ancestor of the publisher) leaves
+  no required job to execute the gate. A skip condition on just one of them
+  stays blocked, because the surviving required job still runs the pinned gate
+  against the edited workflow. That is an inherent limit
   of in-repo gating, not a property these hashes claim to solve; human review
   and branch protection own that trust decision.
 - related_issues: #5308, #5321.
