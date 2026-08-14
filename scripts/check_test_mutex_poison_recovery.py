@@ -24,7 +24,9 @@ For every process-global `std::sync::Mutex<()>` in `src/` -- a `static`, or a
 function returning `&'static Mutex<()>` -- every `.lock()` on it must recover a
 poisoned guard instead of propagating the error. `.unwrap()`, `.expect(..)` and
 `?` propagate; `unwrap_or_else(|poison| poison.into_inner())` and an explicit
-`Err(poisoned) => poisoned.into_inner()` match recover.
+`Err(poisoned) => poisoned.into_inner()` match recover. A direct
+`if let Ok(..) = LOCK.lock()` or `while let Ok(..) = LOCK.lock()` discards the
+poison and is rejected too.
 
 WHY IT STOPS AT `Mutex<()>`
 ---------------------------
@@ -48,18 +50,19 @@ It is a text scan, not a borrow-checked analysis of receiver types.
   to a caller which recovers, and `unwrap_or_else(PoisonError::into_inner)`
   written as a path rather than a closure. A gate that cries wolf 32 times is
   a gate that gets deleted, so this one asserts less and means it.
-* An acquisition that DISCARDS the poison rather than propagating it is not
-  flagged, because none of those four spellings appear in it. The reachable
-  shape is `if let Ok(_g) = SOME_LOCK.lock() { .. }` (and its `while let` /
-  `.ok()` relatives). This is not a milder failure than `.unwrap()`, it is a
-  worse one: once the mutex is poisoned the `Ok` arm never matches again, so
-  the critical section is silently SKIPPED and mutual exclusion is lost for
-  every later acquirer -- with no panic, no `PoisonError` in the transcript,
-  and nothing for a cascade to point at. It is also exactly the refactor that
-  clippy and review pressure produce when an author is told to stop writing
-  `.unwrap()`, so it is arrived at by ordinary means rather than contrived.
-  Widening the patterns to cover it is tracked separately; today it is a known
-  hole, not a covered case.
+* A direct `if let Ok(..) = NAME.lock()` or `while let Ok(..) = NAME.lock()`
+  is classified from the lock result's consumer and rejected. The classifier
+  tokenizes only the surrounding identifiers and delimiters; it is deliberately
+  not a regular expression for Rust grammar. Once the mutex is poisoned the
+  `Ok` arm never matches again, so the critical section is silently SKIPPED
+  and mutual exclusion is lost for every later acquirer -- with no panic, no
+  `PoisonError` in the transcript, and nothing for a cascade to point at.
+  Parenthesized or block-wrapped lock expressions, `let ... else`, and other
+  consumer forms are not inferred by this narrow check.
+* An acquisition that DISCARDS poison through `.lock().ok()` (or a longer
+  `.ok()` chain) remains unflagged. That is a known hole, not a claim that the
+  shape is safe; the fixture tests pin this non-guarantee so a future change in
+  the scanner cannot silently widen the contract.
 * A `.lock()` reached through an alias (`let m = &SOME_LOCK; m.lock()`) or
   through a helper that takes `&'static Mutex<()>` as a parameter is not
   attributed to the static, so it is neither checked nor reported. The
@@ -128,6 +131,176 @@ RECOVERY = re.compile(r"\binto_inner\b")
 
 
 @dataclass(frozen=True)
+class RustToken:
+    text: str
+    start: int
+    end: int
+
+
+def _is_identifier(text: str) -> bool:
+    return bool(text) and (text[0].isalpha() or text[0] == "_") and all(
+        char.isalnum() or char == "_" for char in text[1:]
+    )
+
+
+def _skip_quoted(text: str, start: int, quote: str) -> int:
+    """Return the first position after a quoted Rust string/character."""
+    index = start + 1
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+        elif text[index] == quote:
+            return index + 1
+        else:
+            index += 1
+    return len(text)
+
+
+def _skip_block_comment(text: str, start: int) -> int:
+    """Skip a possibly nested Rust block comment."""
+    depth = 1
+    index = start + 2
+    while index < len(text) and depth:
+        if text.startswith("/*", index):
+            depth += 1
+            index += 2
+        elif text.startswith("*/", index):
+            depth -= 1
+            index += 2
+        else:
+            index += 1
+    return index
+
+
+def _lex_rust_tokens(text: str) -> list[RustToken]:
+    """Tokenize enough Rust to classify a direct lock-result consumer.
+
+    This is intentionally a lexer, not a grammar regex. It preserves token
+    offsets for the existing lock-site matcher and leaves full Rust parsing to
+    rustc; the consumer check only needs identifiers, delimiters, and `=`.
+    """
+    tokens: list[RustToken] = []
+    index = 0
+    multi_char = (
+        "::",
+        "=>",
+        "==",
+        "!=",
+        "<=",
+        ">=",
+        "&&",
+        "||",
+        "->",
+        "+=",
+        "-=",
+        "*=",
+        "/=",
+        "%=",
+        "&=",
+        "|=",
+        "^=",
+        "<<",
+        ">>",
+    )
+    while index < len(text):
+        char = text[index]
+        if char.isspace():
+            index += 1
+            continue
+        if text.startswith("/*", index):
+            index = _skip_block_comment(text, index)
+            continue
+        if char == '"':
+            index = _skip_quoted(text, index, '"')
+            continue
+        # A lifetime (`'static`) is tokenized, while a character literal is
+        # skipped so its contents cannot look like a consumer prefix.
+        if char == "'":
+            if index + 2 < len(text) and text[index + 2] == "'":
+                index = _skip_quoted(text, index, "'")
+                continue
+            tokens.append(RustToken(char, index, index + 1))
+            index += 1
+            continue
+        if char.isalpha() or char == "_":
+            end = index + 1
+            while end < len(text) and (text[end].isalnum() or text[end] == "_"):
+                end += 1
+            tokens.append(RustToken(text[index:end], index, end))
+            index = end
+            continue
+        match = next((operator for operator in multi_char if text.startswith(operator, index)), None)
+        if match is not None:
+            tokens.append(RustToken(match, index, index + len(match)))
+            index += len(match)
+            continue
+        tokens.append(RustToken(char, index, index + 1))
+        index += 1
+    return tokens
+
+
+def _delimiter_pairs(tokens: list[RustToken]) -> dict[int, int]:
+    """Map matching `()`, `[]`, and `{}` token indexes in valid-ish Rust."""
+    opening = {"(": ")", "[": "]", "{": "}"}
+    closing = {value: key for key, value in opening.items()}
+    stack: list[tuple[str, int]] = []
+    pairs: dict[int, int] = {}
+    for index, token in enumerate(tokens):
+        if token.text in opening:
+            stack.append((token.text, index))
+        elif token.text in closing:
+            expected = closing[token.text]
+            for stack_index in range(len(stack) - 1, -1, -1):
+                if stack[stack_index][0] == expected:
+                    _, opening_index = stack[stack_index]
+                    del stack[stack_index:]
+                    pairs[index] = opening_index
+                    pairs[opening_index] = index
+                    break
+    return pairs
+
+
+def _discarding_consumer(
+    tokens: list[RustToken],
+    pairs: dict[int, int],
+    token_by_start: dict[int, int],
+    lock_match: re.Match[str],
+) -> str | None:
+    """Classify a direct `if|while let Ok(..) = <lock>` consumer.
+
+    The receiver may have Rust path qualifiers (`crate::module::LOCK`), but
+    wrappers and aliases are deliberately outside this bounded contract.
+    """
+    receiver = token_by_start.get(lock_match.start())
+    if receiver is None or tokens[receiver].text != lock_match.group("name"):
+        return None
+    while (
+        receiver >= 2
+        and tokens[receiver - 1].text == "::"
+        and _is_identifier(tokens[receiver - 2].text)
+    ):
+        receiver -= 2
+    if receiver == 0 or tokens[receiver - 1].text != "=":
+        return None
+    close = receiver - 2
+    if close < 0 or tokens[close].text != ")":
+        return None
+    opening = pairs.get(close)
+    if opening is None or opening < 3:
+        return None
+    ok = opening - 1
+    let = ok - 1
+    kind = let - 1
+    if (
+        tokens[ok].text != "Ok"
+        or tokens[let].text != "let"
+        or tokens[kind].text not in {"if", "while"}
+    ):
+        return None
+    return f"{tokens[kind].text} let Ok(..)"
+
+
+@dataclass(frozen=True)
 class Violation:
     path: str
     line: int
@@ -135,6 +308,11 @@ class Violation:
     form: str
 
     def render(self) -> str:
+        if self.form in {"if let Ok(..)", "while let Ok(..)"}:
+            return (
+                f"{self.path}:{self.line}: {self.lock}.lock().{self.form} "
+                "discards PoisonError and silently skips the critical section"
+            )
         return f"{self.path}:{self.line}: {self.lock}.lock().{self.form} propagates PoisonError"
 
 
@@ -181,7 +359,13 @@ def scan_file(repo_root: Path, path: Path, names: frozenset[str]) -> list[Violat
         r"\b(?P<name>" + "|".join(re.escape(name) for name in sorted(names)) + r")\b"
         r"\s*(?:\(\s*\))?\s*\.\s*lock\s*\(\s*\)"
     )
-    for match in pattern.finditer(text):
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return violations
+    tokens = _lex_rust_tokens(text)
+    pairs = _delimiter_pairs(tokens)
+    token_by_start = {token.start: index for index, token in enumerate(tokens)}
+    for match in matches:
         tail = text[match.end(): match.end() + RECOVERY_WINDOW]
         label = next(
             (label for propagator, label in PROPAGATING if propagator.match(tail)),
@@ -189,6 +373,8 @@ def scan_file(repo_root: Path, path: Path, names: frozenset[str]) -> list[Violat
         )
         if label is None and FAKE_RECOVERY.match(tail) and not RECOVERY.search(tail):
             label = "unwrap_or_else(..) without into_inner"
+        if label is None:
+            label = _discarding_consumer(tokens, pairs, token_by_start, match)
         if label is not None:
             violations.append(
                 Violation(rel, text.count("\n", 0, match.start()) + 1, match.group("name"), label)
@@ -221,21 +407,26 @@ def check(repo_root: Path, source_root: Path) -> int:
         print(f"  {name}: {', '.join(inventory[name])}")
     if violations:
         print(
-            f"FAIL: {len(violations)} acquisition(s) propagate PoisonError instead of "
-            "recovering it:",
+            f"FAIL: {len(violations)} acquisition(s) propagate or discard PoisonError "
+            "instead of recovering it:",
             file=sys.stderr,
         )
         for violation in sorted(violations, key=lambda v: (v.path, v.line)):
             print(f"  {violation.render()}", file=sys.stderr)
         print(
             "Spell the acquisition `.lock().unwrap_or_else(|poison| poison.into_inner())`. "
-            "A process-global Mutex<()> guards mutual exclusion, not data, so a "
-            "panicking holder leaves nothing torn -- propagating turns one real "
-            "failure into a cascade of poison victims (measured: 1 -> 11, then 1 -> 68).",
+            "Do not consume its result with `if let Ok(..)` or `while let Ok(..)`: "
+            "a process-global Mutex<()> guards mutual exclusion, not data, so a "
+            "panicking holder leaves nothing torn -- propagating or silently "
+            "skipping turns one real failure into a cascade (measured: 1 -> 11, "
+            "then 1 -> 68).",
             file=sys.stderr,
         )
         return 1
-    print(f"test mutex poison recovery: {len(files)} file(s) scanned, 0 propagating acquisitions")
+    print(
+        f"test mutex poison recovery: {len(files)} file(s) scanned, "
+        "0 propagating or discarding acquisitions"
+    )
     return 0
 
 
