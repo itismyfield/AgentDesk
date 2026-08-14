@@ -11,8 +11,9 @@ mod restored_session_cwd_channel_isolation_pg_tests {
     //! recovering channel would recover into the OTHER channel's working tree.
     //! RED before the predicate was added, GREEN after.
     use super::{
-        RestoreDispatchRebindOutcome, consume_dispatched_origin_ghost_if_current,
-        load_restored_session_cwd, rebind_restored_dispatch_if_missing,
+        RestoreDispatchRebindOutcome, add_configured_channel_bindings,
+        consume_dispatched_origin_ghost_if_current, load_restored_session_cwd,
+        rebind_restored_dispatch_if_missing,
     };
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::db::dispatched_sessions::{HookSessionUpsert, upsert_hook_session_pg};
@@ -378,5 +379,56 @@ mod restored_session_cwd_channel_isolation_pg_tests {
         let _ = std::fs::remove_dir_all(&dir);
         pool.close().await;
         pg_db.drop().await;
+    }
+
+    #[test]
+    fn configured_channel_binding_is_last_resort_and_provider_scoped() {
+        let provider = ProviderKind::Codex;
+        let session_name = provider.build_tmux_session_name("yaml-channel");
+        let yaml_only_session = provider.build_tmux_session_name("yaml-only");
+        let agent_sessions = vec![session_name.as_str(), yaml_only_session.as_str()];
+        let mut name_to_channel = std::collections::HashMap::new();
+        name_to_channel.insert(
+            session_name.clone(),
+            (
+                poise::serenity_prelude::ChannelId::new(99),
+                "higher-priority".to_string(),
+            ),
+        );
+
+        add_configured_channel_bindings(
+            &agent_sessions,
+            &provider,
+            vec![
+                crate::services::discord::settings::RegisteredChannelBinding {
+                    channel_id: 42,
+                    owner_provider: provider.clone(),
+                    fallback_name: Some("yaml-only".to_string()),
+                },
+                crate::services::discord::settings::RegisteredChannelBinding {
+                    channel_id: 43,
+                    owner_provider: ProviderKind::Claude,
+                    fallback_name: Some("yaml-only".to_string()),
+                },
+            ],
+            &mut name_to_channel,
+        );
+
+        assert_eq!(
+            name_to_channel.get(&session_name),
+            Some(&(
+                poise::serenity_prelude::ChannelId::new(99),
+                "higher-priority".to_string(),
+            )),
+            "config fallback must not overwrite an earlier mapping",
+        );
+        assert_eq!(
+            name_to_channel.get(&yaml_only_session),
+            Some(&(
+                poise::serenity_prelude::ChannelId::new(42),
+                "yaml-only".to_string(),
+            )),
+            "config fallback must resolve an otherwise-unmapped configured session",
+        );
     }
 }

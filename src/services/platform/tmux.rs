@@ -32,6 +32,9 @@ fn is_blank_session_name(session_name: &str) -> bool {
 
 fn tmux_command() -> Command {
     let mut cmd = Command::new("tmux");
+    // Force tmux's UTF-8 mode so non-ASCII session names survive command
+    // output (without it, names such as Korean channels are masked).
+    cmd.arg("-u");
     binary_resolver::apply_runtime_path(&mut cmd);
     cmd
 }
@@ -993,6 +996,15 @@ pub fn get_option(session_name: &str, key: &str) -> Option<String> {
 #[cfg(test)]
 mod target_safety_tests {
     use super::*;
+
+    #[test]
+    fn tmux_command_enables_utf8_mode() {
+        assert_eq!(
+            tmux_command().get_args().next(),
+            Some(std::ffi::OsStr::new("-u")),
+            "every tmux invocation must request UTF-8 output",
+        );
+    }
 
     #[test]
     fn blank_session_name_is_not_a_valid_target() {
