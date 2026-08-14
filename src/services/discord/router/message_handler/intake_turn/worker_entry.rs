@@ -49,7 +49,6 @@ pub(crate) async fn execute_intake_turn_core(
     token: &str,
     request: IntakeRequest,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let preserve_on_cancel = request.preserve_on_cancel;
     super::handle_text_message(
         &IntakeDeps {
             http,
@@ -58,8 +57,8 @@ pub(crate) async fn execute_intake_turn_core(
             shared,
             token,
         },
+        request.preserve_on_cancel,
         request,
-        preserve_on_cancel,
         false,
         Vec::new(),
         // Worker dispatch has no in-process gate carry-forward; it re-resolves

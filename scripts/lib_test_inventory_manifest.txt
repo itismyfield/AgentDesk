@@ -4010,6 +4010,7 @@ services::discord::router::message_handler::headless_turn::recovery_context_take
 services::discord::router::message_handler::intake_turn::feedback_reminder_take_order_tests::intake_takes_feedback_reminder_once_after_guards_and_before_prompt_use
 services::discord::router::message_handler::intake_turn::feedback_reminder_take_order_tests::tui_busy_enqueue_refusal_puts_back_feedback_reminder_for_next_turn
 services::discord::router::message_handler::intake_turn::intake_outbox_state_builder_tests::builder_adopts_worker_intake_outbox_identity
+services::discord::router::message_handler::intake_turn::intake_outbox_state_builder_tests::builder_cannot_replace_an_already_adopted_intake_outbox_identity
 services::discord::router::message_handler::intake_turn::placeholder_handoff::tests::only_confirmed_missing_replaces_bound_busy_notice_4888
 services::discord::router::message_handler::intake_turn::queue_pending_reaction_clear_tests::cleared_set_covers_every_intake_gate_queue_reaction
 services::discord::router::message_handler::intake_turn::queue_pending_reaction_clear_tests::clears_every_queue_marker_reaction

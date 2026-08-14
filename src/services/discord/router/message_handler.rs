@@ -277,8 +277,8 @@ pub(super) async fn finish_admitted_local(
 ) -> Result<(), Error> {
     intake_turn::handle_text_message(
         deps,
-        request,
         preserve_on_cancel,
+        request,
         queued_drain,
         preloaded_uploads,
         voice_announcement,

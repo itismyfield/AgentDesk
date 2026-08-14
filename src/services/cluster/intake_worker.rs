@@ -563,13 +563,21 @@ mod tests {
             .find("pub(crate) async fn execute_intake_turn_core(")
             .expect("worker executor exists");
         let executor = &executor_source[start..];
+        let call_start = executor
+            .find("super::handle_text_message(")
+            .expect("worker delegates to the intake body");
+        let call_end = executor[call_start..]
+            .find("\n    .await")
+            .map(|offset| call_start + offset)
+            .expect("worker awaits the intake body");
+        let forwarding_call = &executor[call_start..call_end];
 
         assert!(
-            executor.contains("request.preserve_on_cancel,"),
+            forwarding_call.contains("request.preserve_on_cancel,\n        request,"),
             "worker executor must pass the preservation bit restored from the durable row"
         );
         assert!(
-            !executor.contains("request.turn_kind,\n        false,"),
+            !forwarding_call.contains("\n        false,\n        request,"),
             "worker executor must not restore the historical hardcoded false"
         );
     }

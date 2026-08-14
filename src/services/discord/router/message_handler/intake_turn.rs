@@ -60,8 +60,11 @@ mod intake_outbox_state_builder_tests {
     #[test]
     fn builder_adopts_worker_intake_outbox_identity() {
         // This covers construction plus the private-field adoption boundary.
-        // Upstream Some/None selection is covered separately at each request
-        // creation edge; Option's value choice is not a type-level distinction.
+        // Only the worker row-conversion test carries an executed value
+        // assertion (its production `Some(row.id)`). The other four production
+        // `IntakeRequest` constructors — two intake-gate, queued, skill — all
+        // pass `None`, and none asserts that value; those `None` edges rest on
+        // type/inventory pinning rather than a dedicated value check.
         let state = build_intake_inflight_state(Some(5071), || {
             InflightTurnState::new(
                 ProviderKind::Claude,
@@ -81,13 +84,37 @@ mod intake_outbox_state_builder_tests {
 
         assert_eq!(state.intake_outbox_id(), Some(5071));
     }
+
+    #[test]
+    fn builder_cannot_replace_an_already_adopted_intake_outbox_identity() {
+        let state = build_intake_inflight_state(Some(0), || {
+            let mut state = InflightTurnState::new(
+                ProviderKind::Claude,
+                42,
+                Some("adk-cdx".to_string()),
+                7,
+                8,
+                9,
+                "hello".to_string(),
+                None,
+                Some("AgentDesk-claude-adk-cdx".to_string()),
+                Some("/tmp/out.jsonl".to_string()),
+                None,
+                0,
+            );
+            state.adopt_intake_outbox(Some(5071));
+            state
+        });
+
+        assert_eq!(state.intake_outbox_id(), Some(5071));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_text_message(
     deps: &IntakeDeps<'_>,
-    request: IntakeRequest,
     preserve_on_cancel: bool,
+    request: IntakeRequest,
     _queued_drain: bool,
     preloaded_uploads: Vec<String>,
     gate_resolved_voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,

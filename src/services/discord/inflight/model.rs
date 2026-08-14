@@ -129,7 +129,9 @@ pub(in crate::services::discord) struct InflightTurnState {
     pub request_owner_user_id: u64,
     pub user_msg_id: u64,
     /// Primary key of the `intake_outbox` row that produced this turn. Worker
-    /// turns carry `Some`; leader-local and legacy turns carry `None`.
+    /// turns carry `Some`; leader-local and legacy turns carry `None`. Production
+    /// construction sets it through `adopt_intake_outbox`; serde deserialization
+    /// intentionally restores the persisted value for state-file compatibility.
     #[serde(default)]
     intake_outbox_id: Option<i64>,
     /// Queue-merge source identity for the durable retry budget and notice.
@@ -1019,12 +1021,17 @@ impl InflightTurnState {
         }
     }
 
-    /// Adopt the intake outbox identity at the live-turn construction boundary.
+    /// Adopt the intake outbox identity at the sole production construction
+    /// boundary. Deserialization separately restores persisted state and is not
+    /// a runtime wiring entry point. Once present, the identity is immutable so
+    /// a later adoption attempt cannot replace the durable row association.
     pub(in crate::services::discord) fn adopt_intake_outbox(
         &mut self,
         intake_outbox_id: Option<i64>,
     ) {
-        self.intake_outbox_id = intake_outbox_id;
+        if self.intake_outbox_id.is_none() {
+            self.intake_outbox_id = intake_outbox_id;
+        }
     }
 
     pub(in crate::services::discord) fn intake_outbox_id(&self) -> Option<i64> {
