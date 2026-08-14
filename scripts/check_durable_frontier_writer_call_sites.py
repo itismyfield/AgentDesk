@@ -73,8 +73,11 @@ test module:
     whole contract is bound to the spelling. Renaming a symbol does not weaken
     the gate silently -- the count drops to 0 and it fails -- but any route that
     reaches the same code under a different spelling is outside it.
-  * CFG. `#[cfg(unix)]` and friends are not evaluated: a call gated to one
-    target counts on every target, exactly as in the model gate.
+  * CFG. The lexical cfg classifier excludes `#[cfg(test)]` and cfg expressions
+    that require `test` (including nested `all(test, ...)`) from production,
+    while `cfg(any(test, X))` and `cfg(not(test))` remain production because
+    they have a non-test configuration. Other target/feature predicates are
+    not compiler-evaluated, so a target-gated call counts on every target.
   * PROSE. Comments (`//`, `/* */`) and string literals (including raw strings)
     are BLANKED before matching, so the symbol written in a doc comment or a
     log message is not a call site. This differs from the model gate, which
@@ -87,7 +90,9 @@ test module:
     correct. That is what the Rust runtime tests are for.
 
 S8 RAW ATOMIC AND FUNCTION-VALUE GATES. `EXPECTED_RAW_ATOMIC_MUTATIONS` counts
-`confirmed_end_offset.{compare_exchange,store,swap,fetch_*}` over stripped
+`confirmed_end_offset` calls to the complete AtomicU64/AtomicUsize mutator
+allowlist (`compare_exchange`, `compare_exchange_weak`, `store`, `swap`, all
+listed `fetch_*` mutators, and legacy `compare_and_swap`) over stripped
 production file text (not per-line text, so rustfmt receiver chains are seen).
 `EXPECTED_BARE_REFERENCES` counts pinned names that are neither calls,
 definitions, nor `use` items and pins the current historical function-value
@@ -95,8 +100,11 @@ capture. `EXPECTED_PINNED_USE_ALIASES` rejects `use ..::<pinned> as <other>;`;
 the `delivery_record as dr` module alias is outside this rule. Output totals
 are derived from these maps.
 
-WHAT IT DOES BUY. Every textual call site in every regular `.rs` file under
-`src/`, per file, is exactly counted. The gate enumerates all regular files
+WHAT IT DOES BUY. Every supported textual call site in every regular `.rs` file
+under `src/`, per file, is exactly counted. Supported method forms include the
+receiver form (`coord.reset_confirmed_frontier(...)`) and pinned UFCS form
+(`TmuxRelayCoord::reset_confirmed_frontier(coord, ...)`); the raw atomic gate
+enumerates the full mutator class above. The gate enumerates all regular files
 first and fails closed if any non-`.rs` file is present, so an extension cannot
 make a file invisible. That is strictly more than the model gate: it has no
 anchor to escape and no boolean to saturate.
@@ -107,7 +115,9 @@ must pass the single lexical pin in `scripts/test_only_module_skip_pin.py`;
 `src/` file/directory symlinks are rejected and the skipped census must equal
 the pin count. The symlink check is lexical rather than atomic against a
 post-enumeration replacement; CI assumes a static checkout while the gate
-runs. `#[cfg(test)]` regions in remaining files are stripped.
+runs. In remaining files, only cfg expressions proven by the lexical boolean
+classifier to require `test` are stripped; `cfg(any(test, X))` is intentionally
+scanned as production.
 
 RESOLVER NON-GUARANTEES. The reused resolver is intentionally unchanged and
 does not guarantee at least seven measured forms: `#[path]` separated from
@@ -380,8 +390,16 @@ def _call_re(symbol: str) -> re.Pattern[str]:
         # is intentionally lexical (an identifier or a chained `)`), because
         # Rust type resolution is outside this gate; a bare
         # `reset_confirmed_frontier()` is not this pinned method entry point.
+        # The second branch is the UFCS spelling (`Type::method(receiver, ...)`)
+        # for this pinned type/method pair. Keep the type exact: a lexical scan
+        # cannot prove that another type's same-named method is this writer.
+        type_name, _ = symbol.rsplit("::", 1)
+        ufcs_type = rf"(?:\b{re.escape(type_name)}|<\s*{re.escape(type_name)}\s*>)"
         return re.compile(
-            rf"(?:\b[A-Za-z_]\w*|\))\s*\.\s*{re.escape(basename)}\s*\("
+            rf"(?:"
+            rf"(?:\b[A-Za-z_]\w*|\))\s*\.\s*{re.escape(basename)}"
+            rf"|{ufcs_type}\s*::\s*{re.escape(basename)}"
+            rf")\s*\("
         )
     return re.compile(rf"\b{re.escape(basename)}\s*\(")
 
@@ -393,8 +411,175 @@ def _defn_re(symbol: str) -> re.Pattern[str]:
 CALL_RES = {symbol: _call_re(symbol) for symbol in EXPECTED_CALL_SITES}
 DEFN_RES = {symbol: _defn_re(symbol) for symbol in EXPECTED_CALL_SITES}
 
-# `#[cfg(test)]`, `#[cfg(all(test, ...))]`, `#[cfg(any(test, ...))]`.
-CFG_TEST_RE = re.compile(r"#\[\s*cfg\s*\(\s*(?:all|any)?\s*\(?\s*test\b")
+# Rust cfg attributes are Boolean expressions. A regex that merely spots the
+# token `test` treats `cfg(any(test, unix))` as test-only and hides production
+# code, so the gate now tokenises the cfg expression and checks whether it can
+# be true with `test` disabled. The parser is deliberately lexical and is
+# conservative (unsupported/overly large expressions stay production-visible).
+CFG_ATTR_START_RE = re.compile(r"#\s*\[\s*cfg\s*\(")
+
+
+class _CfgNode:
+    __slots__ = ("kind", "name", "children")
+
+    def __init__(
+        self,
+        kind: str,
+        name: str | None = None,
+        children: tuple["_CfgNode", ...] = (),
+    ) -> None:
+        self.kind = kind
+        self.name = name
+        self.children = children
+
+
+class _CfgAttributeMatch:
+    """Small match-like span object used by the line scanner."""
+
+    __slots__ = ("_start", "_end")
+
+    def __init__(self, start: int, end: int) -> None:
+        self._start = start
+        self._end = end
+
+    def start(self) -> int:
+        return self._start
+
+    def end(self) -> int:
+        return self._end
+
+
+def _cfg_tokens(expression: str) -> list[str]:
+    """Tokenise cfg meta syntax after strings/comments were blanked."""
+
+    return re.findall(r"[A-Za-z_]\w*|[(),=]", expression)
+
+
+def _parse_cfg_expression(expression: str) -> _CfgNode | None:
+    """Parse enough cfg meta grammar to evaluate test-only reachability."""
+
+    tokens = _cfg_tokens(expression)
+    if not tokens:
+        return None
+    index = 0
+
+    def parse_expr() -> _CfgNode | None:
+        nonlocal index
+        if index >= len(tokens):
+            return None
+        name = tokens[index]
+        index += 1
+        if name in {"all", "any", "not"} and index < len(tokens) and tokens[index] == "(":
+            index += 1
+            children: list[_CfgNode] = []
+            while index < len(tokens) and tokens[index] != ")":
+                child = parse_expr()
+                if child is None:
+                    return None
+                children.append(child)
+                if index < len(tokens) and tokens[index] == ",":
+                    index += 1
+                    continue
+                if index < len(tokens) and tokens[index] == ")":
+                    break
+                # A malformed expression is safer to leave visible than to
+                # classify as test-only.
+                return None
+            if index >= len(tokens) or tokens[index] != ")":
+                return None
+            index += 1
+            return _CfgNode(name, children=tuple(children))
+
+        # An atom may be a key/value predicate (`feature = "x"`). The string
+        # was blanked before this parser runs; consume its punctuation through
+        # the next top-level comma/close and retain only the atom kind. Unknown
+        # atoms are free variables for the non-test satisfiability check.
+        while index < len(tokens) and tokens[index] not in {",", ")"}:
+            index += 1
+        return _CfgNode("atom", name=name)
+
+    node = parse_expr()
+    if node is None or index != len(tokens):
+        return None
+    return node
+
+
+def _cfg_eval(node: _CfgNode, values: dict[int, bool], test_enabled: bool) -> bool:
+    if node.kind == "atom":
+        if node.name == "test":
+            return test_enabled
+        return values[id(node)]
+    if node.kind == "all":
+        return all(_cfg_eval(child, values, test_enabled) for child in node.children)
+    if node.kind == "any":
+        return any(_cfg_eval(child, values, test_enabled) for child in node.children)
+    if node.kind == "not" and len(node.children) == 1:
+        return not _cfg_eval(node.children[0], values, test_enabled)
+    # Empty/malformed `not` is not safe to hide.
+    return True
+
+
+def _cfg_can_be_true_without_test(node: _CfgNode) -> bool:
+    unknowns: list[_CfgNode] = []
+
+    def collect(current: _CfgNode) -> None:
+        if current.kind == "atom":
+            if current.name != "test":
+                unknowns.append(current)
+            return
+        for child in current.children:
+            collect(child)
+
+    collect(node)
+    # Avoid an exponential scan on a deliberately hostile attribute. A
+    # conservative production result is the only safe fallback for a lexical
+    # gate: it may over-report, but it never hides a production writer.
+    if len(unknowns) > 12:
+        return True
+    for mask in range(1 << len(unknowns)):
+        values = {
+            id(atom): bool(mask & (1 << bit))
+            for bit, atom in enumerate(unknowns)
+        }
+        if _cfg_eval(node, values, test_enabled=False):
+            return True
+    return False
+
+
+def _cfg_test_only_match(code: str, start: int = 0) -> _CfgAttributeMatch | None:
+    """Find the next cfg attribute whose expression requires `test`."""
+
+    for opening in CFG_ATTR_START_RE.finditer(code, start):
+        open_paren = code.find("(", opening.start(), opening.end())
+        depth = 0
+        close_paren = None
+        for index in range(open_paren, len(code)):
+            char = code[index]
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    close_paren = index
+                    break
+        if close_paren is None:
+            continue
+        end = close_paren + 1
+        while end < len(code) and code[end].isspace():
+            end += 1
+        if end >= len(code) or code[end] != "]":
+            continue
+        expression = code[open_paren + 1 : close_paren]
+        parsed = _parse_cfg_expression(expression)
+        if parsed is not None and not _cfg_can_be_true_without_test(parsed):
+            # `production_lines` arms the test-item state while walking this
+            # line. Return the closing `)` position (rather than the span's
+            # final `]`) so the arm is actually visited by that loop; the
+            # attribute's full start is still used when masking its text.
+            return _CfgAttributeMatch(opening.start(), close_paren)
+    return None
+
+
 # An item keyword that introduces a braced body, in ITEM POSITION: at the start
 # of a line, or right after the `]` closing an attribute, or right after a `}`.
 # The position anchor is load-bearing. A bare `\bfn\b` also matches the `fn` in a
@@ -524,12 +709,11 @@ def production_lines(path: Path):
         countable = mode == "normal"
         arm_at = None
         if mode == "normal":
-            match = CFG_TEST_RE.search(code)
+            match = _cfg_test_only_match(code)
             if match:
-                # Arm at the end of the attribute's own `test` token, so the
-                # attribute's trailing `)]` are accounted the same way its
-                # leading `#[cfg(` were, and a `,` inside `all(test, ...)`
-                # cannot resolve the arm it is part of.
+                # Arm at the closing parenthesis of the complete test-only
+                # cfg expression, so commas inside nested `all(...)`/`any(...)`
+                # cannot resolve the arm they are part of.
                 arm_at = match.end()
         # Resolve the item-start keyword position BEFORE walking the line: the
         # comma that must not disarm (`-> HashMap<String, u64> {`) sits on the
@@ -575,7 +759,7 @@ def _production_text(path: Path) -> str:
     for _lineno, code, countable in production_lines(path):
         if countable:
             # Mask compact `#[cfg(test)] fn ... { raw_atomic(); }` items too.
-            cfg_test = CFG_TEST_RE.search(code)
+            cfg_test = _cfg_test_only_match(code)
             if cfg_test:
                 code = code[: cfg_test.start()] + " " * (len(code) - cfg_test.start())
         lines.append(code if countable else " " * len(code))
@@ -667,9 +851,29 @@ def production_definition_file_counts(
     return found
 
 
+# Keep this list explicit rather than accepting an open-ended `fetch_*`: the
+# gate is intended to pin the complete mutating API surface of Rust's
+# AtomicU64/AtomicUsize, including the legacy spelling retained by older code.
+RAW_ATOMIC_MUTATORS = (
+    "compare_exchange",
+    "compare_exchange_weak",
+    "store",
+    "swap",
+    "fetch_add",
+    "fetch_sub",
+    "fetch_and",
+    "fetch_or",
+    "fetch_xor",
+    "fetch_nand",
+    "fetch_max",
+    "fetch_min",
+    "fetch_update",
+    "compare_and_swap",
+)
 RAW_ATOMIC_RE = re.compile(
-    r"\bconfirmed_end_offset\s*\.\s*"
-    r"(?:compare_exchange|store|swap|fetch_[A-Za-z_]\w*)\s*\("
+    r"\bconfirmed_end_offset\s*\.\s*(?:"
+    + "|".join(re.escape(mutator) for mutator in RAW_ATOMIC_MUTATORS)
+    + r")\s*\("
 )
 
 
@@ -775,11 +979,14 @@ def production_bare_references(
 
 LIMITS = (
     "lexical scan of stripped source, not Rust parsing; not proof of reachability; "
-    "call-site matching does not see `use .. as x` aliases, re-export renames, "
-    "name-constructing macros or calls through values; the S8 pinned-alias and "
-    "bare-reference subgates close the first two lexical bypasses; trait-object "
-    "dispatch remains unseen; cfg other than cfg(test) is not "
-    "evaluated; non-.rs regular files fail closed before classification; whole-file "
+    "call-site matching covers direct calls, receiver method calls, and pinned "
+    "`Type::method(receiver, ...)` UFCS calls, but does not see `use .. as x` "
+    "aliases, re-export renames, name-constructing macros or calls through "
+    "values; the S8 pinned-alias and bare-reference subgates close the first "
+    "two lexical bypasses; trait-object dispatch remains unseen; the cfg "
+    "classifier treats cfg(test)/test-required all(...) as test-only and "
+    "cfg(any(test, X))/cfg(not(test)) as production without compiler target "
+    "evaluation; non-.rs regular files fail closed before classification; whole-file "
     "skips use one lexical pin, reject src symlinks, and check "
     "the skipped census; symlink rejection is non-atomic outside a static CI "
     "checkout; the scan root is `src/`; call sites in files reached by "
@@ -789,8 +996,10 @@ LIMITS = (
     "macro mod, two cfg/include forms, cfg_attr path, raw path, ungated include); pin "
     "membership cannot detect production reachability changes inside pinned files; "
     "compiler-backed reachability is follow-up work; textual occurrences are counted "
-    "once regardless of macro expansion; raw atomic and bare-reference gates are "
-    "likewise lexical and do not prove runtime reachability"
+    "once regardless of macro expansion; name-constructing macro assembly and "
+    "trait-object dispatch remain outside the regex/lexical model; raw atomic "
+    "and bare-reference gates are likewise lexical and do not prove runtime "
+    "reachability"
 )
 
 

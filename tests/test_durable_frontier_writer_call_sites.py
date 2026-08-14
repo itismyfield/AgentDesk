@@ -815,6 +815,31 @@ class DiscriminationTests(unittest.TestCase):
         ok, message = self.run_guard(root, expected)
         self.assertTrue(ok, message)
 
+    def test_s8_ufcs_method_writer_is_red_then_pin_green(self):
+        """UFCS is a method call, not a bare function-value reference."""
+
+        root = self.fixture()
+        rel = "src/services/discord/ufcs_writer.rs"
+        write(
+            root,
+            rel,
+            "fn edges(coord: TmuxRelayCoord) {\n"
+            "    TmuxRelayCoord::reset_confirmed_frontier(coord, 10, 0);\n"
+            "}\n",
+        )
+        ok, message = self.run_guard(root)
+        self.assertFalse(ok, message)
+        self.assertIn(
+            "TmuxRelayCoord::reset_confirmed_frontier: UNLISTED call site in "
+            f"{rel} (1x)",
+            message,
+        )
+
+        expected = self.expected()
+        expected["TmuxRelayCoord::reset_confirmed_frontier"] = {rel: 1}
+        ok, message = self.run_guard(root, expected)
+        self.assertTrue(ok, message)
+
     def test_s8_raw_atomic_gate_is_cross_line_and_mutation_proof(self):
         root = self.fixture()
         rel = "src/raw_atomic.rs"
@@ -855,6 +880,51 @@ class DiscriminationTests(unittest.TestCase):
             root, pinned_test_only_files=frozenset()
         )
         self.assertEqual(actual, {rel: 2})
+
+    def test_s8_compare_exchange_weak_raw_writer_is_red_then_pin_green(self):
+        """The weak CAS spelling is part of the complete atomic mutator class."""
+
+        root = self.fixture()
+        rel = "src/raw_atomic_weak.rs"
+        write(
+            root,
+            rel,
+            "fn advance(coord: RelayCoord) {\n"
+            "    coord.confirmed_end_offset.compare_exchange_weak(\n"
+            "        0, 1, Ordering::AcqRel, Ordering::Acquire\n"
+            "    );\n"
+            "}\n",
+        )
+        ok, message = self.run_extended_gate(root)
+        self.assertFalse(ok, message)
+        self.assertIn("raw confirmed_end_offset atomic mutations", message)
+
+        ok, message = self.run_extended_gate(root, raw={rel: 1})
+        self.assertTrue(ok, message)
+
+    def test_s8_cfg_any_test_or_target_writer_is_red_then_pin_green(self):
+        """`any(test, unix)` has a Unix production configuration and is scanned."""
+
+        root = self.fixture()
+        rel = "src/services/discord/cfg_any_writer.rs"
+        write(
+            root,
+            rel,
+            "#[cfg(any(test, unix))]\n"
+            "fn sneaky() { write_delivered_frontier(); }\n",
+        )
+        ok, message = self.run_guard(root)
+        self.assertFalse(ok, message)
+        self.assertIn(
+            "write_delivered_frontier: UNLISTED call site in "
+            f"{rel} (1x)",
+            message,
+        )
+
+        expected = self.expected()
+        expected["write_delivered_frontier"][rel] = 1
+        ok, message = self.run_guard(root, expected)
+        self.assertTrue(ok, message)
 
     def test_s8_bare_reference_gate_is_mutation_proof_and_excludes_calls_defs_use(self):
         root = self.fixture()
