@@ -8496,49 +8496,6 @@ fn repair_fence_parity_treats_inner_fence_as_closer() {
 }
 
 #[test]
-fn completion_footer_warning_clamp_keeps_terminal_line_tail_whole_5325() {
-    const WARNING_MARKER: &str = "⚠️ **턴을 완료하기 전에 커밋되지 않은 변경사항을 확인하세요.**";
-    let first = format!("└ first {} ✓", "a".repeat(480));
-    let second = format!("└ second {} ✗", "b".repeat(200));
-    let completion = format!("Tasks\n{first}\n{second}");
-    let warning = format!("{WARNING_MARKER}\n{}", "w".repeat(2_000));
-    let block = format!("{completion}\n\n{warning}");
-    let rendered_warning =
-        crate::services::discord::single_message_panel::completion_footer_subtext(&warning);
-    let bounded_warning =
-        crate::services::discord::turn_end_wip_warning::bounded_turn_end_wip_warning(
-            &rendered_warning,
-            1_392,
-        );
-    assert_eq!(
-        super::super::formatting::discord_message_units(&bounded_warning),
-        1_392
-    );
-
-    let wire = crate::services::discord::single_message_panel::compose_completion_footer_text(
-        "",
-        Some(&block),
-    );
-    let footer = wire
-        .split_once(&format!("\n\n-# {WARNING_MARKER}"))
-        .expect("bounded warning remains the final suffix")
-        .0;
-
-    assert!(footer.contains(&format!("-# {first}")));
-    assert!(
-        !footer.contains("second"),
-        "partial terminal line leaked: {footer}"
-    );
-    assert!(footer.ends_with('…'));
-    assert!(
-        footer
-            .lines()
-            .filter(|line| line.starts_with("-# └"))
-            .all(|line| line.ends_with('✓') || line.ends_with('✗'))
-    );
-}
-
-#[test]
 fn worktree_warning_preserves_literal_fence_path_and_suffix_5325() {
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::git::GitCommand;

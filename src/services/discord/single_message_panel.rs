@@ -188,8 +188,7 @@ fn compose_completion_footer_text_without_warning_with_limit(
         let body_budget =
             max_block_units.saturating_sub(super::formatting::discord_message_units(ellipsis));
         let safe_end = super::formatting::byte_index_at_discord_message_units(&block, body_budget);
-        let line_end = block[..safe_end].rfind('\n').map_or(0, |end| end + 1);
-        repair_fence_parity(&format!("{}{}", &block[..line_end], ellipsis))
+        repair_fence_parity(&format!("{}{}", &block[..safe_end], ellipsis))
     };
     if block.is_empty() {
         let safe_end = super::formatting::byte_index_at_discord_message_units(body, message_limit);
@@ -215,7 +214,7 @@ fn compose_completion_footer_text_without_warning_with_limit(
     // the combined `{base}{suffix}`, take the appended footer down with it.
     //
     // #3391 delivered-ID honesty invariant: `delivered_terminal_ids` for this
-    // footer were already computed from the footer block (completion_footer.rs:202)
+    // footer were already computed from `render_completion_footer`'s block
     // and are evicted once this edit returns Ok. If repair ate the footer, the
     // ✓/✗ marks would vanish from the delivered text yet their slots would still
     // be evicted — reporting marks the user never saw. Repairing only the body

@@ -474,8 +474,8 @@ fn render_completion_subagent_slot(slot: &SubagentSlot, indicator: &str) -> Stri
 /// inline clamp in `compose_completion_footer_text_without_warning_with_limit`
 /// has a WIP-warning-path block budget (`message_limit - 6`) as low as 600
 /// UTF-16 units, not above this 600-byte source budget: `completion_footer_subtext`
-/// adds three units per non-empty line. That clamp now backs up to a newline
-/// after its unit cut, so it cannot split a retained terminal line's ✓/✗ tail.
+/// adds three units per non-empty line. The downstream clamp can therefore cut
+/// a retained terminal line's ✓/✗ tail after `kept_count` has already been fixed.
 fn clamp_completion_task_section(task_section: &str) -> (String, usize) {
     let lines: Vec<&str> = task_section.lines().collect();
     if task_section.len() <= SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES {
