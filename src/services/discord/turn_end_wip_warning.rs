@@ -1,8 +1,8 @@
 //! Turn-end WIP warning completion-surface merge (#3792, #4217).
 //!
 //! This module bridges the generic git detector in `utils::wip_detect` to the
-//! Discord completion helpers. A per-inflight reservation ensures that the
-//! bridge, watcher, and footer reconciler cannot render duplicate warnings.
+//! Discord completion helpers. A per-inflight reservation coordinates duplicate
+//! warning suppression across the bridge, watcher, and footer reconciler.
 
 use std::collections::{HashSet, VecDeque};
 use std::path::Path;

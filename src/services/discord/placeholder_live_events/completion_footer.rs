@@ -16,8 +16,8 @@ use super::task_panel::{
 };
 
 /// #3391: stable per-slot handle (NOT the rendered line). `ToolUseId`/`TaskId`
-/// carry the slot's primary external id; `Ordinal` is the never-reused internal
-/// counter every slot also has. Compared for equality during eviction.
+/// carry the slot's primary external id; `Ordinal` comes from the saturating
+/// internal counter assigned to each slot. Compared for equality during eviction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) enum SlotKey {
     ToolUseId(String),
@@ -36,20 +36,18 @@ pub(in crate::services::discord) enum TerminalSlotId {
 pub(in crate::services::discord) struct CompletionFooterRender {
     pub(in crate::services::discord) block: Option<String>,
     pub(in crate::services::discord) has_unfinished_entries: bool,
-    /// #3391: EXACT post-section-clamp terminal ids are eviction candidates, but the later inline clamp can still cut their marks (#5348).
-    /// Slot identity (not the line string) is used so two slots rendering the
-    /// IDENTICAL terminal line stay distinct: a clamped-out duplicate keeps its
-    /// (undelivered) mark, and a slot that turned terminal between render and
-    /// ack — whose line happens to match another reported line — is never
-    /// evicted on a mark absent from its source block (Finding 1).
+    /// #3391: terminal identities selected after the section clamp are eviction
+    /// candidates. Identity addressing is narrower than rendered-line matching,
+    /// but reused `tool_use_id`s collapse slots to the same identity; the later
+    /// inline clamp can also cut a candidate's mark (#5348).
     pub(in crate::services::discord) delivered_terminal_ids: Vec<TerminalSlotId>,
 }
 
-// #3391: render-local ack surface; eviction drops exactly the post-section-clamp candidate ids.
+// #3391: render-local candidate surface for the eviction paths below.
 impl super::PlaceholderLiveEvents {
-    /// Once a task card is confirmed, remove only the exact terminal footer
-    /// slot carrying its `tool_use_id`. Missing/id-less/ambiguous identities are
-    /// a no-op; this never guesses by order or rendered text (#4055).
+    /// Removes terminal footer slots addressed by card kind and nonempty
+    /// `tool_use_id`. Missing/id-less/unknown-kind inputs return without eviction;
+    /// a reused `tool_use_id` can address multiple slots with that identity (#4055/#5348).
     pub(in crate::services::discord) fn claim_terminal_slot_for_card(
         &self,
         channel_id: ChannelId,
@@ -77,8 +75,10 @@ impl super::PlaceholderLiveEvents {
         evicted.evicted_any()
     }
 
-    /// Drops post-clamp candidates by IDENTITY after edit/send Ok; this does not prove final-wire
-    /// visibility (#5348). Only listed, STILL-terminal slots drop; ordinals prevent aliasing.
+    /// Applies post-section-clamp identity candidates after edit/send Ok. The
+    /// retain pass matches terminal slots against the supplied identities; reused
+    /// external ids or a saturated id-less ordinal can match multiple slots. This
+    /// does not establish final-wire visibility (#5348).
     pub(in crate::services::discord) fn evict_delivered_terminal_footer_tasks(
         &self,
         channel_id: ChannelId,
@@ -98,12 +98,11 @@ impl super::PlaceholderLiveEvents {
         }
     }
 
-    /// #3404: shared slot-identity eviction core for BOTH the completion-footer
-    /// path (above) and the live-panel path. Drops exactly the terminal slots
-    /// whose identity is in `delivered_terminal_ids` AND that are STILL terminal
-    /// (an in-flight slot can never carry a recycled id — ordinals are never
-    /// reused — so this never drops a running slot). Returns the per-list counts
-    /// actually removed so callers can emit the #3404 observability log.
+    /// #3404: shared identity-based retain pass for the completion-footer and
+    /// live-panel paths. It retains non-terminal slots and terminal slots whose
+    /// current identity is absent from `delivered_terminal_ids`, then returns the
+    /// per-list removal counts. Reused identities can select multiple terminal
+    /// slots (#5348).
     fn evict_delivered_terminal_slots(
         &self,
         channel_id: ChannelId,

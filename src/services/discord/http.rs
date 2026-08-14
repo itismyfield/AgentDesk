@@ -92,13 +92,13 @@ fn channel_message_builder(
     Ok(message)
 }
 
-/// #2839 (relay-stability): mention policy applied to EVERY relay send/edit.
+/// #2839 (relay-stability): mention policy for the Serenity builders in this module.
 ///
 /// Relayed agent output regularly contains `@everyone`/`@here` or role mentions
 /// (an agent literally echoing "@everyone" in its answer) that must NEVER ping
 /// — a single such relay would alert the entire server. With no
 /// `allowed_mentions` set, Discord parses and fires ALL mentions in the content
-/// by default, so this was a live mass-ping hole on every relay message.
+/// by default, so those builders had a mass-ping hole when content contained them.
 ///
 /// Suppress @everyone/@here and ALL role mentions unconditionally, while still
 /// allowing user mentions so the bot's own intentional requester pings

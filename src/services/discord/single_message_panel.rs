@@ -213,10 +213,10 @@ fn compose_completion_footer_text_without_warning_with_limit(
     // #3391: body-only repair prevents `repair_fence_parity` from consuming the rendered footer.
     // Its ids were computed earlier, so the inline block clamp can still cut a reported mark (#5348).
     //
-    // The footer block is fence-balanced by construction: `render_completion_footer`
-    // emits only the context-usage line plus Tasks/Subagents slot lines (no fenced Recent
-    // block lives here), so it carries zero ``` runs (an even count). balanced base
-    // + balanced footer = balanced combined.
+    // Append the separately repaired body to the rendered footer. The assertion
+    // below checks the renderer's current even fence parity; the runtime branch
+    // repairs the suffix separately if that assumption stops holding, without
+    // reaching back across the body/footer boundary.
     let base = repair_fence_parity(base);
     let combined = format!("{base}{suffix}");
     debug_assert_eq!(
@@ -1298,12 +1298,10 @@ mod tests {
         );
     }
 
-    /// #3394 round 2 (P1): the registered-refresh composition site
-    /// (`completion_footer_edit_for_registered_target_at`, ~258) shares the
-    /// `compose_completion_footer_text` pattern. A registered body carrying an
-    /// unterminated fence must still emit the rendered footer's terminal ✓ in the
-    /// delivered edit text, with even combined parity — so the #3391 eviction that
-    /// follows a successful edit only drops marks the user actually saw.
+    /// #3394 round 2 (P1): `completion_footer_edit_for_registered_target_at`
+    /// uses `compose_completion_footer_text`. This test pins the registered path:
+    /// body repair leaves the rendered footer's terminal ✓ in the edit text and
+    /// the combined fence parity is even. Later clamp/eviction risk remains #5348.
     #[test]
     fn registered_refresh_repair_scoped_to_body_keeps_footer_marks_3394() {
         let channel_id = ChannelId::new(3_394_201);
