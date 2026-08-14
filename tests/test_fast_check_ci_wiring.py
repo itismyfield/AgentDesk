@@ -18,7 +18,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "21d099861d7fdd2505f4e79fb62bd552b724cf5a210b908b14687f0eebf85baa"
+    "9be327684586ffccd0ccd5ac99db81cf4af45e6425bd4deab402fb9eb8f27a56"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
@@ -684,7 +684,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         job = yaml.safe_load(workflow)["jobs"]["scripts_required_context"]
         self.assertEqual(job["name"], "Script checks")
         self.assertEqual(job["needs"], ["changes", "scripts"])
-        self.assertNotIn("if", job)
+        self.assertEqual(job["if"], "always()")
         self.assertNotIn("continue-on-error", job)
         self.assertEqual(job["runs-on"], "ubuntu-latest")
         self.assertEqual(len(job["steps"]), 3)
@@ -706,10 +706,9 @@ class FastCheckCiWiringTests(unittest.TestCase):
         mutations = {
             "job deleted": "",
             "changes dependency deleted": mirror.replace("      - changes\n", "", 1),
-            "job if injected": mirror.replace(
-                "      - scripts\n    runs-on: ubuntu-latest\n",
-                "      - scripts\n    if: ${{ github.event_name == 'push' }}\n"
-                "    runs-on: ubuntu-latest\n",
+            "job if weakened": mirror.replace(
+                "    if: always()\n",
+                "    if: ${{ github.event_name == 'push' }}\n",
                 1,
             ),
             "job continue-on-error injected": mirror.replace(
@@ -757,7 +756,64 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 result = self.run_hardening_fixture(mutated)
                 self.assertNotEqual(result.returncode, 0, result.stderr)
 
-    def test_required_job_needs_closure_has_no_skip_or_failure_masking_keys(self) -> None:
+    def test_script_checks_publisher_rejects_missing_always_condition(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        mirror = job_block(workflow, "scripts_required_context")
+        mutated_mirror = mirror.replace("    if: always()\n", "", 1)
+        self.assertNotEqual(mutated_mirror, mirror)
+        mutated = workflow.replace(mirror, mutated_mirror, 1)
+        result = self.run_hardening_fixture(mutated)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(
+            "publisher must carry `if: always()` so upstream failure still "
+            "runs the fail-closed mirror",
+            result.stderr,
+        )
+
+    def test_script_checks_publisher_rejects_conditional_if(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        mirror = job_block(workflow, "scripts_required_context")
+        mutations = {
+            "success": mirror.replace(
+                "    if: always()\n", "    if: success()\n", 1
+            ),
+            "event condition": mirror.replace(
+                "    if: always()\n",
+                "    if: ${{ github.event_name == 'push' }}\n",
+                1,
+            ),
+        }
+        for label, mutated_mirror in mutations.items():
+            with self.subTest(condition=label):
+                self.assertNotEqual(mutated_mirror, mirror)
+                mutated = workflow.replace(mirror, mutated_mirror, 1)
+                result = self.run_hardening_fixture(mutated)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(
+                    "publisher must carry `if: always()` so upstream failure "
+                    "still runs the fail-closed mirror",
+                    result.stderr,
+                )
+
+    def test_relay_authority_publisher_rejects_job_condition(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        relay = job_block(workflow, "relay-authority-contract")
+        mutated_relay = relay.replace(
+            "    name: relay-authority-contract\n",
+            "    name: relay-authority-contract\n    if: always()\n",
+            1,
+        )
+        self.assertNotEqual(mutated_relay, relay)
+        mutated = workflow.replace(relay, mutated_relay, 1)
+        result = self.run_hardening_fixture(mutated)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(
+            "relay-authority-contract must not define an if key so the "
+            "independent publisher always runs",
+            result.stderr,
+        )
+
+    def test_required_job_needs_closure_has_role_specific_scheduling_policy(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         jobs = yaml.safe_load(workflow)["jobs"]
         expected_closure = {
@@ -777,23 +833,36 @@ class FastCheckCiWiringTests(unittest.TestCase):
             frontier.extend([needs] if isinstance(needs, str) else needs)
         self.assertEqual(closure, expected_closure)
 
+        self.assertEqual(jobs["scripts_required_context"]["if"], "always()")
+        for job_id in ("relay-authority-contract", "changes", "scripts"):
+            self.assertNotIn("if", jobs[job_id])
+
         for job_id in sorted(expected_closure):
             job = job_block(workflow, job_id)
             marker = f"    name: {jobs[job_id]['name']}\n"
             self.assertIn(marker, job)
-            for key, value in (
-                ("if", "${{ github.event_name == 'push' }}"),
-                ("continue-on-error", "true"),
-            ):
-                with self.subTest(job=job_id, key=key):
-                    mutated_job = job.replace(
-                        marker,
-                        f"{marker}    {key}: {value}\n",
-                        1,
-                    )
-                    mutated = workflow.replace(job, mutated_job, 1)
-                    result = self.run_hardening_fixture(mutated)
-                    self.assertNotEqual(result.returncode, 0, result.stderr)
+            with self.subTest(job=job_id, key="continue-on-error"):
+                mutated_job = job.replace(
+                    marker,
+                    f"{marker}    continue-on-error: true\n",
+                    1,
+                )
+                mutated = workflow.replace(job, mutated_job, 1)
+                result = self.run_hardening_fixture(mutated)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+
+        for job_id in ("relay-authority-contract", "changes", "scripts"):
+            job = job_block(workflow, job_id)
+            marker = f"    name: {jobs[job_id]['name']}\n"
+            with self.subTest(job=job_id, key="if"):
+                mutated_job = job.replace(
+                    marker,
+                    f"{marker}    if: ${{{{ github.event_name == 'push' }}}}\n",
+                    1,
+                )
+                mutated = workflow.replace(job, mutated_job, 1)
+                result = self.run_hardening_fixture(mutated)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
 
     def test_duplicate_required_job_id_is_rejected_before_last_wins_resolution(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")

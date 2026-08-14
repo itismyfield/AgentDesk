@@ -1369,6 +1369,7 @@ jobs:
     needs:
       - changes
       - scripts
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1390,7 +1391,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=21d099861d7fdd2505f4e79fb62bd552b724cf5a210b908b14687f0eebf85baa
+          expected=9be327684586ffccd0ccd5ac99db81cf4af45e6425bd4deab402fb9eb8f27a56
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -1494,7 +1495,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=21d099861d7fdd2505f4e79fb62bd552b724cf5a210b908b14687f0eebf85baa
+          expected=9be327684586ffccd0ccd5ac99db81cf4af45e6425bd4deab402fb9eb8f27a56
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

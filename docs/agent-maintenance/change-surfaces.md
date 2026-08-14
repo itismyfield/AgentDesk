@@ -203,9 +203,14 @@ time for diagnostics; neither is a stored approval value.
   change the pinned file bytes.
 - fixed surfaces: the `Script checks` publisher has exactly checkout,
   contract, and result-mirror steps; its `name`, `needs: [changes, scripts]`,
-  `runs-on`, checkout provenance, and absence of job-level `if` and
-  `continue-on-error`, `defaults`/`env`/`environment`/`strategy`/`container`
-  are pinned.
+  required job-level `if: always()`, `runs-on`, checkout provenance, and
+  absence of `continue-on-error`,
+  `defaults`/`env`/`environment`/`strategy`/`container` are pinned. The
+  publisher's `if: always()` is what runs the fail-closed
+  mirror after an upstream failure, skip, or cancellation. The independent
+  `relay-authority-contract` publisher has no `needs` and must omit job-level
+  `if`; the internal `changes` and `scripts` execution jobs must also omit
+  job-level `if` so their own work cannot be condition-skipped.
   Its source-byte range is also hashed, so YAML scalar tags and styles remain in
   the comparison; Psych cannot erase an explicit tag such as `!!binary` or
   equate YAML 1.1 spellings such as `yes` and `012` with the intended
@@ -215,8 +220,9 @@ time for diagnostics; neither is a stored approval value.
   content-hash backstop. Starting at the two required publishers, the complete
   recursive `needs` closure is the finite set
   `{scripts_required_context, relay-authority-contract, scripts, changes}`;
-  every member must exist and omit both job-level `if` and
-  `continue-on-error`, and any edge that expands that set is a review-triggering
+  every member must exist and omit `continue-on-error`, the Script checks
+  publisher must carry exactly `if: always()`, and the other three jobs must
+  omit job-level `if`. Any edge that expands that set is a review-triggering
   gate failure.
 - aggregate execution: the calculator records shell/working-directory
   candidates, environment scopes, `runs-on`, prior recognized file writes, and
@@ -281,16 +287,18 @@ time for diagnostics; neither is a stored approval value.
   pair, `container`, `timeout-minutes`, `strategy`, `environment`, and
   pull-request subfilters such as `paths-ignore` are likewise not guaranteed.
   The result mirror detects skipped/failed/cancelled upstream jobs; it cannot
-  prove that an upstream success used the intended semantics.
+  prove that an upstream success used the intended semantics. Because the
+  publisher runs with `if: always()`, a failure, skip, or cancellation of a
+  single upstream job still reaches the mirror and makes the required context
+  red.
   More fundamentally, a single PR that consistently rewrites every guard and
   every pin can pass this in-repository gate system. A cheaper edit in the same
   class: GitHub treats a condition-skipped required check as satisfied, so one
-  PR that stops both required jobs from running (skip conditions on the
-  `Script checks` publisher and `relay-authority-contract` together, or on
-  `relay-authority-contract` plus a `needs` ancestor of the publisher) leaves
-  no required job to execute the gate. A skip condition on just one of them
-  stays blocked, because the surviving required job still runs the pinned gate
-  against the edited workflow. That is an inherent limit
+  PR that adds skip conditions to both the `Script checks` publisher and
+  `relay-authority-contract` leaves no required job to execute the gate. A skip
+  condition on just one required publisher stays blocked because the surviving
+  required job still runs the pinned gate against the edited workflow. This
+  simultaneous required-job skip is an inherent limit
   of in-repo gating, not a property these hashes claim to solve; human review
   and branch protection own that trust decision.
 - related_issues: #5308, #5321.

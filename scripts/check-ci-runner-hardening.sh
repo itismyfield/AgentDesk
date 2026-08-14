@@ -345,12 +345,13 @@ unless changes_job.is_a?(Hash)
   exit 1
 end
 
-# Both branch-protection publishers and every job in their finite needs closure
-# must be structurally unconditional. A skipped required job is reported as a
-# successful required check by GitHub, so even an explicit `if: true` or
-# `continue-on-error: false` is forbidden: the key itself is an unreviewed skip
-# or failure-masking channel. Keep this closed set exact as the needs graph
-# evolves so a newly introduced upstream cannot escape the same policy.
+# Keep both branch-protection publishers and their finite needs closure on the
+# exact fail-closed scheduling policy for their roles. The needs-bearing result
+# publisher must use `if: always()` so upstream failure still reaches its
+# mirror; the independent publisher and internal execution jobs must not gain
+# job-level conditions. Every closure job forbids `continue-on-error`, including
+# an explicit false value, because the key is an unreviewed failure-masking
+# channel. Keep this closed set exact as the needs graph evolves.
 expected_unconditional_closure = %w[
   changes
   relay-authority-contract
@@ -369,9 +370,22 @@ until frontier.empty?
     warn "#{path}: required unconditional needs closure references missing job #{job_id.inspect}"
     exit 1
   end
-  if job.key?("if")
-    warn "#{path}: required unconditional job #{job_id} must not define an if key"
-    exit 1
+  case job_id
+  when "scripts_required_context"
+    unless job.key?("if") && job["if"] == "always()"
+      warn "#{path}: Script checks publisher must carry `if: always()` so upstream failure still runs the fail-closed mirror"
+      exit 1
+    end
+  when "relay-authority-contract"
+    if job.key?("if")
+      warn "#{path}: relay-authority-contract must not define an if key so the independent publisher always runs"
+      exit 1
+    end
+  else
+    if job.key?("if")
+      warn "#{path}: required closure execution job #{job_id} must not define an if key"
+      exit 1
+    end
   end
   if job.key?("continue-on-error")
     warn "#{path}: required unconditional job #{job_id} must not define a continue-on-error key"
@@ -456,6 +470,7 @@ expected_mirror_steps = [
 expected_mirror_job = {
   "name" => "Script checks",
   "needs" => ["changes", "scripts"],
+  "if" => "always()",
   "runs-on" => "ubuntu-latest",
   "steps" => expected_mirror_steps,
 }
@@ -504,7 +519,7 @@ mirror_source = mirror_source&.gsub(
   "expected=<required-check-pin-sha256>",
 )
 mirror_source_sha256 = mirror_source && Digest::SHA256.hexdigest(mirror_source)
-unless mirror_source_sha256 == "1a02f55c416564a21ddfc7425a09015cec20ed02a196490d5fb0002a6b150e0f"
+unless mirror_source_sha256 == "b271d53eb9eca9f1b3c9c9e257979655fa723fb9f6883840e74c7a86acf07fe0"
   warn "#{path}: Script checks required-context source bytes changed (scalar tags/styles and exact three-step surface are pinned); found #{mirror_source_sha256 || '<missing>'}"
   exit 1
 end
