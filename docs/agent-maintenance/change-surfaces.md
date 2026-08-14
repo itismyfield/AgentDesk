@@ -1869,10 +1869,12 @@ time for diagnostics; neither is a stored approval value.
 - active_callsite_coverage: n/a.
 - invariants: LaunchAgent plist and runtime layout are generated only — see
   the matrix in `docs/source-of-truth.md`.
-- allowed_changes: `bugfix` only, except the sub-1000-line
-  `src/cli/intake_outbox.rs` may host the read-only `dispatched-audit` feature.
-  That exception does not permit feature growth in `src/cli/direct.rs`; the
-  PG-cutover retention plan remains owned by #1239.
+- allowed_changes: `bugfix` only, except per #5071 T2-W B3a-1,
+  `src/cli/intake_outbox.rs` may host the read-only `dispatched-audit` feature
+  and `src/cli/args.rs`, `src/cli/run.rs`, and `src/cli/mod.rs` may contain its
+  purely mechanical clap registration, dispatch arm, and module registration.
+  That exception does not permit feature growth in any giant on this surface;
+  the PG-cutover retention plan remains owned by #1239.
 
 ### `runtime_core`
 

@@ -30,7 +30,10 @@ pub(crate) struct DispatchedAuditRow {
     pub(crate) provider_nonempty: bool,
 }
 
-/// Lists every dispatched row without taking a transaction or row lock.
+/// Lists every dispatched row without an explicit multi-statement transaction,
+/// row lock, or advisory lock. Each SELECT runs in an implicit transaction and
+/// takes an ACCESS SHARE relation lock; it is compatible with DML but can delay
+/// ACCESS EXCLUSIVE DDL for the duration of the query.
 pub(crate) async fn list_dispatched_audit(
     pool: &PgPool,
 ) -> Result<Vec<DispatchedAuditRow>, sqlx::Error> {
