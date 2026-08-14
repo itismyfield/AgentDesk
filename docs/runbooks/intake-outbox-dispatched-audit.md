@@ -6,6 +6,17 @@ row's channel route.
 
 ## Run the audit
 
+This command requires migration `0107_intake_outbox_dispatched_clock.sql` to
+be applied to the target database. Confirm it with:
+
+```sql
+SELECT version, success FROM _sqlx_migrations WHERE version = 107;
+```
+
+The prerequisite is satisfied only when this returns exactly one row with
+`success = true`. Otherwise the command fails with
+`ERROR: column "dispatched_at" does not exist`.
+
 On a host configured for the target PostgreSQL database, run:
 
 ```sh
@@ -49,6 +60,9 @@ of an in-progress transaction. Rows committed after statement start are absent,
 and rows in the result can change before an operator acts; the output is
 point-in-time evidence that can become stale immediately. The query has no
 LIMIT or pagination and fetches the full dispatched population into memory.
+Track the underlying unbounded-growth risk in [#5320](https://github.com/itismyfield/AgentDesk/issues/5320),
+which covers production retention, cleanup ownership, and archival policy for
+`intake_outbox`.
 
 The command does not determine whether Discord delivery occurred, repair a
 NULL clock, resolve an open route, or authorize a retry. Correlate the printed
