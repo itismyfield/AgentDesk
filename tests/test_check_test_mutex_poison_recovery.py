@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts/check_test_mutex_poison_recovery.py"
@@ -63,6 +64,28 @@ fn case() {
     while let Ok(_g) = crate::SHARED_TEST_LOCK.lock() {
         critical_section();
         break;
+    }
+}
+"""
+
+DIRECT_DISCARD_WITH_PREFIX = """
+static SHARED_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn case() {
+    let _url = URL_LITERAL;
+    if let Ok(_g) = SHARED_TEST_LOCK.lock() {
+        critical_section();
+    }
+}
+"""
+
+MATCH_DISCARD = """
+static SHARED_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn case() {
+    match SHARED_TEST_LOCK.lock() {
+        Ok(_g) => critical_section(),
+        Err(_poisoned) => {}
     }
 }
 """
@@ -218,6 +241,14 @@ fn case() {
         )
         self.assertEqual(self.run_gate()[0], 0)
 
+    def test_let_chain_remains_a_declared_hole(self) -> None:
+        self.write(IF_LET_OK_DISCARD.replace("if let Ok", "if true && let Ok"))
+        self.assertEqual(self.run_gate()[0], 0)
+
+    def test_match_discard_remains_a_declared_hole(self) -> None:
+        self.write(MATCH_DISCARD)
+        self.assertEqual(self.run_gate()[0], 0)
+
     def test_match_form_recovery_is_accepted(self) -> None:
         self.write(
             RECOVERED.replace(
@@ -237,6 +268,49 @@ fn case() {
             + "\n// Historical shape: SHARED_TEST_LOCK.lock().unwrap();\n"
         )
         self.assertEqual(self.run_gate()[0], 0)
+
+
+class LexerRegression(GateCase):
+    def test_urls_and_raw_strings_do_not_desynchronize_discard_detection(self) -> None:
+        fixtures = (
+            ("d1_no_slashes", '"https:_example.com/docs"'),
+            ("d2_url_with_slashes", '"https://example.com/docs"'),
+            ("d4_slashes_in_format_string", 'format!("{}//{}", "a", "b")'),
+            ("d8_raw_string_hash", 'r#"https://example.com/docs"#'),
+        )
+        for name, literal in fixtures:
+            with self.subTest(fixture=name):
+                self.write(
+                    DIRECT_DISCARD_WITH_PREFIX.replace("URL_LITERAL", literal)
+                )
+                rc, _, error = self.run_gate()
+                self.assertEqual(rc, 1)
+                self.assertIn("if let Ok(..)", error)
+
+    def test_propagating_site_after_url_stays_rejected(self) -> None:
+        self.write(
+            DIRECT_DISCARD_WITH_PREFIX
+            .replace("URL_LITERAL", '"https://example.com/docs"')
+            .replace(
+                "if let Ok(_g) = SHARED_TEST_LOCK.lock() {\n"
+                "        critical_section();\n"
+                "    }",
+                "let _g = SHARED_TEST_LOCK.lock().unwrap();",
+            )
+        )
+        rc, _, error = self.run_gate()
+        self.assertEqual(rc, 1)
+        self.assertIn("unwrap()", error)
+
+    def test_lexer_mismatch_is_fail_closed(self) -> None:
+        self.write(IF_LET_OK_DISCARD)
+        path = self.root / "src/service.rs"
+        with patch.object(gate, "_lex_rust_tokens", return_value=[]), patch.object(
+            gate, "_mask_non_code", return_value=path.read_text("utf-8")
+        ):
+            with self.assertRaises(gate.UntrustedScan) as raised:
+                gate.scan_file(self.root, path, frozenset({"SHARED_TEST_LOCK"}))
+        self.assertIn("file scan is untrusted", str(raised.exception))
 
 
 class InventoryScope(GateCase):

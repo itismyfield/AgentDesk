@@ -57,8 +57,10 @@ It is a text scan, not a borrow-checked analysis of receiver types.
   `Ok` arm never matches again, so the critical section is silently SKIPPED
   and mutual exclusion is lost for every later acquirer -- with no panic, no
   `PoisonError` in the transcript, and nothing for a cascade to point at.
-  Parenthesized or block-wrapped lock expressions, `let ... else`, and other
-  consumer forms are not inferred by this narrow check.
+  Parenthesized or block-wrapped lock expressions, `let ... else`, let-chains
+  such as `if cond && let Ok(..) = NAME.lock()`, and other consumer forms are
+  not inferred by this narrow check. A `match NAME.lock() { Ok(..) => ..,
+  Err(..) => .. }` that discards the error is likewise outside the contract.
 * An acquisition that DISCARDS poison through `.lock().ok()` (or a longer
   `.ok()` chain) remains unflagged. That is a known hole, not a claim that the
   shape is safe; the fixture tests pin this non-guarantee so a future change in
@@ -156,6 +158,26 @@ def _skip_quoted(text: str, start: int, quote: str) -> int:
     return len(text)
 
 
+def _raw_string_end(text: str, start: int) -> int | None:
+    """Return the end of a Rust raw string beginning at *start*, if any."""
+    if text.startswith(("br", "rb"), start):
+        prefix_end = start + 2
+    elif text.startswith("r", start):
+        prefix_end = start + 1
+    else:
+        return None
+    hash_end = prefix_end
+    while hash_end < len(text) and text[hash_end] == "#":
+        hash_end += 1
+    if hash_end >= len(text) or text[hash_end] != '"':
+        return None
+    hashes = text[prefix_end:hash_end]
+    terminator = '"' + hashes
+    body_start = hash_end + 1
+    close = text.find(terminator, body_start)
+    return len(text) if close < 0 else close + len(terminator)
+
+
 def _skip_block_comment(text: str, start: int) -> int:
     """Skip a possibly nested Rust block comment."""
     depth = 1
@@ -207,6 +229,14 @@ def _lex_rust_tokens(text: str) -> list[RustToken]:
         if char.isspace():
             index += 1
             continue
+        raw_end = _raw_string_end(text, index)
+        if raw_end is not None:
+            index = raw_end
+            continue
+        if text.startswith("//", index):
+            newline = text.find("\n", index + 2)
+            index = len(text) if newline < 0 else newline
+            continue
         if text.startswith("/*", index):
             index = _skip_block_comment(text, index)
             continue
@@ -237,6 +267,21 @@ def _lex_rust_tokens(text: str) -> list[RustToken]:
         tokens.append(RustToken(char, index, index + 1))
         index += 1
     return tokens
+
+
+def _mask_non_code(text: str, tokens: list[RustToken]) -> str:
+    """Blank comments and literals while preserving source offsets and lines."""
+    masked = [
+        "\n" if char == "\n" else "\r" if char == "\r" else " "
+        for char in text
+    ]
+    for token in tokens:
+        masked[token.start : token.end] = text[token.start : token.end]
+    return "".join(masked)
+
+
+class LexerMismatch(RuntimeError):
+    """Raised when a code-site match has no corresponding lexer token."""
 
 
 def _delimiter_pairs(tokens: list[RustToken]) -> dict[int, int]:
@@ -272,8 +317,15 @@ def _discarding_consumer(
     wrappers and aliases are deliberately outside this bounded contract.
     """
     receiver = token_by_start.get(lock_match.start())
-    if receiver is None or tokens[receiver].text != lock_match.group("name"):
-        return None
+    if receiver is None:
+        raise LexerMismatch(
+            f"no token at lock receiver offset {lock_match.start()}"
+        )
+    if tokens[receiver].text != lock_match.group("name"):
+        raise LexerMismatch(
+            f"token at lock receiver offset {lock_match.start()} is "
+            f"{tokens[receiver].text!r}, not {lock_match.group('name')!r}"
+        )
     while (
         receiver >= 2
         and tokens[receiver - 1].text == "::"
@@ -316,25 +368,16 @@ class Violation:
         return f"{self.path}:{self.line}: {self.lock}.lock().{self.form} propagates PoisonError"
 
 
-def _strip_line_comments(text: str) -> str:
-    """Blank out `//` comments so a documented `.lock().unwrap()` is not a site.
-
-    Deliberately naive about `//` inside string literals: turning a string body
-    into spaces can only remove candidate sites, and this file's own tests pin
-    the shapes that matter.
-    """
-    out = []
-    for line in text.splitlines(keepends=True):
-        index = line.find("//")
-        out.append(line if index < 0 else line[:index] + "\n")
-    return "".join(out)
+class UntrustedScan(RuntimeError):
+    """Raised when a file cannot be classified reliably."""
 
 
 def discover_inventory(repo_root: Path, files: list[Path]) -> dict[str, list[str]]:
     """Map each process-global `Mutex<()>` name to the files declaring it."""
     inventory: dict[str, list[str]] = {}
     for path in files:
-        text = _strip_line_comments(path.read_text("utf-8", errors="replace"))
+        raw = path.read_text("utf-8", errors="replace")
+        text = _mask_non_code(raw, _lex_rust_tokens(raw))
         rel = str(path.relative_to(repo_root))
         for match in STATIC_UNIT_MUTEX.finditer(text):
             declared = match.group("type")
@@ -350,7 +393,8 @@ def discover_inventory(repo_root: Path, files: list[Path]) -> dict[str, list[str
 
 def scan_file(repo_root: Path, path: Path, names: frozenset[str]) -> list[Violation]:
     raw = path.read_text("utf-8", errors="replace")
-    text = _strip_line_comments(raw)
+    tokens = _lex_rust_tokens(raw)
+    text = _mask_non_code(raw, tokens)
     rel = str(path.relative_to(repo_root))
     violations: list[Violation] = []
     # `NAME.lock()` and `accessor().lock()`, tolerating the line breaks rustfmt
@@ -362,22 +406,42 @@ def scan_file(repo_root: Path, path: Path, names: frozenset[str]) -> list[Violat
     matches = list(pattern.finditer(text))
     if not matches:
         return violations
-    tokens = _lex_rust_tokens(text)
     pairs = _delimiter_pairs(tokens)
     token_by_start = {token.start: index for index, token in enumerate(tokens)}
     for match in matches:
-        tail = text[match.end(): match.end() + RECOVERY_WINDOW]
-        label = next(
-            (label for propagator, label in PROPAGATING if propagator.match(tail)),
-            None,
-        )
-        if label is None and FAKE_RECOVERY.match(tail) and not RECOVERY.search(tail):
-            label = "unwrap_or_else(..) without into_inner"
-        if label is None:
-            label = _discarding_consumer(tokens, pairs, token_by_start, match)
+        try:
+            receiver = token_by_start.get(match.start())
+            if receiver is None:
+                raise LexerMismatch(
+                    f"no token at lock receiver offset {match.start()}"
+                )
+            if tokens[receiver].text != match.group("name"):
+                raise LexerMismatch(
+                    f"token at lock receiver offset {match.start()} is "
+                    f"{tokens[receiver].text!r}, not {match.group('name')!r}"
+                )
+            tail = text[match.end(): match.end() + RECOVERY_WINDOW]
+            label = next(
+                (label for propagator, label in PROPAGATING if propagator.match(tail)),
+                None,
+            )
+            if label is None and FAKE_RECOVERY.match(tail) and not RECOVERY.search(tail):
+                label = "unwrap_or_else(..) without into_inner"
+            if label is None:
+                label = _discarding_consumer(tokens, pairs, token_by_start, match)
+        except LexerMismatch as error:
+            line = raw.count("\n", 0, match.start()) + 1
+            raise UntrustedScan(
+                f"{rel}:{line}: {error}; file scan is untrusted"
+            ) from error
         if label is not None:
             violations.append(
-                Violation(rel, text.count("\n", 0, match.start()) + 1, match.group("name"), label)
+                Violation(
+                    rel,
+                    raw.count("\n", 0, match.start()) + 1,
+                    match.group("name"),
+                    label,
+                )
             )
     return violations
 
@@ -397,7 +461,13 @@ def check(repo_root: Path, source_root: Path) -> int:
         )
         return 2
     names = frozenset(inventory)
-    violations = [v for path in files for v in scan_file(repo_root, path, names)]
+    violations: list[Violation] = []
+    untrusted: list[str] = []
+    for path in files:
+        try:
+            violations.extend(scan_file(repo_root, path, names))
+        except UntrustedScan as error:
+            untrusted.append(str(error))
     statics = sum(len(paths) for paths in inventory.values())
     print(
         f"process-global Mutex<()> inventory: {len(inventory)} distinct name(s), "
@@ -405,6 +475,15 @@ def check(repo_root: Path, source_root: Path) -> int:
     )
     for name in sorted(inventory):
         print(f"  {name}: {', '.join(inventory[name])}")
+    if untrusted:
+        print(
+            f"FAIL: {len(untrusted)} file scan(s) are untrusted because the lexer "
+            "did not align with a lock-site match:",
+            file=sys.stderr,
+        )
+        for error in untrusted:
+            print(f"  {error}", file=sys.stderr)
+        return 2
     if violations:
         print(
             f"FAIL: {len(violations)} acquisition(s) propagate or discard PoisonError "
