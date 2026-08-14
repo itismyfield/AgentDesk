@@ -30,9 +30,20 @@ new direct SQL `UPDATE intake_outbox ... status = 'done'` are not seen. The
 line-break form is rejected by the repository's enforced `cargo fmt --check`.
 It also does not prove a call is reachable, successful, or the right lifecycle
 action. Conversely, a same-spelled free function in a file importing this
-writer could be over-counted. Comments, strings, `*_tests.rs`, and
-`#[cfg(test)]` regions are excluded, but other cfgs are counted without target
-evaluation. When run independently, the wiring test detects removal of the
+writer could be over-counted. Comments, strings, pinned whole-file test modules,
+and `#[cfg(test)]` regions are excluded, but other cfgs are counted without
+target evaluation. Whole-file skips use the single lexical pin in
+`scripts/test_only_module_skip_pin.py`; `src/` symlinks are rejected and the
+skipped census must equal the pin count.
+
+The unchanged shared resolver does not guarantee seven measured forms:
+`#[path]`/`mod` separated by a comment, macro-generated `mod`,
+`cfg(not(test))+include!`, `cfg(any(test,feature))+include!`, `cfg_attr(path=)`,
+raw-string `#[path]`, or ungated `include!`. The pin guarantees membership, not
+content: production reachability can change inside a pinned file without a set
+delta. Compiler-backed reachability is explicitly follow-up slice work.
+
+When run independently, the wiring test detects removal of the
 gate command; it cannot protect deletion of its own unittest invocation from
 `ci-script-checks.sh`. These are declared bounds, not silent skips: the gate
 only claims exact textual call-site counts for this writer spelling within
@@ -41,8 +52,10 @@ those bounds.
 
 from __future__ import annotations
 
+import importlib.util
 import re
 import sys
+from collections.abc import Iterable
 from collections import defaultdict
 from pathlib import Path
 
@@ -55,6 +68,25 @@ SYMBOL_MODULES = {
 CFG_EXCLUSIVELY_TEST_RE = re.compile(
     r"#\[\s*cfg\s*\(\s*(?:test\s*\)|all\s*\(\s*test\s*(?:,|\)))"
 )
+
+
+def _load_skip_pin_module():
+    name = "test_only_module_skip_pin"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(
+        name, Path(__file__).resolve().parent / "test_only_module_skip_pin.py"
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load scripts/test_only_module_skip_pin.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_SKIP_PIN = _load_skip_pin_module()
+PINNED_TEST_ONLY_MODULE_FILES = _SKIP_PIN.PINNED_TEST_ONLY_MODULE_FILES
 
 # Char literal (so `'"'` / `'{'` cannot desync the scanner). Lifetimes (`'a`)
 # do not match and fall through harmlessly.
@@ -177,17 +209,21 @@ def production_text(path: Path) -> str:
 
 
 def production_call_sites(
-    root: Path, expected: dict[str, dict[str, int]]
+    root: Path,
+    expected: dict[str, dict[str, int]],
+    *,
+    pinned_test_only_files: Iterable[str] = PINNED_TEST_ONLY_MODULE_FILES,
 ) -> tuple[dict[str, dict[str, int]], list[str], int, int]:
     """Return call counts, import violations, and scan totals over ``src/``."""
     found: defaultdict[str, defaultdict[str, int]] = defaultdict(lambda: defaultdict(int))
     violations: list[str] = []
+    all_files, whole_file_skips = _SKIP_PIN.validated_scan_files(
+        root, SCAN_ROOT, is_test_file, pinned_paths=pinned_test_only_files
+    )
     scanned = 0
     skipped = 0
-    for path in sorted((root / SCAN_ROOT).rglob("*.rs")):
-        if not path.is_file():
-            continue
-        if is_test_file(path.name):
+    for path in all_files:
+        if path in whole_file_skips:
             skipped += 1
             continue
         scanned += 1
@@ -241,15 +277,27 @@ LIMITS = (
     "NOT seen (cargo fmt --check rejects the line-break call form); same-spelled free functions "
     "may be over-counted; direct protected-symbol aliases are rejected; only braced cfg(test) "
     "and cfg(all(test,...)) items are stripped, while other cfg/cfg_attr forms remain scanned; the "
-    "wiring test cannot protect deletion of its own unittest invocation from ci-script-checks.sh"
+    "whole-file skips use one lexical pin, reject src symlinks, and check their census; "
+    "seven resolver forms are not guaranteed (path/mod comment, macro mod, two cfg/include "
+    "forms, cfg_attr path, raw path, ungated include); pin membership cannot detect "
+    "production reachability changes inside pinned files and compiler-backed reachability "
+    "is follow-up work; wiring tests cannot protect deletion of their own unittest invocation"
 )
 
 
 def check(
-    root: Path, expected: dict[str, dict[str, int]] | None = None
+    root: Path,
+    expected: dict[str, dict[str, int]] | None = None,
+    *,
+    pinned_test_only_files: Iterable[str] = PINNED_TEST_ONLY_MODULE_FILES,
 ) -> tuple[bool, str]:
     expected = expected if expected is not None else expected_call_sites(root)
-    found, import_problems, scanned, skipped = production_call_sites(root, expected)
+    try:
+        found, import_problems, scanned, skipped = production_call_sites(
+            root, expected, pinned_test_only_files=pinned_test_only_files
+        )
+    except RuntimeError as exc:
+        return False, str(exc)
     problems = list(import_problems)
     for symbol in sorted(set(expected) | set(found)):
         expected_files = expected.get(symbol, {})

@@ -84,9 +84,19 @@ WHAT IT DOES BUY. Every textual call site under `src/`, per file, exactly
 counted. That is strictly more than the model gate: it has no anchor to escape
 and no boolean to saturate.
 
-PRODUCTION vs TEST. Files named `tests.rs` / `*_tests.rs` are skipped whole, and
-`#[cfg(test)]` / `#[cfg(all(test, ...))]` / `#[cfg(any(test, ...))]` regions are
-resolved with balanced-brace tracking over comment/string-stripped text.
+PRODUCTION vs TEST. Files named `tests.rs` / `*_tests.rs` and files the shared
+inventory resolver classifies as test-only are skipped whole. Every such path
+must pass the single lexical pin in `scripts/test_only_module_skip_pin.py`;
+`src/` file/directory symlinks are rejected and the skipped census must equal
+the pin count. `#[cfg(test)]` regions in remaining files are stripped.
+
+RESOLVER NON-GUARANTEES. The reused resolver is intentionally unchanged and
+does not guarantee seven measured forms: `#[path]` separated from `mod` by a
+comment; macro-generated `mod`; `cfg(not(test))` plus `include!`;
+`cfg(any(test, feature))` plus `include!`; `cfg_attr(path=)`; raw-string
+`#[path]`; or ungated `include!`. The pin guarantees set membership only: a
+content change can make an already pinned file production-reachable without a
+set delta. Compiler-backed reachability is follow-up slice work.
 
   DEVIATION FROM THE PORTED RESOLVER, DELIBERATE AND MEASURED. The equivalent
   loop in `scripts/check_inflight_blind_save_ratchet.py` resolves an armed
@@ -134,8 +144,10 @@ the reviewable artefact this gate exists to force.
 
 from __future__ import annotations
 
+import importlib.util
 import re
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 
 # Every production call site of every pinned symbol, keyed by symbol then by
@@ -263,6 +275,25 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
 # an untracked new module is still a new call site, and the point of dropping
 # anchors is that no file gets to be invisible.
 SCAN_ROOT = Path("src")
+
+
+def _load_skip_pin_module():
+    name = "test_only_module_skip_pin"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(
+        name, Path(__file__).resolve().parent / "test_only_module_skip_pin.py"
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load scripts/test_only_module_skip_pin.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_SKIP_PIN = _load_skip_pin_module()
+PINNED_TEST_ONLY_MODULE_FILES = _SKIP_PIN.PINNED_TEST_ONLY_MODULE_FILES
 
 # `\b<symbol>\s*(` -- the trailing `(` is what makes longer names with the same
 # prefix (`write_delivered_frontier_at`, `..._guarded_at_with_before_lock`,
@@ -455,16 +486,20 @@ def production_lines(path: Path):
         yield lineno, code, countable
 
 
-def production_call_sites(root: Path) -> tuple[dict[str, dict[str, int]], int, int]:
+def production_call_sites(
+    root: Path,
+    *,
+    pinned_test_only_files: Iterable[str] = PINNED_TEST_ONLY_MODULE_FILES,
+) -> tuple[dict[str, dict[str, int]], int, int]:
     """Return ``(counts, scanned_files, skipped_test_files)`` over ``src/``."""
     found: dict[str, dict[str, int]] = {symbol: {} for symbol in EXPECTED_CALL_SITES}
+    all_files, whole_file_skips = _SKIP_PIN.validated_scan_files(
+        root, SCAN_ROOT, is_test_file, pinned_paths=pinned_test_only_files
+    )
     scanned = 0
     skipped = 0
-    scan_root = root / SCAN_ROOT
-    for path in sorted(scan_root.rglob("*.rs")):
-        if not path.is_file():
-            continue
-        if is_test_file(path.name):
+    for path in all_files:
+        if path in whole_file_skips:
             skipped += 1
             continue
         scanned += 1
@@ -485,12 +520,26 @@ LIMITS = (
     "lexical scan of stripped source, not Rust parsing; not proof of reachability; "
     "`use .. as x` aliases, re-export renames, name-constructing macros and calls "
     "through values or trait objects are NOT seen; cfg other than cfg(test) is not "
-    "evaluated; textual occurrences are counted once regardless of macro expansion"
+    "evaluated; whole-file skips use one lexical pin, reject src symlinks, and check "
+    "the skipped census; seven resolver forms are not guaranteed (path/mod comment, "
+    "macro mod, two cfg/include forms, cfg_attr path, raw path, ungated include); pin "
+    "membership cannot detect production reachability changes inside pinned files; "
+    "compiler-backed reachability is follow-up work; textual occurrences are counted "
+    "once regardless of macro expansion"
 )
 
 
-def check(root: Path) -> tuple[bool, str]:
-    found, scanned, skipped = production_call_sites(root)
+def check(
+    root: Path,
+    *,
+    pinned_test_only_files: Iterable[str] = PINNED_TEST_ONLY_MODULE_FILES,
+) -> tuple[bool, str]:
+    try:
+        found, scanned, skipped = production_call_sites(
+            root, pinned_test_only_files=pinned_test_only_files
+        )
+    except RuntimeError as exc:
+        return False, str(exc)
     problems: list[str] = []
     for symbol, expected in EXPECTED_CALL_SITES.items():
         actual = found[symbol]
