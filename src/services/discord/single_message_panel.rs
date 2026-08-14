@@ -1298,10 +1298,18 @@ mod tests {
         );
     }
 
-    /// #3394 round 2 (P1): `completion_footer_edit_for_registered_target_at`
-    /// uses `compose_completion_footer_text`. This test pins the registered path:
-    /// body repair leaves the rendered footer's terminal ✓ in the edit text and
-    /// the combined fence parity is even. Later clamp/eviction risk remains #5348.
+    /// #3394 round 2 (P1): the registered-refresh edit is implemented by
+    /// `footer_view_reconciler/registry.rs::completion_footer_edit_for_registered_target_at`,
+    /// which uses `compose_completion_footer_text`. With no WIP warning, the
+    /// message limit remains `DISCORD_MSG_LIMIT` and `max_block_units` is 1994,
+    /// so the 600-byte task-section cap plus the other footer lines leave the
+    /// rendered footer's terminal mark in the edit text after body-only repair;
+    /// a successful edit can then evict only a mark present in that text. When
+    /// warning reservation shrinks the remaining block budget as low as 600
+    /// units, the inline clamp can still cut a retained terminal tail after its
+    /// render-local id was selected. That residual risk is accepted to keep the
+    /// warning from being the truncation victim: the possible sacrifice moves
+    /// to the footer tail instead.
     #[test]
     fn registered_refresh_repair_scoped_to_body_keeps_footer_marks_3394() {
         let channel_id = ChannelId::new(3_394_201);
