@@ -1480,6 +1480,16 @@ mod tests {
     }
 
     #[test]
+    fn delivery_journal_mode_stays_yaml_only() {
+        for key in ["delivery_journal_mode", "deliveryJournalMode"] {
+            assert!(
+                !RUNTIME_CONFIG_KEYS.contains(&key),
+                "delivery-journal mode is YAML-only; if this key enters RUNTIME_CONFIG_KEYS, update the Authority contract comment and cutover design together"
+            );
+        }
+    }
+
+    #[test]
     fn runtime_config_write_plan_has_one_blob_authority_and_cleanup_only() {
         let plan = runtime_config_write_plan(r#"{"maxEntryRetries":7}"#.to_string());
 

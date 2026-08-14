@@ -1580,6 +1580,18 @@ pub enum DeliveryJournalMode {
     Shadow,
     /// Keep emitting observations, and let explicitly wired readers treat the journal as
     /// authoritative. Existing delivery writers remain in place until the hot-file handoff.
+    /// This mode is selected by the YAML `runtime.delivery_journal_mode` field only:
+    /// `kv_meta['runtime-config']` and `SettingsService::put_runtime_config` do not read this
+    /// key. A value placed there through the runtime-config API is stored and echoed by that API,
+    /// but the journal consumers ignore it.
+    ///
+    /// Activation is not safe by itself. A direct `Legacy` to `Authority` transition can leave
+    /// an in-flight delivery permanently absent: Legacy admits with no observation, then an
+    /// Authority settle sees `None` and is a no-op. `JournalObserver::submit` also uses bounded
+    /// `try_send`, so a full mailbox drops an observation. Cutover therefore requires Shadow
+    /// warm-up and an in-flight drain/fence; this dormant slice does not provide either one.
+    /// `Shadow` to `Authority` does capture the observation at admit time, so that transition
+    /// does not create the same half-recorded delivery.
     Authority,
 }
 
