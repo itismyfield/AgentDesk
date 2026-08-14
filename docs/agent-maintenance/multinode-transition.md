@@ -1,6 +1,6 @@
 # Multinode Transition
 
-> Last refreshed: 2026-08-14 (against #5071 T2-W S-R2c B2 dormant reducer).
+> Last refreshed: 2026-08-14 (against #5071 T2-W B3a-1 dispatched audit).
 
 ### Audited touches
 - 2026-08-14 (#5071 T2-W B3a-1): the operator CLI adds a read-only

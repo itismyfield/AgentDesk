@@ -613,12 +613,12 @@ operators can run it manually for incident response.
   SQL literals and writers outside the typed bind coordinates remain
   possible. No production writer currently creates `dispatched`, but that does
   not make the table population empty: direct SQL can create a clocked row, and
-  a manually-created row with a NULL clock can survive the later NOT VALID
-  clock CHECK. `None` does not distinguish a vanished row from a failed
-  conflict requery. The open set remains exactly pending/claimed/accepted/
-  spawned/dispatched, so official unknown releases the channel route. The
-  dispatched fence fixture stops at decision/admission and does not execute
-  the outer `admit_text_intake` retirement path.
+  a manually-created row with a NULL clock from before migration 0107 can
+  survive the later NOT VALID clock CHECK. `None` does not distinguish a
+  vanished row from a failed conflict requery. The open set remains exactly
+  pending/claimed/accepted/spawned/dispatched, so official unknown releases the
+  channel route. The dispatched fence fixture stops at decision/admission and
+  does not execute the outer `admit_text_intake` retirement path.
 
 **S-R1 rolling floor (#5071 T2-W):** migrations 0107-0109 must reach every
 node before an unknown writer is enabled. As soon as any of these migrations

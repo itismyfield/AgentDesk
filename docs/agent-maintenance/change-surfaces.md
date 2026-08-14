@@ -1969,7 +1969,8 @@ time for diagnostics; neither is a stored approval value.
     surface, with operator force-fail isolated in
     `src/db/intake_outbox_force_fail.rs`; both production surfaces are below the
     giant-file threshold once `#[cfg(test)] mod` PG coverage is excluded
-    (bugfix only).
+    (bugfix only; +5 from #5071 T2-W B3a-1 mechanically extracting the provider
+    guard for audit reuse, non-behavioral).
 - active_callsite_coverage: PG-only cleanup tracked per #1237/#1238/#1239 —
   see `known-legacy.md`.
 - invariants: production reads/writes go through `pg_pool_ref()`; retired DB
