@@ -289,6 +289,17 @@ mod dispatch_terminal_sync_pg_tests {
     async fn wait_for_run_advisory_waiter(conn: &mut PgConnection) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
+            // The observer connection holds an open transaction (it is the
+            // advisory-token holder), and PostgreSQL freezes backend-status
+            // views such as pg_stat_activity at their first in-transaction
+            // access. Without clearing that snapshot each iteration, a first
+            // poll that lands before the spawned task blocks makes every
+            // later poll return the same stale "no waiter" answer until the
+            // deadline panics (reproduced 1-in-10 locally).
+            sqlx::query("SELECT pg_stat_clear_snapshot()")
+                .execute(&mut *conn)
+                .await
+                .expect("clear backend-status snapshot");
             let waiting = sqlx::query_scalar::<_, bool>(
                 "SELECT EXISTS (
                      SELECT 1
@@ -315,6 +326,13 @@ mod dispatch_terminal_sync_pg_tests {
     async fn wait_for_blocked_slot_update(conn: &mut PgConnection, query_fragment: &str) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
+            // Same per-transaction backend-status snapshot hazard as
+            // wait_for_run_advisory_waiter: clear it so each poll observes
+            // live waiter state instead of the first poll's frozen view.
+            sqlx::query("SELECT pg_stat_clear_snapshot()")
+                .execute(&mut *conn)
+                .await
+                .expect("clear backend-status snapshot");
             let blocked = sqlx::query_scalar::<_, bool>(
                 "SELECT EXISTS (
                      SELECT 1
