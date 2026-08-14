@@ -124,7 +124,16 @@ class SourceContractTests(unittest.TestCase):
         self.assertIn(f"across {PINNED_SYMBOLS} symbols", message)
         # The success path must state its own blindness, not only the failure
         # path: a reader who only ever sees green must still learn the limits.
-        for limit in ("use .. as x", "not Rust parsing", "not proof of reachability"):
+        for limit in (
+            "use .. as x",
+            "not Rust parsing",
+            "not proof of reachability",
+            "Self::method",
+            "raw-identifier or non-ASCII alias spellings",
+            "(*ptr).store",
+            "as_ptr`/`get_mut",
+            "AST/`syn`-based Rust parsing",
+        ):
             self.assertIn(limit, message)
         pinned_count = len(guard.PINNED_TEST_ONLY_MODULE_FILES)
         self.assertIn(f"skipped {pinned_count} test files", message)
@@ -839,6 +848,41 @@ class DiscriminationTests(unittest.TestCase):
         expected["TmuxRelayCoord::reset_confirmed_frontier"] = {rel: 1}
         ok, message = self.run_guard(root, expected)
         self.assertTrue(ok, message)
+
+    def test_s8_self_ufcs_method_writer_inside_impl_is_red_then_pin_green(self):
+        """Natural impl-local UFCS forms resolve to the pinned receiver type."""
+
+        rel = "src/services/discord/impl_ufcs_writer.rs"
+        for receiver_type in (
+            "Self",
+            "<Self>",
+            "<crate::services::discord::TmuxRelayCoord>",
+        ):
+            with self.subTest(receiver_type=receiver_type):
+                root = self.fixture()
+                write(
+                    root,
+                    rel,
+                    "struct TmuxRelayCoord;\n"
+                    "impl TmuxRelayCoord {\n"
+                    "    fn reset_confirmed_frontier(&self, _end: u64, _generation: u64) {}\n"
+                    "    fn extra_writer(&self) {\n"
+                    f"        {receiver_type}::reset_confirmed_frontier(self, 10, 0);\n"
+                    "    }\n"
+                    "}\n",
+                )
+                ok, message = self.run_guard(root)
+                self.assertFalse(ok, message)
+                self.assertIn(
+                    "TmuxRelayCoord::reset_confirmed_frontier: UNLISTED call site in "
+                    f"{rel} (1x)",
+                    message,
+                )
+
+                expected = self.expected()
+                expected["TmuxRelayCoord::reset_confirmed_frontier"] = {rel: 1}
+                ok, message = self.run_guard(root, expected)
+                self.assertTrue(ok, message)
 
     def test_s8_raw_atomic_gate_is_cross_line_and_mutation_proof(self):
         root = self.fixture()

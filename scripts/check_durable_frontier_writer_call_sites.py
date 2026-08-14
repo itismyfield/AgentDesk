@@ -90,10 +90,11 @@ test module:
     correct. That is what the Rust runtime tests are for.
 
 S8 RAW ATOMIC AND FUNCTION-VALUE GATES. `EXPECTED_RAW_ATOMIC_MUTATIONS` counts
-`confirmed_end_offset` calls to the complete AtomicU64/AtomicUsize mutator
-allowlist (`compare_exchange`, `compare_exchange_weak`, `store`, `swap`, all
-listed `fetch_*` mutators, and legacy `compare_and_swap`) over stripped
-production file text (not per-line text, so rustfmt receiver chains are seen).
+`confirmed_end_offset` calls to an explicit allowlist of direct
+AtomicU64/AtomicUsize mutator methods (`compare_exchange`,
+`compare_exchange_weak`, `store`, `swap`, the listed `fetch_*` mutators, and
+legacy `compare_and_swap`) over stripped production file text (not per-line
+text, so rustfmt receiver chains are seen).
 `EXPECTED_BARE_REFERENCES` counts pinned names that are neither calls,
 definitions, nor `use` items and pins the current historical function-value
 capture. `EXPECTED_PINNED_USE_ALIASES` rejects `use ..::<pinned> as <other>;`;
@@ -104,10 +105,10 @@ WHAT IT DOES BUY. Every supported textual call site in every regular `.rs` file
 under `src/`, per file, is exactly counted. Supported method forms include the
 receiver form (`coord.reset_confirmed_frontier(...)`) and pinned UFCS form
 (`TmuxRelayCoord::reset_confirmed_frontier(coord, ...)`); the raw atomic gate
-enumerates the full mutator class above. The gate enumerates all regular files
-first and fails closed if any non-`.rs` file is present, so an extension cannot
-make a file invisible. That is strictly more than the model gate: it has no
-anchor to escape and no boolean to saturate.
+enumerates the direct method spellings above. The gate enumerates all regular
+files first and fails closed if any non-`.rs` file is present, so an extension
+cannot make a file invisible. That is strictly more than the model gate: it has
+no anchor to escape and no boolean to saturate.
 
 PRODUCTION vs TEST. Files named `tests.rs` / `*_tests.rs` and files the shared
 inventory resolver classifies as test-only are skipped whole. Every such path
@@ -391,10 +392,18 @@ def _call_re(symbol: str) -> re.Pattern[str]:
         # Rust type resolution is outside this gate; a bare
         # `reset_confirmed_frontier()` is not this pinned method entry point.
         # The second branch is the UFCS spelling (`Type::method(receiver, ...)`)
-        # for this pinned type/method pair. Keep the type exact: a lexical scan
-        # cannot prove that another type's same-named method is this writer.
+        # for this pinned type/method pair. Inside the type's impl, `Self` is
+        # the same natural receiver type; angle-bracketed UFCS may also end in
+        # a fully qualified path to the pinned type. Keep the terminal type
+        # exact: a lexical scan cannot prove that another type's same-named
+        # method is this writer.
         type_name, _ = symbol.rsplit("::", 1)
-        ufcs_type = rf"(?:\b{re.escape(type_name)}|<\s*{re.escape(type_name)}\s*>)"
+        terminal_type = rf"(?:{re.escape(type_name)}|Self)"
+        ufcs_type = (
+            rf"(?:\b{terminal_type}\b"
+            rf"|<\s*(?:(?:\b(?:crate|self|super)\b|[A-Za-z_]\w*)\s*::\s*)*"
+            rf"{terminal_type}\s*>)"
+        )
         return re.compile(
             rf"(?:"
             rf"(?:\b[A-Za-z_]\w*|\))\s*\.\s*{re.escape(basename)}"
@@ -852,8 +861,10 @@ def production_definition_file_counts(
 
 
 # Keep this list explicit rather than accepting an open-ended `fetch_*`: the
-# gate is intended to pin the complete mutating API surface of Rust's
-# AtomicU64/AtomicUsize, including the legacy spelling retained by older code.
+# gate pins these direct mutator method spellings, including the legacy spelling
+# retained by older code. It does not claim the complete mutating API surface:
+# `as_ptr`/`get_mut` can expose storage for mutation through raw pointers or
+# UnsafeCell, and those paths are outside this lexical gate.
 RAW_ATOMIC_MUTATORS = (
     "compare_exchange",
     "compare_exchange_weak",
@@ -980,10 +991,13 @@ def production_bare_references(
 LIMITS = (
     "lexical scan of stripped source, not Rust parsing; not proof of reachability; "
     "call-site matching covers direct calls, receiver method calls, and pinned "
-    "`Type::method(receiver, ...)` UFCS calls, but does not see `use .. as x` "
-    "aliases, re-export renames, name-constructing macros or calls through "
-    "values; the S8 pinned-alias and bare-reference subgates close the first "
-    "two lexical bypasses; trait-object dispatch remains unseen; the cfg "
+    "`Type::method(receiver, ...)`, `Self::method(self, ...)`, `<Type>::method`, "
+    "and `<Self>::method` UFCS calls (including angle-bracketed paths ending in "
+    "the pinned type), but does not see `use .. as x` aliases, re-export renames, "
+    "raw-identifier or non-ASCII alias spellings, name-constructing macros, or "
+    "calls through values; the S8 pinned-alias and bare-reference subgates close "
+    "only the supported ASCII lexical forms; trait-object dispatch remains "
+    "unseen; the cfg "
     "classifier treats cfg(test)/test-required all(...) as test-only and "
     "cfg(any(test, X))/cfg(not(test)) as production without compiler target "
     "evaluation; non-.rs regular files fail closed before classification; whole-file "
@@ -997,9 +1011,12 @@ LIMITS = (
     "membership cannot detect production reachability changes inside pinned files; "
     "compiler-backed reachability is follow-up work; textual occurrences are counted "
     "once regardless of macro expansion; name-constructing macro assembly and "
-    "trait-object dispatch remain outside the regex/lexical model; raw atomic "
-    "and bare-reference gates are likewise lexical and do not prove runtime "
-    "reachability"
+    "trait-object dispatch remain outside the regex/lexical model; the raw atomic "
+    "scan does not see dereferenced stores such as `(*ptr).store(...)` or mutation "
+    "through `as_ptr`/`get_mut` plus raw-pointer/UnsafeCell access; raw atomic and "
+    "bare-reference gates are likewise lexical and do not prove runtime "
+    "reachability; replacing these enumerated regexes with AST/`syn`-based Rust "
+    "parsing is a separate follow-up issue"
 )
 
 
