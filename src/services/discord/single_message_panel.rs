@@ -114,12 +114,9 @@ pub(in crate::services::discord) fn compose_completion_footer_text(
             (!completion_without_warning.trim().is_empty()).then_some(completion_without_warning);
         let warning = completion_footer_subtext(&warning);
         let separator_units = super::formatting::discord_message_units("\n\n");
-        // Subtracting the byte-denominated section budget from a UTF-16-unit
-        // limit is a conservative lower bound because UTF-8 bytes are never
-        // fewer than UTF-16 units. It leaves that many units for the rendered
-        // non-warning block after framing, but does not guarantee retention of
-        // an entire source section at the byte budget: `completion_footer_subtext`
-        // adds a three-unit prefix to every non-empty line.
+        // Subtracting a byte budget from a UTF-16-unit limit is conservative because UTF-8 bytes
+        // are never fewer than UTF-16 units. It reserves that many rendered non-warning units but
+        // not a whole source section: `completion_footer_subtext` adds three units per non-empty line.
         let warning_budget = super::DISCORD_MSG_LIMIT.saturating_sub(
             SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES
                 .saturating_add(6)
@@ -213,13 +210,8 @@ fn compose_completion_footer_text_without_warning_with_limit(
     // so a body whose fence was chopped by the Discord-limit trim above would, on
     // the combined `{base}{suffix}`, take the appended footer down with it.
     //
-    // #3391 delivered-ID honesty invariant: `delivered_terminal_ids` for this
-    // footer were already computed from `render_completion_footer`'s block
-    // and are evicted once this edit returns Ok. If repair ate the footer, the
-    // ✓/✗ marks would vanish from the delivered text yet their slots would still
-    // be evicted — reporting marks the user never saw. Repairing only the body
-    // keeps every footer mark in the delivered text, so whenever this edit
-    // succeeds every reported terminal slot's mark was actually present.
+    // #3391: body-only repair prevents `repair_fence_parity` from consuming the rendered footer.
+    // Its ids were computed earlier, so the inline block clamp can still cut a reported mark (#5348).
     //
     // The footer block is fence-balanced by construction: `render_completion_footer`
     // emits only the context-usage line plus Tasks/Subagents slot lines (no fenced Recent

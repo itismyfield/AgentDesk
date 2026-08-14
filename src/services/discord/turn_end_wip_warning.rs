@@ -175,15 +175,10 @@ pub(in crate::services::discord) fn merge_turn_end_wip_warning(
     merge_bounded_turn_end_wip_warning(completion_surface, warning)
 }
 
-/// Appends the WIP warning while keeping the merged Discord payload bounded,
-/// trimming the completion surface before sacrificing the warning.
+/// Appends the WIP warning within the Discord bound, trimming completion first.
 ///
-/// If the warning alone exceeds the budget, only an unmarked bounded prefix
-/// survives; it may lose the workspace's closing inline backtick, file counts,
-/// and commit-or-discard instruction because triple-fence repair does not fix
-/// an unmatched inline backtick. `turn_end_wip_warning_text` also requires an
-/// existing directory, making this effectively unreachable under Darwin's
-/// shorter path ceiling but reachable under Linux's longer one.
+/// Warning-only overflow keeps an unmarked prefix and may lose inline-backtick closure or details.
+/// Escaping makes each backtick byte two UTF-16 units, so existing Darwin/Linux paths can reach it; the result stays bounded.
 pub(in crate::services::discord) fn merge_bounded_turn_end_wip_warning(
     completion_surface: String,
     warning: &str,
@@ -220,10 +215,7 @@ pub(in crate::services::discord) fn merge_bounded_turn_end_wip_warning(
     }
 }
 
-/// Returns the longest warning prefix within `max_units`, repairing only
-/// triple-backtick parity after the unit cut. This is a hard-size formatter,
-/// not a path shortener: overflow has no marker and may lose the closing inline
-/// backtick, file counts, and commit-or-discard instruction.
+/// Longest `max_units` prefix; repairs only triple fences, adds no marker, and may lose inline closure/details.
 pub(in crate::services::discord) fn bounded_turn_end_wip_warning(
     warning: &str,
     max_units: usize,
@@ -233,12 +225,7 @@ pub(in crate::services::discord) fn bounded_turn_end_wip_warning(
     super::single_message_panel::repair_fence_parity(&warning[..end])
 }
 
-/// Separates a merged WIP warning from the completion block for independent
-/// final-wire budgeting.
-///
-/// Metadata after the warning boundary moves into the non-warning return value,
-/// so `compose_completion_footer_text` intentionally emits retained metadata
-/// before the reserved warning suffix, reversing the former wire order.
+/// Separates warning for final-wire budgeting; post-warning metadata moves before it, reversing prior wire order.
 pub(in crate::services::discord) fn split_merged_turn_end_wip_warning(
     completion_block: &str,
 ) -> Option<(String, String)> {

@@ -25,10 +25,7 @@ pub(in crate::services::discord) enum SlotKey {
     Ordinal(u64),
 }
 
-/// #3391: identity of a terminal slot whose mark was INCLUDED in a delivered
-/// block, tagged by which list it lives in so eviction targets the right Vec
-/// (a task and a subagent could share the same ordinal counter value only
-/// across lists; the tag keeps them disjoint).
+/// #3391: post-section-clamp terminal-slot id; its list tag targets eviction, while final-wire visibility remains a #5348 concern.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) enum TerminalSlotId {
     Task(SlotKey),
@@ -39,20 +36,16 @@ pub(in crate::services::discord) enum TerminalSlotId {
 pub(in crate::services::discord) struct CompletionFooterRender {
     pub(in crate::services::discord) block: Option<String>,
     pub(in crate::services::discord) has_unfinished_entries: bool,
-    /// #3391: identities of EXACTLY the terminal task/subagent slots whose
-    /// lines were included in `block` post-clamp. After the Discord edit
-    /// containing `block` is CONFIRMED delivered, pass these to
-    /// `evict_delivered_terminal_footer_tasks` so the next render drops them.
+    /// #3391: EXACT post-section-clamp terminal ids are eviction candidates, but the later inline clamp can still cut their marks (#5348).
     /// Slot identity (not the line string) is used so two slots rendering the
     /// IDENTICAL terminal line stay distinct: a clamped-out duplicate keeps its
     /// (undelivered) mark, and a slot that turned terminal between render and
-    /// ack — whose line happens to match another delivered line — is never
-    /// evicted on a mark it never showed (Finding 1).
+    /// ack — whose line happens to match another reported line — is never
+    /// evicted on a mark absent from its source block (Finding 1).
     pub(in crate::services::discord) delivered_terminal_ids: Vec<TerminalSlotId>,
 }
 
-// #3391: delivery-ack surface colocated with the render below — eviction drops
-// exactly the slot identities `render_completion_footer` reported as delivered.
+// #3391: render-local ack surface; eviction drops exactly the post-section-clamp candidate ids.
 impl super::PlaceholderLiveEvents {
     /// Once a task card is confirmed, remove only the exact terminal footer
     /// slot carrying its `tool_use_id`. Missing/id-less/ambiguous identities are
@@ -84,14 +77,8 @@ impl super::PlaceholderLiveEvents {
         evicted.evicted_any()
     }
 
-    /// Drops task/subagent slots whose terminal mark (✓/✗) was confirmed
-    /// delivered in a completion-footer render, addressing them by SLOT
-    /// IDENTITY rather than the rendered line. Call only after the Discord
-    /// edit/send returned Ok — a failed edit retries the terminal mark on the
-    /// next render. A slot is dropped only if its identity is in the delivered
-    /// set AND it is STILL terminal at evict time; ordinals are unique and never
-    /// reused, so a non-terminal slot can never carry a recycled id that aliases
-    /// an evicted one, and in-flight slots are never dropped.
+    /// Drops post-clamp candidates by IDENTITY after edit/send Ok; this does not prove final-wire
+    /// visibility (#5348). Only listed, STILL-terminal slots drop; ordinals prevent aliasing.
     pub(in crate::services::discord) fn evict_delivered_terminal_footer_tasks(
         &self,
         channel_id: ChannelId,
@@ -216,8 +203,7 @@ pub(super) fn render_completion_footer(
 
     // Flat ordered list of emitted task/subagent lines (incl. section headers
     // and the blank separator) carrying each terminal slot's identity. The
-    // clamp below keeps a prefix of these, so a terminal line counts as
-    // delivered iff its position survives.
+    // The clamp keeps a prefix; a terminal id is a render-local candidate iff its line survives.
     let mut emitted: Vec<EmittedLine> = Vec::new();
     let mut has_unfinished_entries = false;
 
@@ -230,12 +216,10 @@ pub(super) fn render_completion_footer(
         for slot in snapshot.tasks.iter().rev().take(STATUS_PANEL_TASK_LIMIT) {
             let (line, unfinished) = render_completion_task_tool_slot(slot, indicator);
             task_unfinished |= unfinished;
-            // #3391 honesty guarantee: only report a delivered identity if the
-            // FINAL rendered line actually ends with this slot's terminal mark.
+            // #3391 render-local gate: report an id only when this renderer's FINAL line ends in its mark.
             // Fix 1 reserves the marker width, so a terminal line ALWAYS ends
             // with its ✓/✗ — debug_assert that invariant, but keep the runtime
-            // `line_shows_marker` gate so a future render regression can never
-            // evict a slot on a mark the user never saw.
+            // The runtime gate rejects ids whose source-block line lacks its mark.
             let marker = task_tool_terminal_marker(slot.status.as_deref());
             let terminal_id = (!unfinished)
                 .then(|| {
@@ -270,9 +254,9 @@ pub(super) fn render_completion_footer(
         {
             subagent_unfinished |= !slot.is_terminal();
             let line = render_completion_subagent_slot(slot, indicator);
-            // #3391 honesty guarantee (mirrors the task loop): a finished
+            // #3391 render-local gate (mirrors the task loop): a finished
             // subagent's line always ends with its ✓/✗ thanks to fix 1 —
-            // debug_assert it, but gate the delivered id on the runtime check.
+            // debug_assert it, but gate the candidate id on the runtime check.
             let marker = slot.terminal_marker();
             let terminal_id = slot
                 .is_terminal()
@@ -329,10 +313,7 @@ pub(super) fn render_completion_footer(
             clamped = clamped_combined;
             has_unfinished_entries = true;
         }
-        // #3391: a terminal mark counts as delivered iff its emitted line
-        // survived the clamp by POSITION. `kept_count` is the number of leading
-        // emitted lines retained (the rest are replaced by the `…` marker), so
-        // exactly the first `kept_count` identities are delivered.
+        // #3391: report a terminal id iff its line is within this clamp's `kept_count` prefix.
         let delivered_terminal_ids = emitted
             .iter()
             .take(kept_count)
@@ -384,9 +365,7 @@ impl EmittedLine {
 
 /// #3391: true iff `line` ends with this slot's terminal mark (`marker` is the
 /// ✓/✗ the slot maps to, or `None` if it is not terminal). Used as the
-/// delivered-id honesty gate: a slot's identity is reported as delivered only
-/// when the user can actually SEE its mark on the rendered line. Fix 1 keeps
-/// this true for every terminal slot; the runtime check is the safety net.
+/// Render-local id gate: require the mark on this source line; downstream wire clamping is outside this check (#5348).
 fn line_shows_marker(line: &str, marker: Option<&str>) -> bool {
     match marker {
         Some(marker) => line.ends_with(marker),
@@ -463,19 +442,16 @@ fn render_completion_subagent_slot(slot: &SubagentSlot, indicator: &str) -> Stri
 
 /// #3391: returns the clamped section together with `kept_count` — the number
 /// of leading lines retained verbatim. Callers map emitted-line positions
-/// `< kept_count` to delivered terminal identities; positions beyond it were
-/// collapsed into the `…` marker and are NOT delivered.
+/// `< kept_count` to render-local terminal-id candidates; positions beyond it
+/// were collapsed into the `…` marker and are not reported.
 ///
 /// #3391 outer-truncation audit (fix 3): this clamp keeps WHOLE lines — it only
 /// joins a leading prefix `lines[..keep_count]` and never splits a kept line, so
 /// a retained terminal line's tail (its ✓/✗) survives intact. The only mid-line
 /// cut is the "not even the first line fits" fallback, which returns
-/// `kept_count == 0`, so nothing is reported delivered there. The downstream
-/// inline clamp in `compose_completion_footer_text_without_warning_with_limit`
-/// has a WIP-warning-path block budget (`message_limit - 6`) as low as 600
-/// UTF-16 units, not above this 600-byte source budget: `completion_footer_subtext`
-/// adds three units per non-empty line. The downstream clamp can therefore cut
-/// a retained terminal line's ✓/✗ tail after `kept_count` has already been fixed.
+/// `kept_count == 0`, so no candidate is reported there. Downstream, the WIP-warning path can have
+/// only `message_limit - 6 == 600` UTF-16 units; the 600-byte source grows by three units per line
+/// in `completion_footer_subtext`, so the inline clamp can cut a retained tail after this count.
 fn clamp_completion_task_section(task_section: &str) -> (String, usize) {
     let lines: Vec<&str> = task_section.lines().collect();
     if task_section.len() <= SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES {
@@ -492,7 +468,7 @@ fn clamp_completion_task_section(task_section: &str) -> (String, usize) {
     }
 
     // Not even the first full line fits: it is truncated mid-line, so no whole
-    // emitted line survived — `kept_count` is 0 and nothing is delivered.
+    // emitted line survived — `kept_count` is 0 and no candidate is reported.
     let first_line = lines.first().copied().unwrap_or_default();
     let first_line_budget = SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES
         .saturating_sub(TRUNCATION_MARKER.len())
