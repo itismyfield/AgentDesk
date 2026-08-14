@@ -377,7 +377,10 @@ time for diagnostics; neither is a stored approval value.
   `src/services/discord/inflight/removal.rs` (load-time prune + removal
   logging), `src/services/discord/inflight/clear_store/mod.rs` and
   `src/services/discord/inflight/clear_store/abandon.rs` (clear/abandon
-  store-side CAS paths).
+  store-side CAS paths). The #5071 T2 S1 precursor moves the turn-kind enums,
+  inflight identity, and serde adapters from `inflight/model.rs` to
+  `inflight/model/*.rs` (mechanical, non-behavioral); the facade re-exports and
+  persisted serde representation remain unchanged.
 - `.generation` writer contract (#5264):
 
   | Writer family | Spawn/adoption sites | Contract |
