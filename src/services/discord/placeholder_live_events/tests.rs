@@ -8495,6 +8495,103 @@ fn repair_fence_parity_treats_inner_fence_as_closer() {
     assert_eq!(fence_count(four) % 2, 0);
 }
 
+#[test]
+fn completion_footer_warning_clamp_keeps_terminal_line_tail_whole_5325() {
+    const WARNING_MARKER: &str = "⚠️ **턴을 완료하기 전에 커밋되지 않은 변경사항을 확인하세요.**";
+    let first = format!("└ first {} ✓", "a".repeat(480));
+    let second = format!("└ second {} ✗", "b".repeat(200));
+    let completion = format!("Tasks\n{first}\n{second}");
+    let warning = format!("{WARNING_MARKER}\n{}", "w".repeat(2_000));
+    let block = format!("{completion}\n\n{warning}");
+    let rendered_warning =
+        crate::services::discord::single_message_panel::completion_footer_subtext(&warning);
+    let bounded_warning =
+        crate::services::discord::turn_end_wip_warning::bounded_turn_end_wip_warning(
+            &rendered_warning,
+            1_392,
+        );
+    assert_eq!(
+        super::super::formatting::discord_message_units(&bounded_warning),
+        1_392
+    );
+
+    let wire = crate::services::discord::single_message_panel::compose_completion_footer_text(
+        "",
+        Some(&block),
+    );
+    let footer = wire
+        .split_once(&format!("\n\n-# {WARNING_MARKER}"))
+        .expect("bounded warning remains the final suffix")
+        .0;
+
+    assert!(footer.contains(&format!("-# {first}")));
+    assert!(
+        !footer.contains("second"),
+        "partial terminal line leaked: {footer}"
+    );
+    assert!(footer.ends_with('…'));
+    assert!(
+        footer
+            .lines()
+            .filter(|line| line.starts_with("-# └"))
+            .all(|line| line.ends_with('✓') || line.ends_with('✗'))
+    );
+}
+
+#[test]
+fn worktree_warning_preserves_literal_fence_path_and_suffix_5325() {
+    use crate::services::discord::inflight::InflightTurnState;
+    use crate::services::git::GitCommand;
+
+    if GitCommand::new().arg("--version").run_output().is_err() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("literal-fence worktree root");
+    let workspace = temp.path().join("```").join("repo");
+    std::fs::create_dir_all(&workspace).expect("literal-fence worktree");
+    GitCommand::new()
+        .repo(&workspace)
+        .arg("init")
+        .run_output()
+        .expect("git init");
+    std::fs::write(workspace.join("untracked.txt"), "dirty\n").expect("dirty fixture");
+    let mut state = InflightTurnState::new(
+        ProviderKind::Claude,
+        42,
+        None,
+        1,
+        2,
+        3,
+        "test".into(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    state.worktree_path = Some(workspace.display().to_string());
+
+    let warning =
+        crate::services::discord::turn_end_wip_warning::turn_end_wip_warning_text(Some(&state))
+            .expect("dirty worktree warning");
+    let escaped_path = workspace.display().to_string().replace('`', "\\`");
+    assert!(warning.contains(&format!("작업공간: `{escaped_path}`")));
+    assert!(warning.contains("파일 수:"));
+    assert!(warning.contains("커밋하거나 명시적으로 폐기하세요"));
+    assert!(
+        super::super::formatting::discord_message_units(&warning) < super::super::DISCORD_MSG_LIMIT
+    );
+
+    let merged = crate::services::discord::turn_end_wip_warning::merge_bounded_turn_end_wip_warning(
+        "x".repeat(2_000),
+        &warning,
+    );
+    assert!(
+        merged.ends_with(&warning),
+        "warning suffix was altered: {merged}"
+    );
+}
+
 /// #3394 (3): the in-turn LIVE panel routes through the protected truncation
 /// path. With bloated Tasks/Subagents PLUS a fenced Recent live block (the
 /// reported screenshot shape), the rendered panel stays under the limit and never

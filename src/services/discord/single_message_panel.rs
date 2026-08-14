@@ -188,7 +188,8 @@ fn compose_completion_footer_text_without_warning_with_limit(
         let body_budget =
             max_block_units.saturating_sub(super::formatting::discord_message_units(ellipsis));
         let safe_end = super::formatting::byte_index_at_discord_message_units(&block, body_budget);
-        repair_fence_parity(&format!("{}{}", &block[..safe_end], ellipsis))
+        let line_end = block[..safe_end].rfind('\n').map_or(0, |end| end + 1);
+        repair_fence_parity(&format!("{}{}", &block[..line_end], ellipsis))
     };
     if block.is_empty() {
         let safe_end = super::formatting::byte_index_at_discord_message_units(body, message_limit);

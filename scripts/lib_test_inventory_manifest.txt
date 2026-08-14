@@ -3242,6 +3242,7 @@ services::discord::placeholder_live_events::tests::completion_footer_slot_turnin
 services::discord::placeholder_live_events::tests::completion_footer_terminal_lines_clamped_out_of_budget_are_not_delivered
 services::discord::placeholder_live_events::tests::completion_footer_terminal_subagent_evicts_after_delivery_inflight_unaffected
 services::discord::placeholder_live_events::tests::completion_footer_undelivered_terminal_task_keeps_rendering_and_inflight_never_evicts
+services::discord::placeholder_live_events::tests::completion_footer_warning_clamp_keeps_terminal_line_tail_whole_5325
 services::discord::placeholder_live_events::tests::confirmed_task_notification_card_evicts_only_exact_terminal_footer_slot
 services::discord::placeholder_live_events::tests::events_from_json_captures_task_notification
 services::discord::placeholder_live_events::tests::events_from_json_filters_internal_cancellation_tool_error
@@ -3417,6 +3418,7 @@ services::discord::placeholder_live_events::tests::waiting_block_above_tasks_ren
 services::discord::placeholder_live_events::tests::waiting_block_renders_exactly_once_4860
 services::discord::placeholder_live_events::tests::waiting_task_subagent_combined_section_stays_within_budget_4860
 services::discord::placeholder_live_events::tests::workflow_completion_card_never_suppressed_because_footer_lacks_workflow_section
+services::discord::placeholder_live_events::tests::worktree_warning_preserves_literal_fence_path_and_suffix_5325
 services::discord::placeholder_live_events::turn_anchor::tests::blank_guild_omits_link
 services::discord::placeholder_live_events::turn_anchor::tests::id_zero_omits_link
 services::discord::placeholder_live_events::turn_anchor::tests::missing_guild_omits_link

@@ -470,12 +470,12 @@ fn render_completion_subagent_slot(slot: &SubagentSlot, indicator: &str) -> Stri
 /// joins a leading prefix `lines[..keep_count]` and never splits a kept line, so
 /// a retained terminal line's tail (its ✓/✗) survives intact. The only mid-line
 /// cut is the "not even the first line fits" fallback, which returns
-/// `kept_count == 0`, so nothing is reported delivered there. The single
-/// ordinary downstream unit-level clamp
-/// (`single_message_panel::clamp_footer_status_block`, ~1994 UTF-16 units against
-/// the Discord message ceiling) sits far above this 600-byte section budget.
-/// `compose_completion_footer_text` separately reserves any bounded WIP-warning
-/// suffix against the final wire budget.
+/// `kept_count == 0`, so nothing is reported delivered there. The downstream
+/// inline clamp in `compose_completion_footer_text_without_warning_with_limit`
+/// has a WIP-warning-path block budget (`message_limit - 6`) as low as 600
+/// UTF-16 units, not above this 600-byte source budget: `completion_footer_subtext`
+/// adds three units per non-empty line. That clamp now backs up to a newline
+/// after its unit cut, so it cannot split a retained terminal line's ✓/✗ tail.
 fn clamp_completion_task_section(task_section: &str) -> (String, usize) {
     let lines: Vec<&str> = task_section.lines().collect();
     if task_section.len() <= SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES {

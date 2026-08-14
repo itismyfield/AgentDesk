@@ -705,9 +705,9 @@ fn join_status_panel_sections(sections: &[String]) -> String {
     sections.join("\n\n")
 }
 
+/// #3394: on overflow, drop whole trailing sections; a lone overflowing section is unit-truncated, then fence-rebalanced, then gets a visible `...` marker appended after the rebalance.
 pub(super) fn truncate_status_panel_sections(mut sections: Vec<String>) -> String {
-    use crate::services::discord::formatting as fmt;
-    use crate::services::discord::single_message_panel::repair_fence_parity;
+    use super::super::{formatting as fmt, single_message_panel::repair_fence_parity};
     while sections.len() > 1
         && fmt::discord_message_units(&join_status_panel_sections(&sections))
             > STATUS_PANEL_MAX_CHARS

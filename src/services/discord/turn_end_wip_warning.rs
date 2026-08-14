@@ -113,7 +113,7 @@ fn format_turn_end_wip_warning(warning: &WipWarning) -> String {
          작업공간: `{}`\n\
          파일 수: 스테이징됨 {}개 · 스테이징 안 됨 {}개 · 추적되지 않음 {}개\n\
          턴을 끝내기 전에 변경사항을 커밋하거나 명시적으로 폐기하세요.",
-        warning.workspace.display(),
+        warning.workspace.display().to_string().replace('`', "\\`"),
         warning.staged.len(),
         warning.unstaged.len(),
         warning.untracked.len()
@@ -178,14 +178,12 @@ pub(in crate::services::discord) fn merge_turn_end_wip_warning(
 /// Appends the WIP warning while keeping the merged Discord payload bounded,
 /// trimming the completion surface before sacrificing the warning.
 ///
-/// Limitation: if the warning alone exceeds the payload budget, only its
-/// bounded prefix survives. That prefix has no truncation marker and may end
-/// inside the workspace inline-code span, losing its closing backtick, the file
-/// counts, and the commit-or-discard instruction. `repair_fence_parity` only
-/// repairs triple-backtick fences, not an unmatched inline backtick. For
-/// warnings produced by `turn_end_wip_warning_text`, this path also requires an
-/// existing directory; it is effectively unreachable under Darwin's shorter
-/// path ceiling but reachable under Linux's longer path ceiling.
+/// If the warning alone exceeds the budget, only an unmarked bounded prefix
+/// survives; it may lose the workspace's closing inline backtick, file counts,
+/// and commit-or-discard instruction because triple-fence repair does not fix
+/// an unmatched inline backtick. `turn_end_wip_warning_text` also requires an
+/// existing directory, making this effectively unreachable under Darwin's
+/// shorter path ceiling but reachable under Linux's longer one.
 pub(in crate::services::discord) fn merge_bounded_turn_end_wip_warning(
     completion_surface: String,
     warning: &str,
@@ -223,12 +221,9 @@ pub(in crate::services::discord) fn merge_bounded_turn_end_wip_warning(
 }
 
 /// Returns the longest warning prefix within `max_units`, repairing only
-/// triple-backtick fence parity after the unit cut.
-///
-/// This is a hard-size formatter, not a path shortener. On overflow it emits no
-/// truncation marker and does not preserve the warning's closing inline
-/// backtick, file-count summary, or commit-or-discard instruction when those
-/// fields fall beyond the retained prefix.
+/// triple-backtick parity after the unit cut. This is a hard-size formatter,
+/// not a path shortener: overflow has no marker and may lose the closing inline
+/// backtick, file counts, and commit-or-discard instruction.
 pub(in crate::services::discord) fn bounded_turn_end_wip_warning(
     warning: &str,
     max_units: usize,
@@ -241,11 +236,9 @@ pub(in crate::services::discord) fn bounded_turn_end_wip_warning(
 /// Separates a merged WIP warning from the completion block for independent
 /// final-wire budgeting.
 ///
-/// Metadata found after the warning boundary is moved into the non-warning
-/// return value. `compose_completion_footer_text` therefore intentionally emits
-/// any retained metadata before the warning, leaving the warning as the
-/// reserved final suffix instead of preserving the former
-/// warning-before-metadata wire order.
+/// Metadata after the warning boundary moves into the non-warning return value,
+/// so `compose_completion_footer_text` intentionally emits retained metadata
+/// before the reserved warning suffix, reversing the former wire order.
 pub(in crate::services::discord) fn split_merged_turn_end_wip_warning(
     completion_block: &str,
 ) -> Option<(String, String)> {
