@@ -4,6 +4,13 @@ pub(super) fn live_status_panel_shape(content: &str) -> bool {
     const PREFIXES: &[&str] = &[
         "🟢 진행 중",
         "🔧 도구 실행 중",
+        // `DerivedStatus::Running` renders through `freshness::render_last_tool`
+        // (added by #4907), so an active panel whose most recent line is the
+        // last-tool label — including the "(아직 없음)" fallback before any tool
+        // runs — is live and must classify as such. Omitting this prefix made
+        // `live_status_panel_shape` return false for a live Running panel, so the
+        // sweeper could treat it as a stale/legacy card.
+        "🔧 마지막 도구",
         "🧵 subagent 실행 중",
         "🧬 workflow 실행 중",
         "💤 monitor 대기",
