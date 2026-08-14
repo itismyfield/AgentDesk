@@ -29,17 +29,38 @@ EXPECTED_COMMANDS = (
 
 AGGREGATE_SELF_PROTECTION_COMMANDS = EXPECTED_COMMANDS[-2:]
 
+EXPECTED_HARDENING_SNIPPETS = (
+    '''unless execution_contract(script_check_execution, expected_script_check_execution)
+  expected = JSON.generate(canonical_yaml(expected_script_check_execution))
+  found = JSON.generate(canonical_yaml(script_check_execution))
+  warn "#{path}: Script checks aggregate effective execution changed; expected #{expected}; found #{found}"
+  exit 1
+end''',
+    '''unless execution_contract(writer_wiring_execution, expected_writer_wiring_execution)
+  expected = JSON.generate(canonical_yaml(expected_writer_wiring_execution))
+  found = JSON.generate(canonical_yaml(writer_wiring_execution))
+  warn "#{path}: writer gate aggregate wiring effective execution changed; expected #{expected}; found #{found}"
+  exit 1
+end''',
+)
+
 
 class WriterGateCiWiringTests(unittest.TestCase):
     def fixture_text(self) -> str:
         return "\n".join(("#!/usr/bin/env bash", *EXPECTED_COMMANDS, ""))
 
-    def run_process(self, text: str) -> subprocess.CompletedProcess[str]:
+    def run_process(
+        self, text: str, hardening_text: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             scripts = root / "scripts"
             scripts.mkdir()
             (scripts / "ci-script-checks.sh").write_text(text, encoding="utf-8")
+            (scripts / "check-ci-runner-hardening.sh").write_text(
+                hardening_text or "\n\n".join(EXPECTED_HARDENING_SNIPPETS) + "\n",
+                encoding="utf-8",
+            )
             return subprocess.run(
                 [sys.executable, str(SCRIPT), "--repo-root", str(root)],
                 text=True,
@@ -52,9 +73,24 @@ class WriterGateCiWiringTests(unittest.TestCase):
             tuple(invocation.command for invocation in guard.REQUIRED_INVOCATIONS),
             EXPECTED_COMMANDS,
         )
+        self.assertEqual(guard.REQUIRED_HARDENING_SNIPPETS, EXPECTED_HARDENING_SNIPPETS)
 
     def test_real_tree_passes(self) -> None:
         self.assertEqual(guard.check(REPO_ROOT), [])
+
+    def test_effective_execution_assertions_are_independently_pinned(self) -> None:
+        self.assertEqual(
+            guard.check_hardening_text("\n\n".join(EXPECTED_HARDENING_SNIPPETS)),
+            [],
+        )
+        for snippet in EXPECTED_HARDENING_SNIPPETS:
+            with self.subTest(snippet=snippet.splitlines()[0]):
+                mutated = "\n\n".join(
+                    candidate for candidate in EXPECTED_HARDENING_SNIPPETS if candidate != snippet
+                )
+                errors = guard.check_hardening_text(mutated)
+                self.assertTrue(errors)
+                self.assertIn("found 0", errors[0])
 
     def test_each_required_invocation_deletion_fails(self) -> None:
         baseline = self.fixture_text()
@@ -113,7 +149,10 @@ class WriterGateCiWiringTests(unittest.TestCase):
     def test_process_exit_code_maps_pass_and_failure(self) -> None:
         passing = self.run_process(self.fixture_text())
         self.assertEqual(passing.returncode, 0, passing.stderr)
-        self.assertIn("7 exact aggregate invocations protected", passing.stdout)
+        self.assertIn(
+            "7 exact aggregate invocations and 2 effective-execution assertions protected",
+            passing.stdout,
+        )
 
         command = EXPECTED_COMMANDS[4]
         failing = self.run_process(self.fixture_text().replace(f"{command}\n", "", 1))

@@ -1254,7 +1254,7 @@ jobs:
         run: ./scripts/required-check-mirror.sh
 
   scripts:
-    name: Script checks
+    name: Script checks runner
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -1326,8 +1326,13 @@ jobs:
           scripts/check-ci-runner-hardening.sh
 
       - name: Run script checks
+        shell: bash
         run: ./scripts/ci-script-checks.sh
         env:
+          # Keep the aggregate interpreter and non-interactive Bash startup
+          # behavior explicit at the protected step boundary.
+          BASH_ENV: /dev/null
+          PYTHON: python3
           # Required Script checks only run on protected PR candidates. Their
           # synthetic merge first parent is the exact immutable base snapshot.
           TEST_LANE_BASELINE_REF: HEAD^1
@@ -1358,6 +1363,49 @@ jobs:
           path: target/maintainability-audit.yaml
           if-no-files-found: ignore
           retention-days: 14
+
+  scripts_required_context:
+    name: Script checks
+    needs:
+      - changes
+      - scripts
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin the shared result primitive out-of-band before running structural
+      # checks. Intentional helper edits must update this value, the independent
+      # relay-authority backstop below, and check-ci-runner-hardening.sh together.
+      - name: Verify Script checks mirror contract (#5321)
+        env:
+          BASH_ENV: /dev/null
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          expected=57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d
+          actual="$(sha256sum scripts/required-check-mirror.sh | cut -d ' ' -f 1)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error file=scripts/required-check-mirror.sh::content hash mismatch: expected $expected, found $actual; review the helper and update all three #5321 pins together"
+            exit 1
+          fi
+          scripts/check-ci-runner-hardening.sh
+          python3 scripts/check_writer_gate_ci_wiring.py
+
+      # Keep the branch-protection context on an unconditional result mirror.
+      # required-check-mirror.sh fails closed when either `changes` or the
+      # execution job is skipped, failed, or cancelled, regardless of which
+      # upstream primitive caused that result.
+      - name: Mirror script checks result for branch protection
+        env:
+          BASH_ENV: /dev/null
+          PYTHON: python3
+          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
+          FILTER_NAME: scripts
+          FILTER_OUTPUT: true
+          UPSTREAM_JOB_NAME: scripts
+          UPSTREAM_RESULT: ${{ needs.scripts.result }}
+        run: ./scripts/required-check-mirror.sh
 
   # #5071 T0: this required-context candidate is intentionally unconditional.
   # Its version-controlled manifest names every current T1-T5 contract target,
@@ -1418,6 +1466,23 @@ jobs:
         shell: bash
         timeout-minutes: 30
         run: bash scripts/run_relay_authority_mutations.sh
+
+      # Independent out-of-band backstop: a conditional helper mutation still
+      # changes bytes and must fail this required, unconditional context.
+      - name: Pin required-check mirror content (#5321)
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          expected=57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d
+          actual="$(sha256sum scripts/required-check-mirror.sh | cut -d ' ' -f 1)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error file=scripts/required-check-mirror.sh::content hash mismatch: expected $expected, found $actual; review the helper and update all three #5321 pins together"
+            exit 1
+          fi
 
       - name: sccache stats
         if: always()

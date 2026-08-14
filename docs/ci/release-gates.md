@@ -225,7 +225,7 @@ bytewise UTF-8 오름차순이어야 하고, 파일은 UTF-8/LF/최종 LF 형식
   함께 리뷰해야 한다.
 
 `--verify-lib-inventory`는 `cargo test --manifest-path Cargo.toml --lib -- --list`를
-실행하므로 전체 lib 크레이트 컴파일이 필요하다. 이를 호출하는 PR `Script checks`와
+실행하므로 전체 lib 크레이트 컴파일이 필요하다. 이를 호출하는 PR `Script checks runner`와
 main `Main script checks` job은 모두 Rust 1.94.1 toolchain, sccache, Cargo dependency
 cache를 먼저 설치한다. 이 wiring을 바꾸면 해당 workflow setup과 이 문서의 재현 명령을
 함께 검토한다.
@@ -324,7 +324,7 @@ high_risk_recovery: # ci-pr.yml only additions
 ### Script checks Python runtime
 
 - `scripts/ci-script-checks.sh` 는 Python 3.11+ 를 최소 런타임으로 요구한다. 이는 `tomllib` 같은 Python 3.11 표준 라이브러리 사용과 `scripts/audit_maintainability.py` 정책에 맞춘다.
-- CI 의 `Script checks` 계열 job 은 `actions/setup-python` 으로 Python 3.11 을 명시적으로 설치한다.
+- CI의 PR `Script checks runner`와 main `Main script checks` job은 `actions/setup-python`으로 Python 3.11을 명시적으로 설치한다.
 - 로컬에서 `python3` 이 3.10 이하이면 `PYTHON=/path/to/python3.11 ./scripts/ci-script-checks.sh` 로 같은 정책을 재현한다. 지원하지 않는 Python 은 check 본문 실행 전에 명확한 오류로 실패해야 한다.
 
 ## 3. High-risk recovery lane test axes

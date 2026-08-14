@@ -168,21 +168,87 @@ time for diagnostics; neither is a stored approval value.
   byte-for-byte as complete, unindented lines. Intentional spelling changes
   such as `"$PYTHON"` to `"${PYTHON}"`, line-continuation refactors, or trailing
   comments require synchronized updates to `REQUIRED_INVOCATIONS` and
-  `tests/test_writer_gate_ci_wiring.py` fixtures. The external `Script checks`
+  `tests/test_writer_gate_ci_wiring.py` fixtures. The external `Script checks runner`
   protection step pins those aggregate lines. The aggregate hardening and
   fast-wiring unittest lines inspect the external step. The static invocation
   chain ends if one diff removes that external step and both aggregate
   self-protection lines together; it does not extend to branch protection.
 - non_guarantees: the checker is not a shell parser. A required line kept at
   column zero inside an `if` or function still satisfies the textual contract,
-  so unconditional execution is not established. The hardening guard also
-  does not pin `env:` on the workflow's `Run script checks` step; that surface
-  can supply a switch consumed by surrounding shell control flow.
+  so unconditional execution is not established. The hardening guard owns the
+  workflow execution contract; this checker only byte-pins its two assertion
+  blocks.
 - tests: `tests/test_writer_gate_ci_wiring.py` builds temporary aggregate
   fixtures and requires a nonzero process exit for deletion of each aggregate
   self-protection line. `tests/test_fast_check_ci_wiring.py` mutation-tests the
   external workflow-step contract.
 - related_issues: #5308.
+
+### `script_checks_effective_execution_contract`
+
+- canonical_modules: `scripts/check-ci-runner-hardening.sh` parses `.github/workflows/ci-pr.yml`,
+  pins the calculated execution surface of the `jobs.scripts`
+  writer-protection/aggregate pair, and verifies the SHA-256 of
+  `scripts/required-check-mirror.sh`. The required `Script checks` publisher
+  and the unconditional required `relay-authority-contract` job independently
+  compare the same helper digest immediately after checkout. The helper's
+  behavior tests remain useful regressions, but byte identity is primary:
+  environment, step-instance, argv0, and unconditional-success branches all
+  change the pinned file bytes.
+- fixed surfaces: the `Script checks` publisher has exactly checkout,
+  contract, and result-mirror steps; its `name`, `needs: [changes, scripts]`,
+  `if: always()`, `runs-on`, checkout provenance, and absence of job-level
+  `defaults`/`env`/`environment`/`strategy`/`container` are pinned.
+  Its source-byte range is also hashed, so YAML scalar tags and styles remain in
+  the comparison; Psych cannot erase an explicit tag such as `!!binary` or
+  equate YAML 1.1 spellings such as `yes` and `012` with the intended
+  Actions scalars. Plain YAML-boolean-like job IDs fail closed, while quoted
+  `"yes"` remains a valid string job ID. The relay job's semantic hash and
+  explicit step registry pin its absent `needs`/`if`, non-matrix shape, and
+  content-hash backstop.
+- aggregate execution: the calculator records shell/working-directory
+  candidates, environment scopes, `runs-on`, prior recognized file writes, and
+  the selected
+  effective values. The protection pair is fixed at indices `[8, 9]` with no
+  interstitial step. Inventory drift reports expected and observed indices
+  separately from other execution-surface failures, and a dedicated malicious
+  pre-pair overwrite fixture prevents an index shift from masquerading as the
+  asserted attack.
+- update procedure: treat `scripts/required-check-mirror.sh` as a redline. For
+  an intentional reviewed edit, run
+  `shasum -a 256 scripts/required-check-mirror.sh`, replace the old digest in
+  the gate plus both workflow backstops (three production pins total), sync the
+  test fixture's expected digest, then run
+  `scripts/check-ci-runner-hardening.sh` and
+  `python3 -m unittest tests.test_fast_check_ci_wiring`. A digest-only edit
+  with unchanged helper bytes is red; changing the helper first is red until
+  all three reviewed pins agree.
+- tests: permanent fixtures cover the historical environment, `GITHUB_ACTION`,
+  argv0, and unconditional-`exit 0` attacks; one-byte helper
+  and digest-only mutations; mirror defaults/env/environment/strategy/container
+  and checkout provenance; relay needs/if/matrix; exact aggregate inventory;
+  YAML boolean-like keys; Psych resolution splits including `!!binary`; and
+  deletion of each independent aggregate-defense assertion. Skipped, failed,
+  and cancelled mirror results still fail closed.
+- threat model — covered: any helper tamper whose bytes differ from the reviewed
+  digest, including conditionally activated code; changes to the fixed
+  publisher surface; the registered relay job surface; and the enumerated
+  aggregate execution inputs above. Hashes are review triggers, so an
+  intentional helper change plus all three digest updates is accepted only as a
+  visible coordinated diff.
+- threat model — not covered: branch protection and hosted-runner policy;
+  compromise of the runner, checkout action, or hashing tool; a coordinated
+  edit of repository-local guards and their pins; or successful-but-different
+  execution outside the declared snapshots. For `jobs.scripts`, N1′ in-place
+  edits to earlier steps are outside the snapshot except for the narrow
+  mechanical scan of quoted writes on `run` lines whose final shell operation
+  is a redirect to `$GITHUB_ENV` or `$GITHUB_PATH`. N1b checkout
+  `repository:` overrides in that runner job, N3 steps after the protected
+  pair, `container`, `timeout-minutes`, `strategy`, `environment`, and
+  pull-request subfilters such as `paths-ignore` are likewise not guaranteed.
+  The result mirror detects skipped/failed/cancelled upstream jobs; it cannot
+  prove that an upstream success used the intended semantics.
+- related_issues: #5308, #5321.
 
 ### `ci_failure_classification`
 
@@ -377,10 +443,7 @@ time for diagnostics; neither is a stored approval value.
   `src/services/discord/inflight/removal.rs` (load-time prune + removal
   logging), `src/services/discord/inflight/clear_store/mod.rs` and
   `src/services/discord/inflight/clear_store/abandon.rs` (clear/abandon
-  store-side CAS paths). The #5071 T2 S1 precursor moves the turn-kind enums,
-  inflight identity, and serde adapters from `inflight/model.rs` to
-  `inflight/model/*.rs` (mechanical, non-behavioral); the facade re-exports and
-  persisted serde representation remain unchanged.
+  store-side CAS paths).
 - `.generation` writer contract (#5264):
 
   | Writer family | Spawn/adoption sites | Contract |

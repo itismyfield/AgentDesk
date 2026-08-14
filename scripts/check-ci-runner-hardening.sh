@@ -8,6 +8,24 @@ error() {
   fail=1
 }
 
+readonly REQUIRED_CHECK_MIRROR_SHA256="57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
+
+verify_required_check_mirror_hash() {
+  local helper="scripts/required-check-mirror.sh"
+  local actual
+  if [ ! -f "$helper" ]; then
+    error "missing $helper"
+    return
+  fi
+  if ! actual="$(ruby -rdigest -e 'print Digest::SHA256.file(ARGV.fetch(0)).hexdigest' "$helper")"; then
+    error "cannot hash $helper"
+    return
+  fi
+  if [ "$actual" != "$REQUIRED_CHECK_MIRROR_SHA256" ]; then
+    error "$helper content hash mismatch: expected $REQUIRED_CHECK_MIRROR_SHA256, found $actual; review the helper and update all three #5321 pins together"
+  fi
+}
+
 validate_pr_debug_envs() {
   if ! command -v ruby >/dev/null 2>&1; then
     error "ruby is required to validate $pr_workflow structurally"
@@ -16,10 +34,10 @@ validate_pr_debug_envs() {
 
   # Parse the workflow as YAML instead of slicing it as text. That keeps
   # quoted job IDs, flow mappings, escaped keys, and sibling job mappings from
-  # satisfying a different job's requirement. Each protected cargo step must
-  # also pin the exact values, disable BASH_ENV startup hooks, and retain the
-  # exact command inventory; all other step-level copies are rejected.
-  if ! ruby - "$pr_workflow" <<'RUBY'
+  # satisfying a different job's requirement. The execution contract below
+  # resolves the shell/env precedence chain for each protected Script checks
+  # step before comparing the complete calculated surface.
+  if ! ruby - "$pr_workflow" "$REQUIRED_CHECK_MIRROR_SHA256" <<'RUBY'
 require "yaml"
 require "json"
 require "digest"
@@ -40,15 +58,218 @@ def canonical_yaml(value)
   end
 end
 
+def normalize_required_check_pin(value)
+  case value
+  when Hash
+    value.transform_values { |item| normalize_required_check_pin(item) }
+  when Array
+    value.map { |item| normalize_required_check_pin(item) }
+  when String
+    value.sub(/expected=[0-9a-f]{64}/, "expected=<required-check-mirror-sha256>")
+  else
+    value
+  end
+end
+
+# Preserve scalar lexemes exactly as GitHub's YAML 1.2-facing workflow surface
+# sees them. Psych's YAML 1.1 resolver turns `yes` into true and `012` into 10;
+# comparing those resolved Ruby values would accept a different Actions value.
+def raw_yaml_node(node)
+  case node
+  when Psych::Nodes::Mapping
+    node.children.each_slice(2).each_with_object({}) do |(key, value), mapped|
+      unless key.is_a?(Psych::Nodes::Scalar)
+        raise "mapping keys must be scalar"
+      end
+      mapped[key.value] = raw_yaml_node(value)
+    end
+  when Psych::Nodes::Sequence
+    node.children.map { |item| raw_yaml_node(item) }
+  when Psych::Nodes::Scalar
+    node.value
+  else
+    raise "unsupported YAML node: #{node.class}"
+  end
+end
+
+# Pin a top-level job's exact source bytes so scalar tags and styles remain part
+# of the contract instead of disappearing during Psych value resolution.
+def raw_job_source(path, key_node)
+  lines = File.binread(path).lines
+  start_line = key_node.start_line
+  end_line = ((start_line + 1)...lines.length).find do |index|
+    lines[index].match?(/\A  (?:[A-Za-z0-9_-]+|["'][^"']+["']):[ \t]*(?:#.*)?(?:\r?\n)?\z/)
+  end || lines.length
+  selected = lines[start_line...end_line]
+  selected.pop while selected.last&.match?(/\A(?:[ \t]*|  #.*)(?:\r?\n)?\z/)
+  selected.join
+end
+
+def string_map(value)
+  return {} unless value.is_a?(Hash)
+
+  value.each_with_object({}) do |(key, item), mapped|
+    mapped[key.to_s] = item
+  end
+end
+
+def nested_value(value, *keys)
+  keys.reduce(value) do |current, key|
+    current.is_a?(Hash) ? current[key] : nil
+  end
+end
+
+def default_shell_for(runs_on)
+  runs_on.to_s.match?(/windows/i) ? "pwsh" : "bash"
+end
+
+def shell_candidates(document, job, step)
+  {
+    "step" => step.key?("shell") ? step["shell"] : nil,
+    "job_defaults" => nested_value(job, "defaults", "run", "shell"),
+    "workflow_defaults" => nested_value(document, "defaults", "run", "shell"),
+    "runner_default" => default_shell_for(job["runs-on"]),
+  }
+end
+
+def working_directory_candidates(document, job, step)
+  {
+    "step" => step.key?("working-directory") ? step["working-directory"] : nil,
+    "job_defaults" => nested_value(job, "defaults", "run", "working-directory"),
+    "workflow_defaults" => nested_value(document, "defaults", "run", "working-directory"),
+  }
+end
+
+def effective_shell(candidates)
+  candidates.fetch("step") || candidates.fetch("job_defaults") ||
+    candidates.fetch("workflow_defaults") || candidates.fetch("runner_default")
+end
+
+def effective_working_directory(candidates)
+  candidates.fetch("step") || candidates.fetch("job_defaults") ||
+    candidates.fetch("workflow_defaults")
+end
+
+def protected_step_inventory(steps)
+  protected_names = [
+    "Protect writer gate aggregate wiring (#5308)",
+    "Run script checks",
+  ]
+  protected_indices = protected_names.map do |name|
+    steps.each_index.find { |index| steps[index].is_a?(Hash) && steps[index]["name"] == name }
+  end
+  between = if protected_indices.length == 2 && protected_indices.all?
+    first, second = protected_indices
+    first < second ? steps[(first + 1)...second].map { |step| canonical_yaml(step) } : nil
+  end
+  {
+    "protected_indices" => protected_indices,
+    "steps_between_protected" => between || ["<invalid protected-step order>"],
+  }
+end
+
+def quoted_outputs(run)
+  return [] unless run.is_a?(String)
+
+  run.scan(/["']([^"']*)["']/).flatten
+end
+
+def runtime_writes(run, marker)
+  return [] unless run.is_a?(String)
+
+  escaped_marker = Regexp.escape(marker)
+  redirect = /(?:>>|>)\s*["']?\$(?:\{#{escaped_marker}\}|#{escaped_marker})["']?(?:\s*(?:#.*)?)?\z/
+  write_lines = run.lines.select { |line| line.strip.match?(redirect) }
+  return [] if write_lines.empty?
+
+  outputs = quoted_outputs(write_lines.join)
+  if marker == "GITHUB_ENV"
+    outputs = outputs.select { |output| output.match?(/\A[A-Za-z_][A-Za-z0-9_]*=/) }
+  else
+    outputs = outputs.reject { |output| output.include?("GITHUB_PATH") }
+  end
+  outputs = ["<unparsed write>"] if outputs.empty?
+  outputs.map do |output|
+    if marker == "GITHUB_ENV" && output.match?(/\A[A-Za-z_][A-Za-z0-9_]*=/)
+      key, value = output.split("=", 2)
+      {"key" => key, "value" => value}
+    elsif marker == "GITHUB_PATH"
+      {"path" => output}
+    else
+      {"unparsed" => output}
+    end
+  end
+end
+
+def effective_execution(document, job_id, step_index)
+  jobs = document.fetch("jobs")
+  job = jobs.fetch(job_id)
+  steps = Array(job["steps"])
+  step = steps.fetch(step_index)
+  workflow_env = string_map(document["env"])
+  job_env = string_map(job["env"])
+  env = workflow_env.merge(job_env)
+  env_writes = []
+  path_writes = []
+
+  steps[0...step_index].each_with_index do |prior_step, prior_index|
+    next unless prior_step.is_a?(Hash)
+
+    runtime_writes(prior_step["run"], "GITHUB_ENV").each do |write|
+      env_writes << {"step" => prior_index, "write" => write}
+      if write["key"]
+        env[write["key"]] = write["value"]
+      end
+    end
+    runtime_writes(prior_step["run"], "GITHUB_PATH").each do |write|
+      path_writes << {"step" => prior_index, "write" => write}
+    end
+  end
+  unless path_writes.empty?
+    env["PATH"] = path_writes.map { |event| event.dig("write", "path") || "<unparsed>" }.join(":")
+  end
+  step_env = string_map(step["env"])
+  effective_env = env.merge(step_env)
+  candidates = shell_candidates(document, job, step)
+  working_directory = working_directory_candidates(document, job, step)
+  {
+    "runs-on" => job["runs-on"],
+    "protected_step_inventory" => protected_step_inventory(steps),
+    "shell_candidates" => candidates,
+    "effective_shell" => effective_shell(candidates),
+    "working_directory_candidates" => working_directory,
+    "effective_working_directory" => effective_working_directory(working_directory),
+    "workflow_env" => workflow_env,
+    "job_env" => job_env,
+    "step_env" => step_env,
+    "runtime_env_writes" => env_writes,
+    "runtime_path_writes" => path_writes,
+    "effective_env" => effective_env,
+  }
+end
+
+def execution_contract(snapshot, expected)
+  canonical_yaml(snapshot) == canonical_yaml(expected)
+end
+
 path = ARGV.fetch(0)
+helper_sha256 = ARGV.fetch(1)
 begin
   document = YAML.load_file(path)
+  yaml_root = Psych.parse_file(path).root
+  raw_document = raw_yaml_node(yaml_root)
 rescue StandardError => error
   warn "#{path}: cannot parse YAML: #{error.message}"
   exit 1
 end
 
 jobs = document.is_a?(Hash) ? document["jobs"] : nil
+raw_jobs = raw_document.is_a?(Hash) ? raw_document["jobs"] : nil
+jobs_node = if yaml_root.is_a?(Psych::Nodes::Mapping)
+  yaml_root.children.each_slice(2).find do |key_node, _value_node|
+    key_node.is_a?(Psych::Nodes::Scalar) && key_node.value == "jobs"
+  end&.last
+end
 unless jobs.is_a?(Hash)
   warn "#{path}: jobs must be a YAML mapping"
   exit 1
@@ -79,42 +300,150 @@ unless trigger_events == ["pull_request"]
   exit 1
 end
 
-# The required Script checks job is intentionally high-churn: concurrent lanes
+# The Script checks execution job is intentionally high-churn: concurrent lanes
 # regularly add gates to its step inventory. Protect only the job and aggregate
-# step fields that can silently disable the required context, rather than
-# whole-job hashing that would force unrelated hash re-pins for every new check.
+# step fields that can silently disable execution, rather than whole-job hashing
+# that would force unrelated hash re-pins for every new check. Its required
+# branch-protection context is published by the separate result mirror below.
 script_checks_job = jobs["scripts"]
 unless script_checks_job.is_a?(Hash)
-  warn "#{path}: Script checks job (scripts) must be a YAML mapping"
+  warn "#{path}: Script checks runner job (scripts) must be a YAML mapping"
   exit 1
 end
 if script_checks_job.key?("if")
-  warn "#{path}: Script checks job must not define a job-level if condition"
+  warn "#{path}: Script checks runner job must not define a job-level if condition"
   exit 1
 end
 if script_checks_job["continue-on-error"]
-  warn "#{path}: Script checks job must not be allowed to continue on error"
+  warn "#{path}: Script checks runner job must not be allowed to continue on error"
   exit 1
 end
 script_checks_needs = script_checks_job["needs"]
 unless script_checks_needs == "changes" || script_checks_needs == ["changes"]
-  warn "#{path}: Script checks job must retain exact needs: changes"
+  warn "#{path}: Script checks runner job must retain exact needs: changes"
+  exit 1
+end
+
+changes_job = jobs["changes"]
+unless changes_job.is_a?(Hash)
+  warn "#{path}: changes job must exist for the Script checks result mirror"
+  exit 1
+end
+
+# The required Script checks context is an unconditional result mirror. It
+# reads both upstream results and delegates the fail-closed skipped/failure
+# policy to required-check-mirror.sh. The mirror is a single fixed node, so its
+# complete job and step surface is pinned below; no alternate execution surface
+# is permitted to hide behind the result policy.
+script_checks_context_job = jobs["scripts_required_context"]
+unless script_checks_context_job.is_a?(Hash)
+  warn "#{path}: Script checks required-context mirror job must be a YAML mapping"
+  exit 1
+end
+expected_mirror_step = {
+  "name" => "Mirror script checks result for branch protection",
+  "env" => {
+    "BASH_ENV" => "/dev/null",
+    "PYTHON" => "python3",
+    "CHANGED_PATHS_RESULT" => "${{ needs.changes.result }}",
+    "FILTER_NAME" => "scripts",
+    "FILTER_OUTPUT" => "true",
+    "UPSTREAM_JOB_NAME" => "scripts",
+    "UPSTREAM_RESULT" => "${{ needs.scripts.result }}",
+  },
+  "run" => "./scripts/required-check-mirror.sh",
+}
+expected_mirror_contract_step = {
+  "name" => "Verify Script checks mirror contract (#5321)",
+  "env" => {"BASH_ENV" => "/dev/null"},
+  "shell" => "bash",
+  "timeout-minutes" => 10,
+  "run" => [
+    "expected=#{helper_sha256}",
+    'actual="$(sha256sum scripts/required-check-mirror.sh | cut -d \' \' -f 1)"',
+    'if [ "$actual" != "$expected" ]; then',
+    '  echo "::error file=scripts/required-check-mirror.sh::content hash mismatch: expected $expected, found $actual; review the helper and update all three #5321 pins together"',
+    "  exit 1",
+    "fi",
+    "scripts/check-ci-runner-hardening.sh",
+    "python3 scripts/check_writer_gate_ci_wiring.py",
+  ].join("\n") + "\n",
+}
+expected_mirror_steps = [
+  {"uses" => "actions/checkout@v4"},
+  expected_mirror_contract_step,
+  expected_mirror_step,
+]
+expected_mirror_job = {
+  "name" => "Script checks",
+  "needs" => ["changes", "scripts"],
+  "if" => "always()",
+  "runs-on" => "ubuntu-latest",
+  "steps" => expected_mirror_steps,
+}
+unless expected_mirror_job.reject { |key, _| key == "steps" }.all? do |key, value|
+  script_checks_context_job[key] == value
+end
+  warn "#{path}: Script checks required-context mirror must retain its exact job wiring"
+  exit 1
+end
+if script_checks_context_job["continue-on-error"]
+  warn "#{path}: Script checks required-context mirror must not continue on error"
+  exit 1
+end
+mirror_steps = Array(script_checks_context_job["steps"]).select do |step|
+  step.is_a?(Hash) && step["name"] == "Mirror script checks result for branch protection"
+end
+unless mirror_steps.length == 1
+  warn "#{path}: Script checks required-context mirror must retain exactly one result-mirror step"
+  exit 1
+end
+mirror_step = mirror_steps.fetch(0)
+normalized_mirror_step = canonical_yaml(mirror_step)
+if normalized_mirror_step.dig("env", "FILTER_OUTPUT")
+  normalized_mirror_step["env"]["FILTER_OUTPUT"] =
+    normalized_mirror_step["env"]["FILTER_OUTPUT"].to_s
+end
+unless normalized_mirror_step == expected_mirror_step
+  warn "#{path}: Script checks result-mirror step must retain the exact fail-closed wiring"
+  exit 1
+end
+raw_mirror_job = raw_jobs.is_a?(Hash) ? raw_jobs["scripts_required_context"] : nil
+expected_raw_mirror_job = canonical_yaml(expected_mirror_job)
+expected_raw_mirror_job["steps"][1]["timeout-minutes"] = "10"
+unless raw_mirror_job == expected_raw_mirror_job
+  warn "#{path}: Script checks required-context mirror must retain the exact fixed job surface (raw YAML scalars; defaults/env/environment/strategy/container and three-step checkout/contract/mirror inventory)"
+  exit 1
+end
+mirror_key_node = if jobs_node.is_a?(Psych::Nodes::Mapping)
+  jobs_node.children.each_slice(2).find do |key_node, _value_node|
+    key_node.is_a?(Psych::Nodes::Scalar) && key_node.value == "scripts_required_context"
+  end&.first
+end
+mirror_source = mirror_key_node && raw_job_source(path, mirror_key_node)
+mirror_source = mirror_source&.sub(
+  /expected=[0-9a-f]{64}/,
+  "expected=<required-check-mirror-sha256>",
+)
+mirror_source_sha256 = mirror_source && Digest::SHA256.hexdigest(mirror_source)
+unless mirror_source_sha256 == "6e5f51dd0841453a8491ce6faab27894f006c3fe659090cf3564b86ab9937bef"
+  warn "#{path}: Script checks required-context source bytes changed (scalar tags/styles and exact three-step surface are pinned); found #{mirror_source_sha256 || '<missing>'}"
   exit 1
 end
 script_check_steps = Array(script_checks_job["steps"]).select do |step|
   step.is_a?(Hash) && step["name"] == "Run script checks"
 end
 unless script_check_steps.length == 1
-  warn "#{path}: Script checks job must retain exactly one \"Run script checks\" step"
+  warn "#{path}: Script checks runner job must retain exactly one \"Run script checks\" step"
   exit 1
 end
 script_check_step = script_check_steps.fetch(0)
 if script_check_step.key?("if")
-  warn "#{path}: Script checks job \"Run script checks\" step must not define if"
+  warn "#{path}: Script checks runner job \"Run script checks\" step must not define if"
   exit 1
 end
 if script_check_step["continue-on-error"]
-  warn "#{path}: Script checks job \"Run script checks\" step must not continue on error"
+  warn "#{path}: Script checks runner job \"Run script checks\" step must not continue on error"
   exit 1
 end
 script_check_commands = if script_check_step["run"].is_a?(String)
@@ -123,7 +452,7 @@ else
   []
 end
 unless script_check_commands == ["./scripts/ci-script-checks.sh"]
-  warn "#{path}: Script checks job \"Run script checks\" step must run exactly ./scripts/ci-script-checks.sh"
+  warn "#{path}: Script checks runner job \"Run script checks\" step must run exactly ./scripts/ci-script-checks.sh"
   exit 1
 end
 
@@ -140,7 +469,7 @@ writer_wiring_steps = Array(script_checks_job["steps"]).select do |step|
   step.is_a?(Hash) && step["name"] == "Protect writer gate aggregate wiring (#5308)"
 end
 unless writer_wiring_steps.length == 1
-  warn "#{path}: Script checks job must retain exactly one writer gate aggregate wiring step"
+  warn "#{path}: Script checks runner job must retain exactly one writer gate aggregate wiring step"
   exit 1
 end
 writer_wiring_step = writer_wiring_steps.fetch(0)
@@ -164,6 +493,111 @@ expected_writer_wiring_commands = [
 ]
 unless writer_wiring_commands == expected_writer_wiring_commands
   warn "#{path}: writer gate aggregate wiring step must retain the exact external protection command list"
+  exit 1
+end
+
+# This is one calculated contract, not one assertion per environment key. The
+# expected workflow environment is copied from the parsed CI PR workflow so a
+# mutation at any contributing scope changes the observed execution surface.
+expected_workflow_env = {
+  "CARGO_TERM_COLOR" => "always",
+  "RUSTC_WRAPPER" => "sccache",
+  "SCCACHE_CACHE_SIZE" => "10G",
+  "SCCACHE_GHA_ENABLED" => "true",
+  "SCCACHE_GHA_RW_MODE" => "${{ github.event_name == 'pull_request' && 'READ_ONLY' || 'READ_WRITE' }}",
+  "POSTGRES_SERVICE_IMAGE" => "${{ vars.AGENTDESK_POSTGRES_SERVICE_IMAGE }}",
+}
+script_check_step_index = Array(script_checks_job["steps"]).index(script_check_step)
+script_check_execution = effective_execution(
+  document,
+  "scripts",
+  script_check_step_index,
+)
+expected_script_check_execution = {
+  "runs-on" => "ubuntu-latest",
+  "protected_step_inventory" => {
+    "protected_indices" => [8, 9],
+    "steps_between_protected" => [],
+  },
+  "shell_candidates" => {
+    "step" => "bash",
+    "job_defaults" => nil,
+    "workflow_defaults" => nil,
+    "runner_default" => "bash",
+  },
+  "effective_shell" => "bash",
+  "working_directory_candidates" => {
+    "step" => nil,
+    "job_defaults" => nil,
+    "workflow_defaults" => nil,
+  },
+  "effective_working_directory" => nil,
+  "workflow_env" => expected_workflow_env,
+  "job_env" => {},
+  "step_env" => {
+    "BASH_ENV" => "/dev/null",
+    "PYTHON" => "python3",
+    "TEST_LANE_BASELINE_REF" => "HEAD^1",
+  },
+  "runtime_env_writes" => [],
+  "runtime_path_writes" => [],
+  "effective_env" => expected_workflow_env.merge(
+    "BASH_ENV" => "/dev/null",
+    "PYTHON" => "python3",
+    "TEST_LANE_BASELINE_REF" => "HEAD^1",
+  ),
+}
+unless script_check_execution["protected_step_inventory"] == expected_script_check_execution["protected_step_inventory"]
+  warn "#{path}: Script checks protected step inventory changed; expected indices [8, 9] with no interstitial steps, found #{JSON.generate(script_check_execution["protected_step_inventory"])}"
+  exit 1
+end
+unless execution_contract(script_check_execution, expected_script_check_execution)
+  expected = JSON.generate(canonical_yaml(expected_script_check_execution))
+  found = JSON.generate(canonical_yaml(script_check_execution))
+  warn "#{path}: Script checks aggregate effective execution changed; expected #{expected}; found #{found}"
+  exit 1
+end
+
+writer_wiring_step_index = Array(script_checks_job["steps"]).index(writer_wiring_step)
+writer_wiring_execution = effective_execution(
+  document,
+  "scripts",
+  writer_wiring_step_index,
+)
+expected_writer_wiring_execution = {
+  "runs-on" => "ubuntu-latest",
+  "protected_step_inventory" => {
+    "protected_indices" => [8, 9],
+    "steps_between_protected" => [],
+  },
+  "shell_candidates" => {
+    "step" => "bash",
+    "job_defaults" => nil,
+    "workflow_defaults" => nil,
+    "runner_default" => "bash",
+  },
+  "effective_shell" => "bash",
+  "working_directory_candidates" => {
+    "step" => nil,
+    "job_defaults" => nil,
+    "workflow_defaults" => nil,
+  },
+  "effective_working_directory" => nil,
+  "workflow_env" => expected_workflow_env,
+  "job_env" => {},
+  "step_env" => {},
+  "runtime_env_writes" => [],
+  "runtime_path_writes" => [],
+  "effective_env" => expected_workflow_env,
+}
+unless writer_wiring_execution["protected_step_inventory"] == expected_writer_wiring_execution["protected_step_inventory"]
+  warn "#{path}: Script checks protected step inventory changed; expected indices [8, 9] with no interstitial steps, found #{JSON.generate(writer_wiring_execution["protected_step_inventory"])}"
+  exit 1
+end
+unless execution_contract(writer_wiring_execution, expected_writer_wiring_execution)
+  expected = JSON.generate(canonical_yaml(expected_writer_wiring_execution))
+  found = JSON.generate(canonical_yaml(writer_wiring_execution))
+  warn "#{path}: writer gate aggregate wiring effective execution changed; expected #{expected}; found #{found}"
   exit 1
 end
 
@@ -359,7 +793,10 @@ targets = {
     "runs_on" => "ubuntu-latest",
     # #5071 registers this unconditional candidate in the existing semantic
     # hardening registry so order-independent job keys cannot disable it silently.
-    "job_sha256" => "20faba743fc3c5007680dba1c5b78938d6a82922c9ef879cbe45c043c1a2ee95",
+    # #5321 re-pins after replacing in-band mirror observers with one protected
+    # out-of-band content-hash backstop.
+    "job_sha256" => "650ff5b00daeb659568ebdc807febcc8594a9fd92bf4cacad69636cecc8ecb09",
+    "job_timeout_minutes" => 30,
     "cargo_steps" => {
       "Verify named relay-authority targets and selection floors" => {
         "commands" => ["python3 scripts/check_relay_authority_contract.py"],
@@ -376,6 +813,17 @@ targets = {
       "Require relay-authority mutations to be killed" => {
         "commands" => ["bash scripts/run_relay_authority_mutations.sh"],
         "timeout_minutes" => 30,
+      },
+      "Pin required-check mirror content (#5321)" => {
+        "commands" => [
+          "expected=#{helper_sha256}",
+          'actual="$(sha256sum scripts/required-check-mirror.sh | cut -d \' \' -f 1)"',
+          'if [ "$actual" != "$expected" ]; then',
+          'echo "::error file=scripts/required-check-mirror.sh::content hash mismatch: expected $expected, found $actual; review the helper and update all three #5321 pins together"',
+          "exit 1",
+          "fi",
+        ],
+        "timeout_minutes" => 10,
       },
     },
   },
@@ -428,12 +876,15 @@ errors = []
 targets.each do |job_id, spec|
   label = spec.fetch("label")
   job = jobs[job_id]
+  raw_job = raw_jobs.is_a?(Hash) ? raw_jobs[job_id] : nil
   unless job.is_a?(Hash)
     errors << "#{label} (#{job_id}) must be a YAML mapping"
     next
   end
 
-  job_sha256 = Digest::SHA256.hexdigest(JSON.generate(canonical_yaml(job)))
+  canonical_job = canonical_yaml(job)
+  canonical_job = normalize_required_check_pin(canonical_job) if job_id == "relay-authority-contract"
+  job_sha256 = Digest::SHA256.hexdigest(JSON.generate(canonical_job))
   unless job_sha256 == spec.fetch("job_sha256")
     errors << "#{label} semantic structure or command inventory changed"
   end
@@ -448,6 +899,10 @@ targets.each do |job_id, spec|
   end
   if job["continue-on-error"]
     errors << "#{label} must not be allowed to continue on error"
+  end
+  if spec.key?("job_timeout_minutes") &&
+      (!raw_job.is_a?(Hash) || raw_job["timeout-minutes"] != spec["job_timeout_minutes"].to_s)
+    errors << "#{label} must retain exact raw timeout-minutes"
   end
   if job_id == "check_fast_cross_os"
     strategy = job["strategy"]
@@ -469,6 +924,7 @@ targets.each do |job_id, spec|
   end
 
   expected_steps = spec.fetch("cargo_steps")
+  raw_steps = raw_job.is_a?(Hash) ? Array(raw_job["steps"]) : []
   seen_steps = []
   Array(job["steps"]).each_with_index do |step, index|
     next unless step.is_a?(Hash)
@@ -497,6 +953,11 @@ targets.each do |job_id, spec|
       unless step["timeout-minutes"] == step_spec.fetch("timeout_minutes")
         errors << "#{label} #{name.inspect} must retain exact timeout policy"
       end
+      raw_step = raw_steps.find { |candidate| candidate.is_a?(Hash) && candidate["name"] == name }
+      expected_raw_timeout = step_spec.fetch("timeout_minutes")&.to_s
+      unless raw_step.is_a?(Hash) && raw_step["timeout-minutes"] == expected_raw_timeout
+        errors << "#{label} #{name.inspect} must retain exact raw timeout policy"
+      end
       unless step_env == protected_step_env
         errors << "#{label} #{name.inspect} must pin exact step env and disable BASH_ENV"
       end
@@ -515,6 +976,7 @@ targets.each do |job_id, spec|
   expected_steps.each_key do |name|
     errors << "#{label} must retain exactly one #{name.inspect} step" unless seen_steps.count(name) == 1
   end
+
 end
 
 errors.each { |message| warn "#{path}: #{message}" }
@@ -563,6 +1025,33 @@ unless jobs.is_a?(Hash)
   warn "#{path}: jobs must be a YAML mapping"
   exit 1
 end
+non_string_job_ids = jobs.keys.reject { |job_id| job_id.is_a?(String) }
+unless non_string_job_ids.empty?
+  rendered_ids = non_string_job_ids.map(&:inspect).join(", ")
+  warn "#{path}: job IDs must be strings; non-string YAML job keys: #{rendered_ids}"
+  exit 1
+end
+ambiguous_plain_job_ids = []
+yaml_root = Psych.parse(File.read(path)).root
+if yaml_root.is_a?(Psych::Nodes::Mapping)
+  jobs_node = yaml_root.children.each_slice(2).find do |key_node, _value_node|
+    key_node.is_a?(Psych::Nodes::Scalar) && key_node.value == "jobs"
+  end&.last
+  if jobs_node.is_a?(Psych::Nodes::Mapping)
+    jobs_node.children.each_slice(2) do |key_node, _value_node|
+      next unless key_node.is_a?(Psych::Nodes::Scalar) && key_node.respond_to?(:plain)
+      next unless key_node.plain &&
+        %w[yes no on off true false y n].include?(key_node.value.downcase)
+
+      ambiguous_plain_job_ids << key_node.value
+    end
+  end
+end
+unless ambiguous_plain_job_ids.empty?
+  rendered_ids = ambiguous_plain_job_ids.map(&:inspect).join(", ")
+  warn "#{path}: ambiguous YAML plain job keys must be quoted or renamed: #{rendered_ids}"
+  exit 1
+end
 required_context = "Script checks"
 required_context_jobs = []
 unsafe_dynamic_name_jobs = []
@@ -590,13 +1079,18 @@ jobs.each do |job_id, job|
 end
 if path == pr_path
   scripts = jobs["scripts"]
-  unless scripts.is_a?(Hash) && scripts["name"] == required_context
-    warn "#{path}: required Script checks context must be the exact literal name of jobs.scripts"
+  mirror = jobs["scripts_required_context"]
+  unless mirror.is_a?(Hash) && mirror["name"] == required_context
+    warn "#{path}: required Script checks context must be the exact literal name of jobs.scripts_required_context"
     exit 1
   end
-  unexpected_required = required_context_jobs - ["scripts"]
+  unless scripts.is_a?(Hash) && scripts["name"] != required_context
+    warn "#{path}: jobs.scripts must not publish the required Script checks context"
+    exit 1
+  end
+  unexpected_required = required_context_jobs - ["scripts_required_context"]
   if unexpected_required.any?
-    warn "#{path}: required Script checks context must belong only to jobs.scripts"
+    warn "#{path}: required Script checks context must belong only to jobs.scripts_required_context"
     exit 1
   end
 elsif required_context_jobs.any?
@@ -620,6 +1114,8 @@ fi
 if [ ! -f "$pr_workflow" ]; then
   error "missing $pr_workflow"
 fi
+
+verify_required_check_mirror_hash
 
 validate_workflow_entries
 

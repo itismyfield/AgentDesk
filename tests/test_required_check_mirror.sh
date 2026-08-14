@@ -15,7 +15,7 @@ run_mirror() {
     CHANGED_PATHS_RESULT="$changes_result" \
     FILTER_NAME="rust_or_policy" \
     FILTER_OUTPUT="$filter_output" \
-    UPSTREAM_JOB_NAME="check_fast" \
+    UPSTREAM_JOB_NAME="scripts" \
     UPSTREAM_RESULT="$upstream_result" \
     "$SCRIPT" >"$OUT_FILE" 2>&1
 }
