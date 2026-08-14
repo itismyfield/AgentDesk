@@ -201,8 +201,8 @@ pub(super) fn render_completion_footer(
     super::turn_anchor::prepend_request_anchor(&mut sections, request_anchor_line);
 
     // Flat ordered list of emitted task/subagent lines (incl. section headers
-    // and the blank separator) carrying each terminal slot's identity. The
-    // The clamp keeps a prefix; a terminal id is a render-local candidate iff its line survives.
+    // and the blank separator) carrying each terminal slot's identity. The clamp
+    // keeps a prefix; a terminal id is a render-local candidate iff its line survives.
     let mut emitted: Vec<EmittedLine> = Vec::new();
     let mut has_unfinished_entries = false;
 
@@ -218,7 +218,7 @@ pub(super) fn render_completion_footer(
             // #3391 render-local gate: report an id only when this renderer's FINAL line ends in its mark.
             // Fix 1 reserves the marker width, so a terminal line ALWAYS ends
             // with its ✓/✗ — debug_assert that invariant, but keep the runtime
-            // The runtime gate rejects ids whose source-block line lacks its mark.
+            // gate as a fallback: it rejects ids whose source-block line lacks its mark.
             let marker = task_tool_terminal_marker(slot.status.as_deref());
             let terminal_id = (!unfinished)
                 .then(|| {
