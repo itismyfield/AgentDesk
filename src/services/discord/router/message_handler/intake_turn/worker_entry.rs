@@ -12,8 +12,19 @@ use super::*;
 /// Adding a column to `intake_outbox` means adding a field here.
 #[derive(Clone, Debug)]
 pub(crate) struct IntakeRequest {
-    /// Worker rows carry their claimed `intake_outbox` primary key; leader-local
-    /// requests have no outbox row and carry `None`.
+    /// Worker rows carry their claimed `intake_outbox` primary key. Every other
+    /// producer carries `None`: a leader-local request is admitted only after any
+    /// stale pending route is retired, so no live outbox row remains to own the
+    /// turn (the `None` is correct, but the reason is the retirement, not an
+    /// absence of any row); and a worker request that loses the mailbox or
+    /// session-transition race is re-queued as an `Intervention`, which does not
+    /// carry this id, so its later queued-drain reconstruction is `None`. The id
+    /// is therefore sealed only along the direct worker path
+    /// (`InflightTurnState` into the headless delivery argument struct); the
+    /// requeue path is outside that seal. This is harmless today because delivery
+    /// does not yet consume the id (it is parked). Binding the requeue /
+    /// `Intervention` path, and sealing the `pub` `IntakeRequest` producer seam
+    /// itself, are later slices.
     pub intake_outbox_id: Option<i64>,
     pub channel_id: ChannelId,
     pub user_msg_id: MessageId,
