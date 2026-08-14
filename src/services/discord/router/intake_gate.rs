@@ -823,6 +823,7 @@ pub(in crate::services::discord) async fn handle_event(
                 let submission = super::IntakeSubmission {
                     provider: data.provider.clone(),
                     request: super::IntakeRequest {
+                        intake_outbox_id: None,
                         channel_id,
                         user_msg_id: new_message.id,
                         busy_followup_retry_user_msg_id: new_message.id,
@@ -1630,6 +1631,7 @@ pub(in crate::services::discord) async fn handle_event(
                 super::IntakeSubmission {
                     provider: data.provider.clone(),
                     request: super::IntakeRequest {
+                        intake_outbox_id: None,
                         channel_id,
                         user_msg_id: new_message.id,
                         busy_followup_retry_user_msg_id: new_message.id,

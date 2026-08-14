@@ -42,6 +42,7 @@ pub(crate) async fn admit_queued_intake(
     let submission = IntakeSubmission {
         provider,
         request: super::super::message_handler::IntakeRequest {
+            intake_outbox_id: None,
             channel_id,
             user_msg_id: intervention.message_id,
             busy_followup_retry_user_msg_id: serenity::MessageId::new(retry_identity.user_msg_id),

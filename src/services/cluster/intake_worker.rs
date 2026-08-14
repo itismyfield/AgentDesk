@@ -459,6 +459,7 @@ fn intake_request_from_row(row: &IntakeOutboxRow) -> Result<IntakeRequest, Strin
         .unwrap_or_else(|| row.request_owner_id.clone());
 
     Ok(IntakeRequest {
+        intake_outbox_id: Some(row.id),
         channel_id: ChannelId::new(channel_id),
         user_msg_id: MessageId::new(user_msg_id),
         busy_followup_retry_user_msg_id: MessageId::new(user_msg_id),
@@ -535,6 +536,7 @@ mod tests {
     fn intake_request_from_row_round_trips_basic_fields() {
         let row = fake_row();
         let req = intake_request_from_row(&row).expect("convert ok");
+        assert_eq!(req.intake_outbox_id, Some(42));
         assert_eq!(req.channel_id.get(), 1234567890);
         assert_eq!(req.user_msg_id.get(), 9876543210);
         assert_eq!(req.request_owner.get(), 555);
@@ -561,13 +563,21 @@ mod tests {
             .find("pub(crate) async fn execute_intake_turn_core(")
             .expect("worker executor exists");
         let executor = &executor_source[start..];
+        let call_start = executor
+            .find("super::handle_text_message(")
+            .expect("worker delegates to the intake body");
+        let call_end = executor[call_start..]
+            .find("\n    .await")
+            .map(|offset| call_start + offset)
+            .expect("worker awaits the intake body");
+        let forwarding_call = &executor[call_start..call_end];
 
         assert!(
-            executor.contains("request.preserve_on_cancel,"),
+            forwarding_call.contains("request.preserve_on_cancel,\n        request,"),
             "worker executor must pass the preservation bit restored from the durable row"
         );
         assert!(
-            !executor.contains("request.turn_kind,\n        false,"),
+            !forwarding_call.contains("\n        false,\n        request,"),
             "worker executor must not restore the historical hardcoded false"
         );
     }

@@ -947,6 +947,8 @@ src/
 │   │   │   ├── completion_postlude/
 │   │   │   │   ├── channel_writeback.rs
 │   │   │   │   └── contracts.rs
+│   │   │   ├── headless_delivery/
+│   │   │   │   └── intake_outbox_argument.rs
 │   │   │   ├── runtime_handoff_loop/
 │   │   │   │   ├── claude_e.rs
 │   │   │   │   ├── guarded_save.rs

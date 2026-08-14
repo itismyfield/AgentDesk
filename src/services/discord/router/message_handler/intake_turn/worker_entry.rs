@@ -3,14 +3,29 @@ use super::*;
 /// Per-message inputs of `handle_text_message` bundled into a single
 /// owned struct. Phase 2-pre.3 of intake-node-routing: lets worker-side
 /// callers (`execute_intake_turn_core`) accept a single deserialized
-/// row from `intake_outbox` instead of 13 positional parameters.
+/// row from `intake_outbox` instead of a long positional parameter list.
 ///
-/// All fields mirror the `intake_outbox` payload columns (see
+/// Payload fields mirror the `intake_outbox` columns (see
 /// migrations/postgres/0052_intake_node_routing.sql) and the per-message
-/// parameters of the legacy 13-arg `handle_text_message` signature.
+/// parameters of the legacy `handle_text_message` signature; the row primary
+/// key is carried separately as `intake_outbox_id`.
 /// Adding a column to `intake_outbox` means adding a field here.
 #[derive(Clone, Debug)]
 pub(crate) struct IntakeRequest {
+    /// Worker rows carry their claimed `intake_outbox` primary key. Every other
+    /// producer carries `None`: a leader-local request is admitted only after any
+    /// stale pending route is retired, so no live outbox row remains to own the
+    /// turn (the `None` is correct, but the reason is the retirement, not an
+    /// absence of any row); and a worker request that loses the mailbox or
+    /// session-transition race is re-queued as an `Intervention`, which does not
+    /// carry this id, so its later queued-drain reconstruction is `None`. The id
+    /// is therefore sealed only along the direct worker path
+    /// (`InflightTurnState` into the headless delivery argument struct); the
+    /// requeue path is outside that seal. This is harmless today because delivery
+    /// does not yet consume the id (it is parked). Binding the requeue /
+    /// `Intervention` path, and sealing the `pub` `IntakeRequest` producer seam
+    /// itself, are later slices.
+    pub intake_outbox_id: Option<i64>,
     pub channel_id: ChannelId,
     pub user_msg_id: MessageId,
     pub busy_followup_retry_user_msg_id: MessageId,
@@ -53,21 +68,8 @@ pub(crate) async fn execute_intake_turn_core(
             shared,
             token,
         },
-        request.channel_id,
-        request.user_msg_id,
-        request.busy_followup_retry_user_msg_id,
-        request.request_owner,
-        &request.request_owner_name,
-        &request.user_text,
-        request.reply_to_user_message,
-        request.defer_watcher_resume,
-        request.wait_for_completion,
-        request.merge_consecutive,
-        request.reply_context,
-        request.has_reply_boundary,
-        request.dm_hint,
-        request.turn_kind,
         request.preserve_on_cancel,
+        request,
         false,
         Vec::new(),
         // Worker dispatch has no in-process gate carry-forward; it re-resolves
