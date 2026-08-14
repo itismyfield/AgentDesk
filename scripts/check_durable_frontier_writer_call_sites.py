@@ -44,9 +44,12 @@ test module:
   * ALIAS AND RE-EXPORT. The CALL-SITE subscan does not see
     `use ...::write_delivered_frontier as w;` followed by `w(..)`, nor a
     renamed `pub use`. S8-1b's separate `EXPECTED_PINNED_USE_ALIASES` scan
-    rejects such aliases for pinned spellings. A module alias is different and
-    IS seen, because the function name survives it: `dr::f(..)`,
-    `delivery_record::f(..)` and a bare `f(..)` all match identically.
+    rejects aliases whose captured spelling starts with ASCII `[A-Za-z_]`.
+    That includes a raw-identifier alias such as `r#w` (the lexical matcher
+    captures its ASCII `r` prefix); an alias whose first character is non-ASCII
+    remains unseen. A module alias is different and IS seen, because the
+    function name survives it: `dr::f(..)`, `delivery_record::f(..)` and a bare
+    `f(..)` all match identically.
   * NAME-CONSTRUCTING MACROS. A macro whose body contains the literal spelling
     IS counted (the text is there, once per textual occurrence, and expansion
     count is invisible to a text scan -- a call inside a macro invoked three
@@ -54,8 +57,11 @@ test module:
     `concat_idents!`) is NOT seen.
   * INDIRECTION THROUGH VALUES. `let f = write_delivered_frontier;` is not a
     CALL-SITE match (no `(` follows the name) and the later `f(..)` is not one
-    either. S8-1b's bare-reference scan catches the named capture itself;
-    trait-object dispatch to a method of the same name remains invisible.
+    either. S8-1b's bare-reference scan catches the named capture itself.
+    Receiver-method matching is type-agnostic, so
+    `obj.reset_confirmed_frontier(..)` is counted even when `obj` is a trait
+    object; the lexical match cannot prove that the receiver has the pinned
+    type.
   * NAME COLLISION -- PRESENT IN THIS TREE, NOT HYPOTHETICAL. Two distinct
     functions are both named `record_watcher_terminal_delivery`: the durable
     funnel at `outbound/delivery_record.rs:2520` and a local wrapper at
@@ -396,7 +402,8 @@ def _call_re(symbol: str) -> re.Pattern[str]:
         # the same natural receiver type; angle-bracketed UFCS may also end in
         # a fully qualified path to the pinned type. Keep the terminal type
         # exact: a lexical scan cannot prove that another type's same-named
-        # method is this writer.
+        # method is this writer, and `Self` is counted in any impl rather than
+        # only an impl of the pinned type.
         type_name, _ = symbol.rsplit("::", 1)
         terminal_type = rf"(?:{re.escape(type_name)}|Self)"
         ufcs_type = (
@@ -993,11 +1000,16 @@ LIMITS = (
     "call-site matching covers direct calls, receiver method calls, and pinned "
     "`Type::method(receiver, ...)`, `Self::method(self, ...)`, `<Type>::method`, "
     "and `<Self>::method` UFCS calls (including angle-bracketed paths ending in "
-    "the pinned type), but does not see `use .. as x` aliases, re-export renames, "
-    "raw-identifier or non-ASCII alias spellings, name-constructing macros, or "
-    "calls through values; the S8 pinned-alias and bare-reference subgates close "
-    "only the supported ASCII lexical forms; trait-object dispatch remains "
-    "unseen; the cfg "
+    "the pinned type); receiver matching is type-agnostic, so same-named methods "
+    "on any receiver, including trait objects, fail closed without proving the "
+    "receiver type; renamed calls through `use .. as x` or re-exports are not "
+    "resolved; raw-identifier or non-ASCII alias spellings are not uniformly "
+    "unseen: the pinned-alias subgate rejects aliases whose captured spelling "
+    "starts with ASCII `[A-Za-z_]`, including the ASCII prefix of raw-identifier "
+    "aliases, while aliases whose first character is non-ASCII remain unseen; "
+    "calls through values are not resolved, but the bare-reference subgate rejects "
+    "a named capture; name-constructing macros, type-alias receiver UFCS, and "
+    "associated-projection receiver calls remain unseen; the cfg "
     "classifier treats cfg(test)/test-required all(...) as test-only and "
     "cfg(any(test, X))/cfg(not(test)) as production without compiler target "
     "evaluation; non-.rs regular files fail closed before classification; whole-file "
@@ -1010,13 +1022,13 @@ LIMITS = (
     "macro mod, two cfg/include forms, cfg_attr path, raw path, ungated include); pin "
     "membership cannot detect production reachability changes inside pinned files; "
     "compiler-backed reachability is follow-up work; textual occurrences are counted "
-    "once regardless of macro expansion; name-constructing macro assembly and "
-    "trait-object dispatch remain outside the regex/lexical model; the raw atomic "
+    "once regardless of macro expansion; the raw atomic "
     "scan does not see dereferenced stores such as `(*ptr).store(...)` or mutation "
-    "through `as_ptr`/`get_mut` plus raw-pointer/UnsafeCell access; raw atomic and "
+    "through `as_ptr`/`get_mut` plus raw-pointer/UnsafeCell access, nor receiver UFCS "
+    "such as `AtomicU64::store(&field, ...)`; raw atomic and "
     "bare-reference gates are likewise lexical and do not prove runtime "
     "reachability; replacing these enumerated regexes with AST/`syn`-based Rust "
-    "parsing is a separate follow-up issue"
+    "parsing is tracked by follow-up issue #5370"
 )
 
 
