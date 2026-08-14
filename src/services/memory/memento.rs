@@ -8,9 +8,8 @@ use poise::serenity_prelude::ChannelId;
 use serde_json::{Map, Value, json};
 
 use super::{
-    CaptureRequest, CaptureResult, LocalMemoryBackend, MemoryBackend, MemoryFuture, RecallMode,
-    RecallRequest, RecallResponse, ReflectRequest, TokenUsage, UNBOUND_MEMORY_ROLE_ID,
-    extract_token_usage,
+    CaptureRequest, CaptureResult, LocalMemoryBackend, MemoryBackend, MemoryFuture, RecallRequest,
+    RecallResponse, ReflectRequest, TokenUsage, UNBOUND_MEMORY_ROLE_ID, extract_token_usage,
     memento_throttle::{
         cached_recall_response, note_memento_dedup_hit, note_memento_remote_call,
         note_memento_tool_feedback_trigger, note_memento_tool_request,
@@ -385,10 +384,9 @@ impl MementoBackend {
             .await?;
         // #2660 — collapse repeat emissions of the static slice
         // (Ranked context / Core memory / Anchored fallback) within
-        // the per-(workspace, agent, session, mode) TTL.
+        // the per-(workspace, agent, session) TTL.
         let rendered = format_context_payload_for_external_recall(&result.payload);
-        let slice_key =
-            build_static_slice_cache_key(workspace, &agent_id, &request.session_id, request.mode);
+        let slice_key = build_static_slice_cache_key(workspace, &agent_id, &request.session_id);
         let external_recall = elide_static_slice_if_recent(rendered, &slice_key);
         Ok(ContextFetchResult {
             external_recall,
@@ -726,16 +724,8 @@ fn mcp_url(endpoint: &str) -> String {
 /// blob, not a per-turn artifact. Including `user_text` (as
 /// `build_recall_dedup_key` does for the response cache) would defeat the
 /// dedupe because the per-turn user message is part of the recall key.
-fn build_static_slice_cache_key(
-    workspace: &str,
-    agent_id: &str,
-    session_id: &str,
-    mode: RecallMode,
-) -> String {
-    let mode = match mode {
-        RecallMode::Full => "full",
-    };
-    [workspace.trim(), agent_id.trim(), session_id.trim(), mode].join("\u{1f}")
+fn build_static_slice_cache_key(workspace: &str, agent_id: &str, session_id: &str) -> String {
+    [workspace.trim(), agent_id.trim(), session_id.trim()].join("\u{1f}")
 }
 
 fn build_recall_dedup_key(
@@ -743,7 +733,6 @@ fn build_recall_dedup_key(
     agent_id: &str,
     session_id: &str,
     dispatch_profile: DispatchProfile,
-    mode: RecallMode,
     user_text: &str,
 ) -> String {
     let profile = match dispatch_profile {
@@ -751,15 +740,11 @@ fn build_recall_dedup_key(
         DispatchProfile::Lite => "lite",
         DispatchProfile::ReviewLite => "review_lite",
     };
-    let mode = match mode {
-        RecallMode::Full => "full",
-    };
     [
         workspace.trim(),
         agent_id.trim(),
         session_id.trim(),
         profile,
-        mode,
         user_text.trim(),
     ]
     .join("\u{1f}")
@@ -1502,7 +1487,7 @@ fn format_context_payload_for_external_recall(payload: &Value) -> Option<String>
 
 /// #2660 — drop the static `Ranked context` / `Core memory` (and anchor
 /// fallback) sections from `external_recall` when they were already emitted
-/// to the same (workspace, agent, session, mode) lane within the tracker
+/// to the same (workspace, agent, session) lane within the tracker
 /// TTL. The caller passes in the cache `key`; we fingerprint just the
 /// static-slice text (not the whole recall envelope) so dynamic sections
 /// like `Active working memory` or `Skip list warnings` always re-emit.
@@ -1662,7 +1647,6 @@ impl MemoryBackend for MementoBackend {
                 &agent_id,
                 &request.session_id,
                 request.dispatch_profile,
-                request.mode,
                 &normalize_whitespace(&request.user_text),
             );
             note_memento_tool_request("recall");
@@ -2004,11 +1988,10 @@ mod static_slice_cache_tests {
     fn build_static_slice_cache_key_omits_user_text_and_dispatch_profile() {
         // The whole point of #2660 — user-text variance per turn MUST NOT
         // bust the static-slice cache.
-        let key_a = build_static_slice_cache_key("ws", "agent", "sess", RecallMode::Full);
-        let key_b = build_static_slice_cache_key("ws", "agent", "sess", RecallMode::Full);
+        let key_a = build_static_slice_cache_key("ws", "agent", "sess");
+        let key_b = build_static_slice_cache_key("ws", "agent", "sess");
         assert_eq!(key_a, key_b);
-        let key_other_session =
-            build_static_slice_cache_key("ws", "agent", "other-sess", RecallMode::Full);
+        let key_other_session = build_static_slice_cache_key("ws", "agent", "other-sess");
         assert_ne!(key_a, key_other_session);
     }
 

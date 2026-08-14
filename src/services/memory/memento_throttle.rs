@@ -10,7 +10,7 @@ const RECALL_DEDUP_WINDOW: Duration = Duration::from_secs(60);
 const REMEMBER_DEDUP_WINDOW: Duration = Duration::from_secs(5 * 60);
 /// #2660 — TTL for the static-slice tracker that records when the
 /// `Ranked context from Memento` + `Core memory from Memento` blob was last
-/// emitted to a given (workspace, agent, session, mode) lane. Within this
+/// emitted to a given (workspace, agent, session) lane. Within this
 /// window, follow-up turns reuse the prior emission (via a one-line pointer)
 /// instead of re-dumping multi-KB literals each turn. The 10-minute value is
 /// a balance: long enough to dedupe a multi-turn user task, short enough that
@@ -122,7 +122,7 @@ struct HourBucket {
 struct MementoThrottleState {
     recall_cache: HashMap<String, CachedRecallEntry>,
     remember_cache: HashMap<String, CachedRememberEntry>,
-    /// #2660 — per-(workspace,agent,session,mode) tracker that records when
+    /// #2660 — per-(workspace,agent,session) tracker that records when
     /// the static Memento dump (Ranked context + Core memory) was last
     /// emitted. Keyed independently from `recall_cache` so per-turn `user_text`
     /// variation no longer forces a multi-KB re-emit.
