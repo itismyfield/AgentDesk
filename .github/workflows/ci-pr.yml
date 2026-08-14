@@ -1369,7 +1369,6 @@ jobs:
     needs:
       - changes
       - scripts
-    if: always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1383,10 +1382,18 @@ jobs:
         shell: bash
         timeout-minutes: 10
         run: |
+          helper_path=scripts/required-check-mirror.sh
           expected=57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d
-          actual="$(sha256sum scripts/required-check-mirror.sh | cut -d ' ' -f 1)"
+          actual="$(sha256sum "$helper_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
-            echo "::error file=scripts/required-check-mirror.sh::content hash mismatch: expected $expected, found $actual; review the helper and update all three #5321 pins together"
+            echo "::error file=$helper_path::content hash mismatch: expected $expected, found $actual; review the helper and update all three #5321 pins together"
+            exit 1
+          fi
+          gate_path=scripts/check-ci-runner-hardening.sh
+          expected=21d099861d7fdd2505f4e79fb62bd552b724cf5a210b908b14687f0eebf85baa
+          actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
             exit 1
           fi
           scripts/check-ci-runner-hardening.sh
@@ -1467,8 +1474,10 @@ jobs:
         timeout-minutes: 30
         run: bash scripts/run_relay_authority_mutations.sh
 
-      # Independent out-of-band backstop: a conditional helper mutation still
-      # changes bytes and must fail this required, unconditional context.
+      # Independent out-of-band backstop: conditional helper or gate mutations
+      # still change bytes and must fail this required, unconditional context.
+      # Run the gate only after its bytes match the reviewed pin, so this job
+      # catches a skipped Script checks publisher as well as helper tampering.
       - name: Pin required-check mirror content (#5321)
         env:
           BASH_ENV: /dev/null
@@ -1477,12 +1486,21 @@ jobs:
         shell: bash
         timeout-minutes: 10
         run: |
+          helper_path=scripts/required-check-mirror.sh
           expected=57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d
-          actual="$(sha256sum scripts/required-check-mirror.sh | cut -d ' ' -f 1)"
+          actual="$(sha256sum "$helper_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
-            echo "::error file=scripts/required-check-mirror.sh::content hash mismatch: expected $expected, found $actual; review the helper and update all three #5321 pins together"
+            echo "::error file=$helper_path::content hash mismatch: expected $expected, found $actual; review the helper and update all three #5321 pins together"
             exit 1
           fi
+          gate_path=scripts/check-ci-runner-hardening.sh
+          expected=21d099861d7fdd2505f4e79fb62bd552b724cf5a210b908b14687f0eebf85baa
+          actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
+            exit 1
+          fi
+          scripts/check-ci-runner-hardening.sh
 
       - name: sccache stats
         if: always()

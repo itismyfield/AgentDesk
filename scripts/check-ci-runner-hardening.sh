@@ -65,7 +65,7 @@ def normalize_required_check_pin(value)
   when Array
     value.map { |item| normalize_required_check_pin(item) }
   when String
-    value.sub(/expected=[0-9a-f]{64}/, "expected=<required-check-mirror-sha256>")
+    value.gsub(/expected=[0-9a-f]{64}/, "expected=<required-check-pin-sha256>")
   else
     value
   end
@@ -254,6 +254,7 @@ end
 
 path = ARGV.fetch(0)
 helper_sha256 = ARGV.fetch(1)
+gate_sha256 = Digest::SHA256.file("scripts/check-ci-runner-hardening.sh").hexdigest
 begin
   document = YAML.load_file(path)
   yaml_root = Psych.parse_file(path).root
@@ -272,6 +273,20 @@ jobs_node = if yaml_root.is_a?(Psych::Nodes::Mapping)
 end
 unless jobs.is_a?(Hash)
   warn "#{path}: jobs must be a YAML mapping"
+  exit 1
+end
+
+job_ids = if jobs_node.is_a?(Psych::Nodes::Mapping)
+  jobs_node.children.each_slice(2).each_with_object([]) do |(key_node, _value_node), ids|
+    ids << key_node.value if key_node.is_a?(Psych::Nodes::Scalar)
+  end
+else
+  []
+end
+job_id_counts = job_ids.each_with_object(Hash.new(0)) { |job_id, counts| counts[job_id] += 1 }
+duplicate_job_ids = job_id_counts.select { |_job_id, count| count > 1 }.keys
+unless duplicate_job_ids.empty?
+  warn "#{path}: duplicate job IDs are forbidden: #{duplicate_job_ids.sort.join(', ')}"
   exit 1
 end
 
@@ -330,6 +345,62 @@ unless changes_job.is_a?(Hash)
   exit 1
 end
 
+# Both branch-protection publishers and every job in their finite needs closure
+# must be structurally unconditional. A skipped required job is reported as a
+# successful required check by GitHub, so even an explicit `if: true` or
+# `continue-on-error: false` is forbidden: the key itself is an unreviewed skip
+# or failure-masking channel. Keep this closed set exact as the needs graph
+# evolves so a newly introduced upstream cannot escape the same policy.
+expected_unconditional_closure = %w[
+  changes
+  relay-authority-contract
+  scripts
+  scripts_required_context
+].sort
+unconditional_roots = %w[scripts_required_context relay-authority-contract]
+unconditional_closure = []
+frontier = unconditional_roots.dup
+until frontier.empty?
+  job_id = frontier.shift
+  next if unconditional_closure.include?(job_id)
+
+  job = jobs[job_id]
+  unless job.is_a?(Hash)
+    warn "#{path}: required unconditional needs closure references missing job #{job_id.inspect}"
+    exit 1
+  end
+  if job.key?("if")
+    warn "#{path}: required unconditional job #{job_id} must not define an if key"
+    exit 1
+  end
+  if job.key?("continue-on-error")
+    warn "#{path}: required unconditional job #{job_id} must not define a continue-on-error key"
+    exit 1
+  end
+
+  unconditional_closure << job_id
+  needs = job["needs"]
+  case needs
+  when nil
+    nil
+  when String
+    frontier << needs
+  when Array
+    unless needs.all? { |dependency| dependency.is_a?(String) }
+      warn "#{path}: required unconditional job #{job_id} has non-string needs"
+      exit 1
+    end
+    frontier.concat(needs)
+  else
+    warn "#{path}: required unconditional job #{job_id} has unsupported needs shape"
+    exit 1
+  end
+end
+unless unconditional_closure.sort == expected_unconditional_closure
+  warn "#{path}: required unconditional needs closure changed; expected #{expected_unconditional_closure.inspect}, found #{unconditional_closure.sort.inspect}"
+  exit 1
+end
+
 # The required Script checks context is an unconditional result mirror. It
 # reads both upstream results and delegates the fail-closed skipped/failure
 # policy to required-check-mirror.sh. The mirror is a single fixed node, so its
@@ -359,10 +430,18 @@ expected_mirror_contract_step = {
   "shell" => "bash",
   "timeout-minutes" => 10,
   "run" => [
+    "helper_path=scripts/required-check-mirror.sh",
     "expected=#{helper_sha256}",
-    'actual="$(sha256sum scripts/required-check-mirror.sh | cut -d \' \' -f 1)"',
+    'actual="$(sha256sum "$helper_path" | cut -d \' \' -f 1)"',
     'if [ "$actual" != "$expected" ]; then',
-    '  echo "::error file=scripts/required-check-mirror.sh::content hash mismatch: expected $expected, found $actual; review the helper and update all three #5321 pins together"',
+    '  echo "::error file=$helper_path::content hash mismatch: expected $expected, found $actual; review the helper and update all three #5321 pins together"',
+    "  exit 1",
+    "fi",
+    "gate_path=scripts/check-ci-runner-hardening.sh",
+    "expected=#{gate_sha256}",
+    'actual="$(sha256sum "$gate_path" | cut -d \' \' -f 1)"',
+    'if [ "$actual" != "$expected" ]; then',
+    '  echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"',
     "  exit 1",
     "fi",
     "scripts/check-ci-runner-hardening.sh",
@@ -377,7 +456,6 @@ expected_mirror_steps = [
 expected_mirror_job = {
   "name" => "Script checks",
   "needs" => ["changes", "scripts"],
-  "if" => "always()",
   "runs-on" => "ubuntu-latest",
   "steps" => expected_mirror_steps,
 }
@@ -421,12 +499,12 @@ mirror_key_node = if jobs_node.is_a?(Psych::Nodes::Mapping)
   end&.first
 end
 mirror_source = mirror_key_node && raw_job_source(path, mirror_key_node)
-mirror_source = mirror_source&.sub(
+mirror_source = mirror_source&.gsub(
   /expected=[0-9a-f]{64}/,
-  "expected=<required-check-mirror-sha256>",
+  "expected=<required-check-pin-sha256>",
 )
 mirror_source_sha256 = mirror_source && Digest::SHA256.hexdigest(mirror_source)
-unless mirror_source_sha256 == "6e5f51dd0841453a8491ce6faab27894f006c3fe659090cf3564b86ab9937bef"
+unless mirror_source_sha256 == "1a02f55c416564a21ddfc7425a09015cec20ed02a196490d5fb0002a6b150e0f"
   warn "#{path}: Script checks required-context source bytes changed (scalar tags/styles and exact three-step surface are pinned); found #{mirror_source_sha256 || '<missing>'}"
   exit 1
 end
@@ -793,9 +871,9 @@ targets = {
     "runs_on" => "ubuntu-latest",
     # #5071 registers this unconditional candidate in the existing semantic
     # hardening registry so order-independent job keys cannot disable it silently.
-    # #5321 re-pins after replacing in-band mirror observers with one protected
-    # out-of-band content-hash backstop.
-    "job_sha256" => "650ff5b00daeb659568ebdc807febcc8594a9fd92bf4cacad69636cecc8ecb09",
+    # #5321 re-pins after making the independent backstop verify both the
+    # result helper and the gate before executing that verified gate.
+    "job_sha256" => "4038e039649d5f7736e9bdeb03f047072db1f0db92243d42f0e8581f0703bb42",
     "job_timeout_minutes" => 30,
     "cargo_steps" => {
       "Verify named relay-authority targets and selection floors" => {
@@ -816,12 +894,21 @@ targets = {
       },
       "Pin required-check mirror content (#5321)" => {
         "commands" => [
+          "helper_path=scripts/required-check-mirror.sh",
           "expected=#{helper_sha256}",
-          'actual="$(sha256sum scripts/required-check-mirror.sh | cut -d \' \' -f 1)"',
+          'actual="$(sha256sum "$helper_path" | cut -d \' \' -f 1)"',
           'if [ "$actual" != "$expected" ]; then',
-          'echo "::error file=scripts/required-check-mirror.sh::content hash mismatch: expected $expected, found $actual; review the helper and update all three #5321 pins together"',
+          'echo "::error file=$helper_path::content hash mismatch: expected $expected, found $actual; review the helper and update all three #5321 pins together"',
           "exit 1",
           "fi",
+          "gate_path=scripts/check-ci-runner-hardening.sh",
+          "expected=#{gate_sha256}",
+          'actual="$(sha256sum "$gate_path" | cut -d \' \' -f 1)"',
+          'if [ "$actual" != "$expected" ]; then',
+          'echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"',
+          "exit 1",
+          "fi",
+          "scripts/check-ci-runner-hardening.sh",
         ],
         "timeout_minutes" => 10,
       },
@@ -886,7 +973,7 @@ targets.each do |job_id, spec|
   canonical_job = normalize_required_check_pin(canonical_job) if job_id == "relay-authority-contract"
   job_sha256 = Digest::SHA256.hexdigest(JSON.generate(canonical_job))
   unless job_sha256 == spec.fetch("job_sha256")
-    errors << "#{label} semantic structure or command inventory changed"
+    errors << "#{label} semantic structure or command inventory changed; found #{job_sha256}"
   end
 
   {
@@ -1032,12 +1119,18 @@ unless non_string_job_ids.empty?
   exit 1
 end
 ambiguous_plain_job_ids = []
+duplicate_job_ids = []
 yaml_root = Psych.parse(File.read(path)).root
 if yaml_root.is_a?(Psych::Nodes::Mapping)
   jobs_node = yaml_root.children.each_slice(2).find do |key_node, _value_node|
     key_node.is_a?(Psych::Nodes::Scalar) && key_node.value == "jobs"
   end&.last
   if jobs_node.is_a?(Psych::Nodes::Mapping)
+    raw_job_ids = jobs_node.children.each_slice(2).each_with_object([]) do |(key_node, _value_node), ids|
+      ids << key_node.value if key_node.is_a?(Psych::Nodes::Scalar)
+    end
+    job_id_counts = raw_job_ids.each_with_object(Hash.new(0)) { |job_id, counts| counts[job_id] += 1 }
+    duplicate_job_ids = job_id_counts.select { |_job_id, count| count > 1 }.keys
     jobs_node.children.each_slice(2) do |key_node, _value_node|
       next unless key_node.is_a?(Psych::Nodes::Scalar) && key_node.respond_to?(:plain)
       next unless key_node.plain &&
@@ -1046,6 +1139,10 @@ if yaml_root.is_a?(Psych::Nodes::Mapping)
       ambiguous_plain_job_ids << key_node.value
     end
   end
+end
+unless duplicate_job_ids.empty?
+  warn "#{path}: duplicate job IDs are forbidden: #{duplicate_job_ids.sort.join(', ')}"
+  exit 1
 end
 unless ambiguous_plain_job_ids.empty?
   rendered_ids = ambiguous_plain_job_ids.map(&:inspect).join(", ")

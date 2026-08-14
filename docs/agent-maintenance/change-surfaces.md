@@ -191,21 +191,31 @@ time for diagnostics; neither is a stored approval value.
   writer-protection/aggregate pair, and verifies the SHA-256 of
   `scripts/required-check-mirror.sh`. The required `Script checks` publisher
   and the unconditional required `relay-authority-contract` job independently
-  compare the same helper digest immediately after checkout. The helper's
+  compare both the helper digest and the digest of
+  `scripts/check-ci-runner-hardening.sh` immediately after checkout, then run
+  only that verified gate. The publisher-side copy is intentional and
+  symmetric: it catches a skipped/altered relay job, while the relay copy
+  catches a skipped/altered publisher. The helper's
   behavior tests remain useful regressions, but byte identity is primary:
   environment, step-instance, argv0, and unconditional-success branches all
   change the pinned file bytes.
 - fixed surfaces: the `Script checks` publisher has exactly checkout,
   contract, and result-mirror steps; its `name`, `needs: [changes, scripts]`,
-  `if: always()`, `runs-on`, checkout provenance, and absence of job-level
-  `defaults`/`env`/`environment`/`strategy`/`container` are pinned.
+  `runs-on`, checkout provenance, and absence of job-level `if` and
+  `continue-on-error`, `defaults`/`env`/`environment`/`strategy`/`container`
+  are pinned.
   Its source-byte range is also hashed, so YAML scalar tags and styles remain in
   the comparison; Psych cannot erase an explicit tag such as `!!binary` or
   equate YAML 1.1 spellings such as `yes` and `012` with the intended
   Actions scalars. Plain YAML-boolean-like job IDs fail closed, while quoted
   `"yes"` remains a valid string job ID. The relay job's semantic hash and
   explicit step registry pin its absent `needs`/`if`, non-matrix shape, and
-  content-hash backstop.
+  content-hash backstop. Starting at the two required publishers, the complete
+  recursive `needs` closure is the finite set
+  `{scripts_required_context, relay-authority-contract, scripts, changes}`;
+  every member must exist and omit both job-level `if` and
+  `continue-on-error`, and any edge that expands that set is a review-triggering
+  gate failure.
 - aggregate execution: the calculator records shell/working-directory
   candidates, environment scopes, `runs-on`, prior recognized file writes, and
   the selected
@@ -227,13 +237,25 @@ time for diagnostics; neither is a stored approval value.
   in `check-ci-runner-hardening.sh`); any edit inside that job — comments
   included — is red until that literal is re-pinned to the hash the failure
   message prints.
+  Treat `scripts/check-ci-runner-hardening.sh` as a separately pinned gate. An
+  intentional gate edit must first make both workflow backstops red. Update any
+  affected in-gate semantic/source-range digest, run
+  `shasum -a 256 scripts/check-ci-runner-hardening.sh`, replace the gate digest
+  in the `Script checks` contract step and the `relay-authority-contract`
+  backstop (two gate pins), and rerun the gate to complete the red-to-green
+  round trip. Do not copy a pre-edit digest or update only one backstop.
 - tests: permanent fixtures cover the historical environment, `GITHUB_ACTION`,
   argv0, and unconditional-`exit 0` attacks; one-byte helper
   and digest-only mutations; mirror defaults/env/environment/strategy/container
   and checkout provenance; relay needs/if/matrix; exact aggregate inventory;
   YAML boolean-like keys; Psych resolution splits including `!!binary`; and
-  deletion of each independent aggregate-defense assertion. Skipped, failed,
-  and cancelled mirror results still fail closed.
+  deletion of each independent aggregate-defense assertion. Duplicate job IDs
+  fail closed in the required gate before Psych's last-wins mapping can diverge
+  from the source-range pin. `actionlint` also diagnoses duplicate keys when
+  run, but it is not invoked by the required `Script checks` path, so it is a
+  supplemental check rather than the authority for this property. The
+  aggregate explicitly requires `tests/test_required_check_mirror.sh`; skipped,
+  failed, and cancelled helper inputs remain covered by that shell suite.
 - threat model — covered: any helper tamper whose bytes differ from the reviewed
   digest, including conditionally activated code; changes to the fixed
   publisher surface; the registered relay job surface; and the enumerated
@@ -252,6 +274,10 @@ time for diagnostics; neither is a stored approval value.
   pull-request subfilters such as `paths-ignore` are likewise not guaranteed.
   The result mirror detects skipped/failed/cancelled upstream jobs; it cannot
   prove that an upstream success used the intended semantics.
+  More fundamentally, a single PR that consistently rewrites every guard and
+  every pin can pass this in-repository gate system. That is an inherent limit
+  of in-repo gating, not a property these hashes claim to solve; human review
+  and branch protection own that trust decision.
 - related_issues: #5308, #5321.
 
 ### `ci_failure_classification`
