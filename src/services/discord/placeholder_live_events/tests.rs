@@ -666,11 +666,22 @@ fn status_panel_codex_active_omits_processing_tail_after_recent_block() {
 
 #[test]
 fn status_panel_truncates_long_body_without_processing_tail() {
-    let sections = vec!["x".repeat(STATUS_PANEL_MAX_CHARS + 100)];
+    assert_eq!(STATUS_PANEL_MAX_CHARS, super::super::DISCORD_MSG_LIMIT);
+    let astral_overflow = format!("😀{}", "x".repeat(STATUS_PANEL_MAX_CHARS - 1));
+    assert_eq!(
+        super::super::formatting::discord_message_units(&astral_overflow),
+        STATUS_PANEL_MAX_CHARS + 1
+    );
 
-    let rendered = truncate_status_panel_sections(sections);
+    let rendered = truncate_status_panel_sections(vec![astral_overflow]);
 
-    assert!(rendered.chars().count() <= STATUS_PANEL_MAX_CHARS);
+    assert_eq!(
+        super::super::formatting::discord_message_units(&rendered),
+        STATUS_PANEL_MAX_CHARS
+    );
+    assert_eq!(rendered.chars().count(), STATUS_PANEL_MAX_CHARS - 1);
+    assert!(rendered.ends_with("..."));
+    assert!(super::super::http::discord_content_or_zwsp(&rendered).is_ok());
     assert!(!rendered.contains("계속 처리 중"));
 }
 
@@ -680,7 +691,10 @@ fn status_panel_subtext_exactly_fits_discord_character_limit_4848() {
     let second = "y".repeat(STATUS_PANEL_MAX_CHARS - 1_000 - 1 - "-# ".chars().count());
     let rendered = format_and_truncate_status_panel_sections(vec![format!("{first}\n{second}")]);
 
-    assert_eq!(rendered.chars().count(), STATUS_PANEL_MAX_CHARS);
+    assert_eq!(
+        super::super::formatting::discord_message_units(&rendered),
+        STATUS_PANEL_MAX_CHARS
+    );
     assert!(
         rendered
             .lines()
@@ -8441,6 +8455,7 @@ fn truncate_panel_fence_safe_when_single_section_overflows() {
 
     assert!(rendered.chars().count() <= STATUS_PANEL_MAX_CHARS);
     assert_eq!(fence_count(&rendered) % 2, 0, "odd fence count: {rendered}");
+    assert!(rendered.ends_with("..."));
 }
 
 /// #3394 (3): parity helper — balanced/odd, exact boundary, and the Discord

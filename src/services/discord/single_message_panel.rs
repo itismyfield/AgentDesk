@@ -106,20 +106,82 @@ pub(in crate::services::discord) fn compose_completion_footer_text(
     body: &str,
     completion_block: Option<&str>,
 ) -> String {
+    if let Some(completion_block) = completion_block
+        && let Some((completion_without_warning, warning)) =
+            super::turn_end_wip_warning::split_merged_turn_end_wip_warning(completion_block)
+    {
+        let completion_without_warning =
+            (!completion_without_warning.trim().is_empty()).then_some(completion_without_warning);
+        let warning = completion_footer_subtext(&warning);
+        let separator_units = super::formatting::discord_message_units("\n\n");
+        // Subtracting the byte-denominated section budget from a UTF-16-unit
+        // limit is a conservative lower bound because UTF-8 bytes are never
+        // fewer than UTF-16 units. It leaves that many units for the rendered
+        // non-warning block after framing, but does not guarantee retention of
+        // an entire source section at the byte budget: `completion_footer_subtext`
+        // adds a three-unit prefix to every non-empty line.
+        let warning_budget = super::DISCORD_MSG_LIMIT.saturating_sub(
+            SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES
+                .saturating_add(6)
+                .saturating_add(separator_units),
+        );
+        let warning =
+            super::turn_end_wip_warning::bounded_turn_end_wip_warning(&warning, warning_budget);
+        let content_limit = super::DISCORD_MSG_LIMIT.saturating_sub(
+            super::formatting::discord_message_units(&warning).saturating_add(separator_units),
+        );
+        let composed = compose_completion_footer_text_without_warning_with_limit(
+            body,
+            completion_without_warning.as_deref(),
+            content_limit,
+            true,
+        );
+        return if composed.trim().is_empty() {
+            warning
+        } else {
+            format!("{composed}\n\n{warning}")
+        };
+    }
+    compose_completion_footer_text_without_warning(body, completion_block)
+}
+
+fn compose_completion_footer_text_without_warning(
+    body: &str,
+    completion_block: Option<&str>,
+) -> String {
+    compose_completion_footer_text_without_warning_with_limit(
+        body,
+        completion_block,
+        super::DISCORD_MSG_LIMIT,
+        false,
+    )
+}
+
+fn compose_completion_footer_text_without_warning_with_limit(
+    body: &str,
+    completion_block: Option<&str>,
+    message_limit: usize,
+    clamp_unadorned_body: bool,
+) -> String {
     let body = body.trim_end();
     let Some(block) = completion_block
         .map(str::trim)
         .filter(|block| !block.is_empty())
     else {
-        return body.to_string();
+        return if clamp_unadorned_body {
+            let safe_end =
+                super::formatting::byte_index_at_discord_message_units(body, message_limit);
+            repair_fence_parity(&body[..safe_end])
+        } else {
+            body.to_string()
+        };
     };
     let block = completion_footer_subtext(block);
-    if body.is_empty() {
-        return clamp_footer_status_block(block);
-    }
 
-    let max_block_units = super::DISCORD_MSG_LIMIT.saturating_sub(6);
-    let block = if super::formatting::discord_message_units(&block) <= max_block_units {
+    let max_block_units = message_limit.saturating_sub(6);
+    let block = if max_block_units == 0 {
+        String::new()
+    } else if super::formatting::discord_message_units(&block) <= max_block_units {
         repair_fence_parity(&block)
     } else {
         let ellipsis = "…";
@@ -128,10 +190,16 @@ pub(in crate::services::discord) fn compose_completion_footer_text(
         let safe_end = super::formatting::byte_index_at_discord_message_units(&block, body_budget);
         repair_fence_parity(&format!("{}{}", &block[..safe_end], ellipsis))
     };
+    if block.is_empty() {
+        let safe_end = super::formatting::byte_index_at_discord_message_units(body, message_limit);
+        return repair_fence_parity(&body[..safe_end]);
+    }
+    if body.is_empty() {
+        return block;
+    }
 
     let suffix = format!("\n\n{block}");
-    let max_units =
-        super::DISCORD_MSG_LIMIT.saturating_sub(super::formatting::discord_message_units(&suffix));
+    let max_units = message_limit.saturating_sub(super::formatting::discord_message_units(&suffix));
     let base = if super::formatting::discord_message_units(body) > max_units {
         let safe_end = super::formatting::byte_index_at_discord_message_units(body, max_units);
         &body[..safe_end]

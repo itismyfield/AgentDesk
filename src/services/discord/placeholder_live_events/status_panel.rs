@@ -705,22 +705,25 @@ fn join_status_panel_sections(sections: &[String]) -> String {
     sections.join("\n\n")
 }
 
-/// #3394: section-wise degradation. A char cut of the JOINED panel chops a
-/// trailing fenced section's ``` (rendered as literal text), so on overflow DROP
-/// whole trailing sections; a lone overflowing section is fence-safe-truncated and
-/// `repair_fence_parity` re-balances every return path.
 pub(super) fn truncate_status_panel_sections(mut sections: Vec<String>) -> String {
+    use crate::services::discord::formatting as fmt;
     use crate::services::discord::single_message_panel::repair_fence_parity;
     while sections.len() > 1
-        && join_status_panel_sections(&sections).chars().count() > STATUS_PANEL_MAX_CHARS
+        && fmt::discord_message_units(&join_status_panel_sections(&sections))
+            > STATUS_PANEL_MAX_CHARS
     {
         sections.pop();
     }
     let joined = join_status_panel_sections(&sections);
-    if joined.chars().count() <= STATUS_PANEL_MAX_CHARS {
+    if fmt::discord_message_units(&joined) <= STATUS_PANEL_MAX_CHARS {
         return repair_fence_parity(&joined);
     }
-    repair_fence_parity(&truncate_chars(&joined, STATUS_PANEL_MAX_CHARS))
+    let marker = "..."; // Preserve the visible degradation marker.
+    let safe_end = fmt::byte_index_at_discord_message_units(
+        &joined,
+        STATUS_PANEL_MAX_CHARS.saturating_sub(fmt::discord_message_units(marker)),
+    );
+    format!("{}{marker}", repair_fence_parity(&joined[..safe_end]))
 }
 
 impl SubagentSlot {
