@@ -2658,6 +2658,7 @@ services::discord::inflight::destructive_commit::tests::typed_outcomes_cover_mis
 services::discord::inflight::episode_guard::tests::exact_episode_readoption_consumes_marker_before_completion_clear
 services::discord::inflight::model::discord_id_tests::optional_id_helpers_return_none_for_zero_without_panicking
 services::discord::inflight::model::turn_source_tests::default_is_managed_for_legacy_rows
+services::discord::inflight::model::turn_source_tests::intake_outbox_id_is_additive_and_bidirectionally_compatible
 services::discord::inflight::model::turn_source_tests::missing_field_defaults_to_managed_when_deserialised
 services::discord::inflight::model::turn_source_tests::relay_owner_kind_defaults_to_none_for_legacy_rows
 services::discord::inflight::model::turn_source_tests::relay_owner_kind_session_bound_relay_round_trips
@@ -4008,6 +4009,7 @@ services::discord::router::message_handler::headless_turn::recovery_context_take
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::reserved_headless_start_has_no_post_spawn_error_path
 services::discord::router::message_handler::intake_turn::feedback_reminder_take_order_tests::intake_takes_feedback_reminder_once_after_guards_and_before_prompt_use
 services::discord::router::message_handler::intake_turn::feedback_reminder_take_order_tests::tui_busy_enqueue_refusal_puts_back_feedback_reminder_for_next_turn
+services::discord::router::message_handler::intake_turn::intake_outbox_state_builder_tests::builder_adopts_worker_intake_outbox_identity
 services::discord::router::message_handler::intake_turn::placeholder_handoff::tests::only_confirmed_missing_replaces_bound_busy_notice_4888
 services::discord::router::message_handler::intake_turn::queue_pending_reaction_clear_tests::cleared_set_covers_every_intake_gate_queue_reaction
 services::discord::router::message_handler::intake_turn::queue_pending_reaction_clear_tests::clears_every_queue_marker_reaction
@@ -5555,6 +5557,7 @@ services::discord::turn_bridge::headless_delivery::headless_delivery_tests::head
 services::discord::turn_bridge::headless_delivery::headless_delivery_tests::routine_supplied_delivery_bot_is_never_overridden
 services::discord::turn_bridge::headless_delivery::headless_delivery_tests::unregistered_provider_still_falls_back_to_the_notify_bot
 services::discord::turn_bridge::headless_delivery::headless_delivery_tests::user_turn_answer_posts_as_the_agent_bot_not_notify
+services::discord::turn_bridge::headless_delivery::intake_outbox_argument::tests::delivery_argument_carries_inflight_intake_outbox_identity
 services::discord::turn_bridge::memory_lifecycle::background_memory_task_tests::model_memento_tool_call_arms_session_end_reflect
 services::discord::turn_bridge::memory_lifecycle::background_memory_task_tests::observes_background_memory_tasks_under_one_timeout_window
 services::discord::turn_bridge::memory_lifecycle::background_memory_task_tests::observes_reflect_and_capture_background_memory_tasks

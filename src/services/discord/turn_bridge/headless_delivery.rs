@@ -260,17 +260,25 @@ fn headless_direct_fallback_prefers_notify_http(delivery_bot: Option<&str>) -> b
     caller_supplied_delivery_bot(delivery_bot).is_some()
 }
 
+mod intake_outbox_argument;
+use intake_outbox_argument::HeadlessDeliveryRuntimeArguments;
+pub(super) use intake_outbox_argument::{
+    HeadlessDeliveryArguments, HeadlessDeliveryInputs, assemble_headless_delivery_arguments,
+};
+
 pub(super) async fn enqueue_headless_delivery(
-    shared: &Arc<SharedData>,
-    channel_id: ChannelId,
-    // `None` for a recovery turn with no anchored user message (user_msg_id == 0).
-    owning_user_msg_id: Option<MessageId>,
-    session_key: Option<&str>,
-    delivery_bot: Option<&str>,
-    provider: &ProviderKind,
-    content: &str,
-    cancel_token: Option<&CancelToken>,
+    arguments: HeadlessDeliveryArguments<'_>,
 ) -> Result<(), String> {
+    let HeadlessDeliveryRuntimeArguments {
+        shared,
+        channel_id,
+        owning_user_msg_id,
+        session_key,
+        delivery_bot,
+        provider,
+        content,
+        cancel_token,
+    } = arguments.into_runtime_arguments();
     let target = format!("channel:{}", channel_id.get());
     let bot = headless_delivery_bot_alias(delivery_bot, provider);
 

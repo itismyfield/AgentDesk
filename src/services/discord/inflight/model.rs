@@ -128,6 +128,10 @@ pub(in crate::services::discord) struct InflightTurnState {
     pub thread_title: Option<String>,
     pub request_owner_user_id: u64,
     pub user_msg_id: u64,
+    /// Primary key of the `intake_outbox` row that produced this turn. Worker
+    /// turns carry `Some`; leader-local and legacy turns carry `None`.
+    #[serde(default)]
+    intake_outbox_id: Option<i64>,
     /// Queue-merge source identity for the durable retry budget and notice.
     #[serde(default)]
     pub busy_followup_retry_user_msg_id: u64,
@@ -849,6 +853,46 @@ mod turn_source_tests {
             serde_json::json!(3)
         );
     }
+
+    #[test]
+    fn intake_outbox_id_is_additive_and_bidirectionally_compatible() {
+        #[derive(serde::Deserialize)]
+        struct LegacyStateProjection {
+            version: u32,
+            provider: String,
+        }
+
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            42,
+            Some("adk-cdx".to_string()),
+            7,
+            8,
+            9,
+            "hello".to_string(),
+            None,
+            Some("AgentDesk-claude-adk-cdx".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            0,
+        );
+        state.adopt_intake_outbox(Some(5071));
+        let mut encoded = serde_json::to_value(&state).expect("serialize intake id");
+        assert_eq!(encoded["intake_outbox_id"], serde_json::json!(5071));
+
+        let old_reader: LegacyStateProjection =
+            serde_json::from_value(encoded.clone()).expect("old reader ignores additive field");
+        assert_eq!(old_reader.version, state.version);
+        assert_eq!(old_reader.provider, "claude");
+
+        encoded
+            .as_object_mut()
+            .expect("state serializes as object")
+            .remove("intake_outbox_id");
+        let legacy: InflightTurnState =
+            serde_json::from_value(encoded).expect("new reader accepts legacy state");
+        assert_eq!(legacy.intake_outbox_id(), None);
+    }
 }
 
 impl InflightTurnState {
@@ -899,6 +943,7 @@ impl InflightTurnState {
             thread_title: None,
             request_owner_user_id,
             user_msg_id,
+            intake_outbox_id: None,
             busy_followup_retry_user_msg_id: user_msg_id,
             finalizer_turn_id,
             status_message_id: None,
@@ -972,6 +1017,18 @@ impl InflightTurnState {
             followup_preserve_on_cancel: false,
             streaming_rollover_frozen_msg_ids: Vec::new(),
         }
+    }
+
+    /// Adopt the intake outbox identity at the live-turn construction boundary.
+    pub(in crate::services::discord) fn adopt_intake_outbox(
+        &mut self,
+        intake_outbox_id: Option<i64>,
+    ) {
+        self.intake_outbox_id = intake_outbox_id;
+    }
+
+    pub(in crate::services::discord) fn intake_outbox_id(&self) -> Option<i64> {
+        self.intake_outbox_id
     }
 
     pub fn provider_kind(&self) -> Option<ProviderKind> {

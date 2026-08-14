@@ -232,6 +232,7 @@ async fn seed_foreign_owner(pool: &sqlx::PgPool, channel_id: ChannelId, owner_in
 
 fn request(channel_id: ChannelId, message_id: u64, text: &str) -> IntakeRequest {
     IntakeRequest {
+        intake_outbox_id: None,
         channel_id,
         user_msg_id: MessageId::new(message_id),
         busy_followup_retry_user_msg_id: MessageId::new(message_id),

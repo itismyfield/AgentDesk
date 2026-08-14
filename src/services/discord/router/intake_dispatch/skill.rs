@@ -22,6 +22,7 @@ pub(crate) async fn dispatch_skill_intake(
     let submission = IntakeSubmission {
         provider,
         request: super::super::message_handler::IntakeRequest {
+            intake_outbox_id: None,
             channel_id,
             user_msg_id,
             busy_followup_retry_user_msg_id: user_msg_id,

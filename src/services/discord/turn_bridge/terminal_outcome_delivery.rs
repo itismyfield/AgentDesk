@@ -705,20 +705,22 @@ pub(super) async fn run_terminal_outcome_delivery(
                     }
                 }
             } else {
-                match enqueue_headless_delivery(
-                    &shared_owned,
-                    channel_id,
-                    user_msg_id,
-                    adk_session_key.as_deref(),
-                    inflight_state.delivery_bot.as_deref(),
-                    // #5159: the identity this answer posts under is decided
-                    // from the turn's provider, not from the delivery path.
-                    &provider,
-                    &delivery_response,
-                    Some(cancel_token.as_ref()),
-                )
-                .await
-                {
+                let delivery_arguments =
+                    super::headless_delivery::assemble_headless_delivery_arguments(
+                        &inflight_state,
+                        super::headless_delivery::HeadlessDeliveryInputs {
+                            shared: &shared_owned,
+                            channel_id,
+                            owning_user_msg_id: user_msg_id,
+                            session_key: adk_session_key.as_deref(),
+                            // #5159: the identity this answer posts under is decided
+                            // from the turn's provider, not from the delivery path.
+                            provider: &provider,
+                            content: &delivery_response,
+                            cancel_token: Some(cancel_token.as_ref()),
+                        },
+                    );
+                match enqueue_headless_delivery(delivery_arguments).await {
                     Ok(()) => {
                         cleanup_headless_streaming_placeholder_after_delivery(
                             shared_owned.as_ref(),

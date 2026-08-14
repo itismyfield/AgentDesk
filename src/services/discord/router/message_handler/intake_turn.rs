@@ -44,23 +44,49 @@ pub(in crate::services::discord) struct IntakeDeps<'a> {
     pub token: &'a str,
 }
 
+fn build_intake_inflight_state(
+    intake_outbox_id: Option<i64>,
+    construct: impl FnOnce() -> InflightTurnState,
+) -> InflightTurnState {
+    let mut state = construct();
+    state.adopt_intake_outbox(intake_outbox_id);
+    state
+}
+
+#[cfg(test)]
+mod intake_outbox_state_builder_tests {
+    use super::*;
+
+    #[test]
+    fn builder_adopts_worker_intake_outbox_identity() {
+        // This covers construction plus the private-field adoption boundary.
+        // Upstream Some/None selection is covered separately at each request
+        // creation edge; Option's value choice is not a type-level distinction.
+        let state = build_intake_inflight_state(Some(5071), || {
+            InflightTurnState::new(
+                ProviderKind::Claude,
+                42,
+                Some("adk-cdx".to_string()),
+                7,
+                8,
+                9,
+                "hello".to_string(),
+                None,
+                Some("AgentDesk-claude-adk-cdx".to_string()),
+                Some("/tmp/out.jsonl".to_string()),
+                None,
+                0,
+            )
+        });
+
+        assert_eq!(state.intake_outbox_id(), Some(5071));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_text_message(
     deps: &IntakeDeps<'_>,
-    channel_id: ChannelId,
-    user_msg_id: MessageId,
-    busy_followup_retry_user_msg_id: MessageId,
-    request_owner: UserId,
-    request_owner_name: &str,
-    user_text: &str,
-    reply_to_user_message: bool,
-    defer_watcher_resume: bool,
-    wait_for_completion: bool,
-    merge_consecutive: bool,
-    reply_context: Option<String>,
-    has_reply_boundary: bool,
-    dm_hint: Option<bool>,
-    turn_kind: TurnKind,
+    request: IntakeRequest,
     preserve_on_cancel: bool,
     _queued_drain: bool,
     preloaded_uploads: Vec<String>,
@@ -73,6 +99,26 @@ pub(super) async fn handle_text_message(
         shared,
         token,
     } = *deps;
+    let IntakeRequest {
+        intake_outbox_id,
+        channel_id,
+        user_msg_id,
+        busy_followup_retry_user_msg_id,
+        request_owner,
+        request_owner_name: request_owner_name_owned,
+        user_text: user_text_owned,
+        reply_to_user_message,
+        defer_watcher_resume,
+        wait_for_completion,
+        merge_consecutive,
+        reply_context,
+        has_reply_boundary,
+        dm_hint,
+        turn_kind,
+        preserve_on_cancel: _,
+    } = request;
+    let request_owner_name = request_owner_name_owned.as_str();
+    let user_text = user_text_owned.as_str();
     let original_channel_id = channel_id;
     let stored_voice_announcement =
         crate::voice::announce_meta::global_store().take_with_acceptance(user_msg_id);
@@ -2106,20 +2152,22 @@ pub(super) async fn handle_text_message(
             (channel_id.get(), None, None)
         };
 
-    let mut inflight_state = InflightTurnState::new(
-        provider.clone(),
-        channel_id.get(),
-        channel_name.clone(),
-        request_owner.get(),
-        user_msg_id.get(),
-        placeholder_msg_id.get(),
-        user_text.to_string(),
-        session_id.clone(),
-        inflight_tmux_name,
-        inflight_output_path,
-        inflight_input_fifo.clone(),
-        inflight_offset,
-    );
+    let mut inflight_state = build_intake_inflight_state(intake_outbox_id, || {
+        InflightTurnState::new(
+            provider.clone(),
+            channel_id.get(),
+            channel_name.clone(),
+            request_owner.get(),
+            user_msg_id.get(),
+            placeholder_msg_id.get(),
+            user_text.to_string(),
+            session_id.clone(),
+            inflight_tmux_name,
+            inflight_output_path,
+            inflight_input_fifo.clone(),
+            inflight_offset,
+        )
+    });
     inflight_state.busy_followup_retry_user_msg_id = busy_followup_retry_user_msg_id.get();
     inflight_state.turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
     apply_prelaunch_runtime_kind(&mut inflight_state, prelaunch_runtime_kind);
