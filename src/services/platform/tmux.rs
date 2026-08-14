@@ -1260,6 +1260,11 @@ mod timeout_tests {
         let path = dir.join("tmux");
         let mut file = std::fs::File::create(&path).expect("fake tmux");
         writeln!(file, "#!/bin/sh").expect("shebang");
+        // tmux_command prepends global option flags (currently -u for UTF-8
+        // mode) before the subcommand; drop them so stub bodies can keep
+        // matching the subcommand positionally via $1.
+        writeln!(file, "while [ \"${{1#-}}\" != \"$1\" ]; do shift; done")
+            .expect("flag skip preamble");
         writeln!(file, "{body}").expect("body");
         let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
         permissions.set_mode(0o755);
