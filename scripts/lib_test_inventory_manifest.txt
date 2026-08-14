@@ -583,6 +583,7 @@ engine::loader::tests::load_single_policy_tolerates_wrong_type_optional_metadata
 engine::loader::tests::load_single_policy_with_deadline_interrupts_runaway_policy
 engine::loader::tests::policy_trust_findings_flag_writable_policy_and_symlink
 engine::loader::tests::test_compute_policy_version
+engine::ops::auto_queue_ops::tests::complete_run_wrapper_preserves_refused_slot_and_atomically_releases_success_pg
 engine::ops::config_ops::tests::config_get_raw_keeps_scalar_string_semantics_and_precedence
 engine::ops::config_ops::tests::config_get_raw_never_exposes_the_reserved_runtime_blob_key
 engine::ops::config_ops::tests::config_get_raw_preserves_runtime_blob_json_types
