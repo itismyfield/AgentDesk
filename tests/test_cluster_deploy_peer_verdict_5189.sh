@@ -37,6 +37,8 @@ extract_function() {
 
 # Exercise the production functions without executing the deploy script.
 eval "$(extract_function _emit_terminal_deploy_marker)"
+eval "$(extract_function _report_peer_verdict_failure)"
+eval "$(extract_function _wait_for_peer_deploy_verdict)"
 
 failures=0
 fail_test() {
@@ -139,6 +141,64 @@ else
     if grep -q 'repo_head 4ee96e55e' "$TMP_ROOT/poll.out"; then
         fail_test "the polling command matched a line that merely QUOTES the terminal marker — it must match terminal lines only"
     fi
+fi
+
+# --- 3. peer completion requires an observed three-axis verdict ------------
+# Stub the peer probe so these checks cannot reach SSH or a live release API.
+# shellcheck disable=SC2034  # Read by the production function loaded through eval.
+DEPLOY_PEER_VERDICT_TIMEOUT_SECS=30
+# shellcheck disable=SC2034  # Read by the production function loaded through eval.
+DEPLOY_PEER_VERDICT_POLL_INTERVAL_SECS=1
+# shellcheck disable=SC2329  # Invoked indirectly by the production wait function.
+_probe_peer_deploy_state() {
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+        success '═══ Deploy Complete ═══' stale-head read true 'ok=true, status=healthy'
+}
+
+peer_verdict_rc=0
+peer_verdict_out="$(_wait_for_peer_deploy_verdict \
+    peer-stub /stub/deploy.log /stub/release-source.json 8791 target-head 2>&1)" \
+    || peer_verdict_rc=$?
+if [ "$peer_verdict_rc" -eq 0 ]; then
+    fail_test "a terminal marker and healthy API must still be red when repo_head differs from the deploy target"
+elif ! grep -q 'repo head does not match the deploy target' <<<"$peer_verdict_out"; then
+    fail_test "a repo_head mismatch must identify the failing verdict axis; got: $peer_verdict_out"
+fi
+
+# shellcheck disable=SC2034  # Read by the production function loaded through eval.
+DEPLOY_PEER_VERDICT_TIMEOUT_SECS=0
+# shellcheck disable=SC2329  # Invoked indirectly by the production wait function.
+_probe_peer_deploy_state() {
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+        missing 'no terminal marker' unavailable 'manifest unavailable' false 'request failed: stub'
+}
+
+peer_verdict_rc=0
+peer_verdict_out="$(_wait_for_peer_deploy_verdict \
+    peer-stub /stub/deploy.log /stub/release-source.json 8791 target-head 2>&1)" \
+    || peer_verdict_rc=$?
+if [ "$peer_verdict_rc" -eq 0 ]; then
+    fail_test "a peer verdict timeout must be red"
+elif ! grep -q 'timed out after 0s' <<<"$peer_verdict_out"; then
+    fail_test "a timeout must be reported as the verdict failure reason; got: $peer_verdict_out"
+elif ! grep -q 'terminal marker: missing' <<<"$peer_verdict_out" \
+    || ! grep -q 'repo head: expected=target-head observed=unavailable' <<<"$peer_verdict_out" \
+    || ! grep -q 'health: ok=false' <<<"$peer_verdict_out"; then
+    fail_test "a timeout must report marker, repo head, and health observations; got: $peer_verdict_out"
+fi
+
+peer_deploy_body="$(extract_function _deploy_to_one_peer)"
+case "$peer_deploy_body" in
+    *_wait_for_peer_deploy_verdict*) : ;;
+    *) fail_test "_deploy_to_one_peer must use the observed peer verdict after SSH launches the deploy" ;;
+esac
+case "$peer_deploy_body" in
+    *'deploy completed'*) fail_test "_deploy_to_one_peer must not describe SSH launch success as deploy completion" ;;
+    *) : ;;
+esac
+
+if grep -q 'Cluster Deploy Complete (all peers healthy)' "$DEPLOY_SH"; then
+    fail_test "the cluster verdict must not claim all peers healthy without naming the verified verdict"
 fi
 
 if [ "$failures" -ne 0 ]; then

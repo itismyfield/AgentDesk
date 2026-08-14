@@ -159,6 +159,12 @@ DEPLOY_FAST="${AGENTDESK_DEPLOY_FAST:-0}"
 # whole cluster deploy. Only the connect is bounded; a reachable peer's long
 # remote build is unaffected.
 DEPLOY_SSH_CONNECT_TIMEOUT="${AGENTDESK_DEPLOY_SSH_CONNECT_TIMEOUT:-10}"
+# Peer build duration is not measured by this script. Keep a conservative
+# 30-minute observation window so release builds have room to finish, while a
+# lost detached helper still reaches a red verdict. Five seconds limits repeated
+# SSH/API pressure without making a completed peer wait long for recognition.
+DEPLOY_PEER_VERDICT_TIMEOUT_SECS="${AGENTDESK_DEPLOY_PEER_VERDICT_TIMEOUT_SECS:-1800}"
+DEPLOY_PEER_VERDICT_POLL_INTERVAL_SECS="${AGENTDESK_DEPLOY_PEER_VERDICT_POLL_INTERVAL_SECS:-5}"
 
 # Parse flags non-destructively into shell vars + env so that the lock-acquire
 # re-exec (lockf/flock pass-through) and the detached-helper tmux script both
@@ -1191,15 +1197,211 @@ _deploy_peer_env_prelude() {
     done
 }
 
+_probe_peer_deploy_state() {
+    local peer="$1"
+    local peer_log_path="$2"
+    local peer_manifest_path="$3"
+    local peer_health_port="$4"
+    local remote_probe_command
+
+    remote_probe_command="$(cat <<EOF
+python3 - $(printf '%q' "$peer_log_path") $(printf '%q' "$peer_manifest_path") $(printf '%q' "$peer_health_port") <<'PY'
+import json
+import re
+import sys
+import urllib.request
+
+log_path, manifest_path, health_port = sys.argv[1:]
+
+
+def clean(value):
+    return str(value).replace("\\t", " ").replace("\\r", " ").replace("\\n", " ")[:240]
+
+
+marker_status = "missing"
+marker_detail = "no terminal marker"
+try:
+    with open(log_path, encoding="utf-8", errors="replace") as handle:
+        for raw_line in handle:
+            line = raw_line.rstrip("\\r\\n")
+            if line == "═══ Deploy Complete ═══":
+                marker_status = "success"
+                marker_detail = line
+            elif re.fullmatch(r"═══ DEPLOY FAILED \\(exit=[0-9]+\\) ═══", line):
+                marker_status = "failure"
+                marker_detail = line
+except OSError as exc:
+    marker_detail = f"log unavailable: {exc.strerror or type(exc).__name__}"
+
+repo_head = "unavailable"
+repo_detail = "manifest unavailable"
+try:
+    with open(manifest_path, encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    value = manifest.get("repo_head") if isinstance(manifest, dict) else None
+    if isinstance(value, str) and value:
+        repo_head = value
+        repo_detail = "read"
+    else:
+        repo_detail = "repo_head missing"
+except (OSError, ValueError) as exc:
+    repo_detail = f"manifest unreadable: {type(exc).__name__}"
+
+health_status = "false"
+health_detail = "request not completed"
+try:
+    with urllib.request.urlopen(
+        f"http://127.0.0.1:{health_port}/api/health", timeout=5
+    ) as response:
+        health = json.load(response)
+    health_ok = isinstance(health, dict) and health.get("ok") is True
+    health_status = "true" if health_ok else "false"
+    status = health.get("status", "missing") if isinstance(health, dict) else "invalid body"
+    health_detail = f"ok={health_status}, status={status}"
+except Exception as exc:
+    health_detail = f"request failed: {type(exc).__name__}"
+
+print(
+    "\\t".join(
+        clean(value)
+        for value in (
+            marker_status,
+            marker_detail,
+            repo_head,
+            repo_detail,
+            health_status,
+            health_detail,
+        )
+    )
+)
+PY
+EOF
+)"
+
+    ssh \
+        -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" \
+        -o ServerAliveInterval=5 \
+        -o ServerAliveCountMax=1 \
+        "$peer" "bash -lc $(printf '%q' "$remote_probe_command")"
+}
+
+_report_peer_verdict_failure() {
+    local peer="$1"
+    local reason="$2"
+    local marker_status="$3"
+    local marker_detail="$4"
+    local expected_repo_head="$5"
+    local observed_repo_head="$6"
+    local repo_detail="$7"
+    local health_status="$8"
+    local health_detail="$9"
+
+    echo "✗ [peer:$peer] verdict failed: $reason"
+    echo "  terminal marker: $marker_status ($marker_detail)"
+    echo "  repo head: expected=$expected_repo_head observed=$observed_repo_head ($repo_detail)"
+    echo "  health: ok=$health_status ($health_detail)"
+}
+
+_wait_for_peer_deploy_verdict() {
+    local peer="$1"
+    local peer_log_path="$2"
+    local peer_manifest_path="$3"
+    local peer_health_port="$4"
+    local expected_repo_head="$5"
+    local timeout_secs="$DEPLOY_PEER_VERDICT_TIMEOUT_SECS"
+    local poll_interval_secs="$DEPLOY_PEER_VERDICT_POLL_INTERVAL_SECS"
+
+    case "$timeout_secs" in
+        ''|*[!0-9]*)
+            echo "✗ [peer:$peer] invalid verdict timeout: $timeout_secs"
+            return 1
+            ;;
+    esac
+    case "$poll_interval_secs" in
+        ''|*[!0-9]*|0)
+            echo "✗ [peer:$peer] invalid verdict poll interval: $poll_interval_secs"
+            return 1
+            ;;
+    esac
+
+    local deadline=$((SECONDS + timeout_secs))
+    local marker_status="unknown"
+    local marker_detail="not probed"
+    local observed_repo_head="unavailable"
+    local repo_detail="not probed"
+    local health_status="false"
+    local health_detail="not probed"
+    local probe_output
+
+    while :; do
+        if probe_output="$(_probe_peer_deploy_state \
+            "$peer" "$peer_log_path" "$peer_manifest_path" "$peer_health_port")"; then
+            IFS=$'\t' read -r \
+                marker_status marker_detail observed_repo_head repo_detail health_status health_detail \
+                <<<"$probe_output"
+        else
+            marker_status="unknown"
+            marker_detail="peer probe failed"
+            observed_repo_head="unavailable"
+            repo_detail="peer probe failed"
+            health_status="false"
+            health_detail="peer probe failed"
+        fi
+
+        if [ "$marker_status" = "success" ] \
+            && [ "$observed_repo_head" = "$expected_repo_head" ] \
+            && [ "$health_status" = "true" ]; then
+            echo "✓ [peer:$peer] deploy verified: terminal marker, repo head, and health ok=true"
+            return 0
+        fi
+
+        if [ "$marker_status" = "failure" ]; then
+            _report_peer_verdict_failure "$peer" "peer log ended in failure" \
+                "$marker_status" "$marker_detail" "$expected_repo_head" \
+                "$observed_repo_head" "$repo_detail" "$health_status" "$health_detail"
+            return 1
+        fi
+
+        if [ "$marker_status" = "success" ] \
+            && [ "$observed_repo_head" != "unavailable" ] \
+            && [ "$observed_repo_head" != "$expected_repo_head" ]; then
+            _report_peer_verdict_failure "$peer" "repo head does not match the deploy target" \
+                "$marker_status" "$marker_detail" "$expected_repo_head" \
+                "$observed_repo_head" "$repo_detail" "$health_status" "$health_detail"
+            return 1
+        fi
+
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            _report_peer_verdict_failure "$peer" "timed out after ${timeout_secs}s" \
+                "$marker_status" "$marker_detail" "$expected_repo_head" \
+                "$observed_repo_head" "$repo_detail" "$health_status" "$health_detail"
+            return 1
+        fi
+
+        local remaining_secs=$((deadline - SECONDS))
+        local sleep_secs="$poll_interval_secs"
+        if [ "$sleep_secs" -gt "$remaining_secs" ]; then
+            sleep_secs="$remaining_secs"
+        fi
+        sleep "$sleep_secs"
+    done
+}
+
 _deploy_to_one_peer() {
     local peer="$1"
     shift
     local quoted_args=""
     local env_prelude
     local remote_cd_command
-    local remote_deploy_command
     local remote_presync_command
+    local expected_repo_head
+    local peer_adk_rel
+    local peer_health_port
+    local peer_log_path
+    local peer_manifest_path
+    local remote_deploy_command
     env_prelude="$(_deploy_peer_env_prelude)"
+    expected_repo_head="$(git -C "$REPO" rev-parse HEAD)"
     if [ "$#" -gt 0 ]; then
         quoted_args=$(printf ' %q' "$@")
     fi
@@ -1213,13 +1415,26 @@ ${remote_cd_command}
 git fetch --quiet origin main
 git checkout --quiet main
 git merge --quiet --ff-only origin/main"
-    remote_deploy_command="${remote_cd_command} && ${env_prelude} bash scripts/deploy-release.sh${quoted_args}"
-
     echo "▸ [peer:$peer] Pre-syncing repo (fast-forward only)..."
     if ! ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" "bash -lc $(printf '%q' "$remote_presync_command")"; then
         echo "✗ [peer:$peer] Pre-sync failed (diverged, fetch error, or unreachable within ${DEPLOY_SSH_CONNECT_TIMEOUT}s). Resolve on the peer and retry."
         return 1
     fi
+
+    if ! peer_adk_rel="$(ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" \
+        'bash -lc '"$(printf '%q' 'echo "${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"')"'')"; then
+        echo "✗ [peer:$peer] could not resolve remote AGENTDESK_ROOT_DIR"
+        return 1
+    fi
+    peer_adk_rel="$(printf '%s' "$peer_adk_rel" | tr -d '\r')"
+    if [ -z "$peer_adk_rel" ]; then
+        echo "✗ [peer:$peer] remote AGENTDESK_ROOT_DIR resolved empty"
+        return 1
+    fi
+    peer_log_path="$peer_adk_rel/logs/deploy-release.cluster-${expected_repo_head}.$$.log"
+    peer_manifest_path="$peer_adk_rel/runtime/release-source.json"
+    peer_health_port="${REL_PORT:-${AGENTDESK_REL_PORT:-$ADK_DEFAULT_PORT}}"
+    remote_deploy_command="${remote_cd_command} && ${env_prelude} AGENTDESK_DEPLOY_LOG=$(printf '%q' "$peer_log_path") bash scripts/deploy-release.sh${quoted_args}"
 
     # Operator-private routines are excluded from the repo (.gitignore:50), so the
     # peer's own `git fetch` above cannot deliver them. Push them before the peer
@@ -1228,13 +1443,6 @@ git merge --quiet --ff-only origin/main"
     # missing these files fails every routine row with "routine script ... is not
     # loaded". No --delete: the peer may hold routines this node does not.
     if [ -d "$ADK_REL/routines" ]; then
-        local peer_adk_rel
-        if ! peer_adk_rel="$(ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" \
-            'bash -lc '"$(printf '%q' 'echo "${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"')"'')"; then
-            echo "✗ [peer:$peer] could not resolve remote AGENTDESK_ROOT_DIR"
-            return 1
-        fi
-        peer_adk_rel="$(printf '%s' "$peer_adk_rel" | tr -d '\r')"
         echo "▸ [peer:$peer] Syncing operator routine scripts..."
         if ! rsync -a -e "ssh -o ConnectTimeout=$DEPLOY_SSH_CONNECT_TIMEOUT" \
             "$ADK_REL/routines/" "$peer:$peer_adk_rel/routines/"; then
@@ -1249,8 +1457,9 @@ git merge --quiet --ff-only origin/main"
         return 1
     fi
 
-    echo "✓ [peer:$peer] deploy completed"
-    return 0
+    echo "▸ [peer:$peer] deploy launched; waiting for observed verdict..."
+    _wait_for_peer_deploy_verdict \
+        "$peer" "$peer_log_path" "$peer_manifest_path" "$peer_health_port" "$expected_repo_head"
 }
 
 _deploy_to_all_peers() {
@@ -1283,7 +1492,7 @@ _deploy_to_all_peers() {
         echo "✗ Cluster deploy: $failures peer(s) failed"
         exit 1
     fi
-    echo "═══ Cluster Deploy Complete (all peers healthy) ═══"
+    echo "═══ Cluster Deploy Complete (all peer verdicts verified) ═══"
 }
 
 _acquire_release_deploy_lock() {
@@ -1367,6 +1576,8 @@ export AGENTDESK_DEPLOY_ALLOW_NON_MAIN=$(printf '%q' "${AGENTDESK_DEPLOY_ALLOW_N
 export AGENTDESK_DEPLOY_ALLOW_DIRTY=$(printf '%q' "${AGENTDESK_DEPLOY_ALLOW_DIRTY:-0}")
 export AGENTDESK_DEPLOY_LOCK_FILE=$(printf '%q' "$DEPLOY_LOCK_FILE")
 export AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS=$(printf '%q' "$DEPLOY_LOCK_TIMEOUT_SECS")
+export AGENTDESK_DEPLOY_PEER_VERDICT_TIMEOUT_SECS=$(printf '%q' "$DEPLOY_PEER_VERDICT_TIMEOUT_SECS")
+export AGENTDESK_DEPLOY_PEER_VERDICT_POLL_INTERVAL_SECS=$(printf '%q' "$DEPLOY_PEER_VERDICT_POLL_INTERVAL_SECS")
 export AGENTDESK_DEPLOY_ALL_NODES=$(printf '%q' "${AGENTDESK_DEPLOY_ALL_NODES:-0}")
 export AGENTDESK_DEPLOY_PEERS=$(printf '%q' "${AGENTDESK_DEPLOY_PEERS:-}")
 export AGENTDESK_DEPLOY_PEERS_FILE=$(printf '%q' "${AGENTDESK_DEPLOY_PEERS_FILE:-}")
