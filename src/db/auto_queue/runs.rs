@@ -185,6 +185,13 @@ async fn remaining_runnable_entry_count_on_pg_tx(
 /// before locking entries. The non-blocking acquisition below adds no wait and
 /// defers finalization whenever another transaction owns the token.
 ///
+/// When the try-lock succeeds, the token remains held until the caller's
+/// transaction commits. Blocking attach, cancel, and explicit-completion
+/// participants can therefore wait behind this opportunistic finalizer. JS
+/// callers remain bounded by the policy-hook execution budget, so avoiding an
+/// entry-row/run-token ABBA comes with bounded participant delay rather than no
+/// waiting anywhere in the protocol.
+///
 /// Moving a blocking acquisition above every entry, card, and run write in the
 /// callers of this helper would broaden per-run serialization across the sync,
 /// GitHub, phase-gate reconciliation, and dispatch-terminal paths. Those paths
@@ -192,6 +199,18 @@ async fn remaining_runnable_entry_count_on_pg_tx(
 /// finalizer instead. Its remaining-entry predicate is derived only after the
 /// token is acquired, so a previously computed count cannot cross an attach
 /// commit protected by the same token.
+///
+/// `lock_phase_gate_state_on_pg_tx` uses PostgreSQL's two-argument advisory
+/// key space. It is separate from the one-argument `aq_run:<run_id>` token and
+/// does not serialize phase-gate state writes with cancel.
+///
+/// Known completed writers outside this token protocol are intentionally
+/// scoped: `complete_run_if_empty` cleans a genuinely entry-less run during
+/// activate, `submit_order_with_pg` completes a newly-created run when no
+/// ready card was accepted, `reset_scoped_with_pg`/`reset_global_with_pg`
+/// destructively remove queue entries before completing runs, and
+/// `update_run_with_pg` is an explicit admin override. They do not inherit the
+/// attach-versus-terminal atomicity guaranteed by the participants above.
 pub(crate) async fn maybe_finalize_run_if_ready_pg(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
@@ -313,7 +332,11 @@ pub async fn resume_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, Strin
 /// its transaction and holds no row locks before acquiring the token. It then
 /// derives the remaining-entry predicate under that token before changing phase
 /// gates, the run, slots, or completion notifications.
-pub async fn complete_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, String> {
+async fn complete_run_on_pg_inner(
+    pool: &PgPool,
+    run_id: &str,
+    queue_completion_notification: bool,
+) -> Result<bool, String> {
     let mut tx = pool
         .begin()
         .await
@@ -371,9 +394,26 @@ pub async fn complete_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, Str
         .await
         .map_err(|error| format!("release slots for completed run {run_id}: {error}"))?;
 
-    queue_run_completion_notify_on_pg(&mut tx, run_id).await?;
+    if queue_completion_notification {
+        queue_run_completion_notify_on_pg(&mut tx, run_id).await?;
+    }
     tx.commit()
         .await
         .map_err(|error| format!("commit postgres complete auto-queue run {run_id}: {error}"))?;
     Ok(true)
+}
+
+pub async fn complete_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, String> {
+    complete_run_on_pg_inner(pool, run_id, true).await
+}
+
+/// Activate historically completed drained runs without sending a completion
+/// notification. Preserve that response/notification contract while routing
+/// its terminal write through the canonical token, predicate, and slot-release
+/// transaction.
+pub(crate) async fn complete_run_after_activate_on_pg(
+    pool: &PgPool,
+    run_id: &str,
+) -> Result<bool, String> {
+    complete_run_on_pg_inner(pool, run_id, false).await
 }

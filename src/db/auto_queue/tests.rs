@@ -114,6 +114,7 @@ mod dispatch_terminal_sync_pg_tests {
         update_entry_status_on_pg, update_entry_status_on_pg_tx,
     };
     use crate::db::auto_queue::runs::acquire_run_advisory_xact_lock_on_pg_tx;
+    use crate::db::auto_queue::runs::complete_run_after_activate_on_pg;
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use chrono::{DateTime, Utc};
     use sqlx::{Connection, PgConnection, PgPool, Row};
@@ -515,6 +516,31 @@ mod dispatch_terminal_sync_pg_tests {
                 3,
             )
         );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_activate_completion_uses_protocol_without_notification_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        seed_entry(
+            &pool,
+            "entry-activate-drained",
+            "card-activate-drained",
+            "failed",
+        )
+        .await;
+
+        assert!(
+            complete_run_after_activate_on_pg(&pool, "run-1")
+                .await
+                .expect("complete drained activate run")
+        );
+        assert_eq!(run_status(&pool, "run-1").await, "completed");
+        assert_eq!(slot_run(&pool, "agent-1", 0).await, None);
+        assert_eq!(count_message_outbox(&pool).await, 0);
 
         pool.close().await;
         pg_db.drop().await;

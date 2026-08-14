@@ -449,8 +449,10 @@ var autoQueue = {
     clearPhaseGateState(gate.run_id, phase);
     resetPhaseGateFailureCount(state.anchor_card_id || dispatch.kanban_card_id, phase);
     if (state.final_phase || gate.final_phase) {
-      completeRunAndNotify(gate.run_id);
-      autoQueueLog("info", "Phase gate passed, completed run " + gate.run_id + " at phase " + phase, {
+      var runCompleted = completeRunAndNotify(gate.run_id);
+      autoQueueLog(runCompleted ? "info" : "warn", runCompleted
+        ? "Phase gate passed, completed run " + gate.run_id + " at phase " + phase
+        : "Phase gate passed, but run " + gate.run_id + " did not complete at phase " + phase + "; resume fallback requested", {
         run_id: gate.run_id,
         dispatch_id: dispatch.id,
         card_id: dispatch.kanban_card_id,
@@ -512,6 +514,7 @@ var autoQueue = {
       "SELECT r.id " +
       "FROM auto_queue_runs r " +
       "WHERE r.status IN ('active', 'paused', 'generated', 'pending') " +
+      "AND EXISTS (SELECT 1 FROM auto_queue_entries e WHERE e.run_id = r.id) " +
       "AND NOT EXISTS (" +
       "  SELECT 1 FROM auto_queue_entries e " +
       "  WHERE e.run_id = r.id AND e.status IN ('pending', 'dispatched', 'user_cancelled')" +

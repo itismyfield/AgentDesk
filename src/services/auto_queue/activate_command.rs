@@ -1267,9 +1267,9 @@ async fn compute_activate_groups_to_dispatch(
     })
 }
 
-/// Final activate phase: drains the run if no entries remain (releasing slots
-/// and best-effort completing the run), recomputes the active/pending group
-/// counts and post-activate turn count, and builds the success payload. Count
+/// Final activate phase: atomically completes and releases a drained run,
+/// recomputes the active/pending group counts and post-activate turn count, and
+/// builds the success payload. Count
 /// failures short-circuit with a 500 returned as `Err(ActivateResponse)`; the
 /// success payload is returned as `Ok(ActivateResponse)`.
 async fn finalize_activate_run_and_build_response(
@@ -1300,56 +1300,23 @@ async fn finalize_activate_run_and_build_response(
         }
     };
     if remaining == 0 {
-        if let Err(error) = crate::db::auto_queue::release_run_slots_pg(pool, run_id).await {
-            crate::auto_queue_log!(
-                warn,
-                "activate_release_run_slots_failed_pg",
+        match crate::db::auto_queue::runs::complete_run_after_activate_on_pg(pool, run_id).await {
+            Ok(true) => {}
+            Ok(false) => crate::auto_queue_log!(
+                info,
+                "activate_finalize_run_deferred_pg",
                 run_log_ctx.clone(),
-                "[auto-queue] failed to release PG slots for drained run {}: {}",
-                run_id,
-                error
-            );
-        }
-        let still_dispatched = match sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT
-             FROM auto_queue_entries
-             WHERE run_id = $1
-               AND status = 'dispatched'",
-        )
-        .bind(run_id)
-        .fetch_one(pool)
-        .await
-        {
-            Ok(value) => value,
-            Err(error) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(
-                        json!({"error": format!("count postgres dispatched entries for {run_id}: {error}")}),
-                    ),
-                ));
-            }
-        };
-        if still_dispatched == 0
-            && let Err(error) = sqlx::query(
-                "UPDATE auto_queue_runs
-                 SET status = 'completed',
-                     completed_at = NOW()
-                 WHERE id = $1
-                   AND status IN ('active', 'paused', 'generated', 'pending')",
-            )
-            .bind(run_id)
-            .execute(pool)
-            .await
-        {
-            crate::auto_queue_log!(
+                "[auto-queue] canonical completion left PG run {} unchanged because it was ineligible or runnable entries remained",
+                run_id
+            ),
+            Err(error) => crate::auto_queue_log!(
                 warn,
                 "activate_finalize_run_failed_pg",
                 run_log_ctx.clone(),
                 "[auto-queue] failed to finalize PG run {} after dispatch drain: {}",
                 run_id,
                 error
-            );
+            ),
         }
     }
 

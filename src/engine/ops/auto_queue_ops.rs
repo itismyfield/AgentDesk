@@ -362,6 +362,9 @@ fn complete_run_raw(
         return r#"{"error":"source is required"}"#.to_string();
     }
 
+    // Options remain parse-validated for host API compatibility, but no option
+    // controls slot release. Canonical completion always releases slots inside
+    // the same transaction as the run status change.
     let _opts_value: serde_json::Value = match serde_json::from_str(opts_json) {
         Ok(value) => value,
         Err(error) => {
