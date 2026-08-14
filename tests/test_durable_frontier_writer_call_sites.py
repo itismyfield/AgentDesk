@@ -333,6 +333,7 @@ class DiscriminationTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
+        write(root, "src/main.rs", "fn main() {}\n")
         removed_path = "src/hidden_tests.rs"
         write(root, removed_path, "")
         canonical = frozenset({removed_path})
@@ -362,6 +363,7 @@ class DiscriminationTests(unittest.TestCase):
     def test_census_survives_pin_comparison_bypass(self):
         root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, root)
+        write(root, "src/main.rs", "fn main() {}\n")
         write(root, "src/new_tests.rs", "")
         original = guard._SKIP_PIN.skip_pin_drift
         guard._SKIP_PIN.skip_pin_drift = lambda *_args, **_kwargs: None
@@ -372,6 +374,22 @@ class DiscriminationTests(unittest.TestCase):
                 )
         finally:
             guard._SKIP_PIN.skip_pin_drift = original
+
+    def test_empty_production_input_reports_the_resolver_guard_not_a_fallback_path(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        write(root, "src/only_tests.rs", "")
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "production file list is empty.*empty-input fallback",
+        ) as raised:
+            guard._SKIP_PIN.validated_scan_files(
+                root,
+                guard.SCAN_ROOT,
+                guard.is_test_file,
+                pinned_paths={"src/only_tests.rs"},
+            )
+        self.assertNotIn("outside lexical src/ enumeration", str(raised.exception))
 
     def test_four_resolver_holes_and_basename_bypass_fail_both_gates(self):
         prelude = (
@@ -434,6 +452,43 @@ class DiscriminationTests(unittest.TestCase):
                     self.assertFalse(ok, message)
                     self.assertIn(f"scan-only (newly skipped): {child}", message)
 
+    def test_non_rs_path_variants_are_enumerated_and_rejected_by_both_gates(self):
+        prelude = (
+            "pub fn write_delivered_frontier() {}\n"
+            "pub mod db { pub mod intake_outbox { pub fn mark_done() {} } }\n"
+        )
+        shared = (
+            "pub fn run() { crate::write_delivered_frontier(); "
+            "crate::db::intake_outbox::mark_done(); }\n"
+        )
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        main = root / "src/main.rs"
+        declarations = (
+            '#[path="gate_escape.rś"]\nmod escape_unicode;\n'
+            '#[path="gate_escape.txt"]\nmod escape_suffix;\n'
+            '#[path="gate_escape"]\nmod escape_none;\n'
+        )
+        write(
+            root,
+            "src/main.rs",
+            prelude
+            + declarations
+            + "fn main() { escape_unicode::run(); escape_suffix::run(); "
+            "escape_none::run(); }\n",
+        )
+        for rel in ("src/gate_escape.rś", "src/gate_escape.txt", "src/gate_escape"):
+            write(root, rel, shared)
+
+        built = self.rustc(root, main)
+        self.assertEqual(built.returncode, 0, built.stderr)
+        for ok, message in self.run_both_skip_gates(root, frozenset()):
+            self.assertFalse(ok, message)
+            self.assertIn("reject non-.rs regular files", message)
+            for rel in ("src/gate_escape.rś", "src/gate_escape.txt", "src/gate_escape"):
+                self.assertIn(rel, message)
+
     def test_file_and_directory_symlinks_are_rejected_by_both_gates(self):
         prelude = (
             "pub fn write_delivered_frontier() {}\n"
@@ -470,6 +525,12 @@ class DiscriminationTests(unittest.TestCase):
                 for ok, message in self.run_both_skip_gates(root, frozenset()):
                     self.assertFalse(ok, message)
                     self.assertIn("reject file or directory symlinks", message)
+                    self.assertIn(
+                        "do not add it to the writer-gate skip pin", message
+                    )
+                    self.assertNotIn(
+                        "Review basename and resolver classification", message
+                    )
 
     def test_legal_test_only_round_trip_updates_only_the_pin(self):
         temp = tempfile.TemporaryDirectory()
@@ -511,6 +572,7 @@ class DiscriminationTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
+        write(root, "src/main.rs", "fn main() {}\n")
         body = (
             "fn probe() { crate::write_delivered_frontier(); "
             "crate::db::intake_outbox::mark_done(); }\n"

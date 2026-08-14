@@ -15,9 +15,9 @@ terminal-receipt holder drives `done`; it does not move `claimed`, `accepted`,
 or `spawned`. Pinning those other lifecycle transitions here would block T2-
 unrelated work. `EXPECTED_CALL_SITES` names the writer symbol and the owning
 function's file, never a line number. The proof writer expects zero sites until
-its exact future owner exists, then exactly one there. Every Rust file below
-`src/` is scanned: within the bounds below, a protected direct import or call
-added, deleted, moved, aliased, or found in an unlisted file fails closed.
+its exact future owner exists, then exactly one there. Every regular `.rs` file
+under `src/` is scanned: within the bounds below, a protected direct import or
+call added, deleted, moved, aliased, or found in an unlisted file fails closed.
 
 WHAT THIS GATE DOES NOT GUARANTEE. This is a lexical scan, not Rust parsing or
 name resolution. It sees a bare `mark_done(...)` only in a file that directly
@@ -33,10 +33,13 @@ action. Conversely, a same-spelled free function in a file importing this
 writer could be over-counted. Comments, strings, pinned whole-file test modules,
 and `#[cfg(test)]` regions are excluded, but other cfgs are counted without
 target evaluation. Whole-file skips use the single lexical pin in
-`scripts/test_only_module_skip_pin.py`; `src/` symlinks are rejected and the
-skipped census must equal the pin count.
+`scripts/test_only_module_skip_pin.py`; non-`.rs` regular files are rejected
+before classification, `src/` symlinks are rejected, and the skipped census
+must equal the pin count. Symlink rejection is lexical rather than atomic
+against a post-enumeration replacement; CI assumes a static checkout while
+the gate runs.
 
-The unchanged shared resolver does not guarantee seven measured forms:
+The unchanged shared resolver does not guarantee at least seven measured forms:
 `#[path]`/`mod` separated by a comment, macro-generated `mod`,
 `cfg(not(test))+include!`, `cfg(any(test,feature))+include!`, `cfg_attr(path=)`,
 raw-string `#[path]`, or ungated `include!`. The pin guarantees membership, not
@@ -278,7 +281,9 @@ LIMITS = (
     "may be over-counted; direct protected-symbol aliases are rejected; only braced cfg(test) "
     "and cfg(all(test,...)) items are stripped, while other cfg/cfg_attr forms remain scanned; the "
     "whole-file skips use one lexical pin, reject src symlinks, and check their census; "
-    "seven resolver forms are not guaranteed (path/mod comment, macro mod, two cfg/include "
+    "non-.rs regular files fail closed before classification; symlink rejection is "
+    "non-atomic outside a static CI checkout; at least seven resolver forms are not "
+    "guaranteed (path/mod comment, macro mod, two cfg/include "
     "forms, cfg_attr path, raw path, ungated include); pin membership cannot detect "
     "production reachability changes inside pinned files and compiler-backed reachability "
     "is follow-up work; wiring tests cannot protect deletion of their own unittest invocation"

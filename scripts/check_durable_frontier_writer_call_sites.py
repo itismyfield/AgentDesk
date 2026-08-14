@@ -80,19 +80,23 @@ test module:
   * SEMANTICS. It says nothing about whether a call is reachable, reached, or
     correct. That is what the Rust runtime tests are for.
 
-WHAT IT DOES BUY. Every textual call site under `src/`, per file, exactly
-counted. That is strictly more than the model gate: it has no anchor to escape
-and no boolean to saturate.
+WHAT IT DOES BUY. Every textual call site in every regular `.rs` file under
+`src/`, per file, is exactly counted. The gate enumerates all regular files
+first and fails closed if any non-`.rs` file is present, so an extension cannot
+make a file invisible. That is strictly more than the model gate: it has no
+anchor to escape and no boolean to saturate.
 
 PRODUCTION vs TEST. Files named `tests.rs` / `*_tests.rs` and files the shared
 inventory resolver classifies as test-only are skipped whole. Every such path
 must pass the single lexical pin in `scripts/test_only_module_skip_pin.py`;
 `src/` file/directory symlinks are rejected and the skipped census must equal
-the pin count. `#[cfg(test)]` regions in remaining files are stripped.
+the pin count. The symlink check is lexical rather than atomic against a
+post-enumeration replacement; CI assumes a static checkout while the gate
+runs. `#[cfg(test)]` regions in remaining files are stripped.
 
 RESOLVER NON-GUARANTEES. The reused resolver is intentionally unchanged and
-does not guarantee seven measured forms: `#[path]` separated from `mod` by a
-comment; macro-generated `mod`; `cfg(not(test))` plus `include!`;
+does not guarantee at least seven measured forms: `#[path]` separated from
+`mod` by a comment; macro-generated `mod`; `cfg(not(test))` plus `include!`;
 `cfg(any(test, feature))` plus `include!`; `cfg_attr(path=)`; raw-string
 `#[path]`; or ungated `include!`. The pin guarantees set membership only: a
 content change can make an already pinned file production-reachable without a
@@ -272,8 +276,9 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
 }
 
 # Scanning `src/` from the filesystem rather than `git ls-files` is deliberate:
-# an untracked new module is still a new call site, and the point of dropping
-# anchors is that no file gets to be invisible.
+# an untracked new module is still a new call site. Every regular `.rs` file is
+# enumerated; a regular non-`.rs` file is rejected before any skip/resolver
+# classification, so no regular source file gets to be invisible.
 SCAN_ROOT = Path("src")
 
 
@@ -520,8 +525,10 @@ LIMITS = (
     "lexical scan of stripped source, not Rust parsing; not proof of reachability; "
     "`use .. as x` aliases, re-export renames, name-constructing macros and calls "
     "through values or trait objects are NOT seen; cfg other than cfg(test) is not "
-    "evaluated; whole-file skips use one lexical pin, reject src symlinks, and check "
-    "the skipped census; seven resolver forms are not guaranteed (path/mod comment, "
+    "evaluated; non-.rs regular files fail closed before classification; whole-file "
+    "skips use one lexical pin, reject src symlinks, and check "
+    "the skipped census; symlink rejection is non-atomic outside a static CI "
+    "checkout; at least seven resolver forms are not guaranteed (path/mod comment, "
     "macro mod, two cfg/include forms, cfg_attr path, raw path, ungated include); pin "
     "membership cannot detect production reachability changes inside pinned files; "
     "compiler-backed reachability is follow-up work; textual occurrences are counted "

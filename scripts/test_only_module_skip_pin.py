@@ -4,16 +4,19 @@ The ordinary basename skips and the higher-risk resolver skips are listed
 separately for review, then exposed as one immutable set.  Every exclusion is
 compared with this repo-relative lexical set before either gate scans files.
 
-The reused resolver is deliberately unchanged.  It does not guarantee these
-seven measured Rust forms: a comment between ``#[path]`` and ``mod``; a
-macro-generated production ``mod``; ``cfg(not(test))`` plus ``include!``;
-``cfg(any(test, feature))`` plus ``include!``; ``cfg_attr(path = ...)``; a
-raw-string ``#[path]``; or an ungated ``include!``.
+The reused resolver is deliberately unchanged.  It does not guarantee at
+least these seven measured Rust forms: a comment between ``#[path]`` and
+``mod``; a macro-generated production ``mod``; ``cfg(not(test))`` plus
+``include!``; ``cfg(any(test, feature))`` plus ``include!``;
+``cfg_attr(path = ...)``; a raw-string ``#[path]``; or an ungated
+``include!``.
 
 This pin guarantees membership, not compiler-backed reachability.  In
 particular, a content change can make an already pinned file production-
 reachable without changing the pinned path set.  Compiler-backed reachability
-is follow-up slice work.
+is follow-up slice work.  Symlink rejection is lexical rather than atomic: a
+post-enumeration filesystem replacement is outside the guarantee; CI assumes a
+static checkout while a gate runs.
 """
 
 from __future__ import annotations
@@ -133,6 +136,11 @@ _UPDATE_HINT = (
     "path/count expectation from that single file."
 )
 
+_SYMLINK_HINT = (
+    "Remove the symlink or replace it with a regular in-tree file; do not add "
+    "it to the writer-gate skip pin."
+)
+
 
 def _load_inventory_generator():
     name = "generate_inventory_docs"
@@ -174,10 +182,11 @@ def skip_pin_drift(
 
 
 def _lexical_rust_files(root: Path, scan_root: Path) -> list[Path]:
-    """Enumerate regular Rust files and reject every symlink under ``src/``."""
+    """Enumerate every regular file and reject symlinks/non-``.rs`` files."""
 
     source = root / scan_root
     symlinks: list[str] = []
+    non_rust: list[str] = []
     if source.is_symlink():
         symlinks.append(scan_root.as_posix())
     files: list[Path] = []
@@ -188,17 +197,26 @@ def _lexical_rust_files(root: Path, scan_root: Path) -> list[Path]:
                 path = directory_path / name
                 if path.is_symlink():
                     symlinks.append(path.relative_to(root).as_posix())
-            files.extend(
-                directory_path / name
-                for name in filenames
-                if name.endswith(".rs") and not (directory_path / name).is_symlink()
-            )
+            for name in sorted(filenames):
+                path = directory_path / name
+                if path.is_symlink() or not path.is_file():
+                    continue
+                files.append(path)
+                if not name.endswith(".rs"):
+                    non_rust.append(path.relative_to(root).as_posix())
     if symlinks:
         raise RuntimeError(
             "FAIL: writer gates reject file or directory symlinks under src/: "
             + ", ".join(sorted(symlinks))
-            + ". Use regular in-tree files; "
-            + _UPDATE_HINT
+            + ". "
+            + _SYMLINK_HINT
+        )
+    if non_rust:
+        raise RuntimeError(
+            "FAIL: writer gates reject non-.rs regular files under src/: "
+            + ", ".join(sorted(non_rust))
+            + ". The writer gate cannot classify non-.rs files under src/; "
+            "remove them or extend the gate policy."
         )
     return sorted(files)
 
@@ -216,6 +234,23 @@ def validated_scan_files(
     all_files = _lexical_rust_files(root, scan_root)
     basename_skips = {path for path in all_files if is_test_file(path.name)}
     production_files = [path for path in all_files if path not in basename_skips]
+    if not production_files:
+        if all_files:
+            detail = (
+                "all enumerated regular .rs files are basename-classified "
+                "test-only files"
+            )
+        else:
+            detail = "the lexical src/ enumeration found no regular .rs files"
+        raise RuntimeError(
+            "FAIL: writer-gate production file list is empty; the shared "
+            "test-only resolver was not invoked because its empty-input "
+            "fallback would scan the repository instead of this lexical src/ "
+            "enumeration. "
+            + detail
+            + ". Restore a production .rs file under src/ or "
+            "extend the gate policy."
+        )
     resolved_to_lexical = {path.resolve(): path for path in all_files}
     resolver_results = _INVENTORY.test_only_module_files(
         production_files=production_files,
