@@ -122,8 +122,10 @@ src/
 │   ├── dispatched_sessions.rs
 │   ├── fixture_target.rs
 │   ├── idempotency.rs
+│   ├── intake_delivery_required_migrations.rs
 │   ├── intake_outbox.rs
 │   ├── intake_outbox_delivery_proof.rs
+│   ├── intake_outbox_dispatch_stamp.rs
 │   ├── intake_outbox_dispatched_audit.rs
 │   ├── intake_outbox_force_fail.rs
 │   ├── intake_outbox_open_status.rs
@@ -741,6 +743,7 @@ src/
 │   │   │   │   │   ├── adk_thread.rs
 │   │   │   │   │   ├── claim_bootstrap.rs
 │   │   │   │   │   ├── dispatch_runtime.rs
+│   │   │   │   │   ├── dispatch_stamp.rs
 │   │   │   │   │   ├── inflight_create_log.rs
 │   │   │   │   │   ├── placeholder_handoff.rs
 │   │   │   │   │   ├── race_loss.rs
@@ -776,6 +779,8 @@ src/
 │   │   │   ├── thread_binding.rs
 │   │   │   └── turn_start.rs
 │   │   ├── runtime_bootstrap/
+│   │   │   ├── intake_delivery_capability/
+│   │   │   │   └── tests.rs
 │   │   │   ├── framework_setup.rs
 │   │   │   ├── gateway_lease.rs
 │   │   │   ├── gateway_lease_recovery.rs

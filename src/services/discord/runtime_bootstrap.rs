@@ -7,7 +7,7 @@ mod gateway_lease_recovery;
 mod gateway_lease_recovery_tests;
 mod gateway_runtime;
 mod intake;
-mod intake_delivery_capability;
+pub(super) mod intake_delivery_capability;
 #[cfg(unix)]
 mod intake_delivery_reconciler;
 mod orphan_recovery;

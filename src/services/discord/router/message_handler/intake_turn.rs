@@ -9,6 +9,7 @@ use super::*;
 mod adk_thread;
 mod claim_bootstrap;
 mod dispatch_runtime;
+mod dispatch_stamp;
 pub(crate) mod inflight_create_log;
 mod placeholder_handoff;
 pub(super) mod race_loss;
@@ -107,6 +108,37 @@ mod intake_outbox_state_builder_tests {
         });
 
         assert_eq!(state.intake_outbox_id(), Some(5071));
+    }
+
+    /// 호출 인접성·개수 검사이지 등록 성공 증명이 아님.
+    #[test]
+    fn bridge_handoff_stamp_call_site_is_adjacent_to_the_only_spawn_turn_bridge() {
+        let source = include_str!("intake_turn.rs");
+        let handler = source
+            .split_once("pub(super) async fn handle_text_message(")
+            .expect("intake handler exists")
+            .1
+            .split_once("#[cfg(test)]\nmod tui_busy_pre_submit_queue_reaction_tests")
+            .expect("intake handler has its next test-module boundary")
+            .0;
+        let spawn_call = ["spawn_turn_", "bridge("].concat();
+        let stamp_call = ["dispatch_stamp::stamp_before_", "bridge_handoff"].concat();
+        assert_eq!(
+            handler.matches(&spawn_call).count(),
+            1,
+            "intake_turn must retain one bridge-spawn call site"
+        );
+
+        let lines: Vec<_> = handler.lines().collect();
+        let spawn_line = lines
+            .iter()
+            .position(|line| line.contains(&spawn_call))
+            .expect("bridge-spawn call site exists");
+        let preceding = &lines[spawn_line.saturating_sub(20)..spawn_line];
+        assert!(
+            preceding.iter().any(|line| line.contains(&stamp_call)),
+            "the dispatch stamp must remain within the preceding 20 lines"
+        );
     }
 }
 
@@ -2492,6 +2524,7 @@ pub(super) async fn handle_text_message(
         channel_id,
         inflight_state.effective_finalizer_turn_id(),
     );
+    dispatch_stamp::stamp_before_bridge_handoff(shared, intake_outbox_id).await;
     spawn_turn_bridge(
         shared.clone(),
         cancel_token.clone(),

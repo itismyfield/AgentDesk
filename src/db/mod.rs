@@ -13,8 +13,10 @@ pub mod dispatches;
 #[cfg(test)]
 mod fixture_target;
 pub mod idempotency;
+pub(crate) mod intake_delivery_required_migrations;
 pub mod intake_outbox;
 pub(crate) mod intake_outbox_delivery_proof;
+pub(crate) mod intake_outbox_dispatch_stamp;
 pub(crate) mod intake_outbox_dispatched_audit;
 pub(crate) mod intake_outbox_force_fail;
 pub(crate) mod intake_outbox_open_status;

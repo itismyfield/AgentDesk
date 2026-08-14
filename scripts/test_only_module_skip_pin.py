@@ -68,6 +68,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/router/message_handler/session_strategy_lifecycle_tests.rs",
         "src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs",
         "src/services/discord/runtime_bootstrap/gateway_lease_tests.rs",
+        "src/services/discord/runtime_bootstrap/intake_delivery_capability/tests.rs",
         "src/services/discord/runtime_bootstrap/spawns_tests.rs",
         "src/services/discord/session_relay_sink/delivery_orchestration_tests.rs",
         "src/services/discord/status_panel_orphan_store_tests.rs",
