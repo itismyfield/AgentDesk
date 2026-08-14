@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Per-file exact-count allowlist for the durable frontier writer symbols (#5071 T1 S7').
+"""Per-file exact-count allowlist for the durable frontier writer symbols (#5071 T1 S8).
 
 WHY THIS EXISTS, AND WHY IT LANDS BEFORE S7. #5071 T1 S7 changes the recovery
 path's durable behaviour: it stops that path from bypassing the
@@ -41,34 +41,49 @@ does not parse Rust, does not resolve paths or types, and does not run rustc.
 Concretely, and each of these was exercised by a mutation in the accompanying
 test module:
 
-  * ALIAS AND RE-EXPORT. `use ...::write_delivered_frontier as w;` then `w(..)`
-    spells neither the symbol nor a call to it. NOT SEEN -- measured, not
-    assumed. Same for `pub use ... as ...` re-exports. A module alias is
-    different and IS seen, because the function name survives it: `dr::f(..)`,
-    `delivery_record::f(..)` and a bare `f(..)` all match identically.
+  * ALIAS AND RE-EXPORT. The CALL-SITE subscan does not see
+    `use ...::write_delivered_frontier as w;` followed by `w(..)`, nor a
+    renamed `pub use`. S8-1b's separate `EXPECTED_PINNED_USE_ALIASES` scan
+    rejects aliases whose captured spelling starts with ASCII `[A-Za-z_]`.
+    That includes a raw-identifier alias such as `r#w` (the lexical matcher
+    captures its ASCII `r` prefix); an alias whose first character is non-ASCII
+    remains unseen. A module alias is different and IS seen, because the
+    function name survives it: `dr::f(..)`, `delivery_record::f(..)` and a bare
+    `f(..)` all match identically.
   * NAME-CONSTRUCTING MACROS. A macro whose body contains the literal spelling
     IS counted (the text is there, once per textual occurrence, and expansion
     count is invisible to a text scan -- a call inside a macro invoked three
     times counts 1). A macro that ASSEMBLES the name (`paste!`,
     `concat_idents!`) is NOT seen.
   * INDIRECTION THROUGH VALUES. `let f = write_delivered_frontier;` is not a
-    call site (no `(` follows the name) and the later `f(..)` is not one either.
-    Trait-object dispatch to a method of the same name is likewise invisible.
+    CALL-SITE match (no `(` follows the name) and the later `f(..)` is not one
+    either. S8-1b's bare-reference scan catches the named capture itself.
+    Receiver-method matching is type-agnostic, so
+    `obj.reset_confirmed_frontier(..)` is counted even when `obj` is a trait
+    object; the lexical match cannot prove that the receiver has the pinned
+    type.
   * NAME COLLISION -- PRESENT IN THIS TREE, NOT HYPOTHETICAL. Two distinct
     functions are both named `record_watcher_terminal_delivery`: the durable
-    funnel at `outbound/delivery_record.rs:2332` and a local wrapper at
+    funnel at `outbound/delivery_record.rs:2520` and a local wrapper at
     `tmux_watcher/terminal_long_chunks.rs:168`. The two production sites this
     map pins for that file are one call to each (`dr::…` at :124, bare at
     :222). The integer is therefore a count of the SPELLING, not of calls to
     one function. It is still the right pin here because the wrapper's only
     job is to reach the funnel, but a future collision under a pinned name
     would be counted the same way and the map would not say so.
+    `EXPECTED_DEFINITION_FILE_COUNTS` below closes that hole: every pinned
+    spelling whose production `fn` definitions occupy two or more files must
+    have an exact per-file definition map. The current collision is
+    `2 = leaf 1 + wrapper 1`.
   * SPELLING COUPLING. Because the completion criterion is a literal grep, the
     whole contract is bound to the spelling. Renaming a symbol does not weaken
     the gate silently -- the count drops to 0 and it fails -- but any route that
     reaches the same code under a different spelling is outside it.
-  * CFG. `#[cfg(unix)]` and friends are not evaluated: a call gated to one
-    target counts on every target, exactly as in the model gate.
+  * CFG. The lexical cfg classifier excludes `#[cfg(test)]` and cfg expressions
+    that require `test` (including nested `all(test, ...)`) from production,
+    while `cfg(any(test, X))` and `cfg(not(test))` remain production because
+    they have a non-test configuration. Other target/feature predicates are
+    not compiler-evaluated, so a target-gated call counts on every target.
   * PROSE. Comments (`//`, `/* */`) and string literals (including raw strings)
     are BLANKED before matching, so the symbol written in a doc comment or a
     log message is not a call site. This differs from the model gate, which
@@ -80,11 +95,26 @@ test module:
   * SEMANTICS. It says nothing about whether a call is reachable, reached, or
     correct. That is what the Rust runtime tests are for.
 
-WHAT IT DOES BUY. Every textual call site in every regular `.rs` file under
-`src/`, per file, is exactly counted. The gate enumerates all regular files
-first and fails closed if any non-`.rs` file is present, so an extension cannot
-make a file invisible. That is strictly more than the model gate: it has no
-anchor to escape and no boolean to saturate.
+S8 RAW ATOMIC AND FUNCTION-VALUE GATES. `EXPECTED_RAW_ATOMIC_MUTATIONS` counts
+`confirmed_end_offset` calls to an explicit allowlist of direct
+AtomicU64/AtomicUsize mutator methods (`compare_exchange`,
+`compare_exchange_weak`, `store`, `swap`, the listed `fetch_*` mutators, and
+legacy `compare_and_swap`) over stripped production file text (not per-line
+text, so rustfmt receiver chains are seen).
+`EXPECTED_BARE_REFERENCES` counts pinned names that are neither calls,
+definitions, nor `use` items and pins the current historical function-value
+capture. `EXPECTED_PINNED_USE_ALIASES` rejects `use ..::<pinned> as <other>;`;
+the `delivery_record as dr` module alias is outside this rule. Output totals
+are derived from these maps.
+
+WHAT IT DOES BUY. Every supported textual call site in every regular `.rs` file
+under `src/`, per file, is exactly counted. Supported method forms include the
+receiver form (`coord.reset_confirmed_frontier(...)`) and pinned UFCS form
+(`TmuxRelayCoord::reset_confirmed_frontier(coord, ...)`); the raw atomic gate
+enumerates the direct method spellings above. The gate enumerates all regular
+files first and fails closed if any non-`.rs` file is present, so an extension
+cannot make a file invisible. That is strictly more than the model gate: it has
+no anchor to escape and no boolean to saturate.
 
 PRODUCTION vs TEST. Files named `tests.rs` / `*_tests.rs` and files the shared
 inventory resolver classifies as test-only are skipped whole. Every such path
@@ -92,7 +122,9 @@ must pass the single lexical pin in `scripts/test_only_module_skip_pin.py`;
 `src/` file/directory symlinks are rejected and the skipped census must equal
 the pin count. The symlink check is lexical rather than atomic against a
 post-enumeration replacement; CI assumes a static checkout while the gate
-runs. `#[cfg(test)]` regions in remaining files are stripped.
+runs. In remaining files, only cfg expressions proven by the lexical boolean
+classifier to require `test` are stripped; `cfg(any(test, X))` is intentionally
+scanned as production.
 
 RESOLVER NON-GUARANTEES. The reused resolver is intentionally unchanged and
 does not guarantee at least seven measured forms: `#[path]` separated from
@@ -157,7 +189,7 @@ from pathlib import Path
 # Every production call site of every pinned symbol, keyed by symbol then by
 # repo-relative path. An empty map pins the symbol at zero production callers:
 # the API exists and compiles, but nothing outside tests may reach it. Measured
-# on 0bde0675b.
+# on e60416050248aaa4d2157dd3077b1edfc099cb76 (the S8-1b base).
 EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
     # -- store 1: durable delivery record ------------------------------------
     # #5071 T1 S7 removed this symbol's recovery_engine call site: the recovery
@@ -273,7 +305,51 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
     "advance_watcher_confirmed_end_for_generation": {
         "src/services/discord/tmux_watcher/terminal_long_chunks.rs": 1,
     },
+    # -- S8-1b: previously unpinned pinned-source and bridge writers ---------
+    "record_current_pinned_delivery": {
+        "src/services/discord/turn_bridge/terminal_delivery.rs": 1,
+    },
+    "record_pinned_delivery_metadata": {
+        "src/services/discord/turn_bridge/terminal_delivery.rs": 1,
+    },
+    # The current writes are reached through a function-value binding; 1b pins
+    # that bare reference and 1c will flatten the calls. Direct count is zero.
+    "record_historical_pinned_delivery": {},
+    "advance_tmux_relay_confirmed_end": {
+        "src/services/discord/turn_bridge/terminal_delivery.rs": 1,
+        "src/services/discord/turn_bridge/terminal_controller_cutover.rs": 2,
+    },
+    # Qualified key: this is a receiver-including TmuxRelayCoord method.
+    "TmuxRelayCoord::reset_confirmed_frontier": {
+        "src/services/discord/tmux_session_files.rs": 2,
+    },
 }
+
+# Collision pin: two or more production definition files require exact counts.
+EXPECTED_DEFINITION_FILE_COUNTS: dict[str, dict[str, int]] = {
+    "record_watcher_terminal_delivery": {
+        "src/services/discord/outbound/delivery_record.rs": 1,
+        "src/services/discord/tmux_watcher/terminal_long_chunks.rs": 1,
+    },
+}
+
+# Raw atomic pin by file; totals are derived from the map.
+EXPECTED_RAW_ATOMIC_MUTATIONS: dict[str, int] = {
+    "src/services/discord/tmux.rs": 1,
+    "src/services/discord/relay_health/frontier.rs": 1,
+    "src/services/discord/turn_bridge/terminal_delivery.rs": 1,
+}
+
+# Bare-reference pin by symbol/file; current capture is the `record` binding.
+EXPECTED_BARE_REFERENCES: dict[str, dict[str, int]] = {
+    "record_historical_pinned_delivery": {
+        "src/services/discord/turn_bridge/terminal_delivery.rs": 1,
+    },
+}
+
+# Pinned-function renames in `use` items are prohibited; empty is a deliberate
+# zero pin and aggregate output is derived by summing it.
+EXPECTED_PINNED_USE_ALIASES: dict[str, dict[str, int]] = {}
 
 # Scanning `src/` from the filesystem rather than `git ls-files` is deliberate:
 # an untracked new module is still a new call site. Every regular `.rs` file
@@ -308,19 +384,218 @@ PINNED_TEST_ONLY_MODULE_FILES = _SKIP_PIN.PINNED_TEST_ONLY_MODULE_FILES
 # `shadow_mirror_delivered_frontier_inner` vs `..._frontier`,
 # `record_delivered_content_fingerprint_for_generation`) NOT match: `_` is not
 # whitespace. `\s*` tolerates the blank left by a stripped inline comment.
+def _symbol_basename(symbol: str) -> str:
+    """Return the function spelling from a simple or qualified map key."""
+
+    return symbol.rsplit("::", 1)[-1]
+
+
 def _call_re(symbol: str) -> re.Pattern[str]:
-    return re.compile(rf"\b{re.escape(symbol)}\s*\(")
+    basename = _symbol_basename(symbol)
+    if "::" in symbol:
+        # Calls to a method are pinned in receiver-including form. The receiver
+        # is intentionally lexical (an identifier or a chained `)`), because
+        # Rust type resolution is outside this gate; a bare
+        # `reset_confirmed_frontier()` is not this pinned method entry point.
+        # The second branch is the UFCS spelling (`Type::method(receiver, ...)`)
+        # for this pinned type/method pair. Inside the type's impl, `Self` is
+        # the same natural receiver type; angle-bracketed UFCS may also end in
+        # a fully qualified path to the pinned type. Keep the terminal type
+        # exact: a lexical scan cannot prove that another type's same-named
+        # method is this writer, and `Self` is counted in any impl rather than
+        # only an impl of the pinned type.
+        type_name, _ = symbol.rsplit("::", 1)
+        terminal_type = rf"(?:{re.escape(type_name)}|Self)"
+        ufcs_type = (
+            rf"(?:\b{terminal_type}\b"
+            rf"|<\s*(?:(?:\b(?:crate|self|super)\b|[A-Za-z_]\w*)\s*::\s*)*"
+            rf"{terminal_type}\s*>)"
+        )
+        return re.compile(
+            rf"(?:"
+            rf"(?:\b[A-Za-z_]\w*|\))\s*\.\s*{re.escape(basename)}"
+            rf"|{ufcs_type}\s*::\s*{re.escape(basename)}"
+            rf")\s*\("
+        )
+    return re.compile(rf"\b{re.escape(basename)}\s*\(")
 
 
 def _defn_re(symbol: str) -> re.Pattern[str]:
-    return re.compile(rf"\bfn\s+{re.escape(symbol)}\s*\(")
+    return re.compile(rf"\bfn\s+{re.escape(_symbol_basename(symbol))}\s*\(")
 
 
 CALL_RES = {symbol: _call_re(symbol) for symbol in EXPECTED_CALL_SITES}
 DEFN_RES = {symbol: _defn_re(symbol) for symbol in EXPECTED_CALL_SITES}
 
-# `#[cfg(test)]`, `#[cfg(all(test, ...))]`, `#[cfg(any(test, ...))]`.
-CFG_TEST_RE = re.compile(r"#\[\s*cfg\s*\(\s*(?:all|any)?\s*\(?\s*test\b")
+# Rust cfg attributes are Boolean expressions. A regex that merely spots the
+# token `test` treats `cfg(any(test, unix))` as test-only and hides production
+# code, so the gate now tokenises the cfg expression and checks whether it can
+# be true with `test` disabled. The parser is deliberately lexical and is
+# conservative (unsupported/overly large expressions stay production-visible).
+CFG_ATTR_START_RE = re.compile(r"#\s*\[\s*cfg\s*\(")
+
+
+class _CfgNode:
+    __slots__ = ("kind", "name", "children")
+
+    def __init__(
+        self,
+        kind: str,
+        name: str | None = None,
+        children: tuple["_CfgNode", ...] = (),
+    ) -> None:
+        self.kind = kind
+        self.name = name
+        self.children = children
+
+
+class _CfgAttributeMatch:
+    """Small match-like span object used by the line scanner."""
+
+    __slots__ = ("_start", "_end")
+
+    def __init__(self, start: int, end: int) -> None:
+        self._start = start
+        self._end = end
+
+    def start(self) -> int:
+        return self._start
+
+    def end(self) -> int:
+        return self._end
+
+
+def _cfg_tokens(expression: str) -> list[str]:
+    """Tokenise cfg meta syntax after strings/comments were blanked."""
+
+    return re.findall(r"[A-Za-z_]\w*|[(),=]", expression)
+
+
+def _parse_cfg_expression(expression: str) -> _CfgNode | None:
+    """Parse enough cfg meta grammar to evaluate test-only reachability."""
+
+    tokens = _cfg_tokens(expression)
+    if not tokens:
+        return None
+    index = 0
+
+    def parse_expr() -> _CfgNode | None:
+        nonlocal index
+        if index >= len(tokens):
+            return None
+        name = tokens[index]
+        index += 1
+        if name in {"all", "any", "not"} and index < len(tokens) and tokens[index] == "(":
+            index += 1
+            children: list[_CfgNode] = []
+            while index < len(tokens) and tokens[index] != ")":
+                child = parse_expr()
+                if child is None:
+                    return None
+                children.append(child)
+                if index < len(tokens) and tokens[index] == ",":
+                    index += 1
+                    continue
+                if index < len(tokens) and tokens[index] == ")":
+                    break
+                # A malformed expression is safer to leave visible than to
+                # classify as test-only.
+                return None
+            if index >= len(tokens) or tokens[index] != ")":
+                return None
+            index += 1
+            return _CfgNode(name, children=tuple(children))
+
+        # An atom may be a key/value predicate (`feature = "x"`). The string
+        # was blanked before this parser runs; consume its punctuation through
+        # the next top-level comma/close and retain only the atom kind. Unknown
+        # atoms are free variables for the non-test satisfiability check.
+        while index < len(tokens) and tokens[index] not in {",", ")"}:
+            index += 1
+        return _CfgNode("atom", name=name)
+
+    node = parse_expr()
+    if node is None or index != len(tokens):
+        return None
+    return node
+
+
+def _cfg_eval(node: _CfgNode, values: dict[int, bool], test_enabled: bool) -> bool:
+    if node.kind == "atom":
+        if node.name == "test":
+            return test_enabled
+        return values[id(node)]
+    if node.kind == "all":
+        return all(_cfg_eval(child, values, test_enabled) for child in node.children)
+    if node.kind == "any":
+        return any(_cfg_eval(child, values, test_enabled) for child in node.children)
+    if node.kind == "not" and len(node.children) == 1:
+        return not _cfg_eval(node.children[0], values, test_enabled)
+    # Empty/malformed `not` is not safe to hide.
+    return True
+
+
+def _cfg_can_be_true_without_test(node: _CfgNode) -> bool:
+    unknowns: list[_CfgNode] = []
+
+    def collect(current: _CfgNode) -> None:
+        if current.kind == "atom":
+            if current.name != "test":
+                unknowns.append(current)
+            return
+        for child in current.children:
+            collect(child)
+
+    collect(node)
+    # Avoid an exponential scan on a deliberately hostile attribute. A
+    # conservative production result is the only safe fallback for a lexical
+    # gate: it may over-report, but it never hides a production writer.
+    if len(unknowns) > 12:
+        return True
+    for mask in range(1 << len(unknowns)):
+        values = {
+            id(atom): bool(mask & (1 << bit))
+            for bit, atom in enumerate(unknowns)
+        }
+        if _cfg_eval(node, values, test_enabled=False):
+            return True
+    return False
+
+
+def _cfg_test_only_match(code: str, start: int = 0) -> _CfgAttributeMatch | None:
+    """Find the next cfg attribute whose expression requires `test`."""
+
+    for opening in CFG_ATTR_START_RE.finditer(code, start):
+        open_paren = code.find("(", opening.start(), opening.end())
+        depth = 0
+        close_paren = None
+        for index in range(open_paren, len(code)):
+            char = code[index]
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    close_paren = index
+                    break
+        if close_paren is None:
+            continue
+        end = close_paren + 1
+        while end < len(code) and code[end].isspace():
+            end += 1
+        if end >= len(code) or code[end] != "]":
+            continue
+        expression = code[open_paren + 1 : close_paren]
+        parsed = _parse_cfg_expression(expression)
+        if parsed is not None and not _cfg_can_be_true_without_test(parsed):
+            # `production_lines` arms the test-item state while walking this
+            # line. Return the closing `)` position (rather than the span's
+            # final `]`) so the arm is actually visited by that loop; the
+            # attribute's full start is still used when masking its text.
+            return _CfgAttributeMatch(opening.start(), close_paren)
+    return None
+
+
 # An item keyword that introduces a braced body, in ITEM POSITION: at the start
 # of a line, or right after the `]` closing an attribute, or right after a `}`.
 # The position anchor is load-bearing. A bare `\bfn\b` also matches the `fn` in a
@@ -450,12 +725,11 @@ def production_lines(path: Path):
         countable = mode == "normal"
         arm_at = None
         if mode == "normal":
-            match = CFG_TEST_RE.search(code)
+            match = _cfg_test_only_match(code)
             if match:
-                # Arm at the end of the attribute's own `test` token, so the
-                # attribute's trailing `)]` are accounted the same way its
-                # leading `#[cfg(` were, and a `,` inside `all(test, ...)`
-                # cannot resolve the arm it is part of.
+                # Arm at the closing parenthesis of the complete test-only
+                # cfg expression, so commas inside nested `all(...)`/`any(...)`
+                # cannot resolve the arm they are part of.
                 arm_at = match.end()
         # Resolve the item-start keyword position BEFORE walking the line: the
         # comma that must not disarm (`-> HashMap<String, u64> {`) sits on the
@@ -494,16 +768,68 @@ def production_lines(path: Path):
         yield lineno, code, countable
 
 
+def _production_text(path: Path) -> str:
+    """Return stripped production text while preserving cross-line chains."""
+
+    lines: list[str] = []
+    for _lineno, code, countable in production_lines(path):
+        if countable:
+            # Mask compact `#[cfg(test)] fn ... { raw_atomic(); }` items too.
+            cfg_test = _cfg_test_only_match(code)
+            if cfg_test:
+                code = code[: cfg_test.start()] + " " * (len(code) - cfg_test.start())
+        lines.append(code if countable else " " * len(code))
+    return "\n".join(lines)
+
+
+def _scan_inputs(
+    root: Path,
+    pinned_test_only_files: Iterable[str],
+) -> tuple[list[Path], frozenset[Path]]:
+    return _SKIP_PIN.validated_scan_files(
+        root,
+        SCAN_ROOT,
+        is_test_file,
+        pinned_paths=pinned_test_only_files,
+    )
+
+
+def _production_paths(
+    all_files: list[Path],
+    whole_file_skips: frozenset[Path],
+) -> list[Path]:
+    return [path for path in all_files if path not in whole_file_skips]
+
+
+def _production_texts(
+    all_files: list[Path],
+    whole_file_skips: frozenset[Path],
+) -> dict[Path, str]:
+    return {
+        path: _production_text(path)
+        for path in _production_paths(all_files, whole_file_skips)
+    }
+
+
+def _call_count_outside_definitions(text: str, symbol: str) -> int:
+    definitions = [match.span() for match in DEFN_RES[symbol].finditer(text)]
+    return sum(
+        1
+        for match in CALL_RES[symbol].finditer(text)
+        if not any(start <= match.start() < end for start, end in definitions)
+    )
+
+
 def production_call_sites(
     root: Path,
     *,
     pinned_test_only_files: Iterable[str] = PINNED_TEST_ONLY_MODULE_FILES,
+    _scan: tuple[list[Path], frozenset[Path]] | None = None,
+    _texts: dict[Path, str] | None = None,
 ) -> tuple[dict[str, dict[str, int]], int, int]:
     """Return ``(counts, scanned_files, skipped_test_files)`` over ``src/``."""
     found: dict[str, dict[str, int]] = {symbol: {} for symbol in EXPECTED_CALL_SITES}
-    all_files, whole_file_skips = _SKIP_PIN.validated_scan_files(
-        root, SCAN_ROOT, is_test_file, pinned_paths=pinned_test_only_files
-    )
+    all_files, whole_file_skips = _scan or _scan_inputs(root, pinned_test_only_files)
     scanned = 0
     skipped = 0
     for path in all_files:
@@ -512,23 +838,181 @@ def production_call_sites(
             continue
         scanned += 1
         rel = path.relative_to(root).as_posix()
-        for _lineno, code, countable in production_lines(path):
-            if not countable:
-                continue
-            for symbol, call_re in CALL_RES.items():
-                if DEFN_RES[symbol].search(code):
-                    continue
-                hits = len(call_re.findall(code))
-                if hits:
-                    found[symbol][rel] = found[symbol].get(rel, 0) + hits
+        text = _texts[path] if _texts is not None else _production_text(path)
+        for symbol in EXPECTED_CALL_SITES:
+            hits = _call_count_outside_definitions(text, symbol)
+            if hits:
+                found[symbol][rel] = hits
     return found, scanned, skipped
+
+
+def production_definition_file_counts(
+    root: Path,
+    *,
+    pinned_test_only_files: Iterable[str] = PINNED_TEST_ONLY_MODULE_FILES,
+    _scan: tuple[list[Path], frozenset[Path]] | None = None,
+    _texts: dict[Path, str] | None = None,
+) -> dict[str, dict[str, int]]:
+    all_files, whole_file_skips = _scan or _scan_inputs(root, pinned_test_only_files)
+    found: dict[str, dict[str, int]] = {
+        symbol: {} for symbol in EXPECTED_CALL_SITES
+    }
+    for path in _production_paths(all_files, whole_file_skips):
+        rel = path.relative_to(root).as_posix()
+        text = _texts[path] if _texts is not None else _production_text(path)
+        for symbol in EXPECTED_CALL_SITES:
+            count = len(DEFN_RES[symbol].findall(text))
+            if count:
+                found[symbol][rel] = count
+    return found
+
+
+# Keep this list explicit rather than accepting an open-ended `fetch_*`: the
+# gate pins these direct mutator method spellings, including the legacy spelling
+# retained by older code. It does not claim the complete mutating API surface:
+# `as_ptr`/`get_mut` can expose storage for mutation through raw pointers or
+# UnsafeCell, and those paths are outside this lexical gate.
+RAW_ATOMIC_MUTATORS = (
+    "compare_exchange",
+    "compare_exchange_weak",
+    "store",
+    "swap",
+    "fetch_add",
+    "fetch_sub",
+    "fetch_and",
+    "fetch_or",
+    "fetch_xor",
+    "fetch_nand",
+    "fetch_max",
+    "fetch_min",
+    "fetch_update",
+    "compare_and_swap",
+)
+RAW_ATOMIC_RE = re.compile(
+    r"\bconfirmed_end_offset\s*\.\s*(?:"
+    + "|".join(re.escape(mutator) for mutator in RAW_ATOMIC_MUTATORS)
+    + r")\s*\("
+)
+
+
+def production_raw_atomic_mutations(
+    root: Path,
+    *,
+    pinned_test_only_files: Iterable[str] = PINNED_TEST_ONLY_MODULE_FILES,
+    _scan: tuple[list[Path], frozenset[Path]] | None = None,
+    _texts: dict[Path, str] | None = None,
+) -> dict[str, int]:
+    """Count raw confirmed-end mutations over whole stripped file text."""
+
+    all_files, whole_file_skips = _scan or _scan_inputs(root, pinned_test_only_files)
+    found: dict[str, int] = {}
+    for path in _production_paths(all_files, whole_file_skips):
+        text = _texts[path] if _texts is not None else _production_text(path)
+        count = len(RAW_ATOMIC_RE.findall(text))
+        if count:
+            found[path.relative_to(root).as_posix()] = count
+    return found
+
+
+USE_ITEM_RE = re.compile(r"\b(?:pub(?:\([^)]*\))?\s+)?use\b.*?;", re.DOTALL)
+CALL_TAIL_RE = re.compile(r"\s*(?:::\s*<[^>]*>)?\s*\(")
+ALIAS_TAIL_RE = re.compile(r"\s+as\s+([A-Za-z_]\w*)\b")
+
+
+def _bare_reference_counts_in_text(
+    text: str,
+    symbols: Iterable[str],
+) -> tuple[dict[str, int], dict[str, int]]:
+    """Return bare-reference and prohibited-alias counts for one file."""
+
+    use_spans = [match.span() for match in USE_ITEM_RE.finditer(text)]
+    bare: dict[str, int] = {}
+    aliases: dict[str, int] = {}
+    symbol_list = tuple(symbols)
+    by_basename: dict[str, list[str]] = {}
+    for symbol in symbol_list:
+        by_basename.setdefault(_symbol_basename(symbol), []).append(symbol)
+    token_re = re.compile(
+        r"\b(?:" + "|".join(re.escape(name) for name in by_basename) + r")\b"
+    )
+    definition_re = re.compile(
+        r"\bfn\s+(?P<name>(?:"
+        + "|".join(re.escape(name) for name in by_basename)
+        + r"))\s*\("
+    )
+    definition_tokens = {
+        (match.start("name"), match.end("name"))
+        for match in definition_re.finditer(text)
+    }
+    for token in token_re.finditer(text):
+        start, end = token.span()
+        basename = token.group(0)
+        in_use_span = next(
+            (
+                (begin, finish)
+                for begin, finish in use_spans
+                if begin <= start < finish
+            ),
+            None,
+        )
+        in_definition = (start, end) in definition_tokens
+        is_call = bool(CALL_TAIL_RE.match(text, end))
+        for symbol in by_basename[basename]:
+            if in_use_span is not None:
+                use_tail = text[end : in_use_span[1]]
+                alias = ALIAS_TAIL_RE.match(use_tail)
+                if alias and alias.group(1) != "_":
+                    aliases[symbol] = aliases.get(symbol, 0) + 1
+            elif not in_definition and not is_call:
+                bare[symbol] = bare.get(symbol, 0) + 1
+    return bare, aliases
+
+
+def production_bare_references(
+    root: Path,
+    *,
+    pinned_test_only_files: Iterable[str] = PINNED_TEST_ONLY_MODULE_FILES,
+    _scan: tuple[list[Path], frozenset[Path]] | None = None,
+    _texts: dict[Path, str] | None = None,
+) -> tuple[dict[str, dict[str, int]], dict[str, dict[str, int]]]:
+    """Count bare pinned references and prohibited `use` aliases by file."""
+
+    all_files, whole_file_skips = _scan or _scan_inputs(root, pinned_test_only_files)
+    bare: dict[str, dict[str, int]] = {symbol: {} for symbol in EXPECTED_CALL_SITES}
+    aliases: dict[str, dict[str, int]] = {
+        symbol: {} for symbol in EXPECTED_CALL_SITES
+    }
+    for path in _production_paths(all_files, whole_file_skips):
+        rel = path.relative_to(root).as_posix()
+        file_bare, file_aliases = _bare_reference_counts_in_text(
+            _texts[path] if _texts is not None else _production_text(path),
+            EXPECTED_CALL_SITES,
+        )
+        for symbol, count in file_bare.items():
+            bare[symbol][rel] = count
+        for symbol, count in file_aliases.items():
+            aliases[symbol][rel] = count
+    return bare, aliases
 
 
 LIMITS = (
     "lexical scan of stripped source, not Rust parsing; not proof of reachability; "
-    "`use .. as x` aliases, re-export renames, name-constructing macros and calls "
-    "through values or trait objects are NOT seen; cfg other than cfg(test) is not "
-    "evaluated; non-.rs regular files fail closed before classification; whole-file "
+    "call-site matching covers direct calls, receiver method calls, and pinned "
+    "`Type::method(receiver, ...)`, `Self::method(self, ...)`, `<Type>::method`, "
+    "and `<Self>::method` UFCS calls (including angle-bracketed paths ending in "
+    "the pinned type); receiver matching is type-agnostic, so same-named methods "
+    "on any receiver, including trait objects, fail closed without proving the "
+    "receiver type; renamed calls through `use .. as x` or re-exports are not "
+    "resolved; raw-identifier or non-ASCII alias spellings are not uniformly "
+    "unseen: the pinned-alias subgate rejects aliases whose captured spelling "
+    "starts with ASCII `[A-Za-z_]`, including the ASCII prefix of raw-identifier "
+    "aliases, while aliases whose first character is non-ASCII remain unseen; "
+    "calls through values are not resolved, but the bare-reference subgate rejects "
+    "a named capture; name-constructing macros, type-alias receiver UFCS, and "
+    "associated-projection receiver calls remain unseen; the cfg "
+    "classifier treats cfg(test)/test-required all(...) as test-only and "
+    "cfg(any(test, X))/cfg(not(test)) as production without compiler target "
+    "evaluation; non-.rs regular files fail closed before classification; whole-file "
     "skips use one lexical pin, reject src symlinks, and check "
     "the skipped census; symlink rejection is non-atomic outside a static CI "
     "checkout; the scan root is `src/`; call sites in files reached by "
@@ -538,8 +1022,106 @@ LIMITS = (
     "macro mod, two cfg/include forms, cfg_attr path, raw path, ungated include); pin "
     "membership cannot detect production reachability changes inside pinned files; "
     "compiler-backed reachability is follow-up work; textual occurrences are counted "
-    "once regardless of macro expansion"
+    "once regardless of macro expansion; the raw atomic "
+    "scan does not see dereferenced stores such as `(*ptr).store(...)` or mutation "
+    "through `as_ptr`/`get_mut` plus raw-pointer/UnsafeCell access, nor receiver UFCS "
+    "such as `AtomicU64::store(&field, ...)`; raw atomic and "
+    "bare-reference gates are likewise lexical and do not prove runtime "
+    "reachability; replacing these enumerated regexes with AST/`syn`-based Rust "
+    "parsing is tracked by follow-up issue #5370"
 )
+
+
+def _nested_map_problems(
+    label: str,
+    expected: dict[str, dict[str, int]],
+    actual: dict[str, dict[str, int]],
+    *,
+    missing_word: str,
+) -> list[str]:
+    problems: list[str] = []
+    for symbol in sorted(set(expected) | set(actual)):
+        wanted = expected.get(symbol, {})
+        found = actual.get(symbol, {})
+        for rel in sorted(set(wanted) | set(found)):
+            want = wanted.get(rel, 0)
+            have = found.get(rel, 0)
+            if want == have:
+                continue
+            if want == 0:
+                problems.append(
+                    f"{symbol}: {missing_word} in {rel} ({have}x)"
+                )
+            elif have == 0:
+                problems.append(
+                    f"{symbol}: {label} gone from {rel} (expected {want}x)"
+                )
+            else:
+                problems.append(
+                    f"{symbol}: {label} in {rel} has {have}x, expected {want}x"
+                )
+    return problems
+
+
+def _flat_map_problems(
+    label: str,
+    expected: dict[str, int],
+    actual: dict[str, int],
+) -> list[str]:
+    """Compare a file/count pin and return deterministic diagnostics."""
+
+    problems: list[str] = []
+    for rel in sorted(set(expected) | set(actual)):
+        want = expected.get(rel, 0)
+        have = actual.get(rel, 0)
+        if want == have:
+            continue
+        if want == 0:
+            problems.append(f"{label}: UNLISTED mutation in {rel} ({have}x)")
+        elif have == 0:
+            problems.append(
+                f"{label}: mutation gone from {rel} (expected {want}x)"
+            )
+        else:
+            problems.append(
+                f"{label}: {rel} has {have}x, expected {want}x"
+            )
+    return problems
+
+
+def _definition_collision_problems(
+    root: Path,
+    definitions: dict[str, dict[str, int]],
+) -> list[str]:
+    """Require a machine-readable map for every observed multi-file collision."""
+
+    problems: list[str] = []
+    for symbol, actual in sorted(definitions.items()):
+        if len(actual) < 2:
+            continue
+        expected = EXPECTED_DEFINITION_FILE_COUNTS.get(symbol)
+        if expected == actual:
+            continue
+        if expected is None:
+            problems.append(
+                f"{symbol}: {len(actual)} production definition files require "
+                "an EXPECTED_DEFINITION_FILE_COUNTS entry"
+            )
+        else:
+            problems.append(
+                f"{symbol}: definition file map has {actual!r}, expected {expected!r}"
+            )
+
+    # On the real checkout, also catch a deleted/moved collision definition;
+    # synthetic fixtures omit Cargo.toml and use the observed branch above.
+    if (root / "Cargo.toml").is_file():
+        for symbol, expected in sorted(EXPECTED_DEFINITION_FILE_COUNTS.items()):
+            actual = definitions.get(symbol, {})
+            if actual != expected:
+                problems.append(
+                    f"{symbol}: definition file map has {actual!r}, expected {expected!r}"
+                )
+    return problems
 
 
 def check(
@@ -548,8 +1130,31 @@ def check(
     pinned_test_only_files: Iterable[str] = PINNED_TEST_ONLY_MODULE_FILES,
 ) -> tuple[bool, str]:
     try:
+        scan = _scan_inputs(root, pinned_test_only_files)
+        texts = _production_texts(*scan)
         found, scanned, skipped = production_call_sites(
-            root, pinned_test_only_files=pinned_test_only_files
+            root,
+            pinned_test_only_files=pinned_test_only_files,
+            _scan=scan,
+            _texts=texts,
+        )
+        definitions = production_definition_file_counts(
+            root,
+            pinned_test_only_files=pinned_test_only_files,
+            _scan=scan,
+            _texts=texts,
+        )
+        raw_atomic = production_raw_atomic_mutations(
+            root,
+            pinned_test_only_files=pinned_test_only_files,
+            _scan=scan,
+            _texts=texts,
+        )
+        bare_references, use_aliases = production_bare_references(
+            root,
+            pinned_test_only_files=pinned_test_only_files,
+            _scan=scan,
+            _texts=texts,
         )
     except RuntimeError as exc:
         return False, str(exc)
@@ -568,13 +1173,51 @@ def check(
                     problems.append(f"{symbol}: call site GONE from {rel} (expected {want}x)")
                 else:
                     problems.append(f"{symbol}: {rel} has {have}x, expected {want}x")
+    problems.extend(_definition_collision_problems(root, definitions))
+    problems.extend(
+        _flat_map_problems(
+            "raw confirmed_end_offset atomic mutations",
+            EXPECTED_RAW_ATOMIC_MUTATIONS,
+            raw_atomic,
+        )
+    )
+    problems.extend(
+        _nested_map_problems(
+            "bare reference",
+            EXPECTED_BARE_REFERENCES,
+            bare_references,
+            missing_word="UNLISTED bare reference",
+        )
+    )
+    problems.extend(
+        _nested_map_problems(
+            "prohibited use alias",
+            EXPECTED_PINNED_USE_ALIASES,
+            use_aliases,
+            missing_word="PROHIBITED use alias",
+        )
+    )
     total_expected = sum(sum(m.values()) for m in EXPECTED_CALL_SITES.values())
     total_actual = sum(sum(m.values()) for m in found.values())
     zero_pinned = sorted(s for s, m in EXPECTED_CALL_SITES.items() if not m)
+    raw_expected_total = sum(EXPECTED_RAW_ATOMIC_MUTATIONS.values())
+    raw_actual_total = sum(raw_atomic.values())
+    bare_expected_total = sum(
+        sum(files.values()) for files in EXPECTED_BARE_REFERENCES.values()
+    )
+    bare_actual_total = sum(sum(files.values()) for files in bare_references.values())
+    alias_expected_total = sum(
+        sum(files.values()) for files in EXPECTED_PINNED_USE_ALIASES.values()
+    )
+    alias_actual_total = sum(sum(files.values()) for files in use_aliases.values())
     header = (
         f"durable frontier writer call sites: {total_actual} production sites across "
         f"{len(EXPECTED_CALL_SITES)} symbols "
         f"({len(zero_pinned)} pinned at zero: {', '.join(zero_pinned)}); "
+        f"raw confirmed_end_offset atomic mutations {raw_actual_total} "
+        f"(expected {raw_expected_total}); "
+        f"bare pinned references {bare_actual_total} (expected {bare_expected_total}); "
+        f"pinned use aliases {alias_actual_total} (expected {alias_expected_total}); "
         f"scanned {scanned} Rust files under {SCAN_ROOT.as_posix()}/, "
         f"skipped {skipped} test files; ({LIMITS})"
     )
