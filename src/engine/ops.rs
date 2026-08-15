@@ -15,6 +15,9 @@ mod dm_reply_ops;
 mod exec_ops;
 mod http_ops;
 mod kanban_ops;
+
+#[cfg(test)]
+pub(crate) use kanban_ops::reopen_done_auto_queue_entries_on_pg_tx;
 mod kv_ops;
 mod log_ops;
 pub(crate) mod message_ops;

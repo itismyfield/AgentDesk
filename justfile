@@ -166,6 +166,9 @@ test-postgres:
     # region), so their paths carry no pg-name marker either. Select each
     # module explicitly for the same coverage-ratchet reason as above.
     cargo test --lib db::auto_queue::entries::tests -- --nocapture --test-threads=1
+    # #5356 S2: the cross-path advisory-order regression is PG-only and also
+    # lives in a plain `tests` module, so select that module explicitly.
+    cargo test --lib services::auto_queue::route::command::tests -- --nocapture --test-threads=1
     cargo test --lib services::auto_queue::route::fsm::tests -- --nocapture --test-threads=1
     cargo test --lib services::auto_queue::route::phase_gate::tests -- --nocapture --test-threads=1
     # #5356 S3: the ownership suite is a PostgreSQL-only out-of-line module;

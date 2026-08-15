@@ -152,6 +152,33 @@ pub(super) async fn acquire_run_advisory_xact_lock_on_pg_tx(
     Ok(())
 }
 
+/// Acquire multiple run tokens in the incumbent force-pause order.
+///
+/// Loading the ordered ids separately makes lock acquisition order explicit;
+/// it does not rely on a planner preserving an `ORDER BY` through a CTE that
+/// also invokes `pg_advisory_xact_lock`.
+pub(crate) async fn acquire_run_advisory_xact_locks_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_ids: &[String],
+) -> Result<Vec<String>, String> {
+    let ordered_run_ids = sqlx::query_scalar::<_, String>(
+        "SELECT id
+         FROM auto_queue_runs
+         WHERE id = ANY($1)
+         ORDER BY created_at ASC, id ASC",
+    )
+    .bind(run_ids)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| format!("order auto-queue runs before advisory locking: {error}"))?;
+
+    for run_id in &ordered_run_ids {
+        acquire_run_advisory_xact_lock_on_pg_tx(tx, run_id).await?;
+    }
+
+    Ok(ordered_run_ids)
+}
+
 async fn try_acquire_run_advisory_xact_lock_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,

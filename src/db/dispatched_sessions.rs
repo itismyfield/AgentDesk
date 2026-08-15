@@ -850,9 +850,9 @@ pub(crate) async fn create_retry_dispatch_pg(
     } else if select_retry_owner_on_pg_tx(&mut tx, meta).await?.is_some() {
         // This detects ownership already visible to the final SELECT and then
         // aborts without acquiring aq_run, preserving the global lock order.
-        // An attachment between this SELECT and commit remains possible; that
-        // late-attach defect belongs to S2 (not yet merged), which will reroute
-        // attachment through the guarded path.
+        // An attachment between this SELECT and commit remains possible. S2
+        // routes production attachment through a dispatch-row FOR SHARE guard;
+        // this retry-side check remains a fail-closed ownership backstop.
         return Err(format!(
             "auto-queue ownership appeared during retry {}",
             meta.origin_dispatch_id

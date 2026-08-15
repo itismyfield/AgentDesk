@@ -4,8 +4,9 @@ use thiserror::Error;
 
 use super::run_status::is_live_run_status;
 use super::runs::{
-    acquire_run_advisory_xact_lock_on_pg_tx, auto_queue_run_review_disabled_on_pg_tx,
-    maybe_finalize_run_after_terminal_entry_pg, maybe_finalize_run_if_ready_pg,
+    acquire_run_advisory_xact_lock_on_pg_tx, acquire_run_advisory_xact_locks_on_pg_tx,
+    auto_queue_run_review_disabled_on_pg_tx, maybe_finalize_run_after_terminal_entry_pg,
+    maybe_finalize_run_if_ready_pg,
 };
 
 mod dispatch_failure;
@@ -106,38 +107,106 @@ pub async fn reactivate_done_entry_on_pg(
         .await;
     }
 
-    let effective_dispatch_id = options
-        .dispatch_id
-        .clone()
-        .or_else(|| current.dispatch_id.clone());
-    let effective_slot_index = options.slot_index.or(current.slot_index);
-
     let mut tx = pool
         .begin()
         .await
         .map_err(|error| format!("open postgres auto-queue done reactivation tx: {error}"))?;
     acquire_run_advisory_xact_lock_on_pg_tx(&mut tx, &current.run_id).await?;
 
+    let expected_dispatch_id = options
+        .dispatch_id
+        .clone()
+        .or_else(|| current.dispatch_id.clone());
+    let expected_slot_index = options.slot_index.or(current.slot_index);
+    let (reloaded_run_id, reloaded_status, reloaded_dispatch_id, reloaded_slot_index) =
+        lock_entry_dispatch_identity_on_pg_tx(&mut tx, entry_id).await?;
+    if reloaded_run_id != current.run_id {
+        tx.rollback().await.map_err(|error| {
+            format!("rollback stale postgres auto-queue reactivation {entry_id}: {error}")
+        })?;
+        return Err(format!(
+            "auto-queue entry {entry_id} run identity changed during reactivation"
+        ));
+    }
+    if reloaded_status == ENTRY_STATUS_DISPATCHED {
+        if reloaded_dispatch_id != expected_dispatch_id
+            || reloaded_slot_index != expected_slot_index
+        {
+            tx.rollback().await.map_err(|error| {
+                format!("rollback stale postgres auto-queue reactivation {entry_id}: {error}")
+            })?;
+            return Err(format!(
+                "auto-queue entry {entry_id} dispatch identity changed during reactivation"
+            ));
+        }
+        ensure_done_entry_run_live_on_pg_tx(&mut tx, &reloaded_run_id, entry_id).await?;
+        tx.commit().await.map_err(|error| {
+            format!("commit accepted postgres auto-queue reactivation {entry_id}: {error}")
+        })?;
+        return Ok(EntryStatusUpdateResult {
+            run_id: reloaded_run_id,
+            from_status: ENTRY_STATUS_DISPATCHED.to_string(),
+            to_status: ENTRY_STATUS_DISPATCHED.to_string(),
+            changed: false,
+        });
+    }
+    if reloaded_status != ENTRY_STATUS_DONE
+        || reloaded_dispatch_id != current.dispatch_id
+        || reloaded_slot_index != current.slot_index
+    {
+        tx.rollback().await.map_err(|error| {
+            format!("rollback stale postgres auto-queue reactivation {entry_id}: {error}")
+        })?;
+        return Err(format!(
+            "auto-queue entry {entry_id} dispatch identity changed during reactivation"
+        ));
+    }
+
+    ensure_done_entry_run_live_on_pg_tx(&mut tx, &reloaded_run_id, entry_id).await?;
+
+    let result = update_entry_status_on_pg_tx(
+        &mut tx,
+        entry_id,
+        ENTRY_STATUS_DISPATCHED,
+        trigger_source,
+        options,
+    )
+    .await?;
+    if !result.changed {
+        tx.rollback().await.map_err(|error| {
+            format!("rollback stale postgres auto-queue reactivation {entry_id}: {error}")
+        })?;
+        return Err(format!(
+            "auto-queue entry {entry_id} dispatch identity changed during reactivation"
+        ));
+    }
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit postgres auto-queue reactivation {entry_id}: {error}"))?;
+
+    Ok(result)
+}
+
+/// Keep done-entry reactivation symmetric across the dedicated reactivate and
+/// kanban-reopen paths after their run token has been acquired.
+pub(crate) async fn ensure_done_entry_run_live_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+    entry_id: &str,
+) -> Result<(), String> {
     let run_status = sqlx::query_scalar::<_, String>(
         "SELECT status
          FROM auto_queue_runs
          WHERE id = $1",
     )
-    .bind(&current.run_id)
-    .fetch_optional(&mut *tx)
+    .bind(run_id)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(|error| {
-        format!(
-            "reload postgres auto-queue run {} before entry reactivation: {error}",
-            current.run_id
-        )
+        format!("reload postgres auto-queue run {run_id} before entry reactivation: {error}")
     })?
-    .ok_or_else(|| {
-        format!(
-            "auto-queue run not found before entry reactivation: {}",
-            current.run_id
-        )
-    })?;
+    .ok_or_else(|| format!("auto-queue run not found before entry reactivation: {run_id}"))?;
 
     if run_status == "completed" {
         let reactivated_run = sqlx::query(
@@ -147,95 +216,97 @@ pub async fn reactivate_done_entry_on_pg(
              WHERE id = $1
                AND status = 'completed'",
         )
-        .bind(&current.run_id)
-        .execute(&mut *tx)
+        .bind(run_id)
+        .execute(&mut **tx)
         .await
-        .map_err(|error| {
-            format!(
-                "reactivate postgres auto-queue run {}: {error}",
-                current.run_id
-            )
-        })?
+        .map_err(|error| format!("reactivate postgres auto-queue run {run_id}: {error}"))?
         .rows_affected();
         if reactivated_run != 1 {
             return Err(format!(
-                "auto-queue run {} changed while reactivating completed entry {entry_id}",
-                current.run_id
+                "auto-queue run {run_id} changed while reactivating completed entry {entry_id}"
             ));
         }
-    } else if !is_live_run_status(&run_status) {
-        return Err(format!(
-            "auto-queue run {} is {run_status}: refusing to reactivate done entry {entry_id}",
-            current.run_id
-        ));
-    }
 
-    let rows_affected = sqlx::query(
-        "UPDATE auto_queue_entries
-         SET status = 'dispatched',
-             dispatch_id = $1,
-             slot_index = $2,
-             dispatched_at = NOW(),
-             completed_at = NULL
-         WHERE id = $3
-           AND status = 'done'",
-    )
-    .bind(&effective_dispatch_id)
-    .bind(effective_slot_index)
-    .bind(entry_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| format!("reactivate postgres auto-queue entry {entry_id}: {error}"))?
-    .rows_affected();
-
-    if rows_affected == 0 {
-        tx.rollback().await.map_err(|error| {
-            format!("rollback postgres auto-queue reactivation {entry_id}: {error}")
-        })?;
-        let latest = load_entry_status_row_pg(pool, entry_id).await?;
-        if entry_status_row_matches_target(
-            &latest,
-            ENTRY_STATUS_DISPATCHED,
-            effective_dispatch_id.as_deref(),
-            effective_slot_index,
-        ) {
-            return Ok(EntryStatusUpdateResult {
-                run_id: latest.run_id,
-                from_status: latest.status,
-                to_status: ENTRY_STATUS_DISPATCHED.to_string(),
-                changed: false,
-            });
+        let (agent_id, slot_index, thread_group) =
+            sqlx::query_as::<_, (Option<String>, Option<i64>, i64)>(
+                "SELECT agent_id,
+                        slot_index::BIGINT,
+                        COALESCE(thread_group, 0)::BIGINT
+                 FROM auto_queue_entries
+                 WHERE id = $1
+                   AND run_id = $2",
+            )
+            .bind(entry_id)
+            .bind(run_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|error| {
+                format!("load postgres auto-queue entry {entry_id} slot identity: {error}")
+            })?
+            .ok_or_else(|| {
+                format!("auto-queue entry {entry_id} disappeared while reactivating run {run_id}")
+            })?;
+        if let Some(slot_index) = slot_index {
+            let reacquired_slot = sqlx::query(
+                "UPDATE auto_queue_slots
+                 SET assigned_run_id = $1,
+                     assigned_thread_group = $2,
+                     updated_at = NOW()
+                 WHERE agent_id = $3
+                   AND slot_index = $4
+                   AND (assigned_run_id IS NULL OR assigned_run_id = $1)",
+            )
+            .bind(run_id)
+            .bind(thread_group)
+            .bind(agent_id.as_deref())
+            .bind(slot_index)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| {
+                format!(
+                    "reacquire postgres auto-queue slot {slot_index} for revived run {run_id}: {error}"
+                )
+            })?
+            .rows_affected();
+            if reacquired_slot != 1 {
+                return Err(format!(
+                    "auto-queue slot {slot_index} for entry {entry_id} is owned by another run: refusing to revive {run_id}"
+                ));
+            }
         }
 
+        // A completion notification cannot be recalled. If reopen revives a
+        // run after that notification was published, resumed activity may be
+        // observed after the completion notification.
+    } else if !is_live_run_status(&run_status) {
         return Err(format!(
-            "invalid auto-queue entry transition for {entry_id}: {} -> {}",
-            latest.status, ENTRY_STATUS_DISPATCHED
+            "auto-queue run {run_id} is {run_status}: refusing to reactivate done entry {entry_id}"
         ));
     }
 
-    if let Some(dispatch_id) = effective_dispatch_id.as_deref() {
-        record_entry_dispatch_history_on_pg(&mut tx, entry_id, dispatch_id, trigger_source).await?;
-    }
+    Ok(())
+}
 
-    record_entry_transition_on_pg(
-        &mut tx,
-        entry_id,
-        ENTRY_STATUS_DONE,
-        ENTRY_STATUS_DISPATCHED,
-        trigger_source,
+/// Lock and return the full entry identity used to accept a concurrent
+/// done-to-dispatched transition. Status alone is not sufficient: a different
+/// dispatch or slot is a competing owner, not an idempotent target state.
+pub(crate) async fn lock_entry_dispatch_identity_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entry_id: &str,
+) -> Result<(String, String, Option<String>, Option<i64>), String> {
+    sqlx::query_as::<_, (String, String, Option<String>, Option<i64>)>(
+        "SELECT run_id, status, dispatch_id, slot_index::BIGINT
+         FROM auto_queue_entries
+         WHERE id = $1
+         FOR UPDATE",
     )
-    .await?;
-
-    tx.commit()
-        .await
-        .map_err(|error| format!("commit postgres auto-queue reactivation {entry_id}: {error}"))?;
-
-    Ok(EntryStatusUpdateResult {
-        run_id: current.run_id,
-        from_status: ENTRY_STATUS_DONE.to_string(),
-        to_status: ENTRY_STATUS_DISPATCHED.to_string(),
-        changed: true,
-    })
+    .bind(entry_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| {
+        format!("lock postgres auto-queue entry {entry_id} dispatch identity: {error}")
+    })?
+    .ok_or_else(|| format!("auto-queue entry not found while locking identity: {entry_id}"))
 }
 
 fn dispatch_json_field(document: Option<&str>, field: &str) -> Option<String> {
@@ -359,6 +430,11 @@ pub async fn update_entry_status_on_pg(
 ) -> Result<EntryStatusUpdateResult, String> {
     let normalized = normalize_entry_status(new_status).map_err(|error| error.to_string())?;
     let mut current = load_entry_status_row_pg(pool, entry_id).await?;
+    let pinned_dispatch_id = options
+        .dispatch_id
+        .clone()
+        .or_else(|| current.dispatch_id.clone());
+    let pinned_slot_index = options.slot_index.or(current.slot_index);
 
     // #2048 F11: bound the stale-retry loop. Without a cap, two concurrent
     // updaters on the same entry can keep losing the optimistic update and
@@ -401,11 +477,6 @@ pub async fn update_entry_status_on_pg(
             ));
         }
 
-        let effective_dispatch_id = options
-            .dispatch_id
-            .clone()
-            .or_else(|| current.dispatch_id.clone());
-        let effective_slot_index = options.slot_index.or(current.slot_index);
         let metadata_change = match normalized {
             ENTRY_STATUS_PENDING => {
                 current.dispatch_id.is_some()
@@ -413,8 +484,8 @@ pub async fn update_entry_status_on_pg(
                     || current.completed_at.is_some()
             }
             ENTRY_STATUS_DISPATCHED => {
-                effective_dispatch_id != current.dispatch_id
-                    || effective_slot_index != current.slot_index
+                pinned_dispatch_id != current.dispatch_id
+                    || pinned_slot_index != current.slot_index
                     || current.completed_at.is_some()
             }
             ENTRY_STATUS_DONE
@@ -441,6 +512,14 @@ pub async fn update_entry_status_on_pg(
 
         if normalized == ENTRY_STATUS_DISPATCHED {
             gate_dispatched_entry_run_on_pg_tx(&mut tx, &current.run_id).await?;
+            validate_new_dispatch_attachment_on_pg_tx(
+                &mut tx,
+                entry_id,
+                &current.status,
+                current.dispatch_id.as_deref(),
+                pinned_dispatch_id.as_deref(),
+            )
+            .await?;
         }
 
         let rows_affected = match normalized {
@@ -473,12 +552,16 @@ pub async fn update_entry_status_on_pg(
                      dispatched_at = NOW(),
                      completed_at = NULL
                  WHERE id = $3
-                   AND status = $4",
+                   AND status = $4
+                   AND dispatch_id IS NOT DISTINCT FROM $5
+                   AND slot_index IS NOT DISTINCT FROM $6",
             )
-            .bind(effective_dispatch_id.as_deref())
-            .bind(effective_slot_index)
+            .bind(pinned_dispatch_id.as_deref())
+            .bind(pinned_slot_index)
             .bind(entry_id)
             .bind(&current.status)
+            .bind(current.dispatch_id.as_deref())
+            .bind(current.slot_index)
             .execute(&mut *tx)
             .await
             .map_err(|error| format!("update auto-queue entry {entry_id} -> dispatched: {error}"))?
@@ -555,8 +638,8 @@ pub async fn update_entry_status_on_pg(
             if entry_status_row_matches_target(
                 &latest,
                 normalized,
-                effective_dispatch_id.as_deref(),
-                effective_slot_index,
+                pinned_dispatch_id.as_deref(),
+                pinned_slot_index,
             ) {
                 return Ok(EntryStatusUpdateResult {
                     run_id: latest.run_id,
@@ -564,6 +647,11 @@ pub async fn update_entry_status_on_pg(
                     to_status: normalized.to_string(),
                     changed: false,
                 });
+            }
+            if latest.dispatch_id != pinned_dispatch_id || latest.slot_index != pinned_slot_index {
+                return Err(format!(
+                    "auto-queue entry {entry_id} dispatch identity changed during status update"
+                ));
             }
 
             if !is_allowed_entry_transition(&latest.status, normalized, trigger_source) {
@@ -600,7 +688,7 @@ pub async fn update_entry_status_on_pg(
             if let Some(previous_dispatch_id) = current
                 .dispatch_id
                 .as_deref()
-                .filter(|value| Some(*value) != effective_dispatch_id.as_deref())
+                .filter(|value| Some(*value) != pinned_dispatch_id.as_deref())
             {
                 record_entry_dispatch_history_on_pg(
                     &mut tx,
@@ -610,7 +698,7 @@ pub async fn update_entry_status_on_pg(
                 )
                 .await?;
             }
-            if let Some(dispatch_id) = effective_dispatch_id.as_deref() {
+            if let Some(dispatch_id) = pinned_dispatch_id.as_deref() {
                 record_entry_dispatch_history_on_pg(&mut tx, entry_id, dispatch_id, trigger_source)
                     .await?;
             }
@@ -735,6 +823,14 @@ pub async fn update_entry_status_on_pg_tx(
 
     if normalized == ENTRY_STATUS_DISPATCHED {
         gate_dispatched_entry_run_on_pg_tx(tx, &current.run_id).await?;
+        validate_new_dispatch_attachment_on_pg_tx(
+            tx,
+            entry_id,
+            &current.status,
+            current.dispatch_id.as_deref(),
+            effective_dispatch_id.as_deref(),
+        )
+        .await?;
     }
 
     let rows_affected = match normalized {
@@ -767,12 +863,16 @@ pub async fn update_entry_status_on_pg_tx(
                  dispatched_at = NOW(),
                  completed_at = NULL
              WHERE id = $3
-               AND status = $4",
+               AND status = $4
+               AND dispatch_id IS NOT DISTINCT FROM $5
+               AND slot_index IS NOT DISTINCT FROM $6",
         )
         .bind(effective_dispatch_id.as_deref())
         .bind(effective_slot_index)
         .bind(entry_id)
         .bind(&current.status)
+        .bind(current.dispatch_id.as_deref())
+        .bind(current.slot_index)
         .execute(&mut **tx)
         .await
         .map_err(|error| format!("update auto-queue entry {entry_id} -> dispatched: {error}"))?
@@ -914,6 +1014,62 @@ async fn gate_dispatched_entry_run_on_pg_tx(
     if !is_live_run_status(&run_status) {
         return Err(format!(
             "auto-queue run {run_id} is {run_status}: refusing to dispatch an entry"
+        ));
+    }
+
+    Ok(())
+}
+
+/// Acquire every run token before a caller-owned transaction writes any row.
+/// Sorting and deduplication keep multi-run attachment transactions on one
+/// advisory-lock order; the dispatched choke point re-enters these tokens.
+pub(crate) async fn acquire_dispatched_entry_run_tokens_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_ids: &[String],
+) -> Result<(), String> {
+    acquire_run_advisory_xact_locks_on_pg_tx(tx, run_ids).await?;
+    Ok(())
+}
+
+/// A newly linked dispatch remains stable through the entry write and history
+/// insert. This closes the window where an attacher observed a live dispatch,
+/// then linked it after another transaction terminalized it. A missing
+/// dispatch row is rejected because attachment ownership cannot be validated,
+/// so the guard fails closed rather than creating an unverifiable link.
+async fn validate_new_dispatch_attachment_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entry_id: &str,
+    current_status: &str,
+    current_dispatch_id: Option<&str>,
+    effective_dispatch_id: Option<&str>,
+) -> Result<(), String> {
+    let retains_existing_link = effective_dispatch_id == current_dispatch_id
+        && matches!(current_status, ENTRY_STATUS_DONE | ENTRY_STATUS_DISPATCHED);
+    let Some(dispatch_id) = effective_dispatch_id.filter(|_| !retains_existing_link) else {
+        return Ok(());
+    };
+
+    let dispatch_status = sqlx::query_scalar::<_, String>(
+        "SELECT status
+         FROM task_dispatches
+         WHERE id = $1
+         FOR SHARE",
+    )
+    .bind(dispatch_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| {
+        format!(
+            "reload dispatch {dispatch_id} before attaching auto-queue entry {entry_id}: {error}"
+        )
+    })?
+    .ok_or_else(|| {
+        format!("dispatch {dispatch_id} not found before attaching auto-queue entry {entry_id}")
+    })?;
+
+    if !matches!(dispatch_status.as_str(), "pending" | "dispatched") {
+        return Err(format!(
+            "dispatch {dispatch_id} is {dispatch_status}: refusing to attach auto-queue entry {entry_id}"
         ));
     }
 
@@ -1396,7 +1552,14 @@ fn is_allowed_entry_transition(from_status: &str, to_status: &str, trigger_sourc
 
     if from_status == ENTRY_STATUS_DONE
         && to_status == ENTRY_STATUS_DISPATCHED
-        && matches!(trigger_source, "pmd_reopen" | "rereview_dispatch")
+        // The API reopen route is an existing caller of the same done-entry
+        // reactivation contract as pmd/rereview; retaining it here preserves
+        // that public behavior even though the design transition table names
+        // the internal sources.
+        && matches!(
+            trigger_source,
+            "api_reopen" | "pmd_reopen" | "rereview_dispatch"
+        )
     {
         return true;
     }
@@ -1488,7 +1651,7 @@ async fn record_entry_transition_on_pg(
 mod tests {
     use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
-    use sqlx::{Connection, PgConnection, PgPool};
+    use sqlx::{Connection, Executor, PgConnection, PgPool};
 
     async fn setup_entry(pool: &PgPool, run_status: &str, entry_status: &str) {
         sqlx::query(
@@ -1745,6 +1908,116 @@ mod tests {
         assert_live_run_allows_dispatched_transition("restoring", "dispatch-restoring").await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pool_status_retry_rejects_competing_dispatch_identity_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        setup_entry(&pool, "active", ENTRY_STATUS_PENDING).await;
+        seed_dispatch(&pool, "dispatch-requested-status-update").await;
+        seed_dispatch(&pool, "dispatch-competing-status-update").await;
+        let mut token_holder = begin_run_token_holder(&pg_db.database_url).await;
+
+        let update_pool = pool.clone();
+        let update = tokio::spawn(async move {
+            update_entry_status_on_pg(
+                &update_pool,
+                "gate-entry",
+                ENTRY_STATUS_DISPATCHED,
+                "test_pool_status_retry",
+                &EntryStatusUpdateOptions {
+                    dispatch_id: Some("dispatch-requested-status-update".to_string()),
+                    slot_index: Some(0),
+                },
+            )
+            .await
+        });
+        wait_for_run_token_waiter(&mut token_holder).await;
+        token_holder
+            .execute(
+                "UPDATE auto_queue_entries
+             SET status = 'dispatched',
+                 dispatch_id = 'dispatch-competing-status-update',
+                 slot_index = 1,
+                 completed_at = NULL
+             WHERE id = 'gate-entry'",
+            )
+            .await
+            .expect("attach competing dispatch during pool status update");
+        token_holder
+            .execute("COMMIT")
+            .await
+            .expect("commit competing dispatch and release run token");
+
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), update)
+            .await
+            .expect("pool status update finishes after competing attachment")
+            .expect("join pool status update")
+            .expect_err("pool status retry must reject a competing dispatch identity");
+        assert!(error.contains("dispatch identity"), "{error}");
+        let identity = load_entry_status_row_pg(&pool, "gate-entry")
+            .await
+            .expect("load preserved competing dispatch identity");
+        assert_eq!(
+            identity.dispatch_id.as_deref(),
+            Some("dispatch-competing-status-update")
+        );
+        assert_eq!(identity.slot_index, Some(1));
+
+        drop(token_holder);
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pool_status_retry_distinguishes_null_and_empty_dispatch_identity_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        setup_entry(&pool, "active", ENTRY_STATUS_PENDING).await;
+        let mut token_holder = begin_run_token_holder(&pg_db.database_url).await;
+
+        let update_pool = pool.clone();
+        let update = tokio::spawn(async move {
+            update_entry_status_on_pg(
+                &update_pool,
+                "gate-entry",
+                ENTRY_STATUS_DISPATCHED,
+                "test_pool_status_retry",
+                &EntryStatusUpdateOptions::default(),
+            )
+            .await
+        });
+        wait_for_run_token_waiter(&mut token_holder).await;
+        token_holder
+            .execute(
+                "UPDATE auto_queue_entries
+             SET status = 'dispatched',
+                 dispatch_id = '',
+                 completed_at = NULL
+             WHERE id = 'gate-entry'",
+            )
+            .await
+            .expect("replace NULL dispatch identity with empty text");
+        token_holder
+            .execute("COMMIT")
+            .await
+            .expect("commit empty dispatch identity and release run token");
+
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), update)
+            .await
+            .expect("pool status update finishes after empty identity wins")
+            .expect("join pool status update")
+            .expect_err("pool status retry must not accept empty text as the pinned NULL identity");
+        assert!(error.contains("dispatch identity"), "{error}");
+        let identity = load_entry_status_row_pg(&pool, "gate-entry")
+            .await
+            .expect("load preserved empty dispatch identity");
+        assert_eq!(identity.dispatch_id.as_deref(), Some(""));
+
+        drop(token_holder);
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
     #[tokio::test]
     async fn reactivate_completed_run_waits_for_token_and_records_history_pg() {
         let pg_db = TestPostgresDb::create().await;
@@ -1786,7 +2059,267 @@ mod tests {
                 .expect("load history-only ownership evidence"),
             vec!["dispatch-reactivated".to_string()]
         );
+        let transition = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT from_status, to_status, trigger_source
+             FROM auto_queue_entry_transitions
+             WHERE entry_id = 'gate-entry'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load canonical done-entry reactivation transition");
+        assert_eq!(
+            transition,
+            (
+                ENTRY_STATUS_DONE.to_string(),
+                ENTRY_STATUS_DISPATCHED.to_string(),
+                "pmd_reopen".to_string()
+            )
+        );
 
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reactivate_reentry_rejects_competing_dispatch_identity_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        setup_entry(&pool, "completed", ENTRY_STATUS_DONE).await;
+        seed_dispatch(&pool, "dispatch-requested-reactivation").await;
+        seed_dispatch(&pool, "dispatch-competing-reactivation").await;
+        let mut token_holder = begin_run_token_holder(&pg_db.database_url).await;
+
+        let reactivate_pool = pool.clone();
+        let reactivation = tokio::spawn(async move {
+            reactivate_done_entry_on_pg(
+                &reactivate_pool,
+                "gate-entry",
+                "pmd_reopen",
+                &EntryStatusUpdateOptions {
+                    dispatch_id: Some("dispatch-requested-reactivation".to_string()),
+                    slot_index: Some(0),
+                },
+            )
+            .await
+        });
+        wait_for_run_token_waiter(&mut token_holder).await;
+        sqlx::query(
+            "UPDATE auto_queue_runs
+             SET status = 'active', completed_at = NULL
+             WHERE id = 'gate-run'",
+        )
+        .execute(&mut token_holder)
+        .await
+        .expect("revive run in competing reactivator");
+        sqlx::query(
+            "UPDATE auto_queue_entries
+             SET status = 'dispatched',
+                 dispatch_id = 'dispatch-competing-reactivation',
+                 slot_index = 0,
+                 completed_at = NULL
+             WHERE id = 'gate-entry'",
+        )
+        .execute(&mut token_holder)
+        .await
+        .expect("attach competing dispatch while owning the run token");
+        sqlx::query("COMMIT")
+            .execute(&mut token_holder)
+            .await
+            .expect("commit competing reactivation and release token");
+
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), reactivation)
+            .await
+            .expect("reactivation finishes after competing attachment")
+            .expect("join competing reactivation task")
+            .expect_err("a different dispatch identity must reject reactivation reentry");
+        assert!(error.contains("dispatch identity"), "{error}");
+        let identity = sqlx::query_as::<_, (String, Option<String>, Option<i64>)>(
+            "SELECT status, dispatch_id, slot_index
+             FROM auto_queue_entries
+             WHERE id = 'gate-entry'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load preserved competing entry identity");
+        assert_eq!(
+            identity,
+            (
+                ENTRY_STATUS_DISPATCHED.to_string(),
+                Some("dispatch-competing-reactivation".to_string()),
+                Some(0)
+            )
+        );
+        assert_eq!(transition_count(&pool).await, 0);
+
+        drop(token_holder);
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn reactivate_done_entry_rejects_unapproved_transition_source_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        setup_entry(&pool, "completed", ENTRY_STATUS_DONE).await;
+        seed_dispatch(&pool, "dispatch-invalid-reactivation").await;
+
+        let error = reactivate_done_entry_on_pg(
+            &pool,
+            "gate-entry",
+            "unapproved_reactivation",
+            &EntryStatusUpdateOptions {
+                dispatch_id: Some("dispatch-invalid-reactivation".to_string()),
+                slot_index: Some(0),
+            },
+        )
+        .await
+        .expect_err("canonical transition validation must reject an unapproved done reactivation");
+        assert!(
+            error.contains("invalid auto-queue entry transition"),
+            "{error}"
+        );
+        assert_eq!(entry_status(&pool).await, ENTRY_STATUS_DONE);
+        assert_eq!(run_status(&pool).await, "completed");
+        assert_eq!(transition_count(&pool).await, 0);
+        assert!(
+            list_entry_dispatch_history_pg(&pool, "gate-entry")
+                .await
+                .expect("load rejected reactivation history")
+                .is_empty()
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn failed_dispatch_is_rechecked_before_late_attachment_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        setup_entry(&pool, "active", ENTRY_STATUS_PENDING).await;
+        seed_dispatch(&pool, "dispatch-failed-before-attach").await;
+        sqlx::query(
+            "UPDATE auto_queue_entries
+             SET dispatch_id = 'dispatch-failed-before-attach'
+             WHERE id = 'gate-entry'",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed stale pending-entry dispatch pointer");
+        sqlx::query(
+            "UPDATE task_dispatches
+             SET status = 'failed', updated_at = NOW()
+             WHERE id = 'dispatch-failed-before-attach'",
+        )
+        .execute(&pool)
+        .await
+        .expect("terminalize dispatch before late attachment");
+
+        let error = update_entry_status_on_pg(
+            &pool,
+            "gate-entry",
+            ENTRY_STATUS_DISPATCHED,
+            "restore_run_attach_existing_dispatch",
+            &EntryStatusUpdateOptions {
+                dispatch_id: Some("dispatch-failed-before-attach".to_string()),
+                slot_index: Some(0),
+            },
+        )
+        .await
+        .expect_err("failed dispatch must not be attached after the restore-path observation");
+        assert!(error.contains("is failed: refusing to attach"), "{error}");
+        assert_eq!(entry_status(&pool).await, ENTRY_STATUS_PENDING);
+        assert_eq!(transition_count(&pool).await, 0);
+        assert!(
+            list_entry_dispatch_history_pg(&pool, "gate-entry")
+                .await
+                .expect("load rejected late-attach history")
+                .is_empty()
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn terminal_dispatch_commit_blocks_and_rejects_late_attachment_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        setup_entry(&pool, "active", ENTRY_STATUS_PENDING).await;
+        seed_dispatch(&pool, "dispatch-terminalizing-during-attach").await;
+
+        let mut terminalizer = pool.acquire().await.expect("acquire terminalizer");
+        sqlx::query("BEGIN")
+            .execute(&mut *terminalizer)
+            .await
+            .expect("begin terminalizer");
+        sqlx::query(
+            "UPDATE task_dispatches
+             SET status = 'failed', updated_at = NOW()
+             WHERE id = 'dispatch-terminalizing-during-attach'",
+        )
+        .execute(&mut *terminalizer)
+        .await
+        .expect("terminalize dispatch without committing");
+
+        let attach_pool = pool.clone();
+        let attachment = tokio::spawn(async move {
+            update_entry_status_on_pg(
+                &attach_pool,
+                "gate-entry",
+                ENTRY_STATUS_DISPATCHED,
+                "restore_run_attach_existing_dispatch",
+                &EntryStatusUpdateOptions {
+                    dispatch_id: Some("dispatch-terminalizing-during-attach".to_string()),
+                    slot_index: Some(0),
+                },
+            )
+            .await
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            sqlx::query("SELECT pg_stat_clear_snapshot()")
+                .execute(&mut *terminalizer)
+                .await
+                .expect("clear late-attach waiter snapshot");
+            let waiting = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                     SELECT 1
+                     FROM pg_stat_activity
+                     WHERE datname = current_database()
+                       AND wait_event_type = 'Lock'
+                       AND query LIKE '%FOR SHARE%'
+                 )",
+            )
+            .fetch_one(&mut *terminalizer)
+            .await
+            .expect("inspect dispatch FOR SHARE waiter");
+            if waiting {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "late attachment did not wait on the terminal dispatch update"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        sqlx::query("COMMIT")
+            .execute(&mut *terminalizer)
+            .await
+            .expect("commit terminal dispatch update");
+
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), attachment)
+            .await
+            .expect("late attachment finishes after terminal commit")
+            .expect("join late attachment")
+            .expect_err("committed terminal dispatch must reject late attachment");
+        assert!(error.contains("is failed: refusing to attach"), "{error}");
+        assert_eq!(entry_status(&pool).await, ENTRY_STATUS_PENDING);
+        assert_eq!(transition_count(&pool).await, 0);
+
+        drop(terminalizer);
         pool.close().await;
         pg_db.drop().await;
     }
