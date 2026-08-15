@@ -863,6 +863,9 @@ pub(crate) async fn create_retry_dispatch_pg(
         .await
         .map_err(|error| format!("commit postgres retry dispatch {dispatch_id}: {error}"))?;
 
+    // Best-effort delivery: a process crash between the commit above and these
+    // emits loses the buffered events. The database rows committed above stay
+    // authoritative; only the observability copies are lost.
     for event in deferred_observability {
         event.emit();
     }

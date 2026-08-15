@@ -163,9 +163,11 @@ async fn try_acquire_run_advisory_xact_lock_on_pg_tx(
         .map_err(|error| format!("try-lock auto-queue run {run_id}: {error}"))
 }
 
-/// Transaction-local opt-out for one failed-sync immediately followed by
-/// reattachment. The caller must restore the setting in the same transaction;
-/// this helper only changes the transaction-local flag.
+/// Transaction-local opt-out for a failed-sync whose replacement attachment
+/// completes later in the same combined transaction, after the intervening
+/// dispatch, event, outbox, and card writes. The caller must restore the
+/// setting in the same transaction; this helper only changes the
+/// transaction-local flag.
 pub(crate) async fn set_terminal_entry_finalize_suppressed_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     suppressed: bool,
