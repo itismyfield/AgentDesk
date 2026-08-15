@@ -156,11 +156,34 @@ async fn try_acquire_run_advisory_xact_lock_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
 ) -> Result<bool, String> {
-    sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock(hashtext('aq_run:' || $1))")
-        .bind(run_id)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|error| format!("try-lock auto-queue run {run_id}: {error}"))
+    // PostgreSQL advisory locks are re-entrant for their owning backend. Treat
+    // an already-owned run token as contention so this opportunistic finalizer
+    // also defers when a larger attach transaction deliberately owns the token.
+    sqlx::query_scalar::<_, bool>(
+        "WITH advisory_key AS (
+             SELECT hashtext('aq_run:' || $1)::BIGINT AS value
+         )
+         SELECT CASE
+             WHEN EXISTS (
+                 SELECT 1
+                 FROM pg_locks, advisory_key
+                 WHERE locktype = 'advisory'
+                   AND pid = pg_backend_pid()
+                   AND granted
+                   AND objsubid = 1
+                   AND classid::BIGINT = CASE
+                       WHEN advisory_key.value < 0 THEN 4294967295
+                       ELSE 0
+                   END
+                   AND objid::BIGINT = (advisory_key.value & 4294967295)
+             ) THEN FALSE
+             ELSE pg_try_advisory_xact_lock((SELECT value FROM advisory_key))
+         END",
+    )
+    .bind(run_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| format!("try-lock auto-queue run {run_id}: {error}"))
 }
 
 async fn remaining_runnable_entry_count_on_pg_tx(

@@ -782,6 +782,18 @@ async fn force_kill_session_impl_with_reason_and_forwarding(
     )) = retry_meta
     {
         if retry_count >= FORCE_KILL_RETRY_LIMIT {
+            if let Err(error) = dispatched_sessions_db::fail_force_killed_dispatch_without_retry_pg(
+                pool,
+                &origin_dispatch_id,
+                Some(session_key),
+            )
+            .await
+            {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
+                );
+            }
             retry_skipped_reason = Some("retry_limit_reached");
             tracing::warn!(
                 "[force-kill] retry dispatch skipped for card {}: retry_count={} limit={}",
@@ -809,9 +821,17 @@ async fn force_kill_session_impl_with_reason_and_forwarding(
                     retry_dispatch_id = Some(new_id);
                 }
                 Err(e) => {
+                    let fallback_error =
+                        dispatched_sessions_db::fail_force_killed_dispatch_without_retry_pg(
+                            pool,
+                            &meta.origin_dispatch_id,
+                            Some(session_key),
+                        )
+                        .await
+                        .err();
                     tracing::warn!(
-                        "[force-kill] retry dispatch creation via postgres path failed for card {}: {e}",
-                        meta.card_id
+                        "[force-kill] retry dispatch creation via postgres path failed for card {}: {e}; standalone fail fallback={fallback_error:?}",
+                        meta.card_id,
                     );
                 }
             }

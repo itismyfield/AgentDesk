@@ -397,37 +397,6 @@ pub(crate) async fn disconnect_session_and_prepare_retry_pg(
             Some("completed") | Some("cancelled") | Some("failed")
         );
 
-        if !is_terminal {
-            let reason = json!({
-                "reason": "force_kill_session",
-                "session_key": session_key,
-            });
-            let allowed_from: &[&str] = &["pending", "dispatched"];
-            // Delegate to the canonical pipeline. The async variant is used
-            // here because we're already inside a tokio runtime (axum
-            // handler); the sync wrapper would `block_on` and panic.
-            let changed = crate::dispatch::set_dispatch_status_on_pg_async(
-                pool,
-                dispatch_id,
-                "failed",
-                Some(&reason),
-                "force_kill_session",
-                Some(allowed_from),
-                true,
-            )
-            .await
-            .map_err(|error| {
-                format!("canonical fail postgres dispatch {dispatch_id} during force-kill: {error}")
-            })?;
-            if changed == 0 {
-                return Ok(None);
-            }
-        }
-
-        // #2045 Finding 4 cancelled→failed guard: if the dispatch was already
-        // `cancelled` (or otherwise terminal) before force-kill ran, do not
-        // synthesize a retry on top of that. The original cancel intent — or
-        // the completion that already happened — must remain authoritative.
         if retry && !is_terminal {
             retry_meta = sqlx::query(
                 "SELECT
@@ -459,10 +428,48 @@ pub(crate) async fn disconnect_session_and_prepare_retry_pg(
             .map_err(|error: sqlx::Error| {
                 format!("decode postgres retry metadata {dispatch_id}: {error}")
             })?;
+        } else if !is_terminal {
+            let changed =
+                fail_force_killed_dispatch_without_retry_pg(pool, dispatch_id, Some(session_key))
+                    .await?;
+            if changed == 0 {
+                return Ok(None);
+            }
         }
+
+        // #2045 Finding 4 cancelled→failed guard: if the dispatch was already
+        // terminal before force-kill ran, retry metadata stays absent. For a
+        // live retry, the canonical failed transition is deferred to
+        // `create_retry_dispatch_pg` so d1 sync and d2 attachment commit in one
+        // run-token transaction. The retry=false branch above remains the
+        // existing standalone canonical transition.
     }
 
     Ok(retry_meta)
+}
+
+pub(crate) async fn fail_force_killed_dispatch_without_retry_pg(
+    pool: &PgPool,
+    dispatch_id: &str,
+    session_key: Option<&str>,
+) -> Result<usize, String> {
+    let reason = json!({
+        "reason": "force_kill_session",
+        "session_key": session_key,
+    });
+    crate::dispatch::set_dispatch_status_on_pg_async(
+        pool,
+        dispatch_id,
+        "failed",
+        Some(&reason),
+        "force_kill_session",
+        Some(&["pending", "dispatched"]),
+        true,
+    )
+    .await
+    .map_err(|error| {
+        format!("canonical fail postgres dispatch {dispatch_id} during force-kill: {error}")
+    })
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -477,6 +484,7 @@ struct RetryOwnerCandidate {
 #[derive(Debug, sqlx::FromRow)]
 struct RetryAutoQueueOwner {
     entry_id: String,
+    run_id: String,
     entry_status: String,
     dispatch_id: Option<String>,
     retry_count: i64,
@@ -567,6 +575,7 @@ async fn prepare_retry_owner_on_pg_tx(
             .ok_or_else(|| format!("auto-queue retry owner run {run_id} no longer exists"))?;
     let owner = sqlx::query_as::<_, RetryAutoQueueOwner>(
         "SELECT id AS entry_id,
+                run_id,
                 status AS entry_status,
                 dispatch_id,
                 retry_count::BIGINT AS retry_count,
@@ -589,25 +598,7 @@ async fn prepare_retry_owner_on_pg_tx(
         ));
     }
 
-    if run_status == "completed" && owner.entry_status == crate::db::auto_queue::ENTRY_STATUS_FAILED
-    {
-        let revived = sqlx::query(
-            "UPDATE auto_queue_runs
-             SET status = 'active',
-                 completed_at = NULL
-             WHERE id = $1 AND status = 'completed'",
-        )
-        .bind(&run_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(|error| format!("revive completed auto-queue retry owner run {run_id}: {error}"))?
-        .rows_affected();
-        if revived != 1 {
-            return Err(format!(
-                "auto-queue retry owner run {run_id} changed before revival"
-            ));
-        }
-    } else if !crate::db::auto_queue::run_status::is_live_run_status(&run_status) {
+    if !crate::db::auto_queue::run_status::is_live_run_status(&run_status) {
         return Err(format!(
             "auto-queue retry owner run {run_id} is not retryable (status={run_status}, entry_status={})",
             owner.entry_status
@@ -615,6 +606,47 @@ async fn prepare_retry_owner_on_pg_tx(
     }
 
     Ok(Some(owner))
+}
+
+async fn reload_retry_owner_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    owner: &RetryAutoQueueOwner,
+    meta: &RetryDispatchMeta,
+) -> Result<RetryAutoQueueOwner, String> {
+    let current = sqlx::query_as::<_, RetryAutoQueueOwner>(
+        "SELECT id AS entry_id,
+                run_id,
+                status AS entry_status,
+                dispatch_id,
+                retry_count::BIGINT AS retry_count,
+                slot_index::BIGINT AS slot_index
+         FROM auto_queue_entries
+         WHERE id = $1 AND run_id = $2 AND kanban_card_id = $3",
+    )
+    .bind(&owner.entry_id)
+    .bind(&owner.run_id)
+    .bind(&meta.card_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| {
+        format!(
+            "reload auto-queue retry owner entry {} after failed sync: {error}",
+            owner.entry_id
+        )
+    })?
+    .ok_or_else(|| {
+        format!(
+            "auto-queue retry owner entry {} changed ownership",
+            owner.entry_id
+        )
+    })?;
+    if current.dispatch_id.as_deref() != Some(meta.origin_dispatch_id.as_str()) {
+        return Err(format!(
+            "auto-queue retry owner entry {} ownership moved from {}",
+            current.entry_id, meta.origin_dispatch_id
+        ));
+    }
+    Ok(current)
 }
 
 pub(crate) async fn create_retry_dispatch_pg(
@@ -638,25 +670,57 @@ pub(crate) async fn create_retry_dispatch_pg(
         .await
         .map_err(|error| format!("begin postgres retry dispatch transaction: {error}"))?;
 
-    let owner = prepare_retry_owner_on_pg_tx(&mut tx, meta).await?;
-    let origin_status =
-        sqlx::query_scalar::<_, String>("SELECT status FROM task_dispatches WHERE id = $1")
-            .bind(&meta.origin_dispatch_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|error| {
-                format!(
-                    "reload origin dispatch {} before retry: {error}",
-                    meta.origin_dispatch_id
-                )
-            })?;
-    if origin_status.as_deref() != Some("failed") {
+    // `aq_retry` is acquired before any optional `aq_run` token. This function
+    // is the sole user of the d1-scoped token, so no path can acquire those two
+    // token classes in the reverse order.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('aq_retry:' || $1))")
+        .bind(&meta.origin_dispatch_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| {
+            format!(
+                "lock origin dispatch {} for retry: {error}",
+                meta.origin_dispatch_id
+            )
+        })?;
+
+    let owner_before_failed_sync = prepare_retry_owner_on_pg_tx(&mut tx, meta).await?;
+    let reason = json!({
+        "reason": "force_kill_session",
+        "retry": true,
+    });
+    // `sync_dispatch_terminal_entries_on_pg_tx` drives the entry to `failed`
+    // and calls `maybe_finalize_run_if_ready_pg`. That S0 finalizer's
+    // `pg_try_advisory_xact_lock` design self-suppresses while this transaction
+    // already owns the run token, keeping the failed sync and d2 attachment in
+    // one completion-free critical section.
+    let changed = crate::dispatch::set_dispatch_status_on_pg_tx_async(
+        &mut tx,
+        &meta.origin_dispatch_id,
+        "failed",
+        Some(&reason),
+        "force_kill_session",
+        Some(&["pending", "dispatched"]),
+        true,
+    )
+    .await
+    .map_err(|error| {
+        format!(
+            "canonical fail postgres dispatch {} during retry force-kill: {error}",
+            meta.origin_dispatch_id
+        )
+    })?;
+    if changed == 0 {
         return Err(format!(
-            "origin dispatch {} is no longer retryable (status={})",
-            meta.origin_dispatch_id,
-            origin_status.as_deref().unwrap_or("missing")
+            "origin dispatch {} is no longer retryable",
+            meta.origin_dispatch_id
         ));
     }
+
+    let owner = match owner_before_failed_sync {
+        Some(owner) => Some(reload_retry_owner_on_pg_tx(&mut tx, &owner, meta).await?),
+        None => None,
+    };
 
     if let Some(owner) = owner.as_ref() {
         match owner.entry_status.as_str() {
@@ -817,11 +881,27 @@ pub(crate) async fn create_retry_dispatch_pg(
                 owner.entry_id
             ));
         }
+    } else if prepare_retry_owner_on_pg_tx(&mut tx, meta).await?.is_some() {
+        // A failed d1 can still be attached late by restore paths that do not
+        // recheck d1 status immediately before attachment. That attacher-side
+        // gap belongs to S2; this second §5.2 lookup closes only ownership that
+        // became visible before the 0-owner retry transaction commits.
+        return Err(format!(
+            "auto-queue ownership appeared during retry {}",
+            meta.origin_dispatch_id
+        ));
     }
 
     tx.commit()
         .await
         .map_err(|error| format!("commit postgres retry dispatch {dispatch_id}: {error}"))?;
+
+    crate::services::dispatches::wait_queue::spawn_cached_constraint_release_wake(
+        pool.clone(),
+        "constraint_release",
+        meta.origin_dispatch_id.clone(),
+        "dispatch_terminal_status",
+    );
 
     Ok(dispatch_id)
 }
@@ -3099,7 +3179,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO task_dispatches
                 (id, kanban_card_id, dispatch_type, status, title, context, retry_count)
-             VALUES ($1, $2, 'implementation', 'failed', $3, '{}', 2)",
+             VALUES ($1, $2, 'implementation', 'dispatched', $3, '{}', 2)",
         )
         .bind(&dispatch_id)
         .bind(&card_id)
@@ -3304,9 +3384,145 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_dispatch_remains_owned_and_run_cancel_cancels_it_pg() {
+    async fn cancel_preempts_run_advisory_and_retry_aborts_pg() {
+        let (database, pool) = setup().await;
+        let (card_id, origin_id) = seed_card_and_origin(&pool, "cancel-first").await;
+        let (run_id, _entry_id) = seed_owner(
+            &pool,
+            "cancel-first",
+            &card_id,
+            &origin_id,
+            "active",
+            "dispatched",
+            true,
+        )
+        .await;
+        let mut cancel_tx = pool.begin().await.expect("begin cancel-first transaction");
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('aq_run:' || $1))")
+            .bind(&run_id)
+            .execute(&mut *cancel_tx)
+            .await
+            .expect("preempt retry with cancel run token");
+
+        let retry_pool = pool.clone();
+        let meta = retry_meta(card_id, origin_id.clone());
+        let retry = tokio::spawn(async move { create_retry_dispatch_pg(&retry_pool, &meta).await });
+        wait_for_run_advisory_waiter(&mut cancel_tx).await;
+        sqlx::query("UPDATE auto_queue_runs SET status = 'cancelled' WHERE id = $1")
+            .bind(&run_id)
+            .execute(&mut *cancel_tx)
+            .await
+            .expect("cancel run while owning token");
+        cancel_tx.commit().await.expect("commit cancel-first state");
+
+        let error = tokio::time::timeout(Duration::from_secs(5), retry)
+            .await
+            .expect("retry unblocks after cancel")
+            .expect("join cancelled retry")
+            .expect_err("cancelled run must reject retry");
+        assert!(error.contains("status=cancelled"));
+        assert_eq!(retry_dispatch_count(&pool, &origin_id).await, 0);
+        finish(database, pool).await;
+    }
+
+    #[tokio::test]
+    async fn completed_run_aborts_retry_without_revival_pg() {
+        let (database, pool) = setup().await;
+        let (card_id, origin_id) = seed_card_and_origin(&pool, "completed-abort").await;
+        let (run_id, _entry_id) = seed_owner(
+            &pool,
+            "completed-abort",
+            &card_id,
+            &origin_id,
+            "completed",
+            "failed",
+            true,
+        )
+        .await;
+        let error = create_retry_dispatch_pg(&pool, &retry_meta(card_id, origin_id.clone()))
+            .await
+            .expect_err("completed run must abort instead of revive");
+        assert!(error.contains("status=completed"));
+        assert_eq!(retry_dispatch_count(&pool, &origin_id).await, 0);
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT status FROM auto_queue_runs WHERE id = $1")
+                .bind(run_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load non-revived run"),
+            "completed"
+        );
+        finish(database, pool).await;
+    }
+
+    #[tokio::test]
+    async fn force_kill_without_retry_still_finalizes_single_entry_run_pg() {
+        let (database, pool) = setup().await;
+        let (card_id, origin_id) = seed_card_and_origin(&pool, "no-retry").await;
+        let (run_id, entry_id) = seed_owner(
+            &pool,
+            "no-retry",
+            &card_id,
+            &origin_id,
+            "active",
+            "dispatched",
+            true,
+        )
+        .await;
+        sqlx::query(
+            "INSERT INTO sessions (session_key, status, active_dispatch_id)
+             VALUES ('retry-disabled-session', 'turn_active', $1)",
+        )
+        .bind(&origin_id)
+        .execute(&pool)
+        .await
+        .expect("seed retry-disabled session");
+
+        assert!(
+            disconnect_session_and_prepare_retry_pg(
+                &pool,
+                "retry-disabled-session",
+                Some(&origin_id),
+                false,
+            )
+            .await
+            .expect("force-kill without retry")
+            .is_none()
+        );
+        assert_eq!(
+            sqlx::query_as::<_, (String, String, String)>(
+                "SELECT d.status, e.status, r.status
+                 FROM task_dispatches d
+                 JOIN auto_queue_entries e ON e.id = $2
+                 JOIN auto_queue_runs r ON r.id = $3
+                 WHERE d.id = $1",
+            )
+            .bind(origin_id)
+            .bind(entry_id)
+            .bind(run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load retry-disabled terminal state"),
+            (
+                "failed".to_string(),
+                "failed".to_string(),
+                "completed".to_string(),
+            )
+        );
+        finish(database, pool).await;
+    }
+
+    #[tokio::test]
+    async fn sole_entry_force_kill_retry_never_completes_run_and_cancel_cleans_d2_pg() {
         let (database, pool) = setup().await;
         let (card_id, origin_id) = seed_card_and_origin(&pool, "cancel").await;
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
+             VALUES ('retry-agent', 'Retry Agent', 'codex', 'retry-channel')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed retry completion-notify target");
         let (run_id, _entry_id) = seed_owner(
             &pool,
             "cancel",
@@ -3317,11 +3533,15 @@ mod tests {
             true,
         )
         .await;
-        sqlx::query("UPDATE task_dispatches SET status = 'dispatched' WHERE id = $1")
-            .bind(&origin_id)
-            .execute(&pool)
-            .await
-            .expect("seed live force-kill dispatch");
+        sqlx::query(
+            "INSERT INTO auto_queue_slots
+                (agent_id, slot_index, assigned_run_id, assigned_thread_group)
+             VALUES ('retry-agent', 3, $1, 0)",
+        )
+        .bind(&run_id)
+        .execute(&pool)
+        .await
+        .expect("seed owned retry slot");
         sqlx::query(
             "INSERT INTO sessions (session_key, status, active_dispatch_id)
              VALUES ('retry-cancel-session', 'turn_active', $1)",
@@ -3345,19 +3565,42 @@ mod tests {
                 .bind(&run_id)
                 .fetch_one(&pool)
                 .await
-                .expect("load finalized sole-entry run"),
-            "completed"
+                .expect("load pre-retry sole-entry run"),
+            "active"
         );
         let retry_id = create_retry_dispatch_pg(&pool, &meta)
             .await
-            .expect("revive sole-entry run and create owned retry");
+            .expect("create owned retry without completing sole-entry run");
+        let invariant = sqlx::query_as::<_, (String, Option<String>, String, i64)>(
+            "SELECT r.status,
+                    s.assigned_run_id,
+                    d.status,
+                    (SELECT COUNT(*) FROM message_outbox
+                     WHERE source = 'system' AND content LIKE '자동큐 완료:%')
+             FROM auto_queue_runs r
+             JOIN auto_queue_slots s ON s.assigned_run_id = r.id
+             JOIN task_dispatches d ON d.id = $2
+             WHERE r.id = $1",
+        );
+        let invariant = invariant
+            .bind(&run_id)
+            .bind(&retry_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load combined retry invariants");
         assert_eq!(
-            sqlx::query_scalar::<_, String>("SELECT status FROM auto_queue_runs WHERE id = $1")
-                .bind(&run_id)
-                .fetch_one(&pool)
+            invariant,
+            (
+                "active".to_string(),
+                Some(run_id.clone()),
+                "pending".to_string(),
+                0,
+            )
+        );
+        assert!(
+            !complete_run_on_pg(&pool, &run_id)
                 .await
-                .expect("load revived sole-entry run"),
-            "active"
+                .expect("run 60-second tick-equivalent finalizer")
         );
         cancel_selected_runs_with_pg(
             None,
@@ -3399,6 +3642,32 @@ mod tests {
             .expect("count retry owners"),
             0
         );
+        finish(database, pool).await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_retries_for_same_d1_create_exactly_one_d2_pg() {
+        let (database, pool) = setup().await;
+        let (card_id, origin_id) = seed_card_and_origin(&pool, "concurrent-d1").await;
+        let first_pool = pool.clone();
+        let first_meta = retry_meta(card_id.clone(), origin_id.clone());
+        let first =
+            tokio::spawn(async move { create_retry_dispatch_pg(&first_pool, &first_meta).await });
+        let second_pool = pool.clone();
+        let second_meta = retry_meta(card_id, origin_id.clone());
+        let second =
+            tokio::spawn(async move { create_retry_dispatch_pg(&second_pool, &second_meta).await });
+        let (first, second) = tokio::join!(first, second);
+        let outcomes = [
+            first.expect("join first retry"),
+            second.expect("join second retry"),
+        ];
+        assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+        assert_eq!(
+            outcomes.iter().filter(|outcome| outcome.is_err()).count(),
+            1
+        );
+        assert_eq!(retry_dispatch_count(&pool, &origin_id).await, 1);
         finish(database, pool).await;
     }
 
@@ -3561,7 +3830,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatched_owner_is_reassigned_to_retry_in_one_transition_pg() {
+    async fn dispatched_owner_is_failed_then_attached_to_retry_in_one_tx_pg() {
         let (database, pool) = setup().await;
         let (card_id, origin_id) = seed_card_and_origin(&pool, "reassign").await;
         let (_run_id, entry_id) = seed_owner(
@@ -3586,7 +3855,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("load reassigned owner");
-        assert_eq!(state, ("dispatched".to_string(), Some(retry_id), 1));
+        assert_eq!(state, ("dispatched".to_string(), Some(retry_id), 3));
         finish(database, pool).await;
     }
 
@@ -3809,7 +4078,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn canonical_status_noop_does_not_emit_retry_metadata_pg() {
+    async fn origin_status_race_aborts_retry_without_d2_pg() {
         let (database, pool) = setup().await;
         let (_card_id, dispatch_id) = seed_card_and_origin(&pool, "stale").await;
         sqlx::query("UPDATE task_dispatches SET status = 'pending' WHERE id = $1")
@@ -3826,25 +4095,27 @@ mod tests {
         .await
         .expect("seed stale force-kill session");
 
+        let meta = disconnect_session_and_prepare_retry_pg(
+            &pool,
+            "retry-stale-session",
+            Some(&dispatch_id),
+            true,
+        )
+        .await
+        .expect("prepare retry force-kill")
+        .expect("load retry metadata");
+
         let mut race_tx = pool.begin().await.expect("begin terminal status racer");
         sqlx::query("SELECT id FROM task_dispatches WHERE id = $1 FOR UPDATE")
             .bind(&dispatch_id)
             .execute(&mut *race_tx)
             .await
             .expect("lock origin dispatch before force-kill status write");
-        let force_kill_pool = pool.clone();
-        let force_kill_dispatch = dispatch_id.clone();
-        let mut force_kill = tokio::spawn(async move {
-            disconnect_session_and_prepare_retry_pg(
-                &force_kill_pool,
-                "retry-stale-session",
-                Some(&force_kill_dispatch),
-                true,
-            )
-            .await
-        });
+        let retry_pool = pool.clone();
+        let mut retry =
+            tokio::spawn(async move { create_retry_dispatch_pg(&retry_pool, &meta).await });
         assert!(
-            tokio::time::timeout(Duration::from_millis(100), &mut force_kill)
+            tokio::time::timeout(Duration::from_millis(100), &mut retry)
                 .await
                 .is_err()
         );
@@ -3854,12 +4125,12 @@ mod tests {
             .await
             .expect("win terminal status race");
         race_tx.commit().await.expect("commit terminal status race");
-        let meta = tokio::time::timeout(Duration::from_secs(2), force_kill)
+        let error = tokio::time::timeout(Duration::from_secs(2), retry)
             .await
-            .expect("force-kill status writer unblocked")
-            .expect("join force-kill status writer")
-            .expect("run force-kill preparation");
-        assert!(meta.is_none());
+            .expect("retry status writer unblocked")
+            .expect("join retry status writer")
+            .expect_err("stale origin status must abort retry");
+        assert!(error.contains("no longer retryable"));
         assert_eq!(retry_dispatch_count(&pool, &dispatch_id).await, 0);
         assert_eq!(
             sqlx::query_scalar::<_, String>("SELECT status FROM task_dispatches WHERE id = $1")
