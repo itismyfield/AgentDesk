@@ -68,7 +68,6 @@ src/services/discord/router/message_handler/intake_turn/dispatch_stamp.rs
 src/services/discord/router/message_handler/voice_announcement_route.rs
 src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs
 src/services/discord/runtime_bootstrap/intake_delivery_capability.rs
-src/services/discord/runtime_bootstrap/intake_delivery_capability/cache.rs
 src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs
 src/services/discord/session_runtime.rs
 src/services/discord/task_notification_delivery/tests.rs
@@ -170,7 +169,6 @@ services::discord::router::message_handler::intake_turn::dispatch_stamp::postgre
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
-services::discord::runtime_bootstrap::intake_delivery_capability::cache::tests
 services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests
 services::discord::task_notification_delivery::tests
@@ -641,8 +639,6 @@ services::discord::router::message_handler::intake_turn::dispatch_stamp::postgre
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::direct_dispatch_carry_forward_admits_announcement_and_still_dedups
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::durable_duplicate_voice_announcement_pg_invokes_foreground_once
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::gateway_orphan_reap_uses_production_query_and_right_parses_instance_id_pg
-services::discord::runtime_bootstrap::intake_delivery_capability::cache::tests::cache_round_trips_the_two_capability_bits
-services::discord::runtime_bootstrap::intake_delivery_capability::cache::tests::probe_policy_is_boot_upward_and_same_only_at_settle_or_higher
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests::capability_accepts_public_0109_under_hostile_search_path_pg
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests::capability_rejects_catalog_and_data_mutations_pg
 services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests::journal_judgment_precedes_proof_lock_pg
