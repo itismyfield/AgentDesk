@@ -579,7 +579,7 @@ async fn settlement_row_lock_timeout_is_swallowed_and_counted_pg() {
 }
 
 #[tokio::test]
-async fn stage_below_settle_performs_no_write_pg() {
+async fn stage_below_settle_still_settles_the_bridges_own_row_pg() {
     let database = TestPostgresDb::create().await;
     let pool = database.connect_and_migrate().await;
     let now = Utc::now();
@@ -604,13 +604,13 @@ async fn stage_below_settle_performs_no_write_pg() {
         BELOW_SETTLE_CAPABILITIES,
     )
     .await;
-    assert_eq!(status(&pool, id).await, IntakeOutboxStatus::Spawned);
+    assert_eq!(status(&pool, id).await, IntakeOutboxStatus::Done);
     pool.close().await;
     database.drop().await;
 }
 
 #[tokio::test]
-async fn stale_capability_probe_after_downgrade_performs_no_write_pg() {
+async fn stale_capability_probe_after_downgrade_cannot_block_own_row_settlement_pg() {
     use crate::config::IntakeDeliverySettlementStage;
     use crate::services::discord::runtime_bootstrap::intake_delivery_capability::bootstrap_from_receiver_for_test;
 
@@ -681,7 +681,7 @@ async fn stale_capability_probe_after_downgrade_performs_no_write_pg() {
         cache.current(),
     )
     .await;
-    assert_eq!(status(&pool, id).await, IntakeOutboxStatus::Spawned);
+    assert_eq!(status(&pool, id).await, IntakeOutboxStatus::Done);
     drop(updates);
     probe_pool.close().await;
     pool.close().await;

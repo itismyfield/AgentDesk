@@ -4050,6 +4050,7 @@ services::discord::router::message_handler::headless_turn::recovery_context_take
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::recovery_context_survives_headless_goal_lifecycle_consumed_return
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::reserved_headless_start_has_no_post_spawn_error_path
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::enforce_downgrade_stops_stamping_but_keeps_settling_pg
+services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::enforce_ready_capability_resolution_writes_dispatched_stamp_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::hosted_tui_busy_pre_submit_requeue_leaves_row_in_spawned_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::inline_completed_paths_never_reach_dispatched_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::race_loss_requeue_leaves_row_in_spawned_and_worker_closes_it_pg
@@ -4212,7 +4213,7 @@ services::discord::runtime_bootstrap::intake_delivery_capability::cache::tests::
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests::capability_accepts_public_0109_under_hostile_search_path_pg
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests::capability_rejects_catalog_and_data_mutations_pg
 services::discord::runtime_bootstrap::intake_delivery_capability::tests::capability_probe_binds_exactly_the_shared_constant
-services::discord::runtime_bootstrap::intake_delivery_capability::tests::enforce_ready_keeps_dispatched_stamping_clamped_until_recovery_ships
+services::discord::runtime_bootstrap::intake_delivery_capability::tests::enforce_ready_enables_dispatched_stamping_after_sweep_ships
 services::discord::runtime_bootstrap::intake_delivery_capability::tests::required_migrations_are_a_subset_of_the_migrations_dir
 services::discord::runtime_bootstrap::intake_delivery_capability::tests::required_migrations_cover_every_schema_object_the_stamp_touches
 services::discord::runtime_bootstrap::intake_delivery_capability::tests::settlement_capabilities_split_stamp_from_future_settle_and_sweep
@@ -5645,8 +5646,8 @@ services::discord::turn_bridge::intake_settlement::tests::settle_is_idempotent_a
 services::discord::turn_bridge::intake_settlement::tests::settlement_rolls_back_with_caller_transaction_pg
 services::discord::turn_bridge::intake_settlement::tests::settlement_row_lock_timeout_is_swallowed_and_counted_pg
 services::discord::turn_bridge::intake_settlement::tests::settlement_sql_error_is_swallowed_and_counted
-services::discord::turn_bridge::intake_settlement::tests::stage_below_settle_performs_no_write_pg
-services::discord::turn_bridge::intake_settlement::tests::stale_capability_probe_after_downgrade_performs_no_write_pg
+services::discord::turn_bridge::intake_settlement::tests::stage_below_settle_still_settles_the_bridges_own_row_pg
+services::discord::turn_bridge::intake_settlement::tests::stale_capability_probe_after_downgrade_cannot_block_own_row_settlement_pg
 services::discord::turn_bridge::intake_settlement::tests::terminal_outcome_delivery_awaits_one_settlement_call_with_branch_flags
 services::discord::turn_bridge::intake_settlement::tests::worker_mark_done_and_settlement_converge_under_either_order_pg
 services::discord::turn_bridge::memory_lifecycle::background_memory_task_tests::model_memento_tool_call_arms_session_end_reflect

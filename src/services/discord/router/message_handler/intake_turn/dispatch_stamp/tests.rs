@@ -1,23 +1,24 @@
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::intake_outbox::mark_done;
-use crate::db::intake_outbox_delivery_proof::{
-    IntakeSettlementSource, settle_intake_done_from_receipt,
-};
 use crate::db::intake_outbox_status::IntakeOutboxStatus;
+use crate::services::discord::inflight::InflightTurnState;
 use crate::services::discord::runtime_bootstrap::intake_delivery_capability::{
-    SettlementCapabilities, SettlementCapabilityCache,
+    SettlementCapabilities, SettlementCapabilityCache, bootstrap_from_receiver_for_test,
 };
+use crate::services::discord::turn_bridge::intake_settlement::{
+    BridgeTurnDisposition, settle_intake_row_at_bridge_exit,
+};
+use crate::services::provider::ProviderKind;
 
+// The #10 bridge-handoff source contract in intake_turn.rs is intentionally a
+// lexical adjacency/count guard. As with the S-W3 wiring precedent, a matching
+// token in a comment or string could satisfy it; the PostgreSQL tests below
+// cover writer behavior separately, not bridge registration success.
 const READY: SettlementCapabilities = SettlementCapabilities {
     stamp_dispatched: true,
     settle_and_sweep: true,
 };
-const LOWERED: SettlementCapabilities = SettlementCapabilities {
-    stamp_dispatched: false,
-    settle_and_sweep: true,
-};
-
 async fn seed_spawned(pool: &sqlx::PgPool, key: &str) -> i64 {
     sqlx::query_scalar(
         "INSERT INTO public.intake_outbox (
@@ -50,20 +51,27 @@ fn shared_with(pool: &sqlx::PgPool, capabilities: SettlementCapabilities) -> Arc
     )
 }
 
-fn assert_return_precedes_handoff(source: &str, marker: &str) {
-    let marker_at = source
-        .find(marker)
-        .expect("representative path marker exists");
-    let return_at = source[marker_at..]
-        .find("return Ok(());")
-        .map(|offset| marker_at + offset)
-        .expect("representative path has an inline return");
-    let stamp_at = source
-        .find("dispatch_stamp::stamp_before_bridge_handoff(shared, intake_outbox_id).await;")
-        .expect("bridge handoff stamp exists");
+fn assert_path_returns_before_handoff(
+    source: &str,
+    start_anchor: &str,
+    end_anchor: &str,
+    expected_returns: usize,
+) {
+    let path = source
+        .split_once(start_anchor)
+        .unwrap_or_else(|| panic!("path start anchor exists: {start_anchor}"))
+        .1
+        .split_once(end_anchor)
+        .unwrap_or_else(|| panic!("path end anchor exists after start: {end_anchor}"))
+        .0;
+    assert_eq!(
+        path.matches("return Ok(());").count(),
+        expected_returns,
+        "the anchored path must retain its own inline return(s): {start_anchor}"
+    );
     assert!(
-        marker_at < return_at && return_at < stamp_at,
-        "representative inline path must return before the handoff stamp: {marker}"
+        !path.contains("dispatch_stamp::stamp_before_bridge_handoff"),
+        "the anchored path must end before dispatched stamping: {start_anchor}"
     );
 }
 
@@ -73,18 +81,62 @@ async fn assert_worker_closes_spawned(pool: &sqlx::PgPool, key: &str) {
     assert_eq!(status(pool, id).await, IntakeOutboxStatus::Done);
 }
 
+fn state_for(id: i64) -> InflightTurnState {
+    let mut state = InflightTurnState::new(
+        ProviderKind::Claude,
+        42,
+        Some("dispatch-stamp-test".to_owned()),
+        7,
+        8,
+        9,
+        "hello".to_owned(),
+        None,
+        Some("AgentDesk-claude-adk-dispatch-stamp-test".to_owned()),
+        None,
+        None,
+        0,
+    );
+    state.adopt_intake_outbox(Some(id));
+    state
+}
+
+async fn wait_for_generation(cache: &SettlementCapabilityCache, generation: u64) {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while cache.generation_for_test() < generation {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("capability reload must publish a new generation");
+}
+
 #[tokio::test]
 async fn inline_completed_paths_never_reach_dispatched_pg() {
     let database = TestPostgresDb::create().await;
     let pool = database.connect_and_migrate().await;
     let source = include_str!("../../intake_turn.rs");
-    for marker in [
-        "No active session. Use `/start <path>` first.",
-        "if let GoalCommandKind::Lifecycle(command) = turn_goal_kind {",
+    assert_path_returns_before_handoff(
+        source,
+        "let (session_id, memento_context_loaded, current_path, auto_start_provider_isolated) =",
+        "let turn_start_attempt =",
+        2,
+    );
+    assert_path_returns_before_handoff(
+        source,
+        "let turn_goal_kind = if !dispatch_reset_provider_state && !dispatch_recreate_tmux {",
+        "let force_fresh_provider_session =",
+        1,
+    );
+    assert_path_returns_before_handoff(
+        source,
         "if stale_dispatch_guard::abort_terminal_dispatch_at_turn_start(",
-    ] {
-        assert_return_precedes_handoff(source, marker);
-    }
+        "claim_bootstrap::bootstrap_claimed_turn(",
+        1,
+    );
+    // The Discord/session fixtures needed to drive these handler branches do
+    // not carry a worker-owned PostgreSQL intake row. The source assertions
+    // above therefore pin each marker-to-return segment, while the three
+    // independent rows below verify only the worker's spawned-to-done close.
     for key in ["inline-no-session", "inline-goal", "inline-stale-dispatch"] {
         assert_worker_closes_spawned(&pool, key).await;
     }
@@ -96,9 +148,15 @@ async fn inline_completed_paths_never_reach_dispatched_pg() {
 async fn race_loss_requeue_leaves_row_in_spawned_and_worker_closes_it_pg() {
     let database = TestPostgresDb::create().await;
     let pool = database.connect_and_migrate().await;
-    assert_return_precedes_handoff(
+    // The production requeue helper requires live Discord mailbox and runtime
+    // transition state but has no PostgreSQL intake-row parameter. This test
+    // therefore combines a bounded source-order check with an independent
+    // worker mark_done row; it is not an end-to-end requeue invocation.
+    assert_path_returns_before_handoff(
         include_str!("../../intake_turn.rs"),
-        "runtime_transition::acquire_after_redirect_or_requeue(",
+        "let Some(intake_runtime_transition) = runtime_transition::acquire_after_redirect_or_requeue(",
+        "let (mut session_id, mut memento_context_loaded, current_path) =",
+        1,
     );
     assert_worker_closes_spawned(&pool, "race-loss-requeue").await;
     pool.close().await;
@@ -109,9 +167,14 @@ async fn race_loss_requeue_leaves_row_in_spawned_and_worker_closes_it_pg() {
 async fn hosted_tui_busy_pre_submit_requeue_leaves_row_in_spawned_pg() {
     let database = TestPostgresDb::create().await;
     let pool = database.connect_and_migrate().await;
-    assert_return_precedes_handoff(
+    // As above, the live TUI/Discord queue path cannot be coupled to the test
+    // database row through the repository's current interfaces. The bounded
+    // source check and independent worker close are the declared substitute.
+    assert_path_returns_before_handoff(
         include_str!("../../intake_turn.rs"),
-        "Claude TUI busy follow-up queued before prompt submission",
+        "if let Some(diagnostic) = tui_busy_diagnostic {",
+        "if recapture_offset_after_busy_wait {",
+        1,
     );
     assert_worker_closes_spawned(&pool, "hosted-tui-busy").await;
     pool.close().await;
@@ -166,38 +229,79 @@ async fn stamp_is_written_when_ready_capability_is_injected_pg() {
 }
 
 #[tokio::test]
+async fn enforce_ready_capability_resolution_writes_dispatched_stamp_pg() {
+    let database = TestPostgresDb::create().await;
+    let pool = database.connect_and_migrate().await;
+    let capabilities =
+        crate::services::discord::runtime_bootstrap::intake_delivery_capability::bootstrap_for_test(
+            Some(pool.clone()),
+            crate::config::IntakeDeliverySettlementStage::Enforce,
+        )
+        .await;
+    assert_eq!(capabilities.current(), READY);
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage_and_intake_capabilities(
+            Some(pool.clone()),
+            capabilities,
+        );
+    let id = seed_spawned(&pool, "resolved-stamp-on").await;
+
+    stamp_before_bridge_handoff(&shared, Some(id)).await;
+    assert_eq!(status(&pool, id).await, IntakeOutboxStatus::Dispatched);
+
+    pool.close().await;
+    database.drop().await;
+}
+
+#[tokio::test]
 async fn enforce_downgrade_stops_stamping_but_keeps_settling_pg() {
     let database = TestPostgresDb::create().await;
     let pool = database.connect_and_migrate().await;
+    let mut config = crate::config::Config::default();
+    config.runtime.intake_delivery_settlement =
+        crate::config::IntakeDeliverySettlementStage::Enforce;
+    let (updates, receiver) = tokio::sync::watch::channel(Some(Arc::new(config.clone())));
+    let capabilities = bootstrap_from_receiver_for_test(Some(pool.clone()), receiver).await;
+    assert_eq!(capabilities.current(), READY);
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage_and_intake_capabilities(
+            Some(pool.clone()),
+            Arc::clone(&capabilities),
+        );
     let before_downgrade = seed_spawned(&pool, "before-downgrade").await;
-    stamp_before_bridge_handoff(&shared_with(&pool, READY), Some(before_downgrade)).await;
+    stamp_before_bridge_handoff(&shared, Some(before_downgrade)).await;
     assert_eq!(
         status(&pool, before_downgrade).await,
         IntakeOutboxStatus::Dispatched
     );
 
+    config.runtime.intake_delivery_settlement =
+        crate::config::IntakeDeliverySettlementStage::Observe;
+    updates
+        .send(Some(Arc::new(config)))
+        .expect("send Observe downgrade");
+    wait_for_generation(&capabilities, 2).await;
+    assert_eq!(capabilities.current(), SettlementCapabilities::default());
+
     let after_downgrade = seed_spawned(&pool, "after-downgrade").await;
-    stamp_before_bridge_handoff(&shared_with(&pool, LOWERED), Some(after_downgrade)).await;
+    stamp_before_bridge_handoff(&shared, Some(after_downgrade)).await;
     assert_eq!(
         status(&pool, after_downgrade).await,
         IntakeOutboxStatus::Spawned
     );
-    let mut transaction = pool.begin().await.unwrap();
-    assert!(
-        settle_intake_done_from_receipt(
-            &mut transaction,
-            after_downgrade,
-            IntakeSettlementSource::Committed,
-        )
-        .await
-        .unwrap()
-    );
-    transaction.commit().await.unwrap();
+    settle_intake_row_at_bridge_exit(
+        &shared,
+        &state_for(before_downgrade),
+        BridgeTurnDisposition::Committed,
+        capabilities.current(),
+    )
+    .await;
     assert_eq!(
-        status(&pool, after_downgrade).await,
+        status(&pool, before_downgrade).await,
         IntakeOutboxStatus::Done
     );
 
+    drop(updates);
     pool.close().await;
     database.drop().await;
 }

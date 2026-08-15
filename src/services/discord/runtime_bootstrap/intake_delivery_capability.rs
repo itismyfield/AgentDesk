@@ -313,23 +313,10 @@ fn capabilities_for(
     stage: IntakeDeliverySettlementStage,
     schema: SchemaReason,
 ) -> SettlementCapabilities {
-    let dispatched_stamping_clamped = stage >= IntakeDeliverySettlementStage::Settle;
-    if dispatched_stamping_clamped {
-        // Resolution runs per bot-instance subscription, so this warning can repeat
-        // at every resolution and independently for each subscribed bot instance.
-        tracing::warn!(
-            ?stage,
-            "dispatched stamping is clamped off; settle_and_sweep remains available to terminal settlement"
-        );
-    }
-
-    // The design activation formula remains `stage >= Enforce && schema == Ready`.
-    // The dispatched-stamping clamp takes precedence. Removing it is part of the
-    // S-W4 DoD, after the S-W3 sweep recovery path exists. S-W2 terminal settlement
-    // already consumes settle_and_sweep.
+    // S-W3's stale spawned/dispatched sweep landed in #5385, so S-W4 removes
+    // the temporary dispatched-stamping clamp and activates the design formula.
     SettlementCapabilities {
-        stamp_dispatched: !dispatched_stamping_clamped
-            && stage >= IntakeDeliverySettlementStage::Enforce
+        stamp_dispatched: stage >= IntakeDeliverySettlementStage::Enforce
             && schema == SchemaReason::Ready,
         settle_and_sweep: schema == SchemaReason::Ready
             && stage >= IntakeDeliverySettlementStage::Settle,

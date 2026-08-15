@@ -2,6 +2,8 @@ use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use chrono::Utc;
 
+static COUNTER_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn seed_dispatched(pool: &PgPool) -> i64 {
     sqlx::query_scalar(
         "INSERT INTO public.intake_outbox (
@@ -35,6 +37,7 @@ fn assert_worker_false_branch_calls_classifier() {
 
 #[tokio::test]
 async fn worker_mark_done_false_on_dispatched_is_not_a_divergence_pg() {
+    let _counter_guard = COUNTER_TEST_LOCK.lock().await;
     let database = TestPostgresDb::create().await;
     let pool = database.connect_and_migrate().await;
     let id = seed_dispatched(&pool).await;
@@ -60,6 +63,7 @@ async fn worker_mark_done_false_on_dispatched_is_not_a_divergence_pg() {
 
 #[tokio::test]
 async fn worker_mark_done_false_on_missing_row_is_a_divergence_pg() {
+    let _counter_guard = COUNTER_TEST_LOCK.lock().await;
     let database = TestPostgresDb::create().await;
     let pool = database.connect_and_migrate().await;
     let counters = mark_done_miss_counters();

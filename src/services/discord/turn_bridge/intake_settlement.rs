@@ -21,7 +21,7 @@ const SETTLEMENT_LOCK_TIMEOUT: &str = "1s";
 
 /// The disposition of a bridge turn at its one normal terminal exit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum BridgeTurnDisposition {
+pub(in crate::services::discord) enum BridgeTurnDisposition {
     /// A retry still owns the inflight row; leave the intake row open.
     PreservedForRetry,
     /// This bridge committed terminal delivery.
@@ -159,19 +159,19 @@ async fn settle_with_lock_timeout(
 ///
 /// The inflight identity is read here for terminal settlement. The headless
 /// delivery argument assembler also reads it into a parked, no-effect seam.
-/// Settlement is gated by the resolved capability snapshot. SQL errors are
-/// counted and swallowed after the bridge classified the turn as committed,
-/// handed off to a relay owner, or complete with no retained retry; changing
-/// those outcomes here could create a duplicate retry.
-pub(super) async fn settle_intake_row_at_bridge_exit(
+/// A present inflight identity is this bridge's own spawned/dispatched debt, so
+/// terminal settlement deliberately ignores a later capability downgrade.
+/// The snapshot remains an explicit argument to make that read-your-own-debt
+/// exception visible at the call site; it still gates new stamping and sweep.
+/// SQL errors are counted and swallowed after the bridge classified the turn as
+/// committed, handed off to a relay owner, or complete with no retained retry;
+/// changing those outcomes here could create a duplicate retry.
+pub(in crate::services::discord) async fn settle_intake_row_at_bridge_exit(
     shared: &std::sync::Arc<SharedData>,
     inflight_state: &InflightTurnState,
     disposition: BridgeTurnDisposition,
-    caps: SettlementCapabilities,
+    _caps: SettlementCapabilities,
 ) {
-    if !caps.settle_and_sweep {
-        return;
-    }
     let Some(source) = disposition.settlement_source() else {
         return;
     };

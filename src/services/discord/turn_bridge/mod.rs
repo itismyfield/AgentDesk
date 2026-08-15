@@ -13,7 +13,7 @@ mod finalize_epilogue;
 mod followup_requeue;
 mod guards;
 mod headless_delivery;
-mod intake_settlement;
+pub(in crate::services::discord) mod intake_settlement;
 mod memory_lifecycle;
 mod output_lifecycle;
 mod panel_lifecycle;
