@@ -1653,6 +1653,15 @@ pub struct RuntimeSettingsConfig {
     pub delivery_journal_internal_channel_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "is_off_intake_delivery_settlement")]
     pub intake_delivery_settlement: IntakeDeliverySettlementStage,
+    /// Heartbeat-absence TTL for stale dispatched debt; unset defaults to 1800 seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intake_delivery_sweep_dispatched_cutoff_secs: Option<u64>,
+    /// Heartbeat-absence TTL for stale spawned debt; defaults to 1800s because queued forwarding can stay spawned for a full turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intake_delivery_sweep_spawned_cutoff_secs: Option<u64>,
+    /// Per-state sweep batch limit; unset defaults to 200 and values clamp to 1..=500.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intake_delivery_sweep_batch_limit: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_timeout_min: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1823,6 +1832,9 @@ impl RuntimeSettingsConfig {
             && self.delivery_journal_cohort_percent == 0
             && self.delivery_journal_internal_channel_ids.is_empty()
             && self.intake_delivery_settlement == IntakeDeliverySettlementStage::Off
+            && self.intake_delivery_sweep_dispatched_cutoff_secs.is_none()
+            && self.intake_delivery_sweep_spawned_cutoff_secs.is_none()
+            && self.intake_delivery_sweep_batch_limit.is_none()
             && self.requested_timeout_min.is_none()
             && self.in_progress_stale_min.is_none()
             && self.long_turn_alert_interval_min.is_none()
@@ -1860,6 +1872,18 @@ impl RuntimeSettingsConfig {
             && self.dispatch_rate_limit_gate_enabled.is_none()
             && self.dispatch_rate_limit_gate_danger_pct.is_none()
             && !self.reset_overrides_on_restart
+    }
+
+    pub(crate) fn intake_delivery_sweep_settings(&self) -> (u64, u64, i64) {
+        (
+            self.intake_delivery_sweep_dispatched_cutoff_secs
+                .unwrap_or(1800),
+            self.intake_delivery_sweep_spawned_cutoff_secs
+                .unwrap_or(1800),
+            self.intake_delivery_sweep_batch_limit
+                .unwrap_or(200)
+                .clamp(1, 500) as i64,
+        )
     }
 }
 

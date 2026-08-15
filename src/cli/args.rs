@@ -662,6 +662,16 @@ pub(crate) enum DispatchAction {
 pub(crate) enum IntakeOutboxAction {
     /// List dispatched rows and their recorded audit facts without changing them.
     DispatchedAudit,
+    DispatchedSettle {
+        id: i64,
+        #[arg(long, default_value = "operator dispatched-settle via CLI")]
+        reason: String,
+    },
+    SpawnedSettle {
+        id: i64,
+        #[arg(long, default_value = "operator spawned-settle via CLI")]
+        reason: String,
+    },
     /// Show recent intake_outbox rows (newest first).
     Status {
         /// Filter to a single Discord channel id.

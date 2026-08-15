@@ -1,8 +1,9 @@
 # Multinode Transition
 
-> Last refreshed: 2026-08-15 (against #5071 T2-W S-W1 r2 capability cache).
+> Last refreshed: 2026-08-15 (against #5071 T2-W S-W3 intake-delivery sweep).
 
 ### Audited touches
+- 2026-08-15 (#5071 T2-W S-W3): framework setup is per bot, but an active-task latch permits one process sweep and resets on task exit; per-tick panic containment keeps later ticks alive. The sweep is PG-lease-free: `FOR UPDATE SKIP LOCKED` plus terminal CAS gives dispatched one winner, and spawned uses the same CAS property. Leader-only is a load recommendation, not a correctness requirement. Before settlement it checks the channel's durable active session and 30-second heartbeat; live or ambiguous evidence defers, and both state cutoffs mean heartbeat-absence time. Both open stamp-debt states restart the sweep after downgrade/restart. §6.1의 미회수 창: (1) `dispatched_at IS NULL` 인 `dispatched` 행, `spawned_at IS NULL` 인 `spawned` 행 → operator CLI 전용. (2) cutoff 이전 구간 → 자동 회수 없음. cutoff 를 줄이면 진행 중인 긴 턴을 `unknown` 으로 오종결한다. 이 트레이드오프는 제거되지 않는다. (3) sweep 루프가 뜨지 않은 상태(스키마 결함으로 probe 실패 + debt 존재) → sweep 은 뜨되 매 틱 SQL 실패 → `error!` + 카운터. operator CLI 가 유일한 탈출구. (4) `PreservedForRetry` 로 열어 둔 행 중 재배달이 끝내 실패한 것 → cutoff 후 sweep 이 `unknown` 으로 종결. (5) sweep 배치 한도(`normalize_limit` 1..=500)를 초과하는 백로그 → 다음 틱으로 이월. `log()` 로 잘린 수를 남긴다. Sweep task death 창은 latch reset+per-tick containment가 닫는다. Restore 열거는 captured-full-response, ordinary output-completed, worktree-failure 두 경로와 completed-during-downtime을 포함한 실측이며 완전성 증명이 아니다; 미열거 경로의 최종 회수자는 상태 sweep이다. Production O-payload의 `intake_outbox_id` binding writer는 0건이라 journal 판정은 사실상 `Unknown`이다. `Unknown`은 배달 실패의 증거가 아니다.
 - 2026-08-15 (#5071 T2-W S-W1 r2): Discord bootstrap owns one
   intake-delivery capability cache per bot instance. Each node subscribes to
   live configuration and independently resolves and installs its local cache;

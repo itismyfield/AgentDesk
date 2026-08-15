@@ -175,5 +175,6 @@ test-postgres:
     # module name, so select both no-marker modules explicitly in the PG lane.
     cargo test --lib db::intake_outbox_delivery_proof::tests -- --nocapture --test-threads=1
     cargo test --lib services::discord::turn_bridge::intake_settlement::tests -- --nocapture --test-threads=1
+    cargo test --lib services::discord::runtime_bootstrap::intake_delivery_sweep::tests -- --nocapture --test-threads=1
 
 check: fmt-check lint cargo-check test

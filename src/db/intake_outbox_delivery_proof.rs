@@ -39,6 +39,8 @@ pub(crate) struct StaleDispatchedRow {
 
 const LIST_STALE_DISPATCHED_SQL: &str = "SELECT id FROM public.intake_outbox
  WHERE status = $1 AND dispatched_at < $2 ORDER BY dispatched_at ASC, id ASC LIMIT $3";
+const LIST_STALE_SPAWNED_SQL: &str = "SELECT id FROM public.intake_outbox
+ WHERE status = $1 AND spawned_at < $2 ORDER BY spawned_at ASC, id ASC LIMIT $3";
 
 fn normalize_limit(limit: i64) -> i64 {
     limit.clamp(1, 500)
@@ -56,6 +58,28 @@ pub(crate) async fn list_stale_dispatched(
         .bind(normalize_limit(limit))
         .fetch_all(pool)
         .await
+}
+
+pub(crate) async fn list_stale_spawned(
+    pool: &PgPool,
+    cutoff: DateTime<Utc>,
+    limit: i64,
+) -> Result<Vec<StaleDispatchedRow>, sqlx::Error> {
+    sqlx::query_as(LIST_STALE_SPAWNED_SQL)
+        .bind(IntakeOutboxStatus::Spawned)
+        .bind(cutoff)
+        .bind(normalize_limit(limit))
+        .fetch_all(pool)
+        .await
+}
+
+pub(crate) async fn open_stamp_debt_exists(pool: &PgPool) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM public.intake_outbox
+          WHERE status IN ('spawned', 'dispatched'))",
+    )
+    .fetch_one(pool)
+    .await
 }
 
 /// Tries to retain the dispatched row for a delivery-proof decision.
@@ -150,6 +174,88 @@ pub(crate) async fn settle_dispatched_unknown(
     .execute(&mut *conn)
     .await?;
     Ok(result.rows_affected() == 1)
+}
+
+pub(crate) async fn settle_spawned_unknown(
+    conn: &mut PgConnection,
+    outbox_id: i64,
+    cutoff: DateTime<Utc>,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query(
+        "UPDATE public.intake_outbox SET status = $2, completed_at = NOW()
+         WHERE id = $1 AND status = $3 AND spawned_at < $4",
+    )
+    .bind(outbox_id)
+    .bind(IntakeOutboxStatus::Unknown)
+    .bind(IntakeOutboxStatus::Spawned)
+    .bind(cutoff)
+    .execute(conn)
+    .await
+    .map(|result| result.rows_affected() == 1)
+}
+
+pub(crate) async fn settle_null_clock_dispatched(
+    conn: &mut PgConnection,
+    outbox_id: i64,
+    reason: &str,
+) -> Result<bool, sqlx::Error> {
+    settle_operator_unknown(
+        conn,
+        outbox_id,
+        IntakeOutboxStatus::Dispatched,
+        reason,
+        Some("dispatched_at"),
+    )
+    .await
+}
+
+pub(crate) async fn settle_null_clock_spawned(
+    conn: &mut PgConnection,
+    outbox_id: i64,
+    reason: &str,
+) -> Result<bool, sqlx::Error> {
+    settle_operator_unknown(
+        conn,
+        outbox_id,
+        IntakeOutboxStatus::Spawned,
+        reason,
+        Some("spawned_at"),
+    )
+    .await
+}
+
+async fn settle_operator_unknown(
+    conn: &mut PgConnection,
+    outbox_id: i64,
+    status: IntakeOutboxStatus,
+    reason: &str,
+    clock: Option<&str>,
+) -> Result<bool, sqlx::Error> {
+    let clock_predicate = clock
+        .map(|clock| format!(" AND {clock} IS NULL"))
+        .unwrap_or_default();
+    let statement = format!(
+        "UPDATE public.intake_outbox SET status = $2, completed_at = NOW(), last_error = $4
+         WHERE id = $1 AND status = $3{clock_predicate}"
+    );
+    sqlx::query(&statement)
+        .bind(outbox_id)
+        .bind(IntakeOutboxStatus::Unknown)
+        .bind(status)
+        .bind(reason)
+        .execute(conn)
+        .await
+        .map(|result| result.rows_affected() == 1)
+}
+
+/// Cutoff-free operator settlement. It never creates a retry child row.
+pub(crate) async fn settle_unknown_by_operator(
+    conn: &mut PgConnection,
+    outbox_id: i64,
+    status: IntakeOutboxStatus,
+    reason: &str,
+) -> Result<bool, sqlx::Error> {
+    settle_operator_unknown(conn, outbox_id, status, reason, None).await
 }
 
 #[cfg(test)]

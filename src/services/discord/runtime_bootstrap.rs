@@ -10,6 +10,7 @@ mod intake;
 pub(super) mod intake_delivery_capability;
 #[cfg(unix)]
 mod intake_delivery_reconciler;
+mod intake_delivery_sweep;
 mod orphan_recovery;
 mod queued_placeholders;
 mod recovery_flush;

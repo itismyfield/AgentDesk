@@ -72,6 +72,7 @@ src/services/discord/router/message_handler/voice_announcement_route.rs
 src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs
 src/services/discord/runtime_bootstrap/intake_delivery_capability.rs
 src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs
+src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs
 src/services/discord/session_runtime.rs
 src/services/discord/task_notification_delivery/tests.rs
 src/services/discord/turn_bridge/completion_guard/completion_postgres.rs
@@ -177,6 +178,7 @@ services::discord::router::message_handler::voice_announcement_route::voice_rout
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
 services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests
+services::discord::runtime_bootstrap::intake_delivery_sweep::tests
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests
 services::discord::task_notification_delivery::tests
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests
@@ -676,6 +678,17 @@ services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests::capability_rejects_catalog_and_data_mutations_pg
 services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests::journal_judgment_precedes_proof_lock_pg
 services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests::reducer_is_existential_strict_transactional_and_public_pg
+services::discord::runtime_bootstrap::intake_delivery_sweep::tests::dispatched_settle_cli_does_not_insert_a_child_row_pg
+services::discord::runtime_bootstrap::intake_delivery_sweep::tests::null_clock_rows_are_invisible_to_sweep_but_visible_to_operator_pg
+services::discord::runtime_bootstrap::intake_delivery_sweep::tests::spawned_settle_cli_does_not_insert_a_child_row_pg
+services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_defers_ambiguous_live_signal_pg
+services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_is_bounded_and_ordered_and_logs_truncation_pg
+services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_runs_after_restart_with_only_spawned_stamp_debt_pg
+services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_runs_when_stage_lowered_but_open_dispatched_exists_pg
+services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_settles_stale_dispatched_as_unknown_pg
+services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_settles_stale_spawned_as_unknown_pg
+services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_live_signal_pg
+services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_rows_not_strictly_stale_pg
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::exact_owned_row_with_null_cwd_is_channel_scoped_empty_path
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::fallback_refused_when_single_row_has_different_channel
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::legacy_null_channel_id_single_row_is_reused

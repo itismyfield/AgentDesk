@@ -181,6 +181,7 @@ jobs:
               - 'src/services/discord/router/message_handler/intake_turn/**'
               - 'src/services/discord/runtime_bootstrap/intake_delivery_capability.rs'
               - 'src/services/discord/runtime_bootstrap/intake_delivery_capability/**'
+              - 'src/services/discord/runtime_bootstrap/**'
               - 'src/services/discord/tmux_watcher.rs'
               - 'src/services/discord/tmux_watcher/**'
               - 'src/services/discord/turn_bridge/terminal_outcome_delivery.rs'
