@@ -168,5 +168,8 @@ test-postgres:
     cargo test --lib db::auto_queue::entries::tests -- --nocapture --test-threads=1
     cargo test --lib services::auto_queue::route::fsm::tests -- --nocapture --test-threads=1
     cargo test --lib services::auto_queue::route::phase_gate::tests -- --nocapture --test-threads=1
+    # #5356 S3: the ownership suite is a PostgreSQL-only out-of-line module;
+    # keep its full module selected explicitly for the coverage ratchet.
+    cargo test --lib db::dispatched_sessions::tests -- --nocapture --test-threads=1
 
 check: fmt-check lint cargo-check test

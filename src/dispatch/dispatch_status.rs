@@ -528,8 +528,8 @@ fn plan_transition_effects(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn set_dispatch_status_on_pg_with_sync(
-    pool: &PgPool,
+async fn set_dispatch_status_on_pg_tx_with_sync(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     dispatch_id: &str,
     to_status: &str,
     result: Option<&serde_json::Value>,
@@ -538,12 +538,8 @@ async fn set_dispatch_status_on_pg_with_sync(
     touch_completed_at: bool,
     sync_auto_queue_terminal_entries: bool,
     assume_external_phase_gate_lifecycle: bool,
+    suppress_auto_queue_finalize: bool,
 ) -> Result<usize> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|error| anyhow::anyhow!("begin postgres dispatch status tx: {error}"))?;
-
     let current = sqlx::query(
         "SELECT status, kanban_card_id, to_agent_id, dispatch_type,
                 context::TEXT AS context_text,
@@ -552,13 +548,10 @@ async fn set_dispatch_status_on_pg_with_sync(
          WHERE id = $1",
     )
     .bind(dispatch_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(|error| anyhow::anyhow!("load postgres dispatch {dispatch_id}: {error}"))?;
     let Some(current) = current else {
-        tx.rollback()
-            .await
-            .map_err(|error| anyhow::anyhow!("rollback postgres dispatch status tx: {error}"))?;
         return Ok(0);
     };
 
@@ -572,9 +565,6 @@ async fn set_dispatch_status_on_pg_with_sync(
     if let Some(allowed_from) = allowed_from
         && !allowed_from.contains(&current_status.as_str())
     {
-        tx.rollback()
-            .await
-            .map_err(|error| anyhow::anyhow!("rollback postgres dispatch status tx: {error}"))?;
         return Ok(0);
     }
 
@@ -596,7 +586,7 @@ async fn set_dispatch_status_on_pg_with_sync(
                 )
             })?;
             let persisted_legacy_default =
-                phase_gate_dispatch_uses_legacy_default_on_pg_tx(&mut tx, dispatch_id).await?;
+                phase_gate_dispatch_uses_legacy_default_on_pg_tx(tx, dispatch_id).await?;
             infer_effective_completion_result(
                 dispatch_id,
                 to_status,
@@ -628,7 +618,7 @@ async fn set_dispatch_status_on_pg_with_sync(
         .bind(result_json)
         .bind(dispatch_id)
         .bind(&current_status)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|error| anyhow::anyhow!("update postgres dispatch {dispatch_id}: {error}"))?
         .rows_affected() as usize,
@@ -645,7 +635,7 @@ async fn set_dispatch_status_on_pg_with_sync(
         .bind(result_json)
         .bind(dispatch_id)
         .bind(&current_status)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|error| anyhow::anyhow!("update postgres dispatch {dispatch_id}: {error}"))?
         .rows_affected() as usize,
@@ -664,7 +654,7 @@ async fn set_dispatch_status_on_pg_with_sync(
         .bind(to_status)
         .bind(dispatch_id)
         .bind(&current_status)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|error| anyhow::anyhow!("update postgres dispatch {dispatch_id}: {error}"))?
         .rows_affected() as usize,
@@ -679,7 +669,7 @@ async fn set_dispatch_status_on_pg_with_sync(
         .bind(to_status)
         .bind(dispatch_id)
         .bind(&current_status)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|error| anyhow::anyhow!("update postgres dispatch {dispatch_id}: {error}"))?
         .rows_affected() as usize,
@@ -711,7 +701,7 @@ async fn set_dispatch_status_on_pg_with_sync(
                      WHERE id = $1",
             )
             .bind(card_id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await
             .map_err(|error| {
                 anyhow::anyhow!("load postgres card metadata for dispatch {dispatch_id}: {error}")
@@ -752,7 +742,7 @@ async fn set_dispatch_status_on_pg_with_sync(
         .bind(to_status)
         .bind(transition_source)
         .bind(result_json.as_deref())
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|error| {
             anyhow::anyhow!("insert postgres dispatch event for {dispatch_id}: {error}")
@@ -790,7 +780,7 @@ async fn set_dispatch_status_on_pg_with_sync(
                  )",
             )
             .bind(dispatch_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(|error| {
                 anyhow::anyhow!("enqueue postgres status_reaction for {dispatch_id}: {error}")
@@ -804,7 +794,7 @@ async fn set_dispatch_status_on_pg_with_sync(
         // is durably created and resolved (#2765).
         let auto_queue_review_disabled =
             if matches!(dispatch_type.as_deref(), Some("implementation" | "rework")) {
-                auto_queue_review_disabled_for_dispatch_on_pg(&mut tx, dispatch_id).await?
+                auto_queue_review_disabled_for_dispatch_on_pg(tx, dispatch_id).await?
             } else {
                 false
             };
@@ -816,10 +806,15 @@ async fn set_dispatch_status_on_pg_with_sync(
             auto_queue_review_disabled,
         );
         if plan.is_terminal && !skip_auto_queue_terminal_sync {
+            if suppress_auto_queue_finalize {
+                crate::db::auto_queue::set_terminal_entry_finalize_suppressed_on_pg_tx(tx, true)
+                    .await
+                    .map_err(anyhow::Error::msg)?;
+            }
             match to_status {
                 "completed" => {
                     crate::db::auto_queue::finalize_completed_dispatch_terminal_entry_on_pg_tx(
-                        &mut tx,
+                        tx,
                         dispatch_id,
                         transition_source,
                         true,
@@ -838,7 +833,7 @@ async fn set_dispatch_status_on_pg_with_sync(
                         crate::db::auto_queue::ENTRY_STATUS_SKIPPED
                     };
                     crate::db::auto_queue::sync_dispatch_terminal_entries_on_pg_tx(
-                        &mut tx,
+                        tx,
                         dispatch_id,
                         entry_status,
                         transition_source,
@@ -852,6 +847,11 @@ async fn set_dispatch_status_on_pg_with_sync(
                     })?;
                 }
                 _ => {}
+            }
+            if suppress_auto_queue_finalize {
+                crate::db::auto_queue::set_terminal_entry_finalize_suppressed_on_pg_tx(tx, false)
+                    .await
+                    .map_err(anyhow::Error::msg)?;
             }
         }
 
@@ -882,7 +882,7 @@ async fn set_dispatch_status_on_pg_with_sync(
             let result_text = result_json.clone().or(persisted_result_text);
             let outcome =
                 crate::db::auto_queue::reconcile_phase_gate_for_terminal_dispatch_on_pg_tx(
-                    &mut tx,
+                    tx,
                     dispatch_id,
                     to_status,
                     context_text.as_deref(),
@@ -898,14 +898,13 @@ async fn set_dispatch_status_on_pg_with_sync(
         }
 
         if plan.is_terminal {
-            crate::db::dispatch_semaphores::release_dispatch_semaphores_on_pg_tx(
-                &mut tx,
-                dispatch_id,
-            )
-            .await
-            .map_err(|error| {
-                anyhow::anyhow!("release postgres dispatch semaphores for {dispatch_id}: {error}")
-            })?;
+            crate::db::dispatch_semaphores::release_dispatch_semaphores_on_pg_tx(tx, dispatch_id)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "release postgres dispatch semaphores for {dispatch_id}: {error}"
+                    )
+                })?;
 
             let session_info = format!("Dispatch {to_status}");
             let cleared = sqlx::query(
@@ -921,7 +920,7 @@ async fn set_dispatch_status_on_pg_with_sync(
             )
             .bind(&session_info)
             .bind(dispatch_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(|error| {
                 anyhow::anyhow!("clear postgres session dispatch link {dispatch_id}: {error}")
@@ -950,13 +949,44 @@ async fn set_dispatch_status_on_pg_with_sync(
         }
     }
 
+    Ok(changed)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn set_dispatch_status_on_pg_with_sync(
+    pool: &PgPool,
+    dispatch_id: &str,
+    to_status: &str,
+    result: Option<&serde_json::Value>,
+    transition_source: &str,
+    allowed_from: Option<&[&str]>,
+    touch_completed_at: bool,
+    sync_auto_queue_terminal_entries: bool,
+    assume_external_phase_gate_lifecycle: bool,
+) -> Result<usize> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| anyhow::anyhow!("begin postgres dispatch status tx: {error}"))?;
+    let changed = set_dispatch_status_on_pg_tx_with_sync(
+        &mut tx,
+        dispatch_id,
+        to_status,
+        result,
+        transition_source,
+        allowed_from,
+        touch_completed_at,
+        sync_auto_queue_terminal_entries,
+        assume_external_phase_gate_lifecycle,
+        false,
+    )
+    .await?;
     tx.commit()
         .await
         .map_err(|error| anyhow::anyhow!("commit postgres dispatch status tx: {error}"))?;
-    // NOTE: deliberately gated on `changed > 0` (not `plan.record_transition`):
-    // an idempotent re-write into the same terminal status (`current == to`)
-    // must still wake constraint-release waiters.
-    if changed > 0 && plan.is_terminal {
+    // An idempotent rewrite into the same terminal status must still wake
+    // constraint-release waiters when the row was touched.
+    if changed > 0 && matches!(to_status, "completed" | "failed" | "cancelled") {
         crate::services::dispatches::wait_queue::spawn_cached_constraint_release_wake(
             pool.clone(),
             "constraint_release",
@@ -965,6 +995,34 @@ async fn set_dispatch_status_on_pg_with_sync(
         );
     }
     Ok(changed)
+}
+
+/// Caller-owned canonical transition. Ordinary wrappers keep suppression false;
+/// only force-kill replacement passes true before immediate reattachment.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn set_dispatch_status_on_pg_tx_async(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    dispatch_id: &str,
+    to_status: &str,
+    result: Option<&serde_json::Value>,
+    transition_source: &str,
+    allowed_from: Option<&[&str]>,
+    touch_completed_at: bool,
+    suppress_auto_queue_finalize: bool,
+) -> Result<usize> {
+    set_dispatch_status_on_pg_tx_with_sync(
+        tx,
+        dispatch_id,
+        to_status,
+        result,
+        transition_source,
+        allowed_from,
+        touch_completed_at,
+        true,
+        false,
+        suppress_auto_queue_finalize,
+    )
+    .await
 }
 
 // reason: Postgres dispatch-status writer; lib-build callers are cfg/test-gated. See #3034.

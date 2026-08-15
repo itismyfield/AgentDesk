@@ -80,7 +80,8 @@ src/
 │   ├── dispatched_sessions/
 │   │   ├── canonical_identity.rs
 │   │   ├── canonical_identity_pg_tests.rs
-│   │   └── rebind_override.rs
+│   │   ├── rebind_override.rs
+│   │   └── tests.rs
 │   ├── dispatches/
 │   │   ├── outbox/
 │   │   │   ├── claim.rs

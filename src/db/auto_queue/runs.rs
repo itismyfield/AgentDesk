@@ -163,6 +163,19 @@ async fn try_acquire_run_advisory_xact_lock_on_pg_tx(
         .map_err(|error| format!("try-lock auto-queue run {run_id}: {error}"))
 }
 
+/// Transaction-local opt-out for one failed-sync immediately followed by reattachment.
+pub(crate) async fn set_terminal_entry_finalize_suppressed_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    suppressed: bool,
+) -> Result<(), String> {
+    sqlx::query("SELECT set_config('agentdesk.suppress_terminal_entry_finalize', $1, true)")
+        .bind(if suppressed { "on" } else { "off" })
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("set terminal-entry finalizer suppression: {error}"))?;
+    Ok(())
+}
+
 async fn remaining_runnable_entry_count_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
@@ -228,6 +241,19 @@ pub(crate) async fn maybe_finalize_run_if_ready_pg(
 ) -> Result<bool, String> {
     if !try_acquire_run_advisory_xact_lock_on_pg_tx(tx, run_id).await? {
         tracing::info!(run_id = %run_id, "run_finalize_deferred_lock_contended");
+        return Ok(false);
+    }
+
+    let finalize_suppressed = sqlx::query_scalar::<_, bool>(
+        "SELECT COALESCE(
+             current_setting('agentdesk.suppress_terminal_entry_finalize', true) = 'on',
+             false
+         )",
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| format!("read terminal-entry finalizer suppression: {error}"))?;
+    if finalize_suppressed {
         return Ok(false);
     }
 

@@ -55,6 +55,7 @@ pub(crate) use dispatch_query::query_dispatch_row_pg;
 pub(crate) use dispatch_status::set_dispatch_status_without_queue_sync_with_backends;
 pub(crate) use dispatch_status::{
     VALID_DISPATCH_STATUSES, emit_dispatch_quality_event, is_valid_dispatch_status,
+    set_dispatch_status_on_pg_tx_async,
 };
 #[allow(unused_imports)]
 pub use dispatch_status::{
