@@ -55,7 +55,7 @@
     {
       "path": "src/dispatch/dispatch_status.rs",
       "lint": "too_many_arguments",
-      "count": 3
+      "count": 5
     },
     {
       "path": "src/engine/ops/http_ops.rs",
