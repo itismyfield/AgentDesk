@@ -200,6 +200,13 @@ db::agents::tests::resolved_primary_provider_keeps_codex_cc_only_binding_on_clau
 db::agents::tests::resolved_primary_provider_keeps_codex_for_primary_only_binding
 db::agents::tests::resolved_primary_provider_preserves_gemini_primary_binding
 db::agents::tests::resolved_primary_provider_preserves_qwen_primary_binding
+db::auto_queue::entries::choke_gate_pg_tests::cancelled_run_allows_skipped_without_waiting_for_gate_pg
+db::auto_queue::entries::choke_gate_pg_tests::cancelled_run_rejects_dispatched_pool_pg
+db::auto_queue::entries::choke_gate_pg_tests::cancelled_run_rejects_dispatched_tx_pg
+db::auto_queue::entries::choke_gate_pg_tests::fsm_recovery_reattach_rejects_cancelled_run_pg
+db::auto_queue::entries::choke_gate_pg_tests::fsm_restore_attach_existing_rejects_cancelled_run_pg
+db::auto_queue::entries::choke_gate_pg_tests::reactivate_completed_run_waits_for_token_and_records_history_pg
+db::auto_queue::entries::choke_gate_pg_tests::restoring_run_allows_dispatched_transition_pg
 db::auto_queue::entries::dispatch_failure::tests::concurrent_failure_has_one_cas_winner_pg
 db::auto_queue::entries::dispatch_failure::tests::non_live_runs_terminalize_entry_instead_of_blocking_dispatch_failure_pg
 db::auto_queue::entries::dispatch_failure::tests::restoring_run_accepts_retry_without_orphaning_entry_pg

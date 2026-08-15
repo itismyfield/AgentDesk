@@ -187,10 +187,12 @@ async fn remaining_runnable_entry_count_on_pg_tx(
 ///
 /// When the try-lock succeeds, the token remains held until the caller's
 /// transaction commits. Blocking attach, cancel, and explicit-completion
-/// participants can therefore wait behind this opportunistic finalizer. JS
-/// callers remain bounded by the policy-hook execution budget, so avoiding an
-/// entry-row/run-token ABBA comes with bounded participant delay rather than no
-/// waiting anywhere in the protocol.
+/// participants can therefore wait behind this opportunistic finalizer. That
+/// set includes the activate tail through `complete_run_after_activate_on_pg`:
+/// JS policy calls are bounded by the bridge deadline, while the HTTP activate
+/// path has no corresponding deadline. Avoiding an entry-row/run-token ABBA
+/// therefore comes with possible participant delay rather than no waiting in
+/// the protocol.
 ///
 /// Moving a blocking acquisition above every entry, card, and run write in the
 /// callers of this helper would broaden per-run serialization across the sync,
@@ -199,6 +201,14 @@ async fn remaining_runnable_entry_count_on_pg_tx(
 /// finalizer instead. Its remaining-entry predicate is derived only after the
 /// token is acquired, so a previously computed count cannot cross an attach
 /// commit protected by the same token.
+///
+/// Blocking participants take `aq_run:<run_id>` before row locks: cancel and
+/// terminalize, force-pause, phase-gate attachment (including its attachment-
+/// free branch), consultation attachment, explicit completion, dispatched-
+/// entry choke points, done-entry reactivation, and retry attachment. Their
+/// later cards/entries/runs/slots ordering is serialized by that first token.
+/// `maybe_finalize_run_if_ready_pg` is the exception: callers may already hold
+/// entry or run rows, so its try-lock is non-blocking and adds no wait edge.
 ///
 /// `lock_phase_gate_state_on_pg_tx` uses PostgreSQL's two-argument advisory
 /// key space. It is separate from the one-argument `aq_run:<run_id>` token and
@@ -407,10 +417,13 @@ pub async fn complete_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, Str
     complete_run_on_pg_inner(pool, run_id, true).await
 }
 
-/// Activate historically completed drained runs without sending a completion
-/// notification. Preserve that response/notification contract while routing
-/// its terminal write through the canonical token, predicate, and slot-release
-/// transaction.
+/// Adapter for the drained-run tail of activate. It deliberately omits the
+/// completion notification, deletes phase-gate rows on successful completion,
+/// and releases slots only inside that successful transaction; activate no
+/// longer performs an unconditional slot pre-release. The activate caller
+/// treats a refused completion as informational and demotes database errors to
+/// a warning instead of turning the otherwise successful activate response
+/// into HTTP 500.
 pub(crate) async fn complete_run_after_activate_on_pg(
     pool: &PgPool,
     run_id: &str,

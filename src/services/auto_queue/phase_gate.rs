@@ -363,36 +363,36 @@ async fn create_activate_dispatch_pg_inner(
             ));
         }
     } else {
-        let paused_run_id_locked = sqlx::query_scalar::<_, String>(
-            "WITH candidate_runs AS (
-                 SELECT r.id, r.status, MAX(e.created_at) AS latest_created_at
-                 FROM auto_queue_entries e
-                 JOIN auto_queue_runs r ON r.id = e.run_id
-                 WHERE e.kanban_card_id = $1
-                 GROUP BY r.id, r.status
-             ),
-             locked AS (
-                 SELECT id,
-                        status,
-                        latest_created_at,
-                        pg_advisory_xact_lock(hashtext('aq_run:' || id)) AS _lock
-                 FROM candidate_runs
-             )
-             SELECT id
-             FROM locked
-             WHERE status = 'paused'
-             ORDER BY latest_created_at DESC NULLS LAST
+        let owning_run_id = sqlx::query_scalar::<_, String>(
+            "SELECT r.id
+             FROM auto_queue_entries e
+             JOIN auto_queue_runs r ON r.id = e.run_id
+             WHERE e.kanban_card_id = $1
+             ORDER BY e.created_at DESC NULLS LAST, e.id DESC
              LIMIT 1",
         )
         .bind(card_id)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|error| format!("recheck paused run for {card_id} inside dispatch tx: {error}"))?;
-        if let Some(run_id) = paused_run_id_locked {
-            tx.rollback().await.ok();
-            return Err(format!(
-                "auto-queue run {run_id} paused: refusing to create {dispatch_type} dispatch for card {card_id}"
-            ));
+        .map_err(|error| format!("load owning run for card {card_id}: {error}"))?;
+        if let Some(run_id) = owning_run_id {
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtext('aq_run:' || $1))")
+                .bind(&run_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("lock auto-queue run {run_id}: {error}"))?;
+            let run_status =
+                sqlx::query_scalar::<_, String>("SELECT status FROM auto_queue_runs WHERE id = $1")
+                    .bind(&run_id)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(|error| format!("reload auto-queue run {run_id}: {error}"))?;
+            if !crate::db::auto_queue::run_status::is_live_run_status(&run_status) {
+                tx.rollback().await.ok();
+                return Err(format!(
+                    "auto-queue run {run_id} is {run_status}: refusing to create {dispatch_type} dispatch for card {card_id}"
+                ));
+            }
         }
     }
 
