@@ -4019,6 +4019,7 @@ services::discord::router::message_handler::headless_turn::recovery_context_take
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::recovery_context_survives_headless_goal_lifecycle_consumed_return
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::reserved_headless_start_has_no_post_spawn_error_path
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::stamp_is_skipped_when_capability_not_ready_pg
+services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::stamp_is_written_when_ready_capability_is_injected_pg
 services::discord::router::message_handler::intake_turn::feedback_reminder_take_order_tests::intake_takes_feedback_reminder_once_after_guards_and_before_prompt_use
 services::discord::router::message_handler::intake_turn::feedback_reminder_take_order_tests::tui_busy_enqueue_refusal_puts_back_feedback_reminder_for_next_turn
 services::discord::router::message_handler::intake_turn::intake_outbox_state_builder_tests::bridge_handoff_stamp_call_site_is_adjacent_to_the_only_spawn_turn_bridge
@@ -4175,6 +4176,7 @@ services::discord::runtime_bootstrap::intake_delivery_capability::cache::tests::
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests::capability_accepts_public_0109_under_hostile_search_path_pg
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests::capability_rejects_catalog_and_data_mutations_pg
 services::discord::runtime_bootstrap::intake_delivery_capability::tests::capability_probe_binds_exactly_the_shared_constant
+services::discord::runtime_bootstrap::intake_delivery_capability::tests::enforce_ready_keeps_dispatched_stamping_clamped_until_recovery_ships
 services::discord::runtime_bootstrap::intake_delivery_capability::tests::required_migrations_are_a_subset_of_the_migrations_dir
 services::discord::runtime_bootstrap::intake_delivery_capability::tests::required_migrations_cover_every_schema_object_the_stamp_touches
 services::discord::runtime_bootstrap::intake_delivery_capability::tests::settlement_capabilities_split_stamp_from_future_settle_and_sweep

@@ -1,8 +1,12 @@
 # Multinode Transition
 
-> Last refreshed: 2026-08-14 (against #5071 T2-W B3a-1 dispatched audit).
+> Last refreshed: 2026-08-15 (against #5071 T2-W S-W1 r2 capability cache).
 
 ### Audited touches
+- 2026-08-15 (#5071 T2-W S-W1 r2): Discord bootstrap owns one
+  intake-delivery capability cache per bot instance. Each node subscribes to
+  live configuration and independently resolves and installs its local cache;
+  no cache value, probe result, or reload completion is shared across nodes.
 - 2026-08-14 (#5071 T2-W B3a-1): the operator CLI adds a DB-row-read-only
   `intake-outbox dispatched-audit` inventory. `cmd_dispatched_audit` calls
   `config::load`, which may harden secret-bearing config-file permissions via

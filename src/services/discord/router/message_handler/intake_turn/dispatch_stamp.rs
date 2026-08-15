@@ -17,9 +17,11 @@ use super::*;
 /// 먼저 올 수 있다. `wait_for_completion=false`도 스케줄링상 worker-first를 보장하지 않는다.
 /// 후속 정산 슬라이스의 2-상태 CAS는 이 두 순서를 모두 받아들여야 한다.
 ///
-/// 라이브 리로드가 Off를 캐시에 적용하기 직전에 이 값을 읽은 턴은 도장을 계속 시도할 수 있다.
-/// 이 straggler 창은 당시 in-flight 턴 수로 유계이며 read-your-own-debt와 후속 S-W3
-/// intake-delivery sweep이 open spawned/dispatched 행을 회수한다.
+/// 킬스위치 적용은 진행 중 probe 완료까지 지연될 수 있고, 그 동안 시작된 턴은 이전 능력으로
+/// 도장한다. 회수는 read-your-own-debt와 sweep 소관이지만 둘 다 후속 슬라이스(S-W2/S-W3)이며
+/// 이 빌드에는 구현되지 않았다. probe 후 스테이지 재확인은 S-W3 소관이다.
+///
+/// Observe의 전부는 도장 비활성 분기의 debug 로그다. 텔레메트리 카운터는 후속 슬라이스다.
 pub(super) async fn stamp_before_bridge_handoff(
     shared: &Arc<SharedData>,
     intake_outbox_id: Option<i64>,
@@ -29,6 +31,12 @@ pub(super) async fn stamp_before_bridge_handoff(
     };
     let capabilities = shared.intake_delivery_capabilities.current();
     if !capabilities.stamp_dispatched {
+        if capabilities.observe_handoffs {
+            tracing::debug!(
+                intake_outbox_id = outbox_id,
+                "intake bridge handoff observed with dispatched stamping disabled"
+            );
+        }
         return;
     }
     let Some(pool) = shared.pg_pool.as_ref() else {
@@ -44,7 +52,7 @@ pub(super) async fn stamp_before_bridge_handoff(
             "intake bridge handoff stamped dispatched"
         ),
         // A terminal row (including `done`) means another actor won a normal
-        // lifecycle race. S-W5 adds read-only status classification; until
+        // lifecycle race. S-W4 adds read-only status classification; until
         // then a false CAS is deliberately observation-only and never warns.
         Ok(false) => tracing::debug!(
             intake_outbox_id = outbox_id,
@@ -111,6 +119,48 @@ mod postgres_tests {
                 .await
                 .expect("read unstamped row");
         assert_eq!(status, IntakeOutboxStatus::Spawned);
+
+        pool.close().await;
+        database.drop().await;
+    }
+
+    #[tokio::test]
+    async fn stamp_is_written_when_ready_capability_is_injected_pg() {
+        let database = TestPostgresDb::create().await;
+        let pool = database.connect_and_migrate().await;
+        let capabilities = crate::services::discord::runtime_bootstrap::intake_delivery_capability::SettlementCapabilityCache::for_test(
+            crate::services::discord::runtime_bootstrap::intake_delivery_capability::SettlementCapabilities {
+                observe_handoffs: true,
+                stamp_dispatched: true,
+                settle_and_sweep: true,
+            },
+        );
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage_and_intake_capabilities(
+            Some(pool.clone()),
+            capabilities,
+        );
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO public.intake_outbox (
+                target_instance_id, forwarded_by_instance_id, channel_id,
+                user_msg_id, request_owner_id, user_text, turn_kind, agent_id,
+                status, claim_owner, spawned_at
+             ) VALUES (
+                'worker', 'leader', 'stamp-on', 'stamp-on', 'user', 'hello',
+                'standard', 'agent', 'spawned', 'dispatch-worker', NOW()
+             ) RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("seed spawned intake row");
+
+        stamp_before_bridge_handoff(&shared, Some(id)).await;
+        let status: IntakeOutboxStatus =
+            sqlx::query_scalar("SELECT status FROM public.intake_outbox WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("read stamped row");
+        assert_eq!(status, IntakeOutboxStatus::Dispatched);
 
         pool.close().await;
         database.drop().await;

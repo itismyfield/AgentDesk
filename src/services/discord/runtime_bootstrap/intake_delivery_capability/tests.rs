@@ -38,11 +38,16 @@ fn settlement_capabilities_split_stamp_from_future_settle_and_sweep() {
     );
     assert_eq!(
         capabilities_for(IntakeDeliverySettlementStage::Observe, SchemaReason::Ready),
-        SettlementCapabilities::default()
+        SettlementCapabilities {
+            observe_handoffs: true,
+            stamp_dispatched: false,
+            settle_and_sweep: false,
+        }
     );
     assert_eq!(
         capabilities_for(IntakeDeliverySettlementStage::Settle, SchemaReason::Ready),
         SettlementCapabilities {
+            observe_handoffs: true,
             stamp_dispatched: false,
             settle_and_sweep: true,
         }
@@ -50,7 +55,8 @@ fn settlement_capabilities_split_stamp_from_future_settle_and_sweep() {
     assert_eq!(
         capabilities_for(IntakeDeliverySettlementStage::Enforce, SchemaReason::Ready),
         SettlementCapabilities {
-            stamp_dispatched: true,
+            observe_handoffs: true,
+            stamp_dispatched: false,
             settle_and_sweep: true,
         }
     );
@@ -60,11 +66,22 @@ fn settlement_capabilities_split_stamp_from_future_settle_and_sweep() {
         IntakeDeliverySettlementStage::Settle,
         IntakeDeliverySettlementStage::Enforce,
     ] {
+        let capabilities = capabilities_for(stage, SchemaReason::Constraint);
         assert_eq!(
-            capabilities_for(stage, SchemaReason::Constraint),
-            SettlementCapabilities::default()
+            capabilities.observe_handoffs,
+            stage >= IntakeDeliverySettlementStage::Observe
         );
+        assert!(!capabilities.stamp_dispatched);
+        assert!(!capabilities.settle_and_sweep);
     }
+}
+
+#[test]
+fn enforce_ready_keeps_dispatched_stamping_clamped_until_recovery_ships() {
+    assert!(
+        !capabilities_for(IntakeDeliverySettlementStage::Enforce, SchemaReason::Ready)
+            .stamp_dispatched
+    );
 }
 
 #[test]

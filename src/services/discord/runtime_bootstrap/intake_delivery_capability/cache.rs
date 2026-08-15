@@ -3,8 +3,9 @@ use crate::config::IntakeDeliverySettlementStage;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-const STAMP_DISPATCHED: u8 = 1;
-const SETTLE_AND_SWEEP: u8 = 1 << 1;
+const OBSERVE_HANDOFFS: u8 = 1;
+const STAMP_DISPATCHED: u8 = 1 << 1;
+const SETTLE_AND_SWEEP: u8 = 1 << 2;
 
 /// Bootstrap-owned capability snapshot read by the per-turn bridge path.
 #[derive(Debug, Default)]
@@ -15,6 +16,9 @@ pub(in crate::services::discord) struct SettlementCapabilityCache {
 impl SettlementCapabilityCache {
     fn replace(&self, capabilities: SettlementCapabilities) {
         let mut bits = 0;
+        if capabilities.observe_handoffs {
+            bits |= OBSERVE_HANDOFFS;
+        }
         if capabilities.stamp_dispatched {
             bits |= STAMP_DISPATCHED;
         }
@@ -27,9 +31,19 @@ impl SettlementCapabilityCache {
     pub(in crate::services::discord) fn current(&self) -> SettlementCapabilities {
         let bits = self.bits.load(Ordering::Acquire);
         SettlementCapabilities {
+            observe_handoffs: bits & OBSERVE_HANDOFFS != 0,
             stamp_dispatched: bits & STAMP_DISPATCHED != 0,
             settle_and_sweep: bits & SETTLE_AND_SWEEP != 0,
         }
+    }
+
+    #[cfg(test)]
+    pub(in crate::services::discord) fn for_test(
+        capabilities: SettlementCapabilities,
+    ) -> Arc<Self> {
+        let cache = Arc::new(Self::default());
+        cache.replace(capabilities);
+        cache
     }
 }
 
@@ -94,6 +108,11 @@ async fn bootstrap_from_updates(
         let mut previous_schema = initial_schema;
         while updates.changed().await.is_ok() {
             let stage = stage_from(updates.borrow_and_update().as_ref());
+            // A kill-switch update can wait behind an already-running probe. Turns
+            // started before that probe completes still read and stamp with the old
+            // capability snapshot. Recovery is owned by read-your-own-debt and sweep,
+            // both later S-W2/S-W3 slices and both unimplemented in this build. A
+            // post-probe stage recheck belongs to S-W3; this slice adds no such machine.
             let (capabilities, schema) = resolve(
                 pool.as_ref(),
                 stage,
@@ -174,10 +193,12 @@ mod tests {
         for capabilities in [
             SettlementCapabilities::default(),
             SettlementCapabilities {
+                observe_handoffs: true,
                 stamp_dispatched: false,
                 settle_and_sweep: true,
             },
             SettlementCapabilities {
+                observe_handoffs: true,
                 stamp_dispatched: true,
                 settle_and_sweep: true,
             },

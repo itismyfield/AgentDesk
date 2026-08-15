@@ -397,6 +397,7 @@ placeholder:
 runtime:
   # T2-W rollout: off keeps the legacy row lifecycle; observe only logs rollout
   # observations. Schema probing starts at settle; new handoff stamps require enforce.
+  # In this build, settle/enforce remain clamped until the recovery slices ship.
   intake_delivery_settlement: off
   requested_timeout_min: 45
   in_progress_stale_min: 120
