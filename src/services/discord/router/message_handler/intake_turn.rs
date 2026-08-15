@@ -114,8 +114,11 @@ mod intake_outbox_state_builder_tests {
     #[test]
     fn bridge_handoff_stamp_call_site_is_adjacent_to_the_only_spawn_turn_bridge() {
         let source = include_str!("intake_turn.rs");
+        // Split the marker so the intake_dispatch source contract (exactly one
+        // textual body occurrence) keeps counting only the real definition.
+        let handler_marker = ["pub(super) async fn handle_", "text_message("].concat();
         let handler = source
-            .split_once("pub(super) async fn handle_text_message(")
+            .split_once(handler_marker.as_str())
             .expect("intake handler exists")
             .1
             .split_once("#[cfg(test)]\nmod tui_busy_pre_submit_queue_reaction_tests")
