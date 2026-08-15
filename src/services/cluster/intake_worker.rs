@@ -24,13 +24,84 @@ use crate::db::intake_outbox::{
     IntakeOutboxRow, claim_pending_for_target, mark_accepted, mark_done, mark_failed_post_accept,
     mark_failed_pre_accept, mark_spawned, return_claimed_to_pending,
 };
+use crate::db::intake_outbox_dispatch_stamp::observe_status;
+use crate::db::intake_outbox_status::IntakeOutboxStatus;
 use crate::services::discord::{IntakeRequest, SharedData, TurnKind, execute_intake_turn_core};
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
 use sqlx::PgPool;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
+
+#[derive(Default)]
+struct MarkDoneMissCounters {
+    stamp_handoff_observed: AtomicU64,
+    lost_to_settlement: AtomicU64,
+    divergence: AtomicU64,
+}
+
+static MARK_DONE_MISS_COUNTERS: OnceLock<MarkDoneMissCounters> = OnceLock::new();
+
+fn mark_done_miss_counters() -> &'static MarkDoneMissCounters {
+    MARK_DONE_MISS_COUNTERS.get_or_init(MarkDoneMissCounters::default)
+}
+
+async fn classify_mark_done_miss(pool: &PgPool, row_id: i64, channel_id: &str, user_msg_id: &str) {
+    match observe_status(pool, row_id).await {
+        Ok(Some(IntakeOutboxStatus::Dispatched)) => {
+            mark_done_miss_counters()
+                .stamp_handoff_observed
+                .fetch_add(1, Ordering::Relaxed);
+            tracing::debug!(
+                counter = "worker_stamp_handoff_observed",
+                row_id,
+                channel_id,
+                user_msg_id,
+                "[intake_worker] mark_done CAS observed dispatched bridge handoff"
+            );
+        }
+        Ok(Some(IntakeOutboxStatus::Done)) => {
+            mark_done_miss_counters()
+                .lost_to_settlement
+                .fetch_add(1, Ordering::Relaxed);
+            tracing::info!(
+                counter = "worker_mark_done_lost_to_settlement",
+                row_id,
+                channel_id,
+                user_msg_id,
+                "[intake_worker] mark_done CAS lost a normal settlement race"
+            );
+        }
+        Ok(observed) => {
+            mark_done_miss_counters()
+                .divergence
+                .fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                counter = "worker_mark_done_divergence",
+                row_id,
+                channel_id,
+                user_msg_id,
+                observed_status = ?observed,
+                "[intake_worker] mark_done CAS miss diverged from bridge handoff or settlement"
+            );
+        }
+        Err(error) => {
+            mark_done_miss_counters()
+                .divergence
+                .fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                counter = "worker_mark_done_divergence",
+                row_id,
+                channel_id,
+                user_msg_id,
+                %error,
+                "[intake_worker] mark_done CAS miss status read failed"
+            );
+        }
+    }
+}
 
 /// Provider-local worker activity used by the restart marker poller. The
 /// process-global shutdown counters remain separate; each provider waits only
@@ -283,20 +354,15 @@ pub(crate) async fn run_intake_worker_tick(
 
     match result {
         Ok(()) => {
-            // `Ok(false)` here means the row left `spawned` while the
-            // executor ran (operator force-fail via transition 12, or
-            // an external state divergence). Log it so the operator
-            // sees the divergence between executor success and DB
-            // state — but do NOT escalate; the row's terminal state
-            // is whatever the operator put it in.
             let advanced = mark_done(pool, row.id, claim_owner).await?;
             if !advanced {
-                tracing::warn!(
-                    row_id = row.id,
-                    channel_id = row.channel_id,
-                    user_msg_id = row.user_msg_id,
-                    "[intake_worker] mark_done = false (row no longer in 'spawned'; operator force-fail or DB divergence)"
-                );
+                classify_mark_done_miss(
+                    pool,
+                    row.id,
+                    row.channel_id.as_str(),
+                    row.user_msg_id.as_str(),
+                )
+                .await;
             }
             Ok(TickOutcome::Processed)
         }
@@ -733,6 +799,10 @@ mod tests {
         assert!(!spawned, "a fenced claimed row must not spawn");
     }
 }
+
+#[cfg(test)]
+#[path = "intake_worker/dispatch_stamp_tests.rs"]
+mod dispatch_stamp_tests;
 
 // PG-backed tick coverage is intentionally NOT in this file:
 // `run_intake_worker_tick` calls `execute_intake_turn_core` →

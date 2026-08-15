@@ -452,6 +452,8 @@ db::intake_outbox_delivery_proof::tests::mark_done_from_delivery_proof_is_idempo
 db::intake_outbox_delivery_proof::tests::proof_lock_skips_contention_and_terminal_cas_has_one_winner_pg
 db::intake_outbox_delivery_proof::tests::settle_dispatched_unknown_rechecks_cutoff_and_preserves_audit_fields_pg
 db::intake_outbox_delivery_proof::tests::stale_reader_projects_exactly_id
+db::intake_outbox_dispatch_stamp::tests::dispatched_row_blocks_new_open_route_for_the_channel_pg
+db::intake_outbox_dispatch_stamp::tests::dispatched_row_is_reclaimed_by_sweep_pg
 db::intake_outbox_dispatch_stamp::tests::mark_dispatched_satisfies_dispatched_requires_clock_check_pg
 db::intake_outbox_dispatch_stamp::tests::mark_dispatched_sets_clock_and_requires_spawned_pg
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_includes_null_clock_rows_pg
@@ -1683,6 +1685,8 @@ services::cluster::intake_routing_config::unit_tests::effective_intake_routing_c
 services::cluster::intake_routing_telemetry::tests::observe_decision_emits_info_level_structured_fields
 services::cluster::intake_routing_telemetry::tests::observe_planner_telemetry_is_stable_and_complete
 services::cluster::intake_routing_telemetry::tests::owner_failure_uses_stable_reason_and_resolution_codes
+services::cluster::intake_worker::dispatch_stamp_tests::worker_mark_done_false_on_dispatched_is_not_a_divergence_pg
+services::cluster::intake_worker::dispatch_stamp_tests::worker_mark_done_false_on_missing_row_is_a_divergence_pg
 services::cluster::intake_worker::tests::fence_between_open_check_and_active_registration_rejects_late_tick
 services::cluster::intake_worker::tests::intake_request_from_row_handles_null_request_owner_name
 services::cluster::intake_worker::tests::intake_request_from_row_rejects_non_numeric_channel_id
@@ -4045,6 +4049,10 @@ services::discord::router::message_handler::headless_turn::recovery_context_take
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::headless_real_turn_consumes_recovery_context_once_before_prompt_use
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::recovery_context_survives_headless_goal_lifecycle_consumed_return
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::reserved_headless_start_has_no_post_spawn_error_path
+services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::enforce_downgrade_stops_stamping_but_keeps_settling_pg
+services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::hosted_tui_busy_pre_submit_requeue_leaves_row_in_spawned_pg
+services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::inline_completed_paths_never_reach_dispatched_pg
+services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::race_loss_requeue_leaves_row_in_spawned_and_worker_closes_it_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::stamp_is_skipped_when_capability_not_ready_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::stamp_is_written_when_ready_capability_is_injected_pg
 services::discord::router::message_handler::intake_turn::feedback_reminder_take_order_tests::intake_takes_feedback_reminder_once_after_guards_and_before_prompt_use

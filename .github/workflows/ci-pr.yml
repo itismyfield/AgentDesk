@@ -177,6 +177,8 @@ jobs:
               - 'src/services/discord/inflight/**'
               # #5071 T2-W S-W1: the bridge-handoff stamp and its PG-backed
               # sidecar tests must select the PostgreSQL lane together.
+              - 'src/services/cluster/intake_worker.rs'
+              - 'src/services/cluster/intake_worker/**'
               - 'src/services/discord/router/message_handler/intake_turn.rs'
               - 'src/services/discord/router/message_handler/intake_turn/**'
               - 'src/services/discord/runtime_bootstrap/intake_delivery_capability.rs'
