@@ -91,6 +91,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tmux_watcher_registry_restore_tests.rs",
         "src/services/discord/tui_prompt_relay/tests.rs",
         "src/services/discord/turn_bridge/chunk_compose_tests.rs",
+        "src/services/discord/turn_bridge/intake_settlement/tests.rs",
         "src/services/discord/turn_bridge/runtime_handoff_loop/tests.rs",
         "src/services/discord/turn_bridge/status_panel_tests.rs",
         "src/services/discord/turn_bridge/stream_loop/expected_identity_tests.rs",

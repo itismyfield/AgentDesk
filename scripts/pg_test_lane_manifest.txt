@@ -75,7 +75,7 @@ src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs
 src/services/discord/session_runtime.rs
 src/services/discord/task_notification_delivery/tests.rs
 src/services/discord/turn_bridge/completion_guard/completion_postgres.rs
-src/services/discord/turn_bridge/intake_settlement.rs
+src/services/discord/turn_bridge/intake_settlement/tests.rs
 src/services/discord/turn_bridge/recovery_text.rs
 src/services/discord/turn_bridge/voice_completion_tests.rs
 src/services/discord/watchers/lifecycle/restore_tests.rs

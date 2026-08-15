@@ -4197,6 +4197,7 @@ services::discord::runtime_bootstrap::gateway_lease_recovery_tests::superseded_p
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::supersession_chain_keeps_owner_until_final_cancel_and_recovers_all_runtimes
 services::discord::runtime_bootstrap::intake_delivery_capability::cache::tests::cache_round_trips_the_two_capability_bits
 services::discord::runtime_bootstrap::intake_delivery_capability::cache::tests::probe_policy_is_boot_upward_and_same_only_at_settle_or_higher
+services::discord::runtime_bootstrap::intake_delivery_capability::cache::tests::stale_probe_generation_cannot_replace_a_newer_downgrade
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests::capability_accepts_public_0109_under_hostile_search_path_pg
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests::capability_rejects_catalog_and_data_mutations_pg
 services::discord::runtime_bootstrap::intake_delivery_capability::tests::capability_probe_binds_exactly_the_shared_constant
@@ -5613,8 +5614,11 @@ services::discord::turn_bridge::intake_settlement::tests::settle_does_not_touch_
 services::discord::turn_bridge::intake_settlement::tests::settle_from_spawned_and_from_dispatched_both_reach_done_pg
 services::discord::turn_bridge::intake_settlement::tests::settle_is_idempotent_and_preserves_dispatch_audit_fields_pg
 services::discord::turn_bridge::intake_settlement::tests::settlement_rolls_back_with_caller_transaction_pg
+services::discord::turn_bridge::intake_settlement::tests::settlement_row_lock_timeout_is_swallowed_and_counted_pg
 services::discord::turn_bridge::intake_settlement::tests::settlement_sql_error_is_swallowed_and_counted
 services::discord::turn_bridge::intake_settlement::tests::stage_below_settle_performs_no_write_pg
+services::discord::turn_bridge::intake_settlement::tests::stale_capability_probe_after_downgrade_performs_no_write_pg
+services::discord::turn_bridge::intake_settlement::tests::terminal_outcome_delivery_awaits_one_settlement_call_with_branch_flags
 services::discord::turn_bridge::intake_settlement::tests::worker_mark_done_and_settlement_converge_under_either_order_pg
 services::discord::turn_bridge::memory_lifecycle::background_memory_task_tests::model_memento_tool_call_arms_session_end_reflect
 services::discord::turn_bridge::memory_lifecycle::background_memory_task_tests::observes_background_memory_tasks_under_one_timeout_window

@@ -956,6 +956,8 @@ src/
 │   │   │   │   └── contracts.rs
 │   │   │   ├── headless_delivery/
 │   │   │   │   └── intake_outbox_argument.rs
+│   │   │   ├── intake_settlement/
+│   │   │   │   └── tests.rs
 │   │   │   ├── runtime_handoff_loop/
 │   │   │   │   ├── claude_e.rs
 │   │   │   │   ├── guarded_save.rs
