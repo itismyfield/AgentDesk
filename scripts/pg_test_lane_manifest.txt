@@ -562,7 +562,7 @@ services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests:
 services::auto_queue::route::fsm::tests::recovery_reattach_path_rechecks_cancelled_run_pg
 services::auto_queue::route::fsm::tests::restore_attach_existing_path_rechecks_cancelled_run_pg
 services::auto_queue::route::phase_gate::tests::attachment_free_gate_uses_newest_entry_single_run_pg
-services::auto_queue::route::phase_gate::tests::cancelled_run_rejects_dispatch_attach
+services::auto_queue::route::phase_gate::tests::cancelled_run_rejects_dispatch_attach_pg
 services::auto_queue::route::planning::failed_entry_alert_tests::failed_entry_transition_and_alert_share_commit_with_explicit_ttl_pg
 services::auto_queue::route::planning::failed_entry_alert_tests::production_failure_wrapper_preserves_restoring_slot_binding_pg
 services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::postgres_tests::unavailable_deploy_gate_creates_no_database_rows

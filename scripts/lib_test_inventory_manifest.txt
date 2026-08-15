@@ -1125,7 +1125,7 @@ services::auto_queue::route::fsm::tests::clamp_retry_limit_bounds
 services::auto_queue::route::fsm::tests::recovery_reattach_path_rechecks_cancelled_run_pg
 services::auto_queue::route::fsm::tests::restore_attach_existing_path_rechecks_cancelled_run_pg
 services::auto_queue::route::phase_gate::tests::attachment_free_gate_uses_newest_entry_single_run_pg
-services::auto_queue::route::phase_gate::tests::cancelled_run_rejects_dispatch_attach
+services::auto_queue::route::phase_gate::tests::cancelled_run_rejects_dispatch_attach_pg
 services::auto_queue::route::phase_gate::tests::sandbox_preflight_metadata_disables_external_side_effects_only_when_safe
 services::auto_queue::route::phase_gate_catalog::tests::catalog_exposes_typed_declaration_and_unavailable_deploy_gate
 services::auto_queue::route::phase_gate_catalog::tests::default_kind_present_in_catalog

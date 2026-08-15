@@ -610,7 +610,7 @@ mod tests {
     use crate::db::auto_queue::test_support::TestPostgresDb;
 
     #[tokio::test]
-    async fn cancelled_run_rejects_dispatch_attach() {
+    async fn cancelled_run_rejects_dispatch_attach_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         sqlx::query(
