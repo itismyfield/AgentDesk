@@ -234,6 +234,7 @@ db::auto_queue::entries::tests::paused_run_allows_dispatched_transition_pg
 db::auto_queue::entries::tests::reactivate_completed_run_waits_for_token_and_records_history_pg
 db::auto_queue::entries::tests::reactivate_done_entry_rejects_unapproved_transition_source_pg
 db::auto_queue::entries::tests::reactivate_rechecks_cancelled_run_after_waiting_for_token_pg
+db::auto_queue::entries::tests::reactivate_reentry_rejects_competing_dispatch_identity_pg
 db::auto_queue::entries::tests::restoring_run_allows_dispatched_transition_pg
 db::auto_queue::entries::tests::terminal_dispatch_commit_blocks_and_rejects_late_attachment_pg
 db::auto_queue::phase_gates::current_batch_phase_pg_tests::done_entry_with_active_review_decision_dispatch_blocks_phase_advance
@@ -479,8 +480,11 @@ engine::ops::config_ops::tests::policy_engine_config_get_query_error_fails_close
 engine::ops::db_ops::tests::policy_db_pg_exec_and_query_support_sqlite_compat_functions
 engine::ops::db_ops::tests::policy_db_query_json_returns_typed_json_columns_and_query_keeps_strings
 engine::ops::kanban_ops::tests::reopen_accepts_entry_concurrently_attached_to_target_state_pg
+engine::ops::kanban_ops::tests::reopen_completed_run_reacquires_unowned_slot_pg
+engine::ops::kanban_ops::tests::reopen_completed_run_rejects_slot_owned_by_another_run_pg
 engine::ops::kanban_ops::tests::reopen_done_entry_rejects_unapproved_transition_source_pg
 engine::ops::kanban_ops::tests::reopen_raw_pg_revives_completed_run_and_routes_done_entry_pg
+engine::ops::kanban_ops::tests::reopen_rejects_entry_concurrently_attached_to_different_dispatch_pg
 engine::ops::kanban_ops::tests::set_status_raw_pg_allows_fresh_pass_verdict_after_review_entered_at
 engine::ops::kanban_ops::tests::set_status_raw_pg_allows_no_rule_in_progress_to_requested_forced
 engine::ops::kanban_ops::tests::set_status_raw_pg_allows_requested_to_in_progress_with_active_dispatch

@@ -113,22 +113,56 @@ pub async fn reactivate_done_entry_on_pg(
         .map_err(|error| format!("open postgres auto-queue done reactivation tx: {error}"))?;
     acquire_run_advisory_xact_lock_on_pg_tx(&mut tx, &current.run_id).await?;
 
-    let reloaded = load_entry_status_row_pg_tx(&mut tx, entry_id).await?;
-    if reloaded.status != ENTRY_STATUS_DONE {
+    let expected_dispatch_id = options
+        .dispatch_id
+        .clone()
+        .or_else(|| current.dispatch_id.clone());
+    let expected_slot_index = options.slot_index.or(current.slot_index);
+    let (reloaded_run_id, reloaded_status, reloaded_dispatch_id, reloaded_slot_index) =
+        lock_entry_dispatch_identity_on_pg_tx(&mut tx, entry_id).await?;
+    if reloaded_run_id != current.run_id {
         tx.rollback().await.map_err(|error| {
             format!("rollback stale postgres auto-queue reactivation {entry_id}: {error}")
         })?;
-        return update_entry_status_on_pg(
-            pool,
-            entry_id,
-            ENTRY_STATUS_DISPATCHED,
-            trigger_source,
-            options,
-        )
-        .await;
+        return Err(format!(
+            "auto-queue entry {entry_id} run identity changed during reactivation"
+        ));
+    }
+    if reloaded_status == ENTRY_STATUS_DISPATCHED {
+        if reloaded_dispatch_id != expected_dispatch_id
+            || reloaded_slot_index != expected_slot_index
+        {
+            tx.rollback().await.map_err(|error| {
+                format!("rollback stale postgres auto-queue reactivation {entry_id}: {error}")
+            })?;
+            return Err(format!(
+                "auto-queue entry {entry_id} dispatch identity changed during reactivation"
+            ));
+        }
+        ensure_done_entry_run_live_on_pg_tx(&mut tx, &reloaded_run_id, entry_id).await?;
+        tx.commit().await.map_err(|error| {
+            format!("commit accepted postgres auto-queue reactivation {entry_id}: {error}")
+        })?;
+        return Ok(EntryStatusUpdateResult {
+            run_id: reloaded_run_id,
+            from_status: ENTRY_STATUS_DISPATCHED.to_string(),
+            to_status: ENTRY_STATUS_DISPATCHED.to_string(),
+            changed: false,
+        });
+    }
+    if reloaded_status != ENTRY_STATUS_DONE
+        || reloaded_dispatch_id != current.dispatch_id
+        || reloaded_slot_index != current.slot_index
+    {
+        tx.rollback().await.map_err(|error| {
+            format!("rollback stale postgres auto-queue reactivation {entry_id}: {error}")
+        })?;
+        return Err(format!(
+            "auto-queue entry {entry_id} dispatch identity changed during reactivation"
+        ));
     }
 
-    ensure_done_entry_run_live_on_pg_tx(&mut tx, &reloaded.run_id, entry_id).await?;
+    ensure_done_entry_run_live_on_pg_tx(&mut tx, &reloaded_run_id, entry_id).await?;
 
     let result = update_entry_status_on_pg_tx(
         &mut tx,
@@ -140,16 +174,11 @@ pub async fn reactivate_done_entry_on_pg(
     .await?;
     if !result.changed {
         tx.rollback().await.map_err(|error| {
-            format!("rollback postgres auto-queue reactivation {entry_id}: {error}")
+            format!("rollback stale postgres auto-queue reactivation {entry_id}: {error}")
         })?;
-        return update_entry_status_on_pg(
-            pool,
-            entry_id,
-            ENTRY_STATUS_DISPATCHED,
-            trigger_source,
-            options,
-        )
-        .await;
+        return Err(format!(
+            "auto-queue entry {entry_id} dispatch identity changed during reactivation"
+        ));
     }
 
     tx.commit()
@@ -197,6 +226,58 @@ pub(crate) async fn ensure_done_entry_run_live_on_pg_tx(
                 "auto-queue run {run_id} changed while reactivating completed entry {entry_id}"
             ));
         }
+
+        let (agent_id, slot_index, thread_group) =
+            sqlx::query_as::<_, (Option<String>, Option<i64>, i64)>(
+                "SELECT agent_id,
+                        slot_index::BIGINT,
+                        COALESCE(thread_group, 0)::BIGINT
+                 FROM auto_queue_entries
+                 WHERE id = $1
+                   AND run_id = $2",
+            )
+            .bind(entry_id)
+            .bind(run_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|error| {
+                format!("load postgres auto-queue entry {entry_id} slot identity: {error}")
+            })?
+            .ok_or_else(|| {
+                format!("auto-queue entry {entry_id} disappeared while reactivating run {run_id}")
+            })?;
+        if let Some(slot_index) = slot_index {
+            let reacquired_slot = sqlx::query(
+                "UPDATE auto_queue_slots
+                 SET assigned_run_id = $1,
+                     assigned_thread_group = $2,
+                     updated_at = NOW()
+                 WHERE agent_id = $3
+                   AND slot_index = $4
+                   AND (assigned_run_id IS NULL OR assigned_run_id = $1)",
+            )
+            .bind(run_id)
+            .bind(thread_group)
+            .bind(agent_id.as_deref())
+            .bind(slot_index)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| {
+                format!(
+                    "reacquire postgres auto-queue slot {slot_index} for revived run {run_id}: {error}"
+                )
+            })?
+            .rows_affected();
+            if reacquired_slot != 1 {
+                return Err(format!(
+                    "auto-queue slot {slot_index} for entry {entry_id} is owned by another run: refusing to revive {run_id}"
+                ));
+            }
+        }
+
+        // A completion notification cannot be recalled. If reopen revives a
+        // run after that notification was published, resumed activity may be
+        // observed after the completion notification.
     } else if !is_live_run_status(&run_status) {
         return Err(format!(
             "auto-queue run {run_id} is {run_status}: refusing to reactivate done entry {entry_id}"
@@ -204,6 +285,28 @@ pub(crate) async fn ensure_done_entry_run_live_on_pg_tx(
     }
 
     Ok(())
+}
+
+/// Lock and return the full entry identity used to accept a concurrent
+/// done-to-dispatched transition. Status alone is not sufficient: a different
+/// dispatch or slot is a competing owner, not an idempotent target state.
+pub(crate) async fn lock_entry_dispatch_identity_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entry_id: &str,
+) -> Result<(String, String, Option<String>, Option<i64>), String> {
+    sqlx::query_as::<_, (String, String, Option<String>, Option<i64>)>(
+        "SELECT run_id, status, dispatch_id, slot_index::BIGINT
+         FROM auto_queue_entries
+         WHERE id = $1
+         FOR UPDATE",
+    )
+    .bind(entry_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| {
+        format!("lock postgres auto-queue entry {entry_id} dispatch identity: {error}")
+    })?
+    .ok_or_else(|| format!("auto-queue entry not found while locking identity: {entry_id}"))
 }
 
 fn dispatch_json_field(document: Option<&str>, field: &str) -> Option<String> {
@@ -449,12 +552,16 @@ pub async fn update_entry_status_on_pg(
                      dispatched_at = NOW(),
                      completed_at = NULL
                  WHERE id = $3
-                   AND status = $4",
+                   AND status = $4
+                   AND dispatch_id IS NOT DISTINCT FROM $5
+                   AND slot_index IS NOT DISTINCT FROM $6",
             )
             .bind(effective_dispatch_id.as_deref())
             .bind(effective_slot_index)
             .bind(entry_id)
             .bind(&current.status)
+            .bind(current.dispatch_id.as_deref())
+            .bind(current.slot_index)
             .execute(&mut *tx)
             .await
             .map_err(|error| format!("update auto-queue entry {entry_id} -> dispatched: {error}"))?
@@ -751,12 +858,16 @@ pub async fn update_entry_status_on_pg_tx(
                  dispatched_at = NOW(),
                  completed_at = NULL
              WHERE id = $3
-               AND status = $4",
+               AND status = $4
+               AND dispatch_id IS NOT DISTINCT FROM $5
+               AND slot_index IS NOT DISTINCT FROM $6",
         )
         .bind(effective_dispatch_id.as_deref())
         .bind(effective_slot_index)
         .bind(entry_id)
         .bind(&current.status)
+        .bind(current.dispatch_id.as_deref())
+        .bind(current.slot_index)
         .execute(&mut **tx)
         .await
         .map_err(|error| format!("update auto-queue entry {entry_id} -> dispatched: {error}"))?
@@ -1850,6 +1961,82 @@ mod tests {
             )
         );
 
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reactivate_reentry_rejects_competing_dispatch_identity_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        setup_entry(&pool, "completed", ENTRY_STATUS_DONE).await;
+        seed_dispatch(&pool, "dispatch-requested-reactivation").await;
+        seed_dispatch(&pool, "dispatch-competing-reactivation").await;
+        let mut token_holder = begin_run_token_holder(&pg_db.database_url).await;
+
+        let reactivate_pool = pool.clone();
+        let reactivation = tokio::spawn(async move {
+            reactivate_done_entry_on_pg(
+                &reactivate_pool,
+                "gate-entry",
+                "pmd_reopen",
+                &EntryStatusUpdateOptions {
+                    dispatch_id: Some("dispatch-requested-reactivation".to_string()),
+                    slot_index: Some(0),
+                },
+            )
+            .await
+        });
+        wait_for_run_token_waiter(&mut token_holder).await;
+        sqlx::query(
+            "UPDATE auto_queue_runs
+             SET status = 'active', completed_at = NULL
+             WHERE id = 'gate-run'",
+        )
+        .execute(&mut token_holder)
+        .await
+        .expect("revive run in competing reactivator");
+        sqlx::query(
+            "UPDATE auto_queue_entries
+             SET status = 'dispatched',
+                 dispatch_id = 'dispatch-competing-reactivation',
+                 slot_index = 0,
+                 completed_at = NULL
+             WHERE id = 'gate-entry'",
+        )
+        .execute(&mut token_holder)
+        .await
+        .expect("attach competing dispatch while owning the run token");
+        sqlx::query("COMMIT")
+            .execute(&mut token_holder)
+            .await
+            .expect("commit competing reactivation and release token");
+
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), reactivation)
+            .await
+            .expect("reactivation finishes after competing attachment")
+            .expect("join competing reactivation task")
+            .expect_err("a different dispatch identity must reject reactivation reentry");
+        assert!(error.contains("dispatch identity"), "{error}");
+        let identity = sqlx::query_as::<_, (String, Option<String>, Option<i64>)>(
+            "SELECT status, dispatch_id, slot_index
+             FROM auto_queue_entries
+             WHERE id = 'gate-entry'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load preserved competing entry identity");
+        assert_eq!(
+            identity,
+            (
+                ENTRY_STATUS_DISPATCHED.to_string(),
+                Some("dispatch-competing-reactivation".to_string()),
+                Some(0)
+            )
+        );
+        assert_eq!(transition_count(&pool).await, 0);
+
+        drop(token_holder);
         pool.close().await;
         pg_db.drop().await;
     }

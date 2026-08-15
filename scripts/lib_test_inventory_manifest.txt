@@ -222,6 +222,7 @@ db::auto_queue::entries::tests::paused_run_allows_dispatched_transition_pg
 db::auto_queue::entries::tests::reactivate_completed_run_waits_for_token_and_records_history_pg
 db::auto_queue::entries::tests::reactivate_done_entry_rejects_unapproved_transition_source_pg
 db::auto_queue::entries::tests::reactivate_rechecks_cancelled_run_after_waiting_for_token_pg
+db::auto_queue::entries::tests::reactivate_reentry_rejects_competing_dispatch_identity_pg
 db::auto_queue::entries::tests::restoring_run_allows_dispatched_transition_pg
 db::auto_queue::entries::tests::terminal_dispatch_commit_blocks_and_rejects_late_attachment_pg
 db::auto_queue::phase_gate_verdict::tests::canonical_snapshot_infers_pass
@@ -670,8 +671,11 @@ engine::ops::http_ops::tests::resolve_http_post_timeout_is_default_without_armed
 engine::ops::http_ops::tests::sanitize_request_target_rejects_control_chars
 engine::ops::http_ops::tests::short_content_length_is_a_transport_error
 engine::ops::kanban_ops::tests::reopen_accepts_entry_concurrently_attached_to_target_state_pg
+engine::ops::kanban_ops::tests::reopen_completed_run_reacquires_unowned_slot_pg
+engine::ops::kanban_ops::tests::reopen_completed_run_rejects_slot_owned_by_another_run_pg
 engine::ops::kanban_ops::tests::reopen_done_entry_rejects_unapproved_transition_source_pg
 engine::ops::kanban_ops::tests::reopen_raw_pg_revives_completed_run_and_routes_done_entry_pg
+engine::ops::kanban_ops::tests::reopen_rejects_entry_concurrently_attached_to_different_dispatch_pg
 engine::ops::kanban_ops::tests::set_status_raw_pg_allows_fresh_pass_verdict_after_review_entered_at
 engine::ops::kanban_ops::tests::set_status_raw_pg_allows_no_rule_in_progress_to_requested_forced
 engine::ops::kanban_ops::tests::set_status_raw_pg_allows_requested_to_in_progress_with_active_dispatch
