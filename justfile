@@ -157,5 +157,10 @@ test-postgres:
     # coverage ratchet. Select the module explicitly instead of adding it to
     # the shrink-only debt baseline.
     cargo test --lib engine::ops::auto_queue_ops::tests -- --nocapture --test-threads=1
+    # #5356 S3: the retry-ownership PG regressions live in a module named
+    # `tests` (the hardening audit only recognizes that module name as a
+    # test region), so its path carries no pg-name marker. Select it
+    # explicitly for the same coverage-ratchet reason as above.
+    cargo test --lib db::dispatched_sessions::tests -- --nocapture --test-threads=1
 
 check: fmt-check lint cargo-check test
