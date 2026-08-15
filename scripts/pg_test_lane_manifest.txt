@@ -761,6 +761,7 @@ services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_
 services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::terminal_failure_reconciles_phase_gate_and_releases_semaphore_pg
 services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::terminal_fallback_finalizes_run_once_pg
 services::discord::turn_bridge::intake_settlement::tests::cancel_prompt_replace_commit_closes_row_pg
+services::discord::turn_bridge::intake_settlement::tests::fresh_off_and_observe_leave_own_rows_for_worker_pg
 services::discord::turn_bridge::intake_settlement::tests::preserved_for_retry_leaves_row_open_pg
 services::discord::turn_bridge::intake_settlement::tests::relay_owner_handoff_closes_row_pg
 services::discord::turn_bridge::intake_settlement::tests::settle_does_not_touch_terminal_or_pre_spawn_states_pg
@@ -768,7 +769,6 @@ services::discord::turn_bridge::intake_settlement::tests::settle_from_spawned_an
 services::discord::turn_bridge::intake_settlement::tests::settle_is_idempotent_and_preserves_dispatch_audit_fields_pg
 services::discord::turn_bridge::intake_settlement::tests::settlement_rolls_back_with_caller_transaction_pg
 services::discord::turn_bridge::intake_settlement::tests::settlement_row_lock_timeout_is_swallowed_and_counted_pg
-services::discord::turn_bridge::intake_settlement::tests::stage_below_settle_still_settles_the_bridges_own_row_pg
 services::discord::turn_bridge::intake_settlement::tests::stale_capability_probe_after_downgrade_cannot_block_own_row_settlement_pg
 services::discord::turn_bridge::intake_settlement::tests::worker_mark_done_and_settlement_converge_under_either_order_pg
 services::discord::turn_bridge::recovery_text::tests::session_retry_context_restore_after_take_round_trips_raw_context_pg

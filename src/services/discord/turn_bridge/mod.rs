@@ -258,6 +258,7 @@ pub(super) fn spawn_turn_bridge(
     mut bridge: TurnBridgeContext,
 ) {
     use tracing::Instrument;
+    intake_settlement::bind_bridge_turn_snapshot(&shared_owned, &mut bridge);
     let bridge_turn_id = discord_turn_id(
         &bridge.provider,
         bridge.channel_id,
@@ -787,7 +788,6 @@ pub(super) fn spawn_turn_bridge(
         #[cfg(unix)]
         let bridge_tui_gate_outcome_early =
             post_loop_finalize_output.bridge_tui_gate_outcome_early;
-
         let terminal_outcome_delivery_output =
             terminal_outcome_delivery::run_terminal_outcome_delivery(
                 terminal_outcome_delivery::TerminalOutcomeDeliveryContext {

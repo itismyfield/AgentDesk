@@ -1624,17 +1624,18 @@ fn is_legacy_delivery_journal_mode(mode: &DeliveryJournalMode) -> bool {
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum IntakeDeliverySettlementStage {
-    /// Preserve the legacy lifecycle; skip probing and rollout observation.
+    /// Disable fresh-turn dispatched stamping and bridge-exit settlement, and skip the schema
+    /// probe. The turn path performs no intake-delivery database work.
     #[default]
     Off,
-    /// In this build, Observe is a no-op on the turn path. Rollout observation telemetry ships
-    /// with the settlement slice (S-W2).
+    /// Reserve the observation stage while leaving fresh turns database-neutral: no probe,
+    /// dispatched stamp, or bridge-exit settlement runs on the turn path.
     Observe,
-    /// Probe and calculate settle_and_sweep, whose consumer has not shipped in this build.
-    /// Dispatched stamping is clamped off.
+    /// Probe the schema and, when ready, enable bridge-exit settlement and stale-debt sweep.
+    /// Dispatched stamping remains disabled.
     Settle,
-    /// Request handoff stamps and calculate settle_and_sweep, whose consumer has not shipped in
-    /// this build. Dispatched stamping is clamped off.
+    /// Probe the schema and, when ready, enable dispatched handoff stamping, bridge-exit
+    /// settlement, and stale-debt sweep.
     Enforce,
 }
 

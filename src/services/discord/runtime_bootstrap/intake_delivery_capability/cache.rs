@@ -1,6 +1,8 @@
 use super::{SchemaReason, SettlementCapabilities, capabilities_for, probe_schema};
 use crate::config::IntakeDeliverySettlementStage;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const STAMP_DISPATCHED: u64 = 1;
@@ -12,6 +14,7 @@ const GENERATION_SHIFT: u32 = 2;
 #[derive(Debug, Default)]
 pub(in crate::services::discord) struct SettlementCapabilityCache {
     state: AtomicU64,
+    bridge_turn_snapshots: Mutex<HashMap<i64, SettlementCapabilities>>,
     #[cfg(test)]
     stale_results: AtomicU64,
 }
@@ -28,14 +31,17 @@ impl SettlementCapabilityCache {
         bits
     }
 
-    /// Starts a config resolution and invalidates active settlement authority
-    /// immediately when the new stage is below `Settle`.
+    /// Starts a config resolution. A downgrade below Enforce clears stamping
+    /// immediately, while a downgrade below Settle clears both capabilities.
+    /// See the four-part snapshot contract on [`SettlementCapabilities`].
     fn begin_resolution(&self, stage: IntakeDeliverySettlementStage) -> u64 {
         let mut current = self.state.load(Ordering::Acquire);
         loop {
             let generation = (current >> GENERATION_SHIFT) + 1;
-            let retained_bits = if stage >= IntakeDeliverySettlementStage::Settle {
+            let retained_bits = if stage >= IntakeDeliverySettlementStage::Enforce {
                 current & CAPABILITY_MASK
+            } else if stage >= IntakeDeliverySettlementStage::Settle {
+                current & SETTLE_AND_SWEEP
             } else {
                 0
             };
@@ -89,6 +95,36 @@ impl SettlementCapabilityCache {
             stamp_dispatched: bits & STAMP_DISPATCHED != 0,
             settle_and_sweep: bits & SETTLE_AND_SWEEP != 0,
         }
+    }
+
+    /// Transfers the pre-await stamp snapshot to the adjacent bridge spawn.
+    /// See the four-part snapshot contract on [`SettlementCapabilities`].
+    pub(in crate::services::discord) fn record_bridge_turn_snapshot(
+        &self,
+        outbox_id: i64,
+        snapshot: SettlementCapabilities,
+    ) {
+        self.bridge_turn_snapshots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(outbox_id, snapshot);
+    }
+
+    /// Consumes the snapshot recorded by dispatched stamping. Non-intake and restored bridges
+    /// have no adjacent stamp call and therefore start from the cache's current snapshot.
+    /// See the four-part snapshot contract on [`SettlementCapabilities`].
+    pub(in crate::services::discord) fn take_bridge_turn_snapshot(
+        &self,
+        outbox_id: Option<i64>,
+    ) -> SettlementCapabilities {
+        outbox_id
+            .and_then(|outbox_id| {
+                self.bridge_turn_snapshots
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&outbox_id)
+            })
+            .unwrap_or_else(|| self.current())
     }
 
     #[cfg(test)]
@@ -367,5 +403,32 @@ mod tests {
             }
         ));
         assert_eq!(cache.current(), SettlementCapabilities::default());
+    }
+
+    #[test]
+    fn downgrade_clears_new_stamps_but_preserves_the_recorded_turn_snapshot() {
+        let cache = SettlementCapabilityCache::default();
+        let ready = SettlementCapabilities {
+            stamp_dispatched: true,
+            settle_and_sweep: true,
+        };
+        cache.replace(ready);
+        cache.record_bridge_turn_snapshot(5071, ready);
+
+        cache.begin_resolution(IntakeDeliverySettlementStage::Settle);
+        assert_eq!(
+            cache.current(),
+            SettlementCapabilities {
+                stamp_dispatched: false,
+                settle_and_sweep: true,
+            }
+        );
+        cache.begin_resolution(IntakeDeliverySettlementStage::Off);
+        assert_eq!(cache.current(), SettlementCapabilities::default());
+        assert_eq!(cache.take_bridge_turn_snapshot(Some(5071)), ready);
+        assert_eq!(
+            cache.take_bridge_turn_snapshot(Some(5071)),
+            SettlementCapabilities::default()
+        );
     }
 }

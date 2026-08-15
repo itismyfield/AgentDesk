@@ -4208,6 +4208,7 @@ services::discord::runtime_bootstrap::gateway_lease_recovery_tests::stale_prior_
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::superseded_promotion_preserves_new_owner_fence_and_flags
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::supersession_chain_keeps_owner_until_final_cancel_and_recovers_all_runtimes
 services::discord::runtime_bootstrap::intake_delivery_capability::cache::tests::cache_round_trips_the_two_capability_bits
+services::discord::runtime_bootstrap::intake_delivery_capability::cache::tests::downgrade_clears_new_stamps_but_preserves_the_recorded_turn_snapshot
 services::discord::runtime_bootstrap::intake_delivery_capability::cache::tests::probe_policy_is_boot_upward_and_same_only_at_settle_or_higher
 services::discord::runtime_bootstrap::intake_delivery_capability::cache::tests::stale_probe_generation_cannot_replace_a_newer_downgrade
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests::capability_accepts_public_0109_under_hostile_search_path_pg
@@ -5638,6 +5639,7 @@ services::discord::turn_bridge::headless_delivery::headless_delivery_tests::user
 services::discord::turn_bridge::headless_delivery::intake_outbox_argument::tests::delivery_argument_carries_inflight_intake_outbox_identity
 services::discord::turn_bridge::intake_settlement::tests::cancel_prompt_replace_commit_closes_row_pg
 services::discord::turn_bridge::intake_settlement::tests::classify_preserve_precedes_every_terminal_receipt
+services::discord::turn_bridge::intake_settlement::tests::fresh_off_and_observe_leave_own_rows_for_worker_pg
 services::discord::turn_bridge::intake_settlement::tests::preserved_for_retry_leaves_row_open_pg
 services::discord::turn_bridge::intake_settlement::tests::relay_owner_handoff_closes_row_pg
 services::discord::turn_bridge::intake_settlement::tests::settle_does_not_touch_terminal_or_pre_spawn_states_pg
@@ -5646,7 +5648,6 @@ services::discord::turn_bridge::intake_settlement::tests::settle_is_idempotent_a
 services::discord::turn_bridge::intake_settlement::tests::settlement_rolls_back_with_caller_transaction_pg
 services::discord::turn_bridge::intake_settlement::tests::settlement_row_lock_timeout_is_swallowed_and_counted_pg
 services::discord::turn_bridge::intake_settlement::tests::settlement_sql_error_is_swallowed_and_counted
-services::discord::turn_bridge::intake_settlement::tests::stage_below_settle_still_settles_the_bridges_own_row_pg
 services::discord::turn_bridge::intake_settlement::tests::stale_capability_probe_after_downgrade_cannot_block_own_row_settlement_pg
 services::discord::turn_bridge::intake_settlement::tests::terminal_outcome_delivery_awaits_one_settlement_call_with_branch_flags
 services::discord::turn_bridge::intake_settlement::tests::worker_mark_done_and_settlement_converge_under_either_order_pg

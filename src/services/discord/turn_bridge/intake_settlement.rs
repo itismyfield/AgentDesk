@@ -19,6 +19,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// This is a service-local safety ceiling, not a measured contention claim.
 const SETTLEMENT_LOCK_TIMEOUT: &str = "1s";
 
+/// Binds the pre-await stamp snapshot into the existing bridge inflight state.
+/// See the four-part snapshot contract on [`SettlementCapabilities`].
+pub(super) fn bind_bridge_turn_snapshot(
+    shared: &std::sync::Arc<SharedData>,
+    bridge: &mut super::TurnBridgeContext,
+) {
+    let snapshot = shared
+        .intake_delivery_capabilities
+        .take_bridge_turn_snapshot(bridge.inflight_state.intake_outbox_id());
+    bridge
+        .inflight_state
+        .bind_intake_delivery_capabilities(snapshot);
+}
+
 /// The disposition of a bridge turn at its one normal terminal exit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::services::discord) enum BridgeTurnDisposition {
@@ -159,10 +173,9 @@ async fn settle_with_lock_timeout(
 ///
 /// The inflight identity is read here for terminal settlement. The headless
 /// delivery argument assembler also reads it into a parked, no-effect seam.
-/// A present inflight identity is this bridge's own spawned/dispatched debt, so
-/// terminal settlement deliberately ignores a later capability downgrade.
-/// The snapshot remains an explicit argument to make that read-your-own-debt
-/// exception visible at the call site; it still gates new stamping and sweep.
+/// The immutable turn snapshot follows the contract declared on
+/// `SettlementCapabilities`: fresh Off/Observe turns return without database
+/// access, while an Enforce turn remains authorized after a later downgrade.
 /// SQL errors are counted and swallowed after the bridge classified the turn as
 /// committed, handed off to a relay owner, or complete with no retained retry;
 /// changing those outcomes here could create a duplicate retry.
@@ -170,7 +183,7 @@ pub(in crate::services::discord) async fn settle_intake_row_at_bridge_exit(
     shared: &std::sync::Arc<SharedData>,
     inflight_state: &InflightTurnState,
     disposition: BridgeTurnDisposition,
-    _caps: SettlementCapabilities,
+    caps: SettlementCapabilities,
 ) {
     let Some(source) = disposition.settlement_source() else {
         return;
@@ -178,6 +191,9 @@ pub(in crate::services::discord) async fn settle_intake_row_at_bridge_exit(
     let Some(outbox_id) = inflight_state.intake_outbox_id() else {
         return;
     };
+    if !caps.settle_and_sweep {
+        return;
+    }
     let Some(pool) = shared.pg_pool.as_ref() else {
         return;
     };

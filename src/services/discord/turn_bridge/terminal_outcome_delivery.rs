@@ -814,6 +814,8 @@ pub(super) async fn run_terminal_outcome_delivery(
             inflight_state.effective_busy_followup_retry_user_msg_id(),
         );
     }
+    // Consume, rather than re-sample, the stamp snapshot under the
+    // `SettlementCapabilities` contract.
     intake_settlement::settle_intake_row_at_bridge_exit(
         &shared_owned,
         &inflight_state,
@@ -824,7 +826,7 @@ pub(super) async fn run_terminal_outcome_delivery(
             bridge_skip_holder_owns_inflight,
             bridge_output_owner.is_some(),
         ),
-        shared_owned.intake_delivery_capabilities.current(),
+        inflight_state.intake_delivery_capabilities(),
     )
     .await;
     TerminalOutcomeDeliveryOutput {

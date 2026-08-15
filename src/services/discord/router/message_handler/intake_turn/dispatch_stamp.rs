@@ -23,8 +23,14 @@ pub(super) async fn stamp_before_bridge_handoff(
     let Some(outbox_id) = intake_outbox_id else {
         return;
     };
+    // This pre-await sample is the snapshot contract declared on
+    // `SettlementCapabilities`; record it for the adjacent bridge spawn after
+    // the stamp attempt finishes.
     let capabilities = shared.intake_delivery_capabilities.current();
     if !capabilities.stamp_dispatched {
+        shared
+            .intake_delivery_capabilities
+            .record_bridge_turn_snapshot(outbox_id, capabilities);
         return;
     }
     let Some(pool) = shared.pg_pool.as_ref() else {
@@ -32,6 +38,9 @@ pub(super) async fn stamp_before_bridge_handoff(
             intake_outbox_id = outbox_id,
             "intake bridge handoff has no PostgreSQL pool for dispatched stamping"
         );
+        shared
+            .intake_delivery_capabilities
+            .record_bridge_turn_snapshot(outbox_id, capabilities);
         return;
     };
     match crate::db::intake_outbox_dispatch_stamp::mark_dispatched(pool, outbox_id).await {
@@ -54,6 +63,9 @@ pub(super) async fn stamp_before_bridge_handoff(
             "failed to stamp intake bridge handoff as dispatched"
         ),
     }
+    shared
+        .intake_delivery_capabilities
+        .record_bridge_turn_snapshot(outbox_id, capabilities);
 }
 
 #[cfg(test)]

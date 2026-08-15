@@ -270,6 +270,7 @@ async fn enforce_downgrade_stops_stamping_but_keeps_settling_pg() {
         );
     let before_downgrade = seed_spawned(&pool, "before-downgrade").await;
     stamp_before_bridge_handoff(&shared, Some(before_downgrade)).await;
+    let turn_snapshot = capabilities.take_bridge_turn_snapshot(Some(before_downgrade));
     assert_eq!(
         status(&pool, before_downgrade).await,
         IntakeOutboxStatus::Dispatched
@@ -293,7 +294,7 @@ async fn enforce_downgrade_stops_stamping_but_keeps_settling_pg() {
         &shared,
         &state_for(before_downgrade),
         BridgeTurnDisposition::Committed,
-        capabilities.current(),
+        turn_snapshot,
     )
     .await;
     assert_eq!(
