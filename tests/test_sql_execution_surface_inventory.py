@@ -28,7 +28,7 @@ class SqlExecutionSurfaceInventoryTests(unittest.TestCase):
         stdout = io.StringIO()
         stderr = io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            rc = scanner.main(["--repo-root", str(root), *args])
+            rc = scanner.main(list(args), root)
         return rc, stdout.getvalue(), stderr.getvalue()
 
     def test_enumerates_only_tracked_three_roots(self):
@@ -60,6 +60,11 @@ class SqlExecutionSurfaceInventoryTests(unittest.TestCase):
 
             self.write(root, "policies/bad.txt", "fixture")
             with self.tracked(["policies/bad.txt"]):
+                with self.assertRaises(scanner.InventoryError):
+                    scanner.enumerate_tracked_inputs(root)
+
+            nested = self.write(root, "migrations/postgres/archive/0001.sql", "SELECT 1")
+            with self.tracked([nested.relative_to(root).as_posix()]):
                 with self.assertRaises(scanner.InventoryError):
                     scanner.enumerate_tracked_inputs(root)
 
@@ -115,15 +120,30 @@ agentdesk.db.query(
 const sql = "SELECT id FROM cards";
 agentdesk.db.query("SELECT id FROM cards");
 agentdesk.db.query("SELECT " + "id FROM cards");
+agentdesk.db.query(`SELECT id FROM cards`);
 agentdesk.db.query(sql);
+agentdesk.db.query("SELECT id FROM " + table);
 agentdesk.db.query(`SELECT id FROM ${table}`);
 agentdesk.db.query(makeSql());
 """,
             )
             records = scanner.scan_js_calls(path, root)
             self.assertEqual([record.classification for record in records], [
-                "STATIC", "STATIC", "UNRESOLVED", "UNRESOLVED", "UNRESOLVED"
+                "STATIC", "STATIC", "STATIC", "UNRESOLVED", "UNRESOLVED",
+                "UNRESOLVED", "UNRESOLVED",
             ])
+            self.assertEqual(records[1].table_tokens, ("cards",))
+            self.assertEqual(records[4].table_tokens, ())
+            boundaries = [
+                ('"a" + "b"', "STATIC"),
+                ('"a" + suffix', "UNRESOLVED"),
+                ('`a ${suffix}`', "UNRESOLVED"),
+                ('makeSql()', "UNRESOLVED"),
+            ]
+            self.assertEqual(
+                [scanner.classify_sql_argument(value, "javascript") for value, _ in boundaries],
+                [expected for _, expected in boundaries],
+            )
 
     def test_rust_literal_raw_and_dynamic_boundaries(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -133,21 +153,26 @@ agentdesk.db.query(makeSql());
                 "src/sql.rs",
                 r'''
 // sqlx::query("FROM decoy")
+let _decoy = r#"sqlx::query("DELETE FROM hidden")"#;
 let _a = sqlx::query(r#"SELECT id FROM cards"#);
 let _b = sqlx::query("UPDATE cards SET seen = 1");
-let _c = sqlx::query(format!("SELECT * FROM {}", table));
-let _d = sqlx::query(sql);
-let _e = QueryBuilder::new(runtime_table);
-let _f = db_execute_raw_pg(sql);
-let _g = execute_policy_sql(format!("DELETE FROM {}", table));
-let _h = rewrite_insert_conflict("INSERT OR REPLACE INTO cards (id) VALUES (?)");
+let _c = sqlx::query::<Row>(r##"SELECT id FROM cards"##);
+let _d = sqlx::query(format!(r#"SELECT * FROM {}"#, table));
+let _e = sqlx::query(sql);
+let _f = QueryBuilder::new("SELECT id FROM cards");
+let _g = db_execute_raw_pg(sql);
+let _h = execute_policy_sql(format!("DELETE FROM {}", table));
+let _i = rewrite_insert_conflict("INSERT OR REPLACE INTO cards (id) VALUES (?)");
 ''',
             )
             records = scanner.scan_rust_calls(path, root)
             by_api = {record.api: record for record in records if record.api != "sqlx::query"}
             query_classes = [record.classification for record in records if record.api == "sqlx::query"]
-            self.assertEqual(query_classes[:2], ["STATIC", "STATIC"])
+            self.assertEqual(query_classes, [
+                "STATIC", "STATIC", "STATIC", "UNRESOLVED", "UNRESOLVED"
+            ])
             self.assertEqual(by_api["QueryBuilder::new"].classification, "UNRESOLVED")
+            self.assertEqual(by_api["QueryBuilder::new"].table_tokens, ())
             self.assertEqual(by_api["db_execute_raw_pg"].classification, "UNRESOLVED")
             self.assertEqual(by_api["execute_policy_sql"].classification, "UNRESOLVED")
             self.assertEqual(by_api["rewrite_insert_conflict"].classification, "STATIC")
@@ -175,14 +200,25 @@ let _h = rewrite_insert_conflict("INSERT OR REPLACE INTO cards (id) VALUES (?)")
             self.write(root, "policies/b.js", "agentdesk.db.query(sql);\n")
             with self.tracked(["policies/b.js", "policies/a.js"]):
                 result = scanner.scan_inventory(root)
-            self.assertEqual([record.path for record in result.records], ["policies/a.js", "policies/b.js"])
+            with self.tracked(["policies/a.js", "policies/b.js"]):
+                shuffled = scanner.scan_inventory(root)
+            self.assertEqual([record.path for record in result], ["policies/a.js", "policies/b.js"])
+            self.assertEqual(
+                [(record.stable_key(), record.fingerprint) for record in result],
+                [(record.stable_key(), record.fingerprint) for record in shuffled],
+            )
             with self.assertRaises(scanner.InventoryError):
-                scanner.validate_records([result.records[0], result.records[0]])
+                scanner.validate_records([result[0], result[0]])
+
+            with self.tracked(["policies/a.js"]):
+                rc, out, err = self.run_main(root)
+            self.assertEqual((rc, bool(out), err), (0, True, ""))
 
             self.write(root, "policies/bad.txt", "bad")
             with self.tracked(["policies/bad.txt"]):
                 rc, _out, err = self.run_main(root)
             self.assertEqual(rc, 1)
+            self.assertIn("UNRESOLVED:", err)
             self.assertIn("LIMITS:", err)
 
     def test_unresolved_and_limits_remain_in_success_output(self):
@@ -199,6 +235,20 @@ let _h = rewrite_insert_conflict("INSERT OR REPLACE INTO cards (id) VALUES (?)")
             self.assertIn("dynamic.js agentdesk.db.execute", out)
             for limit in scanner.LIMITS:
                 self.assertIn(limit, out)
+
+            help_out = io.StringIO()
+            with contextlib.redirect_stdout(help_out):
+                with self.assertRaises(SystemExit) as exit_status:
+                    scanner.main(["--help"])
+            self.assertEqual(exit_status.exception.code, 0)
+            for definition in scanner.CLASSIFICATION_DEFINITIONS.splitlines():
+                self.assertIn(definition, help_out.getvalue())
+
+            static = self.write(root, "policies/static.js", 'agentdesk.db.query("SELECT 1");\n')
+            with self.tracked([static.relative_to(root).as_posix()]):
+                rc, static_out, err = self.run_main(root)
+            self.assertEqual((rc, err), (0, ""))
+            self.assertIn("UNRESOLVED:\n  - (none observed; absence is not completeness evidence)", static_out)
 
 
 if __name__ == "__main__":
