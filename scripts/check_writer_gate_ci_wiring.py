@@ -27,6 +27,7 @@ from pathlib import Path
 
 
 CI_SCRIPT = Path("scripts/ci-script-checks.sh")
+FORBIDDEN_AGGREGATE_TEXT = "--write-baseline"
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,10 @@ REQUIRED_INVOCATIONS = (
     RequiredInvocation(
         "SQL execution surface inventory gate",
         '"$PYTHON" scripts/check_sql_execution_surface_inventory.py --check',
+    ),
+    RequiredInvocation(
+        "SQL execution surface baseline dirty-worktree guard",
+        "git diff --exit-code scripts/sql_execution_surface_inventory.json",
     ),
     RequiredInvocation(
         "SQL execution surface inventory unittest module",
@@ -96,6 +101,12 @@ def check_text(text: str) -> list[str]:
     errors: list[str] = []
     positions: dict[str, int] = {}
 
+    if FORBIDDEN_AGGREGATE_TEXT in text:
+        errors.append(
+            f"aggregate must not contain {FORBIDDEN_AGGREGATE_TEXT!r}; baseline repins "
+            "must remain an explicit reviewed operation"
+        )
+
     for required in REQUIRED_INVOCATIONS:
         matches = [index for index, line in enumerate(lines) if line == required.command]
         if len(matches) != 1:
@@ -115,6 +126,12 @@ def check_text(text: str) -> list[str]:
         if gate_label in positions and test_label in positions:
             if positions[gate_label] >= positions[test_label]:
                 errors.append(f"{gate_label} must run before {test_label}")
+
+    gate_label = "SQL execution surface inventory gate"
+    dirty_label = "SQL execution surface baseline dirty-worktree guard"
+    if gate_label in positions and dirty_label in positions:
+        if positions[dirty_label] != positions[gate_label] + 1:
+            errors.append(f"{dirty_label} must run immediately after {gate_label}")
 
     return errors
 

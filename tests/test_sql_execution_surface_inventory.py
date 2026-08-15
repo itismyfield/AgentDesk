@@ -1,6 +1,7 @@
 import contextlib
 import dataclasses
 import io
+import json
 import os
 import subprocess
 import tempfile
@@ -47,7 +48,7 @@ class SqlExecutionSurfaceInventoryTests(unittest.TestCase):
             self.assertEqual(git.call_args.args[0][-3:], ["src", "policies", "migrations/postgres"])
             self.assertEqual(next(i.kind for i in inputs if i.rel_path.endswith(".json")), "MIGRATION_METADATA")
             with self.tracked(["migrations/postgres/immutable-checksums.json"]):
-                rc, out, err = self.run_main(root)
+                rc, out, err = self.run_main(root, "--verbose")
             self.assertEqual((rc, err), (0, ""))
             self.assertIn("NON_SQL_TRACKED", out)
             self.assertIn("immutable-checksums.json", out)
@@ -165,7 +166,7 @@ let _i = execute_policy_sql(Some(&pool), "UPDATE cards SET seen = 1", &[]);
 let _j = db_query_raw(pool.clone(), "SELECT id FROM cards", "[]");
 let _k = sqlx::raw_sql("CREATE TABLE things(id int)");
 let _l = sqlx::raw_sql(&format!("DROP TABLE {}", table));
-let _m = rewrite_insert_conflict("INSERT OR REPLACE INTO cards (id) VALUES (?)");
+let _m = rewrite_insert_conflict("INSERT OR REPLACE INTO cards (id) VALUES (?)", ConflictMode::Replace);
 ''',
             )
             records = scanner.scan_rust_calls(path, root)
@@ -237,8 +238,15 @@ let _m = rewrite_insert_conflict("INSERT OR REPLACE INTO cards (id) VALUES (?)")
             self.assertEqual((rc, err), (0, ""))
             self.assertIn("UNRESOLVED:", out)
             self.assertIn("dynamic.js agentdesk.db.execute", out)
+            self.assertIn("ROOT COUNTS:", out)
+            self.assertNotIn("STATIC_FILE migrations/postgres/MIGRATION", out)
             for limit in scanner.LIMITS:
                 self.assertIn(limit, out)
+
+            with self.tracked(names):
+                rc, verbose_out, err = self.run_main(root, "--verbose")
+            self.assertEqual((rc, err), (0, ""))
+            self.assertIn("STATIC_FILE migrations/postgres/MIGRATION", verbose_out)
 
             help_out = io.StringIO()
             with contextlib.redirect_stdout(help_out), self.assertRaises(SystemExit) as exit_status:
@@ -281,6 +289,8 @@ let _m = rewrite_insert_conflict("INSERT OR REPLACE INTO cards (id) VALUES (?)")
             for rows in changed:
                 with self.subTest(rows=rows):
                     self.assertTrue(scanner.baseline_drift(rows, baseline))
+            drift_output = scanner._render([record], scanner.baseline_drift([], baseline), root)
+            self.assertTrue(drift_output.rstrip().endswith(scanner.REPIN_GUIDANCE))
             unresolved = dataclasses.replace(record, classification="UNRESOLVED")
             reverse = scanner.baseline_snapshot([unresolved], "8" * 40)
             self.assertTrue(scanner.baseline_drift([record], reverse))
@@ -293,6 +303,68 @@ let _m = rewrite_insert_conflict("INSERT OR REPLACE INTO cards (id) VALUES (?)")
             self.assertTrue(scanner.baseline_drift(scanner.scan_migrations(tracked), migration_baseline))
             renamed = dataclasses.replace(tracked, rel_path="migrations/postgres/0002.sql")
             self.assertTrue(scanner.baseline_drift(scanner.scan_migrations(renamed), migration_baseline))
+
+            empty_path = root / "empty.json"
+            empty_path.write_text(json.dumps({
+                "schema_version": 1,
+                "measured_at_sha": "8" * 40,
+                "records": [],
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(scanner.InventoryError, "records"):
+                scanner.load_baseline(empty_path)
+            with self.assertRaisesRegex(scanner.InventoryError, "must not be empty"):
+                scanner.baseline_snapshot([], "8" * 40)
+
+    def test_gated_modes_fail_closed_on_empty_scan_and_missing_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.object(scanner, "scan_inventory", return_value=[]):
+                rc, out, err = self.run_main(root, "--write-baseline")
+            self.assertEqual((rc, out), (1, ""))
+            self.assertIn("inventory record set is empty", err)
+            for required_root in scanner.REQUIRED_ROOTS:
+                self.assertIn(f"inventory root {required_root} has 0 records", err)
+            self.assertFalse((root / scanner.BASELINE_PATH).exists())
+
+        record = scanner.SurfaceRecord(
+            "src", "RUST", "src/lib.rs", "sqlx::query", "query", "STATIC",
+            "sha256:" + "1" * 64,
+        )
+        errors = scanner.cardinality_errors([record])
+        self.assertFalse(any("root src" in error for error in errors))
+        self.assertTrue(any("root policies" in error for error in errors))
+        self.assertTrue(any("root migrations/postgres" in error for error in errors))
+
+    def test_rewrite_table_name_decoy_rebinding_is_red(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = self.write(root, scanner.REWRITE_PATH, """
+fn rewrite_insert_conflict(sql: &str, mode: ConflictMode) {
+    let rest = sql;
+    let table_end = rest.len();
+    let table_name = rest[..table_end].trim();
+}
+""")
+            self.assertIsNone(scanner._last_rewrite_table_binding_error(root))
+            source.write_text("""
+fn rewrite_insert_conflict(sql: &str, mode: ConflictMode) {
+    let rest = sql;
+    let table_end = rest.len();
+    let table_name = rest[..table_end].trim();
+    let table_name = "auto_queue_runs";
+}
+""", encoding="utf-8")
+            error = scanner._last_rewrite_table_binding_error(root)
+            self.assertIsNotNone(error)
+            self.assertIn("last direct table_name binding", error)
+
+        records = [scanner.SurfaceRecord(
+            "src", "RUST", scanner.REWRITE_PATH, "rewrite_insert_conflict",
+            "rewrite_insert_conflict", "STATIC", "sha256:" + "2" * 64,
+        )]
+        self.assertEqual(scanner._rewrite_dynamic_records(records), [])
+        contract_errors = scanner.live_contract_errors(records, root)
+        self.assertTrue(any("lost rewrite_insert_conflict UNRESOLVED" in e for e in contract_errors))
 
     def test_live_known_blind_spots_and_auto_queue_runs_report(self):
         records = scanner.scan_inventory(scanner.REPO_ROOT)
@@ -312,9 +384,17 @@ let _m = rewrite_insert_conflict("INSERT OR REPLACE INTO cards (id) VALUES (?)")
         policy_path = "policies/lib/auto-queue-phase-gate.js"
         policy_lines = (scanner.REPO_ROOT / policy_path).read_text(encoding="utf-8").splitlines()
         for symbol in ("beginPhaseGateGraceWindow", "clearPhaseGateGraceWindow"):
-            start = next(i for i, line in enumerate(policy_lines) if line.startswith(f"function {symbol}(") )
-            end = next(i for i, line in enumerate(policy_lines[start + 1:], start + 1)
-                       if line.startswith("function "))
+            start = next(
+                (i for i, line in enumerate(policy_lines) if line.startswith(f"function {symbol}(") ),
+                None,
+            )
+            self.assertIsNotNone(start, f"missing grace writer function {symbol}")
+            end = next(
+                (i for i, line in enumerate(policy_lines[start + 1:], start + 1)
+                 if line.startswith("function ")),
+                None,
+            )
+            self.assertIsNotNone(end, f"missing function boundary after {symbol}")
             calls = [r for r in matching(policy_path, "agentdesk.db.execute", "STATIC")
                      if start < r.line <= end and "auto_queue_runs" in r.table_tokens]
             self.assertEqual(len(calls), 1, symbol)
@@ -325,6 +405,12 @@ let _m = rewrite_insert_conflict("INSERT OR REPLACE INTO cards (id) VALUES (?)")
         for root in ("src", "policies", "migrations/postgres"):
             self.assertIn(f"root={root}", report)
         self.assertIn("UNRESOLVED dynamic_boundary=src/engine/ops/db_ops.rs rewrite_insert_conflict.table_name", report)
+        self.assertIn("records=2", report)
+
+        self.assertEqual(scanner.live_contract_errors(records, scanner.REPO_ROOT), [])
+        rendered = scanner._render(records, repo_root=scanner.REPO_ROOT)
+        for symbol, path, table in scanner.GUARD_EXPECTED_CONTRACTS:
+            self.assertIn(f"{symbol} {path} table={table} records=1", rendered)
 
 
 if __name__ == "__main__":

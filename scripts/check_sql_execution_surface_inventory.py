@@ -9,13 +9,16 @@ STATIC: plain string/raw-string or literal-only concatenation.
 UNRESOLVED: variable, format!, macro, template interpolation, function return, or computed table identifier.
 STATIC_FILE: whole tracked migration file fingerprint; SQL meaning is not parsed.
 NON_SQL_TRACKED: allowlisted tracked migration metadata; content is not interpreted.
+GUARD_EXPECTED=blocked: a known static policy write that the current sql_guard rejects.
 
-Success means only that fingerprints were observed in the tracked inputs. It
-does not claim that every SQL writer was found or that runtime writes are
-impossible. Parenthesized literals and comment-separated literal concatenation
-may conservatively remain UNRESOLVED. Query APIs do not prove read-only SQL,
-migration deployment state is unknown, and this inventory neither blocks
-runtime calls nor repairs existing guard mismatches.
+Success means only that fingerprints were observed in the three enumerated
+tracked roots. With ``--check``, it additionally means that the live record set
+matches the baseline in both directions. It does not claim that every SQL
+writer was found or that runtime writes are impossible. Parenthesized literals
+and comment-separated literal concatenation may conservatively remain
+UNRESOLVED. Query APIs do not prove read-only SQL, migration deployment state
+is unknown, and this inventory neither blocks runtime calls nor repairs
+existing guard mismatches.
 """
 
 from __future__ import annotations
@@ -44,7 +47,8 @@ BASELINE_FIELDS = ("root", "kind", "path", "api", "symbol", "classification", "f
 CLASSIFICATION_DEFINITIONS = """STATIC: plain string/raw-string or literal-only concatenation.
 UNRESOLVED: variable, format!, macro, template interpolation, function return, or computed table identifier.
 STATIC_FILE: whole tracked migration file fingerprint; SQL meaning is not parsed.
-NON_SQL_TRACKED: allowlisted tracked migration metadata; content is not interpreted."""
+NON_SQL_TRACKED: allowlisted tracked migration metadata; content is not interpreted.
+GUARD_EXPECTED=blocked: a known static policy write that the current sql_guard rejects."""
 JS_APIS = {"query": "agentdesk.db.query", "execute": "agentdesk.db.execute"}
 RUST_API_SQL_ARGUMENT = {
     "sqlx::query": 0, "sqlx::query_as": 0, "sqlx::query_scalar": 0,
@@ -69,6 +73,7 @@ MIGRATION_NON_SQL_ALLOWLIST = frozenset({
     "migrations/postgres/immutable-checksums.json",
 })
 LIMITS = (
+    "enumerated roots are only tracked src/**/*.rs, policies/**, and migrations/postgres/*; migrations/001_initial.sql is outside scope",
     "exact-spelling lexical calls only; no compiler, name resolution, or SQL semantic parsing",
     "unsupported aliases, re-exports, macros, indirection, eval, generated and untracked inputs may be absent",
     "runtime SQL, interpolation, format!/computed identifiers, reachability, commit, and DB state are not proven",
@@ -77,6 +82,16 @@ LIMITS = (
     "migration deployment state, ordering, and successful application are not proven",
     "this inventory is not a runtime blocker and does not repair existing raw-writer/guard mismatches",
     "parenthesized or comment-separated literals may conservatively remain UNRESOLVED",
+)
+REPIN_GUIDANCE = (
+    "의도된 surface 변경이면: --write-baseline 재실행 → JSON diff 를 커밋에 포함해 "
+    "리뷰 표면에 노출 → measured_at_sha 갱신"
+)
+REQUIRED_ROOTS = ("src", "policies", "migrations/postgres")
+REWRITE_PATH = "src/engine/ops/db_ops.rs"
+GUARD_EXPECTED_CONTRACTS = (
+    ("rotateActiveRunSweepCursor", "policies/lib/auto-queue-dispatch.js", "auto_queue_entries"),
+    ("timeouts._section_E review auto-accept", "policies/timeouts/review-auto-accept.js", "task_dispatches"),
 )
 TABLE_TOKEN_RE = re.compile(
     r"\b(?:from|join|into|update|delete\s+from|insert\s+into)\s+"
@@ -488,6 +503,8 @@ def scan_inventory(repo_root: Path = REPO_ROOT) -> list[SurfaceRecord]:
 
 
 def baseline_snapshot(records: Sequence[SurfaceRecord], measured_sha: str) -> dict[str, object]:
+    if not records:
+        raise InventoryError("baseline records must not be empty")
     return {
         "schema_version": 1,
         "measured_at_sha": measured_sha,
@@ -510,7 +527,7 @@ def load_baseline(path: Path) -> dict[str, object]:
     if data.get("schema_version") != 1 or not re.fullmatch(r"[0-9a-f]{40}", data.get("measured_at_sha", "")):
         raise InventoryError("baseline schema or measured_at_sha is invalid")
     rows = data.get("records")
-    if not isinstance(rows, list) or any(set(row) != set(BASELINE_FIELDS) for row in rows):
+    if not isinstance(rows, list) or not rows or any(set(row) != set(BASELINE_FIELDS) for row in rows):
         raise InventoryError("baseline records do not match the line-number-free schema")
     keys = [tuple(row[field] for field in BASELINE_FIELDS) for row in rows]
     if keys != sorted(keys) or len(keys) != len(set(keys)):
@@ -528,6 +545,105 @@ def baseline_drift(records: Sequence[SurfaceRecord], baseline: dict[str, object]
     return errors
 
 
+def cardinality_errors(records: Sequence[SurfaceRecord]) -> list[str]:
+    """Enforce a conservative fail-closed floor for both gated CLI modes."""
+    errors = []
+    if not records:
+        errors.append("inventory record set is empty")
+    for root in REQUIRED_ROOTS:
+        count = sum(record.root == root for record in records)
+        if count < 1:
+            errors.append(f"inventory root {root} has {count} records; expected at least 1")
+    return errors
+
+
+def _rewrite_dynamic_records(records: Sequence[SurfaceRecord]) -> list[SurfaceRecord]:
+    return [
+        record for record in records
+        if record.path == REWRITE_PATH
+        and record.api == "rewrite_insert_conflict"
+        and record.classification == "UNRESOLVED"
+    ]
+
+
+def _last_rewrite_table_binding_error(repo_root: Path) -> str | None:
+    """Check the current direct, one-line ``table_name`` binding lexically.
+
+    This deliberately narrow vocabulary catches a later direct rebinding in
+    ``rewrite_insert_conflict``. It cannot prove Rust data flow or detect an
+    indirect bypass through another function; doing that would require the AST
+    or broader semantic analysis that this inventory explicitly does not use.
+    """
+    path = repo_root / REWRITE_PATH
+    try:
+        source = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return f"known blind spot source cannot be read: {REWRITE_PATH}: {exc}"
+    masked = _mask_rust(source)
+    signature = "fn rewrite_insert_conflict("
+    start = masked.find(signature)
+    if start < 0:
+        return "known blind spot function rewrite_insert_conflict was not observed"
+    open_brace = masked.find("{", start + len(signature))
+    if open_brace < 0:
+        return "known blind spot function rewrite_insert_conflict has no lexical body"
+    depth = 0
+    body_end = -1
+    for index in range(open_brace, len(masked)):
+        if masked[index] == "{":
+            depth += 1
+        elif masked[index] == "}":
+            depth -= 1
+            if depth == 0:
+                body_end = index
+                break
+    if body_end < 0:
+        return "known blind spot function rewrite_insert_conflict has an unterminated lexical body"
+    body = masked[open_brace + 1 : body_end]
+    bindings = re.findall(
+        r"(?m)^[ \t]*let[ \t]+(?:mut[ \t]+)?table_name[ \t]*=[ \t]*([^;\n]+);[ \t]*$",
+        body,
+    )
+    expected = "rest[..table_end].trim()"
+    if not bindings or re.sub(r"\s+", "", bindings[-1]) != expected:
+        return (
+            "known blind spot requires the last direct table_name binding in "
+            f"rewrite_insert_conflict to be {expected}"
+        )
+    return None
+
+
+def _guard_expected_matches(
+    records: Sequence[SurfaceRecord], path: str, table: str
+) -> list[SurfaceRecord]:
+    return [
+        record for record in records
+        if record.path == path
+        and record.api == "agentdesk.db.execute"
+        and record.classification == "STATIC"
+        and table in record.table_tokens
+    ]
+
+
+def live_contract_errors(records: Sequence[SurfaceRecord], repo_root: Path) -> list[str]:
+    """Pin live known-blind-spot and already-blocked writer observations."""
+    errors = []
+    dynamic = _rewrite_dynamic_records(records)
+    if not dynamic:
+        errors.append("known blind spot lost rewrite_insert_conflict UNRESOLVED records")
+    binding_error = _last_rewrite_table_binding_error(repo_root)
+    if binding_error:
+        errors.append(binding_error)
+    for symbol, path, table in GUARD_EXPECTED_CONTRACTS:
+        matches = _guard_expected_matches(records, path, table)
+        if len(matches) != 1:
+            errors.append(
+                f"GUARD_EXPECTED=blocked {symbol}: expected 1 {path} write to {table}, "
+                f"observed {len(matches)}"
+            )
+    return errors
+
+
 def _auto_queue_runs_report(records: Sequence[SurfaceRecord], repo_root: Path) -> list[str]:
     lines = ["AUTO_QUEUE_RUNS OBSERVED (not a complete runtime table set):"]
     for root in ("src", "policies"):
@@ -538,31 +654,37 @@ def _auto_queue_runs_report(records: Sequence[SurfaceRecord], repo_root: Path) -
         if record.kind == "MIGRATION" and b"auto_queue_runs" in (repo_root / record.path).read_bytes()
     ]
     lines.append(f"  - root=migrations/postgres tracked_token_files={len(migrations)} (SQL meaning not parsed)")
-    source = repo_root / "src/engine/ops/db_ops.rs"
-    observed = source.is_file() and re.search(
-        r"let\s+table_name\s*=\s*rest\s*\[\.\.table_end\]\s*\.trim\(\);",
-        source.read_text(encoding="utf-8"),
-    )
-    detail = "src/engine/ops/db_ops.rs rewrite_insert_conflict.table_name" if observed else "(not observed)"
-    lines.append(f"  - UNRESOLVED dynamic_boundary={detail}")
+    dynamic = _rewrite_dynamic_records(records)
+    detail = f"{REWRITE_PATH} rewrite_insert_conflict.table_name" if dynamic else "(not observed)"
+    lines.append(f"  - UNRESOLVED dynamic_boundary={detail} records={len(dynamic)}")
     return lines
 
 
 def _render(
     records: Sequence[SurfaceRecord], errors: Sequence[str] = (), repo_root: Path = REPO_ROOT,
-    baseline_status: str = "",
+    baseline_status: str = "", verbose: bool = False,
 ) -> str:
     lines = [
         "SQL execution surface inventory: tracked inputs에서 관측된 fingerprint",
         f"RECORDS: {len(records)}",
     ]
-    for record in records:
-        tables = ",".join(record.table_tokens) or "-"
-        location = f" line={record.line}" if record.line is not None else ""
-        lines.append(
-            f"{record.classification} {record.root}/{record.kind} {record.path} "
-            f"{record.api} fingerprint={record.fingerprint} tables={tables}{location}"
-        )
+    lines.append("ROOT COUNTS:")
+    lines.extend(f"  - {root}={sum(record.root == root for record in records)}" for root in REQUIRED_ROOTS)
+    if verbose or errors:
+        for record in records:
+            tables = ",".join(record.table_tokens) or "-"
+            location = f" line={record.line}" if record.line is not None else ""
+            guard_expected = ""
+            if any(
+                record in _guard_expected_matches(records, path, table)
+                for _symbol, path, table in GUARD_EXPECTED_CONTRACTS
+            ):
+                guard_expected = " GUARD_EXPECTED=blocked"
+            lines.append(
+                f"{record.classification} {record.root}/{record.kind} {record.path} "
+                f"{record.api} fingerprint={record.fingerprint} tables={tables}"
+                f"{guard_expected}{location}"
+            )
     lines.append("UNRESOLVED:")
     unresolved = [record for record in records if record.classification == "UNRESOLVED"]
     lines.extend(
@@ -571,6 +693,10 @@ def _render(
     )
     if not unresolved:
         lines.append("  - (none observed; absence is not completeness evidence)")
+    lines.append("GUARD_EXPECTED=blocked:")
+    for symbol, path, table in GUARD_EXPECTED_CONTRACTS:
+        matches = _guard_expected_matches(records, path, table)
+        lines.append(f"  - {symbol} {path} table={table} records={len(matches)}")
     lines.extend(_auto_queue_runs_report(records, Path(repo_root)))
     if baseline_status:
         lines.append(baseline_status)
@@ -579,6 +705,8 @@ def _render(
     if errors:
         lines.append("ERRORS:")
         lines.extend(f"  - {error}" for error in errors)
+        if any(error.startswith("baseline GONE:") or error.startswith("baseline UNLISTED:") for error in errors):
+            lines.append(REPIN_GUIDANCE)
     return "\n".join(lines) + "\n"
 
 
@@ -594,6 +722,7 @@ def main(argv: Sequence[str] | None = None, repo_root: Path = REPO_ROOT) -> int:
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--check", action="store_true", help="compare live observations with the baseline")
     modes.add_argument("--write-baseline", action="store_true", help="record the live observations as the baseline")
+    parser.add_argument("--verbose", action="store_true", help="print every inventory record on success")
     args = parser.parse_args(argv)
     root = Path(repo_root).resolve()
     baseline_status = ""
@@ -601,12 +730,15 @@ def main(argv: Sequence[str] | None = None, repo_root: Path = REPO_ROOT) -> int:
         records = scan_inventory(root)
         errors = []
         baseline_path = root / BASELINE_PATH
+        if args.check or args.write_baseline:
+            errors.extend(cardinality_errors(records))
+            errors.extend(live_contract_errors(records, root))
         if args.check:
             baseline = load_baseline(baseline_path)
             errors.extend(baseline_drift(records, baseline))
             if not errors:
                 baseline_status = "BASELINE: tracked-input observations match the recorded fingerprints"
-        elif args.write_baseline:
+        elif args.write_baseline and not errors:
             measured_sha = subprocess.run(
                 ["git", "rev-parse", "HEAD"], cwd=root, text=True, capture_output=True, check=True
             ).stdout.strip()
@@ -615,7 +747,11 @@ def main(argv: Sequence[str] | None = None, repo_root: Path = REPO_ROOT) -> int:
     except Exception as exc:  # failure output must retain UNRESOLVED and LIMITS
         records = []
         errors = [f"{type(exc).__name__}: {exc}"]
-    print(_render(records, errors, root, baseline_status), file=sys.stderr if errors else sys.stdout, end="")
+    print(
+        _render(records, errors, root, baseline_status, args.verbose),
+        file=sys.stderr if errors else sys.stdout,
+        end="",
+    )
     return 1 if errors else 0
 
 
