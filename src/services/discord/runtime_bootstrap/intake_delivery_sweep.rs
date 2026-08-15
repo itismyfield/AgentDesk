@@ -2,8 +2,8 @@
 
 use super::intake_delivery_capability::SettlementCapabilities;
 use crate::db::intake_outbox_delivery_proof::{
-    list_stale_dispatched, list_stale_spawned, open_stamp_debt_exists, settle_dispatched_unknown,
-    settle_spawned_unknown,
+    DURABLE_INFLIGHT_SESSION_SCOPE_SQL, durable_inflight_liveness_case_sql, list_stale_dispatched,
+    list_stale_spawned, open_stamp_debt_exists, settle_dispatched_unknown, settle_spawned_unknown,
 };
 use crate::services::discord::SharedData;
 use chrono::{DateTime, Duration, Utc};
@@ -28,9 +28,11 @@ pub(super) struct SweepCutoffs {
 impl SweepCutoffs {
     fn from_now(dispatched_secs: u64, spawned_secs: u64) -> Self {
         let now = Utc::now();
+        let dispatched_secs = dispatched_secs.min(crate::config::MAX_INTAKE_SWEEP_CUTOFF_SECS);
+        let spawned_secs = spawned_secs.min(crate::config::MAX_INTAKE_SWEEP_CUTOFF_SECS);
         Self {
-            dispatched: now - Duration::seconds(dispatched_secs.min(i64::MAX as u64) as i64),
-            spawned: now - Duration::seconds(spawned_secs.min(i64::MAX as u64) as i64),
+            dispatched: now - Duration::seconds(dispatched_secs as i64),
+            spawned: now - Duration::seconds(spawned_secs as i64),
             heartbeat_fresh: now - Duration::seconds(HEARTBEAT_FRESH_SECS),
         }
     }
@@ -50,8 +52,6 @@ pub(super) struct SweepStats {
     pub(super) skipped_ambiguous: usize,
     pub(super) truncated_dispatched: i64,
     pub(super) truncated_spawned: i64,
-    #[cfg(test)]
-    pub(super) truncation_logged: bool,
 }
 
 async fn live_signal(
@@ -60,26 +60,24 @@ async fn live_signal(
     heartbeat_fresh: DateTime<Utc>,
     absence_cutoff: DateTime<Utc>,
 ) -> Result<LiveSignal, sqlx::Error> {
-    let (rows, fresh, unresolved): (i64, bool, bool) = sqlx::query_as(
-        "SELECT count(*)::bigint,
-                COALESCE(bool_or(s.last_heartbeat >= $2), false),
-                COALESCE(bool_or(s.last_heartbeat IS NULL OR s.last_heartbeat >= $3), false)
+    let liveness = durable_inflight_liveness_case_sql(2, 3);
+    let session_scope = DURABLE_INFLIGHT_SESSION_SCOPE_SQL;
+    let statement = format!(
+        "SELECT COALESCE(MAX({liveness}), 0)::smallint
            FROM public.intake_outbox io
-           JOIN public.sessions s ON s.channel_id = io.channel_id
-          WHERE io.id = $1 AND s.status = 'turn_active'
-            AND s.active_dispatch_id IS NOT NULL",
-    )
-    .bind(outbox_id)
-    .bind(heartbeat_fresh)
-    .bind(absence_cutoff)
-    .fetch_one(pool)
-    .await?;
-    Ok(if fresh {
-        LiveSignal::Live
-    } else if rows > 0 && unresolved {
-        LiveSignal::Ambiguous
-    } else {
-        LiveSignal::Absent
+           JOIN public.sessions s ON {session_scope}
+          WHERE io.id = $1"
+    );
+    let signal: i16 = sqlx::query_scalar(&statement)
+        .bind(outbox_id)
+        .bind(heartbeat_fresh)
+        .bind(absence_cutoff)
+        .fetch_one(pool)
+        .await?;
+    Ok(match signal {
+        0 => LiveSignal::Absent,
+        2 => LiveSignal::Live,
+        _ => LiveSignal::Ambiguous,
     })
 }
 
@@ -100,10 +98,13 @@ async fn settle_dispatched(
     pool: &PgPool,
     id: i64,
     cutoff: DateTime<Utc>,
+    heartbeat_fresh: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
     #[cfg(unix)]
     {
-        match super::intake_delivery_reconciler::reconcile_row(pool, id, cutoff).await {
+        match super::intake_delivery_reconciler::reconcile_row(pool, id, cutoff, heartbeat_fresh)
+            .await
+        {
             Ok(
                 super::intake_delivery_reconciler::ReconcileOutcome::Done
                 | super::intake_delivery_reconciler::ReconcileOutcome::Unknown,
@@ -115,7 +116,7 @@ async fn settle_dispatched(
         }
     }
     let mut transaction = pool.begin().await?;
-    let won = settle_dispatched_unknown(&mut transaction, id, cutoff).await?;
+    let won = settle_dispatched_unknown(&mut transaction, id, cutoff, heartbeat_fresh).await?;
     transaction.commit().await?;
     Ok(won)
 }
@@ -124,9 +125,10 @@ async fn settle_spawned(
     pool: &PgPool,
     id: i64,
     cutoff: DateTime<Utc>,
+    heartbeat_fresh: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
     let mut transaction = pool.begin().await?;
-    let won = settle_spawned_unknown(&mut transaction, id, cutoff).await?;
+    let won = settle_spawned_unknown(&mut transaction, id, cutoff, heartbeat_fresh).await?;
     transaction.commit().await?;
     Ok(won)
 }
@@ -182,7 +184,7 @@ pub(super) async fn sweep_once(
             }
             _ => {}
         }
-        match settle_dispatched(pool, row.id, cutoffs.dispatched).await {
+        match settle_dispatched(pool, row.id, cutoffs.dispatched, cutoffs.heartbeat_fresh).await {
             Ok(true) => stats.settled += 1,
             Ok(false) => {}
             Err(error) => {
@@ -201,7 +203,7 @@ pub(super) async fn sweep_once(
             }
             _ => {}
         }
-        match settle_spawned(pool, row.id, cutoffs.spawned).await {
+        match settle_spawned(pool, row.id, cutoffs.spawned, cutoffs.heartbeat_fresh).await {
             Ok(true) => stats.settled += 1,
             Ok(false) => {}
             Err(error) => {
@@ -210,10 +212,6 @@ pub(super) async fn sweep_once(
         }
     }
     if stats.truncated_dispatched > 0 || stats.truncated_spawned > 0 {
-        #[cfg(test)]
-        {
-            stats.truncation_logged = true;
-        }
         tracing::warn!(
             remaining_dispatched = stats.truncated_dispatched,
             remaining_spawned = stats.truncated_spawned,

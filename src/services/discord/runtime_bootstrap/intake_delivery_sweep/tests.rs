@@ -4,6 +4,9 @@ use crate::db::intake_outbox_delivery_proof::{
     settle_null_clock_dispatched, settle_null_clock_spawned, settle_unknown_by_operator,
 };
 use crate::db::intake_outbox_status::IntakeOutboxStatus;
+use std::io::{self, Write};
+use std::sync::{Arc, Mutex};
+use tokio::time::{Duration as TokioDuration, timeout};
 
 const READY: SettlementCapabilities = SettlementCapabilities {
     stamp_dispatched: false,
@@ -76,16 +79,91 @@ async fn seed_clocked(
     seed(pool, key, status, Some(at)).await
 }
 
-async fn seed_inflight(pool: &PgPool, channel: &str, heartbeat: Option<DateTime<Utc>>) {
+async fn seed_inflight(
+    pool: &PgPool,
+    channel: &str,
+    heartbeat: Option<DateTime<Utc>>,
+    active_dispatch_id: Option<&str>,
+) {
     sqlx::query(
         "INSERT INTO public.sessions(session_key,status,active_dispatch_id,last_heartbeat,channel_id)
-         VALUES($1,'turn_active','dispatch-live',$2,$1)",
+         VALUES($1,'turn_active',$3,$2,$1)",
     )
     .bind(channel)
     .bind(heartbeat)
+    .bind(active_dispatch_id)
     .execute(pool)
     .await
     .expect("seed durable inflight signal");
+}
+
+async fn lock_intake_row(pool: &PgPool, id: i64) -> sqlx::Transaction<'_, sqlx::Postgres> {
+    let mut transaction = pool.begin().await.expect("begin intake row lock");
+    sqlx::query("SELECT id FROM public.intake_outbox WHERE id=$1 FOR UPDATE")
+        .bind(id)
+        .execute(&mut *transaction)
+        .await
+        .expect("lock intake row");
+    transaction
+}
+
+async fn wait_for_blocked_on(pool: &PgPool, holder_pid: i32, expected: i64) {
+    timeout(TokioDuration::from_secs(5), async {
+        loop {
+            let blocked: i64 = sqlx::query_scalar(
+                "SELECT count(*)::bigint FROM pg_stat_activity a
+                  WHERE $1 = ANY(pg_blocking_pids(a.pid))",
+            )
+            .bind(holder_pid)
+            .fetch_one(pool)
+            .await
+            .expect("observe blocked sweep settlement");
+            if blocked >= expected {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("sweep reaches locked terminal CAS");
+}
+
+async fn wait_for_spawned_settlement_waiters(pool: &PgPool, expected: i64) {
+    timeout(TokioDuration::from_secs(5), async {
+        loop {
+            let blocked: i64 = sqlx::query_scalar(
+                "SELECT count(*)::bigint FROM pg_stat_activity
+                  WHERE wait_event_type = 'Lock'
+                    AND query LIKE 'SELECT id FROM public.intake_outbox%'
+                    AND query LIKE '%status = ''spawned'' FOR UPDATE%'",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("observe concurrent sweep settlement waiters");
+            if blocked >= expected {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both sweeps reach the locked spawned settlement");
+}
+
+#[derive(Clone)]
+struct TestLogWriter {
+    buffer: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Write for TestLogWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.buffer.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 async fn settlement_case(row_status: IntakeOutboxStatus, key: &str, caps: SettlementCapabilities) {
@@ -136,15 +214,31 @@ async fn sweep_skips_rows_not_strictly_stale_pg() {
     finish(db, pool).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn sweep_is_bounded_and_ordered_and_logs_truncation_pg() {
     let (db, pool) = setup().await;
     let now = Utc::now();
     let oldest = seed_clocked(&pool, "oldest", S, now - Duration::hours(2)).await;
     let newer = seed_clocked(&pool, "newer", S, now - Duration::hours(1)).await;
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let writer_buffer = Arc::clone(&buffer);
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(move || TestLogWriter {
+            buffer: Arc::clone(&writer_buffer),
+        })
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
     let stats = sweep_once(&pool, READY, cutoffs(now), 1).await.unwrap();
+    drop(_guard);
+    let logs = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
     assert_eq!((stats.settled, stats.truncated_spawned), (1, 1));
-    assert!(stats.truncation_logged);
+    assert!(
+        logs.contains("intake delivery sweep batch limit left stale rows for a later tick")
+            && logs.contains("remaining_spawned=1"),
+        "truncation warn was not emitted; logs={logs}"
+    );
     assert_eq!(status(&pool, oldest).await, U);
     assert_eq!(status(&pool, newer).await, S);
     finish(db, pool).await;
@@ -157,6 +251,33 @@ fn sweep_spawns_exactly_once_per_process() {
     assert!(claim_active(&latch).is_none());
     assert!(claim_active(&latch).is_none());
     drop(active);
+}
+
+#[test]
+fn spawn_wiring_claims_process_latch_before_observed_task() {
+    let sweep_source = include_str!("../intake_delivery_sweep.rs");
+    let guard = sweep_source
+        .find("claim_active(&SWEEP_ACTIVE)")
+        .expect("spawn function claims the process latch");
+    let task = sweep_source
+        .find("task_supervisor::spawn_observed")
+        .expect("spawn function registers the observed task");
+    assert!(
+        guard < task,
+        "the process latch is claimed before task spawn"
+    );
+    assert_eq!(
+        include_str!("../framework_setup.rs")
+            .matches("spawn_intake_delivery_sweep(shared_clone.clone())")
+            .count(),
+        1,
+        "framework setup wires exactly one sweep spawn attempt per bot"
+    );
+}
+
+#[test]
+fn sweep_cutoffs_do_not_panic_for_extreme_values() {
+    let _ = SweepCutoffs::from_now(u64::MAX, u64::MAX);
 }
 
 #[tokio::test]
@@ -250,11 +371,11 @@ async fn spawned_settle_cli_does_not_insert_a_child_row_pg() {
 }
 
 #[tokio::test]
-async fn sweep_skips_live_signal_pg() {
+async fn sweep_skips_live_interactive_turn_without_dispatch_binding_pg() {
     let (db, pool) = setup().await;
     let now = Utc::now();
     let id = seed_clocked(&pool, "live", S, now - Duration::hours(1)).await;
-    seed_inflight(&pool, "live", Some(now)).await;
+    seed_inflight(&pool, "live", Some(now), None).await;
     let stats = sweep_once(&pool, READY, cutoffs(now), 200).await.unwrap();
     assert_eq!((stats.settled, stats.skipped_live), (0, 1));
     assert_eq!(status(&pool, id).await, S);
@@ -267,11 +388,80 @@ async fn sweep_defers_ambiguous_live_signal_pg() {
     let now = Utc::now();
     let stale = seed_clocked(&pool, "ambiguous-stale", D, now - Duration::hours(1)).await;
     let missing = seed_clocked(&pool, "ambiguous-null", S, now - Duration::hours(1)).await;
-    seed_inflight(&pool, "ambiguous-stale", Some(now - Duration::minutes(5))).await;
-    seed_inflight(&pool, "ambiguous-null", None).await;
+    seed_inflight(
+        &pool,
+        "ambiguous-stale",
+        Some(now - Duration::minutes(5)),
+        Some("dispatch-live"),
+    )
+    .await;
+    seed_inflight(&pool, "ambiguous-null", None, None).await;
     let stats = sweep_once(&pool, READY, cutoffs(now), 200).await.unwrap();
     assert_eq!((stats.settled, stats.skipped_ambiguous), (0, 2));
     assert_eq!(status(&pool, stale).await, D);
     assert_eq!(status(&pool, missing).await, S);
+    finish(db, pool).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn heartbeat_refresh_during_settlement_prevents_unknown_cas_pg() {
+    let (db, pool) = setup().await;
+    let now = Utc::now();
+    let id = seed_clocked(&pool, "heartbeat-race", S, now - Duration::hours(2)).await;
+    seed_inflight(
+        &pool,
+        "heartbeat-race",
+        Some(now - Duration::hours(2)),
+        None,
+    )
+    .await;
+    let mut holder = lock_intake_row(&pool, id).await;
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    let sweep_pool = pool.clone();
+    let sweeping = tokio::spawn(async move {
+        sweep_once(&sweep_pool, READY, cutoffs(now), 200)
+            .await
+            .unwrap()
+    });
+    wait_for_blocked_on(&pool, holder_pid, 1).await;
+    sqlx::query("UPDATE public.sessions SET last_heartbeat=$2 WHERE channel_id=$1")
+        .bind("heartbeat-race")
+        .bind(Utc::now())
+        .execute(&pool)
+        .await
+        .unwrap();
+    holder.rollback().await.unwrap();
+    let stats = sweeping.await.unwrap();
+    assert_eq!(stats.settled, 0);
+    assert_eq!(status(&pool, id).await, S);
+    finish(db, pool).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_sweep_once_calls_have_one_terminal_winner_pg() {
+    let (db, pool) = setup().await;
+    let now = Utc::now();
+    let id = seed_clocked(&pool, "concurrent-sweeps", S, now - Duration::hours(1)).await;
+    let holder = lock_intake_row(&pool, id).await;
+    let first_pool = pool.clone();
+    let second_pool = pool.clone();
+    let first = tokio::spawn(async move {
+        sweep_once(&first_pool, READY, cutoffs(now), 200)
+            .await
+            .unwrap()
+    });
+    let second = tokio::spawn(async move {
+        sweep_once(&second_pool, READY, cutoffs(now), 200)
+            .await
+            .unwrap()
+    });
+    wait_for_spawned_settlement_waiters(&pool, 2).await;
+    holder.rollback().await.unwrap();
+    let (first, second) = tokio::join!(first, second);
+    assert_eq!(first.unwrap().settled + second.unwrap().settled, 1);
+    assert_eq!(status(&pool, id).await, U);
     finish(db, pool).await;
 }

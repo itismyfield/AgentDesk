@@ -60,14 +60,14 @@ pub(crate) async fn cmd_dispatched_audit() -> Result<(), String> {
     Ok(())
 }
 
-/// Settles an open handoff without `force_fail_and_retry_as_new`, whose child insert could redeliver an already delivered turn.
+/// Settles an open handoff without `force_fail_and_retry_as_new`, whose child
+/// insert could redeliver an already delivered turn.
 pub(crate) async fn cmd_settle(
     id: i64,
     reason: &str,
     status: crate::db::intake_outbox_status::IntakeOutboxStatus,
 ) -> Result<(), String> {
     use crate::db::intake_outbox_delivery_proof as proof;
-    use crate::db::intake_outbox_status::IntakeOutboxStatus;
 
     let config = crate::config::load().map_err(|error| format!("load config: {error}"))?;
     let pool = crate::db::postgres::connect(&config)
@@ -75,17 +75,7 @@ pub(crate) async fn cmd_settle(
         .ok_or_else(|| "postgres pool unavailable for intake settlement".to_string())?;
     let result = async {
         let mut transaction = pool.begin().await?;
-        let null_clock = match status {
-            IntakeOutboxStatus::Dispatched => {
-                proof::settle_null_clock_dispatched(&mut transaction, id, reason).await?
-            }
-            IntakeOutboxStatus::Spawned => {
-                proof::settle_null_clock_spawned(&mut transaction, id, reason).await?
-            }
-            _ => false,
-        };
-        let won = null_clock
-            || proof::settle_unknown_by_operator(&mut transaction, id, status, reason).await?;
+        let won = proof::settle_unknown_by_operator(&mut transaction, id, status, reason).await?;
         transaction.commit().await?;
         Ok::<_, sqlx::Error>(won)
     }

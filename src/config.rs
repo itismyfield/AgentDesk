@@ -1642,6 +1642,10 @@ fn is_off_intake_delivery_settlement(stage: &IntakeDeliverySettlementStage) -> b
     *stage == IntakeDeliverySettlementStage::Off
 }
 
+/// A conservative bound that stays within chrono's duration and UTC datetime
+/// ranges while remaining far above any operational sweep TTL.
+pub(crate) const MAX_INTAKE_SWEEP_CUTOFF_SECS: u64 = i64::MAX as u64 / 1_000_000_000;
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct RuntimeSettingsConfig {
@@ -1877,9 +1881,11 @@ impl RuntimeSettingsConfig {
     pub(crate) fn intake_delivery_sweep_settings(&self) -> (u64, u64, i64) {
         (
             self.intake_delivery_sweep_dispatched_cutoff_secs
-                .unwrap_or(1800),
+                .unwrap_or(1800)
+                .min(MAX_INTAKE_SWEEP_CUTOFF_SECS),
             self.intake_delivery_sweep_spawned_cutoff_secs
-                .unwrap_or(1800),
+                .unwrap_or(1800)
+                .min(MAX_INTAKE_SWEEP_CUTOFF_SECS),
             self.intake_delivery_sweep_batch_limit
                 .unwrap_or(200)
                 .clamp(1, 500) as i64,
@@ -2026,6 +2032,20 @@ mod runtime_hook_registry_config_tests {
                 parsed
             );
         }
+    }
+
+    #[test]
+    fn intake_delivery_sweep_cutoffs_clamp_before_chrono_conversion() {
+        let runtime = RuntimeSettingsConfig {
+            intake_delivery_sweep_dispatched_cutoff_secs: Some(u64::MAX),
+            intake_delivery_sweep_spawned_cutoff_secs: Some(u64::MAX),
+            ..RuntimeSettingsConfig::default()
+        };
+        let (dispatched, spawned, _) = runtime.intake_delivery_sweep_settings();
+        assert_eq!(
+            (dispatched, spawned),
+            (MAX_INTAKE_SWEEP_CUTOFF_SECS, MAX_INTAKE_SWEEP_CUTOFF_SECS)
+        );
     }
 }
 

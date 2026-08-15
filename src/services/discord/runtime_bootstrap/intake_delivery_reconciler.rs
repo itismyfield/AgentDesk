@@ -27,9 +27,10 @@ pub(super) async fn reconcile_row(
     pool: &PgPool,
     outbox_id: i64,
     cutoff: DateTime<Utc>,
+    heartbeat_fresh: DateTime<Utc>,
 ) -> Result<ReconcileOutcome, sqlx::Error> {
     let mut transaction = pool.begin().await?;
-    let outcome = reconcile_in_tx(&mut transaction, outbox_id, cutoff).await?;
+    let outcome = reconcile_in_tx(&mut transaction, outbox_id, cutoff, heartbeat_fresh).await?;
     transaction.commit().await?;
     Ok(outcome)
 }
@@ -38,6 +39,7 @@ async fn reconcile_in_tx(
     connection: &mut PgConnection,
     outbox_id: i64,
     cutoff: DateTime<Utc>,
+    heartbeat_fresh: DateTime<Utc>,
 ) -> Result<ReconcileOutcome, sqlx::Error> {
     // Capture the mode once so a YAML reload cannot mix readers in this transaction.
     let journal_mode = crate::config_live_reload::current()
@@ -82,7 +84,7 @@ async fn reconcile_in_tx(
 
     if !delivered {
         return Ok(
-            if settle_dispatched_unknown(connection, outbox_id, cutoff).await? {
+            if settle_dispatched_unknown(connection, outbox_id, cutoff, heartbeat_fresh).await? {
                 ReconcileOutcome::Unknown
             } else {
                 ReconcileOutcome::Unchanged
@@ -213,7 +215,7 @@ mod postgres_tests {
             .expect("block journal judgment");
         let mut reducer = pool.begin().await.expect("begin reducer transaction");
         let reducing = tokio::spawn(async move {
-            let result = reconcile_in_tx(&mut reducer, row, cutoff).await;
+            let result = reconcile_in_tx(&mut reducer, row, cutoff, cutoff).await;
             reducer
                 .rollback()
                 .await
@@ -284,19 +286,21 @@ mod postgres_tests {
             .expect("refresh listed row");
 
         assert_eq!(
-            reconcile_row(&pool, done, cutoff).await.unwrap(),
+            reconcile_row(&pool, done, cutoff, cutoff).await.unwrap(),
             ReconcileOutcome::Done
         );
         assert_eq!(
-            reconcile_row(&pool, unknown, cutoff).await.unwrap(),
+            reconcile_row(&pool, unknown, cutoff, cutoff).await.unwrap(),
             ReconcileOutcome::Unknown
         );
         assert_eq!(
-            reconcile_row(&pool, equal, cutoff).await.unwrap(),
+            reconcile_row(&pool, equal, cutoff, cutoff).await.unwrap(),
             ReconcileOutcome::Unchanged
         );
         assert_eq!(
-            reconcile_row(&pool, refreshed, cutoff).await.unwrap(),
+            reconcile_row(&pool, refreshed, cutoff, cutoff)
+                .await
+                .unwrap(),
             ReconcileOutcome::Unchanged
         );
         for (id, status, at) in [
@@ -325,7 +329,11 @@ mod postgres_tests {
         .execute(&pool)
         .await
         .expect("install rollback trigger");
-        assert!(reconcile_row(&pool, rollback, cutoff).await.is_err());
+        assert!(
+            reconcile_row(&pool, rollback, cutoff, cutoff)
+                .await
+                .is_err()
+        );
         sqlx::raw_sql(
             "DROP TRIGGER reject_proof_done ON public.intake_outbox;
              DROP FUNCTION public.reject_proof_done()",
@@ -369,7 +377,7 @@ mod postgres_tests {
             .await
             .expect("set hostile search path");
         assert_eq!(
-            reconcile_in_tx(&mut transaction, hostile, cutoff)
+            reconcile_in_tx(&mut transaction, hostile, cutoff, cutoff)
                 .await
                 .unwrap(),
             ReconcileOutcome::Done

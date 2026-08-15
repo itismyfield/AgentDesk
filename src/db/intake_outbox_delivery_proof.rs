@@ -42,6 +42,30 @@ const LIST_STALE_DISPATCHED_SQL: &str = "SELECT id FROM public.intake_outbox
 const LIST_STALE_SPAWNED_SQL: &str = "SELECT id FROM public.intake_outbox
  WHERE status = $1 AND spawned_at < $2 ORDER BY spawned_at ASC, id ASC LIMIT $3";
 
+pub(crate) const DURABLE_INFLIGHT_SESSION_SCOPE_SQL: &str =
+    "s.channel_id = io.channel_id AND s.status = 'turn_active'";
+
+/// Builds the shared durable-session liveness classification used by both the
+/// sweep's cheap preflight and its authoritative terminal CAS.
+///
+/// The surrounding query must expose the intake row as `io` and the session as
+/// `s`. The result is 2 for a fresh live heartbeat, 1 for evidence that must be
+/// deferred, and 0 only when the active-session heartbeat has been absent past
+/// the state's cutoff. An active dispatch binding is deliberately irrelevant:
+/// ordinary interactive turns normally leave it NULL.
+pub(crate) fn durable_inflight_liveness_case_sql(
+    fresh_param: usize,
+    absence_param: usize,
+) -> String {
+    format!(
+        "CASE
+           WHEN s.last_heartbeat >= ${fresh_param} THEN 2
+           WHEN s.last_heartbeat IS NULL OR s.last_heartbeat >= ${absence_param} THEN 1
+           ELSE 0
+         END"
+    )
+}
+
 fn normalize_limit(limit: i64) -> i64 {
     limit.clamp(1, 500)
 }
@@ -159,20 +183,27 @@ pub(crate) async fn settle_dispatched_unknown(
     conn: &mut PgConnection,
     outbox_id: i64,
     cutoff: DateTime<Utc>,
+    heartbeat_fresh: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
     if !try_lock_dispatched_for_proof(conn, outbox_id).await? {
         return Ok(false);
     }
-    let result = sqlx::query(
-        "UPDATE public.intake_outbox SET status = $2, completed_at = NOW()
-         WHERE id = $1 AND status = $3 AND dispatched_at < $4",
-    )
-    .bind(outbox_id)
-    .bind(IntakeOutboxStatus::Unknown)
-    .bind(IntakeOutboxStatus::Dispatched)
-    .bind(cutoff)
-    .execute(&mut *conn)
-    .await?;
+    let liveness = durable_inflight_liveness_case_sql(3, 2);
+    let session_scope = DURABLE_INFLIGHT_SESSION_SCOPE_SQL;
+    let statement = format!(
+        "UPDATE public.intake_outbox AS io SET status = 'unknown', completed_at = NOW()
+         WHERE io.id = $1 AND io.status = 'dispatched' AND io.dispatched_at < $2
+           AND NOT EXISTS (
+             SELECT 1 FROM public.sessions s
+              WHERE {session_scope}
+                AND ({liveness}) <> 0)"
+    );
+    let result = sqlx::query(&statement)
+        .bind(outbox_id)
+        .bind(cutoff)
+        .bind(heartbeat_fresh)
+        .execute(&mut *conn)
+        .await?;
     Ok(result.rows_affected() == 1)
 }
 
@@ -180,18 +211,37 @@ pub(crate) async fn settle_spawned_unknown(
     conn: &mut PgConnection,
     outbox_id: i64,
     cutoff: DateTime<Utc>,
+    heartbeat_fresh: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query(
-        "UPDATE public.intake_outbox SET status = $2, completed_at = NOW()
-         WHERE id = $1 AND status = $3 AND spawned_at < $4",
+    let locked: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM public.intake_outbox
+          WHERE id = $1 AND status = 'spawned' FOR UPDATE",
     )
     .bind(outbox_id)
-    .bind(IntakeOutboxStatus::Unknown)
-    .bind(IntakeOutboxStatus::Spawned)
-    .bind(cutoff)
-    .execute(conn)
-    .await
-    .map(|result| result.rows_affected() == 1)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if locked.is_none() {
+        return Ok(false);
+    }
+    // The CAS gets a new READ COMMITTED snapshot after the row lock, so it
+    // includes heartbeat commits made while lock acquisition was delayed.
+    let liveness = durable_inflight_liveness_case_sql(3, 2);
+    let session_scope = DURABLE_INFLIGHT_SESSION_SCOPE_SQL;
+    let statement = format!(
+        "UPDATE public.intake_outbox AS io SET status = 'unknown', completed_at = NOW()
+         WHERE io.id = $1 AND io.status = 'spawned' AND io.spawned_at < $2
+           AND NOT EXISTS (
+             SELECT 1 FROM public.sessions s
+              WHERE {session_scope}
+                AND ({liveness}) <> 0)"
+    );
+    sqlx::query(&statement)
+        .bind(outbox_id)
+        .bind(cutoff)
+        .bind(heartbeat_fresh)
+        .execute(conn)
+        .await
+        .map(|result| result.rows_affected() == 1)
 }
 
 pub(crate) async fn settle_null_clock_dispatched(
@@ -432,7 +482,7 @@ mod tests {
         for (id, expected) in [(old, true), (equal, false), (fresh, false)] {
             let mut tx = pool.begin().await.expect("begin unknown transaction"); // agentdesk-audit: allow-unwrap — PostgreSQL test assertion
             assert_eq!(
-                settle_dispatched_unknown(&mut *tx, id, cutoff)
+                settle_dispatched_unknown(&mut *tx, id, cutoff, cutoff)
                     .await
                     .expect("settle unknown"), // agentdesk-audit: allow-unwrap — PostgreSQL test assertion
                 expected
@@ -451,7 +501,7 @@ mod tests {
         assert!(settled.1.is_some());
         let mut repeat = pool.begin().await.expect("begin repeat"); // agentdesk-audit: allow-unwrap — PostgreSQL test assertion
         assert!(
-            !settle_dispatched_unknown(&mut *repeat, old, cutoff)
+            !settle_dispatched_unknown(&mut *repeat, old, cutoff, cutoff)
                 .await
                 .expect("repeat unknown") // agentdesk-audit: allow-unwrap — PostgreSQL test assertion
         );
@@ -504,7 +554,7 @@ mod tests {
         let unknown = async {
             let mut tx = pool.begin().await.expect("begin unknown actor"); // agentdesk-audit: allow-unwrap — PostgreSQL test assertion
             unknown_gate.wait().await;
-            let won = settle_dispatched_unknown(&mut *tx, id, cutoff)
+            let won = settle_dispatched_unknown(&mut *tx, id, cutoff, cutoff)
                 .await
                 .expect("unknown CAS"); // agentdesk-audit: allow-unwrap — PostgreSQL test assertion
             tx.commit().await.expect("commit unknown actor"); // agentdesk-audit: allow-unwrap — PostgreSQL test assertion
