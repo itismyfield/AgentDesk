@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use super::intake_settlement;
 use super::output_lifecycle::BridgeOutputOwner;
 use super::stream_tick::{
     LongRunningPlaceholderActive, PendingLongRunningOpenAfterStateSave,
@@ -813,6 +814,19 @@ pub(super) async fn run_terminal_outcome_delivery(
             inflight_state.effective_busy_followup_retry_user_msg_id(),
         );
     }
+    intake_settlement::settle_intake_row_at_bridge_exit(
+        &shared_owned,
+        &inflight_state,
+        intake_settlement::classify(
+            terminal_delivery_committed,
+            status_panel_terminal_committed,
+            preserve_inflight_for_cleanup_retry,
+            bridge_skip_holder_owns_inflight,
+            bridge_output_owner.is_some(),
+        ),
+        shared_owned.intake_delivery_capabilities.current(),
+    )
+    .await;
     TerminalOutcomeDeliveryOutput {
         outcome: TerminalOutcomeDeliveryOutcome::Completed,
         shared_owned,

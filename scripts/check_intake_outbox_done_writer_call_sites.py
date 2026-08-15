@@ -8,8 +8,11 @@ with no gate underneath it protects nothing. This script changes no production
 behaviour; it records the production call sites that exist before the move.
 
 WHAT IS PINNED. The scope is deliberately the legacy
-`crate::db::intake_outbox::mark_done` writer and the future delivery-proof
-`crate::db::intake_outbox_delivery_proof::mark_done_from_delivery_proof` writer.
+`crate::db::intake_outbox::mark_done` writer, the delivery-proof
+`crate::db::intake_outbox_delivery_proof::mark_done_from_delivery_proof`
+writer, and the receipt-backed
+`crate::db::intake_outbox_delivery_proof::settle_intake_done_from_receipt`
+writer.
 EPIC #5071 says the worker's `Ok` stamp becomes `dispatched` and that only the
 terminal-receipt holder drives `done`; it does not move `claimed`, `accepted`,
 or `spawned`. Pinning those other lifecycle transitions here would block T2-
@@ -68,6 +71,7 @@ PROOF_OWNER = "src/services/discord/runtime_bootstrap/intake_delivery_reconciler
 SYMBOL_MODULES = {
     "mark_done": "intake_outbox",
     "mark_done_from_delivery_proof": "intake_outbox_delivery_proof",
+    "settle_intake_done_from_receipt": "intake_outbox_delivery_proof",
 }
 CFG_EXCLUSIVELY_TEST_RE = re.compile(
     r"#\[\s*cfg\s*\(\s*(?:test\s*\)|all\s*\(\s*test\s*(?:,|\)))"
@@ -271,6 +275,9 @@ def expected_call_sites(root: Path) -> dict[str, dict[str, int]]:
         "mark_done_from_delivery_proof": (
             {PROOF_OWNER: 1} if (root / PROOF_OWNER).is_file() else {}
         ),
+        "settle_intake_done_from_receipt": {
+            "src/services/discord/turn_bridge/intake_settlement.rs": 1
+        },
     }
 
 

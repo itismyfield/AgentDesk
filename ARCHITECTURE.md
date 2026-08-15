@@ -1020,6 +1020,7 @@ src/
 │   │   │   ├── followup_requeue.rs
 │   │   │   ├── guards.rs
 │   │   │   ├── headless_delivery.rs
+│   │   │   ├── intake_settlement.rs
 │   │   │   ├── memory_lifecycle.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── output_lifecycle.rs

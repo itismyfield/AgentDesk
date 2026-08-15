@@ -171,5 +171,9 @@ test-postgres:
     # #5356 S3: the ownership suite is a PostgreSQL-only out-of-line module;
     # keep its full module selected explicitly for the coverage ratchet.
     cargo test --lib db::dispatched_sessions::tests -- --nocapture --test-threads=1
+    # #5071 T2-W S-W2: settlement regressions use the hardening-audit `tests`
+    # module name, so select both no-marker modules explicitly in the PG lane.
+    cargo test --lib db::intake_outbox_delivery_proof::tests -- --nocapture --test-threads=1
+    cargo test --lib services::discord::turn_bridge::intake_settlement::tests -- --nocapture --test-threads=1
 
 check: fmt-check lint cargo-check test
