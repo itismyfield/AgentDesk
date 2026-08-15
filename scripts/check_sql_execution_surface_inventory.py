@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import stat
@@ -38,6 +39,8 @@ except ModuleNotFoundError:  # direct ``python3 scripts/<tool>.py`` invocation
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+BASELINE_PATH = Path("scripts/sql_execution_surface_inventory.json")
+BASELINE_FIELDS = ("root", "kind", "path", "api", "symbol", "classification", "fingerprint")
 CLASSIFICATION_DEFINITIONS = """STATIC: plain string/raw-string or literal-only concatenation.
 UNRESOLVED: variable, format!, macro, template interpolation, function return, or computed table identifier.
 STATIC_FILE: whole tracked migration file fingerprint; SQL meaning is not parsed.
@@ -484,7 +487,71 @@ def scan_inventory(repo_root: Path = REPO_ROOT) -> list[SurfaceRecord]:
     return validate_records(records)
 
 
-def _render(records: Sequence[SurfaceRecord], errors: Sequence[str] = ()) -> str:
+def baseline_snapshot(records: Sequence[SurfaceRecord], measured_sha: str) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "measured_at_sha": measured_sha,
+        "records": [
+            {field: getattr(record, field) for field in BASELINE_FIELDS}
+            for record in validate_records(records)
+        ],
+    }
+
+
+def write_baseline(path: Path, records: Sequence[SurfaceRecord], measured_sha: str) -> None:
+    path.write_text(
+        json.dumps(baseline_snapshot(records, measured_sha), indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def load_baseline(path: Path) -> dict[str, object]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("schema_version") != 1 or not re.fullmatch(r"[0-9a-f]{40}", data.get("measured_at_sha", "")):
+        raise InventoryError("baseline schema or measured_at_sha is invalid")
+    rows = data.get("records")
+    if not isinstance(rows, list) or any(set(row) != set(BASELINE_FIELDS) for row in rows):
+        raise InventoryError("baseline records do not match the line-number-free schema")
+    keys = [tuple(row[field] for field in BASELINE_FIELDS) for row in rows]
+    if keys != sorted(keys) or len(keys) != len(set(keys)):
+        raise InventoryError("baseline records are not sorted and unique")
+    return data
+
+
+def baseline_drift(records: Sequence[SurfaceRecord], baseline: dict[str, object]) -> list[str]:
+    current = {tuple(getattr(record, field) for field in BASELINE_FIELDS) for record in records}
+    expected = {tuple(row[field] for field in BASELINE_FIELDS) for row in baseline["records"]}
+    errors = []
+    for label, rows in (("GONE", expected - current), ("UNLISTED", current - expected)):
+        for row in sorted(rows):
+            errors.append(f"baseline {label}: {row[2]} {row[3]} {row[5]} {row[6]}")
+    return errors
+
+
+def _auto_queue_runs_report(records: Sequence[SurfaceRecord], repo_root: Path) -> list[str]:
+    lines = ["AUTO_QUEUE_RUNS OBSERVED (not a complete runtime table set):"]
+    for root in ("src", "policies"):
+        count = sum(record.root == root and "auto_queue_runs" in record.table_tokens for record in records)
+        lines.append(f"  - root={root} static_token_records={count}")
+    migrations = [
+        record for record in records
+        if record.kind == "MIGRATION" and b"auto_queue_runs" in (repo_root / record.path).read_bytes()
+    ]
+    lines.append(f"  - root=migrations/postgres tracked_token_files={len(migrations)} (SQL meaning not parsed)")
+    source = repo_root / "src/engine/ops/db_ops.rs"
+    observed = source.is_file() and re.search(
+        r"let\s+table_name\s*=\s*rest\s*\[\.\.table_end\]\s*\.trim\(\);",
+        source.read_text(encoding="utf-8"),
+    )
+    detail = "src/engine/ops/db_ops.rs rewrite_insert_conflict.table_name" if observed else "(not observed)"
+    lines.append(f"  - UNRESOLVED dynamic_boundary={detail}")
+    return lines
+
+
+def _render(
+    records: Sequence[SurfaceRecord], errors: Sequence[str] = (), repo_root: Path = REPO_ROOT,
+    baseline_status: str = "",
+) -> str:
     lines = [
         "SQL execution surface inventory: tracked inputs에서 관측된 fingerprint",
         f"RECORDS: {len(records)}",
@@ -504,6 +571,9 @@ def _render(records: Sequence[SurfaceRecord], errors: Sequence[str] = ()) -> str
     )
     if not unresolved:
         lines.append("  - (none observed; absence is not completeness evidence)")
+    lines.extend(_auto_queue_runs_report(records, Path(repo_root)))
+    if baseline_status:
+        lines.append(baseline_status)
     lines.append("LIMITS:")
     lines.extend(f"  - {limit}" for limit in LIMITS)
     if errors:
@@ -521,14 +591,31 @@ def main(argv: Sequence[str] | None = None, repo_root: Path = REPO_ROOT) -> int:
     parser = InventoryArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.parse_args(argv)
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--check", action="store_true", help="compare live observations with the baseline")
+    modes.add_argument("--write-baseline", action="store_true", help="record the live observations as the baseline")
+    args = parser.parse_args(argv)
+    root = Path(repo_root).resolve()
+    baseline_status = ""
     try:
-        records = scan_inventory(Path(repo_root).resolve())
-        errors: tuple[str, ...] = ()
+        records = scan_inventory(root)
+        errors = []
+        baseline_path = root / BASELINE_PATH
+        if args.check:
+            baseline = load_baseline(baseline_path)
+            errors.extend(baseline_drift(records, baseline))
+            if not errors:
+                baseline_status = "BASELINE: tracked-input observations match the recorded fingerprints"
+        elif args.write_baseline:
+            measured_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=root, text=True, capture_output=True, check=True
+            ).stdout.strip()
+            write_baseline(baseline_path, records, measured_sha)
+            baseline_status = f"BASELINE: recorded live observations measured at {measured_sha}"
     except Exception as exc:  # failure output must retain UNRESOLVED and LIMITS
         records = []
-        errors = (f"{type(exc).__name__}: {exc}",)
-    print(_render(records, errors), file=sys.stderr if errors else sys.stdout, end="")
+        errors = [f"{type(exc).__name__}: {exc}"]
+    print(_render(records, errors, root, baseline_status), file=sys.stderr if errors else sys.stdout, end="")
     return 1 if errors else 0
 
 

@@ -23,6 +23,8 @@ EXPECTED_COMMANDS = (
     '"$PYTHON" -m unittest tests.test_durable_frontier_writer_call_sites',
     '"$PYTHON" scripts/check_intake_outbox_done_writer_call_sites.py',
     '"$PYTHON" -m unittest tests.test_intake_outbox_done_writer_call_sites',
+    '"$PYTHON" scripts/check_sql_execution_surface_inventory.py --check',
+    '"$PYTHON" -m unittest tests.test_sql_execution_surface_inventory',
     "./scripts/check-ci-runner-hardening.sh",
     '"$PYTHON" -m unittest tests.test_fast_check_ci_wiring',
 )
@@ -130,12 +132,12 @@ class WriterGateCiWiringTests(unittest.TestCase):
                 self.assertTrue(any("found 0" in error for error in errors), errors)
 
     def test_duplicate_invocation_fails(self) -> None:
-        command = EXPECTED_COMMANDS[1]
-        errors = guard.check_text(self.fixture_text() + f"{command}\n")
-        self.assertTrue(any("found 2" in error for error in errors), errors)
+        for command in (EXPECTED_COMMANDS[1], EXPECTED_COMMANDS[5], EXPECTED_COMMANDS[6]):
+            errors = guard.check_text(self.fixture_text() + f"{command}\n")
+            self.assertTrue(any("found 2" in error for error in errors), errors)
 
     def test_each_tested_gate_must_precede_its_unittest(self) -> None:
-        pairs = ((1, 2), (3, 4))
+        pairs = ((1, 2), (3, 4), (5, 6))
         for gate_index, test_index in pairs:
             with self.subTest(gate=EXPECTED_COMMANDS[gate_index]):
                 commands = list(EXPECTED_COMMANDS)
@@ -150,7 +152,7 @@ class WriterGateCiWiringTests(unittest.TestCase):
         passing = self.run_process(self.fixture_text())
         self.assertEqual(passing.returncode, 0, passing.stderr)
         self.assertIn(
-            "7 exact aggregate invocations and 2 effective-execution assertions protected",
+            "9 exact aggregate invocations and 2 effective-execution assertions protected",
             passing.stdout,
         )
 

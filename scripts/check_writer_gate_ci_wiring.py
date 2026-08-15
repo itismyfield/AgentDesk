@@ -57,6 +57,14 @@ REQUIRED_INVOCATIONS = (
         '"$PYTHON" -m unittest tests.test_intake_outbox_done_writer_call_sites',
     ),
     RequiredInvocation(
+        "SQL execution surface inventory gate",
+        '"$PYTHON" scripts/check_sql_execution_surface_inventory.py --check',
+    ),
+    RequiredInvocation(
+        "SQL execution surface inventory unittest module",
+        '"$PYTHON" -m unittest tests.test_sql_execution_surface_inventory',
+    ),
+    RequiredInvocation(
         "CI runner hardening gate",
         "./scripts/check-ci-runner-hardening.sh",
     ),
@@ -101,6 +109,7 @@ def check_text(text: str) -> list[str]:
     ordered_pairs = (
         ("durable-frontier writer gate", "durable-frontier writer unittest module"),
         ("intake-outbox done-writer gate", "intake-outbox done-writer unittest module"),
+        ("SQL execution surface inventory gate", "SQL execution surface inventory unittest module"),
     )
     for gate_label, test_label in ordered_pairs:
         if gate_label in positions and test_label in positions:

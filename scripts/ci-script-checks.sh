@@ -65,6 +65,10 @@ echo "=== Policy DB capability manifest guard (#3734) ==="
   --require-manifest policies/merge-automation.cap.yaml
 "$PYTHON" -m unittest tests.test_policy_db_capabilities
 
+echo "=== SQL execution surface inventory baseline (#5358) ==="
+"$PYTHON" scripts/check_sql_execution_surface_inventory.py --check
+"$PYTHON" -m unittest tests.test_sql_execution_surface_inventory
+
 echo "=== Merge automation policy tests (#4250) ==="
 node --test policies/__tests__/merge-automation.test.js
 

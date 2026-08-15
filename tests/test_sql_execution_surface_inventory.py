@@ -1,4 +1,5 @@
 import contextlib
+import dataclasses
 import io
 import os
 import subprocess
@@ -258,6 +259,72 @@ let _m = rewrite_insert_conflict("INSERT OR REPLACE INTO cards (id) VALUES (?)")
                 rc, static_out, err = self.run_main(root)
             self.assertEqual((rc, err), (0, ""))
             self.assertIn("UNRESOLVED:\n  - (none observed; absence is not completeness evidence)", static_out)
+
+    def test_baseline_round_trip_and_bidirectional_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = self.write(root, "policies/outside-manifest.js", 'agentdesk.db.query("SELECT 1");\n')
+            record = scanner.scan_js_calls(path, root)[0]
+            baseline_path = root / "baseline.json"
+            scanner.write_baseline(baseline_path, [record], "8" * 40)
+            baseline = scanner.load_baseline(baseline_path)
+            self.assertNotIn("line", baseline["records"][0])
+            self.assertEqual(scanner.baseline_drift([record], baseline), [])
+
+            changed = (
+                [],
+                [record, dataclasses.replace(record, path="policies/new-static.js")],
+                [dataclasses.replace(record, path="policies/moved.js")],
+                [dataclasses.replace(record, fingerprint="sha256:" + "1" * 64)],
+                [dataclasses.replace(record, classification="UNRESOLVED")],
+            )
+            for rows in changed:
+                with self.subTest(rows=rows):
+                    self.assertTrue(scanner.baseline_drift(rows, baseline))
+            unresolved = dataclasses.replace(record, classification="UNRESOLVED")
+            reverse = scanner.baseline_snapshot([unresolved], "8" * 40)
+            self.assertTrue(scanner.baseline_drift([record], reverse))
+
+            migration = self.write(root, "migrations/postgres/0001.sql", "CREATE TABLE cards(id int);\n")
+            tracked = scanner.TrackedInput("migrations/postgres", "MIGRATION", migration,
+                                           "migrations/postgres/0001.sql")
+            migration_baseline = scanner.baseline_snapshot(scanner.scan_migrations(tracked), "8" * 40)
+            migration.write_text("CREATE TABLE other(id int);\n", encoding="utf-8")
+            self.assertTrue(scanner.baseline_drift(scanner.scan_migrations(tracked), migration_baseline))
+            renamed = dataclasses.replace(tracked, rel_path="migrations/postgres/0002.sql")
+            self.assertTrue(scanner.baseline_drift(scanner.scan_migrations(renamed), migration_baseline))
+
+    def test_live_known_blind_spots_and_auto_queue_runs_report(self):
+        records = scanner.scan_inventory(scanner.REPO_ROOT)
+        def matching(path, api, classification):
+            return [r for r in records if (r.path, r.api, r.classification) ==
+                    (path, api, classification)]
+
+        db_ops = "src/engine/ops/db_ops.rs"
+        self.assertEqual(len(matching(db_ops, "db_execute_raw_pg", "UNRESOLVED")), 1)
+        self.assertEqual(len(matching("src/engine/intent.rs", "execute_policy_sql", "UNRESOLVED")), 1)
+        self.assertIn("Intent::ExecuteSQL { sql, params } =>", (scanner.REPO_ROOT / "src/engine/intent.rs").read_text(encoding="utf-8"))
+        self.assertTrue(matching(db_ops, "db_query_raw_with_json_mode", "UNRESOLVED"))
+        source = (scanner.REPO_ROOT / db_ops).read_text(encoding="utf-8")
+        self.assertRegex(source, r"let\s+table_name\s*=\s*rest\s*\[\.\.table_end\]\s*\.trim\(\);")
+        self.assertEqual(len(matching(db_ops, "rewrite_insert_conflict", "UNRESOLVED")), 2)
+
+        policy_path = "policies/lib/auto-queue-phase-gate.js"
+        policy_lines = (scanner.REPO_ROOT / policy_path).read_text(encoding="utf-8").splitlines()
+        for symbol in ("beginPhaseGateGraceWindow", "clearPhaseGateGraceWindow"):
+            start = next(i for i, line in enumerate(policy_lines) if line.startswith(f"function {symbol}(") )
+            end = next(i for i, line in enumerate(policy_lines[start + 1:], start + 1)
+                       if line.startswith("function "))
+            calls = [r for r in matching(policy_path, "agentdesk.db.execute", "STATIC")
+                     if start < r.line <= end and "auto_queue_runs" in r.table_tokens]
+            self.assertEqual(len(calls), 1, symbol)
+
+        migrations = [r for r in records if r.kind == "MIGRATION"]
+        self.assertTrue(any(r.path.endswith("0025_auto_queue_phase_gate_grace.sql") for r in migrations))
+        report = "\n".join(scanner._auto_queue_runs_report(records, scanner.REPO_ROOT))
+        for root in ("src", "policies", "migrations/postgres"):
+            self.assertIn(f"root={root}", report)
+        self.assertIn("UNRESOLVED dynamic_boundary=src/engine/ops/db_ops.rs rewrite_insert_conflict.table_name", report)
 
 
 if __name__ == "__main__":
