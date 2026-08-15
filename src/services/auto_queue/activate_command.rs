@@ -38,6 +38,10 @@ pub(crate) async fn activate_with_deps_pg(
         Ok(guard) => guard,
         Err(response) => return activate_response_result(response),
     };
+    // Optimization only: `gate_dispatched_entry_run_on_pg_tx` remains the authoritative choke point.
+    if let Err(response) = ensure_activate_run_is_live(pool, &run_id).await {
+        return activate_response_result(response);
+    }
     if let Err(response) = promote_run_and_clear_inactive_slots(pool, &run_id, active_only).await {
         return activate_response_result(response);
     }
@@ -724,6 +728,7 @@ async fn resolve_activate_target_run_id(
     active_only: bool,
 ) -> Result<String, ActivateResponse> {
     if let Some(run_id) = body.run_id.clone() {
+        ensure_activate_run_is_live(pool, &run_id).await?;
         return Ok(run_id);
     }
     let repo = body
@@ -764,6 +769,43 @@ async fn resolve_activate_target_run_id(
             Json(json!({"error": format!("load postgres auto-queue run: {error}")})),
         )),
     }
+}
+
+async fn ensure_activate_run_is_live(
+    pool: &sqlx::PgPool,
+    run_id: &str,
+) -> Result<(), ActivateResponse> {
+    let status = sqlx::query_scalar::<_, String>(
+        "SELECT status
+         FROM auto_queue_runs
+         WHERE id = $1",
+    )
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("load postgres auto-queue run {run_id} status for activate: {error}")})),
+        )
+    })?
+    .ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("auto-queue run not found for activate: {run_id}")})),
+        )
+    })?;
+
+    if !crate::db::auto_queue::run_status::is_live_run_status(&status) {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(
+                json!({"error": format!("activate requires a live auto-queue run: run_id={run_id}, status={status}")}),
+            ),
+        ));
+    }
+
+    Ok(())
 }
 
 /// #2048 F4: serialize per-run activate so concurrent
@@ -1678,6 +1720,249 @@ mod tests {
         // (asserting just `scope_assessment_pending()` on a loaded state without
         // running activate or counting dispatch rows) were vacuous — they passed
         // even with the loop guard deleted — and have been replaced.
+    }
+
+    mod activate_upstream_live_gate_pg_tests {
+        use super::super::{
+            ActivateBody, AutoQueueActivateDeps, activate_with_deps_pg,
+            resolve_activate_target_run_id,
+        };
+        use crate::db::auto_queue::test_support::TestPostgresDb;
+        use sqlx::{Connection, PgConnection, PgPool};
+        use std::sync::Arc;
+
+        type ActivateState = (
+            (String, bool, i64),
+            (String, Option<String>, Option<i64>),
+            (Option<String>, Option<i64>, Option<String>),
+            i64,
+        );
+
+        async fn seed_activate_state(pool: &PgPool) {
+            sqlx::query(
+                "INSERT INTO auto_queue_runs
+                    (id, repo, agent_id, status, max_concurrent_threads, thread_group_count)
+                 VALUES ('activate-live-run', 'repo-1', 'activate-agent', 'active', 2, 1)",
+            )
+            .execute(pool)
+            .await
+            .expect("seed activate run");
+            sqlx::query(
+                "INSERT INTO agents (id, name, provider, discord_channel_id)
+                 VALUES ('activate-agent', 'Activate Agent', 'claude', '5356')",
+            )
+            .execute(pool)
+            .await
+            .expect("seed activate agent");
+            sqlx::query(
+                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, repo_id)
+                 VALUES ('activate-card', 'Activate Card', 'in_progress', 'activate-agent', 'repo-1')",
+            )
+            .execute(pool)
+            .await
+            .expect("seed activate card");
+            sqlx::query(
+                "INSERT INTO auto_queue_entries
+                    (id, run_id, kanban_card_id, agent_id, status, thread_group, batch_phase)
+                 VALUES ('activate-entry', 'activate-live-run', 'activate-card',
+                         'activate-agent', 'pending', 0, 0)",
+            )
+            .execute(pool)
+            .await
+            .expect("seed activate entry");
+            sqlx::query(
+                "INSERT INTO auto_queue_slots
+                    (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map)
+                 VALUES ('activate-agent', 0, 'activate-live-run', 0, '{}'::jsonb)",
+            )
+            .execute(pool)
+            .await
+            .expect("seed activate slot");
+        }
+
+        fn activate_body() -> ActivateBody {
+            ActivateBody {
+                run_id: Some("activate-live-run".to_string()),
+                repo: None,
+                agent_id: None,
+                thread_group: None,
+                unified_thread: None,
+                active_only: None,
+            }
+        }
+
+        fn activate_deps(pool: &PgPool) -> AutoQueueActivateDeps {
+            let config = crate::config::Config::default();
+            let engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone()))
+                .expect("create activate policy engine");
+            AutoQueueActivateDeps {
+                pg_pool: Some(pool.clone()),
+                engine,
+                config: Arc::new(config),
+                health_registry: None,
+                guild_id: None,
+            }
+        }
+
+        async fn activate_state(pool: &PgPool) -> ActivateState {
+            let run = sqlx::query_as::<_, (String, bool, i64)>(
+                "SELECT status, completed_at IS NOT NULL, max_concurrent_threads::BIGINT
+                 FROM auto_queue_runs WHERE id = 'activate-live-run'",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("load activate run state");
+            let entry = sqlx::query_as::<_, (String, Option<String>, Option<i64>)>(
+                "SELECT status, dispatch_id, slot_index::BIGINT
+                 FROM auto_queue_entries WHERE id = 'activate-entry'",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("load activate entry state");
+            let slot = sqlx::query_as::<_, (Option<String>, Option<i64>, Option<String>)>(
+                "SELECT assigned_run_id, assigned_thread_group::BIGINT, thread_id_map::TEXT
+                 FROM auto_queue_slots WHERE agent_id = 'activate-agent' AND slot_index = 0",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("load activate slot state");
+            let dispatch_count = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM task_dispatches WHERE kanban_card_id = 'activate-card'",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("count activate card dispatches");
+            (run, entry, slot, dispatch_count)
+        }
+
+        async fn wait_for_activate_lock_waiter(conn: &mut PgConnection) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                sqlx::query("SELECT pg_stat_clear_snapshot()")
+                    .execute(&mut *conn)
+                    .await
+                    .expect("clear activate backend-status snapshot");
+                let waiting = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (
+                         SELECT 1 FROM pg_stat_activity
+                         WHERE datname = current_database()
+                           AND wait_event_type = 'Lock'
+                           AND query LIKE '%pg_advisory_lock(hashtext($1), hashtext($2))%'
+                     )",
+                )
+                .fetch_one(&mut *conn)
+                .await
+                .expect("inspect activate lock waiter");
+                if waiting {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "activate did not wait for its per-run advisory lock"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+
+        #[tokio::test]
+        async fn explicit_run_id_rejects_terminal_and_accepts_live_run_pg() {
+            let pg_db = TestPostgresDb::create().await;
+            let pool = pg_db.connect_and_migrate().await;
+            seed_activate_state(&pool).await;
+            let body = activate_body();
+
+            for terminal_status in ["completed", "failed"] {
+                sqlx::query(
+                    "UPDATE auto_queue_runs SET status = $1 WHERE id = 'activate-live-run'",
+                )
+                .bind(terminal_status)
+                .execute(&pool)
+                .await
+                .expect("set explicit run terminal");
+                let (status, body) = resolve_activate_target_run_id(&pool, &body, false)
+                    .await
+                    .expect_err("explicit terminal run must be rejected");
+                assert_eq!(status, axum::http::StatusCode::CONFLICT);
+                assert_eq!(
+                    body.0["error"],
+                    format!(
+                        "activate requires a live auto-queue run: run_id=activate-live-run, status={terminal_status}"
+                    )
+                );
+            }
+
+            sqlx::query(
+                "UPDATE auto_queue_runs SET status = 'active' WHERE id = 'activate-live-run'",
+            )
+            .execute(&pool)
+            .await
+            .expect("restore explicit run live");
+            assert_eq!(
+                resolve_activate_target_run_id(&pool, &body, false)
+                    .await
+                    .expect("explicit live run remains eligible"),
+                "activate-live-run"
+            );
+
+            pool.close().await;
+            pg_db.drop().await;
+        }
+
+        #[tokio::test]
+        async fn terminal_race_rejects_after_activate_lock_without_side_effects_pg() {
+            let pg_db = TestPostgresDb::create().await;
+            let pool = pg_db.connect_and_migrate_with_max_connections(8).await;
+            seed_activate_state(&pool).await;
+
+            let mut holder = PgConnection::connect(&pg_db.database_url)
+                .await
+                .expect("connect activate lock holder");
+            sqlx::query("SELECT pg_advisory_lock(hashtext($1), hashtext($2))")
+                .bind("aq_activate")
+                .bind("activate-live-run")
+                .execute(&mut holder)
+                .await
+                .expect("hold activate advisory lock");
+
+            let deps = activate_deps(&pool);
+            let activate =
+                tokio::spawn(async move { activate_with_deps_pg(&deps, activate_body()).await });
+            wait_for_activate_lock_waiter(&mut holder).await;
+            sqlx::query(
+                "UPDATE auto_queue_runs
+                 SET status = 'completed', completed_at = NOW()
+                 WHERE id = 'activate-live-run'",
+            )
+            .execute(&pool)
+            .await
+            .expect("complete run while activate waits");
+            let terminal_state = activate_state(&pool).await;
+
+            sqlx::query("SELECT pg_advisory_unlock(hashtext($1), hashtext($2))")
+                .bind("aq_activate")
+                .bind("activate-live-run")
+                .execute(&mut holder)
+                .await
+                .expect("release activate advisory lock");
+            let error = tokio::time::timeout(std::time::Duration::from_secs(5), activate)
+                .await
+                .expect("activate completes after lock release")
+                .expect("join activate task")
+                .expect_err("post-lock live check must reject the completed run");
+            assert_eq!(error.status(), axum::http::StatusCode::CONFLICT);
+            assert_eq!(
+                error.message(),
+                "activate requires a live auto-queue run: run_id=activate-live-run, status=completed"
+            );
+            assert_eq!(
+                activate_state(&pool).await,
+                terminal_state,
+                "post-lock rejection must leave run, entry, slot, and dispatch state unchanged"
+            );
+
+            pool.close().await;
+            pg_db.drop().await;
+        }
     }
 
     /// #3594 (T3, codex Finding 4): EFFECTIVE race-gate tests. The previous
