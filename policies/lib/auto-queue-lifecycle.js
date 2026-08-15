@@ -90,8 +90,7 @@ function finalizeRunWithoutPhaseGate(runId) {
   try {
     var result = agentdesk.autoQueue.completeRun(
       runId,
-      "finalize_without_phase_gate",
-      { releaseSlots: true }
+      "finalize_without_phase_gate"
     );
     completed = !!(result && result.changed);
   } catch (e) {
@@ -109,14 +108,13 @@ function finalizeRunWithoutPhaseGate(runId) {
 }
 
 function completeRunAndNotify(runId) {
-  if (!runId) return;
+  if (!runId) return false;
   try {
     var completed = agentdesk.autoQueue.completeRun(
       runId,
-      "phase_gate_complete",
-      { releaseSlots: true }
+      "phase_gate_complete"
     );
-    if (completed && completed.changed) return;
+    if (completed && completed.changed) return true;
     autoQueueLog("warn", "Phase-gate completion did not mark run " + runId + " completed; falling back to resume", {
       run_id: runId
     });
@@ -133,6 +131,7 @@ function completeRunAndNotify(runId) {
     });
   }
   activateRun(runId, null);
+  return false;
 }
 
 function continueRunAfterEntry(runId, agentId, doneGroup, donePhase, anchorCardId) {

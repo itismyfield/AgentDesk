@@ -21,6 +21,7 @@ src/db/session_transcripts.rs
 src/dispatch/dispatch_cancel.rs
 src/dispatch/dispatch_context.rs
 src/dispatch/dispatch_status.rs
+src/engine/ops/auto_queue_ops.rs
 src/engine/ops/config_ops.rs
 src/engine/ops/db_ops.rs
 src/engine/ops/kanban_ops.rs
@@ -118,6 +119,7 @@ db::session_transcripts::clear_fence_pg_tests
 dispatch::dispatch_cancel::pg_observability_tests
 dispatch::dispatch_context::pg_rereview_tests
 dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests
+engine::ops::auto_queue_ops::tests
 engine::ops::config_ops::tests
 engine::ops::db_ops::tests
 engine::ops::kanban_ops::tests
@@ -255,9 +257,14 @@ db::auto_queue::tests::dispatch_terminal_sync_pg_tests::phase_gate_state_concurr
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::phase_gate_state_save_is_idempotent_for_dispatch_rows_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::phase_gate_state_save_is_idempotent_for_empty_dispatch_set_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::phase_gate_state_save_rolls_back_stale_cleanup_when_write_fails_pg
+db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_activate_completion_uses_protocol_without_notification_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_auto_queue_pause_run_releases_slots_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_auto_queue_policy_complete_preserves_card_and_cleans_resources_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_auto_queue_resume_run_changes_paused_status_pg
+db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_complete_waits_for_attach_commit_and_recounts_remaining_pg
+db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_consultation_waits_for_run_token_before_card_lock_pg
+db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_terminal_transition_defers_finalize_without_advisory_wait_pg
+db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_terminal_transition_reenters_owned_run_token_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::review_4883_end_cleans_resources_without_touching_card_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::review_4883_restoring_run_keeps_allocating_its_live_slot_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::review_4883_stale_allocator_reclaims_slot_after_end_pg
@@ -420,6 +427,7 @@ dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgre
 dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests::finalize_and_patch_reject_nonblank_legacy_provenance
 dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests::normal_finalize_infers_legacy_default_only_from_persisted_null_kind
 dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests::patch_completion_reconstructs_legacy_default_and_clears_gate
+engine::ops::auto_queue_ops::tests::complete_run_wrapper_preserves_refused_slot_and_atomically_releases_success_pg
 engine::ops::config_ops::tests::policy_engine_config_get_preserves_types_precedence_and_fail_closed_contract
 engine::ops::config_ops::tests::policy_engine_config_get_query_error_fails_closed_with_live_postgres
 engine::ops::db_ops::tests::policy_db_pg_exec_and_query_support_sqlite_compat_functions

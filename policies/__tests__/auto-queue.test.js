@@ -561,7 +561,22 @@ test("auto-queue onTick1min honors stale dispatched runtime config", () => {
         result: []
       },
       {
-        match: "FROM auto_queue_runs r WHERE r.status IN ('active', 'paused')",
+        // This router matches SQL text; it does not execute status/EXISTS
+        // filtering and cannot reproduce the entry-less orphan or the
+        // run-INSERT/entry-INSERT interleaving. Pin the recovery SQL here.
+        // PostgreSQL integration for those scenarios remains follow-up work.
+        match(sql) {
+          if (!sql.includes("FROM auto_queue_runs r WHERE r.status IN")) return false;
+          assert.match(
+            sql,
+            /WHERE r\.status IN \('active', 'paused', 'generated', 'pending'\)/
+          );
+          assert.match(
+            sql,
+            /AND EXISTS \(SELECT 1 FROM auto_queue_entries e WHERE e\.run_id = r\.id\)/
+          );
+          return true;
+        },
         result: []
       },
       {
@@ -755,10 +770,29 @@ test("auto-queue finalization sweep filters blocked runs before LIMIT", () => {
     query.sql.includes("auto_queue_phase_gates")
   );
   assert.match(finishedRunQuery.sql, /NOT EXISTS \(  SELECT 1 FROM auto_queue_phase_gates pg/);
+  assert.match(finishedRunQuery.sql, /EXISTS \(SELECT 1 FROM auto_queue_entries e WHERE e\.run_id = r\.id\)/);
   assert.match(finishedRunQuery.sql, /datetime\(r\.phase_gate_grace_until\) <= datetime\('now'\)/);
   assert.deepEqual(state.autoQueueCompletes, [
-    { runId: "run-eligible", reason: "finalize_without_phase_gate", options: { releaseSlots: true } }
+    { runId: "run-eligible", reason: "finalize_without_phase_gate", options: {} }
   ]);
+});
+
+test("auto-queue phase-gate completion logs refusal instead of claiming completion", () => {
+  const { module, state } = loadPolicy("policies/lib/auto-queue-lifecycle.js", {
+    autoQueueComplete() {
+      return { changed: false };
+    }
+  });
+
+  assert.equal(module.completeRunAndNotify("run-refused"), false);
+  assert.deepEqual(state.autoQueueCompletes, [
+    { runId: "run-refused", reason: "phase_gate_complete", options: {} }
+  ]);
+  assert.deepEqual(state.autoQueueResumes, [
+    { runId: "run-refused", source: "phase_gate_complete_resume_fallback" }
+  ]);
+  assert.equal(state.autoQueueActivations.length, 1);
+  assert.match(state.logs.warn.join("\n"), /did not mark run run-refused completed/);
 });
 
 test("auto-queue rotates saturated active runs in bounded tick sweep", () => {

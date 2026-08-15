@@ -151,5 +151,11 @@ test-non-pg:
 test-postgres:
     @test -n "${POSTGRES_TEST_DATABASE_URL_BASE:-}" || (echo "POSTGRES_TEST_DATABASE_URL_BASE must name the dedicated PostgreSQL test server with an explicit host and port" >&2; exit 1)
     cargo test --lib -- _pg pg_ postgres --nocapture --test-threads=1
+    # #5356 S0: the engine wrapper's PG regression module path
+    # (`engine::ops::auto_queue_ops::tests`) carries no pg-name marker, so the
+    # name-filtered invocation above cannot fully select it for the test-lane
+    # coverage ratchet. Select the module explicitly instead of adding it to
+    # the shrink-only debt baseline.
+    cargo test --lib engine::ops::auto_queue_ops::tests -- --nocapture --test-threads=1
 
 check: fmt-check lint cargo-check test

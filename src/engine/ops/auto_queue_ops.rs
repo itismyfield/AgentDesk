@@ -362,7 +362,10 @@ fn complete_run_raw(
         return r#"{"error":"source is required"}"#.to_string();
     }
 
-    let opts_value: serde_json::Value = match serde_json::from_str(opts_json) {
+    // Options remain parse-validated for host API compatibility, but no option
+    // controls slot release. Canonical completion always releases slots inside
+    // the same transaction as the run status change.
+    let _opts_value: serde_json::Value = match serde_json::from_str(opts_json) {
         Ok(value) => value,
         Err(error) => {
             return serde_json::json!({
@@ -371,21 +374,11 @@ fn complete_run_raw(
             .to_string();
         }
     };
-    let release_slots = opts_value
-        .get("releaseSlots")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false);
-
     let Some(pool) = pg_pool else {
         return r#"{"error":"postgres backend is required for autoQueue.completeRun"}"#.to_string();
     };
     let run_id_owned = run_id.to_string();
     let result = run_async_bridge_pg(pool, move |pool| async move {
-        if release_slots {
-            crate::db::auto_queue::release_run_slots_pg(&pool, &run_id_owned)
-                .await
-                .map_err(|error| format!("release postgres auto-queue slots: {error}"))?;
-        }
         crate::db::auto_queue::complete_run_on_pg(&pool, &run_id_owned).await
     });
 
@@ -661,4 +654,154 @@ where
     T: Send + 'static,
 {
     crate::utils::async_bridge::block_on_pg_result(pool, future_factory, |error| error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::complete_run_raw;
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use sqlx::{PgPool, Row};
+
+    async fn setup_complete_wrapper_pool(pg_db: &TestPostgresDb) -> PgPool {
+        let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
+             VALUES ('wrapper-agent', 'Wrapper Agent', 'claude', 'wrapper-channel')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed wrapper agent");
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES
+                ('wrapper-refused', 'repo-wrapper', 'wrapper-agent', 'active'),
+                ('wrapper-success', 'repo-wrapper', 'wrapper-agent', 'active')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed wrapper runs");
+        sqlx::query(
+            "INSERT INTO auto_queue_slots
+                (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map)
+             VALUES
+                ('wrapper-agent', 0, 'wrapper-refused', 0, CAST('{}' AS jsonb)),
+                ('wrapper-agent', 1, 'wrapper-success', 0, CAST('{}' AS jsonb))",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed wrapper slots");
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id)
+             VALUES
+                ('wrapper-card-refused', 'Wrapper Refused', 'in_progress', 'wrapper-agent'),
+                ('wrapper-card-success', 'Wrapper Success', 'in_progress', 'wrapper-agent')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed wrapper cards");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status)
+             VALUES
+                ('wrapper-entry-refused', 'wrapper-refused', 'wrapper-card-refused',
+                 'wrapper-agent', 'dispatched'),
+                ('wrapper-entry-success', 'wrapper-success', 'wrapper-card-success',
+                 'wrapper-agent', 'failed')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed wrapper entries");
+        sqlx::query(
+            "INSERT INTO auto_queue_phase_gates (run_id, phase, status)
+             VALUES
+                ('wrapper-refused', 0, 'pending'),
+                ('wrapper-success', 0, 'pending')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed wrapper phase gates");
+        pool
+    }
+
+    async fn wrapper_run_state(
+        pool: &PgPool,
+        run_id: &str,
+        slot_index: i64,
+    ) -> (String, Option<String>, i64) {
+        let row = sqlx::query(
+            "SELECT r.status,
+                    (SELECT assigned_run_id
+                     FROM auto_queue_slots
+                     WHERE agent_id = r.agent_id AND slot_index = $2) AS assigned_run_id,
+                    (SELECT COUNT(*)::BIGINT
+                     FROM auto_queue_phase_gates pg
+                     WHERE pg.run_id = r.id) AS gate_count
+             FROM auto_queue_runs r
+             WHERE r.id = $1",
+        )
+        .bind(run_id)
+        .bind(slot_index)
+        .fetch_one(pool)
+        .await
+        .expect("load wrapper run state");
+        (
+            row.try_get("status").expect("wrapper run status"),
+            row.try_get("assigned_run_id")
+                .expect("wrapper assigned run"),
+            row.try_get("gate_count").expect("wrapper gate count"),
+        )
+    }
+
+    /// This exercises the synchronous engine wrapper used by the JS policy.
+    /// The lane cannot observe an uncommitted intermediate state, so it pins
+    /// both postconditions: refusal preserves slot/gate state, while success
+    /// commits completion and slot release together.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn complete_run_wrapper_preserves_refused_slot_and_atomically_releases_success_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_complete_wrapper_pool(&pg_db).await;
+
+        let refused = serde_json::from_str::<serde_json::Value>(&complete_run_raw(
+            Some(&pool),
+            "wrapper-refused",
+            "test_wrapper_refused",
+            r#"{"releaseSlots":true}"#,
+        ))
+        .expect("decode refused wrapper response");
+        assert_eq!(
+            refused.get("ok").and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            refused.get("changed").and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            wrapper_run_state(&pool, "wrapper-refused", 0).await,
+            ("active".to_string(), Some("wrapper-refused".to_string()), 1,)
+        );
+
+        let completed = serde_json::from_str::<serde_json::Value>(&complete_run_raw(
+            Some(&pool),
+            "wrapper-success",
+            "test_wrapper_success",
+            r#"{"releaseSlots":true}"#,
+        ))
+        .expect("decode successful wrapper response");
+        assert_eq!(
+            completed.get("ok").and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            completed.get("changed").and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            wrapper_run_state(&pool, "wrapper-success", 1).await,
+            ("completed".to_string(), None, 0)
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
 }

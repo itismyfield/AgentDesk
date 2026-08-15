@@ -108,10 +108,13 @@ mod dispatch_terminal_sync_pg_tests {
         EntryStatusUpdateOptions, PhaseGateStateWrite, SlotAllocation,
         allocate_slot_for_group_agent_pg, clear_phase_gate_state_on_pg, complete_run_on_pg,
         finalize_completed_dispatch_terminal_entry_on_pg_tx, pause_run_on_pg,
-        record_entry_dispatch_failure_on_pg, resume_run_on_pg, save_phase_gate_state_on_pg,
-        slot_has_active_dispatch_pg, slot_has_recent_terminal_auto_queue_dispatch_pg,
-        sync_dispatch_terminal_entries_on_pg_tx, update_entry_status_on_pg,
+        record_consultation_dispatch_on_pg, record_entry_dispatch_failure_on_pg, resume_run_on_pg,
+        save_phase_gate_state_on_pg, slot_has_active_dispatch_pg,
+        slot_has_recent_terminal_auto_queue_dispatch_pg, sync_dispatch_terminal_entries_on_pg_tx,
+        update_entry_status_on_pg, update_entry_status_on_pg_tx,
     };
+    use crate::db::auto_queue::runs::acquire_run_advisory_xact_lock_on_pg_tx;
+    use crate::db::auto_queue::runs::complete_run_after_activate_on_pg;
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use chrono::{DateTime, Utc};
     use sqlx::{Connection, PgConnection, PgPool, Row};
@@ -267,9 +270,69 @@ mod dispatch_terminal_sync_pg_tests {
         conn
     }
 
+    async fn begin_run_token_holder(database_url: &str, run_id: &str) -> PgConnection {
+        let mut conn = PgConnection::connect(database_url)
+            .await
+            .expect("connect run-token holder");
+        sqlx::query("BEGIN")
+            .execute(&mut conn)
+            .await
+            .expect("begin run-token holder");
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('aq_run:' || $1))")
+            .bind(run_id)
+            .execute(&mut conn)
+            .await
+            .expect("hold run token");
+        conn
+    }
+
+    async fn wait_for_run_advisory_waiter(conn: &mut PgConnection) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            // The observer connection holds an open transaction (it is the
+            // advisory-token holder), and PostgreSQL freezes backend-status
+            // views such as pg_stat_activity at their first in-transaction
+            // access. Without clearing that snapshot each iteration, a first
+            // poll that lands before the spawned task blocks makes every
+            // later poll return the same stale "no waiter" answer until the
+            // deadline panics (reproduced 1-in-10 locally).
+            sqlx::query("SELECT pg_stat_clear_snapshot()")
+                .execute(&mut *conn)
+                .await
+                .expect("clear backend-status snapshot");
+            let waiting = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                     SELECT 1
+                     FROM pg_stat_activity
+                     WHERE datname = current_database()
+                       AND wait_event_type = 'Lock'
+                       AND query LIKE '%pg_advisory_xact_lock%aq_run:%'
+                 )",
+            )
+            .fetch_one(&mut *conn)
+            .await
+            .expect("inspect run-token wait");
+            if waiting {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "transaction did not wait for the run token"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
     async fn wait_for_blocked_slot_update(conn: &mut PgConnection, query_fragment: &str) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
+            // Same per-transaction backend-status snapshot hazard as
+            // wait_for_run_advisory_waiter: clear it so each poll observes
+            // live waiter state instead of the first poll's frozen view.
+            sqlx::query("SELECT pg_stat_clear_snapshot()")
+                .execute(&mut *conn)
+                .await
+                .expect("clear backend-status snapshot");
             let blocked = sqlx::query_scalar::<_, bool>(
                 "SELECT EXISTS (
                      SELECT 1
@@ -358,6 +421,29 @@ mod dispatch_terminal_sync_pg_tests {
             .expect("message outbox count")
     }
 
+    async fn seed_entry(pool: &PgPool, entry_id: &str, card_id: &str, status: &str) {
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id)
+             VALUES ($1, $2, 'in_progress', 'agent-1')",
+        )
+        .bind(card_id)
+        .bind(card_id)
+        .execute(pool)
+        .await
+        .expect("seed entry card");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status)
+             VALUES ($1, 'run-1', $2, 'agent-1', $3)",
+        )
+        .bind(entry_id)
+        .bind(card_id)
+        .bind(status)
+        .execute(pool)
+        .await
+        .expect("seed entry");
+    }
+
     #[tokio::test]
     async fn postgres_auto_queue_pause_run_releases_slots_pg() {
         let pg_db = TestPostgresDb::create().await;
@@ -384,6 +470,9 @@ mod dispatch_terminal_sync_pg_tests {
         pg_db.drop().await;
     }
 
+    /// Manual completion now intentionally rejects runnable entries. This
+    /// terminal fixture preserves the resource-cleanup/card-preservation
+    /// purpose of the older test while recording that strengthened contract.
     #[tokio::test]
     async fn postgres_auto_queue_policy_complete_preserves_card_and_cleans_resources_pg() {
         let pg_db = TestPostgresDb::create().await;
@@ -408,7 +497,7 @@ mod dispatch_terminal_sync_pg_tests {
             "INSERT INTO auto_queue_entries
                 (id, run_id, kanban_card_id, agent_id, status)
              VALUES ('entry-policy-complete', 'run-1', 'card-policy-complete',
-                     'agent-1', 'dispatched')",
+                     'agent-1', 'failed')",
         )
         .execute(&pool)
         .await
@@ -445,6 +534,217 @@ mod dispatch_terminal_sync_pg_tests {
                 3,
             )
         );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_activate_completion_uses_protocol_without_notification_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        seed_entry(
+            &pool,
+            "entry-activate-drained",
+            "card-activate-drained",
+            "failed",
+        )
+        .await;
+
+        assert!(
+            complete_run_after_activate_on_pg(&pool, "run-1")
+                .await
+                .expect("complete drained activate run")
+        );
+        assert_eq!(run_status(&pool, "run-1").await, "completed");
+        assert_eq!(slot_run(&pool, "agent-1", 0).await, None);
+        assert_eq!(count_message_outbox(&pool).await, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_terminal_transition_defers_finalize_without_advisory_wait_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        seed_entry(&pool, "entry-contended", "card-contended", "pending").await;
+
+        let mut lock_conn = begin_run_token_holder(&pg_db.database_url, "run-1").await;
+
+        let transition = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            update_entry_status_on_pg(
+                &pool,
+                "entry-contended",
+                ENTRY_STATUS_SKIPPED,
+                "test_terminal_transition",
+                &EntryStatusUpdateOptions::default(),
+            ),
+        )
+        .await
+        .expect("terminal transition must not wait for the run token")
+        .expect("terminal transition");
+        assert!(transition.changed);
+        assert_eq!(run_status(&pool, "run-1").await, "active");
+        assert_eq!(
+            slot_run(&pool, "agent-1", 0).await.as_deref(),
+            Some("run-1")
+        );
+
+        let waiting_advisory_locks = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM pg_locks
+             WHERE locktype = 'advisory'
+               AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+               AND NOT granted",
+        )
+        .fetch_one(&mut lock_conn)
+        .await
+        .expect("inspect advisory waiters");
+        assert_eq!(waiting_advisory_locks, 0);
+
+        sqlx::query("COMMIT")
+            .execute(&mut lock_conn)
+            .await
+            .expect("release run token");
+        assert!(
+            complete_run_on_pg(&pool, "run-1")
+                .await
+                .expect("recovery completion")
+        );
+        assert_eq!(run_status(&pool, "run-1").await, "completed");
+        assert_eq!(slot_run(&pool, "agent-1", 0).await, None);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_terminal_transition_reenters_owned_run_token_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        seed_entry(&pool, "entry-reentrant", "card-reentrant", "pending").await;
+
+        let mut tx = pool.begin().await.expect("begin token-owning transaction");
+        acquire_run_advisory_xact_lock_on_pg_tx(&mut tx, "run-1")
+            .await
+            .expect("acquire run token");
+        let transition = update_entry_status_on_pg_tx(
+            &mut tx,
+            "entry-reentrant",
+            ENTRY_STATUS_SKIPPED,
+            "test_reentrant_terminal_transition",
+            &EntryStatusUpdateOptions::default(),
+        )
+        .await
+        .expect("terminal transition under owned run token");
+        assert!(transition.changed);
+        tx.commit().await.expect("commit token-owning transaction");
+
+        assert_eq!(run_status(&pool, "run-1").await, "completed");
+        assert_eq!(slot_run(&pool, "agent-1", 0).await, None);
+        assert_eq!(count_message_outbox(&pool).await, 1);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_complete_waits_for_attach_commit_and_recounts_remaining_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+
+        let mut attach_conn = begin_run_token_holder(&pg_db.database_url, "run-1").await;
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id)
+             VALUES ('card-uncommitted-attach', 'Uncommitted Attach', 'in_progress', 'agent-1')",
+        )
+        .execute(&mut attach_conn)
+        .await
+        .expect("seed attach card");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status)
+             VALUES ('entry-uncommitted-attach', 'run-1', 'card-uncommitted-attach',
+                     'agent-1', 'dispatched')",
+        )
+        .execute(&mut attach_conn)
+        .await
+        .expect("seed uncommitted attached entry");
+
+        let complete_pool = pool.clone();
+        let completion =
+            tokio::spawn(async move { complete_run_on_pg(&complete_pool, "run-1").await });
+        wait_for_run_advisory_waiter(&mut attach_conn).await;
+
+        sqlx::query("COMMIT")
+            .execute(&mut attach_conn)
+            .await
+            .expect("commit attached entry");
+        let changed = tokio::time::timeout(std::time::Duration::from_secs(5), completion)
+            .await
+            .expect("completion should finish after attach commit")
+            .expect("join completion task")
+            .expect("completion result");
+        assert!(!changed);
+        assert_eq!(run_status(&pool, "run-1").await, "active");
+        assert_eq!(
+            slot_run(&pool, "agent-1", 0).await.as_deref(),
+            Some("run-1")
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// S0 pins the lock-order prerequisite for consultation/cancel concurrency.
+    /// Rejection after a cancel wins belongs to the dispatched-entry choke
+    /// point in S1 and is deliberately not asserted by this slice.
+    #[tokio::test]
+    async fn postgres_consultation_waits_for_run_token_before_card_lock_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        seed_entry(&pool, "entry-consultation", "card-consultation", "pending").await;
+        seed_active_slot_dispatch(&pool, "dispatch-consultation", 0).await;
+
+        let mut lock_conn = begin_run_token_holder(&pg_db.database_url, "run-1").await;
+
+        let consultation_pool = pool.clone();
+        let consultation = tokio::spawn(async move {
+            record_consultation_dispatch_on_pg(
+                &consultation_pool,
+                "entry-consultation",
+                "card-consultation",
+                "dispatch-consultation",
+                "test_consultation",
+                "{}",
+            )
+            .await
+        });
+
+        wait_for_run_advisory_waiter(&mut lock_conn).await;
+
+        sqlx::query(
+            "SELECT 1
+             FROM kanban_cards
+             WHERE id = 'card-consultation'
+             FOR UPDATE NOWAIT",
+        )
+        .fetch_one(&mut lock_conn)
+        .await
+        .expect("consultation must not lock the card before the run token");
+        sqlx::query("COMMIT")
+            .execute(&mut lock_conn)
+            .await
+            .expect("release consultation run token and card row");
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), consultation)
+            .await
+            .expect("consultation should finish after token release")
+            .expect("join consultation task")
+            .expect("record consultation dispatch");
+        assert!(result.entry_status_changed);
 
         pool.close().await;
         pg_db.drop().await;

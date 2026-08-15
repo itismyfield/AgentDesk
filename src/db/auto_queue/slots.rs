@@ -65,6 +65,7 @@ pub async fn clear_inactive_slot_assignments_pg(pool: &PgPool) -> Result<u64, sq
     Ok(result.rows_affected())
 }
 
+#[cfg(test)]
 pub async fn release_run_slots_pg(pool: &PgPool, run_id: &str) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(
         "UPDATE auto_queue_slots
