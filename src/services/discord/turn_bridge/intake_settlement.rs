@@ -15,6 +15,10 @@ use crate::services::discord::runtime_bootstrap::intake_delivery_capability::Set
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// A terminal bridge must not wait indefinitely behind an unrelated row lock.
+/// This is a service-local safety ceiling, not a measured contention claim.
+const SETTLEMENT_LOCK_TIMEOUT: &str = "1s";
+
 /// The disposition of a bridge turn at its one normal terminal exit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum BridgeTurnDisposition {
@@ -58,7 +62,14 @@ pub(super) fn classify(
     }
 }
 
-const SOURCE_COUNT: usize = 4;
+// `Sweep` is reserved for the S-W3 caller and already owns its telemetry slot.
+const SETTLEMENT_SOURCES: [IntakeSettlementSource; 4] = [
+    IntakeSettlementSource::Committed,
+    IntakeSettlementSource::RelayOwnerHandoff,
+    IntakeSettlementSource::NoBodyNoRetry,
+    IntakeSettlementSource::Sweep,
+];
+const SOURCE_COUNT: usize = SETTLEMENT_SOURCES.len();
 
 struct SettlementCounters {
     cas_won: [AtomicU64; SOURCE_COUNT],
@@ -129,13 +140,29 @@ fn record_settlement_result(
     }
 }
 
+async fn settle_with_lock_timeout(
+    pool: &sqlx::PgPool,
+    outbox_id: i64,
+    source: IntakeSettlementSource,
+) -> Result<bool, sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+        .bind(SETTLEMENT_LOCK_TIMEOUT)
+        .execute(&mut *transaction)
+        .await?;
+    let won = settle_intake_done_from_receipt(&mut transaction, outbox_id, source).await?;
+    transaction.commit().await?;
+    Ok(won)
+}
+
 /// Settles the intake row associated with a bridge at the terminal exit.
 ///
-/// The inflight identity is read here, and nowhere else in the terminal
-/// delivery path.  Settlement is gated by the resolved capability snapshot;
-/// SQL errors are counted and swallowed because terminal delivery has already
-/// completed and turning this error into a worker failure can create a
-/// duplicate retry.
+/// The inflight identity is read here for terminal settlement. The headless
+/// delivery argument assembler also reads it into a parked, no-effect seam.
+/// Settlement is gated by the resolved capability snapshot. SQL errors are
+/// counted and swallowed after the bridge classified the turn as committed,
+/// handed off to a relay owner, or complete with no retained retry; changing
+/// those outcomes here could create a duplicate retry.
 pub(super) async fn settle_intake_row_at_bridge_exit(
     shared: &std::sync::Arc<SharedData>,
     inflight_state: &InflightTurnState,
@@ -155,12 +182,7 @@ pub(super) async fn settle_intake_row_at_bridge_exit(
         return;
     };
 
-    let result = match pool.acquire().await {
-        Ok(mut connection) => {
-            settle_intake_done_from_receipt(&mut connection, outbox_id, source).await
-        }
-        Err(error) => Err(error),
-    };
+    let result = settle_with_lock_timeout(pool, outbox_id, source).await;
     record_settlement_result(outbox_id, source, result);
 }
 
@@ -173,8 +195,10 @@ mod tests {
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::ProviderKind;
     use chrono::{DateTime, Utc};
-    use std::sync::Arc;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
     use tokio::sync::Barrier;
+    use tracing_subscriber::fmt::writer::MakeWriter;
 
     const READY_CAPABILITIES: SettlementCapabilities = SettlementCapabilities {
         stamp_dispatched: true,
@@ -267,6 +291,28 @@ mod tests {
         )
     }
 
+    #[derive(Clone)]
+    struct CapturingWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CapturingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("capture settlement log").extend(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
     #[test]
     fn classify_preserve_precedes_every_terminal_receipt() {
         assert_eq!(
@@ -344,15 +390,13 @@ mod tests {
         )
         .await;
         let first = audit(&pool, id).await;
-        settle_intake_row_at_bridge_exit(
-            &shared,
-            &state_for(id),
-            BridgeTurnDisposition::Committed,
-            READY_CAPABILITIES,
-        )
-        .await;
+        let second_won = settle_with_lock_timeout(&pool, id, IntakeSettlementSource::Committed)
+            .await
+            .expect("repeat settlement query");
         let second = audit(&pool, id).await;
+        assert!(!second_won, "the idempotent second CAS must be a no-op");
         assert_eq!(first.0, IntakeOutboxStatus::Done);
+        assert_eq!(first.1, second.1, "completed_at must be preserved");
         assert_eq!(first.2, Some("dispatch-worker".to_owned()));
         assert_eq!(first.3, Some(spawned_at));
         assert_eq!(first.4, Some(dispatched_at));
@@ -406,44 +450,76 @@ mod tests {
         let database = TestPostgresDb::create().await;
         let pool = database.connect_and_migrate().await;
         let now = Utc::now();
-        for (index, settlement_first) in [true, false].into_iter().enumerate() {
-            let id = seed(
-                &pool,
-                &format!("settle-converge-{index}"),
-                IntakeOutboxStatus::Spawned,
-                Some(now),
-                None,
+        let settlement_first = seed(
+            &pool,
+            "settle-converge-settlement-first",
+            IntakeOutboxStatus::Spawned,
+            Some(now),
+            None,
+        )
+        .await;
+        let settlement_won =
+            settle_with_lock_timeout(&pool, settlement_first, IntakeSettlementSource::Committed)
+                .await
+                .expect("settlement-first CAS");
+        let worker_won = mark_done(&pool, settlement_first, "dispatch-worker")
+            .await
+            .expect("worker CAS after settlement commit");
+        assert_eq!((settlement_won, worker_won), (true, false));
+
+        let worker_first = seed(
+            &pool,
+            "settle-converge-worker-first",
+            IntakeOutboxStatus::Spawned,
+            Some(now),
+            None,
+        )
+        .await;
+        let worker_won = mark_done(&pool, worker_first, "dispatch-worker")
+            .await
+            .expect("worker-first CAS");
+        let settlement_won =
+            settle_with_lock_timeout(&pool, worker_first, IntakeSettlementSource::Committed)
+                .await
+                .expect("settlement CAS after worker commit");
+        assert_eq!((worker_won, settlement_won), (true, false));
+
+        let concurrent = seed(
+            &pool,
+            "settle-converge-concurrent",
+            IntakeOutboxStatus::Spawned,
+            Some(now),
+            None,
+        )
+        .await;
+        let barrier = Arc::new(Barrier::new(2));
+        let settlement_barrier = Arc::clone(&barrier);
+        let settlement_pool = pool.clone();
+        let settlement = async move {
+            settlement_barrier.wait().await;
+            settle_with_lock_timeout(
+                &settlement_pool,
+                concurrent,
+                IntakeSettlementSource::Committed,
             )
-            .await;
-            let shared = shared_with_pool(pool.clone()).await;
-            let state = state_for(id);
-            let barrier = Arc::new(Barrier::new(2));
-            let settle_barrier = Arc::clone(&barrier);
-            let settle_shared = Arc::clone(&shared);
-            let settle_state = state.clone();
-            let worker_pool = pool.clone();
-            let settlement = async move {
-                settle_barrier.wait().await;
-                settle_intake_row_at_bridge_exit(
-                    &settle_shared,
-                    &settle_state,
-                    BridgeTurnDisposition::Committed,
-                    READY_CAPABILITIES,
-                )
-                .await;
-            };
-            let worker_barrier = Arc::clone(&barrier);
-            let worker = async move {
-                worker_barrier.wait().await;
-                mark_done(&worker_pool, id, "dispatch-worker").await
-            };
-            if settlement_first {
-                let (_, worker_result) = tokio::join!(settlement, worker);
-                worker_result.expect("worker mark_done query");
-            } else {
-                let (worker_result, _) = tokio::join!(worker, settlement);
-                worker_result.expect("worker mark_done query");
-            }
+            .await
+        };
+        let worker_barrier = Arc::clone(&barrier);
+        let worker_pool = pool.clone();
+        let worker = async move {
+            worker_barrier.wait().await;
+            mark_done(&worker_pool, concurrent, "dispatch-worker").await
+        };
+        let (settlement_won, worker_won) = tokio::join!(settlement, worker);
+        let settlement_won = settlement_won.expect("concurrent settlement CAS");
+        let worker_won = worker_won.expect("concurrent worker CAS");
+        assert_eq!(
+            usize::from(settlement_won) + usize::from(worker_won),
+            1,
+            "exactly one concurrent CAS must win"
+        );
+
+        for id in [settlement_first, worker_first, concurrent] {
             assert_eq!(status(&pool, id).await, IntakeOutboxStatus::Done);
         }
         pool.close().await;
@@ -556,18 +632,96 @@ mod tests {
     }
 
     #[test]
-    fn settlement_sql_error_is_swallowed_and_counted() {
+    fn terminal_outcome_delivery_awaits_one_settlement_call_with_branch_flags() {
+        let source = include_str!("terminal_outcome_delivery.rs");
+        assert_eq!(
+            source
+                .matches("intake_settlement::settle_intake_row_at_bridge_exit")
+                .count(),
+            1,
+            "terminal delivery must have exactly one settlement call"
+        );
+        let compact = source.split_whitespace().collect::<Vec<_>>().join(" ");
+        let expected = "intake_settlement::settle_intake_row_at_bridge_exit( &shared_owned, &inflight_state, intake_settlement::classify( terminal_delivery_committed, status_panel_terminal_committed, preserve_inflight_for_cleanup_retry, bridge_skip_holder_owns_inflight, bridge_output_owner.is_some(), ), shared_owned.intake_delivery_capabilities.current(), ) .await;";
+        assert!(
+            compact.contains(expected),
+            "terminal delivery must await settlement with every disposition flag"
+        );
+    }
+
+    #[tokio::test]
+    async fn settlement_sql_error_is_swallowed_and_counted() {
         let source = IntakeSettlementSource::Committed;
         let before = counters().write_failed[source_index(source)].load(Ordering::Relaxed);
-        record_settlement_result(
-            99,
-            source,
-            Err(sqlx::Error::Protocol(
-                "injected settlement SQL error".to_owned(),
-            )),
-        );
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost/settlement-error")
+            .expect("construct lazy settlement error pool");
+        let shared = shared_with_pool(pool.clone()).await;
+        pool.close().await;
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::ERROR)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(CapturingWriter(Arc::clone(&logs)))
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        settle_intake_row_at_bridge_exit(
+            &shared,
+            &state_for(99),
+            BridgeTurnDisposition::Committed,
+            READY_CAPABILITIES,
+        )
+        .await;
         let after = counters().write_failed[source_index(source)].load(Ordering::Relaxed);
         assert_eq!(after, before + 1);
+        let logs = String::from_utf8(logs.lock().expect("read settlement logs").clone())
+            .expect("settlement logs are UTF-8");
+        assert!(logs.contains("intake_settlement_write_failed"));
+        assert!(logs.contains("intake settlement SQL failed"));
+    }
+
+    #[tokio::test]
+    async fn settlement_row_lock_timeout_is_swallowed_and_counted_pg() {
+        let database = TestPostgresDb::create().await;
+        let pool = database.connect_and_migrate().await;
+        let id = seed(
+            &pool,
+            "settle-lock-timeout",
+            IntakeOutboxStatus::Spawned,
+            Some(Utc::now()),
+            None,
+        )
+        .await;
+        let mut blocker = pool.begin().await.expect("begin competing transaction");
+        sqlx::query("SELECT id FROM public.intake_outbox WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_one(&mut *blocker)
+            .await
+            .expect("lock intake row");
+        let shared = shared_with_pool(pool.clone()).await;
+        let source = IntakeSettlementSource::Committed;
+        let before = counters().write_failed[source_index(source)].load(Ordering::Relaxed);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            settle_intake_row_at_bridge_exit(
+                &shared,
+                &state_for(id),
+                BridgeTurnDisposition::Committed,
+                READY_CAPABILITIES,
+            ),
+        )
+        .await
+        .expect("settlement must return within its lock-wait ceiling");
+        let after = counters().write_failed[source_index(source)].load(Ordering::Relaxed);
+        assert_eq!(after, before + 1);
+        assert_eq!(status(&pool, id).await, IntakeOutboxStatus::Spawned);
+        blocker
+            .rollback()
+            .await
+            .expect("release competing row lock");
+        pool.close().await;
+        database.drop().await;
     }
 
     #[tokio::test]
@@ -597,6 +751,84 @@ mod tests {
         )
         .await;
         assert_eq!(status(&pool, id).await, IntakeOutboxStatus::Spawned);
+        pool.close().await;
+        database.drop().await;
+    }
+
+    #[tokio::test]
+    async fn stale_capability_probe_after_downgrade_performs_no_write_pg() {
+        use crate::config::IntakeDeliverySettlementStage;
+        use crate::services::discord::runtime_bootstrap::intake_delivery_capability::bootstrap_from_receiver_for_test;
+
+        let database = TestPostgresDb::create().await;
+        let pool = database.connect_and_migrate().await;
+        let id = seed(
+            &pool,
+            "settle-stale-capability",
+            IntakeOutboxStatus::Spawned,
+            Some(Utc::now()),
+            None,
+        )
+        .await;
+        let probe_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database.database_url)
+            .await
+            .expect("connect single-slot probe pool");
+        let held_probe_slot = probe_pool.acquire().await.expect("hold probe pool slot");
+        let mut config = crate::config::Config::default();
+        config.runtime.intake_delivery_settlement = IntakeDeliverySettlementStage::Observe;
+        let (updates, receiver) = tokio::sync::watch::channel(Some(Arc::new(config.clone())));
+        let cache = bootstrap_from_receiver_for_test(Some(probe_pool.clone()), receiver).await;
+        assert_eq!(cache.generation_for_test(), 1);
+
+        config.runtime.intake_delivery_settlement = IntakeDeliverySettlementStage::Settle;
+        updates
+            .send(Some(Arc::new(config.clone())))
+            .expect("send Settle update");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while cache.generation_for_test() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Settle probe must start while the pool slot is held");
+
+        config.runtime.intake_delivery_settlement = IntakeDeliverySettlementStage::Off;
+        updates
+            .send(Some(Arc::new(config)))
+            .expect("send Off downgrade");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while cache.generation_for_test() < 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Off downgrade must supersede the blocked probe");
+        drop(held_probe_slot);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while cache.stale_results_for_test() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the old Settle probe must complete and be discarded after Off");
+        assert_eq!(cache.current(), BELOW_SETTLE_CAPABILITIES);
+
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage_and_intake_capabilities(
+            Some(pool.clone()),
+            Arc::clone(&cache),
+        );
+        settle_intake_row_at_bridge_exit(
+            &shared,
+            &state_for(id),
+            BridgeTurnDisposition::Committed,
+            cache.current(),
+        )
+        .await;
+        assert_eq!(status(&pool, id).await, IntakeOutboxStatus::Spawned);
+        drop(updates);
+        probe_pool.close().await;
         pool.close().await;
         database.drop().await;
     }

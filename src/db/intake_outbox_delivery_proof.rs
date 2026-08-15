@@ -8,10 +8,11 @@ use super::intake_outbox_status::IntakeOutboxStatus;
 use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool};
 
-/// The bridge-side receipt that authorizes an intake row to become terminal.
+/// The terminal-delivery or sweep source authorizing an intake row transition.
 ///
 /// This value is an observability label only.  The settlement CAS is the same
-/// for every source so a receipt cannot accidentally widen the SQL predicate.
+/// for every source so an authority label cannot widen the SQL predicate. The
+/// sweep label is reserved for its S-W3 caller.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum IntakeSettlementSource {
     Committed,
