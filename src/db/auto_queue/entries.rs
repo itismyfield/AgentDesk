@@ -430,6 +430,11 @@ pub async fn update_entry_status_on_pg(
 ) -> Result<EntryStatusUpdateResult, String> {
     let normalized = normalize_entry_status(new_status).map_err(|error| error.to_string())?;
     let mut current = load_entry_status_row_pg(pool, entry_id).await?;
+    let pinned_dispatch_id = options
+        .dispatch_id
+        .clone()
+        .or_else(|| current.dispatch_id.clone());
+    let pinned_slot_index = options.slot_index.or(current.slot_index);
 
     // #2048 F11: bound the stale-retry loop. Without a cap, two concurrent
     // updaters on the same entry can keep losing the optimistic update and
@@ -472,11 +477,6 @@ pub async fn update_entry_status_on_pg(
             ));
         }
 
-        let effective_dispatch_id = options
-            .dispatch_id
-            .clone()
-            .or_else(|| current.dispatch_id.clone());
-        let effective_slot_index = options.slot_index.or(current.slot_index);
         let metadata_change = match normalized {
             ENTRY_STATUS_PENDING => {
                 current.dispatch_id.is_some()
@@ -484,8 +484,8 @@ pub async fn update_entry_status_on_pg(
                     || current.completed_at.is_some()
             }
             ENTRY_STATUS_DISPATCHED => {
-                effective_dispatch_id != current.dispatch_id
-                    || effective_slot_index != current.slot_index
+                pinned_dispatch_id != current.dispatch_id
+                    || pinned_slot_index != current.slot_index
                     || current.completed_at.is_some()
             }
             ENTRY_STATUS_DONE
@@ -517,7 +517,7 @@ pub async fn update_entry_status_on_pg(
                 entry_id,
                 &current.status,
                 current.dispatch_id.as_deref(),
-                effective_dispatch_id.as_deref(),
+                pinned_dispatch_id.as_deref(),
             )
             .await?;
         }
@@ -556,8 +556,8 @@ pub async fn update_entry_status_on_pg(
                    AND dispatch_id IS NOT DISTINCT FROM $5
                    AND slot_index IS NOT DISTINCT FROM $6",
             )
-            .bind(effective_dispatch_id.as_deref())
-            .bind(effective_slot_index)
+            .bind(pinned_dispatch_id.as_deref())
+            .bind(pinned_slot_index)
             .bind(entry_id)
             .bind(&current.status)
             .bind(current.dispatch_id.as_deref())
@@ -638,8 +638,8 @@ pub async fn update_entry_status_on_pg(
             if entry_status_row_matches_target(
                 &latest,
                 normalized,
-                effective_dispatch_id.as_deref(),
-                effective_slot_index,
+                pinned_dispatch_id.as_deref(),
+                pinned_slot_index,
             ) {
                 return Ok(EntryStatusUpdateResult {
                     run_id: latest.run_id,
@@ -647,6 +647,11 @@ pub async fn update_entry_status_on_pg(
                     to_status: normalized.to_string(),
                     changed: false,
                 });
+            }
+            if latest.dispatch_id != pinned_dispatch_id || latest.slot_index != pinned_slot_index {
+                return Err(format!(
+                    "auto-queue entry {entry_id} dispatch identity changed during status update"
+                ));
             }
 
             if !is_allowed_entry_transition(&latest.status, normalized, trigger_source) {
@@ -683,7 +688,7 @@ pub async fn update_entry_status_on_pg(
             if let Some(previous_dispatch_id) = current
                 .dispatch_id
                 .as_deref()
-                .filter(|value| Some(*value) != effective_dispatch_id.as_deref())
+                .filter(|value| Some(*value) != pinned_dispatch_id.as_deref())
             {
                 record_entry_dispatch_history_on_pg(
                     &mut tx,
@@ -693,7 +698,7 @@ pub async fn update_entry_status_on_pg(
                 )
                 .await?;
             }
-            if let Some(dispatch_id) = effective_dispatch_id.as_deref() {
+            if let Some(dispatch_id) = pinned_dispatch_id.as_deref() {
                 record_entry_dispatch_history_on_pg(&mut tx, entry_id, dispatch_id, trigger_source)
                     .await?;
             }
@@ -1646,7 +1651,7 @@ async fn record_entry_transition_on_pg(
 mod tests {
     use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
-    use sqlx::{Connection, PgConnection, PgPool};
+    use sqlx::{Connection, Executor, PgConnection, PgPool};
 
     async fn setup_entry(pool: &PgPool, run_status: &str, entry_status: &str) {
         sqlx::query(
@@ -1901,6 +1906,116 @@ mod tests {
     #[tokio::test]
     async fn restoring_run_allows_dispatched_transition_pg() {
         assert_live_run_allows_dispatched_transition("restoring", "dispatch-restoring").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pool_status_retry_rejects_competing_dispatch_identity_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        setup_entry(&pool, "active", ENTRY_STATUS_PENDING).await;
+        seed_dispatch(&pool, "dispatch-requested-status-update").await;
+        seed_dispatch(&pool, "dispatch-competing-status-update").await;
+        let mut token_holder = begin_run_token_holder(&pg_db.database_url).await;
+
+        let update_pool = pool.clone();
+        let update = tokio::spawn(async move {
+            update_entry_status_on_pg(
+                &update_pool,
+                "gate-entry",
+                ENTRY_STATUS_DISPATCHED,
+                "test_pool_status_retry",
+                &EntryStatusUpdateOptions {
+                    dispatch_id: Some("dispatch-requested-status-update".to_string()),
+                    slot_index: Some(0),
+                },
+            )
+            .await
+        });
+        wait_for_run_token_waiter(&mut token_holder).await;
+        token_holder
+            .execute(
+                "UPDATE auto_queue_entries
+             SET status = 'dispatched',
+                 dispatch_id = 'dispatch-competing-status-update',
+                 slot_index = 1,
+                 completed_at = NULL
+             WHERE id = 'gate-entry'",
+            )
+            .await
+            .expect("attach competing dispatch during pool status update");
+        token_holder
+            .execute("COMMIT")
+            .await
+            .expect("commit competing dispatch and release run token");
+
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), update)
+            .await
+            .expect("pool status update finishes after competing attachment")
+            .expect("join pool status update")
+            .expect_err("pool status retry must reject a competing dispatch identity");
+        assert!(error.contains("dispatch identity"), "{error}");
+        let identity = load_entry_status_row_pg(&pool, "gate-entry")
+            .await
+            .expect("load preserved competing dispatch identity");
+        assert_eq!(
+            identity.dispatch_id.as_deref(),
+            Some("dispatch-competing-status-update")
+        );
+        assert_eq!(identity.slot_index, Some(1));
+
+        drop(token_holder);
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pool_status_retry_distinguishes_null_and_empty_dispatch_identity_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        setup_entry(&pool, "active", ENTRY_STATUS_PENDING).await;
+        let mut token_holder = begin_run_token_holder(&pg_db.database_url).await;
+
+        let update_pool = pool.clone();
+        let update = tokio::spawn(async move {
+            update_entry_status_on_pg(
+                &update_pool,
+                "gate-entry",
+                ENTRY_STATUS_DISPATCHED,
+                "test_pool_status_retry",
+                &EntryStatusUpdateOptions::default(),
+            )
+            .await
+        });
+        wait_for_run_token_waiter(&mut token_holder).await;
+        token_holder
+            .execute(
+                "UPDATE auto_queue_entries
+             SET status = 'dispatched',
+                 dispatch_id = '',
+                 completed_at = NULL
+             WHERE id = 'gate-entry'",
+            )
+            .await
+            .expect("replace NULL dispatch identity with empty text");
+        token_holder
+            .execute("COMMIT")
+            .await
+            .expect("commit empty dispatch identity and release run token");
+
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), update)
+            .await
+            .expect("pool status update finishes after empty identity wins")
+            .expect("join pool status update")
+            .expect_err("pool status retry must not accept empty text as the pinned NULL identity");
+        assert!(error.contains("dispatch identity"), "{error}");
+        let identity = load_entry_status_row_pg(&pool, "gate-entry")
+            .await
+            .expect("load preserved empty dispatch identity");
+        assert_eq!(identity.dispatch_id.as_deref(), Some(""));
+
+        drop(token_holder);
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
