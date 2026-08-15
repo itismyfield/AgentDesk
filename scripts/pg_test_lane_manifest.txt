@@ -49,6 +49,7 @@ src/services/auto_queue.rs
 src/services/auto_queue/activate_command.rs
 src/services/auto_queue/cancel_run.rs
 src/services/auto_queue/cleanup_tasks_pg_tests.rs
+src/services/auto_queue/fsm.rs
 src/services/auto_queue/phase_gate.rs
 src/services/auto_queue/planning.rs
 src/services/auto_queue/route_generate.rs
@@ -150,6 +151,7 @@ services::auto_queue::cancel_run::pg_tests
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests
 services::auto_queue::route::activate_command::tests::depth_gate_activate_pg_tests
 services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests
+services::auto_queue::route::fsm::choke_gate_pg_tests
 services::auto_queue::route::phase_gate::pg_tests
 services::auto_queue::route::planning::failed_entry_alert_tests
 services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::postgres_tests
@@ -203,12 +205,16 @@ services::stale_turn_reconciler::tests
 voice::announce_meta::tests
 voice::turn_link::tests
 [tests]
+db::auto_queue::entries::choke_gate_pg_tests::active_run_allows_dispatched_transition_pg
+db::auto_queue::entries::choke_gate_pg_tests::cancelled_run_allows_cancelled_without_waiting_for_gate_pg
+db::auto_queue::entries::choke_gate_pg_tests::cancelled_run_allows_done_without_waiting_for_gate_pg
+db::auto_queue::entries::choke_gate_pg_tests::cancelled_run_allows_failed_without_waiting_for_gate_pg
 db::auto_queue::entries::choke_gate_pg_tests::cancelled_run_allows_skipped_without_waiting_for_gate_pg
 db::auto_queue::entries::choke_gate_pg_tests::cancelled_run_rejects_dispatched_pool_pg
 db::auto_queue::entries::choke_gate_pg_tests::cancelled_run_rejects_dispatched_tx_pg
-db::auto_queue::entries::choke_gate_pg_tests::fsm_recovery_reattach_rejects_cancelled_run_pg
-db::auto_queue::entries::choke_gate_pg_tests::fsm_restore_attach_existing_rejects_cancelled_run_pg
+db::auto_queue::entries::choke_gate_pg_tests::paused_run_allows_dispatched_transition_pg
 db::auto_queue::entries::choke_gate_pg_tests::reactivate_completed_run_waits_for_token_and_records_history_pg
+db::auto_queue::entries::choke_gate_pg_tests::reactivate_rechecks_cancelled_run_after_waiting_for_token_pg
 db::auto_queue::entries::choke_gate_pg_tests::restoring_run_allows_dispatched_transition_pg
 db::auto_queue::entries::dispatch_failure::tests::concurrent_failure_has_one_cas_winner_pg
 db::auto_queue::entries::dispatch_failure::tests::non_live_runs_terminalize_entry_instead_of_blocking_dispatch_failure_pg
@@ -553,6 +559,9 @@ services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests:
 services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests::implementation_latest_dispatch_is_attachable_pg
 services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests::scope_assessment_completion_does_not_finalize_pending_entry_pg
 services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests::scope_assessment_latest_dispatch_is_not_attachable_pg
+services::auto_queue::route::fsm::choke_gate_pg_tests::recovery_reattach_path_rechecks_cancelled_run_pg
+services::auto_queue::route::fsm::choke_gate_pg_tests::restore_attach_existing_path_rechecks_cancelled_run_pg
+services::auto_queue::route::phase_gate::pg_tests::attachment_free_gate_uses_newest_entry_single_run_pg
 services::auto_queue::route::phase_gate::pg_tests::cancelled_run_rejects_dispatch_attach
 services::auto_queue::route::planning::failed_entry_alert_tests::failed_entry_transition_and_alert_share_commit_with_explicit_ttl_pg
 services::auto_queue::route::planning::failed_entry_alert_tests::production_failure_wrapper_preserves_restoring_slot_binding_pg

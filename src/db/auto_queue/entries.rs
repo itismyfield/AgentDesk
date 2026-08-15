@@ -118,6 +118,58 @@ pub async fn reactivate_done_entry_on_pg(
         .map_err(|error| format!("open postgres auto-queue done reactivation tx: {error}"))?;
     acquire_run_advisory_xact_lock_on_pg_tx(&mut tx, &current.run_id).await?;
 
+    let run_status = sqlx::query_scalar::<_, String>(
+        "SELECT status
+         FROM auto_queue_runs
+         WHERE id = $1",
+    )
+    .bind(&current.run_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| {
+        format!(
+            "reload postgres auto-queue run {} before entry reactivation: {error}",
+            current.run_id
+        )
+    })?
+    .ok_or_else(|| {
+        format!(
+            "auto-queue run not found before entry reactivation: {}",
+            current.run_id
+        )
+    })?;
+
+    if run_status == "completed" {
+        let reactivated_run = sqlx::query(
+            "UPDATE auto_queue_runs
+             SET status = 'active',
+                 completed_at = NULL
+             WHERE id = $1
+               AND status = 'completed'",
+        )
+        .bind(&current.run_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| {
+            format!(
+                "reactivate postgres auto-queue run {}: {error}",
+                current.run_id
+            )
+        })?
+        .rows_affected();
+        if reactivated_run != 1 {
+            return Err(format!(
+                "auto-queue run {} changed while reactivating completed entry {entry_id}",
+                current.run_id
+            ));
+        }
+    } else if !is_live_run_status(&run_status) {
+        return Err(format!(
+            "auto-queue run {} is {run_status}: refusing to reactivate done entry {entry_id}",
+            current.run_id
+        ));
+    }
+
     let rows_affected = sqlx::query(
         "UPDATE auto_queue_entries
          SET status = 'dispatched',
@@ -160,23 +212,6 @@ pub async fn reactivate_done_entry_on_pg(
             latest.status, ENTRY_STATUS_DISPATCHED
         ));
     }
-
-    sqlx::query(
-        "UPDATE auto_queue_runs
-         SET status = 'active',
-             completed_at = NULL
-         WHERE id = $1
-           AND status = 'completed'",
-    )
-    .bind(&current.run_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| {
-        format!(
-            "reactivate postgres auto-queue run {}: {error}",
-            current.run_id
-        )
-    })?;
 
     if let Some(dispatch_id) = effective_dispatch_id.as_deref() {
         record_entry_dispatch_history_on_pg(&mut tx, entry_id, dispatch_id, trigger_source).await?;
@@ -1516,6 +1551,17 @@ mod choke_gate_pg_tests {
             .expect("load gate run status")
     }
 
+    async fn transition_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT
+             FROM auto_queue_entry_transitions
+             WHERE entry_id = 'gate-entry'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("count gate entry transitions")
+    }
+
     async fn begin_run_token_holder(database_url: &str) -> PgConnection {
         let mut conn = PgConnection::connect(database_url)
             .await
@@ -1607,11 +1653,10 @@ mod choke_gate_pg_tests {
         pg_db.drop().await;
     }
 
-    #[tokio::test]
-    async fn cancelled_run_allows_skipped_without_waiting_for_gate_pg() {
+    async fn assert_terminal_transition_does_not_wait(initial_status: &str, terminal_status: &str) {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
-        setup_entry(&pool, "cancelled", ENTRY_STATUS_PENDING).await;
+        setup_entry(&pool, "cancelled", initial_status).await;
         let mut token_holder = begin_run_token_holder(&pg_db.database_url).await;
 
         let result = tokio::time::timeout(
@@ -1619,16 +1664,16 @@ mod choke_gate_pg_tests {
             update_entry_status_on_pg(
                 &pool,
                 "gate-entry",
-                ENTRY_STATUS_SKIPPED,
+                terminal_status,
                 "test_terminal_arm",
                 &EntryStatusUpdateOptions::default(),
             ),
         )
         .await
         .expect("terminal arm must not wait for the dispatched gate")
-        .expect("skip cancelled-run entry");
+        .expect("terminalize cancelled-run entry");
         assert!(result.changed);
-        assert_eq!(entry_status(&pool).await, ENTRY_STATUS_SKIPPED);
+        assert_eq!(entry_status(&pool).await, terminal_status);
         sqlx::query("COMMIT")
             .execute(&mut token_holder)
             .await
@@ -1639,81 +1684,65 @@ mod choke_gate_pg_tests {
     }
 
     #[tokio::test]
-    async fn fsm_restore_attach_existing_rejects_cancelled_run_pg() {
-        let pg_db = TestPostgresDb::create().await;
-        let pool = pg_db.connect_and_migrate().await;
-        setup_entry(&pool, "cancelled", ENTRY_STATUS_PENDING).await;
-        seed_dispatch(&pool, "dispatch-restore-existing").await;
-
-        let error = update_entry_status_on_pg(
-            &pool,
-            "gate-entry",
-            ENTRY_STATUS_DISPATCHED,
-            "restore_run_attach_existing_dispatch",
-            &EntryStatusUpdateOptions {
-                dispatch_id: Some("dispatch-restore-existing".to_string()),
-                slot_index: Some(0),
-            },
-        )
-        .await
-        .expect_err("FSM attach-existing path must reject a cancelled run");
-        assert!(error.contains("gate-run is cancelled"), "{error}");
-        assert_eq!(entry_status(&pool).await, ENTRY_STATUS_PENDING);
-
-        pool.close().await;
-        pg_db.drop().await;
+    async fn cancelled_run_allows_skipped_without_waiting_for_gate_pg() {
+        assert_terminal_transition_does_not_wait(ENTRY_STATUS_PENDING, ENTRY_STATUS_SKIPPED).await;
     }
 
     #[tokio::test]
-    async fn fsm_recovery_reattach_rejects_cancelled_run_pg() {
-        let pg_db = TestPostgresDb::create().await;
-        let pool = pg_db.connect_and_migrate().await;
-        setup_entry(&pool, "cancelled", ENTRY_STATUS_PENDING).await;
-        seed_dispatch(&pool, "dispatch-recovered").await;
-
-        let error = update_entry_status_on_pg(
-            &pool,
-            "gate-entry",
-            ENTRY_STATUS_DISPATCHED,
-            "restore_run_create_dispatch",
-            &EntryStatusUpdateOptions {
-                dispatch_id: Some("dispatch-recovered".to_string()),
-                slot_index: Some(0),
-            },
-        )
-        .await
-        .expect_err("FSM recovery reattach path must reject a cancelled run");
-        assert!(error.contains("gate-run is cancelled"), "{error}");
-        assert_eq!(entry_status(&pool).await, ENTRY_STATUS_PENDING);
-
-        pool.close().await;
-        pg_db.drop().await;
+    async fn cancelled_run_allows_failed_without_waiting_for_gate_pg() {
+        assert_terminal_transition_does_not_wait(ENTRY_STATUS_DISPATCHED, ENTRY_STATUS_FAILED)
+            .await;
     }
 
     #[tokio::test]
-    async fn restoring_run_allows_dispatched_transition_pg() {
+    async fn cancelled_run_allows_cancelled_without_waiting_for_gate_pg() {
+        assert_terminal_transition_does_not_wait(ENTRY_STATUS_PENDING, ENTRY_STATUS_USER_CANCELLED)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_run_allows_done_without_waiting_for_gate_pg() {
+        assert_terminal_transition_does_not_wait(ENTRY_STATUS_PENDING, ENTRY_STATUS_DONE).await;
+    }
+
+    async fn assert_live_run_allows_dispatched_transition(run_status: &str, dispatch_id: &str) {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
-        setup_entry(&pool, "restoring", ENTRY_STATUS_PENDING).await;
-        seed_dispatch(&pool, "dispatch-restoring").await;
+        setup_entry(&pool, run_status, ENTRY_STATUS_PENDING).await;
+        seed_dispatch(&pool, dispatch_id).await;
 
         let result = update_entry_status_on_pg(
             &pool,
             "gate-entry",
             ENTRY_STATUS_DISPATCHED,
-            "test_restoring_gate",
+            "test_live_gate",
             &EntryStatusUpdateOptions {
-                dispatch_id: Some("dispatch-restoring".to_string()),
+                dispatch_id: Some(dispatch_id.to_string()),
                 slot_index: Some(0),
             },
         )
         .await
-        .expect("restoring run remains live for attachment");
+        .expect("live run remains eligible for attachment");
         assert!(result.changed);
         assert_eq!(entry_status(&pool).await, ENTRY_STATUS_DISPATCHED);
 
         pool.close().await;
         pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn active_run_allows_dispatched_transition_pg() {
+        assert_live_run_allows_dispatched_transition("active", "dispatch-active").await;
+    }
+
+    #[tokio::test]
+    async fn paused_run_allows_dispatched_transition_pg() {
+        assert_live_run_allows_dispatched_transition("paused", "dispatch-paused").await;
+    }
+
+    #[tokio::test]
+    async fn restoring_run_allows_dispatched_transition_pg() {
+        assert_live_run_allows_dispatched_transition("restoring", "dispatch-restoring").await;
     }
 
     #[tokio::test]
@@ -1757,6 +1786,61 @@ mod choke_gate_pg_tests {
                 .expect("load history-only ownership evidence"),
             vec!["dispatch-reactivated".to_string()]
         );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn reactivate_rechecks_cancelled_run_after_waiting_for_token_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        setup_entry(&pool, "completed", ENTRY_STATUS_DONE).await;
+        seed_dispatch(&pool, "dispatch-rejected-reactivation").await;
+        let mut token_holder = begin_run_token_holder(&pg_db.database_url).await;
+
+        let reactivate_pool = pool.clone();
+        let reactivation = tokio::spawn(async move {
+            reactivate_done_entry_on_pg(
+                &reactivate_pool,
+                "gate-entry",
+                "pmd_reopen",
+                &EntryStatusUpdateOptions {
+                    dispatch_id: Some("dispatch-rejected-reactivation".to_string()),
+                    slot_index: Some(0),
+                },
+            )
+            .await
+        });
+        wait_for_run_token_waiter(&mut token_holder).await;
+        sqlx::query(
+            "UPDATE auto_queue_runs
+             SET status = 'cancelled', completed_at = NOW()
+             WHERE id = 'gate-run'",
+        )
+        .execute(&mut token_holder)
+        .await
+        .expect("cancel run while owning its token");
+        sqlx::query("COMMIT")
+            .execute(&mut token_holder)
+            .await
+            .expect("commit run cancellation and release token");
+
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), reactivation)
+            .await
+            .expect("reactivation finishes after cancellation commits")
+            .expect("join rejected reactivation task")
+            .expect_err("cancelled run must reject done-entry reactivation");
+        assert!(error.contains("gate-run is cancelled"), "{error}");
+        assert_eq!(entry_status(&pool).await, ENTRY_STATUS_DONE);
+        assert_eq!(run_status(&pool).await, "cancelled");
+        assert!(
+            list_entry_dispatch_history_pg(&pool, "gate-entry")
+                .await
+                .expect("load rejected reactivation history")
+                .is_empty()
+        );
+        assert_eq!(transition_count(&pool).await, 0);
 
         pool.close().await;
         pg_db.drop().await;

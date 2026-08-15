@@ -363,6 +363,10 @@ async fn create_activate_dispatch_pg_inner(
             ));
         }
     } else {
+        // This attachment-free compatibility branch currently has no
+        // production caller: entry dispatch creation always supplies an
+        // attachment. Preserve its historical card lookup by selecting one
+        // owning run from the newest entry, rather than combining run states.
         let owning_run_id = sqlx::query_scalar::<_, String>(
             "SELECT r.id
              FROM auto_queue_entries e
@@ -668,6 +672,83 @@ mod pg_tests {
         .fetch_one(&pool)
         .await
         .expect("count late dispatches");
+        assert_eq!(dispatch_count, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn attachment_free_gate_uses_newest_entry_single_run_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
+             VALUES ('agent-card-gate', 'Card Gate Agent', 'claude', '456')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed attachment-free gate agent");
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, metadata)
+             VALUES (
+                 'card-multi-run', 'Multi Run Card', 'in_progress',
+                 'agent-card-gate',
+                 '{\"sandbox_preflight\":true,\"production_mutation_allowed\":false}'::jsonb
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed attachment-free gate card");
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, agent_id, status)
+             VALUES
+                ('run-older-live', 'agent-card-gate', 'active'),
+                ('run-newer-cancelled', 'agent-card-gate', 'cancelled')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed attachment-free gate runs");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, created_at)
+             VALUES
+                (
+                    'entry-older-live', 'run-older-live', 'card-multi-run',
+                    'agent-card-gate', 'pending', NOW() - INTERVAL '1 minute'
+                ),
+                (
+                    'entry-newer-cancelled', 'run-newer-cancelled', 'card-multi-run',
+                    'agent-card-gate', 'pending', NOW()
+                )",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed entries from distinct owning runs");
+
+        let error = create_activate_dispatch_pg_inner(
+            &pool,
+            "card-multi-run",
+            "agent-card-gate",
+            "implementation",
+            "Late attachment-free dispatch",
+            &json!({}),
+            None,
+        )
+        .await
+        .expect_err("newest cancelled owning run must fail closed");
+        assert!(
+            error.contains("run-newer-cancelled is cancelled"),
+            "{error}"
+        );
+        let dispatch_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM task_dispatches
+             WHERE kanban_card_id = 'card-multi-run'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count attachment-free dispatches");
         assert_eq!(dispatch_count, 0);
 
         pool.close().await;

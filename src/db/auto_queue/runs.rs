@@ -205,8 +205,9 @@ async fn remaining_runnable_entry_count_on_pg_tx(
 /// Blocking participants take `aq_run:<run_id>` before row locks: cancel and
 /// terminalize, force-pause, phase-gate attachment (including its attachment-
 /// free branch), consultation attachment, explicit completion, dispatched-
-/// entry choke points, done-entry reactivation, and retry attachment. Their
-/// later cards/entries/runs/slots ordering is serialized by that first token.
+/// entry choke points, and done-entry reactivation. Retry attachment joins
+/// this participant set when S3 is merged. Later cards/entries/runs/slots
+/// ordering is serialized by that first token for current participants.
 /// `maybe_finalize_run_if_ready_pg` is the exception: callers may already hold
 /// entry or run rows, so its try-lock is non-blocking and adds no wait edge.
 ///
