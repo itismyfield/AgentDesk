@@ -822,25 +822,19 @@ async fn terminalize_selected_runs_with_pg(
         "TRUE"
     };
     let lock_runs_sql = format!(
-        "WITH target_runs AS (
-             SELECT id
-             FROM auto_queue_runs
-             WHERE id = ANY($1)
-               AND {lock_status_filter}
-             ORDER BY id ASC
-         ),
-         locked AS (
-             SELECT id,
-                    pg_advisory_xact_lock(hashtext('aq_run:' || id)) AS _lock
-             FROM target_runs
-         )
-         SELECT id FROM locked ORDER BY id ASC"
+        "SELECT id
+         FROM auto_queue_runs
+         WHERE id = ANY($1)
+           AND {lock_status_filter}"
     );
-    let locked_run_ids = sqlx::query_scalar::<_, String>(&lock_runs_sql)
+    let lock_candidates = sqlx::query_scalar::<_, String>(&lock_runs_sql)
         .bind(target_run_ids)
         .fetch_all(&mut *tx)
         .await
-        .map_err(|error| format!("lock postgres auto_queue_runs for cancel: {error}"))?;
+        .map_err(|error| format!("load postgres auto_queue_runs for cancel: {error}"))?;
+    let locked_run_ids =
+        crate::db::auto_queue::acquire_run_advisory_xact_locks_on_pg_tx(&mut tx, &lock_candidates)
+            .await?;
 
     let rollback_candidate_card_ids = sqlx::query_scalar::<_, String>(
         "SELECT DISTINCT kanban_card_id

@@ -4,8 +4,9 @@ use thiserror::Error;
 
 use super::run_status::is_live_run_status;
 use super::runs::{
-    acquire_run_advisory_xact_lock_on_pg_tx, auto_queue_run_review_disabled_on_pg_tx,
-    maybe_finalize_run_after_terminal_entry_pg, maybe_finalize_run_if_ready_pg,
+    acquire_run_advisory_xact_lock_on_pg_tx, acquire_run_advisory_xact_locks_on_pg_tx,
+    auto_queue_run_review_disabled_on_pg_tx, maybe_finalize_run_after_terminal_entry_pg,
+    maybe_finalize_run_if_ready_pg,
 };
 
 mod dispatch_failure;
@@ -127,57 +128,7 @@ pub async fn reactivate_done_entry_on_pg(
         .await;
     }
 
-    let run_status = sqlx::query_scalar::<_, String>(
-        "SELECT status
-         FROM auto_queue_runs
-         WHERE id = $1",
-    )
-    .bind(&current.run_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|error| {
-        format!(
-            "reload postgres auto-queue run {} before entry reactivation: {error}",
-            current.run_id
-        )
-    })?
-    .ok_or_else(|| {
-        format!(
-            "auto-queue run not found before entry reactivation: {}",
-            current.run_id
-        )
-    })?;
-
-    if run_status == "completed" {
-        let reactivated_run = sqlx::query(
-            "UPDATE auto_queue_runs
-             SET status = 'active',
-                 completed_at = NULL
-             WHERE id = $1
-               AND status = 'completed'",
-        )
-        .bind(&current.run_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| {
-            format!(
-                "reactivate postgres auto-queue run {}: {error}",
-                current.run_id
-            )
-        })?
-        .rows_affected();
-        if reactivated_run != 1 {
-            return Err(format!(
-                "auto-queue run {} changed while reactivating completed entry {entry_id}",
-                current.run_id
-            ));
-        }
-    } else if !is_live_run_status(&run_status) {
-        return Err(format!(
-            "auto-queue run {} is {run_status}: refusing to reactivate done entry {entry_id}",
-            current.run_id
-        ));
-    }
+    ensure_done_entry_run_live_on_pg_tx(&mut tx, &reloaded.run_id, entry_id).await?;
 
     let result = update_entry_status_on_pg_tx(
         &mut tx,
@@ -206,6 +157,53 @@ pub async fn reactivate_done_entry_on_pg(
         .map_err(|error| format!("commit postgres auto-queue reactivation {entry_id}: {error}"))?;
 
     Ok(result)
+}
+
+/// Keep done-entry reactivation symmetric across the dedicated reactivate and
+/// kanban-reopen paths after their run token has been acquired.
+pub(crate) async fn ensure_done_entry_run_live_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+    entry_id: &str,
+) -> Result<(), String> {
+    let run_status = sqlx::query_scalar::<_, String>(
+        "SELECT status
+         FROM auto_queue_runs
+         WHERE id = $1",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| {
+        format!("reload postgres auto-queue run {run_id} before entry reactivation: {error}")
+    })?
+    .ok_or_else(|| format!("auto-queue run not found before entry reactivation: {run_id}"))?;
+
+    if run_status == "completed" {
+        let reactivated_run = sqlx::query(
+            "UPDATE auto_queue_runs
+             SET status = 'active',
+                 completed_at = NULL
+             WHERE id = $1
+               AND status = 'completed'",
+        )
+        .bind(run_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("reactivate postgres auto-queue run {run_id}: {error}"))?
+        .rows_affected();
+        if reactivated_run != 1 {
+            return Err(format!(
+                "auto-queue run {run_id} changed while reactivating completed entry {entry_id}"
+            ));
+        }
+    } else if !is_live_run_status(&run_status) {
+        return Err(format!(
+            "auto-queue run {run_id} is {run_status}: refusing to reactivate done entry {entry_id}"
+        ));
+    }
+
+    Ok(())
 }
 
 fn dispatch_json_field(document: Option<&str>, field: &str) -> Option<String> {
@@ -913,16 +911,15 @@ pub(crate) async fn acquire_dispatched_entry_run_tokens_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_ids: &[String],
 ) -> Result<(), String> {
-    let ordered_run_ids = run_ids.iter().collect::<BTreeSet<_>>();
-    for run_id in ordered_run_ids {
-        acquire_run_advisory_xact_lock_on_pg_tx(tx, run_id).await?;
-    }
+    acquire_run_advisory_xact_locks_on_pg_tx(tx, run_ids).await?;
     Ok(())
 }
 
 /// A newly linked dispatch remains stable through the entry write and history
 /// insert. This closes the window where an attacher observed a live dispatch,
-/// then linked it after another transaction terminalized it.
+/// then linked it after another transaction terminalized it. A missing
+/// dispatch row is rejected because attachment ownership cannot be validated,
+/// so the guard fails closed rather than creating an unverifiable link.
 async fn validate_new_dispatch_attachment_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     entry_id: &str,
@@ -1439,6 +1436,10 @@ fn is_allowed_entry_transition(from_status: &str, to_status: &str, trigger_sourc
 
     if from_status == ENTRY_STATUS_DONE
         && to_status == ENTRY_STATUS_DISPATCHED
+        // The API reopen route is an existing caller of the same done-entry
+        // reactivation contract as pmd/rereview; retaining it here preserves
+        // that public behavior even though the design transition table names
+        // the internal sources.
         && matches!(
             trigger_source,
             "api_reopen" | "pmd_reopen" | "rereview_dispatch"
@@ -1934,6 +1935,89 @@ mod tests {
                 .is_empty()
         );
 
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn terminal_dispatch_commit_blocks_and_rejects_late_attachment_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        setup_entry(&pool, "active", ENTRY_STATUS_PENDING).await;
+        seed_dispatch(&pool, "dispatch-terminalizing-during-attach").await;
+
+        let mut terminalizer = pool.acquire().await.expect("acquire terminalizer");
+        sqlx::query("BEGIN")
+            .execute(&mut *terminalizer)
+            .await
+            .expect("begin terminalizer");
+        sqlx::query(
+            "UPDATE task_dispatches
+             SET status = 'failed', updated_at = NOW()
+             WHERE id = 'dispatch-terminalizing-during-attach'",
+        )
+        .execute(&mut *terminalizer)
+        .await
+        .expect("terminalize dispatch without committing");
+
+        let attach_pool = pool.clone();
+        let attachment = tokio::spawn(async move {
+            update_entry_status_on_pg(
+                &attach_pool,
+                "gate-entry",
+                ENTRY_STATUS_DISPATCHED,
+                "restore_run_attach_existing_dispatch",
+                &EntryStatusUpdateOptions {
+                    dispatch_id: Some("dispatch-terminalizing-during-attach".to_string()),
+                    slot_index: Some(0),
+                },
+            )
+            .await
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            sqlx::query("SELECT pg_stat_clear_snapshot()")
+                .execute(&mut *terminalizer)
+                .await
+                .expect("clear late-attach waiter snapshot");
+            let waiting = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                     SELECT 1
+                     FROM pg_stat_activity
+                     WHERE datname = current_database()
+                       AND wait_event_type = 'Lock'
+                       AND query LIKE '%FOR SHARE%'
+                 )",
+            )
+            .fetch_one(&mut *terminalizer)
+            .await
+            .expect("inspect dispatch FOR SHARE waiter");
+            if waiting {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "late attachment did not wait on the terminal dispatch update"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        sqlx::query("COMMIT")
+            .execute(&mut *terminalizer)
+            .await
+            .expect("commit terminal dispatch update");
+
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), attachment)
+            .await
+            .expect("late attachment finishes after terminal commit")
+            .expect("join late attachment")
+            .expect_err("committed terminal dispatch must reject late attachment");
+        assert!(error.contains("is failed: refusing to attach"), "{error}");
+        assert_eq!(entry_status(&pool).await, ENTRY_STATUS_PENDING);
+        assert_eq!(transition_count(&pool).await, 0);
+
+        drop(terminalizer);
         pool.close().await;
         pg_db.drop().await;
     }

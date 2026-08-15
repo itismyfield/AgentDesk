@@ -445,7 +445,7 @@ fn set_status_raw_pg(pool: &PgPool, card_id: &str, new_status: &str, force: bool
     }
 }
 
-async fn reopen_done_auto_queue_entries_on_pg_tx(
+pub(crate) async fn reopen_done_auto_queue_entries_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     card_id: &str,
     trigger_source: &str,
@@ -467,7 +467,8 @@ async fn reopen_done_auto_queue_entries_on_pg_tx(
         .collect::<Vec<_>>();
     crate::db::auto_queue::acquire_dispatched_entry_run_tokens_on_pg_tx(tx, &run_ids).await?;
 
-    for (entry_id, _) in entries {
+    for (entry_id, run_id) in entries {
+        crate::db::auto_queue::ensure_done_entry_run_live_on_pg_tx(tx, &run_id, &entry_id).await?;
         let result = crate::db::auto_queue::update_entry_status_on_pg_tx(
             tx,
             &entry_id,
@@ -477,6 +478,11 @@ async fn reopen_done_auto_queue_entries_on_pg_tx(
         )
         .await?;
         if !result.changed {
+            if result.from_status == result.to_status
+                && result.to_status == crate::db::auto_queue::ENTRY_STATUS_DISPATCHED
+            {
+                continue;
+            }
             return Err(format!(
                 "auto-queue entry {entry_id} changed while reopening card {card_id}"
             ));
@@ -540,7 +546,9 @@ fn reopen_raw_pg(pool: &PgPool, card_id: &str, new_status: &str) -> String {
 
         // Acquire every affected run token before the first row write. The
         // canonical entry helper then validates and records each transition
-        // while retaining the existing dispatch link.
+        // while retaining the existing dispatch link. The helper also enforces
+        // run liveness: completed runs are revived and cancelled runs reject
+        // the reopen.
         reopen_done_auto_queue_entries_on_pg_tx(&mut tx, &card_id, "pmd_reopen").await?;
 
         let clock_extra = match effective.clock_for_state(&new_status) {
@@ -1588,8 +1596,8 @@ mod tests {
         .await
         .expect("seed completed reopen dispatch");
         sqlx::query(
-            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
-             VALUES ('reopen-run', 'reopen-repo', 'reopen-agent', 'active')",
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, completed_at)
+             VALUES ('reopen-run', 'reopen-repo', 'reopen-agent', 'completed', NOW())",
         )
         .execute(pool)
         .await
@@ -1607,7 +1615,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn reopen_raw_pg_routes_done_entry_through_canonical_transition_pg() {
+    async fn reopen_raw_pg_revives_completed_run_and_routes_done_entry_pg() {
         let db = pg_test_db().await;
         let pool = db.connect_and_migrate().await;
         crate::pipeline::ensure_loaded();
@@ -1628,6 +1636,16 @@ mod tests {
         .expect("load reopened auto-queue entry");
         assert_eq!(entry.0, crate::db::auto_queue::ENTRY_STATUS_DISPATCHED);
         assert_eq!(entry.1.as_deref(), Some("reopen-completed-dispatch"));
+        let run = sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT status, completed_at::TEXT
+             FROM auto_queue_runs
+             WHERE id = 'reopen-run'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load revived auto-queue run");
+        assert_eq!(run.0, "active");
+        assert_eq!(run.1, None);
         let transition = sqlx::query_as::<_, (String, String, String)>(
             "SELECT from_status, to_status, trigger_source
              FROM auto_queue_entry_transitions
@@ -1645,6 +1663,102 @@ mod tests {
             )
         );
 
+        pool.close().await;
+        db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reopen_accepts_entry_concurrently_attached_to_target_state_pg() {
+        let db = pg_test_db().await;
+        let pool = db.connect_and_migrate_with_max_connections(4).await;
+        seed_reopen_auto_queue_entry_pg(&pool).await;
+
+        let mut attacher = pool.acquire().await.expect("acquire concurrent attacher");
+        sqlx::query("BEGIN")
+            .execute(&mut *attacher)
+            .await
+            .expect("begin concurrent attacher");
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('aq_run:' || 'reopen-run'))")
+            .execute(&mut *attacher)
+            .await
+            .expect("hold reopen run token");
+
+        let reopen_pool = pool.clone();
+        let reopen = tokio::spawn(async move {
+            let mut tx = reopen_pool.begin().await.expect("begin concurrent reopen");
+            let result =
+                reopen_done_auto_queue_entries_on_pg_tx(&mut tx, "reopen-card", "pmd_reopen").await;
+            match result {
+                Ok(()) => tx.commit().await.map_err(|error| error.to_string()),
+                Err(error) => {
+                    let _ = tx.rollback().await;
+                    Err(error)
+                }
+            }
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            sqlx::query("SELECT pg_stat_clear_snapshot()")
+                .execute(&mut *attacher)
+                .await
+                .expect("clear concurrent-reopen snapshot");
+            let waiting = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                     SELECT 1
+                     FROM pg_stat_activity
+                     WHERE datname = current_database()
+                       AND wait_event_type = 'Lock'
+                       AND query LIKE '%pg_advisory_xact_lock%'
+                 )",
+            )
+            .fetch_one(&mut *attacher)
+            .await
+            .expect("inspect concurrent reopen waiter");
+            if waiting {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "reopen did not wait behind the concurrent attacher"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        sqlx::query(
+            "UPDATE auto_queue_runs
+             SET status = 'active', completed_at = NULL
+             WHERE id = 'reopen-run'",
+        )
+        .execute(&mut *attacher)
+        .await
+        .expect("revive run in concurrent attacher");
+        sqlx::query(
+            "UPDATE auto_queue_entries
+             SET status = 'dispatched', completed_at = NULL
+             WHERE id = 'reopen-entry'",
+        )
+        .execute(&mut *attacher)
+        .await
+        .expect("move entry to reopen target state concurrently");
+        sqlx::query("COMMIT")
+            .execute(&mut *attacher)
+            .await
+            .expect("commit concurrent attacher");
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), reopen)
+            .await
+            .expect("reopen completes after concurrent attachment")
+            .expect("join concurrent reopen")
+            .expect("target-state race is a successful reopen");
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM auto_queue_entries WHERE id = 'reopen-entry'")
+                .fetch_one(&pool)
+                .await
+                .expect("load concurrently reopened entry");
+        assert_eq!(status, crate::db::auto_queue::ENTRY_STATUS_DISPATCHED);
+
+        drop(attacher);
         pool.close().await;
         db.drop().await;
     }
