@@ -42,6 +42,11 @@ use crate::voice::barge_in::BargeInSensitivity;
 /// Process-global live config snapshot. `None` until [`install`] runs at boot.
 static LIVE: OnceLock<RwLock<Arc<Config>>> = OnceLock::new();
 
+/// Every successfully installed snapshot, including a same-value reload.
+/// Consumers that must redo external validation subscribe here instead of
+/// polling [`current`] from their hot paths.
+static LIVE_UPDATES: OnceLock<tokio::sync::watch::Sender<Option<Arc<Config>>>> = OnceLock::new();
+
 /// Debounce window for collapsing bursts of filesystem events (editors emit
 /// several per save). Matches the policies watcher.
 const DEBOUNCE: Duration = Duration::from_millis(500);
@@ -73,11 +78,20 @@ pub fn current() -> Option<Arc<Config>> {
     })
 }
 
+pub(crate) fn subscribe() -> tokio::sync::watch::Receiver<Option<Arc<Config>>> {
+    LIVE_UPDATES
+        .get_or_init(|| tokio::sync::watch::channel(None).0)
+        .subscribe()
+}
+
 fn store(config: Arc<Config>) {
     let lock = LIVE.get_or_init(|| RwLock::new(config.clone()));
     *lock
         .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = config;
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = config.clone();
+    LIVE_UPDATES
+        .get_or_init(|| tokio::sync::watch::channel(None).0)
+        .send_replace(Some(config));
 }
 
 /// Two config values' section serializes differently. Used to detect changes
@@ -624,6 +638,18 @@ mod tests {
         let outcome = reload_from_path(&path);
         assert!(matches!(outcome, ReloadOutcome::Applied { .. }));
         assert_eq!(current().unwrap().server.port, 8799);
+    }
+
+    #[test]
+    fn subscribers_observe_same_value_install() {
+        let _guard = global_test_guard();
+        let config = Config::default();
+        install(config.clone());
+        let receiver = subscribe();
+
+        install(config);
+
+        assert!(matches!(receiver.has_changed(), Ok(true)));
     }
 
     // A broken edit is rejected and the running snapshot is preserved.

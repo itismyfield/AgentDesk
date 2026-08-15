@@ -1,8 +1,11 @@
-//! Dormant PostgreSQL capability probe for intake-delivery reconciliation.
+//! Boot/reload PostgreSQL capability probe for intake-delivery reconciliation.
 
 #![allow(dead_code)]
 use crate::config::IntakeDeliverySettlementStage;
 use sqlx::{Connection, PgConnection, PgPool};
+
+mod cache;
+pub(in crate::services::discord) use cache::{SettlementCapabilityCache, bootstrap};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::services::discord) struct SettlementCapabilities {
@@ -246,14 +249,16 @@ async fn catalog_shape(
     })
 }
 async fn probe_inner(conn: &mut PgConnection) -> Result<SchemaReason, sqlx::Error> {
+    let required_migrations =
+        crate::db::intake_delivery_required_migrations::INTAKE_DELIVERY_REQUIRED_MIGRATIONS;
     let migration_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM public._sqlx_migrations
           WHERE version=ANY($1::bigint[]) AND success",
     )
-    .bind(crate::db::intake_delivery_required_migrations::INTAKE_DELIVERY_REQUIRED_MIGRATIONS)
+    .bind(required_migrations)
     .fetch_one(&mut *conn)
     .await?;
-    if migration_count != 6 {
+    if migration_count != required_migrations.len() as i64 {
         return Ok(SchemaReason::Migration);
     }
     let Some((journal, intake)) = relation_oids(conn).await? else {
@@ -312,29 +317,9 @@ fn capabilities_for(
         return SettlementCapabilities::default();
     }
     SettlementCapabilities {
-        stamp_dispatched: stage >= IntakeDeliverySettlementStage::Observe,
+        stamp_dispatched: stage >= IntakeDeliverySettlementStage::Enforce,
         settle_and_sweep: stage >= IntakeDeliverySettlementStage::Settle,
     }
-}
-
-/// Resolves the two independent rollout capabilities from the live YAML stage.
-///
-/// `Off` returns before touching PostgreSQL. `Observe` may stamp and observe
-/// the bridge handoff, but it never enables the destructive settlement/sweep
-/// capability. A missing pool or a non-ready schema fails closed.
-pub(in crate::services::discord) async fn resolve_capabilities(
-    pool: Option<&PgPool>,
-) -> SettlementCapabilities {
-    let stage = crate::config_live_reload::current()
-        .map(|config| config.runtime.intake_delivery_settlement)
-        .unwrap_or_default();
-    if stage == IntakeDeliverySettlementStage::Off {
-        return SettlementCapabilities::default();
-    }
-    let Some(pool) = pool else {
-        return SettlementCapabilities::default();
-    };
-    capabilities_for(stage, probe_schema(pool).await)
 }
 
 #[cfg(test)]
@@ -689,3 +674,6 @@ mod postgres_tests {
         finish(database, pool).await;
     }
 }
+
+#[cfg(test)]
+pub(in crate::services::discord) use cache::bootstrap_for_test;

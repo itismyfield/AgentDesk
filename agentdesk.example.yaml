@@ -395,8 +395,8 @@ placeholder:
   two_message_panel_enabled: false
 
 runtime:
-  # T2-W rollout: off keeps the legacy row lifecycle. observe stamps
-  # spawned→dispatched at bridge handoff but leaves settlement/sweep disabled.
+  # T2-W rollout: off keeps the legacy row lifecycle; observe only logs rollout
+  # observations. Schema probing starts at settle; new handoff stamps require enforce.
   intake_delivery_settlement: off
   requested_timeout_min: 45
   in_progress_stale_min: 120

@@ -38,23 +38,22 @@ fn settlement_capabilities_split_stamp_from_future_settle_and_sweep() {
     );
     assert_eq!(
         capabilities_for(IntakeDeliverySettlementStage::Observe, SchemaReason::Ready),
+        SettlementCapabilities::default()
+    );
+    assert_eq!(
+        capabilities_for(IntakeDeliverySettlementStage::Settle, SchemaReason::Ready),
         SettlementCapabilities {
-            stamp_dispatched: true,
-            settle_and_sweep: false,
+            stamp_dispatched: false,
+            settle_and_sweep: true,
         }
     );
-    for stage in [
-        IntakeDeliverySettlementStage::Settle,
-        IntakeDeliverySettlementStage::Enforce,
-    ] {
-        assert_eq!(
-            capabilities_for(stage, SchemaReason::Ready),
-            SettlementCapabilities {
-                stamp_dispatched: true,
-                settle_and_sweep: true,
-            }
-        );
-    }
+    assert_eq!(
+        capabilities_for(IntakeDeliverySettlementStage::Enforce, SchemaReason::Ready),
+        SettlementCapabilities {
+            stamp_dispatched: true,
+            settle_and_sweep: true,
+        }
+    );
     for stage in [
         IntakeDeliverySettlementStage::Off,
         IntakeDeliverySettlementStage::Observe,

@@ -1,20 +1,25 @@
 //! Intake-outbox handoff stamp at the worker bridge boundary.
 
 use super::*;
-use crate::services::discord::runtime_bootstrap::intake_delivery_capability::{
-    SettlementCapabilities, resolve_capabilities,
-};
-
 /// Stamps the worker's intake row immediately before the bridge is registered.
 ///
 /// `dispatched` 도장은 유일 호출 지점(intake_turn.rs의 spawn_turn_bridge 직전)에서만 찍힌다.
 /// 도장 SQL 실패 시 spawned인 채 bridge가 뜨는 창, 도장 성공 후 spawn 등록 실패로 bridge 없는
-/// dispatched가 남는 창이 각각 존재하며, 전자는 spawned sweep(A), 후자는 dispatched sweep +
-/// E-회수자가 정산한다.
+/// dispatched가 남는 창이 각각 존재하며, 후속 S-W3 intake-delivery sweep은 worker가 닫지 않은
+/// spawned 잔류와 dispatched 잔류를 회수한다.
+///
+/// `wait_for_completion=false`에서는 도장 SQL이 실패한 뒤 worker가 spawned→done을 먼저
+/// 끝내고 terminal delivery 커밋 전에 bridge가 죽을 수 있다. 그 미배달 done 행은 sweep 대상이
+/// 아니며 pre-T2-W에도 있던 기존 노출이다. 후속 S-W2 receipt settlement 설계가 이 순서를
+/// 다룬다.
 ///
 /// `wait_for_completion=true`인 Forwarded 경로에서는 bridge 커밋이 worker의 done 도장보다
 /// 먼저 올 수 있다. `wait_for_completion=false`도 스케줄링상 worker-first를 보장하지 않는다.
 /// 후속 정산 슬라이스의 2-상태 CAS는 이 두 순서를 모두 받아들여야 한다.
+///
+/// 라이브 리로드가 Off를 캐시에 적용하기 직전에 이 값을 읽은 턴은 도장을 계속 시도할 수 있다.
+/// 이 straggler 창은 당시 in-flight 턴 수로 유계이며 read-your-own-debt와 후속 S-W3
+/// intake-delivery sweep이 open spawned/dispatched 행을 회수한다.
 pub(super) async fn stamp_before_bridge_handoff(
     shared: &Arc<SharedData>,
     intake_outbox_id: Option<i64>,
@@ -22,23 +27,11 @@ pub(super) async fn stamp_before_bridge_handoff(
     let Some(outbox_id) = intake_outbox_id else {
         return;
     };
-    let capabilities = resolve_capabilities(shared.pg_pool.as_ref()).await;
-    stamp_with_capabilities(shared.pg_pool.as_ref(), outbox_id, capabilities).await;
-}
-
-async fn stamp_with_capabilities(
-    pool: Option<&sqlx::PgPool>,
-    outbox_id: i64,
-    capabilities: SettlementCapabilities,
-) {
+    let capabilities = shared.intake_delivery_capabilities.current();
     if !capabilities.stamp_dispatched {
-        tracing::debug!(
-            intake_outbox_id = outbox_id,
-            "intake bridge handoff observed with dispatched stamping disabled"
-        );
         return;
     }
-    let Some(pool) = pool else {
+    let Some(pool) = shared.pg_pool.as_ref() else {
         tracing::debug!(
             intake_outbox_id = outbox_id,
             "intake bridge handoff has no PostgreSQL pool for dispatched stamping"
@@ -57,8 +50,9 @@ async fn stamp_with_capabilities(
             intake_outbox_id = outbox_id,
             "intake bridge handoff dispatched CAS was a no-op"
         ),
-        // The bridge still launches. A later spawned/dispatched sweep owns the
-        // open row; turning this into a turn error risks duplicate delivery.
+        // The bridge still launches. S-W3 can reclaim an open spawned row, but
+        // not the existing worker-first done window described above. Turning
+        // the SQL failure into a turn error risks duplicate delivery.
         Err(error) => tracing::error!(
             intake_outbox_id = outbox_id,
             %error,
@@ -77,6 +71,24 @@ mod postgres_tests {
     async fn stamp_is_skipped_when_capability_not_ready_pg() {
         let database = TestPostgresDb::create().await;
         let pool = database.connect_and_migrate().await;
+        sqlx::query(
+            "ALTER TABLE public.intake_outbox
+             DROP CONSTRAINT intake_outbox_dispatched_requires_clock",
+        )
+        .execute(&pool)
+        .await
+        .expect("make the migrated schema fail the capability probe");
+        let capabilities =
+            crate::services::discord::runtime_bootstrap::intake_delivery_capability::bootstrap_for_test(
+                Some(pool.clone()),
+                crate::config::IntakeDeliverySettlementStage::Enforce,
+            )
+            .await;
+        assert!(!capabilities.current().stamp_dispatched);
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage_and_intake_capabilities(
+            Some(pool.clone()),
+            capabilities,
+        );
         let id: i64 = sqlx::query_scalar(
             "INSERT INTO public.intake_outbox (
                 target_instance_id, forwarded_by_instance_id, channel_id,
@@ -91,7 +103,7 @@ mod postgres_tests {
         .await
         .expect("seed spawned intake row");
 
-        stamp_with_capabilities(Some(&pool), id, SettlementCapabilities::default()).await;
+        stamp_before_bridge_handoff(&shared, Some(id)).await;
         let status: IntakeOutboxStatus =
             sqlx::query_scalar("SELECT status FROM public.intake_outbox WHERE id = $1")
                 .bind(id)

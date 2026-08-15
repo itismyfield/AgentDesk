@@ -1399,6 +1399,9 @@ mod tests {
             provider: ProviderKind::Claude,
             api_port: 9,
             pg_pool,
+            intake_delivery_capabilities: Arc::new(
+                super::super::runtime_bootstrap::intake_delivery_capability::SettlementCapabilityCache::default(),
+            ),
             policy: super::super::PolicyRuntime { engine: None },
             health_registry: std::sync::Weak::new(),
             known_slash_commands: tokio::sync::OnceCell::new(),

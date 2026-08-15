@@ -1139,6 +1139,10 @@ pub(crate) struct SharedData {
     pub(super) api_port: u16,
     /// Shared PostgreSQL pool for PG-backed route and runtime helpers.
     pub(super) pg_pool: Option<sqlx::PgPool>,
+    /// Boot/reload-resolved intake delivery capabilities. Turn handling reads
+    /// this atomic snapshot without consulting config or probing PostgreSQL.
+    pub(in crate::services::discord) intake_delivery_capabilities:
+        Arc<runtime_bootstrap::intake_delivery_capability::SettlementCapabilityCache>,
     pub(in crate::services::discord) policy: PolicyRuntime,
     /// Weak reference to the process-wide health registry so turn handlers can
     /// reach dedicated Discord bot HTTP clients without creating an Arc cycle.
@@ -1359,6 +1363,21 @@ pub(super) fn make_shared_data_for_tests() -> Arc<SharedData> {
 pub(super) fn make_shared_data_for_tests_with_storage(
     pg_pool: Option<sqlx::PgPool>,
 ) -> Arc<SharedData> {
+    make_shared_data_for_tests_with_storage_and_intake_capabilities(
+        pg_pool,
+        Arc::new(
+            runtime_bootstrap::intake_delivery_capability::SettlementCapabilityCache::default(),
+        ),
+    )
+}
+
+#[cfg(test)]
+fn make_shared_data_for_tests_with_storage_and_intake_capabilities(
+    pg_pool: Option<sqlx::PgPool>,
+    intake_delivery_capabilities: Arc<
+        runtime_bootstrap::intake_delivery_capability::SettlementCapabilityCache,
+    >,
+) -> Arc<SharedData> {
     Arc::new(SharedData {
         core: tokio::sync::Mutex::new(CoreState {
             sessions: std::collections::HashMap::new(),
@@ -1445,6 +1464,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         provider: ProviderKind::Claude,
         api_port: 9,
         pg_pool,
+        intake_delivery_capabilities,
         policy: PolicyRuntime { engine: None },
         health_registry: std::sync::Weak::new(),
         known_slash_commands: tokio::sync::OnceCell::new(),

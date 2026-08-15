@@ -1624,14 +1624,14 @@ fn is_legacy_delivery_journal_mode(mode: &DeliveryJournalMode) -> bool {
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum IntakeDeliverySettlementStage {
-    /// Preserve the legacy worker-owned lifecycle without probing or stamping.
+    /// Preserve the legacy lifecycle; skip probing and rollout observation.
     #[default]
     Off,
-    /// Stamp bridge handoff and emit observations; do not settle or sweep rows.
+    /// Keep log-only rollout observation; skip probing and row-state changes.
     Observe,
-    /// Enable receipt settlement once the follow-up slice wires its consumer.
+    /// Probe before enabling settlement and sweep; do not stamp new handoffs.
     Settle,
-    /// Enable the complete settlement policy once all follow-up slices are deployed.
+    /// Probe before enabling handoff stamps together with settlement and sweep.
     Enforce,
 }
 
