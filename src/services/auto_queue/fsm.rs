@@ -708,11 +708,7 @@ mod tests {
         assert_eq!(clamp_retry_limit(i64::MAX as u64 + 10), i64::MAX);
         assert_eq!(clamp_retry_limit(u64::MAX), i64::MAX);
     }
-}
 
-#[cfg(test)]
-mod choke_gate_pg_tests {
-    use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use sqlx::{Connection, PgConnection, PgPool};
 

@@ -161,5 +161,12 @@ test-postgres:
     # named `tests` (hardening-audit region naming), so the path carries no
     # pg-name marker. Select the module explicitly for the coverage ratchet.
     cargo test --lib db::intake_outbox_dispatch_stamp::tests -- --nocapture --test-threads=1
+    # #5356 S1: the choke-gate PG regressions live in modules named `tests`
+    # (the hardening audit only recognizes that module name as a test
+    # region), so their paths carry no pg-name marker either. Select each
+    # module explicitly for the same coverage-ratchet reason as above.
+    cargo test --lib db::auto_queue::entries::tests -- --nocapture --test-threads=1
+    cargo test --lib services::auto_queue::route::fsm::tests -- --nocapture --test-threads=1
+    cargo test --lib services::auto_queue::route::phase_gate::tests -- --nocapture --test-threads=1
 
 check: fmt-check lint cargo-check test

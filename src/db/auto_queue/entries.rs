@@ -1485,7 +1485,7 @@ async fn record_entry_transition_on_pg(
 }
 
 #[cfg(test)]
-mod choke_gate_pg_tests {
+mod tests {
     use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use sqlx::{Connection, PgConnection, PgPool};
