@@ -395,9 +395,11 @@ placeholder:
   two_message_panel_enabled: false
 
 runtime:
-  # T2-W rollout: off keeps the legacy row lifecycle; observe only logs rollout
-  # observations. Schema probing starts at settle; new handoff stamps require enforce.
-  # In this build, settle/enforce remain clamped until the recovery slices ship.
+  # T2-W rollout: off keeps the legacy row lifecycle. In this build, observe is a
+  # turn-path no-op; rollout observation telemetry ships with settlement slice (S-W2).
+  # Schema probing starts at settle and new handoff stamps require enforce. Only
+  # dispatched stamping is clamped off; settle_and_sweep is calculated, but this
+  # build has no consumer for that flag.
   intake_delivery_settlement: off
   requested_timeout_min: 45
   in_progress_stale_min: 120

@@ -1627,14 +1627,14 @@ pub enum IntakeDeliverySettlementStage {
     /// Preserve the legacy lifecycle; skip probing and rollout observation.
     #[default]
     Off,
-    /// Keep log-only rollout observation; skip probing and row-state changes. The handoff debug
-    /// log is the entire observation in this build; telemetry counters belong to a later slice.
+    /// In this build, Observe is a no-op on the turn path. Rollout observation telemetry ships
+    /// with the settlement slice (S-W2).
     Observe,
-    /// Probe before enabling settlement and sweep; do not stamp new handoffs. This build clamps
-    /// the stage until the recovery slices ship.
+    /// Probe and calculate settle_and_sweep, whose consumer has not shipped in this build.
+    /// Dispatched stamping is clamped off.
     Settle,
-    /// Request handoff stamps together with settlement and sweep. This build clamps the request
-    /// and keeps stamps disabled until the recovery slices ship.
+    /// Request handoff stamps and calculate settle_and_sweep, whose consumer has not shipped in
+    /// this build. Dispatched stamping is clamped off.
     Enforce,
 }
 

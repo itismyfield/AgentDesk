@@ -17,11 +17,11 @@ use super::*;
 /// 먼저 올 수 있다. `wait_for_completion=false`도 스케줄링상 worker-first를 보장하지 않는다.
 /// 후속 정산 슬라이스의 2-상태 CAS는 이 두 순서를 모두 받아들여야 한다.
 ///
-/// 킬스위치 적용은 진행 중 probe 완료까지 지연될 수 있고, 그 동안 시작된 턴은 이전 능력으로
-/// 도장한다. 회수는 read-your-own-debt와 sweep 소관이지만 둘 다 후속 슬라이스(S-W2/S-W3)이며
-/// 이 빌드에는 구현되지 않았다. probe 후 스테이지 재확인은 S-W3 소관이다.
-///
-/// Observe의 전부는 도장 비활성 분기의 debug 로그다. 텔레메트리 카운터는 후속 슬라이스다.
+/// `changed` 완료 후 설정 버전은 `borrow_and_update`에서 소비되고 probe를 await한다. 그 사이 Off가
+/// 도착하면 stale stage 결과가 먼저 replace되고, 다음 반복에서야 Off 결과가 replace된다. 이
+/// 빌드에서는 dispatched-stamping 클램프 때문에 그 창에 이전 능력으로 도장할 수 없다. 클램프가
+/// 해제되는 S-W3 이후에는 두 replace 사이에서 시작된 턴이 stale 능력으로 도장할 수 있으므로,
+/// probe 후 스테이지 재확인도 S-W3에서 함께 다룬다.
 pub(super) async fn stamp_before_bridge_handoff(
     shared: &Arc<SharedData>,
     intake_outbox_id: Option<i64>,
@@ -31,12 +31,6 @@ pub(super) async fn stamp_before_bridge_handoff(
     };
     let capabilities = shared.intake_delivery_capabilities.current();
     if !capabilities.stamp_dispatched {
-        if capabilities.observe_handoffs {
-            tracing::debug!(
-                intake_outbox_id = outbox_id,
-                "intake bridge handoff observed with dispatched stamping disabled"
-            );
-        }
         return;
     }
     let Some(pool) = shared.pg_pool.as_ref() else {
@@ -130,7 +124,6 @@ mod postgres_tests {
         let pool = database.connect_and_migrate().await;
         let capabilities = crate::services::discord::runtime_bootstrap::intake_delivery_capability::SettlementCapabilityCache::for_test(
             crate::services::discord::runtime_bootstrap::intake_delivery_capability::SettlementCapabilities {
-                observe_handoffs: true,
                 stamp_dispatched: true,
                 settle_and_sweep: true,
             },

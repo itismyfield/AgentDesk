@@ -9,8 +9,6 @@ pub(in crate::services::discord) use cache::{SettlementCapabilityCache, bootstra
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::services::discord) struct SettlementCapabilities {
-    /// Log-only handoff observation. Telemetry counters belong to a later slice.
-    pub(in crate::services::discord) observe_handoffs: bool,
     pub(in crate::services::discord) stamp_dispatched: bool,
     /// Defined in S-W1; settlement and sweep consumers land in later slices.
     pub(in crate::services::discord) settle_and_sweep: bool,
@@ -315,20 +313,21 @@ fn capabilities_for(
     stage: IntakeDeliverySettlementStage,
     schema: SchemaReason,
 ) -> SettlementCapabilities {
-    let recovery_slices_unshipped = stage >= IntakeDeliverySettlementStage::Settle;
-    if recovery_slices_unshipped {
+    let dispatched_stamping_clamped = stage >= IntakeDeliverySettlementStage::Settle;
+    if dispatched_stamping_clamped {
+        // Resolution runs per bot-instance subscription, so this warning can repeat
+        // at every resolution and independently for each subscribed bot instance.
         tracing::warn!(
             ?stage,
-            "settlement/sweep slices are not shipped; requested stage remains clamped with dispatched stamping disabled"
+            "dispatched stamping is clamped off; settle_and_sweep is calculated but has no consumer in this build"
         );
     }
 
     // The design activation formula remains `stage >= Enforce && schema == Ready`.
-    // The unshipped-recovery clamp takes precedence. Removing it is part of the
-    // S-W3 DoD, after the S-W2 settlement and S-W3 sweep consumers have shipped.
+    // The dispatched-stamping clamp takes precedence. Removing it is part of the
+    // S-W3 DoD; settle_and_sweep is still calculated but has no consumer in this build.
     SettlementCapabilities {
-        observe_handoffs: stage >= IntakeDeliverySettlementStage::Observe,
-        stamp_dispatched: !recovery_slices_unshipped
+        stamp_dispatched: !dispatched_stamping_clamped
             && stage >= IntakeDeliverySettlementStage::Enforce
             && schema == SchemaReason::Ready,
         settle_and_sweep: schema == SchemaReason::Ready
