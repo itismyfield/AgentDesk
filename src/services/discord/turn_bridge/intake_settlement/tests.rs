@@ -437,15 +437,59 @@ async fn cancel_prompt_replace_commit_closes_row_pg() {
     database.drop().await;
 }
 
+/// Strips comments and string literals so occurrence counts below can only
+/// match executable source. Rust block comments nest; strings use a
+/// double-quote scan with escape handling (raw strings in the scanned file
+/// would need hash-aware handling, which this contract does not require).
+fn executable_source_only(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let bytes = source.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+        } else if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            let mut depth = 1usize;
+            i += 2;
+            while i < bytes.len() && depth > 0 {
+                if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+                    depth += 1;
+                    i += 2;
+                } else if bytes[i] == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+        } else if bytes[i] == b'"' {
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'"' {
+                if bytes[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i += 1;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
 #[test]
 fn terminal_outcome_delivery_awaits_one_settlement_call_with_branch_flags() {
-    let source = include_str!("../terminal_outcome_delivery.rs");
+    let source = executable_source_only(include_str!("../terminal_outcome_delivery.rs"));
     assert_eq!(
         source
             .matches("intake_settlement::settle_intake_row_at_bridge_exit")
             .count(),
         1,
-        "terminal delivery must have exactly one settlement call"
+        "terminal delivery must have exactly one settlement call outside comments and strings"
     );
     let compact = source.split_whitespace().collect::<Vec<_>>().join(" ");
     let expected = "intake_settlement::settle_intake_row_at_bridge_exit( &shared_owned, &inflight_state, intake_settlement::classify( terminal_delivery_committed, status_panel_terminal_committed, preserve_inflight_for_cleanup_retry, bridge_skip_holder_owns_inflight, bridge_output_owner.is_some(), ), shared_owned.intake_delivery_capabilities.current(), ) .await;";
