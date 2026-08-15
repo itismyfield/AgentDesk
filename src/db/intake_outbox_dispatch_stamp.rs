@@ -22,7 +22,7 @@ pub(crate) async fn mark_dispatched(pool: &PgPool, outbox_id: i64) -> Result<boo
 }
 
 #[cfg(test)]
-mod postgres_tests {
+mod tests {
     use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use chrono::{DateTime, Utc};
