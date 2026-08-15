@@ -673,10 +673,10 @@ pub(crate) async fn mark_spawned(
 /// Successful completion: `spawned → done`. Worker calls this on
 /// `Ok(())` from `execute_intake_turn_core`.
 ///
-/// Returns `Ok(true)` on a real transition; `Ok(false)` if the row was
-/// no longer in `spawned` (e.g., already moved to `failed_post_accept`
-/// by an operator). Workers should log the divergence rather than
-/// retry on `Ok(false)`.
+/// Returns `Ok(true)` on a real transition. `Ok(false)` with `dispatched`
+/// means the bridge handoff stamp won first and is normal; `done` means terminal
+/// settlement won first and is also normal. Other observed states (including a
+/// missing row) are divergence and should be logged rather than retried.
 pub(crate) async fn mark_done(
     pool: &PgPool,
     id: i64,

@@ -487,6 +487,28 @@ fn executable_source_only(source: &str) -> String {
 
 #[test]
 fn terminal_outcome_delivery_awaits_one_settlement_call_with_branch_flags() {
+    let bridge_source = executable_source_only(include_str!("../mod.rs"));
+    assert_eq!(
+        bridge_source
+            .matches("intake_settlement::bind_bridge_turn_snapshot")
+            .count(),
+        1,
+        "the bridge must bind exactly one turn-start snapshot"
+    );
+    let spawn = bridge_source
+        .find("pub(super) fn spawn_turn_bridge")
+        .expect("bridge spawn remains present");
+    let bind = bridge_source
+        .find("intake_settlement::bind_bridge_turn_snapshot")
+        .expect("bridge spawn binds the turn snapshot");
+    let task = bridge_source
+        .find("task_supervisor::spawn_observed")
+        .expect("bridge task spawn remains present");
+    assert!(
+        spawn < bind && bind < task,
+        "snapshot binds before task spawn"
+    );
+
     let source = executable_source_only(include_str!("../terminal_outcome_delivery.rs"));
     assert_eq!(
         source
@@ -496,7 +518,7 @@ fn terminal_outcome_delivery_awaits_one_settlement_call_with_branch_flags() {
         "terminal delivery must have exactly one settlement call outside comments and strings"
     );
     let compact = source.split_whitespace().collect::<Vec<_>>().join(" ");
-    let expected = "intake_settlement::settle_intake_row_at_bridge_exit( &shared_owned, &inflight_state, intake_settlement::classify( terminal_delivery_committed, status_panel_terminal_committed, preserve_inflight_for_cleanup_retry, bridge_skip_holder_owns_inflight, bridge_output_owner.is_some(), ), shared_owned.intake_delivery_capabilities.current(), ) .await;";
+    let expected = "intake_settlement::settle_intake_row_at_bridge_exit( &shared_owned, &inflight_state, intake_settlement::classify( terminal_delivery_committed, status_panel_terminal_committed, preserve_inflight_for_cleanup_retry, bridge_skip_holder_owns_inflight, bridge_output_owner.is_some(), ), inflight_state.intake_delivery_capabilities(), ) .await;";
     assert!(
         compact.contains(expected),
         "terminal delivery must await settlement with every disposition flag"
@@ -579,38 +601,42 @@ async fn settlement_row_lock_timeout_is_swallowed_and_counted_pg() {
 }
 
 #[tokio::test]
-async fn stage_below_settle_performs_no_write_pg() {
+async fn fresh_off_and_observe_leave_own_rows_for_worker_pg() {
     let database = TestPostgresDb::create().await;
     let pool = database.connect_and_migrate().await;
     let now = Utc::now();
-    let id = seed(
-        &pool,
-        "settle-stage-off",
-        IntakeOutboxStatus::Spawned,
-        Some(now),
-        None,
-    )
-    .await;
     let shared = crate::services::discord::make_shared_data_for_tests_with_storage_and_intake_capabilities(
         Some(pool.clone()),
         crate::services::discord::runtime_bootstrap::intake_delivery_capability::SettlementCapabilityCache::for_test(
             BELOW_SETTLE_CAPABILITIES,
         ),
     );
-    settle_intake_row_at_bridge_exit(
-        &shared,
-        &state_for(id),
-        BridgeTurnDisposition::Committed,
-        BELOW_SETTLE_CAPABILITIES,
-    )
-    .await;
-    assert_eq!(status(&pool, id).await, IntakeOutboxStatus::Spawned);
+    for stage in ["off", "observe"] {
+        let id = seed(
+            &pool,
+            &format!("settle-stage-{stage}"),
+            IntakeOutboxStatus::Spawned,
+            Some(now),
+            None,
+        )
+        .await;
+        settle_intake_row_at_bridge_exit(
+            &shared,
+            &state_for(id),
+            BridgeTurnDisposition::Committed,
+            BELOW_SETTLE_CAPABILITIES,
+        )
+        .await;
+        assert_eq!(status(&pool, id).await, IntakeOutboxStatus::Spawned);
+        assert!(mark_done(&pool, id, "dispatch-worker").await.unwrap());
+        assert_eq!(status(&pool, id).await, IntakeOutboxStatus::Done);
+    }
     pool.close().await;
     database.drop().await;
 }
 
 #[tokio::test]
-async fn stale_capability_probe_after_downgrade_performs_no_write_pg() {
+async fn stale_capability_probe_after_downgrade_cannot_block_own_row_settlement_pg() {
     use crate::config::IntakeDeliverySettlementStage;
     use crate::services::discord::runtime_bootstrap::intake_delivery_capability::bootstrap_from_receiver_for_test;
 
@@ -629,24 +655,32 @@ async fn stale_capability_probe_after_downgrade_performs_no_write_pg() {
         .connect(&database.database_url)
         .await
         .expect("connect single-slot probe pool");
-    let held_probe_slot = probe_pool.acquire().await.expect("hold probe pool slot");
     let mut config = crate::config::Config::default();
-    config.runtime.intake_delivery_settlement = IntakeDeliverySettlementStage::Observe;
+    config.runtime.intake_delivery_settlement = IntakeDeliverySettlementStage::Enforce;
     let (updates, receiver) = tokio::sync::watch::channel(Some(Arc::new(config.clone())));
     let cache = bootstrap_from_receiver_for_test(Some(probe_pool.clone()), receiver).await;
     assert_eq!(cache.generation_for_test(), 1);
+    assert_eq!(cache.current(), READY_CAPABILITIES);
+    let turn_snapshot = cache.current();
+    assert!(
+        crate::db::intake_outbox_dispatch_stamp::mark_dispatched(&pool, id)
+            .await
+            .unwrap()
+    );
+    assert_eq!(status(&pool, id).await, IntakeOutboxStatus::Dispatched);
+    let held_probe_slot = probe_pool.acquire().await.expect("hold probe pool slot");
 
-    config.runtime.intake_delivery_settlement = IntakeDeliverySettlementStage::Settle;
+    config.runtime.intake_delivery_settlement = IntakeDeliverySettlementStage::Enforce;
     updates
         .send(Some(Arc::new(config.clone())))
-        .expect("send Settle update");
+        .expect("send same-stage Enforce update");
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while cache.generation_for_test() < 2 {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("Settle probe must start while the pool slot is held");
+    .expect("same-stage Enforce probe must start while the pool slot is held");
 
     config.runtime.intake_delivery_settlement = IntakeDeliverySettlementStage::Off;
     updates
@@ -678,10 +712,10 @@ async fn stale_capability_probe_after_downgrade_performs_no_write_pg() {
         &shared,
         &state_for(id),
         BridgeTurnDisposition::Committed,
-        cache.current(),
+        turn_snapshot,
     )
     .await;
-    assert_eq!(status(&pool, id).await, IntakeOutboxStatus::Spawned);
+    assert_eq!(status(&pool, id).await, IntakeOutboxStatus::Done);
     drop(updates);
     probe_pool.close().await;
     pool.close().await;

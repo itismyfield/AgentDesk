@@ -1,4 +1,11 @@
 //! Boot/reload PostgreSQL capability probe for intake-delivery reconciliation.
+//!
+//! A bridge turn samples [`SettlementCapabilities`] before its dispatched-stamp await, and that
+//! snapshot governs the stamp through completion. A stage downgrade clears the cache bits
+//! immediately so later turns cannot stamp. A later stage elevation cannot publish its newly
+//! requested capability until its schema probe completes. Bridge-exit settlement consumes the
+//! same per-turn snapshot that the stamp consumed, so a downgrade cannot strand that turn while
+//! fresh Off/Observe turns remain database-neutral.
 
 #![allow(dead_code)]
 use crate::config::IntakeDeliverySettlementStage;
@@ -7,10 +14,17 @@ use sqlx::{Connection, PgConnection, PgPool};
 mod cache;
 pub(in crate::services::discord) use cache::{SettlementCapabilityCache, bootstrap};
 
+/// One turn's immutable intake-delivery authority snapshot.
+///
+/// Package visibility is the minimum production visibility shared by the sibling
+/// `runtime_bootstrap`, `router`, and `turn_bridge` modules that publish, stamp with, and settle
+/// from this value; it is not widened for tests.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::services::discord) struct SettlementCapabilities {
+    /// Whether this snapshot authorizes a dispatched handoff stamp.
     pub(in crate::services::discord) stamp_dispatched: bool,
-    /// Terminal settlement consumes this in S-W2; the sweep consumer lands in S-W3.
+    /// Whether this snapshot authorizes bridge-exit settlement and the capability-driven sweep.
+    /// Capability resolution sets it only for Settle/Enforce after a Ready schema probe.
     pub(in crate::services::discord) settle_and_sweep: bool,
 }
 
@@ -313,23 +327,10 @@ fn capabilities_for(
     stage: IntakeDeliverySettlementStage,
     schema: SchemaReason,
 ) -> SettlementCapabilities {
-    let dispatched_stamping_clamped = stage >= IntakeDeliverySettlementStage::Settle;
-    if dispatched_stamping_clamped {
-        // Resolution runs per bot-instance subscription, so this warning can repeat
-        // at every resolution and independently for each subscribed bot instance.
-        tracing::warn!(
-            ?stage,
-            "dispatched stamping is clamped off; settle_and_sweep remains available to terminal settlement"
-        );
-    }
-
-    // The design activation formula remains `stage >= Enforce && schema == Ready`.
-    // The dispatched-stamping clamp takes precedence. Removing it is part of the
-    // S-W4 DoD, after the S-W3 sweep recovery path exists. S-W2 terminal settlement
-    // already consumes settle_and_sweep.
+    // S-W3's stale spawned/dispatched sweep landed in #5385, so S-W4 removes
+    // the temporary dispatched-stamping clamp and activates the design formula.
     SettlementCapabilities {
-        stamp_dispatched: !dispatched_stamping_clamped
-            && stage >= IntakeDeliverySettlementStage::Enforce
+        stamp_dispatched: stage >= IntakeDeliverySettlementStage::Enforce
             && schema == SchemaReason::Ready,
         settle_and_sweep: schema == SchemaReason::Ready
             && stage >= IntakeDeliverySettlementStage::Settle,

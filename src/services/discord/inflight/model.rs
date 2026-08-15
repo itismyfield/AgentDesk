@@ -134,6 +134,9 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// intentionally restores the persisted value for state-file compatibility.
     #[serde(default)]
     intake_outbox_id: Option<i64>,
+    /// Transient bridge-turn authority; never persisted or restored from disk.
+    #[serde(skip)]
+    intake_delivery_capabilities: crate::services::discord::runtime_bootstrap::intake_delivery_capability::SettlementCapabilities,
     /// Queue-merge source identity for the durable retry budget and notice.
     #[serde(default)]
     pub busy_followup_retry_user_msg_id: u64,
@@ -946,6 +949,7 @@ impl InflightTurnState {
             request_owner_user_id,
             user_msg_id,
             intake_outbox_id: None,
+            intake_delivery_capabilities: Default::default(),
             busy_followup_retry_user_msg_id: user_msg_id,
             finalizer_turn_id,
             status_message_id: None,
@@ -1036,6 +1040,20 @@ impl InflightTurnState {
 
     pub(in crate::services::discord) fn intake_outbox_id(&self) -> Option<i64> {
         self.intake_outbox_id
+    }
+
+    pub(in crate::services::discord) fn bind_intake_delivery_capabilities(
+        &mut self,
+        capabilities: crate::services::discord::runtime_bootstrap::intake_delivery_capability::SettlementCapabilities,
+    ) {
+        self.intake_delivery_capabilities = capabilities;
+    }
+
+    pub(in crate::services::discord) fn intake_delivery_capabilities(
+        &self,
+    ) -> crate::services::discord::runtime_bootstrap::intake_delivery_capability::SettlementCapabilities
+    {
+        self.intake_delivery_capabilities
     }
 
     pub fn provider_kind(&self) -> Option<ProviderKind> {
