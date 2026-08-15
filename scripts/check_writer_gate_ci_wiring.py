@@ -63,7 +63,7 @@ REQUIRED_INVOCATIONS = (
     ),
     RequiredInvocation(
         "SQL execution surface baseline dirty-worktree guard",
-        "git diff --exit-code scripts/sql_execution_surface_inventory.json",
+        "git diff --exit-code HEAD -- scripts/sql_execution_surface_inventory.json",
     ),
     RequiredInvocation(
         "SQL execution surface inventory unittest module",

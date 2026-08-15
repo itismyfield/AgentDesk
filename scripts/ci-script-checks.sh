@@ -67,7 +67,7 @@ echo "=== Policy DB capability manifest guard (#3734) ==="
 
 echo "=== SQL execution surface inventory baseline (#5358) ==="
 "$PYTHON" scripts/check_sql_execution_surface_inventory.py --check
-git diff --exit-code scripts/sql_execution_surface_inventory.json
+git diff --exit-code HEAD -- scripts/sql_execution_surface_inventory.json
 "$PYTHON" -m unittest tests.test_sql_execution_surface_inventory
 
 echo "=== Merge automation policy tests (#4250) ==="

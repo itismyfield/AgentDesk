@@ -24,7 +24,7 @@ EXPECTED_COMMANDS = (
     '"$PYTHON" scripts/check_intake_outbox_done_writer_call_sites.py',
     '"$PYTHON" -m unittest tests.test_intake_outbox_done_writer_call_sites',
     '"$PYTHON" scripts/check_sql_execution_surface_inventory.py --check',
-    "git diff --exit-code scripts/sql_execution_surface_inventory.json",
+    "git diff --exit-code HEAD -- scripts/sql_execution_surface_inventory.json",
     '"$PYTHON" -m unittest tests.test_sql_execution_surface_inventory',
     "./scripts/check-ci-runner-hardening.sh",
     '"$PYTHON" -m unittest tests.test_fast_check_ci_wiring',

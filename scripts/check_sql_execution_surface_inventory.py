@@ -85,7 +85,8 @@ LIMITS = (
 )
 REPIN_GUIDANCE = (
     "의도된 surface 변경이면: --write-baseline 재실행 → JSON diff 를 커밋에 포함해 "
-    "리뷰 표면에 노출 → measured_at_sha 갱신"
+    "리뷰 표면에 노출 → measured_at_sha 갱신 및 재핀 커밋 → 커밋 후 aggregate 재실행 "
+    "(재핀 직후 커밋 전 aggregate dirty guard rc=1은 정상)"
 )
 REQUIRED_ROOTS = ("src", "policies", "migrations/postgres")
 REWRITE_PATH = "src/engine/ops/db_ops.rs"
