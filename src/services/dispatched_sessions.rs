@@ -752,6 +752,7 @@ async fn force_kill_session_impl_with_reason_and_forwarding(
     {
         Ok(meta) => meta.map(|meta| {
             (
+                meta.origin_dispatch_id,
                 meta.card_id,
                 meta.to_agent_id,
                 meta.dispatch_type,
@@ -770,7 +771,16 @@ async fn force_kill_session_impl_with_reason_and_forwarding(
 
     // Create retry dispatch via central authoritative path (#108)
     let mut retry_skipped_reason: Option<&'static str> = None;
-    if let Some((card_id, to_agent_id, dispatch_type, title, context, retry_count)) = retry_meta {
+    if let Some((
+        origin_dispatch_id,
+        card_id,
+        to_agent_id,
+        dispatch_type,
+        title,
+        context,
+        retry_count,
+    )) = retry_meta
+    {
         if retry_count >= FORCE_KILL_RETRY_LIMIT {
             retry_skipped_reason = Some("retry_limit_reached");
             tracing::warn!(
@@ -786,6 +796,7 @@ async fn force_kill_session_impl_with_reason_and_forwarding(
                 .unwrap_or_else(|| json!({}));
 
             let meta = dispatched_sessions_db::RetryDispatchMeta {
+                origin_dispatch_id,
                 card_id,
                 to_agent_id,
                 dispatch_type,
