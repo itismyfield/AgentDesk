@@ -32,6 +32,8 @@ fn is_blank_session_name(session_name: &str) -> bool {
 
 fn tmux_command() -> Command {
     let mut cmd = Command::new("tmux");
+    // -u forces UTF-8 mode so non-ASCII session names are not masked in output.
+    cmd.arg("-u");
     binary_resolver::apply_runtime_path(&mut cmd);
     cmd
 }
@@ -995,6 +997,15 @@ mod target_safety_tests {
     use super::*;
 
     #[test]
+    fn tmux_command_enables_utf8_mode() {
+        assert_eq!(
+            tmux_command().get_args().next(),
+            Some(std::ffi::OsStr::new("-u")),
+            "every tmux invocation must request UTF-8 output",
+        );
+    }
+
+    #[test]
     fn blank_session_name_is_not_a_valid_target() {
         assert!(!has_session(""));
         assert_eq!(get_option("", "@agentdesk-probe-option"), None);
@@ -1248,6 +1259,11 @@ mod timeout_tests {
         let path = dir.join("tmux");
         let mut file = std::fs::File::create(&path).expect("fake tmux");
         writeln!(file, "#!/bin/sh").expect("shebang");
+        // tmux_command prepends global option flags (currently -u for UTF-8
+        // mode) before the subcommand; drop them so stub bodies can keep
+        // matching the subcommand positionally via $1.
+        writeln!(file, "while [ \"${{1#-}}\" != \"$1\" ]; do shift; done")
+            .expect("flag skip preamble");
         writeln!(file, "{body}").expect("body");
         let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
         permissions.set_mode(0o755);

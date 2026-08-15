@@ -44,6 +44,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -82,6 +83,39 @@ impl Default for DiscoveryConfig {
 /// active watcher). The handle is process-global so the dispatch path can
 /// import it without plumbing through state.
 static DISCOVERY_NOTIFY: OnceLock<Arc<Notify>> = OnceLock::new();
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BindingObservation {
+    Bound,
+    NoBinding,
+}
+
+static DISCOVERY_BINDING_OBSERVATIONS: OnceLock<Mutex<HashMap<String, BindingObservation>>> =
+    OnceLock::new();
+
+fn binding_observations() -> &'static Mutex<HashMap<String, BindingObservation>> {
+    DISCOVERY_BINDING_OBSERVATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn prune_binding_observations(enumeration: &[EnumeratedSession]) {
+    let live_names: HashSet<&str> = enumeration
+        .iter()
+        .map(|session| session.session_name.as_str())
+        .collect();
+    let mut observations = binding_observations()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    observations.retain(|session_name, _| live_names.contains(session_name.as_str()));
+}
+
+fn record_binding_observation(session_name: &str, observation: BindingObservation) -> bool {
+    let mut observations = binding_observations()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let changed = observations.get(session_name).copied() != Some(observation);
+    observations.insert(session_name.to_string(), observation);
+    changed
+}
 
 fn discovery_notifier() -> Arc<Notify> {
     DISCOVERY_NOTIFY
@@ -450,6 +484,7 @@ pub(crate) fn reconcile_from_enumeration_with_process_args_probe(
     process_args_probe: fn(u32) -> Option<String>,
 ) -> TickReport {
     let enumerated = enumeration.len();
+    prune_binding_observations(&enumeration);
     let mut matches: Vec<MatchedChannel> = Vec::new();
     let mut preserve_present: Vec<String> = Vec::new();
     for session in enumeration {
@@ -457,7 +492,20 @@ pub(crate) fn reconcile_from_enumeration_with_process_args_probe(
         let outcome =
             match_session_detailed(&session.session_name, Some(&effective_pane_cmd), directory);
         match outcome {
-            MatchOutcome::Matched(matched) => matches.push(matched),
+            MatchOutcome::Matched(matched) => {
+                if record_binding_observation(
+                    &matched.expected_session_name,
+                    BindingObservation::Bound,
+                ) {
+                    tracing::info!(
+                        session = %matched.expected_session_name,
+                        provider = ?matched.provider,
+                        channel_id = %matched.channel_id,
+                        "session-discovery: channel binding observed",
+                    );
+                }
+                matches.push(matched);
+            }
             MatchOutcome::Rejected(reason) => {
                 if is_retryable_rejection(&reason) {
                     // Session is physically present in tmux — protect the
@@ -560,11 +608,13 @@ fn trace_rejection(session: &EnumeratedSession, reason: &MatchRejection) {
             session_name,
             provider,
         } => {
-            tracing::info!(
-                session = %session_name,
-                provider = ?provider,
-                "session-discovery: AgentDesk-named session has no channel binding (operator session?)",
-            );
+            if record_binding_observation(session_name, BindingObservation::NoBinding) {
+                tracing::info!(
+                    session = %session_name,
+                    provider = ?provider,
+                    "session-discovery: AgentDesk-named session has no channel binding (operator session?)",
+                );
+            }
         }
         MatchRejection::PaneProviderUnknown {
             session_name,
@@ -1276,5 +1326,26 @@ mod tests {
                 .await
                 .expect("notification should be delivered");
         });
+    }
+
+    #[test]
+    fn binding_observation_logs_only_on_state_transitions() {
+        let session_name = format!("binding-observation-{}", std::process::id());
+        assert!(record_binding_observation(
+            &session_name,
+            BindingObservation::NoBinding,
+        ));
+        assert!(!record_binding_observation(
+            &session_name,
+            BindingObservation::NoBinding,
+        ));
+        assert!(record_binding_observation(
+            &session_name,
+            BindingObservation::Bound,
+        ));
+        assert!(!record_binding_observation(
+            &session_name,
+            BindingObservation::Bound,
+        ));
     }
 }

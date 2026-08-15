@@ -135,6 +135,22 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                 }
             }
         }
+
+        // agentdesk.yaml-backed settings are the final source of truth, so
+        // consult them only for sessions all earlier paths left unresolved.
+        let config_unresolved: Vec<&str> = agent_sessions
+            .iter()
+            .copied()
+            .filter(|session| !name_to_channel.contains_key(*session))
+            .collect();
+        if !config_unresolved.is_empty() {
+            add_configured_channel_bindings(
+                &config_unresolved,
+                &provider,
+                super::super::super::settings::list_registered_channel_bindings(),
+                &mut name_to_channel,
+            );
+        }
     }
 
     // Collect sessions to restore
@@ -842,5 +858,34 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         // pre-migration wrappers) — we only clean the new persistent
         // directory. See issue #892.
         sweep_orphan_session_files().await;
+    }
+}
+
+pub(super) fn add_configured_channel_bindings(
+    agent_sessions: &[&str],
+    provider: &ProviderKind,
+    configured_bindings: impl IntoIterator<
+        Item = super::super::super::settings::RegisteredChannelBinding,
+    >,
+    name_to_channel: &mut std::collections::HashMap<String, (ChannelId, String)>,
+) {
+    for binding in configured_bindings {
+        if binding.owner_provider != *provider {
+            continue;
+        }
+        let Some(channel_name) = binding
+            .fallback_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        let tmux_name = provider.build_tmux_session_name(channel_name);
+        if agent_sessions.iter().any(|session| **session == tmux_name) {
+            name_to_channel
+                .entry(tmux_name)
+                .or_insert_with(|| (ChannelId::new(binding.channel_id), channel_name.to_string()));
+        }
     }
 }
