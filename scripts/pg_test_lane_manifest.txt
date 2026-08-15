@@ -12,6 +12,7 @@ src/db/dispatches/outbox/delivery.rs
 src/db/idempotency.rs
 src/db/intake_outbox.rs
 src/db/intake_outbox_delivery_proof.rs
+src/db/intake_outbox_dispatch_stamp.rs
 src/db/intake_outbox_dispatched_audit.rs
 src/db/postgres.rs
 src/db/prompt_manifests/tests.rs
@@ -63,6 +64,7 @@ src/services/discord/mod.rs
 src/services/discord/relay_recovery_circuit_alert_producer.rs
 src/services/discord/relay_recovery_circuit_breaker.rs
 src/services/discord/router/intake_dispatch/tests.rs
+src/services/discord/router/message_handler/intake_turn/dispatch_stamp.rs
 src/services/discord/router/message_handler/voice_announcement_route.rs
 src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs
 src/services/discord/runtime_bootstrap/intake_delivery_capability.rs
@@ -110,6 +112,7 @@ db::idempotency::tests::pg_integration
 db::intake_outbox::migration_pg_tests
 db::intake_outbox::postgres_tests
 db::intake_outbox_delivery_proof::postgres_tests
+db::intake_outbox_dispatch_stamp::tests
 db::intake_outbox_dispatched_audit::postgres_tests
 db::postgres::tests
 db::prompt_manifests::tests
@@ -162,6 +165,7 @@ services::discord::idle_recap_interaction::tests
 services::discord::relay_recovery::circuit_breaker::tests
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
 services::discord::router::intake_dispatch::tests
+services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
@@ -358,6 +362,8 @@ db::intake_outbox_delivery_proof::postgres_tests::list_stale_dispatched_is_stric
 db::intake_outbox_delivery_proof::postgres_tests::mark_done_from_delivery_proof_is_idempotent_and_preserves_dispatch_audit_fields_pg
 db::intake_outbox_delivery_proof::postgres_tests::proof_lock_skips_contention_and_terminal_cas_has_one_winner_pg
 db::intake_outbox_delivery_proof::postgres_tests::settle_dispatched_unknown_rechecks_cutoff_and_preserves_audit_fields_pg
+db::intake_outbox_dispatch_stamp::tests::mark_dispatched_satisfies_dispatched_requires_clock_check_pg
+db::intake_outbox_dispatch_stamp::tests::mark_dispatched_sets_clock_and_requires_spawned_pg
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_includes_null_clock_rows_pg
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_marks_empty_provider_false_pg
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_returns_empty_when_no_rows_pg
@@ -629,6 +635,8 @@ services::discord::router::intake_dispatch::tests::obligation_window_facade_rest
 services::discord::router::intake_dispatch::tests::queued_foreign_attachment_is_rejected_without_requeue_pg
 services::discord::router::intake_dispatch::tests::queued_foreign_owner_forwards_without_local_body_pg
 services::discord::router::intake_dispatch::tests::raw_attachment_foreign_owner_blocks_before_outbox_or_local_state_pg
+services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::stamp_is_skipped_when_capability_not_ready_pg
+services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::stamp_is_written_when_ready_capability_is_injected_pg
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::direct_dispatch_carry_forward_admits_announcement_and_still_dedups
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::durable_duplicate_voice_announcement_pg_invokes_foreground_once
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::gateway_orphan_reap_uses_production_query_and_right_parses_instance_id_pg

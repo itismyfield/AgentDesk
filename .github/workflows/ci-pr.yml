@@ -175,6 +175,12 @@ jobs:
               # required mirror is `Fast targeted tests (ubuntu-latest)`.
               - 'src/services/discord/inflight.rs'
               - 'src/services/discord/inflight/**'
+              # #5071 T2-W S-W1: the bridge-handoff stamp and its PG-backed
+              # sidecar tests must select the PostgreSQL lane together.
+              - 'src/services/discord/router/message_handler/intake_turn.rs'
+              - 'src/services/discord/router/message_handler/intake_turn/**'
+              - 'src/services/discord/runtime_bootstrap/intake_delivery_capability.rs'
+              - 'src/services/discord/runtime_bootstrap/intake_delivery_capability/**'
               - 'src/services/discord/tmux_watcher.rs'
               - 'src/services/discord/tmux_watcher/**'
               - 'src/services/discord/turn_bridge/terminal_outcome_delivery.rs'

@@ -157,5 +157,9 @@ test-postgres:
     # coverage ratchet. Select the module explicitly instead of adding it to
     # the shrink-only debt baseline.
     cargo test --lib engine::ops::auto_queue_ops::tests -- --nocapture --test-threads=1
+    # #5071 T2-W S-W1: the dispatch-stamp PG regressions live in a module
+    # named `tests` (hardening-audit region naming), so the path carries no
+    # pg-name marker. Select the module explicitly for the coverage ratchet.
+    cargo test --lib db::intake_outbox_dispatch_stamp::tests -- --nocapture --test-threads=1
 
 check: fmt-check lint cargo-check test

@@ -7,7 +7,7 @@ mod gateway_lease_recovery;
 mod gateway_lease_recovery_tests;
 mod gateway_runtime;
 mod intake;
-mod intake_delivery_capability;
+pub(super) mod intake_delivery_capability;
 #[cfg(unix)]
 mod intake_delivery_reconciler;
 mod orphan_recovery;
@@ -179,6 +179,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     let restored_fast_mode_reset_channels = restored_fast_mode_reset_channels(&bot_settings);
     let restored_codex_goals_channels = restored_codex_goals_enabled_channels(&bot_settings);
     let restored_codex_goals_reset_channels = restored_codex_goals_reset_channels(&bot_settings);
+    let intake_delivery_capabilities = intake_delivery_capability::bootstrap(pg_pool.clone()).await;
 
     let shared = run_bot_build_shared_data(
         bot_settings,
@@ -190,6 +191,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             voice_barge_in: voice_barge_in.clone(),
             health_registry: health_registry.clone(),
             pg_pool,
+            intake_delivery_capabilities,
             engine,
         },
         ProcessLifecycleCounters {
@@ -803,6 +805,9 @@ mod restart_lifecycle_characterization_tests {
                 voice_barge_in: voice,
                 health_registry,
                 pg_pool: None,
+                intake_delivery_capabilities: Arc::new(
+                    intake_delivery_capability::SettlementCapabilityCache::default(),
+                ),
                 engine: None,
             },
             ProcessLifecycleCounters {

@@ -1,8 +1,8 @@
 use super::*;
 
 /// #3479 Item 3: runtime services/handles/backends consumed by the SharedData
-/// builder. Groups seven former positional args; field names match the original
-/// argument names so the builder body is unchanged after destructuring.
+/// builder. Field names match the original arguments so the builder body stays
+/// explicit at the ownership boundary.
 pub(super) struct RuntimeServices {
     pub(super) initial_skills: Vec<(String, String)>,
     pub(super) token_hash: String,
@@ -10,6 +10,8 @@ pub(super) struct RuntimeServices {
     pub(super) voice_barge_in: Arc<voice_barge_in::VoiceBargeInRuntime>,
     pub(super) health_registry: Arc<health::HealthRegistry>,
     pub(super) pg_pool: Option<sqlx::PgPool>,
+    pub(super) intake_delivery_capabilities:
+        Arc<intake_delivery_capability::SettlementCapabilityCache>,
     pub(super) engine: Option<crate::engine::PolicyEngine>,
 }
 
@@ -69,6 +71,7 @@ pub(super) fn run_bot_build_shared_data(
         voice_barge_in,
         health_registry,
         pg_pool,
+        intake_delivery_capabilities,
         engine,
     } = services;
     let ProcessLifecycleCounters {
@@ -246,6 +249,7 @@ pub(super) fn run_bot_build_shared_data(
         provider: provider.clone(),
         api_port,
         pg_pool,
+        intake_delivery_capabilities,
         policy: PolicyRuntime { engine },
         health_registry: Arc::downgrade(&health_registry),
         known_slash_commands: tokio::sync::OnceCell::new(),

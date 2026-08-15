@@ -1,7 +1,19 @@
-//! Dormant PostgreSQL capability probe for intake-delivery reconciliation.
+//! Boot/reload PostgreSQL capability probe for intake-delivery reconciliation.
 
 #![allow(dead_code)]
+use crate::config::IntakeDeliverySettlementStage;
 use sqlx::{Connection, PgConnection, PgPool};
+
+mod cache;
+pub(in crate::services::discord) use cache::{SettlementCapabilityCache, bootstrap};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::services::discord) struct SettlementCapabilities {
+    pub(in crate::services::discord) stamp_dispatched: bool,
+    /// Defined in S-W1; settlement and sweep consumers land in later slices.
+    pub(in crate::services::discord) settle_and_sweep: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SchemaReason {
     /// Required reconciliation terms are readable and have the expected shape.
@@ -237,14 +249,16 @@ async fn catalog_shape(
     })
 }
 async fn probe_inner(conn: &mut PgConnection) -> Result<SchemaReason, sqlx::Error> {
+    let required_migrations =
+        crate::db::intake_delivery_required_migrations::INTAKE_DELIVERY_REQUIRED_MIGRATIONS;
     let migration_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM public._sqlx_migrations
           WHERE version=ANY($1::bigint[]) AND success",
     )
-    .bind([103_i64, 105, 106, 107, 108, 109])
+    .bind(required_migrations)
     .fetch_one(&mut *conn)
     .await?;
-    if migration_count != 6 {
+    if migration_count != required_migrations.len() as i64 {
         return Ok(SchemaReason::Migration);
     }
     let Some((journal, intake)) = relation_oids(conn).await? else {
@@ -295,38 +309,35 @@ pub(super) async fn probe_schema(pool: &PgPool) -> SchemaReason {
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn capabilities_for(
+    stage: IntakeDeliverySettlementStage,
+    schema: SchemaReason,
+) -> SettlementCapabilities {
+    let dispatched_stamping_clamped = stage >= IntakeDeliverySettlementStage::Settle;
+    if dispatched_stamping_clamped {
+        // Resolution runs per bot-instance subscription, so this warning can repeat
+        // at every resolution and independently for each subscribed bot instance.
+        tracing::warn!(
+            ?stage,
+            "dispatched stamping is clamped off; settle_and_sweep is calculated but has no consumer in this build"
+        );
+    }
 
-    #[test]
-    fn sql_tokenizer_preserves_literals_and_strips_only_terminal_not_valid() {
-        assert_ne!(
-            sql_tokens("CHECK(status='dis patched')"),
-            sql_tokens("CHECK(status='dispatched')")
-        );
-        assert_eq!(
-            sql_tokens("CHECK(name='it''s ok') NOT VALID"),
-            sql_tokens("CHECK(name='it''s ok')")
-        );
-        assert_ne!(
-            sql_tokens("CHECK(\"a b\"='x')"),
-            sql_tokens("CHECK(\"ab\"='x')")
-        );
-        let status_tokens = sql_tokens(INTAKE_CHECKS[1].1);
-        let official = crate::db::intake_outbox_status::IntakeOutboxStatus::ALL;
-        assert_eq!(
-            status_tokens
-                .iter()
-                .filter(|token| token.starts_with('\''))
-                .count(),
-            official.len()
-        );
-        for status in official {
-            assert!(status_tokens.contains(&format!("'{}'", status.as_str())));
-        }
+    // The design activation formula remains `stage >= Enforce && schema == Ready`.
+    // The dispatched-stamping clamp takes precedence. Removing it is part of the
+    // S-W3 DoD; settle_and_sweep is still calculated but has no consumer in this build.
+    SettlementCapabilities {
+        stamp_dispatched: !dispatched_stamping_clamped
+            && stage >= IntakeDeliverySettlementStage::Enforce
+            && schema == SchemaReason::Ready,
+        settle_and_sweep: schema == SchemaReason::Ready
+            && stage >= IntakeDeliverySettlementStage::Settle,
     }
 }
+
+#[cfg(test)]
+#[path = "intake_delivery_capability/tests.rs"]
+mod tests;
 
 #[cfg(test)]
 mod postgres_tests {
@@ -477,7 +488,9 @@ mod postgres_tests {
         }
         assert_eq!(probe_schema(&pool).await, SchemaReason::Ready);
 
-        for version in [103_i64, 105, 106, 107, 108, 109] {
+        for version in
+            crate::db::intake_delivery_required_migrations::INTAKE_DELIVERY_REQUIRED_MIGRATIONS
+        {
             sqlx::query("UPDATE public._sqlx_migrations SET success=false WHERE version=$1")
                 .bind(version)
                 .execute(&pool)
@@ -674,3 +687,6 @@ mod postgres_tests {
         finish(database, pool).await;
     }
 }
+
+#[cfg(test)]
+pub(in crate::services::discord) use cache::bootstrap_for_test;

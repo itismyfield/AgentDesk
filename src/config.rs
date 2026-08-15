@@ -1621,6 +1621,27 @@ fn is_legacy_delivery_journal_mode(mode: &DeliveryJournalMode) -> bool {
     *mode == DeliveryJournalMode::Legacy
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum IntakeDeliverySettlementStage {
+    /// Preserve the legacy lifecycle; skip probing and rollout observation.
+    #[default]
+    Off,
+    /// In this build, Observe is a no-op on the turn path. Rollout observation telemetry ships
+    /// with the settlement slice (S-W2).
+    Observe,
+    /// Probe and calculate settle_and_sweep, whose consumer has not shipped in this build.
+    /// Dispatched stamping is clamped off.
+    Settle,
+    /// Request handoff stamps and calculate settle_and_sweep, whose consumer has not shipped in
+    /// this build. Dispatched stamping is clamped off.
+    Enforce,
+}
+
+fn is_off_intake_delivery_settlement(stage: &IntakeDeliverySettlementStage) -> bool {
+    *stage == IntakeDeliverySettlementStage::Off
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct RuntimeSettingsConfig {
@@ -1630,6 +1651,8 @@ pub struct RuntimeSettingsConfig {
     pub delivery_journal_cohort_percent: u8,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delivery_journal_internal_channel_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_off_intake_delivery_settlement")]
+    pub intake_delivery_settlement: IntakeDeliverySettlementStage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_timeout_min: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1799,6 +1822,7 @@ impl RuntimeSettingsConfig {
         self.delivery_journal_mode == DeliveryJournalMode::Legacy
             && self.delivery_journal_cohort_percent == 0
             && self.delivery_journal_internal_channel_ids.is_empty()
+            && self.intake_delivery_settlement == IntakeDeliverySettlementStage::Off
             && self.requested_timeout_min.is_none()
             && self.in_progress_stale_min.is_none()
             && self.long_turn_alert_interval_min.is_none()
@@ -1867,6 +1891,10 @@ mod runtime_hook_registry_config_tests {
         let absent: RuntimeSettingsConfig = serde_yaml::from_str("{}").unwrap();
         assert_eq!(absent.delivery_journal_mode, DeliveryJournalMode::Legacy);
         assert_eq!(absent.delivery_journal_cohort_percent, 0);
+        assert_eq!(
+            absent.intake_delivery_settlement,
+            IntakeDeliverySettlementStage::Off
+        );
         assert!(!absent.delivery_journal_mode.records_shadow_observations());
         assert!(!absent.delivery_journal_mode.reads_as_authority());
         assert!(absent.is_empty());
@@ -1935,6 +1963,45 @@ mod runtime_hook_registry_config_tests {
         assert_eq!(empty.tui_hook_buffer_ttl_secs, None);
         assert_eq!(empty.tui_unclaimed_stop_delay_ms, None);
         assert_eq!(empty.tui_hook_registry_enabled, None);
+    }
+
+    #[test]
+    fn intake_delivery_settlement_defaults_off_and_round_trips() {
+        let default = RuntimeSettingsConfig::default();
+        assert_eq!(
+            default.intake_delivery_settlement,
+            IntakeDeliverySettlementStage::Off
+        );
+        assert!(
+            !serde_yaml::to_string(&default)
+                .expect("serialize default runtime")
+                .contains("intake_delivery_settlement")
+        );
+
+        for stage in [
+            IntakeDeliverySettlementStage::Off,
+            IntakeDeliverySettlementStage::Observe,
+            IntakeDeliverySettlementStage::Settle,
+            IntakeDeliverySettlementStage::Enforce,
+        ] {
+            let yaml = format!(
+                "intake_delivery_settlement: {}\n",
+                serde_yaml::to_value(stage)
+                    .expect("serialize stage")
+                    .as_str()
+                    .expect("stage serializes as a string")
+            );
+            let parsed: RuntimeSettingsConfig =
+                serde_yaml::from_str(&yaml).expect("parse settlement stage");
+            assert_eq!(parsed.intake_delivery_settlement, stage);
+            assert_eq!(
+                serde_yaml::from_str::<RuntimeSettingsConfig>(
+                    &serde_yaml::to_string(&parsed).expect("serialize runtime")
+                )
+                .expect("reparse runtime"),
+                parsed
+            );
+        }
     }
 }
 
