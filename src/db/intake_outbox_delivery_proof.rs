@@ -50,9 +50,13 @@ pub(crate) const DURABLE_INFLIGHT_SESSION_SCOPE_SQL: &str =
 ///
 /// The surrounding query must expose the intake row as `io` and the session as
 /// `s`. The result is 2 for a fresh live heartbeat, 1 for evidence that must be
-/// deferred, and 0 only when the active-session heartbeat has been absent past
-/// the state's cutoff. An active dispatch binding is deliberately irrelevant:
-/// ordinary interactive turns normally leave it NULL.
+/// deferred, and 0 when the active-session heartbeat has been absent past the
+/// state's cutoff. Callers coalesce no matching durable row to 0, so a missing
+/// row and an existing non-`turn_active` row are both classified as Absent. An
+/// active dispatch binding is deliberately irrelevant: ordinary interactive
+/// turns normally leave it NULL. Migration 0028's
+/// `sessions_status_known_check` rejects the legacy `working` status, so the
+/// durable liveness scope does not include it.
 pub(crate) fn durable_inflight_liveness_case_sql(
     fresh_param: usize,
     absence_param: usize,
@@ -173,11 +177,55 @@ pub(crate) async fn settle_intake_done_from_receipt(
     Ok(result.rows_affected() == 1)
 }
 
+/// Locks every existing durable session row for the intake row's channel and
+/// re-evaluates inflight liveness while those locks remain held.
+///
+/// Locking all channel rows, rather than only rows currently marked
+/// `turn_active`, also serializes a concurrent status transition on an existing
+/// row. PostgreSQL cannot row-lock an absent row, so a concurrent first INSERT
+/// remains the explicitly documented Absent case.
+async fn lock_and_classify_durable_inflight(
+    conn: &mut PgConnection,
+    outbox_id: i64,
+    heartbeat_fresh: DateTime<Utc>,
+    absence_cutoff: DateTime<Utc>,
+) -> Result<i16, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT s.id
+           FROM public.intake_outbox io
+           JOIN public.sessions s ON s.channel_id = io.channel_id
+          WHERE io.id = $1
+          ORDER BY s.id
+          FOR SHARE OF s",
+    )
+    .bind(outbox_id)
+    .fetch_all(&mut *conn)
+    .await?;
+
+    let liveness = durable_inflight_liveness_case_sql(2, 3);
+    let session_scope = DURABLE_INFLIGHT_SESSION_SCOPE_SQL;
+    let statement = format!(
+        "SELECT COALESCE(MAX({liveness}), 0)::smallint
+           FROM public.intake_outbox io
+           JOIN public.sessions s ON {session_scope}
+          WHERE io.id = $1"
+    );
+    sqlx::query_scalar(&statement)
+        .bind(outbox_id)
+        .bind(heartbeat_fresh)
+        .bind(absence_cutoff)
+        .fetch_one(conn)
+        .await
+}
+
 /// Locks and settles a strictly stale dispatched row as official `Unknown`.
 ///
 /// `conn` must belong to the caller-owned active transaction that performed
-/// reconciliation judgment. The same connection retains the proof lock through
-/// the cutoff recheck and CAS; autocommit use is forbidden.
+/// reconciliation judgment at READ COMMITTED isolation. The same connection
+/// retains the outbox lock and channel session share locks through the freshness
+/// and cutoff rechecks and CAS; autocommit use is forbidden. READ COMMITTED is
+/// required so the post-lock statement observes a heartbeat that committed
+/// while session-lock acquisition waited.
 #[allow(dead_code)]
 pub(crate) async fn settle_dispatched_unknown(
     conn: &mut PgConnection,
@@ -188,25 +236,24 @@ pub(crate) async fn settle_dispatched_unknown(
     if !try_lock_dispatched_for_proof(conn, outbox_id).await? {
         return Ok(false);
     }
-    let liveness = durable_inflight_liveness_case_sql(3, 2);
-    let session_scope = DURABLE_INFLIGHT_SESSION_SCOPE_SQL;
-    let statement = format!(
+    if lock_and_classify_durable_inflight(conn, outbox_id, heartbeat_fresh, cutoff).await? != 0 {
+        return Ok(false);
+    }
+    let result = sqlx::query(
         "UPDATE public.intake_outbox AS io SET status = 'unknown', completed_at = NOW()
-         WHERE io.id = $1 AND io.status = 'dispatched' AND io.dispatched_at < $2
-           AND NOT EXISTS (
-             SELECT 1 FROM public.sessions s
-              WHERE {session_scope}
-                AND ({liveness}) <> 0)"
-    );
-    let result = sqlx::query(&statement)
-        .bind(outbox_id)
-        .bind(cutoff)
-        .bind(heartbeat_fresh)
-        .execute(&mut *conn)
-        .await?;
+         WHERE io.id = $1 AND io.status = 'dispatched' AND io.dispatched_at < $2",
+    )
+    .bind(outbox_id)
+    .bind(cutoff)
+    .execute(&mut *conn)
+    .await?;
     Ok(result.rows_affected() == 1)
 }
 
+/// Settles stale spawned debt inside a caller-owned active READ COMMITTED
+/// transaction. The caller must commit or roll back the transaction; autocommit
+/// use is forbidden. The outbox and channel session locks remain held through
+/// the liveness recheck and terminal CAS.
 pub(crate) async fn settle_spawned_unknown(
     conn: &mut PgConnection,
     outbox_id: i64,
@@ -223,55 +270,18 @@ pub(crate) async fn settle_spawned_unknown(
     if locked.is_none() {
         return Ok(false);
     }
-    // The CAS gets a new READ COMMITTED snapshot after the row lock, so it
-    // includes heartbeat commits made while lock acquisition was delayed.
-    let liveness = durable_inflight_liveness_case_sql(3, 2);
-    let session_scope = DURABLE_INFLIGHT_SESSION_SCOPE_SQL;
-    let statement = format!(
+    if lock_and_classify_durable_inflight(conn, outbox_id, heartbeat_fresh, cutoff).await? != 0 {
+        return Ok(false);
+    }
+    sqlx::query(
         "UPDATE public.intake_outbox AS io SET status = 'unknown', completed_at = NOW()
-         WHERE io.id = $1 AND io.status = 'spawned' AND io.spawned_at < $2
-           AND NOT EXISTS (
-             SELECT 1 FROM public.sessions s
-              WHERE {session_scope}
-                AND ({liveness}) <> 0)"
-    );
-    sqlx::query(&statement)
-        .bind(outbox_id)
-        .bind(cutoff)
-        .bind(heartbeat_fresh)
-        .execute(conn)
-        .await
-        .map(|result| result.rows_affected() == 1)
-}
-
-pub(crate) async fn settle_null_clock_dispatched(
-    conn: &mut PgConnection,
-    outbox_id: i64,
-    reason: &str,
-) -> Result<bool, sqlx::Error> {
-    settle_operator_unknown(
-        conn,
-        outbox_id,
-        IntakeOutboxStatus::Dispatched,
-        reason,
-        Some("dispatched_at"),
+         WHERE io.id = $1 AND io.status = 'spawned' AND io.spawned_at < $2",
     )
+    .bind(outbox_id)
+    .bind(cutoff)
+    .execute(conn)
     .await
-}
-
-pub(crate) async fn settle_null_clock_spawned(
-    conn: &mut PgConnection,
-    outbox_id: i64,
-    reason: &str,
-) -> Result<bool, sqlx::Error> {
-    settle_operator_unknown(
-        conn,
-        outbox_id,
-        IntakeOutboxStatus::Spawned,
-        reason,
-        Some("spawned_at"),
-    )
-    .await
+    .map(|result| result.rows_affected() == 1)
 }
 
 async fn settle_operator_unknown(
@@ -279,23 +289,18 @@ async fn settle_operator_unknown(
     outbox_id: i64,
     status: IntakeOutboxStatus,
     reason: &str,
-    clock: Option<&str>,
 ) -> Result<bool, sqlx::Error> {
-    let clock_predicate = clock
-        .map(|clock| format!(" AND {clock} IS NULL"))
-        .unwrap_or_default();
-    let statement = format!(
+    sqlx::query(
         "UPDATE public.intake_outbox SET status = $2, completed_at = NOW(), last_error = $4
-         WHERE id = $1 AND status = $3{clock_predicate}"
-    );
-    sqlx::query(&statement)
-        .bind(outbox_id)
-        .bind(IntakeOutboxStatus::Unknown)
-        .bind(status)
-        .bind(reason)
-        .execute(conn)
-        .await
-        .map(|result| result.rows_affected() == 1)
+         WHERE id = $1 AND status = $3",
+    )
+    .bind(outbox_id)
+    .bind(IntakeOutboxStatus::Unknown)
+    .bind(status)
+    .bind(reason)
+    .execute(conn)
+    .await
+    .map(|result| result.rows_affected() == 1)
 }
 
 /// Cutoff-free operator settlement. It never creates a retry child row.
@@ -305,7 +310,7 @@ pub(crate) async fn settle_unknown_by_operator(
     status: IntakeOutboxStatus,
     reason: &str,
 ) -> Result<bool, sqlx::Error> {
-    settle_operator_unknown(conn, outbox_id, status, reason, None).await
+    settle_operator_unknown(conn, outbox_id, status, reason).await
 }
 
 #[cfg(test)]

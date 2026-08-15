@@ -16,6 +16,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 const HEARTBEAT_FRESH_SECS: i64 = 30;
 const SWEEP_INTERVAL_SECS: u64 = 60;
+#[cfg(not(test))]
+const SWEEP_INITIAL_DELAY_SECS: u64 = crate::config::INTAKE_DELIVERY_SWEEP_INITIAL_DELAY_SECS;
+#[cfg(test)]
+const SWEEP_INITIAL_DELAY_SECS: u64 = 0;
 static SWEEP_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy)]
@@ -251,6 +255,7 @@ pub(super) fn spawn_intake_delivery_sweep(shared: Arc<SharedData>) {
         "intake_delivery_sweep",
         async move {
             let _active = active;
+            tokio::time::sleep(std::time::Duration::from_secs(SWEEP_INITIAL_DELAY_SECS)).await;
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(SWEEP_INTERVAL_SECS));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

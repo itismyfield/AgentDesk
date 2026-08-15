@@ -1645,6 +1645,9 @@ fn is_off_intake_delivery_settlement(stage: &IntakeDeliverySettlementStage) -> b
 /// A conservative bound that stays within chrono's duration and UTC datetime
 /// ranges while remaining far above any operational sweep TTL.
 pub(crate) const MAX_INTAKE_SWEEP_CUTOFF_SECS: u64 = i64::MAX as u64 / 1_000_000_000;
+/// Gives startup recovery and session restoration two minutes before the first
+/// intake-delivery sweep. This matches the sibling session-GC startup delay.
+pub(crate) const INTAKE_DELIVERY_SWEEP_INITIAL_DELAY_SECS: u64 = 120;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
@@ -2046,6 +2049,11 @@ mod runtime_hook_registry_config_tests {
             (dispatched, spawned),
             (MAX_INTAKE_SWEEP_CUTOFF_SECS, MAX_INTAKE_SWEEP_CUTOFF_SECS)
         );
+    }
+
+    #[test]
+    fn intake_delivery_sweep_initial_delay_stays_within_boot_grace_contract() {
+        assert!((60..=180).contains(&INTAKE_DELIVERY_SWEEP_INITIAL_DELAY_SECS));
     }
 }
 

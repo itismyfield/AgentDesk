@@ -1,8 +1,6 @@
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::db::intake_outbox_delivery_proof::{
-    settle_null_clock_dispatched, settle_null_clock_spawned, settle_unknown_by_operator,
-};
+use crate::db::intake_outbox_delivery_proof::settle_unknown_by_operator;
 use crate::db::intake_outbox_status::IntakeOutboxStatus;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
@@ -255,6 +253,9 @@ fn sweep_spawns_exactly_once_per_process() {
 
 #[test]
 fn spawn_wiring_claims_process_latch_before_observed_task() {
+    // This is intentionally only a lexical adjacency guard. A matching token
+    // in a comment or string could satisfy `.find()`; runtime task ownership is
+    // covered separately by the latch tests.
     let sweep_source = include_str!("../intake_delivery_sweep.rs");
     let guard = sweep_source
         .find("claim_active(&SWEEP_ACTIVE)")
@@ -302,8 +303,6 @@ async fn null_clock_rows_are_invisible_to_sweep_but_visible_to_operator_pg() {
     .unwrap();
     let dispatched = seed(&pool, "null-d", D, None).await;
     let spawned = seed(&pool, "null-s", S, None).await;
-    let clocked_d = seed_clocked(&pool, "clock-d", D, Utc::now()).await;
-    let clocked_s = seed_clocked(&pool, "clock-s", S, Utc::now()).await;
     assert_eq!(
         sweep_once(&pool, READY, cutoffs(Utc::now()), 200)
             .await
@@ -313,22 +312,12 @@ async fn null_clock_rows_are_invisible_to_sweep_but_visible_to_operator_pg() {
     );
     let mut tx = pool.begin().await.unwrap();
     assert!(
-        settle_null_clock_dispatched(&mut tx, dispatched, "operator")
+        settle_unknown_by_operator(&mut tx, dispatched, D, "operator")
             .await
             .unwrap()
     );
     assert!(
-        settle_null_clock_spawned(&mut tx, spawned, "operator")
-            .await
-            .unwrap()
-    );
-    assert!(
-        !settle_null_clock_dispatched(&mut tx, clocked_d, "operator")
-            .await
-            .unwrap()
-    );
-    assert!(
-        !settle_null_clock_spawned(&mut tx, clocked_s, "operator")
+        settle_unknown_by_operator(&mut tx, spawned, S, "operator")
             .await
             .unwrap()
     );
@@ -404,40 +393,39 @@ async fn sweep_defers_ambiguous_live_signal_pg() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn heartbeat_refresh_during_settlement_prevents_unknown_cas_pg() {
-    let (db, pool) = setup().await;
-    let now = Utc::now();
-    let id = seed_clocked(&pool, "heartbeat-race", S, now - Duration::hours(2)).await;
-    seed_inflight(
-        &pool,
-        "heartbeat-race",
-        Some(now - Duration::hours(2)),
-        None,
-    )
-    .await;
-    let mut holder = lock_intake_row(&pool, id).await;
-    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *holder)
-        .await
-        .unwrap();
-    let sweep_pool = pool.clone();
-    let sweeping = tokio::spawn(async move {
-        sweep_once(&sweep_pool, READY, cutoffs(now), 200)
+async fn heartbeat_writer_serializes_before_unknown_settlement_pg() {
+    for (row_status, key) in [(S, "heartbeat-race-s"), (D, "heartbeat-race-d")] {
+        let (db, pool) = setup().await;
+        let now = Utc::now();
+        let id = seed_clocked(&pool, key, row_status, now - Duration::hours(2)).await;
+        seed_inflight(&pool, key, Some(now - Duration::hours(2)), None).await;
+
+        let mut heartbeat = pool.begin().await.unwrap();
+        let heartbeat_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *heartbeat)
             .await
-            .unwrap()
-    });
-    wait_for_blocked_on(&pool, holder_pid, 1).await;
-    sqlx::query("UPDATE public.sessions SET last_heartbeat=$2 WHERE channel_id=$1")
-        .bind("heartbeat-race")
-        .bind(Utc::now())
-        .execute(&pool)
-        .await
-        .unwrap();
-    holder.rollback().await.unwrap();
-    let stats = sweeping.await.unwrap();
-    assert_eq!(stats.settled, 0);
-    assert_eq!(status(&pool, id).await, S);
-    finish(db, pool).await;
+            .unwrap();
+        sqlx::query("UPDATE public.sessions SET last_heartbeat=$2 WHERE channel_id=$1")
+            .bind(key)
+            .bind(Utc::now())
+            .execute(&mut *heartbeat)
+            .await
+            .unwrap();
+
+        let sweep_pool = pool.clone();
+        let sweeping = tokio::spawn(async move {
+            sweep_once(&sweep_pool, READY, cutoffs(now), 200)
+                .await
+                .unwrap()
+        });
+        wait_for_blocked_on(&pool, heartbeat_pid, 1).await;
+        heartbeat.commit().await.unwrap();
+
+        let stats = sweeping.await.unwrap();
+        assert_eq!(stats.settled, 0);
+        assert_eq!(status(&pool, id).await, row_status);
+        finish(db, pool).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
