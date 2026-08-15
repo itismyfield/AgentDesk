@@ -465,7 +465,13 @@ mod failed_entry_alert_tests {
         must_ok(
             sqlx::query(
                 "INSERT INTO auto_queue_entries (id, run_id, agent_id, status, retry_count)
-             VALUES ('entry-identity', 'run-alert-identity', 'agent-1', 'dispatched', 0)",
+             VALUES ('entry-identity', 'run-alert-identity', 'agent-1', 'dispatched', 0),
+                    -- The sibling keeps the run live across the failure
+                    -- transitions: without it the finalizer completes the
+                    -- run when the sole entry fails, and the S1 choke gate
+                    -- then (correctly) refuses the redispatch this test
+                    -- needs for its alert-TTL commit assertions.
+                    ('entry-identity-sibling', 'run-alert-identity', 'agent-1', 'pending', 0)",
             )
             .execute(&pool)
             .await,

@@ -363,36 +363,40 @@ async fn create_activate_dispatch_pg_inner(
             ));
         }
     } else {
-        let paused_run_id_locked = sqlx::query_scalar::<_, String>(
-            "WITH candidate_runs AS (
-                 SELECT r.id, r.status, MAX(e.created_at) AS latest_created_at
-                 FROM auto_queue_entries e
-                 JOIN auto_queue_runs r ON r.id = e.run_id
-                 WHERE e.kanban_card_id = $1
-                 GROUP BY r.id, r.status
-             ),
-             locked AS (
-                 SELECT id,
-                        status,
-                        latest_created_at,
-                        pg_advisory_xact_lock(hashtext('aq_run:' || id)) AS _lock
-                 FROM candidate_runs
-             )
-             SELECT id
-             FROM locked
-             WHERE status = 'paused'
-             ORDER BY latest_created_at DESC NULLS LAST
+        // This attachment-free compatibility branch currently has no
+        // production caller: entry dispatch creation always supplies an
+        // attachment. Preserve its historical card lookup by selecting one
+        // owning run from the newest entry, rather than combining run states.
+        let owning_run_id = sqlx::query_scalar::<_, String>(
+            "SELECT r.id
+             FROM auto_queue_entries e
+             JOIN auto_queue_runs r ON r.id = e.run_id
+             WHERE e.kanban_card_id = $1
+             ORDER BY e.created_at DESC NULLS LAST, e.id DESC
              LIMIT 1",
         )
         .bind(card_id)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|error| format!("recheck paused run for {card_id} inside dispatch tx: {error}"))?;
-        if let Some(run_id) = paused_run_id_locked {
-            tx.rollback().await.ok();
-            return Err(format!(
-                "auto-queue run {run_id} paused: refusing to create {dispatch_type} dispatch for card {card_id}"
-            ));
+        .map_err(|error| format!("load owning run for card {card_id}: {error}"))?;
+        if let Some(run_id) = owning_run_id {
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtext('aq_run:' || $1))")
+                .bind(&run_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("lock auto-queue run {run_id}: {error}"))?;
+            let run_status =
+                sqlx::query_scalar::<_, String>("SELECT status FROM auto_queue_runs WHERE id = $1")
+                    .bind(&run_id)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(|error| format!("reload auto-queue run {run_id}: {error}"))?;
+            if !crate::db::auto_queue::run_status::is_live_run_status(&run_status) {
+                tx.rollback().await.ok();
+                return Err(format!(
+                    "auto-queue run {run_id} is {run_status}: refusing to create {dispatch_type} dispatch for card {card_id}"
+                ));
+            }
         }
     }
 
@@ -601,12 +605,12 @@ async fn create_activate_dispatch_pg_inner(
 }
 
 #[cfg(test)]
-mod pg_tests {
+mod tests {
     use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
 
     #[tokio::test]
-    async fn cancelled_run_rejects_dispatch_attach() {
+    async fn cancelled_run_rejects_dispatch_attach_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         sqlx::query(
@@ -673,10 +677,84 @@ mod pg_tests {
         pool.close().await;
         pg_db.drop().await;
     }
-}
 
-#[cfg(test)]
-mod tests {
+    #[tokio::test]
+    async fn attachment_free_gate_uses_newest_entry_single_run_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
+             VALUES ('agent-card-gate', 'Card Gate Agent', 'claude', '456')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed attachment-free gate agent");
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, metadata)
+             VALUES (
+                 'card-multi-run', 'Multi Run Card', 'in_progress',
+                 'agent-card-gate',
+                 '{\"sandbox_preflight\":true,\"production_mutation_allowed\":false}'::jsonb
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed attachment-free gate card");
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, agent_id, status)
+             VALUES
+                ('run-older-live', 'agent-card-gate', 'active'),
+                ('run-newer-cancelled', 'agent-card-gate', 'cancelled')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed attachment-free gate runs");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, created_at)
+             VALUES
+                (
+                    'entry-older-live', 'run-older-live', 'card-multi-run',
+                    'agent-card-gate', 'pending', NOW() - INTERVAL '1 minute'
+                ),
+                (
+                    'entry-newer-cancelled', 'run-newer-cancelled', 'card-multi-run',
+                    'agent-card-gate', 'pending', NOW()
+                )",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed entries from distinct owning runs");
+
+        let error = create_activate_dispatch_pg_inner(
+            &pool,
+            "card-multi-run",
+            "agent-card-gate",
+            "implementation",
+            "Late attachment-free dispatch",
+            &json!({}),
+            None,
+        )
+        .await
+        .expect_err("newest cancelled owning run must fail closed");
+        assert!(
+            error.contains("run-newer-cancelled is cancelled"),
+            "{error}"
+        );
+        let dispatch_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM task_dispatches
+             WHERE kanban_card_id = 'card-multi-run'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count attachment-free dispatches");
+        assert_eq!(dispatch_count, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
     use crate::dispatch::sandbox_preflight_metadata_disables_external_side_effects;
 
     #[test]
