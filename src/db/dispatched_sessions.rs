@@ -8,6 +8,10 @@ use crate::db::session_agent_resolution::{
 use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::session_activity::SessionActivityResolver;
 
+#[cfg(test)]
+#[path = "dispatched_sessions/tests.rs"]
+mod tests;
+
 async fn resolve_session_locator_pg(
     pool: &PgPool,
     session_key: &str,
@@ -33,6 +37,7 @@ pub(crate) async fn load_dispatch_thread_id_pg(pool: &PgPool, dispatch_id: &str)
 
 #[derive(Debug)]
 pub(crate) struct RetryDispatchMeta {
+    pub(crate) origin_dispatch_id: String,
     pub(crate) card_id: String,
     pub(crate) to_agent_id: Option<String>,
     pub(crate) dispatch_type: Option<String>,
@@ -338,20 +343,9 @@ pub(crate) async fn disconnect_session_and_prepare_retry_pg(
     active_dispatch_id: Option<&str>,
     retry: bool,
 ) -> Result<Option<RetryDispatchMeta>, String> {
-    // #2045 Finding 4 (P0): force-kill used to issue a raw `UPDATE
-    // task_dispatches SET status='failed'` inside the same tx that disconnects
-    // the session row. That bypassed semaphore release, auto_queue_entries
-    // reconcile, phase-gate reconcile, observability emit, and wait-queue
-    // wake — i.e. the same cleanup hazards described in Finding 3. The fix:
-    //   1) disconnect the session row in its own short tx (so we don't hold a
-    //      tx open across the canonical pipeline call below),
-    //   2) load retry metadata (still pending/dispatched at that point),
-    //   3) delegate the dispatch terminal transition to the canonical
-    //      `set_dispatch_status_on_pg_async`, which owns the full cleanup
-    //      pipeline,
-    //   4) guard against `cancelled → failed` — cancelled is already terminal
-    //      and overwriting it would corrupt incident metrics and double-count
-    //      failures on retry.
+    // Session disconnect is independently durable. Dispatch failure still
+    // goes through the canonical pipeline, either standalone or in the retry
+    // transaction, and terminal dispatches remain authoritative.
     {
         let mut tx = pool
             .begin()
@@ -396,34 +390,6 @@ pub(crate) async fn disconnect_session_and_prepare_retry_pg(
             Some("completed") | Some("cancelled") | Some("failed")
         );
 
-        if !is_terminal {
-            let reason = json!({
-                "reason": "force_kill_session",
-                "session_key": session_key,
-            });
-            let allowed_from: &[&str] = &["pending", "dispatched"];
-            // Delegate to the canonical pipeline. The async variant is used
-            // here because we're already inside a tokio runtime (axum
-            // handler); the sync wrapper would `block_on` and panic.
-            crate::dispatch::set_dispatch_status_on_pg_async(
-                pool,
-                dispatch_id,
-                "failed",
-                Some(&reason),
-                "force_kill_session",
-                Some(allowed_from),
-                true,
-            )
-            .await
-            .map_err(|error| {
-                format!("canonical fail postgres dispatch {dispatch_id} during force-kill: {error}")
-            })?;
-        }
-
-        // #2045 Finding 4 cancelled→failed guard: if the dispatch was already
-        // `cancelled` (or otherwise terminal) before force-kill ran, do not
-        // synthesize a retry on top of that. The original cancel intent — or
-        // the completion that already happened — must remain authoritative.
         if retry && !is_terminal {
             retry_meta = sqlx::query(
                 "SELECT
@@ -442,6 +408,7 @@ pub(crate) async fn disconnect_session_and_prepare_retry_pg(
             .map_err(|error| format!("load postgres retry metadata {dispatch_id}: {error}"))?
             .map(|row| {
                 Ok(RetryDispatchMeta {
+                    origin_dispatch_id: dispatch_id.to_string(),
                     card_id: row.try_get("kanban_card_id")?,
                     to_agent_id: row.try_get("to_agent_id")?,
                     dispatch_type: row.try_get("dispatch_type")?,
@@ -454,10 +421,206 @@ pub(crate) async fn disconnect_session_and_prepare_retry_pg(
             .map_err(|error: sqlx::Error| {
                 format!("decode postgres retry metadata {dispatch_id}: {error}")
             })?;
+        } else if !is_terminal {
+            let changed =
+                fail_force_killed_dispatch_without_retry_pg(pool, dispatch_id, Some(session_key))
+                    .await?;
+            if changed == 0 {
+                return Ok(None);
+            }
         }
+
+        // Retry-capable force-kill defers d1 failure to the replacement
+        // transaction. If that transaction dies before commit, d1 failure is
+        // rolled back too; the session disconnect above is already committed.
+        // A normal returned error is handled by the standalone fallback.
     }
 
     Ok(retry_meta)
+}
+
+pub(crate) async fn fail_force_killed_dispatch_without_retry_pg(
+    pool: &PgPool,
+    dispatch_id: &str,
+    session_key: Option<&str>,
+) -> Result<usize, String> {
+    let reason = json!({
+        "reason": "force_kill_session",
+        "session_key": session_key,
+    });
+    crate::dispatch::set_dispatch_status_on_pg_async(
+        pool,
+        dispatch_id,
+        "failed",
+        Some(&reason),
+        "force_kill_session",
+        Some(&["pending", "dispatched"]),
+        true,
+    )
+    .await
+    .map_err(|error| {
+        format!("canonical fail postgres dispatch {dispatch_id} during force-kill: {error}")
+    })
+}
+
+#[derive(Clone, Debug, sqlx::FromRow)]
+struct RetryOwnerCandidate {
+    entry_id: String,
+    run_id: String,
+    card_id: String,
+    entry_status: String,
+    dispatch_id: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct RetryAutoQueueOwner {
+    entry_id: String,
+    run_id: String,
+    entry_status: String,
+    retry_count: i64,
+    slot_index: Option<i64>,
+}
+
+async fn select_retry_owner_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    meta: &RetryDispatchMeta,
+) -> Result<Option<RetryOwnerCandidate>, String> {
+    let candidates = sqlx::query_as::<_, RetryOwnerCandidate>(
+        "SELECT e.id AS entry_id,
+                e.run_id,
+                e.kanban_card_id AS card_id,
+                e.status AS entry_status,
+                e.dispatch_id
+         FROM auto_queue_entry_dispatch_history h
+         JOIN auto_queue_entries e ON e.id = h.entry_id
+         WHERE h.dispatch_id = $1
+         ORDER BY e.id ASC",
+    )
+    .bind(&meta.origin_dispatch_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| {
+        format!(
+            "load auto-queue ownership for retry {}: {error}",
+            meta.origin_dispatch_id
+        )
+    })?;
+
+    if candidates
+        .iter()
+        .any(|candidate| candidate.card_id != meta.card_id)
+    {
+        return Err(format!(
+            "ambiguous auto-queue ownership for retry {}: card mismatch",
+            meta.origin_dispatch_id
+        ));
+    }
+
+    let linked = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.dispatch_id.as_deref() == Some(meta.origin_dispatch_id.as_str())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let eligible = if linked.len() == 1 {
+        linked
+    } else {
+        candidates
+            .into_iter()
+            .filter(|candidate| !matches!(candidate.entry_status.as_str(), "skipped" | "cancelled"))
+            .collect::<Vec<_>>()
+    };
+
+    match eligible.len() {
+        0 => Ok(None),
+        1 => Ok(eligible.into_iter().next()),
+        count => Err(format!(
+            "ambiguous auto-queue ownership for retry {}: {count} candidates",
+            meta.origin_dispatch_id
+        )),
+    }
+}
+
+async fn prepare_retry_owner_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    meta: &RetryDispatchMeta,
+) -> Result<Option<RetryAutoQueueOwner>, String> {
+    let Some(candidate) = select_retry_owner_on_pg_tx(tx, meta).await? else {
+        return Ok(None);
+    };
+
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('aq_run:' || $1))")
+        .bind(&candidate.run_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| {
+            format!(
+                "lock auto-queue run {} for retry: {error}",
+                candidate.run_id
+            )
+        })?;
+
+    let run_status =
+        sqlx::query_scalar::<_, String>("SELECT status FROM auto_queue_runs WHERE id = $1")
+            .bind(&candidate.run_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|error| {
+                format!(
+                    "reload auto-queue run {} for retry: {error}",
+                    candidate.run_id
+                )
+            })?
+            .ok_or_else(|| {
+                format!(
+                    "auto-queue retry owner run {} no longer exists",
+                    candidate.run_id
+                )
+            })?;
+    if !crate::db::auto_queue::run_status::is_live_run_status(&run_status) {
+        return Err(format!(
+            "auto-queue retry owner run {} is not retryable (status={run_status})",
+            candidate.run_id
+        ));
+    }
+
+    load_retry_owner_on_pg_tx(tx, &candidate.entry_id, &candidate.run_id, meta)
+        .await
+        .map(Some)
+}
+
+async fn load_retry_owner_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entry_id: &str,
+    run_id: &str,
+    meta: &RetryDispatchMeta,
+) -> Result<RetryAutoQueueOwner, String> {
+    sqlx::query_as::<_, RetryAutoQueueOwner>(
+        "SELECT id AS entry_id,
+                run_id,
+                status AS entry_status,
+                retry_count::BIGINT AS retry_count,
+                slot_index::BIGINT AS slot_index
+         FROM auto_queue_entries
+         WHERE id = $1
+           AND run_id = $2
+           AND kanban_card_id = $3
+           AND dispatch_id = $4",
+    )
+    .bind(entry_id)
+    .bind(run_id)
+    .bind(&meta.card_id)
+    .bind(&meta.origin_dispatch_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| format!("reload auto-queue retry owner entry {entry_id}: {error}"))?
+    .ok_or_else(|| {
+        format!(
+            "auto-queue retry owner entry {} no longer links dispatch {}",
+            entry_id, meta.origin_dispatch_id
+        )
+    })
 }
 
 pub(crate) async fn create_retry_dispatch_pg(
@@ -480,6 +643,71 @@ pub(crate) async fn create_retry_dispatch_pg(
         .begin()
         .await
         .map_err(|error| format!("begin postgres retry dispatch transaction: {error}"))?;
+
+    // The d1 token precedes every optional run token, including the 0-owner
+    // path, and makes concurrent retries for the same dispatch single-writer.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('aq_retry:' || $1))")
+        .bind(&meta.origin_dispatch_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| {
+            format!(
+                "lock origin dispatch {} for retry: {error}",
+                meta.origin_dispatch_id
+            )
+        })?;
+
+    let owner_before_failed_sync = prepare_retry_owner_on_pg_tx(&mut tx, meta).await?;
+    let reason = json!({"reason": "force_kill_session", "retry": true});
+    let mut deferred_observability = Vec::new();
+    let changed = crate::dispatch::set_dispatch_status_on_pg_tx_async(
+        &mut tx,
+        &meta.origin_dispatch_id,
+        "failed",
+        Some(&reason),
+        "force_kill_session",
+        Some(&["pending", "dispatched"]),
+        true,
+        true,
+        Some(&mut deferred_observability),
+    )
+    .await
+    .map_err(|error| {
+        format!(
+            "canonical fail postgres dispatch {} during retry force-kill: {error}",
+            meta.origin_dispatch_id
+        )
+    })?;
+    if changed == 0 {
+        return Err(format!(
+            "origin dispatch {} is no longer retryable",
+            meta.origin_dispatch_id
+        ));
+    }
+
+    let owner = match owner_before_failed_sync {
+        Some(owner) => {
+            Some(load_retry_owner_on_pg_tx(&mut tx, &owner.entry_id, &owner.run_id, meta).await?)
+        }
+        None => None,
+    };
+    if let Some(owner) = owner.as_ref() {
+        match owner.entry_status.as_str() {
+            "failed" | "dispatched" | "pending" | "skipped" => {}
+            "done" | "user_cancelled" => {
+                return Err(format!(
+                    "auto-queue retry owner entry {} is not attachable (status={})",
+                    owner.entry_id, owner.entry_status
+                ));
+            }
+            status => {
+                return Err(format!(
+                    "auto-queue retry owner entry {} has unsupported status {status}",
+                    owner.entry_id
+                ));
+            }
+        }
+    }
 
     sqlx::query(
         "INSERT INTO task_dispatches (
@@ -562,9 +790,92 @@ pub(crate) async fn create_retry_dispatch_pg(
         )
     })?;
 
+    if let Some(owner) = owner {
+        if owner.entry_status == crate::db::auto_queue::ENTRY_STATUS_FAILED {
+            let pending = crate::db::auto_queue::update_entry_status_on_pg_tx(
+                &mut tx,
+                &owner.entry_id,
+                crate::db::auto_queue::ENTRY_STATUS_PENDING,
+                "force_kill_session_retry",
+                &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+            )
+            .await?;
+            if !pending.changed {
+                return Err(format!(
+                    "auto-queue retry owner entry {} changed before pending attach",
+                    owner.entry_id
+                ));
+            }
+            let restored = sqlx::query(
+                "UPDATE auto_queue_entries
+                 SET retry_count = $1
+                 WHERE id = $2 AND status = 'pending'",
+            )
+            .bind(owner.retry_count)
+            .bind(&owner.entry_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                format!(
+                    "restore auto-queue retry count for {}: {error}",
+                    owner.entry_id
+                )
+            })?
+            .rows_affected();
+            if restored != 1 {
+                return Err(format!(
+                    "auto-queue retry owner entry {} left pending state",
+                    owner.entry_id
+                ));
+            }
+        }
+
+        let attached = crate::db::auto_queue::update_entry_status_on_pg_tx(
+            &mut tx,
+            &owner.entry_id,
+            crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
+            "force_kill_session_retry",
+            &crate::db::auto_queue::EntryStatusUpdateOptions {
+                dispatch_id: Some(dispatch_id.clone()),
+                slot_index: owner.slot_index,
+            },
+        )
+        .await?;
+        if !attached.changed {
+            return Err(format!(
+                "auto-queue retry owner entry {} was not attached",
+                owner.entry_id
+            ));
+        }
+    } else if select_retry_owner_on_pg_tx(&mut tx, meta).await?.is_some() {
+        // This detects ownership already visible to the final SELECT and then
+        // aborts without acquiring aq_run, preserving the global lock order.
+        // An attachment between this SELECT and commit remains possible; that
+        // late-attach defect belongs to S2 (not yet merged), which will reroute
+        // attachment through the guarded path.
+        return Err(format!(
+            "auto-queue ownership appeared during retry {}",
+            meta.origin_dispatch_id
+        ));
+    }
+
     tx.commit()
         .await
         .map_err(|error| format!("commit postgres retry dispatch {dispatch_id}: {error}"))?;
+
+    // Best-effort delivery: a process crash between the commit above and these
+    // emits loses the buffered events. The database rows committed above stay
+    // authoritative; only the observability copies are lost.
+    for event in deferred_observability {
+        event.emit();
+    }
+
+    crate::services::dispatches::wait_queue::spawn_cached_constraint_release_wake(
+        pool.clone(),
+        "constraint_release",
+        meta.origin_dispatch_id.clone(),
+        "dispatch_terminal_status",
+    );
 
     Ok(dispatch_id)
 }

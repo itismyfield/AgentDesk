@@ -163,6 +163,23 @@ async fn try_acquire_run_advisory_xact_lock_on_pg_tx(
         .map_err(|error| format!("try-lock auto-queue run {run_id}: {error}"))
 }
 
+/// Transaction-local opt-out for a failed-sync whose replacement attachment
+/// completes later in the same combined transaction, after the intervening
+/// dispatch, event, outbox, and card writes. The caller must restore the
+/// setting in the same transaction; this helper only changes the
+/// transaction-local flag.
+pub(crate) async fn set_terminal_entry_finalize_suppressed_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    suppressed: bool,
+) -> Result<(), String> {
+    sqlx::query("SELECT set_config('agentdesk.suppress_terminal_entry_finalize', $1, true)")
+        .bind(if suppressed { "on" } else { "off" })
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("set terminal-entry finalizer suppression: {error}"))?;
+    Ok(())
+}
+
 async fn remaining_runnable_entry_count_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
@@ -205,9 +222,10 @@ async fn remaining_runnable_entry_count_on_pg_tx(
 /// Blocking participants take `aq_run:<run_id>` before row locks: cancel and
 /// terminalize, force-pause, phase-gate attachment (including its attachment-
 /// free branch), consultation attachment, explicit completion, dispatched-
-/// entry choke points, and done-entry reactivation. Retry attachment joins
-/// this participant set when S3 is merged. Later cards/entries/runs/slots
-/// ordering is serialized by that first token for current participants.
+/// entry choke points, done-entry reactivation, and retry attachment. Retry
+/// already takes the d1 retry token first and then the run token before its
+/// failed-sync and replacement attachment. Later cards/entries/runs/slots
+/// ordering is serialized by that first run token for these participants.
 /// `maybe_finalize_run_if_ready_pg` is the exception: callers may already hold
 /// entry or run rows, so its try-lock is non-blocking and adds no wait edge.
 ///
@@ -228,6 +246,19 @@ pub(crate) async fn maybe_finalize_run_if_ready_pg(
 ) -> Result<bool, String> {
     if !try_acquire_run_advisory_xact_lock_on_pg_tx(tx, run_id).await? {
         tracing::info!(run_id = %run_id, "run_finalize_deferred_lock_contended");
+        return Ok(false);
+    }
+
+    let finalize_suppressed = sqlx::query_scalar::<_, bool>(
+        "SELECT COALESCE(
+             current_setting('agentdesk.suppress_terminal_entry_finalize', true) = 'on',
+             false
+         )",
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| format!("read terminal-entry finalizer suppression: {error}"))?;
+    if finalize_suppressed {
         return Ok(false);
     }
 

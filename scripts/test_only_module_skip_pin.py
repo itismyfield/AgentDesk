@@ -37,6 +37,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/db/auto_queue/tests.rs",
         "src/db/automation_candidates/verdict_tests.rs",
         "src/db/dispatched_sessions/canonical_identity_pg_tests.rs",
+        "src/db/dispatched_sessions/tests.rs",
         "src/db/prompt_manifests/tests.rs",
         "src/db/scheduled_messages/postgres_tests.rs",
         "src/server/database_fixture_invariant_tests.rs",
