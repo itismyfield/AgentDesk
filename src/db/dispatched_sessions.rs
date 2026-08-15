@@ -3062,7 +3062,7 @@ pub(crate) async fn update_session_pg(
 }
 
 #[cfg(test)]
-mod retry_ownership_pg_tests {
+mod tests {
     use super::{
         RetryDispatchMeta, create_retry_dispatch_pg, disconnect_session_and_prepare_retry_pg,
         prepare_retry_owner_on_pg_tx,
