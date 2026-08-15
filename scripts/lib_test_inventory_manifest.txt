@@ -274,6 +274,7 @@ db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::repair_serializes_wi
 db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::status_only_completion_uses_persisted_result_for_pass
 db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::verdict_mismatch_marks_gate_failed_and_pauses_run
 db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::whitespace_padded_check_status_is_not_inferred_as_pass
+db::auto_queue::run_status::tests::activate_eligible_status_contract_admits_promotable_runs
 db::auto_queue::run_status::tests::live_run_status_contract_includes_restore_window
 db::auto_queue::slot_predicate::tests::exists_form_matches_legacy_claim_exists
 db::auto_queue::slot_predicate::tests::exists_form_with_bind_params_matches_slots_and_runtime_inline
@@ -1130,8 +1131,11 @@ services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::replay_sk
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::session_clear_failure_stays_retry_eligible_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::session_clear_is_a_structural_no_op_after_the_cancel_commit_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::slot_release_and_its_durable_record_commit_together_pg
-services::auto_queue::route::activate_command::tests::activate_upstream_live_gate_pg_tests::explicit_run_id_rejects_terminal_and_accepts_live_run_pg
-services::auto_queue::route::activate_command::tests::activate_upstream_live_gate_pg_tests::terminal_race_rejects_after_activate_lock_without_side_effects_pg
+services::auto_queue::route::activate_command::tests::activate_upstream_eligibility_gate_pg_tests::explicit_run_id_admits_eligible_and_rejects_terminal_statuses_pg
+services::auto_queue::route::activate_command::tests::activate_upstream_eligibility_gate_pg_tests::explicit_unknown_run_id_is_not_found_pg
+services::auto_queue::route::activate_command::tests::activate_upstream_eligibility_gate_pg_tests::generated_run_explicit_activate_promotes_and_dispatches_pg
+services::auto_queue::route::activate_command::tests::activate_upstream_eligibility_gate_pg_tests::pending_run_implicit_activate_promotes_and_dispatches_pg
+services::auto_queue::route::activate_command::tests::activate_upstream_eligibility_gate_pg_tests::terminal_race_rejects_after_activate_lock_without_side_effects_pg
 services::auto_queue::route::activate_command::tests::depth_gate_activate_pg_tests::absent_scope_depth_never_creates_plan_no_regression_pg
 services::auto_queue::route::activate_command::tests::depth_gate_activate_pg_tests::card_without_scope_assessment_entry_binds_no_regression_pg
 services::auto_queue::route::activate_command::tests::depth_gate_activate_pg_tests::late_entry_direct_depth_creates_impl_no_plan_pg
