@@ -181,7 +181,11 @@ async fn settle_from_spawned_and_from_dispatched_both_reach_done_pg() {
 async fn settle_is_idempotent_and_preserves_dispatch_audit_fields_pg() {
     let database = TestPostgresDb::create().await;
     let pool = database.connect_and_migrate().await;
-    let spawned_at = Utc::now();
+    // PostgreSQL stores timestamptz at microsecond precision, so the seeded
+    // values must be pre-truncated or the round-trip comparison fails on
+    // hosts whose clock reports nanoseconds (Linux; macOS reports micros).
+    let spawned_at = chrono::DateTime::from_timestamp_micros(Utc::now().timestamp_micros())
+        .expect("valid microsecond timestamp");
     let dispatched_at = spawned_at + chrono::Duration::seconds(1);
     let id = seed(
         &pool,
