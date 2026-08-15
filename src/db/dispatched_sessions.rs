@@ -659,6 +659,7 @@ pub(crate) async fn create_retry_dispatch_pg(
 
     let owner_before_failed_sync = prepare_retry_owner_on_pg_tx(&mut tx, meta).await?;
     let reason = json!({"reason": "force_kill_session", "retry": true});
+    let mut deferred_observability = Vec::new();
     let changed = crate::dispatch::set_dispatch_status_on_pg_tx_async(
         &mut tx,
         &meta.origin_dispatch_id,
@@ -668,6 +669,7 @@ pub(crate) async fn create_retry_dispatch_pg(
         Some(&["pending", "dispatched"]),
         true,
         true,
+        Some(&mut deferred_observability),
     )
     .await
     .map_err(|error| {
@@ -849,7 +851,8 @@ pub(crate) async fn create_retry_dispatch_pg(
         // This detects ownership already visible to the final SELECT and then
         // aborts without acquiring aq_run, preserving the global lock order.
         // An attachment between this SELECT and commit remains possible; that
-        // late-attach defect belongs to the attachment reroute work.
+        // late-attach defect belongs to S2 (not yet merged), which will reroute
+        // attachment through the guarded path.
         return Err(format!(
             "auto-queue ownership appeared during retry {}",
             meta.origin_dispatch_id
@@ -859,6 +862,10 @@ pub(crate) async fn create_retry_dispatch_pg(
     tx.commit()
         .await
         .map_err(|error| format!("commit postgres retry dispatch {dispatch_id}: {error}"))?;
+
+    for event in deferred_observability {
+        event.emit();
+    }
 
     crate::services::dispatches::wait_queue::spawn_cached_constraint_release_wake(
         pool.clone(),

@@ -77,6 +77,42 @@ pub(crate) fn emit_dispatch_quality_event(
     );
 }
 
+#[derive(Debug)]
+pub(crate) struct DeferredDispatchObservability {
+    dispatch_id: String,
+    agent_id: Option<String>,
+    card_id: Option<String>,
+    dispatch_type: Option<String>,
+    from_status: String,
+    to_status: String,
+    transition_source: String,
+    payload: Option<serde_json::Value>,
+}
+
+impl DeferredDispatchObservability {
+    pub(crate) fn emit(self) {
+        crate::services::observability::emit_dispatch_result(
+            &self.dispatch_id,
+            self.card_id.as_deref(),
+            self.dispatch_type.as_deref(),
+            Some(&self.from_status),
+            &self.to_status,
+            &self.transition_source,
+            self.payload.as_ref(),
+        );
+        emit_dispatch_quality_event(
+            &self.dispatch_id,
+            self.agent_id.as_deref(),
+            self.card_id.as_deref(),
+            self.dispatch_type.as_deref(),
+            Some(&self.from_status),
+            &self.to_status,
+            &self.transition_source,
+            self.payload.as_ref(),
+        );
+    }
+}
+
 async fn auto_queue_review_disabled_for_dispatch_on_pg(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     dispatch_id: &str,
@@ -539,6 +575,7 @@ async fn set_dispatch_status_on_pg_tx_with_sync(
     sync_auto_queue_terminal_entries: bool,
     assume_external_phase_gate_lifecycle: bool,
     suppress_auto_queue_finalize: bool,
+    mut deferred_observability: Option<&mut Vec<DeferredDispatchObservability>>,
 ) -> Result<usize> {
     let current = sqlx::query(
         "SELECT status, kanban_card_id, to_agent_id, dispatch_type,
@@ -747,25 +784,21 @@ async fn set_dispatch_status_on_pg_tx_with_sync(
         .map_err(|error| {
             anyhow::anyhow!("insert postgres dispatch event for {dispatch_id}: {error}")
         })?;
-        crate::services::observability::emit_dispatch_result(
-            dispatch_id,
-            kanban_card_id.as_deref(),
-            dispatch_type.as_deref(),
-            Some(&current_status),
-            to_status,
-            transition_source,
-            result,
-        );
-        emit_dispatch_quality_event(
-            dispatch_id,
-            agent_id.as_deref(),
-            kanban_card_id.as_deref(),
-            dispatch_type.as_deref(),
-            Some(&current_status),
-            to_status,
-            transition_source,
-            result,
-        );
+        let observability = DeferredDispatchObservability {
+            dispatch_id: dispatch_id.to_string(),
+            agent_id: agent_id.clone(),
+            card_id: kanban_card_id.clone(),
+            dispatch_type: dispatch_type.clone(),
+            from_status: current_status.clone(),
+            to_status: to_status.to_string(),
+            transition_source: transition_source.to_string(),
+            payload: result.cloned(),
+        };
+        if let Some(events) = deferred_observability.as_deref_mut() {
+            events.push(observability);
+        } else {
+            observability.emit();
+        }
 
         if plan.enqueue_status_reaction && !sandbox_preflight_without_external_side_effects {
             sqlx::query(
@@ -979,6 +1012,7 @@ async fn set_dispatch_status_on_pg_with_sync(
         sync_auto_queue_terminal_entries,
         assume_external_phase_gate_lifecycle,
         false,
+        None,
     )
     .await?;
     tx.commit()
@@ -997,8 +1031,9 @@ async fn set_dispatch_status_on_pg_with_sync(
     Ok(changed)
 }
 
-/// Caller-owned canonical transition. Ordinary wrappers keep suppression false;
-/// only force-kill replacement passes true before immediate reattachment.
+/// Caller-owned canonical transition. Ordinary wrappers keep suppression false
+/// and emit immediately; only force-kill replacement passes true and supplies
+/// a buffer that it emits after its combined transaction commits.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn set_dispatch_status_on_pg_tx_async(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -1009,6 +1044,7 @@ pub(crate) async fn set_dispatch_status_on_pg_tx_async(
     allowed_from: Option<&[&str]>,
     touch_completed_at: bool,
     suppress_auto_queue_finalize: bool,
+    deferred_observability: Option<&mut Vec<DeferredDispatchObservability>>,
 ) -> Result<usize> {
     set_dispatch_status_on_pg_tx_with_sync(
         tx,
@@ -1021,6 +1057,7 @@ pub(crate) async fn set_dispatch_status_on_pg_tx_async(
         true,
         false,
         suppress_auto_queue_finalize,
+        deferred_observability,
     )
     .await
 }

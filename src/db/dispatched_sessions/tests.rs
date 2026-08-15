@@ -5,6 +5,15 @@ use super::{
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use sqlx::{PgPool, Row};
 
+fn dispatch_observability_count(dispatch_id: &str, event_type: &str) -> usize {
+    crate::services::observability::events::recent(usize::MAX)
+        .into_iter()
+        .filter(|event| {
+            event.event_type == event_type && event.payload["dispatch_id"] == dispatch_id
+        })
+        .count()
+}
+
 async fn setup() -> (TestPostgresDb, PgPool) {
     let database = TestPostgresDb::create().await;
     let pool = database.connect_and_migrate_with_max_connections(12).await;
@@ -336,16 +345,28 @@ async fn stale_history_only_and_no_history_both_use_zero_owner_relaxation_pg() {
 async fn concurrent_retries_for_one_origin_create_exactly_one_replacement_pg() {
     let (database, pool) = setup().await;
     let (card_id, origin_id) = seed_origin(&pool, "concurrent").await;
+    let mut origin_blocker = pool.begin().await.expect("begin concurrent origin blocker");
+    sqlx::query("SELECT id FROM task_dispatches WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(&origin_id)
+        .fetch_one(&mut *origin_blocker)
+        .await
+        .expect("lock concurrent origin dispatch");
     let left = tokio::spawn({
         let pool = pool.clone();
         let meta = retry_meta(card_id.clone(), origin_id.clone());
         async move { create_retry_dispatch_pg(&pool, &meta).await }
     });
+    wait_until_retry_blocks_on_origin(&pool).await;
     let right = tokio::spawn({
         let pool = pool.clone();
         let meta = retry_meta(card_id.clone(), origin_id.clone());
         async move { create_retry_dispatch_pg(&pool, &meta).await }
     });
+    wait_until_retry_blocks_on_retry_token(&pool).await;
+    origin_blocker
+        .commit()
+        .await
+        .expect("release concurrent origin dispatch");
     let results = [
         left.await.expect("left retry"),
         right.await.expect("right retry"),
@@ -378,6 +399,8 @@ async fn retry_first_keeps_run_slot_and_cancel_later_cleans_replacement_pg() {
         true,
     )
     .await;
+    // This test intentionally checks the sequential retry-then-cancel outcome;
+    // deterministic retry/cancel overlap is outside this test's scope.
     let replacement = create_retry_dispatch_pg(&pool, &retry_meta(card_id, origin_id))
         .await
         .expect("create replacement before cancel");
@@ -501,11 +524,37 @@ async fn wait_until_retry_blocks_on_origin(pool: &PgPool) {
     panic!("retry did not block on the origin dispatch row");
 }
 
+async fn wait_until_retry_blocks_on_retry_token(pool: &PgPool) {
+    for _ in 0..100 {
+        let blocked: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM pg_stat_activity a
+                 JOIN pg_locks l ON l.pid = a.pid
+                 WHERE a.datname = current_database()
+                   AND a.pid <> pg_backend_pid()
+                   AND a.wait_event_type = 'Lock'
+                   AND a.query LIKE 'SELECT pg_advisory_xact_lock%aq_retry%'
+                   AND l.locktype = 'advisory'
+                   AND NOT l.granted
+             )",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("inspect contended retry token");
+        if blocked {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("second retry did not contend on the origin retry token");
+}
+
 #[tokio::test]
 async fn zero_owner_revalidation_aborts_on_new_visible_ownership_without_late_run_lock_pg() {
     let (database, pool) = setup().await;
     let (card_id, origin_id) = seed_origin(&pool, "revalidate").await;
-    let (_, late_entry_id) = seed_owner(
+    let (late_run_id, late_entry_id) = seed_owner(
         &pool,
         "revalidate-late-owner",
         &card_id,
@@ -541,13 +590,24 @@ async fn zero_owner_revalidation_aborts_on_new_visible_ownership_without_late_ru
     .execute(&pool)
     .await
     .expect("publish owner history before retry revalidation");
-    blocker.commit().await.expect("release origin blocker");
-    let error = retry
+    let mut run_blocker = pool.begin().await.expect("begin late run-token blocker");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('aq_run:' || $1))")
+        .bind(&late_run_id)
+        .execute(&mut *run_blocker)
         .await
+        .expect("hold late owner run token");
+    blocker.commit().await.expect("release origin blocker");
+    let error = tokio::time::timeout(std::time::Duration::from_secs(1), retry)
+        .await
+        .expect("revalidation must not wait on the late owner run token")
         .expect("join retry")
         .expect_err("visible ownership must abort zero-owner retry");
     assert!(error.contains("ownership appeared"));
     assert_eq!(dispatch_status(&pool, &origin_id).await, "dispatched");
+    run_blocker
+        .rollback()
+        .await
+        .expect("release late run token");
     finish(database, pool).await;
 }
 
@@ -594,6 +654,7 @@ async fn precommit_backend_crash_rolls_back_failure_after_session_disconnect_pg(
         .fetch_one(&mut *tx)
         .await
         .expect("load retry backend pid");
+    let mut deferred_observability = Vec::new();
     crate::dispatch::set_dispatch_status_on_pg_tx_async(
         &mut tx,
         &origin_id,
@@ -603,6 +664,7 @@ async fn precommit_backend_crash_rolls_back_failure_after_session_disconnect_pg(
         Some(&["pending", "dispatched"]),
         true,
         true,
+        Some(&mut deferred_observability),
     )
     .await
     .expect("stage failed sync");
@@ -615,6 +677,14 @@ async fn precommit_backend_crash_rolls_back_failure_after_session_disconnect_pg(
     assert!(terminated);
     drop(tx);
     assert_eq!(dispatch_status(&pool, &origin_id).await, "dispatched");
+    assert_eq!(
+        dispatch_observability_count(&origin_id, "dispatch_result"),
+        0
+    );
+    assert_eq!(
+        dispatch_observability_count(&origin_id, "agent_quality_event"),
+        0
+    );
     let session =
         sqlx::query("SELECT status, active_dispatch_id FROM sessions WHERE session_key = $1")
             .bind(session_key)
@@ -623,5 +693,20 @@ async fn precommit_backend_crash_rolls_back_failure_after_session_disconnect_pg(
             .expect("load disconnected session");
     assert_eq!(session.get::<String, _>("status"), "disconnected");
     assert_eq!(session.get::<Option<String>, _>("active_dispatch_id"), None);
+    assert_eq!(
+        fail_force_killed_dispatch_without_retry_pg(&pool, &origin_id, None)
+            .await
+            .expect("standalone failure fallback"),
+        1
+    );
+    assert_eq!(dispatch_status(&pool, &origin_id).await, "failed");
+    assert_eq!(
+        dispatch_observability_count(&origin_id, "dispatch_result"),
+        1
+    );
+    assert_eq!(
+        dispatch_observability_count(&origin_id, "agent_quality_event"),
+        1
+    );
     finish(database, pool).await;
 }
