@@ -8,10 +8,14 @@ shown by ``--help``):
 STATIC: plain string/raw-string or literal-only concatenation.
 UNRESOLVED: variable, format!, macro, template interpolation, function return, or computed table identifier.
 STATIC_FILE: whole tracked migration file fingerprint; SQL meaning is not parsed.
+NON_SQL_TRACKED: allowlisted tracked migration metadata; content is not interpreted.
 
 Success means only that fingerprints were observed in the tracked inputs. It
 does not claim that every SQL writer was found or that runtime writes are
-impossible.
+impossible. Parenthesized literals and comment-separated literal concatenation
+may conservatively remain UNRESOLVED. Query APIs do not prove read-only SQL,
+migration deployment state is unknown, and this inventory neither blocks
+runtime calls nor repairs existing guard mismatches.
 """
 
 from __future__ import annotations
@@ -36,32 +40,40 @@ except ModuleNotFoundError:  # direct ``python3 scripts/<tool>.py`` invocation
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CLASSIFICATION_DEFINITIONS = """STATIC: plain string/raw-string or literal-only concatenation.
 UNRESOLVED: variable, format!, macro, template interpolation, function return, or computed table identifier.
-STATIC_FILE: whole tracked migration file fingerprint; SQL meaning is not parsed."""
+STATIC_FILE: whole tracked migration file fingerprint; SQL meaning is not parsed.
+NON_SQL_TRACKED: allowlisted tracked migration metadata; content is not interpreted."""
 JS_APIS = {"query": "agentdesk.db.query", "execute": "agentdesk.db.execute"}
-RUST_APIS = (
-    "sqlx::query",
-    "sqlx::query_as",
-    "sqlx::query_scalar",
-    "QueryBuilder::new",
-    "db_execute_raw",
-    "db_execute_raw_pg",
-    "db_query_raw",
-    "execute_policy_sql",
-    "prepare_policy_sql_for_pg",
-    "translate_insert_with_conflict",
-    "rewrite_insert_conflict",
-    "db_query_raw_with_json_mode",
-    "db_query_raw_pg_with_json_mode",
-)
+RUST_API_SQL_ARGUMENT = {
+    "sqlx::query": 0, "sqlx::query_as": 0, "sqlx::query_scalar": 0,
+    "sqlx::raw_sql": 0, "QueryBuilder::new": 0,
+    "db_execute_raw": 1, "db_execute_raw_pg": 1,
+    "db_query_raw": 1, "db_query_json_raw": 1, "db_query_raw_pg": 1,
+    "db_query_raw_with_json_mode": 1, "db_query_raw_pg_with_json_mode": 1,
+    "execute_policy_sql": 1, "prepare_policy_sql_for_pg": 0,
+    "translate_insert_with_conflict": 0, "rewrite_insert_conflict": 0,
+}
+RUST_APIS = tuple(RUST_API_SQL_ARGUMENT)
+QUERY_BUILDER_PATTERN = r"QueryBuilder(?:::\s*<[A-Za-z_][A-Za-z0-9_:]*\s*>)?::new"
 RUST_API_RE = re.compile(
-    r"(?<![A-Za-z0-9_$])(" + "|".join(map(re.escape, sorted(RUST_APIS, key=len, reverse=True)))
+    r"(?<![A-Za-z0-9_$])(" + "|".join(
+        QUERY_BUILDER_PATTERN if api == "QueryBuilder::new" else re.escape(api)
+        for api in sorted(RUST_APIS, key=len, reverse=True)
+    )
     + r")(?![A-Za-z0-9_$])"
 )
+MIGRATION_NON_SQL_ALLOWLIST = frozenset({
+    "migrations/postgres/checksum-repair-allowlist.json",
+    "migrations/postgres/immutable-checksums.json",
+})
 LIMITS = (
     "exact-spelling lexical calls only; no compiler, name resolution, or SQL semantic parsing",
     "unsupported aliases, re-exports, macros, indirection, eval, generated and untracked inputs may be absent",
     "runtime SQL, interpolation, format!/computed identifiers, reachability, commit, and DB state are not proven",
     "STATIC table tokens are observed candidates, not a complete runtime table set; migrations are not SQL-parsed",
+    "query API names do not prove read-only SQL or authorize the observed statement",
+    "migration deployment state, ordering, and successful application are not proven",
+    "this inventory is not a runtime blocker and does not repair existing raw-writer/guard mismatches",
+    "parenthesized or comment-separated literals may conservatively remain UNRESOLVED",
 )
 TABLE_TOKEN_RE = re.compile(
     r"\b(?:from|join|into|update|delete\s+from|insert\s+into)\s+"
@@ -127,8 +139,7 @@ def enumerate_tracked_inputs(repo_root: Path = REPO_ROOT) -> list[TrackedInput]:
     """Return regular tracked inputs in the three design-enumerated roots."""
     repo_root = Path(repo_root).resolve()
     completed = subprocess.run(
-        ["git", "ls-files", "-z", "--", "src/**.rs", "policies/**",
-         "migrations/postgres/*.sql"],
+        ["git", "ls-files", "-z", "--", "src", "policies", "migrations/postgres"],
         cwd=repo_root,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -150,16 +161,21 @@ def enumerate_tracked_inputs(repo_root: Path = REPO_ROOT) -> list[TrackedInput]:
             continue
         seen.add(rel_path)
         if rel_path.startswith("src/"):
-            root, kind, extensions = "src", "RUST", (".rs",)
+            root, kind, allowed = "src", "RUST", rel_path.endswith(".rs")
         elif rel_path.startswith("policies/"):
             root = "policies"
             kind = "TEST" if rel_path.startswith("policies/__tests__/") else "POLICY"
-            extensions = (".js", ".yaml", ".yml")
+            allowed = rel_path.endswith((".js", ".yaml", ".yml"))
         elif rel_path.startswith("migrations/postgres/"):
-            root, kind, extensions = "migrations/postgres", "MIGRATION", (".sql",)
+            root = "migrations/postgres"
             if "/" in rel_path[len("migrations/postgres/") :]:
                 errors.append(f"nested tracked migration is outside the inventory: {rel_path}")
                 continue
+            if rel_path.endswith(".sql"):
+                kind, allowed = "MIGRATION", True
+            else:
+                kind = "MIGRATION_METADATA"
+                allowed = rel_path in MIGRATION_NON_SQL_ALLOWLIST
         else:
             continue
         path = repo_root / rel_path
@@ -170,7 +186,7 @@ def enumerate_tracked_inputs(repo_root: Path = REPO_ROOT) -> list[TrackedInput]:
             continue
         if path.is_symlink() or not stat.S_ISREG(mode):
             errors.append(f"tracked input is not a regular non-symlink file: {rel_path}")
-        elif not rel_path.endswith(extensions):
+        elif not allowed:
             errors.append(f"unexpected tracked extension under {root}: {rel_path}")
         else:
             inputs.append(TrackedInput(root, kind, path, rel_path))
@@ -341,7 +357,9 @@ def _mask_rust(text: str) -> str:
     return "".join(chars)
 
 
-def _rust_expression(text: str, masked: str, start: int, symbol_end: int) -> tuple[str, str] | None:
+def _rust_expression(
+    text: str, masked: str, start: int, symbol_end: int, argument_index: int
+) -> tuple[str, str] | None:
     index = symbol_end
     while index < len(masked) and masked[index].isspace():
         index += 1
@@ -366,7 +384,7 @@ def _rust_expression(text: str, masked: str, start: int, symbol_end: int) -> tup
         return None
     open_paren = index
     parens = brackets = braces = 0
-    comma: int | None = None
+    commas: list[int] = []
     while index < len(masked):
         char = masked[index]
         if char == "(":
@@ -374,8 +392,11 @@ def _rust_expression(text: str, masked: str, start: int, symbol_end: int) -> tup
         elif char == ")":
             parens -= 1
             if parens == 0:
-                arg_end = comma if comma is not None else index
-                return text[start : index + 1], text[open_paren + 1 : arg_end]
+                starts = [open_paren + 1] + [comma + 1 for comma in commas]
+                ends = commas + [index]
+                if argument_index >= len(starts):
+                    raise InventoryError("registered SQL argument is absent")
+                return text[start : index + 1], text[starts[argument_index] : ends[argument_index]]
         elif char == "[":
             brackets += 1
         elif char == "]":
@@ -384,8 +405,8 @@ def _rust_expression(text: str, masked: str, start: int, symbol_end: int) -> tup
             braces += 1
         elif char == "}":
             braces = max(0, braces - 1)
-        elif char == "," and parens == 1 and brackets == braces == 0 and comma is None:
-            comma = index
+        elif char == "," and parens == 1 and brackets == braces == 0:
+            commas.append(index)
         index += 1
     raise InventoryError(f"unterminated Rust call near byte {open_paren}")
 
@@ -395,7 +416,7 @@ def scan_rust_calls(path: Path | str, repo_root: Path = REPO_ROOT) -> list[Surfa
     path = Path(path).resolve()
     tracked = TrackedInput("src", "RUST", path, path.relative_to(repo_root).as_posix())
     text = path.read_text(encoding="utf-8")
-    if not any(api in text for api in RUST_APIS):
+    if not any(("QueryBuilder" if api == "QueryBuilder::new" else api) in text for api in RUST_APIS):
         return []
     masked = _mask_rust(text)
     records: list[SurfaceRecord] = []
@@ -403,8 +424,11 @@ def scan_rust_calls(path: Path | str, repo_root: Path = REPO_ROOT) -> list[Surfa
     for match in RUST_API_RE.finditer(masked):
         if re.search(r"\bfn\s*$", masked[max(0, match.start() - 40) : match.start()]):
             continue
-        api = match.group(1)
-        found = _rust_expression(text, masked, match.start(), match.end())
+        spelling = match.group(1)
+        api = "QueryBuilder::new" if spelling.startswith("QueryBuilder") else spelling
+        found = _rust_expression(
+            text, masked, match.start(), match.end(), RUST_API_SQL_ARGUMENT[api]
+        )
         if found is None:
             continue
         expression, argument = found
@@ -433,6 +457,8 @@ def scan_migrations(tracked: TrackedInput | Path | str, repo_root: Path = REPO_R
             "migrations/postgres", "MIGRATION", path, path.relative_to(root).as_posix()
         )
     content_hash = hashlib.sha256(tracked.path.read_bytes()).hexdigest()
+    if tracked.kind == "MIGRATION_METADATA":
+        return [_record(tracked, "migration.non_sql_tracked", "NON_SQL_TRACKED", content_hash)]
     return [_record(tracked, "migration.file", "STATIC_FILE", content_hash)]
 
 
@@ -487,7 +513,12 @@ def _render(records: Sequence[SurfaceRecord], errors: Sequence[str] = ()) -> str
 
 
 def main(argv: Sequence[str] | None = None, repo_root: Path = REPO_ROOT) -> int:
-    parser = argparse.ArgumentParser(
+    class InventoryArgumentParser(argparse.ArgumentParser):
+        def error(self, message: str) -> None:
+            print(_render((), (f"ArgumentError: {message}",)), file=sys.stderr, end="")
+            super().error(message)
+
+    parser = InventoryArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.parse_args(argv)

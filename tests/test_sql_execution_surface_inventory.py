@@ -9,7 +9,6 @@ from unittest import mock
 
 from scripts import check_sql_execution_surface_inventory as scanner
 
-
 class SqlExecutionSurfaceInventoryTests(unittest.TestCase):
     def write(self, root: Path, rel: str, text: str = "") -> Path:
         path = root / rel
@@ -19,9 +18,7 @@ class SqlExecutionSurfaceInventoryTests(unittest.TestCase):
 
     def tracked(self, names: list[str]) -> mock._patch:
         payload = b"\0".join(name.encode() for name in names) + b"\0"
-        result = subprocess.CompletedProcess(
-            ["git", "ls-files", "-z", "--"], 0, stdout=payload, stderr=b""
-        )
+        result = subprocess.CompletedProcess(["git", "ls-files", "-z", "--"], 0, payload, b"")
         return mock.patch.object(scanner.subprocess, "run", return_value=result)
 
     def run_main(self, root: Path, *args: str) -> tuple[int, str, str]:
@@ -34,21 +31,25 @@ class SqlExecutionSurfaceInventoryTests(unittest.TestCase):
     def test_enumerates_only_tracked_three_roots(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            names = [
-                "src/lib.rs",
-                "policies/rule.js",
-                "policies/default.yaml",
+            names = ["src/lib.rs", "policies/rule.js", "policies/default.yaml",
                 "migrations/postgres/0001.sql",
+                "migrations/postgres/immutable-checksums.json",
             ]
             for name in names:
                 self.write(root, name, "// fixture\n")
             self.write(root, "policies/ignored.js", "agentdesk.db.query('ignored')")
             self.write(root, "README.md", "not an input")
-            with self.tracked(names):
+            with self.tracked(names) as git:
                 inputs = scanner.enumerate_tracked_inputs(root)
             self.assertEqual([item.rel_path for item in inputs], sorted(names))
             self.assertEqual({item.root for item in inputs}, {"src", "policies", "migrations/postgres"})
-
+            self.assertEqual(git.call_args.args[0][-3:], ["src", "policies", "migrations/postgres"])
+            self.assertEqual(next(i.kind for i in inputs if i.rel_path.endswith(".json")), "MIGRATION_METADATA")
+            with self.tracked(["migrations/postgres/immutable-checksums.json"]):
+                rc, out, err = self.run_main(root)
+            self.assertEqual((rc, err), (0, ""))
+            self.assertIn("NON_SQL_TRACKED", out)
+            self.assertIn("immutable-checksums.json", out)
     def test_tracked_symlink_and_unexpected_extension_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -57,12 +58,10 @@ class SqlExecutionSurfaceInventoryTests(unittest.TestCase):
             with self.tracked(["src/link.rs"]):
                 with self.assertRaises(scanner.InventoryError):
                     scanner.enumerate_tracked_inputs(root)
-
-            self.write(root, "policies/bad.txt", "fixture")
-            with self.tracked(["policies/bad.txt"]):
+            self.write(root, "src/bad.txt", "fixture")
+            with self.tracked(["src/bad.txt"]):
                 with self.assertRaises(scanner.InventoryError):
                     scanner.enumerate_tracked_inputs(root)
-
             nested = self.write(root, "migrations/postgres/archive/0001.sql", "SELECT 1")
             with self.tracked([nested.relative_to(root).as_posix()]):
                 with self.assertRaises(scanner.InventoryError):
@@ -134,9 +133,7 @@ agentdesk.db.query(makeSql());
             ])
             self.assertEqual(records[1].table_tokens, ("cards",))
             self.assertEqual(records[4].table_tokens, ())
-            boundaries = [
-                ('"a" + "b"', "STATIC"),
-                ('"a" + suffix', "UNRESOLVED"),
+            boundaries = [('"a" + "b"', "STATIC"), ('"a" + suffix', "UNRESOLVED"),
                 ('`a ${suffix}`', "UNRESOLVED"),
                 ('makeSql()', "UNRESOLVED"),
             ]
@@ -160,23 +157,27 @@ let _c = sqlx::query::<Row>(r##"SELECT id FROM cards"##);
 let _d = sqlx::query(format!(r#"SELECT * FROM {}"#, table));
 let _e = sqlx::query(sql);
 let _f = QueryBuilder::new("SELECT id FROM cards");
-let _g = db_execute_raw_pg(sql);
-let _h = execute_policy_sql(format!("DELETE FROM {}", table));
-let _i = rewrite_insert_conflict("INSERT OR REPLACE INTO cards (id) VALUES (?)");
+let _g = QueryBuilder::<Postgres>::new("SELECT id FROM cards");
+let _decoy = NotQueryBuilder::<Postgres>::new("SELECT 1");
+let _h = db_execute_raw_pg(&pool, "DELETE FROM cards", &[], started);
+let _i = execute_policy_sql(Some(&pool), "UPDATE cards SET seen = 1", &[]);
+let _j = db_query_raw(pool.clone(), "SELECT id FROM cards", "[]");
+let _k = sqlx::raw_sql("CREATE TABLE things(id int)");
+let _l = sqlx::raw_sql(&format!("DROP TABLE {}", table));
+let _m = rewrite_insert_conflict("INSERT OR REPLACE INTO cards (id) VALUES (?)");
 ''',
             )
             records = scanner.scan_rust_calls(path, root)
-            by_api = {record.api: record for record in records if record.api != "sqlx::query"}
             query_classes = [record.classification for record in records if record.api == "sqlx::query"]
-            self.assertEqual(query_classes, [
-                "STATIC", "STATIC", "STATIC", "UNRESOLVED", "UNRESOLVED"
-            ])
-            self.assertEqual(by_api["QueryBuilder::new"].classification, "UNRESOLVED")
-            self.assertEqual(by_api["QueryBuilder::new"].table_tokens, ())
-            self.assertEqual(by_api["db_execute_raw_pg"].classification, "UNRESOLVED")
-            self.assertEqual(by_api["execute_policy_sql"].classification, "UNRESOLVED")
-            self.assertEqual(by_api["rewrite_insert_conflict"].classification, "STATIC")
-            self.assertIn("cards", by_api["rewrite_insert_conflict"].table_tokens)
+            self.assertEqual(query_classes, ["STATIC", "STATIC", "STATIC", "UNRESOLVED", "UNRESOLVED"])
+            builder_classes = [r.classification for r in records if r.api == "QueryBuilder::new"]
+            self.assertEqual(builder_classes, ["UNRESOLVED", "UNRESOLVED"])
+            by_api = {r.api: r for r in records if r.api not in {"sqlx::query", "QueryBuilder::new", "sqlx::raw_sql"}}
+            for api in ("db_execute_raw_pg", "execute_policy_sql", "db_query_raw", "rewrite_insert_conflict"):
+                self.assertEqual(by_api[api].classification, "STATIC")
+                self.assertIn("cards", by_api[api].table_tokens)
+            raw_sql_classes = [r.classification for r in records if r.api == "sqlx::raw_sql"]
+            self.assertEqual(raw_sql_classes, ["STATIC", "UNRESOLVED"])
 
     def test_migration_fingerprint_is_deterministic_and_distinguishes_rename_content(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -203,10 +204,13 @@ let _i = rewrite_insert_conflict("INSERT OR REPLACE INTO cards (id) VALUES (?)")
             with self.tracked(["policies/a.js", "policies/b.js"]):
                 shuffled = scanner.scan_inventory(root)
             self.assertEqual([record.path for record in result], ["policies/a.js", "policies/b.js"])
-            self.assertEqual(
-                [(record.stable_key(), record.fingerprint) for record in result],
-                [(record.stable_key(), record.fingerprint) for record in shuffled],
-            )
+            keys = lambda rows: [(r.stable_key(), r.fingerprint) for r in rows]
+            self.assertEqual(keys(result), keys(shuffled))
+            before = scanner.scan_js_calls(root / "policies/a.js", root)[0]
+            self.write(root, "policies/a.js", "\n\nagentdesk.db.query(sql);\n")
+            after = scanner.scan_js_calls(root / "policies/a.js", root)[0]
+            self.assertNotEqual(before.line, after.line)
+            self.assertEqual(before.fingerprint, after.fingerprint)
             with self.assertRaises(scanner.InventoryError):
                 scanner.validate_records([result[0], result[0]])
 
@@ -229,20 +233,25 @@ let _i = rewrite_insert_conflict("INSERT OR REPLACE INTO cards (id) VALUES (?)")
             names = ["policies/dynamic.js", "migrations/postgres/0001.sql"]
             with self.tracked(names):
                 rc, out, err = self.run_main(root)
-            self.assertEqual(rc, 0)
-            self.assertEqual(err, "")
+            self.assertEqual((rc, err), (0, ""))
             self.assertIn("UNRESOLVED:", out)
             self.assertIn("dynamic.js agentdesk.db.execute", out)
             for limit in scanner.LIMITS:
                 self.assertIn(limit, out)
 
             help_out = io.StringIO()
-            with contextlib.redirect_stdout(help_out):
-                with self.assertRaises(SystemExit) as exit_status:
-                    scanner.main(["--help"])
+            with contextlib.redirect_stdout(help_out), self.assertRaises(SystemExit) as exit_status:
+                scanner.main(["--help"])
             self.assertEqual(exit_status.exception.code, 0)
             for definition in scanner.CLASSIFICATION_DEFINITIONS.splitlines():
                 self.assertIn(definition, help_out.getvalue())
+
+            bad_err = io.StringIO()
+            with contextlib.redirect_stderr(bad_err), self.assertRaises(SystemExit) as bad_status:
+                scanner.main(["--unknown"])
+            self.assertEqual(bad_status.exception.code, 2)
+            self.assertIn("UNRESOLVED:", bad_err.getvalue())
+            self.assertIn("LIMITS:", bad_err.getvalue())
 
             static = self.write(root, "policies/static.js", 'agentdesk.db.query("SELECT 1");\n')
             with self.tracked([static.relative_to(root).as_posix()]):
