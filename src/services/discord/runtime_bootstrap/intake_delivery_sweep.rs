@@ -22,6 +22,24 @@ const SWEEP_INITIAL_DELAY_SECS: u64 = crate::config::INTAKE_DELIVERY_SWEEP_INITI
 const SWEEP_INITIAL_DELAY_SECS: u64 = 0;
 static SWEEP_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+pub(super) async fn begin_settlement_transaction(
+    pool: &PgPool,
+) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+        .bind(format!(
+            "{}s",
+            crate::config::INTAKE_DELIVERY_SWEEP_LOCK_TIMEOUT_SECS
+        ))
+        .execute(&mut *transaction)
+        .await?;
+    Ok(transaction)
+}
+
+fn is_lock_timeout(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Database(error) if error.code().as_deref() == Some("55P03"))
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct SweepCutoffs {
     dispatched: DateTime<Utc>,
@@ -114,12 +132,13 @@ async fn settle_dispatched(
                 | super::intake_delivery_reconciler::ReconcileOutcome::Unknown,
             ) => return Ok(true),
             Ok(super::intake_delivery_reconciler::ReconcileOutcome::Unchanged) => return Ok(false),
+            Err(error) if is_lock_timeout(&error) => return Err(error),
             Err(error) => {
                 tracing::warn!(outbox_id = id, %error, "journal judgment failed; falling back to unknown settlement")
             }
         }
     }
-    let mut transaction = pool.begin().await?;
+    let mut transaction = begin_settlement_transaction(pool).await?;
     let won = settle_dispatched_unknown(&mut transaction, id, cutoff, heartbeat_fresh).await?;
     transaction.commit().await?;
     Ok(won)
@@ -131,7 +150,7 @@ async fn settle_spawned(
     cutoff: DateTime<Utc>,
     heartbeat_fresh: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
-    let mut transaction = pool.begin().await?;
+    let mut transaction = begin_settlement_transaction(pool).await?;
     let won = settle_spawned_unknown(&mut transaction, id, cutoff, heartbeat_fresh).await?;
     transaction.commit().await?;
     Ok(won)
@@ -191,6 +210,10 @@ pub(super) async fn sweep_once(
         match settle_dispatched(pool, row.id, cutoffs.dispatched, cutoffs.heartbeat_fresh).await {
             Ok(true) => stats.settled += 1,
             Ok(false) => {}
+            Err(error) if is_lock_timeout(&error) => {
+                stats.skipped_ambiguous += 1;
+                tracing::warn!(outbox_id = row.id, %error, "stale dispatched settlement lock timed out; deferring ambiguous row");
+            }
             Err(error) => {
                 tracing::error!(outbox_id = row.id, %error, "stale dispatched settlement failed")
             }
@@ -210,6 +233,10 @@ pub(super) async fn sweep_once(
         match settle_spawned(pool, row.id, cutoffs.spawned, cutoffs.heartbeat_fresh).await {
             Ok(true) => stats.settled += 1,
             Ok(false) => {}
+            Err(error) if is_lock_timeout(&error) => {
+                stats.skipped_ambiguous += 1;
+                tracing::warn!(outbox_id = row.id, %error, "stale spawned settlement lock timed out; deferring ambiguous row");
+            }
             Err(error) => {
                 tracing::error!(outbox_id = row.id, %error, "stale spawned settlement failed")
             }

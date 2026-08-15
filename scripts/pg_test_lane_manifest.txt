@@ -680,6 +680,7 @@ services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests
 services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests::reducer_is_existential_strict_transactional_and_public_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::concurrent_sweep_once_calls_have_one_terminal_winner_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::dispatched_settle_cli_does_not_insert_a_child_row_pg
+services::discord::runtime_bootstrap::intake_delivery_sweep::tests::heartbeat_writer_lock_timeout_skips_row_and_continues_tick_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::heartbeat_writer_serializes_before_unknown_settlement_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::null_clock_rows_are_invisible_to_sweep_but_visible_to_operator_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::spawned_settle_cli_does_not_insert_a_child_row_pg

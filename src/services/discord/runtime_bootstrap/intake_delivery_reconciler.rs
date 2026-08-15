@@ -29,7 +29,7 @@ pub(super) async fn reconcile_row(
     cutoff: DateTime<Utc>,
     heartbeat_fresh: DateTime<Utc>,
 ) -> Result<ReconcileOutcome, sqlx::Error> {
-    let mut transaction = pool.begin().await?;
+    let mut transaction = super::intake_delivery_sweep::begin_settlement_transaction(pool).await?;
     let outcome = reconcile_in_tx(&mut transaction, outbox_id, cutoff, heartbeat_fresh).await?;
     transaction.commit().await?;
     Ok(outcome)

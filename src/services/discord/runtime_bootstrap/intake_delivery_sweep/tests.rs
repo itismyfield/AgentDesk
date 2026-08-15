@@ -428,6 +428,49 @@ async fn heartbeat_writer_serializes_before_unknown_settlement_pg() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn heartbeat_writer_lock_timeout_skips_row_and_continues_tick_pg() {
+    let (db, pool) = setup().await;
+    let now = Utc::now();
+    let blocked = seed_clocked(&pool, "heartbeat-timeout", S, now - Duration::hours(2)).await;
+    let next = seed_clocked(
+        &pool,
+        "after-heartbeat-timeout",
+        S,
+        now - Duration::hours(1),
+    )
+    .await;
+    seed_inflight(
+        &pool,
+        "heartbeat-timeout",
+        Some(now - Duration::hours(2)),
+        None,
+    )
+    .await;
+
+    let mut heartbeat = pool.begin().await.unwrap();
+    sqlx::query("UPDATE public.sessions SET last_heartbeat=$2 WHERE channel_id=$1")
+        .bind("heartbeat-timeout")
+        .bind(Utc::now())
+        .execute(&mut *heartbeat)
+        .await
+        .unwrap();
+
+    let stats = timeout(
+        TokioDuration::from_secs(crate::config::INTAKE_DELIVERY_SWEEP_LOCK_TIMEOUT_SECS + 3),
+        sweep_once(&pool, READY, cutoffs(now), 200),
+    )
+    .await
+    .expect("one writer-held session row cannot stall the sweep tick")
+    .unwrap();
+
+    assert_eq!((stats.settled, stats.skipped_ambiguous), (1, 1));
+    assert_eq!(status(&pool, blocked).await, S);
+    assert_eq!(status(&pool, next).await, U);
+    heartbeat.rollback().await.unwrap();
+    finish(db, pool).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_sweep_once_calls_have_one_terminal_winner_pg() {
     let (db, pool) = setup().await;

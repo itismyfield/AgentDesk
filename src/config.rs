@@ -1648,6 +1648,8 @@ pub(crate) const MAX_INTAKE_SWEEP_CUTOFF_SECS: u64 = i64::MAX as u64 / 1_000_000
 /// Gives startup recovery and session restoration two minutes before the first
 /// intake-delivery sweep. This matches the sibling session-GC startup delay.
 pub(crate) const INTAKE_DELIVERY_SWEEP_INITIAL_DELAY_SECS: u64 = 120;
+/// Bounds each intake-delivery settlement transaction's PostgreSQL lock wait.
+pub(crate) const INTAKE_DELIVERY_SWEEP_LOCK_TIMEOUT_SECS: u64 = 3;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
@@ -2054,6 +2056,11 @@ mod runtime_hook_registry_config_tests {
     #[test]
     fn intake_delivery_sweep_initial_delay_stays_within_boot_grace_contract() {
         assert!((60..=180).contains(&INTAKE_DELIVERY_SWEEP_INITIAL_DELAY_SECS));
+    }
+
+    #[test]
+    fn intake_delivery_sweep_lock_timeout_stays_within_short_retry_contract() {
+        assert!((1..=5).contains(&INTAKE_DELIVERY_SWEEP_LOCK_TIMEOUT_SECS));
     }
 }
 
