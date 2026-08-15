@@ -8,6 +8,30 @@ use super::intake_outbox_status::IntakeOutboxStatus;
 use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool};
 
+/// The terminal-delivery or sweep source authorizing an intake row transition.
+///
+/// This value is an observability label only.  The settlement CAS is the same
+/// for every source so an authority label cannot widen the SQL predicate. The
+/// sweep label is reserved for its S-W3 caller.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntakeSettlementSource {
+    Committed,
+    RelayOwnerHandoff,
+    NoBodyNoRetry,
+    Sweep,
+}
+
+impl IntakeSettlementSource {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Committed => "committed",
+            Self::RelayOwnerHandoff => "relay_owner_handoff",
+            Self::NoBodyNoRetry => "no_body_no_retry",
+            Self::Sweep => "sweep",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, sqlx::FromRow)]
 pub(crate) struct StaleDispatchedRow {
     pub(crate) id: i64,
@@ -78,6 +102,29 @@ pub(crate) async fn mark_done_from_delivery_proof(
     Ok(result.rows_affected() == 1)
 }
 
+/// Settles a receipt-backed intake row from either open handoff state.
+///
+/// The bridge does not own the worker claim token, so this deliberately uses
+/// only the monotonic `spawned`/`dispatched` state CAS.  Audit fields such as
+/// `claim_owner`, `spawned_at`, and `dispatched_at` are left untouched.
+pub(crate) async fn settle_intake_done_from_receipt(
+    conn: &mut PgConnection,
+    outbox_id: i64,
+    source: IntakeSettlementSource,
+) -> Result<bool, sqlx::Error> {
+    let _ = source;
+    let result = sqlx::query(
+        "UPDATE public.intake_outbox
+         SET status = 'done', completed_at = NOW()
+         WHERE id = $1
+           AND status IN ('spawned', 'dispatched')",
+    )
+    .bind(outbox_id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
 /// Locks and settles a strictly stale dispatched row as official `Unknown`.
 ///
 /// `conn` must belong to the caller-owned active transaction that performed
@@ -106,7 +153,7 @@ pub(crate) async fn settle_dispatched_unknown(
 }
 
 #[cfg(test)]
-mod postgres_tests {
+mod tests {
     use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use chrono::Duration;

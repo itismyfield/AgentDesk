@@ -2096,6 +2096,10 @@ time for diagnostics; neither is a stored approval value.
     giant-file threshold once `#[cfg(test)] mod` PG coverage is excluded
     (bugfix only; +4 from #5071 T2-W B3a-1 mechanically extracting the provider
     guard for audit reuse, non-behavioral).
+  - #5071 T2-W S-W2 is a same-shaped B3a-1 exception: the new receipt-backed
+    `done` authority lives only in `src/db/intake_outbox_delivery_proof.rs`.
+    `src/db/intake_outbox.rs` remains bugfix-only and is deliberately untouched;
+    adding this authority there would widen the claim/transition surface.
 - active_callsite_coverage: PG-only cleanup tracked per #1237/#1238/#1239 —
   see `known-legacy.md`.
 - invariants: production reads/writes go through `AppState::pg_pool_ref()`,

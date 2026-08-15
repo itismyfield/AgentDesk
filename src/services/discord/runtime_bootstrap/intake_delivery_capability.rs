@@ -10,7 +10,7 @@ pub(in crate::services::discord) use cache::{SettlementCapabilityCache, bootstra
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::services::discord) struct SettlementCapabilities {
     pub(in crate::services::discord) stamp_dispatched: bool,
-    /// Defined in S-W1; settlement and sweep consumers land in later slices.
+    /// Terminal settlement consumes this in S-W2; the sweep consumer lands in S-W3.
     pub(in crate::services::discord) settle_and_sweep: bool,
 }
 
@@ -319,13 +319,14 @@ fn capabilities_for(
         // at every resolution and independently for each subscribed bot instance.
         tracing::warn!(
             ?stage,
-            "dispatched stamping is clamped off; settle_and_sweep is calculated but has no consumer in this build"
+            "dispatched stamping is clamped off; settle_and_sweep remains available to terminal settlement"
         );
     }
 
     // The design activation formula remains `stage >= Enforce && schema == Ready`.
     // The dispatched-stamping clamp takes precedence. Removing it is part of the
-    // S-W3 DoD; settle_and_sweep is still calculated but has no consumer in this build.
+    // S-W4 DoD, after the S-W3 sweep recovery path exists. S-W2 terminal settlement
+    // already consumes settle_and_sweep.
     SettlementCapabilities {
         stamp_dispatched: !dispatched_stamping_clamped
             && stage >= IntakeDeliverySettlementStage::Enforce
@@ -334,6 +335,9 @@ fn capabilities_for(
             && stage >= IntakeDeliverySettlementStage::Settle,
     }
 }
+
+#[cfg(test)]
+pub(in crate::services::discord) use cache::bootstrap_from_receiver_for_test;
 
 #[cfg(test)]
 #[path = "intake_delivery_capability/tests.rs"]
