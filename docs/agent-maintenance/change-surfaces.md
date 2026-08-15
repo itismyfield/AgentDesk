@@ -2100,6 +2100,7 @@ time for diagnostics; neither is a stored approval value.
     `done` authority lives only in `src/db/intake_outbox_delivery_proof.rs`.
     `src/db/intake_outbox.rs` remains bugfix-only and is deliberately untouched;
     adding this authority there would widen the claim/transition surface.
+  - #5071 T2-W S-W3 extends that sibling authority with bounded stale `spawned`/`dispatched` settlement and NULL-clock operator repair. Frozen `src/db/intake_outbox.rs` stays untouched; scheduling lives in capped `runtime_bootstrap/intake_delivery_sweep.rs`.
 - active_callsite_coverage: PG-only cleanup tracked per #1237/#1238/#1239 —
   see `known-legacy.md`.
 - invariants: production reads/writes go through `AppState::pg_pool_ref()`,

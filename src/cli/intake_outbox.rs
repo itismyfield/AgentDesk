@@ -60,6 +60,40 @@ pub(crate) async fn cmd_dispatched_audit() -> Result<(), String> {
     Ok(())
 }
 
+/// Settles an open handoff without `force_fail_and_retry_as_new`, whose child
+/// insert could redeliver an already delivered turn.
+pub(crate) async fn cmd_settle(
+    id: i64,
+    reason: &str,
+    status: crate::db::intake_outbox_status::IntakeOutboxStatus,
+) -> Result<(), String> {
+    use crate::db::intake_outbox_delivery_proof as proof;
+
+    let config = crate::config::load().map_err(|error| format!("load config: {error}"))?;
+    let pool = crate::db::postgres::connect(&config)
+        .await?
+        .ok_or_else(|| "postgres pool unavailable for intake settlement".to_string())?;
+    let result = async {
+        let mut transaction = pool.begin().await?;
+        let won = proof::settle_unknown_by_operator(&mut transaction, id, status, reason).await?;
+        transaction.commit().await?;
+        Ok::<_, sqlx::Error>(won)
+    }
+    .await;
+    pool.close().await;
+    match result {
+        Ok(true) => {
+            println!("settled intake_outbox {id} as unknown");
+            Ok(())
+        }
+        Ok(false) => Err(format!(
+            "intake_outbox {id} is absent or not in {}",
+            status.as_str()
+        )),
+        Err(error) => Err(format!("settle intake_outbox {id}: {error}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

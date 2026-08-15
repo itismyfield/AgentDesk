@@ -188,6 +188,7 @@ pub(super) async fn run_bot_framework_setup(
     // but rows still carrying an active_dispatch_id stay until the
     // 3-hour safety TTL so warm-resume sessions keep DB ownership.
     super::spawns::run_bot_spawn_stale_session_gc(&shared_clone);
+    super::intake_delivery_sweep::spawn_intake_delivery_sweep(shared_clone.clone());
 
     super::voice::run_bot_spawn_voice_auto_join(
         ctx,

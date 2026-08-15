@@ -1642,6 +1642,15 @@ fn is_off_intake_delivery_settlement(stage: &IntakeDeliverySettlementStage) -> b
     *stage == IntakeDeliverySettlementStage::Off
 }
 
+/// A conservative bound that stays within chrono's duration and UTC datetime
+/// ranges while remaining far above any operational sweep TTL.
+pub(crate) const MAX_INTAKE_SWEEP_CUTOFF_SECS: u64 = i64::MAX as u64 / 1_000_000_000;
+/// Gives startup recovery and session restoration two minutes before the first
+/// intake-delivery sweep. This matches the sibling session-GC startup delay.
+pub(crate) const INTAKE_DELIVERY_SWEEP_INITIAL_DELAY_SECS: u64 = 120;
+/// Bounds each intake-delivery settlement transaction's PostgreSQL lock wait.
+pub(crate) const INTAKE_DELIVERY_SWEEP_LOCK_TIMEOUT_SECS: u64 = 3;
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct RuntimeSettingsConfig {
@@ -1653,6 +1662,15 @@ pub struct RuntimeSettingsConfig {
     pub delivery_journal_internal_channel_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "is_off_intake_delivery_settlement")]
     pub intake_delivery_settlement: IntakeDeliverySettlementStage,
+    /// Heartbeat-absence TTL for stale dispatched debt; unset defaults to 1800 seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intake_delivery_sweep_dispatched_cutoff_secs: Option<u64>,
+    /// Heartbeat-absence TTL for stale spawned debt; defaults to 1800s because queued forwarding can stay spawned for a full turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intake_delivery_sweep_spawned_cutoff_secs: Option<u64>,
+    /// Per-state sweep batch limit; unset defaults to 200 and values clamp to 1..=500.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intake_delivery_sweep_batch_limit: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_timeout_min: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1823,6 +1841,9 @@ impl RuntimeSettingsConfig {
             && self.delivery_journal_cohort_percent == 0
             && self.delivery_journal_internal_channel_ids.is_empty()
             && self.intake_delivery_settlement == IntakeDeliverySettlementStage::Off
+            && self.intake_delivery_sweep_dispatched_cutoff_secs.is_none()
+            && self.intake_delivery_sweep_spawned_cutoff_secs.is_none()
+            && self.intake_delivery_sweep_batch_limit.is_none()
             && self.requested_timeout_min.is_none()
             && self.in_progress_stale_min.is_none()
             && self.long_turn_alert_interval_min.is_none()
@@ -1860,6 +1881,20 @@ impl RuntimeSettingsConfig {
             && self.dispatch_rate_limit_gate_enabled.is_none()
             && self.dispatch_rate_limit_gate_danger_pct.is_none()
             && !self.reset_overrides_on_restart
+    }
+
+    pub(crate) fn intake_delivery_sweep_settings(&self) -> (u64, u64, i64) {
+        (
+            self.intake_delivery_sweep_dispatched_cutoff_secs
+                .unwrap_or(1800)
+                .min(MAX_INTAKE_SWEEP_CUTOFF_SECS),
+            self.intake_delivery_sweep_spawned_cutoff_secs
+                .unwrap_or(1800)
+                .min(MAX_INTAKE_SWEEP_CUTOFF_SECS),
+            self.intake_delivery_sweep_batch_limit
+                .unwrap_or(200)
+                .clamp(1, 500) as i64,
+        )
     }
 }
 
@@ -2002,6 +2037,30 @@ mod runtime_hook_registry_config_tests {
                 parsed
             );
         }
+    }
+
+    #[test]
+    fn intake_delivery_sweep_cutoffs_clamp_before_chrono_conversion() {
+        let runtime = RuntimeSettingsConfig {
+            intake_delivery_sweep_dispatched_cutoff_secs: Some(u64::MAX),
+            intake_delivery_sweep_spawned_cutoff_secs: Some(u64::MAX),
+            ..RuntimeSettingsConfig::default()
+        };
+        let (dispatched, spawned, _) = runtime.intake_delivery_sweep_settings();
+        assert_eq!(
+            (dispatched, spawned),
+            (MAX_INTAKE_SWEEP_CUTOFF_SECS, MAX_INTAKE_SWEEP_CUTOFF_SECS)
+        );
+    }
+
+    #[test]
+    fn intake_delivery_sweep_initial_delay_stays_within_boot_grace_contract() {
+        assert!((60..=180).contains(&INTAKE_DELIVERY_SWEEP_INITIAL_DELAY_SECS));
+    }
+
+    #[test]
+    fn intake_delivery_sweep_lock_timeout_stays_within_short_retry_contract() {
+        assert!((1..=5).contains(&INTAKE_DELIVERY_SWEEP_LOCK_TIMEOUT_SECS));
     }
 }
 
