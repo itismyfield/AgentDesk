@@ -227,8 +227,10 @@ db::auto_queue::entries::tests::cancelled_run_allows_failed_without_waiting_for_
 db::auto_queue::entries::tests::cancelled_run_allows_skipped_without_waiting_for_gate_pg
 db::auto_queue::entries::tests::cancelled_run_rejects_dispatched_pool_pg
 db::auto_queue::entries::tests::cancelled_run_rejects_dispatched_tx_pg
+db::auto_queue::entries::tests::failed_dispatch_is_rechecked_before_late_attachment_pg
 db::auto_queue::entries::tests::paused_run_allows_dispatched_transition_pg
 db::auto_queue::entries::tests::reactivate_completed_run_waits_for_token_and_records_history_pg
+db::auto_queue::entries::tests::reactivate_done_entry_rejects_unapproved_transition_source_pg
 db::auto_queue::entries::tests::reactivate_rechecks_cancelled_run_after_waiting_for_token_pg
 db::auto_queue::entries::tests::restoring_run_allows_dispatched_transition_pg
 db::auto_queue::phase_gates::current_batch_phase_pg_tests::done_entry_with_active_review_decision_dispatch_blocks_phase_advance
@@ -473,6 +475,8 @@ engine::ops::config_ops::tests::policy_engine_config_get_preserves_types_precede
 engine::ops::config_ops::tests::policy_engine_config_get_query_error_fails_closed_with_live_postgres
 engine::ops::db_ops::tests::policy_db_pg_exec_and_query_support_sqlite_compat_functions
 engine::ops::db_ops::tests::policy_db_query_json_returns_typed_json_columns_and_query_keeps_strings
+engine::ops::kanban_ops::tests::reopen_done_entry_rejects_unapproved_transition_source_pg
+engine::ops::kanban_ops::tests::reopen_raw_pg_routes_done_entry_through_canonical_transition_pg
 engine::ops::kanban_ops::tests::set_status_raw_pg_allows_fresh_pass_verdict_after_review_entered_at
 engine::ops::kanban_ops::tests::set_status_raw_pg_allows_no_rule_in_progress_to_requested_forced
 engine::ops::kanban_ops::tests::set_status_raw_pg_allows_requested_to_in_progress_with_active_dispatch

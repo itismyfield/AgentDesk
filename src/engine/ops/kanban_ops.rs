@@ -445,6 +445,47 @@ fn set_status_raw_pg(pool: &PgPool, card_id: &str, new_status: &str, force: bool
     }
 }
 
+async fn reopen_done_auto_queue_entries_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    card_id: &str,
+    trigger_source: &str,
+) -> Result<(), String> {
+    let entries = sqlx::query_as::<_, (String, String)>(
+        "SELECT id, run_id
+         FROM auto_queue_entries
+         WHERE kanban_card_id = $1
+           AND status = 'done'
+         ORDER BY run_id ASC, id ASC",
+    )
+    .bind(card_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| format!("load auto-queue done entries for {card_id}: {error}"))?;
+    let run_ids = entries
+        .iter()
+        .map(|(_, run_id)| run_id.clone())
+        .collect::<Vec<_>>();
+    crate::db::auto_queue::acquire_dispatched_entry_run_tokens_on_pg_tx(tx, &run_ids).await?;
+
+    for (entry_id, _) in entries {
+        let result = crate::db::auto_queue::update_entry_status_on_pg_tx(
+            tx,
+            &entry_id,
+            crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
+            trigger_source,
+            &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+        )
+        .await?;
+        if !result.changed {
+            return Err(format!(
+                "auto-queue entry {entry_id} changed while reopening card {card_id}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn reopen_raw_pg(pool: &PgPool, card_id: &str, new_status: &str) -> String {
     let card_id = card_id.to_string();
     let new_status = new_status.to_string();
@@ -497,6 +538,11 @@ fn reopen_raw_pg(pool: &PgPool, card_id: &str, new_status: &str) -> String {
             }));
         }
 
+        // Acquire every affected run token before the first row write. The
+        // canonical entry helper then validates and records each transition
+        // while retaining the existing dispatch link.
+        reopen_done_auto_queue_entries_on_pg_tx(&mut tx, &card_id, "pmd_reopen").await?;
+
         let clock_extra = match effective.clock_for_state(&new_status) {
             Some(clock) if clock.mode.as_deref() == Some("coalesce") => {
                 format!(", {} = COALESCE({}, NOW())", clock.set, clock.set)
@@ -514,30 +560,6 @@ fn reopen_raw_pg(pool: &PgPool, card_id: &str, new_status: &str) -> String {
             .execute(&mut *tx)
             .await
             .map_err(|error| format!("update kanban card {card_id} reopen: {error}"))?;
-
-        // Move done auto-queue entries back to dispatched on reopen.
-        let entry_ids = sqlx::query_scalar::<_, String>(
-            "SELECT id FROM auto_queue_entries
-             WHERE kanban_card_id = $1 AND status = 'done'",
-        )
-        .bind(&card_id)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|error| format!("load auto-queue done entries for {card_id}: {error}"))?;
-        for entry_id in entry_ids {
-            sqlx::query(
-                "UPDATE auto_queue_entries
-                 SET status = 'dispatched',
-                     updated_at = NOW()
-                 WHERE id = $1",
-            )
-            .bind(&entry_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| {
-                format!("reset auto-queue entry {entry_id} to dispatched on reopen: {error}")
-            })?;
-        }
 
         let has_hooks = effective
             .hooks_for_state(&new_status)
@@ -1533,6 +1555,135 @@ mod tests {
             is_transition_ok_to(&response, "in_progress"),
             "requested->in_progress with active dispatch must be allowed, got: {response}"
         );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    async fn seed_reopen_auto_queue_entry_pg(pool: &sqlx::PgPool) {
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
+             VALUES ('reopen-agent', 'Reopen Agent', 'claude', 'reopen-channel')",
+        )
+        .execute(pool)
+        .await
+        .expect("seed reopen agent");
+        sqlx::query(
+            "INSERT INTO kanban_cards
+                (id, title, status, assigned_agent_id, completed_at, created_at, updated_at)
+             VALUES
+                ('reopen-card', 'Reopen Card', 'done', 'reopen-agent', NOW(), NOW(), NOW())",
+        )
+        .execute(pool)
+        .await
+        .expect("seed reopen card");
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, to_agent_id, dispatch_type, status, completed_at)
+             VALUES
+                ('reopen-completed-dispatch', 'reopen-card', 'reopen-agent',
+                 'implementation', 'completed', NOW())",
+        )
+        .execute(pool)
+        .await
+        .expect("seed completed reopen dispatch");
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('reopen-run', 'reopen-repo', 'reopen-agent', 'active')",
+        )
+        .execute(pool)
+        .await
+        .expect("seed reopen run");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, dispatch_id, completed_at)
+             VALUES
+                ('reopen-entry', 'reopen-run', 'reopen-card', 'reopen-agent',
+                 'done', 'reopen-completed-dispatch', NOW())",
+        )
+        .execute(pool)
+        .await
+        .expect("seed done reopen entry");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reopen_raw_pg_routes_done_entry_through_canonical_transition_pg() {
+        let db = pg_test_db().await;
+        let pool = db.connect_and_migrate().await;
+        crate::pipeline::ensure_loaded();
+        seed_reopen_auto_queue_entry_pg(&pool).await;
+
+        let response = reopen_raw_pg(&pool, "reopen-card", "in_progress");
+        assert!(
+            is_transition_ok_to(&response, "in_progress"),
+            "kanban reopen must succeed through the canonical entry transition: {response}"
+        );
+        let entry = sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT status, dispatch_id
+             FROM auto_queue_entries
+             WHERE id = 'reopen-entry'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load reopened auto-queue entry");
+        assert_eq!(entry.0, crate::db::auto_queue::ENTRY_STATUS_DISPATCHED);
+        assert_eq!(entry.1.as_deref(), Some("reopen-completed-dispatch"));
+        let transition = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT from_status, to_status, trigger_source
+             FROM auto_queue_entry_transitions
+             WHERE entry_id = 'reopen-entry'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load kanban reopen entry transition");
+        assert_eq!(
+            transition,
+            (
+                crate::db::auto_queue::ENTRY_STATUS_DONE.to_string(),
+                crate::db::auto_queue::ENTRY_STATUS_DISPATCHED.to_string(),
+                "pmd_reopen".to_string()
+            )
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reopen_done_entry_rejects_unapproved_transition_source_pg() {
+        let db = pg_test_db().await;
+        let pool = db.connect_and_migrate().await;
+        seed_reopen_auto_queue_entry_pg(&pool).await;
+
+        let mut tx = pool.begin().await.expect("begin invalid reopen tx");
+        let error = reopen_done_auto_queue_entries_on_pg_tx(
+            &mut tx,
+            "reopen-card",
+            "unapproved_kanban_reopen",
+        )
+        .await
+        .expect_err("canonical transition validation must reject an unapproved reopen source");
+        assert!(
+            error.contains("invalid auto-queue entry transition"),
+            "{error}"
+        );
+        tx.rollback().await.expect("rollback invalid reopen tx");
+
+        let entry_status: String =
+            sqlx::query_scalar("SELECT status FROM auto_queue_entries WHERE id = 'reopen-entry'")
+                .fetch_one(&pool)
+                .await
+                .expect("load rejected reopen entry");
+        assert_eq!(entry_status, crate::db::auto_queue::ENTRY_STATUS_DONE);
+        let transition_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT
+             FROM auto_queue_entry_transitions
+             WHERE entry_id = 'reopen-entry'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count rejected reopen transitions");
+        assert_eq!(transition_count, 0);
 
         pool.close().await;
         db.drop().await;
