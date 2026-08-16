@@ -149,8 +149,9 @@ pub(in crate::services::discord) fn set_execution_identity_mode_for_tests(
     ExecutionIdentityModeGuard { previous }
 }
 
-/// The registry row a caller pinned before its CAS, for the T3-R2 conjuncts its
-/// removal helper does not compare on its own.
+/// The owner-channel and output-path VALUES a caller read off the live registry
+/// row before its CAS, for the T3-R2 conjuncts its removal helper does not
+/// compare on its own.
 ///
 /// `remove_tmux_session_if_current` compares the session key and the cancel
 /// pointer and nothing else, so T3-R2's `(owner_channel, tmux_session_name,
@@ -174,6 +175,52 @@ struct PinnedWatcherBinding {
 /// marker rename racing the re-read is still possible; the design records that
 /// as a non-guarantee rather than papering over it. This is an identity
 /// re-check, not an emission lease.
+///
+/// # What the completed tuple establishes
+///
+/// A VALUE match, and only that. Under `Enforce` the two CAS cores below refuse
+/// whenever any captured value stops equalling the live one, which covers every
+/// shape the conjuncts were added for: a row whose owner channel moved, a row
+/// whose output path moved, a replacement watcher carrying a fresh cancel `Arc`
+/// (`Arc::ptr_eq` fails), a respawn that minted a new `.spawn_nonce`, and a
+/// marker that is unreadable on either side. `Legacy` keeps each call site's
+/// pre-A1 comparison verbatim and `Observe` only counts.
+///
+/// # Declared limit: A -> B -> A readmission is indistinguishable
+///
+/// Every conjunct compares captured values against live values, and neither the
+/// registry nor this fence keeps a row generation, epoch, or insertion counter
+/// for the comparison to read. So a row that is replaced by a different one and
+/// then re-admitted with ALL of its pinned values restored — the same owner
+/// channel, the same output path, the very same cancel `Arc`, and an untouched
+/// `.spawn_nonce` — compares equal to a row that never moved, and `Enforce`
+/// permits the removal. That readmission is a DECLARED limit of a value CAS, not
+/// a defect these conjuncts were meant to catch; #5071 T3 deliberately adds no
+/// generation counter to close it. The documentation test
+/// `value_cas_declared_non_guarantee_readmitted_identical_row_passes_enforce`
+/// (in `tmux_watcher_registry_restore_tests`) fixes the current behaviour, so a
+/// future change to it forces this paragraph to be rewritten.
+///
+/// No production writer can build that sequence at this commit. `insert_locked`
+/// is the registry's only insertion path, and its only production callers are
+/// `watchers::lifecycle::claims::{try_claim_watcher_with_thread_parent,
+/// claim_watcher}`. Both take the handle by value from the caller, and every
+/// production caller that reaches them constructs a NEW handle with a fresh
+/// `Arc<AtomicBool>` for `cancel` immediately beforehand:
+/// `turn_bridge::runtime_handoff_loop` and its `watcher_handoff` sibling;
+/// `watchers::lifecycle::restore::restore_tmux_watchers`;
+/// `recovery_engine::restore_inflight::restore_inflight_turns` (two
+/// constructions); `attach_paused_turn_watcher_inner` in
+/// `router::message_handler::watchdog`; and
+/// `recovery_engine::manual_rebind::rebind_inflight_for_channel_inner`. So no
+/// production re-admission restores the pinned pointer. The handoff pair is the
+/// closest shape to a "move" and is not one: it mints a fresh pointer and lets
+/// `claim_watcher` cancel and remove the incumbent, which is a replacement the
+/// CAS correctly refuses for a pin taken before it.
+///
+/// That is an enumeration of today's writers, not an invariant the types hold. A
+/// future writer that re-inserts a handle carrying an existing `cancel` `Arc`
+/// would make the sequence reachable and would falsify this paragraph.
 pub(in crate::services::discord) struct WatcherIdentityFence {
     mode: ExecutionIdentityMode,
     /// Static label the observation counters and logs attribute this to.
@@ -470,7 +517,9 @@ impl TmuxWatcherRegistry {
     /// The unfenced spelling compares the session key and the cancel pointer
     /// only. The live owner channel and output path read here complete T3-R2's
     /// tuple for a fence that pinned them; without a fence they are read and
-    /// discarded, leaving the unfenced answer unchanged.
+    /// discarded, leaving the unfenced answer unchanged. Every conjunct is a
+    /// value comparison — see [`WatcherIdentityFence`] for what that does and
+    /// does not establish.
     fn remove_tmux_session_if_current_locked(
         &self,
         guard: &TmuxWatcherRegistryGuard,
@@ -515,8 +564,9 @@ impl TmuxWatcherRegistry {
     /// Shared core for the fenced and unfenced spellings. The `cancel` store
     /// happens only after every conjunct — channel binding, session name,
     /// output path, cancel pointer, and the optional #5071 T3-A1 identity
-    /// re-read — has matched and the entry has been removed, so a `false`
-    /// return leaves the watcher both registered and uncancelled.
+    /// re-read — has compared equal and the entry has been removed, so a `false`
+    /// return leaves the watcher both registered and uncancelled. Equality of
+    /// those values is the whole guarantee; see [`WatcherIdentityFence`].
     fn cancel_and_remove_channel_if_current_locked(
         &self,
         guard: &TmuxWatcherRegistryGuard,

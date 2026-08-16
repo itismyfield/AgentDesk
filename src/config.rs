@@ -1666,15 +1666,22 @@ pub enum ExecutionIdentityMode {
     #[default]
     Legacy,
     /// Legacy behaviour plus captured-vs-current nonce counters and logs, and a
-    /// log whenever a pinned registry row no longer matches the live one. Still
-    /// never denies.
+    /// log whenever the pinned owner channel or output path no longer equals the
+    /// live one. Still never denies.
     Observe,
     /// Refuse the two automatic watcher-registry removals T3-A1 converted — the
     /// relay-recovery dead-frontier cancel and the TUI stale-FOREIGN demote —
-    /// unless the pinned registry row still matches AND the captured
-    /// `Some(nonce)` equals the marker re-read inside the registry lock. Absent
-    /// and mismatched nonces are both a deny, so on a platform with no tmux
-    /// marker store at all this mode refuses both paths unconditionally.
+    /// unless every pinned VALUE still equals the live one (owner channel,
+    /// session name, output path, and `Arc::ptr_eq` on the cancel pointer) AND
+    /// the captured `Some(nonce)` equals the marker re-read inside the registry
+    /// lock. Absent and mismatched nonces are both a deny, so on a platform with
+    /// no tmux marker store at all this mode refuses both paths unconditionally.
+    ///
+    /// Equal values are all this establishes. The registry keeps no incarnation
+    /// counter, so this mode cannot tell a row that never moved from one that was
+    /// replaced and then re-admitted with every pinned value restored; see
+    /// `services::discord::tmux_watcher_registry::WatcherIdentityFence` for that
+    /// declared limit.
     ///
     /// Nothing else changes: operator/CLI resets, tmux and process kills, and
     /// every registry removal T3 did not convert are out of scope, and refusing

@@ -76,8 +76,11 @@ pub(in crate::services::discord) struct CommitError {
 ///   exact-key ledger prevent duplicate finalization, not duplicate commit claims;
 /// - the cancel `Arc` and the #5071 T3-A1 spawn-nonce pin are both captured
 ///   outside the flock and may name a replaced watcher incarnation; the registry
-///   CAS then fails closed with nothing cancelled, but a `Committed*` outcome was
-///   already returned;
+///   CAS fails closed with nothing cancelled whenever one of those captured
+///   VALUES stops equalling the live row, but a value comparison cannot see a row
+///   that was replaced and then re-admitted with every pinned value restored
+///   (`tmux_watcher_registry::WatcherIdentityFence` declares that limit). Either
+///   way a `Committed*` outcome was already returned;
 /// - sidecar flock authority is host-local and does not fence another node's
 ///   watcher, inflight row, or mailbox authority;
 /// - the age/lifecycle-qualified stale-row sweep in `reconcile.rs` removes rows

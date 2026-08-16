@@ -239,11 +239,17 @@ pub(super) async fn apply_relay_recovery_decision(
                             // #5071 T3-A1 retired the #5067 in-flight emission
                             // read that used to sit here. The registry CAS below
                             // now carries the identity conjunct, which is a
-                            // different guarantee: it proves the entry is still
-                            // the pinned incarnation, NOT that the same
-                            // incarnation has no terminal POST in flight. That
-                            // same-incarnation emission race is a declared
-                            // non-guarantee, not a closed hole.
+                            // different guarantee: it re-compares the pinned
+                            // VALUES (owner channel, session, output path,
+                            // cancel pointer, `.spawn_nonce`) against the live
+                            // row, so a replaced or respawned row is refused. It
+                            // does NOT establish a row generation — see
+                            // `WatcherIdentityFence` for the A -> B -> A
+                            // readmission it cannot see — and it says nothing
+                            // about a terminal POST the SAME incarnation may
+                            // have in flight. That same-incarnation emission
+                            // race is a declared non-guarantee, not a closed
+                            // hole.
                             if mailbox_active_user_msg_id != probe.pin.mailbox_active_user_msg_id {
                                 tracing::warn!(
                                     target: "agentdesk::discord::relay_recovery",

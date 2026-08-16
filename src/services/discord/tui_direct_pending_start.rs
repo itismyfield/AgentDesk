@@ -913,7 +913,7 @@ async fn submit_stale_foreign_inflight_cancel(
         probe.save_generation,
         // #5071 T3-A1: the flock callback no longer stores `cancel`. This
         // helper only REMOVES from the registry, so the store moved below the
-        // CAS that proves the entry is still the pinned incarnation.
+        // CAS that re-compares the pinned values against the live row.
         move |_| {
             if pinned_watcher {
                 Ok(super::inflight::CommitEvidence::CancelledWatcher)
@@ -942,10 +942,11 @@ async fn submit_stale_foreign_inflight_cancel(
         // #5071 T3-A1: unlike the relay-recovery sibling, this helper only
         // REMOVES — it never writes `cancel` — so the store belongs here, after
         // the CAS (cancel pointer, plus the pinned owner channel, output path
-        // and captured/live spawn nonce carried by the fence) proved the
-        // registry entry is still the row this path pinned. A failed CAS
-        // therefore leaves `cancel` unset and the watcher relaying, rather than
-        // silencing a watcher the registry still lists.
+        // and captured/live spawn nonce carried by the fence) found every value
+        // this path pinned still equal to the live one. That equality is not a
+        // row-generation proof; `WatcherIdentityFence` declares what it misses.
+        // A failed CAS leaves `cancel` unset and the watcher relaying, rather
+        // than silencing a watcher the registry still lists.
         if shared
             .tmux_watchers
             .under_identity_fence(identity_fence)
