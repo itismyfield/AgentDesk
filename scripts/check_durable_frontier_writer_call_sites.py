@@ -191,6 +191,11 @@ try:
 except ModuleNotFoundError:  # imported from a repo-root unittest
     from scripts.rust_cfg import find_test_only_cfg_attribute as _cfg_test_only_match
 
+try:
+    from rust_lex import StripState, strip_line
+except ModuleNotFoundError:  # imported from a repo-root unittest
+    from scripts.rust_lex import StripState, strip_line
+
 # Every production call site of every pinned symbol, keyed by symbol then by
 # repo-relative path. An empty map pins the symbol at zero production callers:
 # the API exists and compiles, but nothing outside tests may reach it. Measured
@@ -446,102 +451,10 @@ ITEM_START_RE = re.compile(
     r"(?:fn|impl|mod|trait|macro_rules)\b"
 )
 
-# --- Cross-line string/comment stripper, ported verbatim from
-# scripts/check_inflight_blind_save_ratchet.py (#4259), which ported it from
-# scripts/check_log_key_drift.py (#4218). Copied rather than imported so each
-# guard stays a dependency-free single-file script, per the convention those two
-# state; if a bug is found here, fix it in all three. Blanked output keeps
-# `{` / `}` / `;` / `,` counts honest for the cfg(test) tracking below: without
-# cross-line state, an unbalanced `{` inside a multi-line raw string poisons the
-# brace depth and hides every later call in the file. ---
-
-# Char literal (so `'"'` / `'{'` cannot desync the scanners). Lifetimes (`'a`)
-# do not match and fall through harmlessly.
-_CHAR_LITERAL = re.compile(r"'(\\.|[^'\\])'")
-
-# Raw / byte string openers: r"…", r#"…"#, br"…"; b"…" is handled separately.
-_RAW_STRING_OPEN = re.compile(r'(?:r|br)(#*)"')
-
-
-class StripState:
-    """Cross-line lexer state: strings and block comments span lines."""
-
-    __slots__ = ("in_string", "raw_hashes", "block_depth")
-
-    def __init__(self) -> None:
-        self.in_string = False  # inside a normal "…" / b"…" string
-        self.raw_hashes: int | None = None  # inside r"…" / r#"…"# (hash count)
-        self.block_depth = 0  # nested /* … */ depth
-
-
-def strip_line(line: str, state: StripState) -> str:
-    """Blank out string-literal/comment content, preserving column positions."""
-    out: list[str] = []
-    i = 0
-    n = len(line)
-    while i < n:
-        if state.block_depth > 0:
-            if line.startswith("/*", i):
-                state.block_depth += 1
-                out.append("  ")
-                i += 2
-            elif line.startswith("*/", i):
-                state.block_depth -= 1
-                out.append("  ")
-                i += 2
-            else:
-                out.append(" ")
-                i += 1
-            continue
-        if state.raw_hashes is not None:
-            closer = '"' + "#" * state.raw_hashes
-            if line.startswith(closer, i):
-                state.raw_hashes = None
-                out.append(" " * len(closer))
-                i += len(closer)
-            else:
-                out.append(" ")
-                i += 1
-            continue
-        if state.in_string:
-            if line[i] == "\\" and i + 1 < n:
-                out.append("  ")
-                i += 2
-            else:
-                if line[i] == '"':
-                    state.in_string = False
-                out.append(" ")
-                i += 1
-            continue
-        # --- normal code ---
-        if line.startswith("//", i):
-            break  # line comment: drop the rest of the line
-        if line.startswith("/*", i):
-            state.block_depth = 1
-            out.append("  ")
-            i += 2
-            continue
-        raw = _RAW_STRING_OPEN.match(line, i)
-        if raw:
-            state.raw_hashes = len(raw.group(1))
-            out.append(" " * (raw.end() - i))
-            i = raw.end()
-            continue
-        if line[i] == '"' or line.startswith('b"', i):
-            skip = 2 if line[i] == "b" else 1
-            state.in_string = True
-            out.append(" " * skip)
-            i += skip
-            continue
-        if line[i] == "'":
-            m = _CHAR_LITERAL.match(line, i)
-            if m:
-                out.append(" " * (m.end() - i))
-                i = m.end()
-                continue
-        out.append(line[i])
-        i += 1
-    return "".join(out)
+# Cross-line string/comment stripper imported from scripts/rust_lex.py.
+# Blanked output keeps `{` / `}` / `;` / `,` counts honest for the cfg(test)
+# tracking below: without cross-line state, an unbalanced `{` inside a
+# multi-line raw string poisons the brace depth and hides every later call.
 
 
 def is_test_file(name: str) -> bool:
