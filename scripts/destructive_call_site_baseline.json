@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "9964338e8a3060ceddef26c76ab4acf851dc2cb0",
+  "measured_at_sha": "3df6de3edab19035f9e717a025b21cdad46e6561",
   "comment": "These counts are a growth-blocking baseline, not proof of safety.",
   "categories": {
     "tmux_kill": {
@@ -62,7 +62,7 @@
       }
     },
     "registry_remove": {
-      "comment": "Measured production external removals are 9/2/3/2 (total 16). The design's 10/2/3/2=17 counted turn_finalizer/watcher_backstop.rs:252, which is inside #[cfg(test)] at this SHA. health/recovery.rs remove_locked is classified as direct channel remove, not remove_tmux_session_locked.",
+      "comment": "Measured production external removals are 8/3/3/2 (total 16). The design's 10/2/3/2=17 counted turn_finalizer/watcher_backstop.rs:252, which is inside #[cfg(test)] at this SHA. health/recovery.rs remove_locked is classified as direct channel remove, not remove_tmux_session_locked.",
       "files": {
         "src/services/discord/health/recovery.rs": 2,
         "src/services/discord/health/relay_auto_heal.rs": 1,

@@ -4697,6 +4697,8 @@ services::discord::task_notification_delivery::tests::watcher_primary_key_blocks
 services::discord::task_notification_delivery::tests::xml_and_stream_json_share_semantic_key_and_nonce_is_bounded
 services::discord::task_supervisor::tests::panic_payload_summary_handles_common_payloads
 services::discord::task_supervisor::tests::spawn_observed_contains_child_panic
+services::discord::task_supervisor::tests::task_guard_leaves_a_replacement_watcher_entry_in_place
+services::discord::task_supervisor::tests::task_guard_removes_the_registry_entry_it_still_owns
 services::discord::terminal_ui_obligation::tests::obligation_store_round_trips_lists_and_clears
 services::discord::terminal_ui_obligation::tests::terminal_ui_claude_tui_without_runtime_output_path_stays_not_ready
 services::discord::terminal_ui_obligation::tests::terminal_ui_obligation_generation_match_requires_nonzero_same_generation
@@ -4896,6 +4898,9 @@ services::discord::tmux::tmux_watcher::panel_decisions::completion_footer_suppre
 services::discord::tmux::tmux_watcher::panel_decisions::completion_footer_suppression_tests::synthetic_tui_mirror_finalize_strips_live_status_footer_to_prose_3964
 services::discord::tmux::tmux_watcher::panel_decisions::redrive_placeholder_shield_tests::redrive_placeholder_shield_truth_table_4299
 services::discord::tmux::tmux_watcher::placeholder_reclaim::redrive_reclaim_e2e_tests::live_tmux_redrive_reclaim_cycle_terminates_4299
+services::discord::tmux::tmux_watcher::post_stream_exit::tests::post_stream_exit_releases_its_own_registry_entry
+services::discord::tmux::tmux_watcher::post_stream_exit::tests::stale_post_stream_exit_preserves_a_rebound_channel_entry
+services::discord::tmux::tmux_watcher::post_stream_exit::tests::stale_post_stream_exit_preserves_a_replacement_watcher_entry
 services::discord::tmux::tmux_watcher::provider_session_persistence::tests::persistable_provider_session_falls_back_to_cached_selector_on_resume_turn
 services::discord::tmux::tmux_watcher::provider_session_persistence::tests::persistable_provider_session_prefers_freshly_observed_id
 services::discord::tmux::tmux_watcher::provider_session_persistence::tests::persistable_provider_session_skips_when_no_usable_selector
