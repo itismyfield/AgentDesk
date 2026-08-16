@@ -2507,6 +2507,7 @@ services::discord::health::relay_auto_heal::tests::redrive_self_reattach_identit
 services::discord::health::relay_auto_heal::tests::redrive_stale_frontier_token_cannot_nudge_after_reset_4181
 services::discord::health::relay_dead_reattach::tests::relay_dead_reattach_try_apply_reads_live_emission_fence
 services::discord::health::relay_dead_reattach::tests::relay_dead_watcher_reattach_handles_dead_frontier_liveness
+services::discord::health::relay_dead_reattach::tests::reuse_no_op_keeps_the_relay_dead_tick_short_circuit
 services::discord::health::relay_progress::tests::backlog_grace_is_observation_not_producer_or_delivery_progress
 services::discord::health::relay_progress::tests::composite_progress_distinguishes_backpressure_and_delivery_only
 services::discord::health::runtime_resolve::direct_meeting_candidate_tests::multiple_explicit_matches_are_ambiguous
@@ -3878,6 +3879,9 @@ services::discord::relay_owner_observability::tests::ui_outcome_gate_suppressed_
 services::discord::relay_owner_observability::tests::ui_outcome_stale_identity_takes_precedence_over_gate
 services::discord::relay_recovery::auto_heal_apply::tests::relay_recovery_emission_in_flight_consumes_budget_until_frontier_progress
 services::discord::relay_recovery::auto_heal_apply::tests::relay_recovery_manual_apply_succeeds_after_probe_budget_is_exhausted
+services::discord::relay_recovery::auto_heal_apply::tests::relay_recovery_repeated_reuse_no_transition_opens_failure_backoff
+services::discord::relay_recovery::auto_heal_apply::tests::relay_recovery_reuse_existing_live_watcher_refunds_instead_of_counting_applied
+services::discord::relay_recovery::auto_heal_apply::tests::relay_recovery_spawned_reattach_still_counts_applied_and_commits
 services::discord::relay_recovery::auto_heal_apply::tests::relay_recovery_startup_grace_consumes_budget_until_frontier_progress
 services::discord::relay_recovery::auto_heal_apply::tests::reserved_episode_replacement_at_apply_barrier_is_untouched
 services::discord::relay_recovery::auto_heal_attempts::tests::relay_recovery_confirm_failure_counts_attempt_and_backs_off
@@ -3950,6 +3954,7 @@ services::discord::relay_recovery::tests::reattach_status_reports_live_incumbent
 services::discord::relay_recovery::tests::relay_recovery_identity_pin_preserves_t2_started_after_t1_snapshot
 services::discord::relay_recovery::tests::relay_recovery_takeover_forgets_registered_completion_footer_target
 services::discord::relay_recovery::tests::relay_recovery_takeover_keeps_different_completion_footer_target
+services::discord::relay_recovery::tests::reused_live_watcher_status_is_not_counted_applied
 services::discord::relay_recovery::tests::stale_watcher_with_jsonl_progress_rebinds_without_canceling_turn
 services::discord::relay_recovery::tests::token_only_agentdesk_tmux_confirmed_dead_is_reclaimed_after_grace
 services::discord::relay_recovery::tests::token_only_agentdesk_tmux_with_unknown_liveness_stays_protected_after_grace

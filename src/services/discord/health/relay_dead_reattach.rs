@@ -115,7 +115,10 @@ pub(super) async fn try_apply(
     )
     .await
     {
-        Ok(response) => response.applied,
+        Ok(response) => reattach_lane_handled_tick(
+            response.applied,
+            response.apply_result.as_ref().map(|result| result.status),
+        ),
         Err(error) => {
             tracing::warn!(
                 target: "agentdesk::discord::relay_recovery",
@@ -128,6 +131,19 @@ pub(super) async fn try_apply(
             false
         }
     }
+}
+
+/// The stall-watchdog tick reads this as "the reattach lane handled this channel
+/// on this pass" and skips its remaining branches, several of which are
+/// destructive. #5021 stopped counting `reuse_existing_live_watcher` as an
+/// applied heal so the auto-heal budget can back off on a repeating no-op; that
+/// accounting correction must not, as a side effect, drop a live turn into those
+/// destructive branches. So the reuse status keeps the short-circuit it already
+/// had while its budget settles as a refund.
+fn reattach_lane_handled_tick(applied: bool, apply_status: Option<&str>) -> bool {
+    applied
+        || apply_status
+            .is_some_and(discord::relay_recovery::relay_recovery_status_reused_live_watcher)
 }
 
 #[cfg(test)]
@@ -236,6 +252,20 @@ mod tests {
                 unpaired_active_token_reconfirmed: false,
             },
         }
+    }
+
+    /// #5021: the budget correction is accounting-only. The relay-dead lane must
+    /// still report the reuse no-op as handled so this tick keeps skipping the
+    /// destructive branches that follow the reattach call.
+    #[test]
+    fn reuse_no_op_keeps_the_relay_dead_tick_short_circuit() {
+        assert!(reattach_lane_handled_tick(
+            false,
+            Some("reuse_existing_live_watcher")
+        ));
+        assert!(reattach_lane_handled_tick(true, Some("reattached_watcher")));
+        assert!(!reattach_lane_handled_tick(false, Some("rebind_failed")));
+        assert!(!reattach_lane_handled_tick(false, None));
     }
 
     #[tokio::test]
