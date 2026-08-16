@@ -764,23 +764,32 @@ async fn dead_frontier_gate_pass_then_generation_mismatch_preserves_turn() {
     assert!(super::super::inflight::load_inflight_state(&provider, channel.get()).is_some());
 }
 
-#[tokio::test]
-async fn destructive_cancel_stops_when_terminal_lease_starts_after_gate() {
-    let _guard = auto_heal_test_lock().lock().await;
-    clear_auto_heal_attempts_for_tests();
-    let (_root_guard, root_dir) = isolated_agentdesk_root();
-    let provider = ProviderKind::Codex;
-    let (registry, shared) = registry_with_shared(provider.clone()).await;
-    let channel = ChannelId::new(4_030_005);
-    let user_msg = MessageId::new(4_030_105);
-    let tmux = "AgentDesk-codex-4030-post-gate-lease";
-    let output_path = root_dir.path().join("post-gate-lease.jsonl");
-    std::fs::write(
-        &output_path,
-        r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}"#,
-    )
-    .expect("write terminal output fixture");
-    let token = start_test_turn(&shared, channel, user_msg).await;
+/// Shared fixture for the #5071 T3-A1 dead-frontier destructive-cancel tests: a
+/// watcher-owned stalled turn whose planned decision reaches the destructive
+/// branch in `apply_relay_recovery_decision`.
+struct DeadFrontierFixture {
+    decision: RelayRecoveryDecision,
+    token: Arc<CancelToken>,
+    watcher_cancel: Arc<std::sync::atomic::AtomicBool>,
+    output_path: std::path::PathBuf,
+}
+
+async fn dead_frontier_fixture(
+    shared: &Arc<SharedData>,
+    root_dir: &tempfile::TempDir,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    user_msg: MessageId,
+    tmux: &str,
+    label: &str,
+) -> DeadFrontierFixture {
+    let output_path = root_dir.path().join(format!("{label}.jsonl"));
+    std::fs::write(&output_path, r#"{"type":"thread.started","thread_id":"t"}"#)
+        .expect("write output fixture");
+    let output_len = std::fs::metadata(&output_path)
+        .expect("output fixture metadata")
+        .len();
+    let token = start_test_turn(shared, channel, user_msg).await;
     shared.restart.global_active.store(1, Ordering::Relaxed);
 
     let mut state = super::super::inflight::InflightTurnState::new(
@@ -789,54 +798,31 @@ async fn destructive_cancel_stops_when_terminal_lease_starts_after_gate() {
         None,
         1,
         user_msg.get(),
-        4_030_205,
-        "watcher-owned post-gate lease".to_string(),
+        user_msg.get() + 100,
+        format!("watcher-owned {label}"),
         None,
         Some(tmux.to_string()),
         Some(output_path.to_string_lossy().to_string()),
         None,
-        0,
+        output_len,
     );
     state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui);
     state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::Watcher);
     super::super::inflight::save_inflight_state(&state).expect("save watcher inflight");
-    let persisted = super::super::inflight::load_inflight_state(&provider, channel.get())
-        .expect("load watcher inflight");
     shared.turn_finalizer.register_start(
         super::super::turn_finalizer::TurnKey::new(
             channel,
-            persisted.effective_finalizer_turn_id(),
+            state.effective_finalizer_turn_id(),
             shared.restart.current_generation,
         ),
         provider.clone(),
         super::super::inflight::RelayOwnerKind::Watcher,
-        &shared,
+        shared,
     );
     let (watcher, watcher_cancel) = test_watcher_handle(tmux, &output_path);
     watcher.last_heartbeat_ts_ms.store(1, Ordering::Release);
     shared.tmux_watchers.insert(channel, watcher);
 
-    let lease_key = super::super::DeliveryLeaseKey::from_inflight_state_for_site(
-        channel,
-        shared.restart.current_generation,
-        &persisted,
-        "relay_recovery_post_gate_test",
-    );
-    let hook_shared = Arc::clone(&shared);
-    let hook_key = lease_key.clone();
-    let _hook = set_destructive_cancel_post_gate_hook_for_tests(Arc::new(move || {
-        assert!(hook_shared.delivery_lease(channel).try_acquire(
-            hook_key.clone(),
-            super::super::LeaseHolder::Bridge,
-            0,
-            1,
-            u64::MAX,
-        ));
-        hook_shared
-            .tmux_relay_coord(channel)
-            .relay_slot
-            .store(1, Ordering::Release);
-    }));
     let snapshot = RelayHealthSnapshot {
         provider: provider.as_str().to_string(),
         channel_id: channel.get(),
@@ -844,36 +830,190 @@ async fn destructive_cancel_stops_when_terminal_lease_starts_after_gate() {
         tmux_session: Some(tmux.to_string()),
         tmux_alive: Some(true),
         watcher_attached: true,
-        watcher_attached_stale: true,
         watcher_owner_channel_id: Some(channel.get()),
         watcher_owns_live_relay: true,
         bridge_inflight_present: true,
         mailbox_has_cancel_token: true,
         mailbox_active_user_msg_id: Some(user_msg.get()),
-        last_capture_offset: Some(1),
+        mailbox_turn_started_at_ms: None,
+        last_capture_offset: Some(128),
         last_relay_offset: 0,
-        unread_bytes: Some(1),
+        unread_bytes: Some(128),
         desynced: true,
         ..snapshot()
     };
     let mut decision = plan_relay_recovery(&snapshot, RelayStallState::TmuxAliveRelayDead, 1_000);
-    decision.affected.finalizer_turn_id = Some(persisted.effective_finalizer_turn_id());
+    decision.affected.finalizer_turn_id = Some(state.effective_finalizer_turn_id());
+    assert_eq!(
+        relay_frontier_dead_reattach_owner(&decision),
+        Some(channel),
+        "fixture must reach the destructive dead-frontier branch"
+    );
+    DeadFrontierFixture {
+        decision,
+        token,
+        watcher_cancel,
+        output_path,
+    }
+}
+
+/// #5071 T3-A1 fixed mutation gate (c), fence site 2 of 2: the #5067 in-flight
+/// emission read is GONE from this call site, so re-adding it as a post-gate
+/// skip fails this test. The design keeps the same-incarnation emission race as
+/// a declared non-guarantee instead of restoring the fence; site 1 of 2 is
+/// pinned by `health::relay_dead_reattach::tests::relay_dead_reattach_no_longer_fences_on_live_relay_emission`.
+#[tokio::test]
+async fn post_gate_relay_emission_no_longer_blocks_dead_frontier_watcher_cancel() {
+    let _guard = auto_heal_test_lock().lock().await;
+    clear_auto_heal_attempts_for_tests();
+    let (_root_guard, root_dir) = isolated_agentdesk_root();
+    let provider = ProviderKind::Codex;
+    let (registry, shared) = registry_with_shared(provider.clone()).await;
+    let channel = ChannelId::new(4_030_005);
+    let fixture = dead_frontier_fixture(
+        &shared,
+        &root_dir,
+        &provider,
+        channel,
+        MessageId::new(4_030_105),
+        "AgentDesk-codex-4030-post-gate-emission",
+        "post-gate-emission",
+    )
+    .await;
+
+    let hook_shared = Arc::clone(&shared);
+    let _hook = set_destructive_cancel_post_gate_hook_for_tests(Arc::new(move || {
+        hook_shared
+            .tmux_relay_coord(channel)
+            .relay_slot
+            .store(1, Ordering::Release);
+    }));
 
     let _ = apply_relay_recovery_decision(
         &registry,
         &shared,
         &provider,
-        &decision,
+        &fixture.decision,
         None,
         RelayRecoveryApplySource::ProbeAutoHeal,
     )
     .await;
 
-    assert!(!watcher_cancel.load(Ordering::Acquire));
+    assert!(
+        shared.relay_emission_in_flight(channel),
+        "the hook must have opened a relay emission slot before the CAS"
+    );
+    assert!(
+        fixture.watcher_cancel.load(Ordering::Acquire),
+        "an in-flight relay emission must no longer veto the committed watcher cancel"
+    );
+    assert!(!shared.tmux_watchers.contains_key(&channel));
+    assert!(fixture.token.cancelled.load(Ordering::Relaxed));
+}
+
+/// #5071 T3-A1 fixed mutation gates (a), (b) and (e) for the canceling helper.
+/// Both races land between the pin capture and the registry CAS, and both must
+/// leave every watcher uncancelled and the turn intact:
+///   * the registry slot is replaced (stale cancel pointer), and
+///   * the session is respawned under `Enforce` (fresh `.spawn_nonce`).
+/// Restoring the pre-A1 store inside the flock callback, or dropping the nonce
+/// conjunct from the CAS, fails here.
+#[cfg(unix)]
+#[tokio::test]
+async fn dead_frontier_registry_cas_fails_closed_on_replacement_and_respawn() {
+    let _guard = auto_heal_test_lock().lock().await;
+    let (_root_guard, root_dir) = isolated_agentdesk_root();
+    let provider = ProviderKind::Codex;
+
+    // Race 1: a replacement watcher claims the slot before the CAS.
+    clear_auto_heal_attempts_for_tests();
+    let (registry, shared) = registry_with_shared(provider.clone()).await;
+    let channel = ChannelId::new(4_030_006);
+    let tmux = "AgentDesk-codex-4030-post-gate-replacement";
+    let fixture = dead_frontier_fixture(
+        &shared,
+        &root_dir,
+        &provider,
+        channel,
+        MessageId::new(4_030_106),
+        tmux,
+        "post-gate-replacement",
+    )
+    .await;
+    let (fresh, fresh_cancel) = test_watcher_handle(tmux, &fixture.output_path);
+    fresh.last_heartbeat_ts_ms.store(1, Ordering::Release);
+    let hook_shared = Arc::clone(&shared);
+    let fresh_slot = std::sync::Mutex::new(Some(fresh));
+    let hook = set_destructive_cancel_post_gate_hook_for_tests(Arc::new(move || {
+        if let Some(fresh) = fresh_slot
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take()
+        {
+            hook_shared.tmux_watchers.insert(channel, fresh);
+        }
+    }));
+    let _ = apply_relay_recovery_decision(
+        &registry,
+        &shared,
+        &provider,
+        &fixture.decision,
+        None,
+        RelayRecoveryApplySource::ProbeAutoHeal,
+    )
+    .await;
+    drop(hook);
+    assert!(
+        !fixture.watcher_cancel.load(Ordering::Acquire),
+        "the pinned watcher must stay uncancelled once its registry slot was replaced"
+    );
+    assert!(
+        !fresh_cancel.load(Ordering::Acquire),
+        "the replacement watcher must not inherit the stale pin's destruction"
+    );
     assert!(shared.tmux_watchers.contains_key(&channel));
-    assert!(!token.cancelled.load(Ordering::Relaxed));
+    assert!(!fixture.token.cancelled.load(Ordering::Relaxed));
     assert!(super::super::inflight::load_inflight_state(&provider, channel.get()).is_some());
-    assert!(shared.relay_emission_in_flight(channel));
+
+    // Race 2: the same tmux NAME is respawned with a fresh nonce under Enforce.
+    clear_auto_heal_attempts_for_tests();
+    let _mode = super::super::tmux_watcher_registry::set_execution_identity_mode_for_tests(
+        crate::config::ExecutionIdentityMode::Enforce,
+    );
+    let (registry, shared) = registry_with_shared(provider.clone()).await;
+    let channel = ChannelId::new(4_030_007);
+    let tmux = "AgentDesk-codex-4030-post-gate-respawn";
+    let fixture = dead_frontier_fixture(
+        &shared,
+        &root_dir,
+        &provider,
+        channel,
+        MessageId::new(4_030_107),
+        tmux,
+        "post-gate-respawn",
+    )
+    .await;
+    let first_nonce = super::super::write_spawn_nonce(tmux).expect("first spawn nonce");
+    let _hook = set_destructive_cancel_post_gate_hook_for_tests(Arc::new(move || {
+        let respawned = super::super::write_spawn_nonce(tmux).expect("respawn nonce");
+        assert_ne!(first_nonce, respawned, "each spawn mints a fresh nonce");
+    }));
+    let _ = apply_relay_recovery_decision(
+        &registry,
+        &shared,
+        &provider,
+        &fixture.decision,
+        None,
+        RelayRecoveryApplySource::ProbeAutoHeal,
+    )
+    .await;
+    assert!(
+        !fixture.watcher_cancel.load(Ordering::Acquire),
+        "Enforce must refuse to cancel across a respawn of the same tmux session name"
+    );
+    assert!(shared.tmux_watchers.contains_key(&channel));
+    assert!(!fixture.token.cancelled.load(Ordering::Relaxed));
+    assert!(super::super::inflight::load_inflight_state(&provider, channel.get()).is_some());
 }
 
 #[tokio::test]

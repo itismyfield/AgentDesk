@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::config::ExecutionIdentityMode;
+
 /// Shared state for the Discord bot (multi-channel: each channel has its own session)
 /// Handle for a background tmux output watcher
 pub(in crate::services::discord) struct TmuxWatcherHandle {
@@ -59,6 +61,175 @@ pub(in crate::services::discord) fn lock_tmux_watcher_registry() -> TmuxWatcherR
     TMUX_WATCHER_REGISTRY_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner())
+}
+
+/// The `.spawn_nonce` read model lives under `super::tmux`, which is
+/// `cfg(unix)`; this module is not.
+#[cfg(unix)]
+use super::tmux::execution_identity::{
+    capture_spawn_nonce as capture_session_spawn_nonce, destruction_permitted_under_identity,
+};
+
+/// A platform that cannot host a tmux session has no marker to capture, so the
+/// comparison is permanently `Unknown` there — the same "absence of evidence is
+/// not proof" answer a missing marker gets on unix, and only `Enforce` turns it
+/// into a deny. There is no counter to move because there is no marker store.
+#[cfg(not(unix))]
+fn capture_session_spawn_nonce(_tmux_session_name: &str) -> Option<String> {
+    None
+}
+
+#[cfg(not(unix))]
+fn destruction_permitted_under_identity(
+    mode: ExecutionIdentityMode,
+    _site: &'static str,
+    _tmux_session_name: &str,
+    _captured_spawn_nonce: Option<&str>,
+) -> bool {
+    !mode.denies_on_incarnation_mismatch()
+}
+
+#[cfg(test)]
+static EXECUTION_IDENTITY_MODE_OVERRIDE: std::sync::Mutex<Option<ExecutionIdentityMode>> =
+    std::sync::Mutex::new(None);
+
+/// The live rollout stage for the #5071 T3 identity fence.
+///
+/// Read per decision through `config_live_reload::current()` so an
+/// `agentdesk.yaml` edit applies without a restart, and `Legacy` before the boot
+/// config is installed. `Legacy` is also the compiled-in default, so an
+/// untouched deployment keeps the pre-existing pointer/output CAS verbatim.
+pub(in crate::services::discord) fn execution_identity_mode() -> ExecutionIdentityMode {
+    #[cfg(test)]
+    if let Some(mode) = *EXECUTION_IDENTITY_MODE_OVERRIDE
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+    {
+        return mode;
+    }
+    crate::config_live_reload::current()
+        .map(|config| config.runtime.execution_identity_mode)
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) struct ExecutionIdentityModeGuard {
+    previous: Option<ExecutionIdentityMode>,
+}
+
+#[cfg(test)]
+impl Drop for ExecutionIdentityModeGuard {
+    fn drop(&mut self) {
+        *EXECUTION_IDENTITY_MODE_OVERRIDE
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = self.previous.take();
+    }
+}
+
+/// Override [`execution_identity_mode`] for the lifetime of the returned guard.
+/// Process-global, so callers must already hold whichever test lock serializes
+/// their suite.
+#[cfg(test)]
+pub(in crate::services::discord) fn set_execution_identity_mode_for_tests(
+    mode: ExecutionIdentityMode,
+) -> ExecutionIdentityModeGuard {
+    let previous = EXECUTION_IDENTITY_MODE_OVERRIDE
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .replace(mode);
+    ExecutionIdentityModeGuard { previous }
+}
+
+/// #5071 T3-A1: the execution-identity conjunct the two H6 registry CAS sites
+/// add on top of the existing `(channel, session, output_path, cancel pointer)`
+/// comparison.
+///
+/// The nonce is captured once at decision time and re-read inside the registry
+/// lock immediately before the removal, so the re-read cannot interleave with
+/// another registry mutation. The spawn path does not take that lock, so a
+/// marker rename racing the re-read is still possible; the design records that
+/// as a non-guarantee rather than papering over it. This is an identity
+/// re-check, not an emission lease.
+pub(in crate::services::discord) struct WatcherIdentityFence {
+    mode: ExecutionIdentityMode,
+    /// Static label the observation counters and logs attribute this to.
+    site: &'static str,
+    tmux_session_name: String,
+    captured_spawn_nonce: Option<String>,
+}
+
+impl WatcherIdentityFence {
+    pub(in crate::services::discord) fn capture(
+        mode: ExecutionIdentityMode,
+        site: &'static str,
+        tmux_session_name: &str,
+    ) -> Self {
+        Self {
+            mode,
+            site,
+            tmux_session_name: tmux_session_name.to_string(),
+            captured_spawn_nonce: capture_session_spawn_nonce(tmux_session_name),
+        }
+    }
+
+    fn permits_destruction(&self) -> bool {
+        destruction_permitted_under_identity(
+            self.mode,
+            self.site,
+            &self.tmux_session_name,
+            self.captured_spawn_nonce.as_deref(),
+        )
+    }
+}
+
+/// A registry view whose two CAS removals also require the [`WatcherIdentityFence`]
+/// conjunct.
+///
+/// The fenced methods keep the SAME names as their unfenced originals on
+/// purpose: the #5071 T3-A4 destructive-call-site ratchet counts those names
+/// lexically, so routing a destructive removal through this view must not make
+/// the call site disappear from the inventory.
+pub(in crate::services::discord) struct IdentityFencedRegistry<'a> {
+    registry: &'a TmuxWatcherRegistry,
+    fence: WatcherIdentityFence,
+}
+
+impl IdentityFencedRegistry<'_> {
+    /// Only REMOVES — like the unfenced original it never writes `cancel`, so
+    /// the caller stores it after a `Some` return.
+    pub(in crate::services::discord) fn remove_tmux_session_if_current(
+        &self,
+        tmux_session_name: &str,
+        expected_cancel: &Arc<std::sync::atomic::AtomicBool>,
+    ) -> Option<(ChannelId, TmuxWatcherHandle)> {
+        let guard = lock_tmux_watcher_registry();
+        self.registry.remove_tmux_session_if_current_locked(
+            &guard,
+            tmux_session_name,
+            expected_cancel,
+            Some(&self.fence),
+        )
+    }
+
+    /// Cancels internally, so a `true` return already means the removed
+    /// handle's `cancel` was stored — and a `false` return means nothing was.
+    pub(in crate::services::discord) fn cancel_and_remove_channel_if_current(
+        &self,
+        channel_id: &ChannelId,
+        expected_tmux_session_name: &str,
+        expected_output_path: &str,
+        expected_cancel: &Arc<std::sync::atomic::AtomicBool>,
+    ) -> bool {
+        let guard = lock_tmux_watcher_registry();
+        self.registry.cancel_and_remove_channel_if_current_locked(
+            &guard,
+            channel_id,
+            expected_tmux_session_name,
+            expected_output_path,
+            expected_cancel,
+            Some(&self.fence),
+        )
+    }
 }
 
 /// Registry for active tmux output watchers.
@@ -205,6 +376,20 @@ impl TmuxWatcherRegistry {
         expected_cancel: &Arc<std::sync::atomic::AtomicBool>,
     ) -> Option<(ChannelId, TmuxWatcherHandle)> {
         let guard = lock_tmux_watcher_registry();
+        self.remove_tmux_session_if_current_locked(&guard, tmux_session_name, expected_cancel, None)
+    }
+
+    /// Shared core for the fenced and unfenced spellings. `identity` is the
+    /// #5071 T3-A1 conjunct: it is evaluated INSIDE the registry lock and only
+    /// after the cancel-pointer CAS already matched, so a fence miss and a
+    /// pointer miss produce the same answer — nothing removed, nothing stored.
+    fn remove_tmux_session_if_current_locked(
+        &self,
+        guard: &TmuxWatcherRegistryGuard,
+        tmux_session_name: &str,
+        expected_cancel: &Arc<std::sync::atomic::AtomicBool>,
+        identity: Option<&WatcherIdentityFence>,
+    ) -> Option<(ChannelId, TmuxWatcherHandle)> {
         let is_current = self
             .by_tmux_session
             .get(tmux_session_name)
@@ -212,7 +397,10 @@ impl TmuxWatcherRegistry {
         if !is_current {
             return None;
         }
-        self.remove_tmux_session_locked(&guard, tmux_session_name)
+        if identity.is_some_and(|identity| !identity.permits_destruction()) {
+            return None;
+        }
+        self.remove_tmux_session_locked(guard, tmux_session_name)
     }
 
     pub(in crate::services::discord) fn cancel_and_remove_channel_if_current(
@@ -223,6 +411,30 @@ impl TmuxWatcherRegistry {
         expected_cancel: &Arc<std::sync::atomic::AtomicBool>,
     ) -> bool {
         let guard = lock_tmux_watcher_registry();
+        self.cancel_and_remove_channel_if_current_locked(
+            &guard,
+            channel_id,
+            expected_tmux_session_name,
+            expected_output_path,
+            expected_cancel,
+            None,
+        )
+    }
+
+    /// Shared core for the fenced and unfenced spellings. The `cancel` store
+    /// happens only after every conjunct — channel binding, session name,
+    /// output path, cancel pointer, and the optional #5071 T3-A1 identity
+    /// re-read — has matched and the entry has been removed, so a `false`
+    /// return leaves the watcher both registered and uncancelled.
+    fn cancel_and_remove_channel_if_current_locked(
+        &self,
+        guard: &TmuxWatcherRegistryGuard,
+        channel_id: &ChannelId,
+        expected_tmux_session_name: &str,
+        expected_output_path: &str,
+        expected_cancel: &Arc<std::sync::atomic::AtomicBool>,
+        identity: Option<&WatcherIdentityFence>,
+    ) -> bool {
         let Some(tmux_session_name) = self
             .tmux_session_by_channel
             .get(channel_id)
@@ -243,13 +455,26 @@ impl TmuxWatcherRegistry {
         if !matches_current {
             return false;
         }
-        let Some((_, handle)) = self.remove_locked(&guard, channel_id) else {
+        if identity.is_some_and(|identity| !identity.permits_destruction()) {
+            return false;
+        }
+        let Some((_, handle)) = self.remove_locked(guard, channel_id) else {
             return false;
         };
         handle
             .cancel
             .store(true, std::sync::atomic::Ordering::Relaxed);
         true
+    }
+
+    /// Bind an identity fence to the next CAS removal. The returned view spells
+    /// the two removal helpers with their original names so the destructive
+    /// call-site ratchet keeps counting the caller.
+    pub(in crate::services::discord) fn under_identity_fence(
+        &self,
+        fence: WatcherIdentityFence,
+    ) -> IdentityFencedRegistry<'_> {
+        IdentityFencedRegistry { registry: self, fence }
     }
 
     pub(in crate::services::discord) fn iter(&self) -> dashmap::iter::Iter<'_, String, TmuxWatcherHandle> {
