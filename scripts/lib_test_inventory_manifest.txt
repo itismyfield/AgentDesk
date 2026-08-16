@@ -2458,6 +2458,7 @@ services::discord::health::recovery::stall_watchdog_auto_heal_tests::idle_tmux_s
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::idle_tmux_stale_turn_tail_recheck_preserves_mailbox_after_precheck_passed
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_capture_advance_has_defense_in_depth_suppression_pg
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_flat_capture_pages_genuine_stall_pg
+services::discord::health::recovery::stall_watchdog_auto_heal_tests::reuse_no_op_reattach_tick_still_skips_the_destructive_branches_5396
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::stall_watchdog_cleanup_releases_residual_orphan_pending_token
 services::discord::health::recovery::stall_watchdog_pure_tests::chunk_ledger_growing_response_never_lowers_confirmed_prefix
 services::discord::health::recovery::stall_watchdog_pure_tests::chunk_ledger_ignores_stale_identity_or_changed_confirmed_chunk
@@ -2499,12 +2500,13 @@ services::discord::health::relay_auto_heal::tests::frontier_reset_rearms_capped_
 services::discord::health::relay_auto_heal::tests::redrive_actions_and_cap_alarm_continue_while_producer_is_vouched_4615
 services::discord::health::relay_auto_heal::tests::redrive_cap_resets_only_for_progress_identity_or_watcher_4299
 services::discord::health::relay_auto_heal::tests::redrive_frozen_backlog_backs_off_and_caps_once_4299
-services::discord::health::relay_auto_heal::tests::redrive_non_applied_reattach_response_cools_down_instead_of_committing_5021
 services::discord::health::relay_auto_heal::tests::redrive_nudge_requires_matching_output_path
 services::discord::health::relay_auto_heal::tests::redrive_nudge_skips_healthy_advancing_backlog
 services::discord::health::relay_auto_heal::tests::redrive_nudge_skips_if_live_frontier_advanced_after_snapshot
 services::discord::health::relay_auto_heal::tests::redrive_nudge_yields_while_relay_emission_in_flight
 services::discord::health::relay_auto_heal::tests::redrive_owner_shield_freezes_first_episode_snapshot_4299
+services::discord::health::relay_auto_heal::tests::redrive_planner_refused_reattach_response_cools_down_instead_of_committing
+services::discord::health::relay_auto_heal::tests::redrive_reuse_no_op_reattach_response_cools_down_instead_of_committing_5021
 services::discord::health::relay_auto_heal::tests::redrive_self_reattach_identity_rejects_unrelated_synthetic_turns_4299
 services::discord::health::relay_auto_heal::tests::redrive_stale_frontier_token_cannot_nudge_after_reset_4181
 services::discord::health::relay_dead_reattach::tests::relay_dead_reattach_no_longer_fences_on_live_relay_emission
