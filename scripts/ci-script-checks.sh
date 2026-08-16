@@ -3,13 +3,37 @@ set -euo pipefail
 
 PYTHON="${PYTHON:-python3}"
 
+python_probe_error() {
+  local invocation="$1"
+  local expected="$2"
+  local actual="$3"
+
+  printf "ERROR: '%s' failed the Python interpreter identity check for the %s invocation.\n" \
+    "$PYTHON" "$invocation" >&2
+  printf "Expected exact stdout marker '%s'; received %q.\n" "$expected" "$actual" >&2
+  echo "AgentDesk script checks require a real Python 3.11+ interpreter for stdin, file, and -m invocations." >&2
+  echo "Set PYTHON=/path/to/python3.11+ or put python3.11+ first on PATH." >&2
+}
+
+require_python_probe_marker() {
+  local invocation="$1"
+  local expected="$2"
+  local actual="$3"
+
+  if [ "$actual" != "$expected" ]; then
+    python_probe_error "$invocation" "$expected" "$actual"
+    return 1
+  fi
+}
+
 if ! command -v "$PYTHON" >/dev/null 2>&1; then
   echo "ERROR: AgentDesk script checks require Python 3.11+, but '$PYTHON' was not found." >&2
   echo "Set PYTHON=/path/to/python3.11+ or put python3.11+ first on PATH." >&2
   exit 1
 fi
 
-if ! "$PYTHON" - <<'PY'
+stdin_probe_marker="agentdesk-python-probe:stdin"
+if ! stdin_probe_output="$("$PYTHON" - <<'PY'
 import platform
 import sys
 
@@ -24,10 +48,55 @@ if sys.version_info < (3, 11):
         file=sys.stderr,
     )
     raise SystemExit(1)
+print("agentdesk-python-probe:stdin")
 PY
-then
+)"; then
+  python_probe_error "stdin (-)" "$stdin_probe_marker" "<process exited non-zero>"
   exit 1
 fi
+require_python_probe_marker "stdin (-)" "$stdin_probe_marker" "$stdin_probe_output"
+
+# The aggregate uses both file and `-m` Python entry points. Verify each shape
+# emits a marker from executed Python code. This catches rc-only no-op stubs and
+# wrappers that do not preserve every invocation shape; the protected workflow
+# execution contract separately prevents injecting a more elaborate wrapper.
+python_probe_dir=""
+cleanup_python_probe() {
+  if [ -n "$python_probe_dir" ]; then
+    rm -rf -- "$python_probe_dir"
+    python_probe_dir=""
+  fi
+}
+trap cleanup_python_probe EXIT
+python_probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-python-probe.XXXXXX")"
+cat > "$python_probe_dir/agentdesk_python_probe.py" <<'PY'
+import sys
+
+if sys.version_info < (3, 11):
+    raise SystemExit(1)
+if len(sys.argv) != 2 or sys.argv[1] not in {"file", "module"}:
+    raise SystemExit(1)
+print(f"agentdesk-python-probe:{sys.argv[1]}")
+PY
+
+file_probe_marker="agentdesk-python-probe:file"
+if ! file_probe_output="$("$PYTHON" "$python_probe_dir/agentdesk_python_probe.py" file)"; then
+  python_probe_error "file" "$file_probe_marker" "<process exited non-zero>"
+  exit 1
+fi
+require_python_probe_marker "file" "$file_probe_marker" "$file_probe_output"
+
+module_probe_marker="agentdesk-python-probe:module"
+if ! module_probe_output="$(
+  cd "$python_probe_dir"
+  "$PYTHON" -m agentdesk_python_probe module
+)"; then
+  python_probe_error "-m module" "$module_probe_marker" "<process exited non-zero>"
+  exit 1
+fi
+require_python_probe_marker "-m module" "$module_probe_marker" "$module_probe_output"
+cleanup_python_probe
+trap - EXIT
 
 if command -v shellcheck >/dev/null 2>&1; then
   echo "=== shellcheck scripts ==="
