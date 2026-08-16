@@ -13,9 +13,16 @@
 //! NOT folded in here: the T3 read model is `(tmux_session_name, spawn_nonce?)`
 //! only.
 //!
-//! Because T3-A0 lands with no destructive consumer, the items below have no
-//! production caller yet; `ExecutionIdentityMode::Enforce` therefore changes
-//! nothing at runtime. T3-A1 is the slice that converts real call sites.
+//! T3-A0 landed this model with no destructive consumer. T3-A1 wires the first
+//! one: [`destruction_permitted_under_identity`] is the single decision point
+//! the two H6 watcher-registry CAS sites consult, so `Enforce` now changes
+//! runtime behaviour — but only on those two automatic paths, and only by
+//! REFUSING. Nothing here cancels, kills, or removes anything itself.
+//!
+//! What this is NOT: an emission lease. A `Match` says the tmux session name
+//! still denotes the spawn that was captured; it says nothing about a terminal
+//! delivery the SAME incarnation may have in flight, and there is no shared lock
+//! between the marker read and a concurrent spawn's rename.
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,7 +37,6 @@ use super::tmux_session_files::read_spawn_nonce;
 /// — the same three cases `read_spawn_nonce` folds together. A `None` is an
 /// absence of evidence and is never widened into a wildcard match; see
 /// [`compare_spawn_nonce`].
-#[allow(dead_code)] // #5071 T3-A0: read model lands before its T3-A1 call sites.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) struct SessionIncarnationRef {
     tmux_session_name: String,
@@ -57,7 +63,6 @@ pub(in crate::services::discord) enum IncarnationObservation {
 /// being `None` yields `Unknown`, so a missing marker can never be mistaken for
 /// proof that the captured spawn is still the live one — that widening is
 /// exactly the `#{name}#0` collision `.spawn_nonce` was introduced to avoid.
-#[allow(dead_code)] // #5071 T3-A0: read model lands before its T3-A1 call sites.
 pub(in crate::services::discord) fn compare_spawn_nonce(
     captured: Option<&str>,
     current: Option<&str>,
@@ -69,7 +74,6 @@ pub(in crate::services::discord) fn compare_spawn_nonce(
     }
 }
 
-#[allow(dead_code)] // #5071 T3-A0: read model lands before its T3-A1 call sites.
 impl SessionIncarnationRef {
     /// Capture the identity of `tmux_session_name` by reading the existing
     /// `.spawn_nonce` marker once. Reading is the whole operation: no marker is
@@ -142,7 +146,6 @@ fn counters() -> &'static IncarnationObservationCounters {
 /// `Legacy` records nothing, matching the switch semantics where the nonce is
 /// not consulted at all. `Observe` and `Enforce` both count; neither decides
 /// anything here, because this module has no destructive branch to gate.
-#[allow(dead_code)] // #5071 T3-A0: read model lands before its T3-A1 call sites.
 pub(in crate::services::discord) fn record_incarnation_observation(
     mode: ExecutionIdentityMode,
     site: &'static str,
@@ -182,6 +185,46 @@ pub(in crate::services::discord) fn record_incarnation_observation(
             );
         }
     }
+}
+
+/// Capture the live `.spawn_nonce` of `tmux_session_name` for a later re-read.
+///
+/// Reading is the whole operation, so capturing is safe on any path. `None`
+/// means the marker is missing, unreadable, or empty — an absence of evidence
+/// that [`compare_spawn_nonce`] never widens into a match.
+pub(in crate::services::discord) fn capture_spawn_nonce(tmux_session_name: &str) -> Option<String> {
+    SessionIncarnationRef::capture(tmux_session_name)
+        .spawn_nonce()
+        .map(str::to_string)
+}
+
+/// Re-read `tmux_session_name`'s marker, record the captured-vs-live comparison,
+/// and answer whether a destructive registry removal may proceed under `mode`.
+///
+/// This is the #5071 T3-A1 decision point, and the only one. `Enforce` requires
+/// a readable nonce on BOTH sides that compares equal, so a missing marker and a
+/// changed marker are the same answer: deny (T3-R2). `Legacy` and `Observe`
+/// always permit and differ only in whether the outcome moves a counter, which
+/// keeps the pre-existing `(session, output_path, cancel pointer)` CAS as the
+/// whole check outside `Enforce`.
+///
+/// The re-read runs inside the watcher-registry lock at both call sites, which
+/// orders it against other registry mutations. It is NOT ordered against a
+/// concurrent spawn's marker rename — no lock is shared with the spawn path — so
+/// this re-check is not a linearizable fence and not an emission lease.
+pub(in crate::services::discord) fn destruction_permitted_under_identity(
+    mode: ExecutionIdentityMode,
+    site: &'static str,
+    tmux_session_name: &str,
+    captured_spawn_nonce: Option<&str>,
+) -> bool {
+    let captured = SessionIncarnationRef::from_parts(
+        tmux_session_name,
+        captured_spawn_nonce.map(str::to_string),
+    );
+    let observed = captured.observe_current();
+    record_incarnation_observation(mode, site, &captured, observed);
+    !mode.denies_on_incarnation_mismatch() || observed == IncarnationObservation::Match
 }
 
 #[cfg(test)]
@@ -269,9 +312,12 @@ mod tests {
 
     /// `Legacy` does not consult the nonce, so it must not move any counter;
     /// `Observe` and `Enforce` both record. Counters are process-global, so this
-    /// single test owns all three of them and asserts deltas.
+    /// single test owns all three of them and asserts deltas — and it holds the
+    /// shared env guard so the other counter-moving tests in this module cannot
+    /// interleave.
     #[test]
     fn observation_counters_record_only_outside_legacy_mode() {
+        let (_root, _env) = isolated_runtime_root();
         let session_ref = SessionIncarnationRef::from_parts("counter-probe", Some("a1b2".into()));
         let (matched_before, mismatched_before, unknown_before) = observation_counts();
 
@@ -316,10 +362,50 @@ mod tests {
         );
     }
 
-    /// T3-A0 lands the read model with no destructive consumer. The compiled-in
-    /// default stays `Legacy`, so an untouched config observes nothing, and
-    /// `Enforce` is the only mode that may ever deny — which it cannot do in
-    /// this slice because no call site reads the predicate yet.
+    /// #5071 T3-A1: `destruction_permitted_under_identity` is the ONLY place a
+    /// nonce turns into a refusal, so the whole mode x observation matrix is
+    /// pinned here. Making the `Enforce` arm permit a `Mismatch`/`Unknown`, or
+    /// making `Legacy`/`Observe` deny, must fail this test.
+    #[test]
+    fn only_enforce_denies_and_only_on_a_non_matching_incarnation() {
+        let (_root, _env) = isolated_runtime_root();
+        let live_session = unique_session("gate-matrix");
+        let live = write_spawn_nonce(&live_session).expect("live spawn nonce");
+        let absent_session = unique_session("gate-matrix-absent");
+        assert_eq!(capture_spawn_nonce(&absent_session), None);
+
+        // (session, captured nonce, shape) x mode -> permitted?
+        for (session, captured, shape, matches) in [
+            (&live_session, Some(live.as_str()), "match", true),
+            (&live_session, Some("stale-nonce"), "mismatch", false),
+            (&live_session, None, "captured-absent", false),
+            (&absent_session, Some(live.as_str()), "live-absent", false),
+        ] {
+            for mode in [
+                ExecutionIdentityMode::Legacy,
+                ExecutionIdentityMode::Observe,
+            ] {
+                assert!(
+                    destruction_permitted_under_identity(mode, "t3a1_test", session, captured),
+                    "{mode:?} never denies ({shape})"
+                );
+            }
+            assert_eq!(
+                destruction_permitted_under_identity(
+                    ExecutionIdentityMode::Enforce,
+                    "t3a1_test",
+                    session,
+                    captured,
+                ),
+                matches,
+                "Enforce permits only an exact captured/live nonce match ({shape})"
+            );
+        }
+    }
+
+    /// T3-A0 landed the read model with no destructive consumer. The compiled-in
+    /// default stays `Legacy` after T3-A1 wires the first one, so an untouched
+    /// config still reads no nonce and records no observation.
     #[test]
     fn execution_identity_modes_keep_a0_non_destructive() {
         assert_eq!(

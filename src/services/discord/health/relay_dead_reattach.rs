@@ -11,7 +11,9 @@ use crate::services::provider::ProviderKind;
 #[cfg(test)]
 #[derive(Clone, Copy)]
 enum ReattachApplyHookPoint {
-    BeforeFenceRead,
+    /// Fires once this tick has decided the channel is a reattach candidate,
+    /// immediately before the recovery call. #5071 T3-A1 removed the sibling
+    /// `BeforeFenceRead` point together with the #5067 read it existed to race.
     CandidateAccepted,
 }
 #[cfg(test)]
@@ -31,16 +33,27 @@ fn run_reattach_apply_hook_for_tests(point: ReattachApplyHookPoint) {
     }
 }
 
+/// #5071 T3-A1 retired the #5067 `relay_emission_in_flight` conjunct that used
+/// to lead this predicate, together with its sibling read in
+/// `relay_recovery/apply.rs` — the same origin commit, the same call chain. The
+/// reattach this lane requests is itself non-destructive, and the one branch
+/// downstream that destroys under the retired fence's old cover — the
+/// dead-frontier watcher cancel in `relay_recovery::apply` — carries the
+/// registry identity CAS in its place. That CAS is not an emission lease, so the
+/// same-incarnation emission race stays a declared non-guarantee.
+///
+/// That replacement covers the dead-frontier branch and nothing else in this
+/// lane. When the reattach instead rebinds an existing claim,
+/// `watchers::lifecycle::claims` removes through `remove_tmux_session_locked`,
+/// which carries no identity conjunct and is left to T5.
 fn should_reattach_relay_dead_watcher(
     snapshot: &WatcherStateSnapshot,
     channel_id: ChannelId,
-    relay_emission_in_flight: bool,
     latest_runtime_activity_unix_nanos: i64,
     now_unix_secs: i64,
     boot_unix_secs: i64,
 ) -> bool {
-    if relay_emission_in_flight
-        || snapshot.relay_stall_state != RelayStallState::TmuxAliveRelayDead
+    if snapshot.relay_stall_state != RelayStallState::TmuxAliveRelayDead
         || !snapshot.attached
         || snapshot.watcher_owner_channel_id != Some(channel_id.get())
         || snapshot.tmux_session_alive != Some(true)
@@ -83,9 +96,6 @@ pub(super) async fn try_apply(
     snapshot: &WatcherStateSnapshot,
     now_unix_secs: i64,
 ) -> bool {
-    #[cfg(test)]
-    run_reattach_apply_hook_for_tests(ReattachApplyHookPoint::BeforeFenceRead);
-    let relay_emission_in_flight = shared.relay_emission_in_flight(channel_id);
     let Some(latest_activity_unix_nanos) = snapshot
         .tmux_session
         .as_deref()
@@ -96,7 +106,6 @@ pub(super) async fn try_apply(
     if !should_reattach_relay_dead_watcher(
         snapshot,
         channel_id,
-        relay_emission_in_flight,
         latest_activity_unix_nanos,
         now_unix_secs,
         registry.started_at_unix(),
@@ -268,8 +277,15 @@ mod tests {
         assert!(!reattach_lane_handled_tick(false, None));
     }
 
+    /// #5071 T3-A1 fixed mutation gate (c), fence site 1 of 2: the #5067
+    /// in-flight emission read is GONE from this lane. Re-adding
+    /// `shared.relay_emission_in_flight(..)` here — as a `try_apply` early
+    /// return or as a `should_reattach_relay_dead_watcher` conjunct — makes this
+    /// test fail, because the candidate must still be accepted while the relay
+    /// slot is held. The sibling site is pinned by
+    /// `relay_recovery::tests::post_gate_relay_emission_no_longer_blocks_dead_frontier_watcher_cancel`.
     #[tokio::test]
-    async fn relay_dead_reattach_try_apply_reads_live_emission_fence() {
+    async fn relay_dead_reattach_no_longer_fences_on_live_relay_emission() {
         let now = chrono::Utc::now().timestamp();
         let stale = local_string(now - (recovery::STALL_WATCHDOG_THRESHOLD_SECS as i64) - 1);
         let channel = ChannelId::new(50_220_004);
@@ -277,40 +293,42 @@ mod tests {
         shared
             .tmux_relay_coord(channel)
             .relay_slot
-            .store(0, Ordering::Release);
-        assert!(!shared.relay_emission_in_flight(channel));
-        let hook_shared = Arc::clone(&shared);
+            .store(1, Ordering::Release);
+        assert!(shared.relay_emission_in_flight(channel));
+        let accepted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook_accepted = Arc::clone(&accepted);
         let _hook = set_reattach_hook(Arc::new(move |point| match point {
-            ReattachApplyHookPoint::BeforeFenceRead => hook_shared
-                .tmux_relay_coord(channel)
-                .relay_slot
-                .store(1, Ordering::Release),
             ReattachApplyHookPoint::CandidateAccepted => {
-                panic!("candidate passed despite an in-flight relay emission")
+                hook_accepted.store(true, Ordering::Release)
             }
         }));
         let mut registry = HealthRegistry::new();
         registry.started_at_unix = now - (recovery::STALL_WATCHDOG_THRESHOLD_SECS as i64) - 100;
 
-        assert!(
-            !try_apply(
-                &registry,
-                shared,
-                &ProviderKind::Codex,
-                channel,
-                &WatcherStateSnapshot {
+        // The recovery call that follows resolves no snapshot for this
+        // unregistered provider, so `try_apply` still returns false; the hook is
+        // what proves the candidate got past the retired fence.
+        let _ = try_apply(
+            &registry,
+            shared,
+            &ProviderKind::Codex,
+            channel,
+            &WatcherStateSnapshot {
+                watcher_owner_channel_id: Some(channel.get()),
+                relay_health: RelayHealthSnapshot {
+                    channel_id: channel.get(),
                     watcher_owner_channel_id: Some(channel.get()),
-                    relay_health: RelayHealthSnapshot {
-                        channel_id: channel.get(),
-                        watcher_owner_channel_id: Some(channel.get()),
-                        ..snapshot(&stale).relay_health
-                    },
-                    ..snapshot(&stale)
+                    ..snapshot(&stale).relay_health
                 },
-                now,
-            )
-            .await,
-            "try_apply must re-read the production relay emission fence before reattaching"
+                ..snapshot(&stale)
+            },
+            now,
+        )
+        .await;
+
+        assert!(
+            accepted.load(Ordering::Acquire),
+            "an in-flight relay emission must no longer block the non-destructive reattach lane"
         );
     }
 
@@ -327,15 +345,6 @@ mod tests {
         assert!(should_reattach_relay_dead_watcher(
             &snapshot(&stale),
             ChannelId::new(42),
-            false,
-            stale_activity,
-            now,
-            boot,
-        ));
-        assert!(!should_reattach_relay_dead_watcher(
-            &snapshot(&stale),
-            ChannelId::new(42),
-            true,
             stale_activity,
             now,
             boot,
@@ -381,7 +390,6 @@ mod tests {
                 !should_reattach_relay_dead_watcher(
                     &candidate,
                     ChannelId::new(42),
-                    false,
                     activity,
                     now,
                     boot_unix_secs,
@@ -393,7 +401,6 @@ mod tests {
             should_reattach_relay_dead_watcher(
                 &snapshot(&stale),
                 ChannelId::new(42),
-                false,
                 fresh_activity,
                 now,
                 boot,
@@ -404,7 +411,6 @@ mod tests {
             should_reattach_relay_dead_watcher(
                 &advanced_frontier,
                 ChannelId::new(42),
-                false,
                 stale_activity,
                 now,
                 boot,
@@ -415,7 +421,6 @@ mod tests {
             should_reattach_relay_dead_watcher(
                 &fresh_outbound,
                 ChannelId::new(42),
-                false,
                 stale_activity,
                 now,
                 boot,

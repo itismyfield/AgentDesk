@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "3df6de3edab19035f9e717a025b21cdad46e6561",
+  "measured_at_sha": "3b3279774a49d20fddf2197a0d42e74b9e88a78f",
   "comment": "These counts are a growth-blocking baseline, not proof of safety.",
   "categories": {
     "tmux_kill": {
@@ -39,7 +39,7 @@
         "src/services/discord/inflight/destructive_commit.rs": 1,
         "src/services/discord/inflight_heartbeat_sweeper.rs": 1,
         "src/services/discord/recovery_engine/manual_rebind/mod.rs": 1,
-        "src/services/discord/relay_recovery/apply.rs": 2,
+        "src/services/discord/relay_recovery/apply.rs": 1,
         "src/services/discord/relay_recovery_auto_heal_confirm.rs": 1,
         "src/services/discord/runtime_bootstrap/gateway_lease.rs": 1,
         "src/services/discord/tmux_watcher/placeholder_reclaim.rs": 1,

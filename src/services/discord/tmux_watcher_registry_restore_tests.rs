@@ -213,3 +213,93 @@ fn tmux_session_is_stale_does_not_fold_cancel_flag_into_heartbeat() {
         "the same cancelled handle is still not relay-live; cancel is evaluated separately"
     );
 }
+
+// #5071 T3-A1 r2, from the r2 reviewer's counterexample.
+//
+// THIS TEST IS NOT A DEFECT REPRODUCTION. It fixes the DECLARED limit of the
+// value CAS documented on `WatcherIdentityFence`: nothing in the registry keeps
+// a row generation, so an A -> B -> A readmission that restores every pinned
+// value — the same owner channel, the same output path, the very same cancel
+// `Arc`, and an untouched `.spawn_nonce` — compares equal to a row that never
+// moved, and `Enforce` permits the removal. The assertions below are the CURRENT
+// behaviour on purpose. If this behaviour ever changes, the declaration on
+// `WatcherIdentityFence` must be rewritten in the same commit.
+//
+// Reachability is a separate question, answered in that same declaration: every
+// production registry writer mints a fresh cancel `Arc`, so only a test can hand
+// the registry back the pinned pointer.
+//
+// `cfg(unix)`: off unix there is no `.spawn_nonce` marker store, so the nonce
+// conjunct is permanently `Unknown` and `Enforce` denies unconditionally.
+#[cfg(unix)]
+#[test]
+fn value_cas_declared_non_guarantee_readmitted_identical_row_passes_enforce() {
+    use super::tmux_watcher_registry::WatcherIdentityFence;
+    use crate::config::ExecutionIdentityMode;
+
+    const SITE: &str = "t3a1_readmitted_row_declared_limit";
+
+    let root = tempfile::tempdir().expect("isolated runtime root");
+    let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+
+    let registry = TmuxWatcherRegistry::new();
+    let tmux = "AgentDesk-5071-t3a1-readmitted-row";
+    let owner = ChannelId::new(5_071_000_000_000_000_001);
+    let usurper = ChannelId::new(5_071_000_000_000_000_002);
+
+    // Row A, plus the single spawn whose marker the fence re-reads. The session
+    // is never respawned, so the nonce conjunct matches throughout and cannot be
+    // what decides this run.
+    let handle = live_watcher_handle(tmux);
+    let pinned_output_path = handle.output_path.clone();
+    let pinned_cancel = handle.cancel.clone();
+    registry.insert(owner, handle);
+    super::write_spawn_nonce(tmux).expect("spawn nonce");
+
+    // The complete T3-R2 pin, captured the way the TUI call site captures it.
+    let fence = WatcherIdentityFence::capture(ExecutionIdentityMode::Enforce, SITE, tmux)
+        .with_pinned_binding(owner, &pinned_output_path);
+
+    // A -> B: a genuinely different row takes the session key — another owner,
+    // another output path, its own cancel `Arc`.
+    let mut replacement = live_watcher_handle(tmux);
+    replacement.output_path = format!("/tmp/{tmux}-replacement.jsonl");
+    let replacement_cancel = replacement.cancel.clone();
+    registry.insert(usurper, replacement);
+    assert!(
+        !Arc::ptr_eq(&replacement_cancel, &pinned_cancel),
+        "the replacement must carry its own cancel pointer"
+    );
+
+    // Control: the fence really is enforcing at this point. Pinning B's pointer
+    // gets past `Arc::ptr_eq` and is then refused by the owner/output conjunct.
+    let control = WatcherIdentityFence::capture(ExecutionIdentityMode::Enforce, SITE, tmux)
+        .with_pinned_binding(owner, &pinned_output_path);
+    assert!(
+        registry
+            .under_identity_fence(control)
+            .remove_tmux_session_if_current(tmux, &replacement_cancel)
+            .is_none(),
+        "Enforce must refuse while the live row genuinely differs from the pin"
+    );
+
+    // B -> A: the row is restored value for value, including the SAME cancel
+    // `Arc`. No production writer does this; see `WatcherIdentityFence`.
+    let mut readmitted = live_watcher_handle(tmux);
+    readmitted.output_path = pinned_output_path.clone();
+    readmitted.cancel = pinned_cancel.clone();
+    registry.insert(owner, readmitted);
+
+    assert!(
+        registry
+            .under_identity_fence(fence)
+            .remove_tmux_session_if_current(tmux, &pinned_cancel)
+            .is_some(),
+        "declared limit: a value CAS cannot see the A -> B -> A replacement history"
+    );
+    assert_eq!(
+        registry.owner_channel_for_tmux_session(tmux),
+        None,
+        "the readmitted row is removed, which is exactly the limit being declared"
+    );
+}

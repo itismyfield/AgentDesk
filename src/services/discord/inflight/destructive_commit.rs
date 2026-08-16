@@ -15,9 +15,13 @@ pub(in crate::services::discord) enum DestructiveCancelPinField {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum DestructiveCancelCommitOutcome {
-    /// The pin matched and the callback actually signalled a watcher cancel.
+    /// The pin matched and the callback reported a pinned watcher to cancel.
+    /// Since #5071 T3-A1 neither caller cancels inside the callback, so this
+    /// records that the row pin held over a watcher-bearing turn — not that any
+    /// watcher was cancelled. The cancel happens afterwards, under the registry
+    /// CAS, and can still fail closed there.
     CommittedCancelled,
-    /// The pin matched, but no watcher existed for the callback to cancel.
+    /// The pin matched, but the caller had pinned no watcher to cancel.
     CommittedNoWatcher,
     PinMismatch {
         field: DestructiveCancelPinField,
@@ -30,6 +34,10 @@ pub(in crate::services::discord) enum DestructiveCancelCommitOutcome {
     IoError,
 }
 
+/// What the verified callback found. Since #5071 T3-A1 both callers report the
+/// SHAPE of the pin rather than an action they already took: the actual cancel
+/// store now happens after this function returns, inside the watcher-registry
+/// CAS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum CommitEvidence {
     CancelledWatcher,
@@ -45,9 +53,10 @@ pub(in crate::services::discord) struct CommitError {
 ///
 /// A `Committed*` outcome means only that the row matched the identity plus
 /// `save_generation` pin at that instant and the callback returned typed evidence.
-/// `CommittedCancelled` distinguishes an actual watcher cancel from
+/// `CommittedCancelled` distinguishes a watcher-bearing pin from
 /// `CommittedNoWatcher`. Neither means that destructive authority was acquired
-/// exclusively or durably.
+/// exclusively or durably, and since #5071 T3-A1 neither means a watcher was
+/// cancelled: both callers store `cancel` only after the later registry CAS.
 /// `updated_at` is checked as supplemental diagnostics, but its one-second local
 /// timestamp resolution means it is not an independent fencing dimension.
 ///
@@ -60,16 +69,18 @@ pub(in crate::services::discord) struct CommitError {
 /// - delivery/persist from the last watcher iteration before it observes cancel;
 /// - row recreation after destruction (#5012/E3);
 /// - durable observation of a partially degraded finalizer commit (E2/E6);
-/// - a committed in-memory cancel followed by registry CAS failure skips both the
-///   finalizer and row clear, leaving a partially destructive state;
 /// - the callback writes no durable intent/epoch, so a crash after a `Committed*` outcome
 ///   can erase the cancel decision before finalization starts;
 /// - the callback does not advance row version, so multiple serialized callers
 ///   may receive a `Committed*` outcome; downstream registry CAS and the finalizer's
 ///   exact-key ledger prevent duplicate finalization, not duplicate commit claims;
-/// - the cancel `Arc` is captured outside the flock and may name a replaced
-///   watcher incarnation; registry CAS then fails closed, but a `Committed*` outcome was
-///   already returned;
+/// - the cancel `Arc` and the #5071 T3-A1 spawn-nonce pin are both captured
+///   outside the flock and may name a replaced watcher incarnation; the registry
+///   CAS fails closed with nothing cancelled whenever one of those captured
+///   VALUES stops equalling the live row, but a value comparison cannot see a row
+///   that was replaced and then re-admitted with every pinned value restored
+///   (`tmux_watcher_registry::WatcherIdentityFence` declares that limit). Either
+///   way a `Committed*` outcome was already returned;
 /// - sidecar flock authority is host-local and does not fence another node's
 ///   watcher, inflight row, or mailbox authority;
 /// - the age/lifecycle-qualified stale-row sweep in `reconcile.rs` removes rows

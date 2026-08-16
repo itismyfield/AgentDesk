@@ -2506,7 +2506,7 @@ services::discord::health::relay_auto_heal::tests::redrive_nudge_yields_while_re
 services::discord::health::relay_auto_heal::tests::redrive_owner_shield_freezes_first_episode_snapshot_4299
 services::discord::health::relay_auto_heal::tests::redrive_self_reattach_identity_rejects_unrelated_synthetic_turns_4299
 services::discord::health::relay_auto_heal::tests::redrive_stale_frontier_token_cannot_nudge_after_reset_4181
-services::discord::health::relay_dead_reattach::tests::relay_dead_reattach_try_apply_reads_live_emission_fence
+services::discord::health::relay_dead_reattach::tests::relay_dead_reattach_no_longer_fences_on_live_relay_emission
 services::discord::health::relay_dead_reattach::tests::relay_dead_watcher_reattach_handles_dead_frontier_liveness
 services::discord::health::relay_dead_reattach::tests::reuse_no_op_keeps_the_relay_dead_tick_short_circuit
 services::discord::health::relay_progress::tests::backlog_grace_is_observation_not_producer_or_delivery_progress
@@ -3927,8 +3927,8 @@ services::discord::relay_recovery::tests::circuit_breaker_apply::first_reserved_
 services::discord::relay_recovery::tests::circuit_breaker_apply::zero_originating_message_with_a_distinct_mailbox_anchor_reaches_reattach_apply
 services::discord::relay_recovery::tests::dead_frontier_gate_pass_then_generation_mismatch_preserves_turn
 services::discord::relay_recovery::tests::dead_frontier_reattach_gets_one_bounded_retry_only
+services::discord::relay_recovery::tests::dead_frontier_registry_cas_fails_closed_on_replacement_and_respawn
 services::discord::relay_recovery::tests::dead_frontier_watcher_cancel_finalizes_owner_and_releases_inflight
-services::discord::relay_recovery::tests::destructive_cancel_stops_when_terminal_lease_starts_after_gate
 services::discord::relay_recovery::tests::dry_run_plans_safe_stale_thread_proof_cleanup
 services::discord::relay_recovery::tests::fresh_orphan_shape_is_guarded_by_admission_grace
 services::discord::relay_recovery::tests::fresh_watcher_heartbeat_blocks_destructive_cancel_before_reattach
@@ -3942,6 +3942,7 @@ services::discord::relay_recovery::tests::live_agentdesk_tmux_relay_dead_can_rea
 services::discord::relay_recovery::tests::live_agentdesk_tmux_relay_dead_without_mailbox_token_can_adopt_ownerless_inflight
 services::discord::relay_recovery::tests::old_orphan_shape_remains_auto_heal_eligible
 services::discord::relay_recovery::tests::orphan_token_live_evidence_and_agentdesk_tmux_stay_protected
+services::discord::relay_recovery::tests::post_gate_relay_emission_no_longer_blocks_dead_frontier_watcher_cancel
 services::discord::relay_recovery::tests::probe_auto_apply_is_rate_limited_per_channel_action
 services::discord::relay_recovery::tests::queue_blocked_allows_disk_backed_queue_to_reach_drain_helper
 services::discord::relay_recovery::tests::queue_blocked_does_not_drain_when_live_turn_evidence_remains
@@ -4714,6 +4715,7 @@ services::discord::tmux::buffer_offset_tests::advance_buffer_start_offset_tracks
 services::discord::tmux::execution_identity::tests::absent_spawn_nonce_is_never_observed_as_a_match
 services::discord::tmux::execution_identity::tests::execution_identity_modes_keep_a0_non_destructive
 services::discord::tmux::execution_identity::tests::observation_counters_record_only_outside_legacy_mode
+services::discord::tmux::execution_identity::tests::only_enforce_denies_and_only_on_a_non_matching_incarnation
 services::discord::tmux::execution_identity::tests::spawn_nonce_mismatch_under_the_same_session_name_is_observed_as_mismatch
 services::discord::tmux::lifecycle_stage_pause_matrix_tests::every_outcome_emits_completion
 services::discord::tmux::lifecycle_stage_pause_matrix_tests::gate_outcomes_never_pause_lifecycle
@@ -5219,6 +5221,7 @@ services::discord::tmux_watcher_registry_restore_tests::restore_is_noop_when_liv
 services::discord::tmux_watcher_registry_restore_tests::restored_owner_makes_missing_registry_resolve_for_live_session
 services::discord::tmux_watcher_registry_restore_tests::session_rebind_retains_owner_when_called_after_watcher_teardown
 services::discord::tmux_watcher_registry_restore_tests::tmux_session_is_stale_does_not_fold_cancel_flag_into_heartbeat
+services::discord::tmux_watcher_registry_restore_tests::value_cas_declared_non_guarantee_readmitted_identical_row_passes_enforce
 services::discord::tui_direct_abort_marker::deferred_claim::tests::bool_probe_shorthand_is_never_pinned
 services::discord::tui_direct_abort_marker::deferred_claim::tests::covered_and_http_arms_match_abort_kind
 services::discord::tui_direct_abort_marker::deferred_claim::tests::ensure_covers_from_own_tombstone_and_sweep_delivers_completion
@@ -5301,10 +5304,13 @@ services::discord::tui_direct_pending_start::tests::claim_false_exhausted_still_
 services::discord::tui_direct_pending_start::tests::claim_false_retains_record_and_retries
 services::discord::tui_direct_pending_start::tests::committed_leaked_foreign_row_clears_then_pending_start_claims
 services::discord::tui_direct_pending_start::tests::durable_restore_roundtrip_loads_fifo_order
+services::discord::tui_direct_pending_start::tests::enforce_mode_stale_foreign_demote_refuses_a_replaced_owner_and_output
+services::discord::tui_direct_pending_start::tests::enforce_mode_stale_foreign_demote_refuses_across_a_respawn
 services::discord::tui_direct_pending_start::tests::finalized_when_no_prior_inflight_and_no_blocking_turn_and_binding
 services::discord::tui_direct_pending_start::tests::generalized_helper_records_marker_for_watcher_lease_and_own_row
 services::discord::tui_direct_pending_start::tests::generalized_helper_skips_non_watcher_lease
 services::discord::tui_direct_pending_start::tests::inline_claim_marker_wiring_records_only_when_claimed
+services::discord::tui_direct_pending_start::tests::legacy_mode_stale_foreign_demote_keeps_its_pre_a1_session_and_pointer_check
 services::discord::tui_direct_pending_start::tests::live_worker_with_capped_attempt_count_is_not_abandoned
 services::discord::tui_direct_pending_start::tests::not_finalized_while_mailbox_blocking_turn_present
 services::discord::tui_direct_pending_start::tests::not_finalized_while_prior_inflight_undrained

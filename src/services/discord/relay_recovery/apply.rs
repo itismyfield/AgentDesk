@@ -1,5 +1,12 @@
 use super::*;
 
+use crate::services::discord::tmux_watcher_registry::{
+    WatcherIdentityFence, execution_identity_mode,
+};
+
+/// #5071 T3-A1 observation label for the dead-frontier automatic watcher cancel.
+const DEAD_FRONTIER_CANCEL_IDENTITY_SITE: &str = "relay_recovery_dead_frontier_cancel";
+
 pub(super) async fn apply_relay_recovery_decision(
     registry: &HealthRegistry,
     shared: &Arc<SharedData>,
@@ -189,13 +196,29 @@ pub(super) async fn apply_relay_recovery_decision(
                     decision,
                 ) {
                     Ok(probe) => {
-                        let expected_watcher =
-                            shared.tmux_watchers.get(&owner_channel_id).map(|watcher| {
+                        let expected_watcher = shared
+                            .tmux_watchers
+                            .get(&owner_channel_id)
+                            .map(|watcher| {
                                 (
                                     watcher.tmux_session_name.clone(),
                                     watcher.output_path.clone(),
                                     watcher.cancel.clone(),
                                 )
+                            })
+                            // #5071 T3-A1: pin the live execution identity in the
+                            // same breath as the pointer/output pin, so the
+                            // registry CAS below re-reads it across the whole
+                            // gate -> commit -> CAS window. Captured outside the
+                            // closure above because the marker read is file I/O
+                            // and must not run under the dashmap ref.
+                            .map(|(tmux_session_name, output_path, cancel)| {
+                                let identity_fence = WatcherIdentityFence::capture(
+                                    execution_identity_mode(),
+                                    DEAD_FRONTIER_CANCEL_IDENTITY_SITE,
+                                    &tmux_session_name,
+                                );
+                                (tmux_session_name, output_path, cancel, identity_fence)
                             });
                         let gate = super::destructive_cancel_gate::evaluate(
                             shared,
@@ -213,18 +236,21 @@ pub(super) async fn apply_relay_recovery_decision(
                                     .await
                                     .active_user_message_id
                                     .map(|id| id.get());
-                            if shared.relay_emission_in_flight(owner_channel_id) {
-                                tracing::warn!(
-                                    target: "agentdesk::discord::relay_recovery",
-                                    provider = provider.as_str(),
-                                    channel_id = decision.channel_id,
-                                    watcher_owner_channel_id = owner_channel_id.get(),
-                                    death_evidence = gate.allowed_reason().unwrap_or("unknown"),
-                                    "relay recovery skipped destructive watcher cancel after gate; terminal delivery became active"
-                                );
-                            } else if mailbox_active_user_msg_id
-                                != probe.pin.mailbox_active_user_msg_id
-                            {
+                            // #5071 T3-A1 retired the #5067 in-flight emission
+                            // read that used to sit here. The registry CAS below
+                            // now carries the identity conjunct, which is a
+                            // different guarantee: it re-compares the pinned
+                            // VALUES (owner channel, session, output path,
+                            // cancel pointer, `.spawn_nonce`) against the live
+                            // row, so a replaced or respawned row is refused. It
+                            // does NOT establish a row generation — see
+                            // `WatcherIdentityFence` for the A -> B -> A
+                            // readmission it cannot see — and it says nothing
+                            // about a terminal POST the SAME incarnation may
+                            // have in flight. That same-incarnation emission
+                            // race is a declared non-guarantee, not a closed
+                            // hole.
+                            if mailbox_active_user_msg_id != probe.pin.mailbox_active_user_msg_id {
                                 tracing::warn!(
                                     target: "agentdesk::discord::relay_recovery",
                                     provider = provider.as_str(),
@@ -235,11 +261,14 @@ pub(super) async fn apply_relay_recovery_decision(
                                     mailbox_active_user_msg_id = mailbox_active_user_msg_id.unwrap_or(0),
                                     "relay recovery skipped destructive watcher cancel after gate; mailbox episode changed"
                                 );
-                            } else if let Some((tmux_session_name, output_path, cancel)) =
-                                expected_watcher.as_ref()
+                            } else if let Some((
+                                tmux_session_name,
+                                output_path,
+                                cancel,
+                                identity_fence,
+                            )) = expected_watcher
                             {
                                 let expected_identity = probe.inflight_identity.clone();
-                                let cancel_for_commit = cancel.clone();
                                 let commit_outcome =
                                     super::inflight::commit_destructive_cancel_locked(
                                         provider,
@@ -247,10 +276,13 @@ pub(super) async fn apply_relay_recovery_decision(
                                         &expected_identity,
                                         &probe.updated_at,
                                         probe.save_generation,
-                                        move |_| {
-                                            cancel_for_commit.store(true, Ordering::Release);
-                                            Ok(super::inflight::CommitEvidence::CancelledWatcher)
-                                        },
+                                        // #5071 T3-A1: the flock callback no
+                                        // longer stores `cancel`. This helper
+                                        // cancels inside its own CAS below, so
+                                        // storing here would leave a cancelled
+                                        // watcher that the registry still lists
+                                        // whenever that CAS fails.
+                                        |_| Ok(super::inflight::CommitEvidence::CancelledWatcher),
                                     );
                                 if commit_outcome
                                     != super::inflight::DestructiveCancelCommitOutcome::CommittedCancelled
@@ -266,12 +298,18 @@ pub(super) async fn apply_relay_recovery_decision(
                                     );
                                 } else {
                                     // The flock is released before registry CAS; the two lock domains never overlap.
-                                    let watcher_removed =
-                                        shared.tmux_watchers.cancel_and_remove_channel_if_current(
+                                    // #5071 T3-A1: this helper stores `cancel`
+                                    // itself, inside the CAS, so `true` already
+                                    // means the watcher was cancelled and
+                                    // `false` means nothing was written.
+                                    let watcher_removed = shared
+                                        .tmux_watchers
+                                        .under_identity_fence(identity_fence)
+                                        .cancel_and_remove_channel_if_current(
                                             &owner_channel_id,
-                                            tmux_session_name,
-                                            output_path,
-                                            cancel,
+                                            &tmux_session_name,
+                                            &output_path,
+                                            &cancel,
                                         );
                                     if !watcher_removed {
                                         tracing::warn!(
