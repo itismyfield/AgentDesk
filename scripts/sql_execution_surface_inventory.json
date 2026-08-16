@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "8ab654508af7440bbd9a52e3f0272cc6ed505917",
+  "measured_at_sha": "c17338b5e0008e755d3931c9de8b0407c12fb0a3",
   "records": [
     {
       "root": "migrations/postgres",
@@ -15940,6 +15940,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:779c529797b7589968194009c0af915628fe08e185eee89df59e77ebe1c4f5d5"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/multinode_regression.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:bac1852c44c79ddb0c36088e4a4c1b0f2323a6688ff8a392f3b8adaa1db56d05"
     },
     {
       "root": "src",
