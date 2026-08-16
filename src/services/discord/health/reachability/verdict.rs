@@ -3,8 +3,13 @@
 //! This file is vocabulary and polarity. It deliberately holds no composition
 //! rule, no threshold, no clock read, and no I/O:
 //!
-//! * choosing `Degraded` vs `Unreachable` is the `warn_bound`/`fail_bound`
-//!   subtraction T4-B2 adds on top of the obligation ledger;
+//! * choosing `Degraded` vs `Unreachable` is a `warn_bound`/`fail_bound`
+//!   subtraction over the obligation ledger, and T4-B2 landed the ledger
+//!   WITHOUT those bounds — 4987 §3.4 makes them the output of the 30-day
+//!   observation and §10 lists hardcoding one at S1 as NO-GO. (This bullet
+//!   said "T4-B2 adds" when B1 landed; B2 corrected it to what B2 actually did,
+//!   which is produce the obligations those bounds will later be measured
+//!   against.) T4-B6 owns the subtraction;
 //! * the final product `worst(ReachabilityVerdict, ExternalRelayVerdict)` is
 //!   T4-B6, and turning it on is gated behind `G-T4`.
 //!
@@ -46,6 +51,12 @@ pub(in crate::services::discord) enum ReachabilityVerdict {
     /// producer may spell it — "nothing observed" is never GREEN.
     Reachable,
     /// Unsatisfied obligations passed `warn_bound` but not `fail_bound`.
+    ///
+    /// Unconstructed as of #5071 T4-B2 and deliberately so: the bounds that
+    /// separate this from `Unreachable` are the OUTPUT of the 30-day
+    /// observation T4-B2 starts (4987 §3.4), and hardcoding one at S1 is an
+    /// explicit NO-GO (§10). T4-B6 produces it.
+    #[allow(dead_code)]
     Degraded {
         oldest_unsatisfied_age_secs: u64,
         uncovered_ranges: u32,
@@ -55,11 +66,22 @@ pub(in crate::services::discord) enum ReachabilityVerdict {
     /// mid-turn, a live placeholder). 4987 §-1.3b: this is **not**
     /// `Unreachable`, its alarm wording differs, and it states "do not
     /// redeliver by hand".
+    ///
+    /// Unconstructed as of #5071 T4-B2: every one of its evidence sources is a
+    /// later slice's — the delivery-lease and placeholder traces come with the
+    /// receipt index (T4-B3) and the external verdict intake (T4-B5).
+    #[allow(dead_code)]
     TransportUnknown {
         since_secs: u64,
         evidence: TransportUnknownEvidence,
     },
     /// No receipt and no trace of a transport, past `fail_bound`.
+    ///
+    /// Unconstructed as of #5071 T4-B2, for two independent reasons: the
+    /// `fail_bound` does not exist yet (§10 NO-GO), and neither does the
+    /// subtrahend — the receipt index is T4-B3, so B2 can see that an
+    /// obligation exists and cannot see that it was met.
+    #[allow(dead_code)]
     Unreachable {
         oldest_unsatisfied_age_secs: u64,
         uncovered_ranges: u32,
@@ -76,6 +98,9 @@ pub(in crate::services::discord) enum ReachabilityVerdict {
 ///
 /// Every variant is an observation of a *trace*, never of a receipt: a receipt
 /// would have made the range `Reachable` instead.
+///
+/// Unconstructed as of #5071 T4-B2 along with the variant that carries it.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum TransportUnknownEvidence {
     /// A delivery lease for this incarnation was taken and never released.
@@ -98,6 +123,11 @@ pub(in crate::services::discord) enum ReachabilityUnknownReason {
     /// The mailbox reports an active turn with no inflight row. 4987 §-1.4
     /// demotes this to an explanatory attribute; it produces no verdict of its
     /// own beyond this `Unknown`.
+    ///
+    /// Unconstructed as of #5071 T4-B2: producing it means comparing the
+    /// mailbox against the row, which is the derived-signal wiring of T4-B4.
+    /// B2's observation never looks at either — that is I14.
+    #[allow(dead_code)]
     RowlessActiveTurn,
     /// The bounded per-tick read hit its cap, so the tick did not see the whole
     /// tail. See [`super::tail::TAIL_READ_CAP_BYTES`].
@@ -107,6 +137,12 @@ pub(in crate::services::discord) enum ReachabilityUnknownReason {
     ReceiptStoreUnreadable,
 }
 
+/// The polarity predicates carry their own `dead_code` allow, one at a time,
+/// because they are the artifact T4-B6 composes with: #5071 T4-B2 produces
+/// verdicts and records them, and calling any of these would be the first step
+/// of judging one, which stays behind `G-T4`. They are exercised by this file's
+/// named tests, which is what keeps the polarity from drifting during the wait.
+/// Only `unknown` has a production caller — the observation task.
 impl ReachabilityVerdict {
     /// Whether this verdict permits a GREEN final health verdict — 4987 §4.1.
     /// True for `Reachable` only; `TransportUnknown` is false here by the same
@@ -114,6 +150,7 @@ impl ReachabilityVerdict {
     /// requires positive incarnation-alive evidence before a producer may spell
     /// `Reachable` at all, B6 owns the product this feeds, and nothing calls
     /// this yet.
+    #[allow(dead_code)]
     pub(in crate::services::discord) fn permits_health(&self) -> bool {
         match self {
             Self::Reachable => true,
@@ -132,6 +169,7 @@ impl ReachabilityVerdict {
     /// how the duplicate gets created. The arms are spelled out rather than
     /// collapsed to `false` so a new variant is a compile error here and a
     /// flipped arm dies in a named test instead of vanishing into a constant.
+    #[allow(dead_code)]
     pub(in crate::services::discord) fn authorizes_redelivery(&self) -> bool {
         match self {
             Self::Reachable
@@ -150,6 +188,7 @@ impl ReachabilityVerdict {
     /// destructive `RelayRecoveryActionKind` variants behind a private
     /// constructor, so a future caller CAN ignore this. It exists so that
     /// ignoring it is a visible choice.
+    #[allow(dead_code)]
     pub(in crate::services::discord) fn authorizes_destructive_action(&self) -> bool {
         match self {
             Self::Reachable
@@ -164,11 +203,13 @@ impl ReachabilityVerdict {
     /// redeliver by hand" notice (4987 §-1.3b). `TransportUnknown` only:
     /// `Unreachable` gets the ordinary wording, and the ban notice exists
     /// because the crash window looks like a loss and is not one.
+    #[allow(dead_code)]
     pub(in crate::services::discord) fn requires_manual_redelivery_ban_notice(&self) -> bool {
         matches!(self, Self::TransportUnknown { .. })
     }
 
     /// The `Unknown` reason, when this is an `Unknown`.
+    #[allow(dead_code)]
     pub(in crate::services::discord) fn unknown_reason(&self) -> Option<ReachabilityUnknownReason> {
         match self {
             Self::Unknown { reason, .. } => Some(*reason),

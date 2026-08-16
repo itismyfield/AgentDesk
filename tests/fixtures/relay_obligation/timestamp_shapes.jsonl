@@ -1,0 +1,7 @@
+{"type":"assistant","timestamp":"2026-08-17T01:02:03.456Z","message":{"model":"claude-opus-5","content":[{"type":"text","text":"iso with millis and Z"}]}}
+{"type":"assistant","timestamp":"2026-08-17T01:02:03","message":{"model":"claude-opus-5","content":[{"type":"text","text":"exactly nineteen chars"}]}}
+{"type":"assistant","timestamp":"2026-8-7T1:2:3","message":{"model":"claude-opus-5","content":[{"type":"text","text":"single digit fields"}]}}
+{"type":"assistant","timestamp":"2026-13-17T01:02:03","message":{"model":"claude-opus-5","content":[{"type":"text","text":"month thirteen"}]}}
+{"type":"assistant","timestamp":"2026-08-17","message":{"model":"claude-opus-5","content":[{"type":"text","text":"date only"}]}}
+{"type":"assistant","timestamp":"","message":{"model":"claude-opus-5","content":[{"type":"text","text":"empty timestamp"}]}}
+{"type":"assistant","timestamp":"not-a-timestamp-at-all","message":{"model":"claude-opus-5","content":[{"type":"text","text":"garbage"}]}}

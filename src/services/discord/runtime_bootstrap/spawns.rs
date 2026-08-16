@@ -471,6 +471,34 @@ pub(super) fn run_bot_spawn_dead_tmux_reaper(shared_clone: &Arc<SharedData>) {
     });
 }
 
+/// Background: the #5071 T4-B2 relay-reachability observation task (4987 S1).
+///
+/// An INDEPENDENT task, deliberately: 4987 §9.4 forbids hanging the tick off
+/// `health/recovery.rs`, which is registry-tracked as a giant, and an
+/// out-of-line loop keeps the observation's cost and failures separable from
+/// the stall watchdog's.
+///
+/// It observes and records only. It reads the watcher registry, the transcript
+/// sidecars and the transcript tail, and it writes one per-channel ledger under
+/// `runtime/`. Nothing reads that ledger back — no health field, no snapshot,
+/// no recovery input — so this spawn changes zero production verdicts. The
+/// health composition is T4-B6 and is gated behind `G-T4`.
+#[cfg(unix)]
+pub(super) fn run_bot_spawn_reachability_observation(
+    shared_clone: &Arc<SharedData>,
+    provider: &ProviderKind,
+) {
+    let shared_for_observation = shared_clone.clone();
+    let provider_for_observation = provider.clone();
+    task_supervisor::spawn_observed(
+        "reachability_observation",
+        crate::services::discord::health::reachability::observation::run_observation_loop(
+            shared_for_observation,
+            provider_for_observation,
+        ),
+    );
+}
+
 #[cfg(test)]
 #[path = "spawns_tests.rs"]
 mod tests;

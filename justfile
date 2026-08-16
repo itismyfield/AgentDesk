@@ -25,6 +25,19 @@ test-active-usage-4631:
     cargo test --lib claude_compact_trigger::tests
     cargo test --lib assistant_usage_emits_complete_active_snapshot_before_done
 
+# #5071 T4-B2 (4987 blocker B1'): the RUST half of the Rust<->Python canonical
+# mutation runner. Each declared mutation edits `obligation.rs` alone and must
+# turn the golden-corpus test red; the file is restored either way.
+#
+# It is not in `ci-script-checks.sh` because it rebuilds the crate once per
+# mutation. What CI holds instead is (a) the corpus test itself in the
+# `test-non-pg` obligation lane, so ANY Rust-only change to the obligation rule
+# is already red there, and (b) `tests.test_reachability_canonical_equivalence`,
+# which fails if a declared mutation stops anchoring on real source and would
+# therefore be silently skipped. Run this before changing the framing rules.
+reachability-mutation-runner:
+    python3 scripts/check_reachability_canonical_equivalence.py --with-rust
+
 # Stage 1 keeps the existing CI-safe subset. The broad non-PG sweep currently
 # fails legacy/full integration route tests; see docs/ci/rust-quality-gates.md.
 test-non-pg:
@@ -46,6 +59,13 @@ test-non-pg:
     cargo test --lib services::discord::health::reachability::verdict::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::discord::health::reachability::discovery::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::discord::health::reachability::tail::tests -- --skip _pg --skip pg_ --skip postgres
+    # #5071 T4-B2 (4987 S1, second half): obligation framing, the durable
+    # ledger, and the observation tick. The obligation lane carries the Rust
+    # half of the Rust<->Python canonical equivalence, so this recipe is where
+    # a Rust-only mutation of the obligation rule dies in ordinary CI.
+    cargo test --lib services::discord::health::reachability::obligation::tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib services::discord::health::reachability::ledger::tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib services::discord::health::reachability::observation::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::discord::e2e_control::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib server::routes::e2e_control::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib formatting -- --skip _pg --skip pg_ --skip postgres

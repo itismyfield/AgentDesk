@@ -183,6 +183,15 @@ pub(super) async fn run_bot_framework_setup(
     #[cfg(unix)]
     super::spawns::run_bot_spawn_dead_tmux_reaper(&shared_clone);
 
+    // #5071 T4-B2 (4987 S1): relay-reachability OBSERVATION. Resolves each
+    // live watcher's transcript independently of the in-flight row, frames
+    // what it grew by into canonical obligations, and appends them to a
+    // durable per-channel ledger. It records; it does not judge. No health
+    // field, snapshot or recovery input reads its output, and no verdict it
+    // produces authorizes a destructive action or a redelivery.
+    #[cfg(unix)]
+    super::spawns::run_bot_spawn_reachability_observation(&shared_clone, &provider_for_setup);
+
     // Background: periodic GC for stale thread sessions in DB.
     // Normal idle/disconnected thread rows expire after 1 hour,
     // but rows still carrying an active_dispatch_id stay until the

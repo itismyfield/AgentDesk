@@ -15,3 +15,14 @@ scripts/** text eol=lf
 # hand-authored / emitted by a different generator and must never be clobbered.
 docs/generated/route-inventory.md merge=regen-inventory
 docs/generated/worker-inventory.md merge=regen-inventory
+
+# #5071 T4-B2: the relay-obligation golden corpus is byte-exact fixture DATA,
+# and one case (`malformed_and_nonobject.jsonl`) is deliberately not valid
+# UTF-8 — a transcript line that cannot be decoded must classify as
+# MALFORMED_JSON in both the Rust and the Python implementation, and only a
+# real non-UTF-8 fixture proves they agree. Marked `-diff -text` so git never
+# emits those raw bytes into a textual diff: `scripts/
+# audit_state_lint_hardening.py` and its siblings read `git diff` as UTF-8 text
+# and crash on them. `-text` additionally keeps EOL conversion away from files
+# whose exact bytes are the assertion.
+tests/fixtures/relay_obligation/*.jsonl -diff -text

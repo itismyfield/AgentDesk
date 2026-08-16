@@ -1,0 +1,295 @@
+"""Mutation proof for scripts/check_reachability_canonical_equivalence.py (#5071 T4-B2).
+
+The gate is the machine half of 4987 blocker B1'. A gate that only ever runs
+green on the real corpus proves nothing about what it would catch, so every
+check it makes is exercised here against a synthetic repo root reproducing one
+defect at a time:
+
+  * a Python output that no longer matches the golden corpus;
+  * a corpus thinned below the floor, which is the vacuous-pass shape — a gate
+    finding nothing to compare must never read as a gate that compared and
+    agreed;
+  * a mutation whose anchor text no longer exists, i.e. a mutation that is
+    silently never applied. This is the failure mode a mutation runner is most
+    likely to develop and least likely to notice;
+  * a mutation the implementation no longer kills;
+  * a lane filter matching zero manifest rows (#5071 §4.1 gate 3);
+  * a consumer added outside the tree, and the tree's expected wiring removed;
+  * a `warn_bound` introduced inside the tree (4987 §10 NO-GO).
+
+The live-repo cases at the end pin that the gate is wired into
+`scripts/ci-script-checks.sh`, that the checked-in tree passes it, and that the
+declared Rust mutations still anchor on text that exists — a `--with-rust` run
+needs a compiler and does not belong in the fast lane, but a Rust mutation
+silently anchoring on deleted text is exactly the rot this file exists to catch,
+and checking the ANCHOR costs nothing.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import shutil
+import sys
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_PATH = REPO_ROOT / "scripts" / "check_reachability_canonical_equivalence.py"
+CI_SCRIPT = REPO_ROOT / "scripts" / "ci-script-checks.sh"
+
+_SPEC = importlib.util.spec_from_file_location(
+    "check_reachability_canonical_equivalence", SCRIPT_PATH
+)
+GATE = importlib.util.module_from_spec(_SPEC)
+assert _SPEC.loader is not None
+sys.modules[_SPEC.name] = GATE
+_SPEC.loader.exec_module(GATE)
+
+
+def _mirror_repo(tmp: str) -> Path:
+    """A synthetic root carrying only what the gate reads.
+
+    Real files rather than hand-written stand-ins: the point of each case below
+    is that ONE thing is wrong, and a from-scratch fixture would differ from the
+    real tree in ways nobody chose.
+    """
+    root = Path(tmp)
+    (root / "scripts").mkdir()
+    (root / "tests/fixtures").mkdir(parents=True)
+    (root / "src/services/discord/health").mkdir(parents=True)
+
+    for name in (
+        "relay_watchdog.py",
+        "check_clippy_allow_ratchet.py",
+        "lib_test_inventory_manifest.txt",
+    ):
+        shutil.copy(REPO_ROOT / "scripts" / name, root / "scripts" / name)
+    shutil.copy(REPO_ROOT / "justfile", root / "justfile")
+    shutil.copytree(
+        REPO_ROOT / "tests/fixtures/relay_obligation",
+        root / "tests/fixtures/relay_obligation",
+    )
+    shutil.copy(
+        REPO_ROOT / "src/services/discord/health/reachability.rs",
+        root / "src/services/discord/health/reachability.rs",
+    )
+    shutil.copytree(
+        REPO_ROOT / "src/services/discord/health/reachability",
+        root / "src/services/discord/health/reachability",
+    )
+    for rel in GATE.ALLOWED_TREE_REFERENCES:
+        source = REPO_ROOT / rel
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(source, target)
+    return root
+
+
+def _run(root: Path) -> list[str]:
+    cases = GATE.load_corpus(root)
+    problems = GATE.check_corpus_equivalence(root, cases)
+    problems += GATE.run_python_mutations(root, cases)
+    problems += GATE.check_lane_selection(root)
+    problems += GATE.check_no_judgment_authority(root)
+    return problems
+
+
+def _patch(path: Path, before: str, after: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    assert text.count(before) == 1, f"anchor {before!r} is not unique in {path}"
+    path.write_text(text.replace(before, after), encoding="utf-8")
+
+
+class SyntheticRootTests(unittest.TestCase):
+    def assertProblem(self, problems: list[str], needle: str) -> None:
+        self.assertTrue(
+            any(needle in problem for problem in problems),
+            f"expected a problem mentioning {needle!r}; got {problems}",
+        )
+
+    def test_the_mirrored_root_is_clean(self):
+        with TemporaryDirectory() as tmp:
+            self.assertEqual(_run(_mirror_repo(tmp)), [])
+
+    def test_a_python_output_that_drifts_from_the_corpus_is_reported(self):
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            _patch(
+                root / "scripts/relay_watchdog.py",
+                'CANONICAL_SCHEMA_HEADER = "relay_obligation_canonical_v1"',
+                'CANONICAL_SCHEMA_HEADER = "relay_obligation_canonical_v2"',
+            )
+            self.assertProblem(_run(root), "!= golden corpus")
+
+    def test_a_corpus_thinned_below_the_floor_is_not_a_clean_run(self):
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            manifest = root / "tests/fixtures/relay_obligation/cases.json"
+            entries = json.loads(manifest.read_text(encoding="utf-8"))
+            manifest.write_text(json.dumps(entries[:2]), encoding="utf-8")
+            self.assertProblem(_run(root), "below the")
+
+    def test_a_mutation_whose_anchor_vanished_is_reported_not_skipped(self):
+        """The anchor is dissolved by an edit that changes NOTHING semantically
+        — the same byte spelled `\\x0d` instead of `\\r`. So the corpus still
+        matches and the ONLY complaint is that a declared mutation could not be
+        applied, which is precisely the silent-skip the runner must never
+        tolerate: a runner that applies nothing reports no survivors."""
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            name, before, _after = GATE.PYTHON_MUTATIONS[0]
+            _patch(
+                root / "scripts/relay_watchdog.py",
+                before,
+                before.replace('b"\\r"', 'b"\\x0d"'),
+            )
+            problems = _run(root)
+            self.assertProblem(problems, f"{name!r} anchors on text appearing 0")
+
+    def test_a_surviving_mutation_is_reported(self):
+        """A mutation that applies cleanly and changes nothing observable must
+        be named, not counted as killed.
+
+        Constructed by adding one deliberately semantics-free mutation to the
+        declared set — renaming a local — rather than by weakening the
+        implementation: the claim under test is about the RUNNER's verdict, and
+        a real rule broken in a way that happened to survive would be testing
+        the rule instead."""
+        original = GATE.PYTHON_MUTATIONS
+        GATE.PYTHON_MUTATIONS = original + (
+            (
+                "no-op-local-rename",
+                "    line_start = 0\n    while True:",
+                "    line_start = 0\n    del_me = line_start\n    line_start = del_me\n    while True:",
+            ),
+        )
+        try:
+            with TemporaryDirectory() as tmp:
+                problems = _run(_mirror_repo(tmp))
+        finally:
+            GATE.PYTHON_MUTATIONS = original
+        self.assertProblem(problems, "'no-op-local-rename' SURVIVED")
+
+    def test_a_lane_filter_matching_no_manifest_row_is_reported(self):
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            _patch(
+                root / "justfile",
+                "cargo test --lib services::discord::health::reachability::ledger::tests",
+                "cargo test --lib services::discord::health::reachability::nonexistent::tests",
+            )
+            self.assertProblem(_run(root), "matches 0 rows")
+
+    def test_a_tree_with_no_lane_at_all_is_reported(self):
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            justfile = root / "justfile"
+            justfile.write_text(
+                "\n".join(
+                    line
+                    for line in justfile.read_text(encoding="utf-8").splitlines()
+                    if "health::reachability" not in line
+                ),
+                encoding="utf-8",
+            )
+            self.assertProblem(_run(root), "no curated lane selects")
+
+    def test_a_consumer_outside_the_tree_is_reported(self):
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            intruder = root / "src/services/discord/health/snapshot.rs"
+            intruder.write_text(
+                "fn peek() {\n"
+                "    let _ = super::reachability::ledger::ledger_path();\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            self.assertProblem(_run(root), "grew a consumer")
+
+    def test_prose_and_string_literals_are_not_consumers(self):
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            bystander = root / "src/services/discord/health/snapshot.rs"
+            bystander.write_text(
+                "// The reachability::ledger tree is deliberately not read here.\n"
+                'const NOTE: &str = "reachability::ledger";\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(_run(root), [])
+
+    def test_removing_the_expected_wiring_is_reported(self):
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            wiring = root / "src/services/discord/runtime_bootstrap/spawns.rs"
+            wiring.write_text("// the observation task was removed\n", encoding="utf-8")
+            self.assertProblem(_run(root), "the expected wiring is gone")
+
+    def test_a_bound_introduced_inside_the_tree_is_reported(self):
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            target = root / "src/services/discord/health/reachability/ledger.rs"
+            target.write_text(
+                target.read_text(encoding="utf-8")
+                + "\nconst WARN_BOUND_SECS: u64 = 60;\n"
+                + "fn bound() -> u64 { let warn_bound = WARN_BOUND_SECS; warn_bound }\n",
+                encoding="utf-8",
+            )
+            self.assertProblem(_run(root), "warn_bound")
+
+    def test_a_bound_named_only_in_prose_is_not_reported(self):
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            target = root / "src/services/discord/health/reachability/ledger.rs"
+            target.write_text(
+                "//! The warn_bound and fail_bound belong to T4-B6, not here.\n"
+                + target.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            self.assertEqual(_run(root), [])
+
+    def test_an_absent_tree_is_not_a_clean_scan(self):
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            shutil.rmtree(root / "src/services/discord/health/reachability")
+            (root / "src/services/discord/health/reachability.rs").unlink()
+            self.assertProblem(
+                GATE.check_no_judgment_authority(root), "an empty scan is not a clean scan"
+            )
+
+
+class LiveRepoTests(unittest.TestCase):
+    def test_the_checked_in_tree_passes_the_gate(self):
+        self.assertEqual(GATE.main(["--repo-root", str(REPO_ROOT)]), 0)
+
+    def test_the_gate_is_wired_into_ci_script_checks(self):
+        body = CI_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("scripts/check_reachability_canonical_equivalence.py", body)
+        self.assertIn("tests.test_reachability_canonical_equivalence", body)
+
+    def test_every_declared_rust_mutation_still_anchors_on_real_source(self):
+        """A `--with-rust` run needs cargo and stays out of the fast lane, but a
+        mutation anchored on text that no longer exists would silently stop
+        being applied — and a runner that applies nothing reports no
+        survivors."""
+        source = (REPO_ROOT / GATE.OBLIGATION_REL).read_text(encoding="utf-8")
+        for name, before, after in GATE.RUST_MUTATIONS:
+            with self.subTest(mutation=name):
+                self.assertEqual(
+                    source.count(before),
+                    1,
+                    f"rust mutation {name!r} must anchor on exactly one site",
+                )
+                self.assertNotEqual(before, after)
+
+    def test_every_declared_python_mutation_still_anchors_on_real_source(self):
+        source = (REPO_ROOT / GATE.WATCHDOG_REL).read_text(encoding="utf-8")
+        for name, before, after in GATE.PYTHON_MUTATIONS:
+            with self.subTest(mutation=name):
+                self.assertEqual(source.count(before), 1)
+                self.assertNotEqual(before, after)
+
+
+if __name__ == "__main__":
+    unittest.main()

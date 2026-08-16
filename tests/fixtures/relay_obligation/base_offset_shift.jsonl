@@ -1,0 +1,2 @@
+{"type":"assistant","timestamp":"2026-08-17T01:02:03.456Z","message":{"model":"claude-opus-5","content":[{"type":"text","text":"hello"}]}}
+{"type":"assistant","timestamp":"2026-08-17T01:02:03.456Z","message":{"model":"claude-opus-5","content":[{"type":"text","text":"world"}]}}

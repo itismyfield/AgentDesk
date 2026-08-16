@@ -1,0 +1,7 @@
+{"type":"assistant","timestamp":"2026-08-17T01:02:03.456Z","message":{"model":"claude-opus-5","content":[{"type":"text","text":""}]}}
+{"type":"assistant","timestamp":"2026-08-17T01:02:03.456Z","message":{"model":"claude-opus-5","content":[{"type":"text","text":"   "}]}}
+{"type":"assistant","timestamp":"2026-08-17T01:02:03.456Z","message":{"model":"claude-opus-5","content":[{"type":"text","text":" "}]}}
+{"type":"assistant","timestamp":"2026-08-17T01:02:03","message":{"model":"m","content":[]}}
+{"type":"assistant","timestamp":"2026-08-17T01:02:03","message":{"model":"m"}}
+{"type":"assistant","timestamp":"2026-08-17T01:02:03"}
+{"type":"assistant","timestamp":"2026-08-17T01:02:03","message":{"model":"m","content":[{"type":"text","text":" "},{"type":"text","text":"second block wins"}]}}
