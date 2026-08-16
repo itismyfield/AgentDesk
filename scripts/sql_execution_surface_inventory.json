@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "a700085d2ab7a673c75a9d44b6752fd5f1123530",
+  "measured_at_sha": "4c5261be98b00d0c96ed28ac0ab8407b19d19829",
   "records": [
     {
       "root": "migrations/postgres",
@@ -2925,6 +2925,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:0b62766c0c3de5bc21a0d97da076f994da4d223c17c1b67c9a2f08ff060f0fce"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/auto_queue/entries.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:1346b6c8f541bdfe89a6a02020134a09ff729a83609038f967f3259fa941b8fc"
     },
     {
@@ -3007,6 +3016,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:4b771ffbb15e5a49c81a0601810326fae5761c07a16222ecf09299050222b7a7"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/auto_queue/entries.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:56157096edb5c8f7605b3c168dd607c43ac9063c42f31ada2f7eebb9df2ebce4"
     },
     {
       "root": "src",
@@ -3213,6 +3231,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:c444b8de847b856634cf01766ea37e09234f3bada6b2ac1df18228175f3bd433"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/auto_queue/entries.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:c7715e4842e54bd223aadc208b56e5838fb7b89640a5e48200a61361e4aa03e6"
     },
     {
@@ -3358,6 +3385,15 @@
       "symbol": "query_as",
       "classification": "STATIC",
       "fingerprint": "sha256:41d4bd0fddbeaea0323caf99fe1727d4810cf70052dd041458c5932c9c8b0d19"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/auto_queue/entries.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:aaf9c373350f8905653f465dd8bbeeb0b39c26998f6c25df6e23cf73ace78f33"
     },
     {
       "root": "src",
