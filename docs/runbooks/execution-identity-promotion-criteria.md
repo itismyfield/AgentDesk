@@ -155,7 +155,11 @@ observed totals, and the measurement mechanism used.
 
 ## Measuring It
 
-Preferred: whatever readout #5399 item 1 lands. Until then:
+Preferred: whatever readout #5399 item 1 lands — provided it carries `site`. P4's
+floor is per-site, and the three `OBSERVATION_COUNTERS` totals do not carry
+attribution (`record_incarnation_observation` passes `site` to the log line only),
+so a readout of those totals alone gives P4's denominator and not its
+`tui_direct_stale_foreign_cancel` minimum. Until then:
 
 **Interim A — mismatch-only, from the dcserver log.** Only `info` lines survive
 the default filter, so this yields a numerator with per-session attribution and

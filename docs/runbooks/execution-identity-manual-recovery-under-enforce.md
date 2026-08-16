@@ -53,10 +53,45 @@ for the `ReattachWatcher` action:
   `reserved_episode` stays `None`.
 
 So the fenced dead-frontier cancel is **exclusively operator-triggered**. Its
-entry point is `POST /api/channels/{id}/relay-recovery` with `apply=true`
+entry point is `POST /api/channels/{id}/relay-recovery`
 (`health_api::relay_recovery_handler` → `health::recovery::handle_relay_recovery`
 → `relay_recovery::run_relay_recovery`, which hard-codes
-`RelayRecoveryApplySource::Manual`).
+`RelayRecoveryApplySource::Manual`) with `apply` set to `true`.
+
+### How to actually set `apply`
+
+**`apply` is a field of the JSON request body. It is not a query parameter.**
+`relay_recovery_handler` takes `Path(channel_id)` and `body: Bytes` and extracts
+no `Query` at all: an empty body becomes `RelayRecoveryRequest::default()`, and a
+non-empty one goes through `serde_json::from_str::<RelayRecoveryRequest>`, whose
+shape is `{ provider: Option<String>, apply: bool }` with `#[serde(default)]` on
+`apply`. So a missing body, an empty body, a body without the field, and
+`{"apply": false}` all mean the same thing — **dry run** — and a `?apply=true`
+query string is silently ignored, leaving the call a dry run that applies
+nothing. A malformed body is a `400 invalid request: …` rather than a dry run.
+
+```bash
+API="http://127.0.0.1:<config.server.port>/api/channels/<channel_id>/relay-recovery"
+
+# Dry run — plan + evidence only. run_relay_recovery returns
+# {"mode":"dry_run","applied":false,…} before any fence is captured.
+curl -sS -X POST "$API" -H 'Content-Type: application/json' -d '{"apply":false}'
+
+# Apply — the ONLY form that reaches the fenced dead-frontier cancel.
+curl -sS -X POST "$API" -H 'Content-Type: application/json' -d '{"apply":true}'
+
+# Optional provider filter (same field set, either mode).
+curl -sS -X POST "$API" -H 'Content-Type: application/json' \
+  -d '{"provider":"codex","apply":true}'
+```
+
+Tell the two apart in the response, not in the request you think you sent: only
+an apply leaves the `!apply` early return in `run_relay_recovery`, so a body that
+comes back `"mode":"dry_run"` with `"applied":false` did **not** run the fenced
+path regardless of the URL. The route is a control endpoint
+(`local_or_configured_control_endpoint_allowed`) — a non-loopback caller with no
+`server.auth_token` configured gets `403 auth_token required for non-loopback
+host`, which is also not a dry run.
 
 The design's vocabulary explains the collision: §5.1 described operator **reset**
 authority, while T3-A1 fenced two **automatic watcher-registry removals** — and
@@ -70,7 +105,7 @@ plan. The tension is a naming overlap, not a behavioural surprise.
 | Claim | Scope in which it is true |
 |---|---|
 | "operator 경로 영향 없음" (§5.1) | Process/tmux reset: `reset_managed_process_session`, `recreate_tmux_session`, and every `tmux_kill`/`process_kill` site. Unfenced in all modes. |
-| "Manual is refused under Enforce" | The dead-frontier destructive watcher cancel in `relay_recovery::apply`, reachable only via `POST /api/channels/{id}/relay-recovery?apply=true`. Fenced; denies on a non-`Match` nonce. |
+| "Manual is refused under Enforce" | The dead-frontier destructive watcher cancel in `relay_recovery::apply`, reachable only via `POST /api/channels/{id}/relay-recovery` with a JSON body of `{"apply": true}`. Fenced; denies on a non-`Match` nonce. |
 
 Neither generalizes. In particular:
 
@@ -117,8 +152,11 @@ reset family for a hard reset — which additionally re-mints `.spawn_nonce` on 
 next spawn. This is the recommended route: no config change, no window with the
 fence off.
 
-**2. Diagnose with a dry run first.** `apply=false` is the default and returns
-`mode: "dry_run"` with the planned action plus evidence. Use it to confirm the
+**2. Diagnose with a dry run first.** `apply` defaults to `false` — an omitted
+body is enough — and the call returns `mode: "dry_run"`, `applied: false`, with
+the planned action plus evidence (see
+[How to actually set `apply`](#how-to-actually-set-apply); the field is in the
+JSON body, so a `?apply=true` URL also lands here). Use it to confirm the
 decision really is the dead-frontier shape —
 `relay_recovery::relay_frontier_dead_reattach_owner` requires
 `RelayStallState::TmuxAliveRelayDead`, `desynced`, `tmux_alive == Some(true)`,

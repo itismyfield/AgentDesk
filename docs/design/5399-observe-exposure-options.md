@@ -16,10 +16,12 @@ Last refreshed: 2026-08-17
 defines the Legacy → Observe → Enforce promotion formula. Two clauses cannot be
 evaluated on a default-configured dcserver: **P4 (sample floor)** needs the total
 number of comparisons — the `Match` and `Unknown` outcomes, i.e. the denominator
-— and **P5 (zero condition)** needs `unknown == 0`, `Unknown` being exactly the
-outcome that predicts an `Enforce` deny for a marker-absent session. Both are
-invisible. Until an option below lands, an Observe window can only falsify the
-promotion, never satisfy it.
+— **and a per-`site` split of it**, because P4's floor is "≥ N observations, of
+which ≥ M carry `site = tui_direct_stale_foreign_cancel`"; and **P5 (zero
+condition)** needs `unknown == 0`, `Unknown` being exactly the outcome that
+predicts an `Enforce` deny for a marker-absent session. Both are invisible. Until
+an option below lands, an Observe window can only falsify the promotion, never
+satisfy it.
 
 ## Current State
 
@@ -73,14 +75,28 @@ Make `observation_counts` non-test and surface the three totals through
 `health_response(&state, true)`).
 
 Gives exact totals in one poll, no log-retention dependency, machine readable.
-Could also carry a per-site or per-conjunct breakdown, including a new counter
-for the binding conjunct — the only option that closes that gap.
+It is also the only option that can close the binding-conjunct gap, by adding a
+counter `permits_pinned_binding` currently does not move.
+
+**Required scope, not an optional extra: split the counters per `site`.**
+`IncarnationObservationCounters` is three bare `AtomicU64` (`matched`,
+`mismatched`, `unknown`) and `record_incarnation_observation` takes `site` only
+to put it on the log line — it never reaches a counter. So a B that publishes
+`observation_counts()` as it stands gives P4's **total** and none of its
+`site = tui_direct_stale_foreign_cancel` floor, and P4 exists to reject exactly
+the window a total-only readout cannot rule out: one met entirely by
+operator-triggered `relay_recovery_dead_frontier_cancel` calls while the
+automatically-firing site stayed unexercised. Per-site counters are therefore
+inside B's scope if B is to satisfy P4 on its own; without them B is a partial
+answer to P4 and no answer to P5.
 
 Costs: the counters are process-local and non-durable, so the readout is
 meaningless without a companion "counting since" epoch in the same object — a
 restart otherwise resets numerator and denominator mid-window with no way for the
-reader to tell. No attribution: `mismatched: 3` does not say which sessions,
-which is what P5 needs, so B alone still sends the operator back to A's logs.
+reader to tell. No per-session attribution at any granularity:
+`tui_direct_stale_foreign_cancel: {unknown: 3}` still does not say which three
+sessions, which is what P5's follow-up needs, so B alone sends the operator back
+to A's logs.
 Widest surface: `/api/health/detail` is a control endpoint
 (`local_or_configured_control_endpoint_allowed`) and a new field there is a
 compatibility commitment — a *new route* would additionally need registering in
@@ -111,6 +127,7 @@ after-the-fact way to detect that they did not.
 | | A — `info` | B — health readout | C — filter guidance |
 |---|---|---|---|
 | Gives a denominator | yes | yes | if the directive works |
+| P4's per-`site` floor | yes (`site` on every line) | only if B also splits the counters per `site` | if the directive works |
 | Per-session attribution | yes | no | yes |
 | Survives a restart | yes (on-disk log) | no (needs an epoch field) | yes |
 | Covers the binding conjunct | no | possible | no |
@@ -126,9 +143,11 @@ after-the-fact way to detect that they did not.
 The formula's binding constraint is not "how many" but "which". P5 requires
 `unknown == 0`, and every `unknown` is a specific marker-absent session the
 [Enforce rollout runbook](../runbooks/execution-identity-enforce-rollout.md) must
-clear by name. Only the log lines carry `site` and `session_key`, so Option B
-satisfies P4 while leaving P5's follow-up undone and would in practice be paired
-with A anyway. A is also the only option whose cost is bounded by something
+clear by name. Only the log lines carry `site` and `session_key`. So Option B as
+its counters stand today satisfies neither clause outright: it gives P4's total
+but not P4's per-`site` floor, and it gives P5 no way to name the sessions it
+must clear. B closes P4 only if per-site counters are built with it, and it would
+in practice be paired with A regardless. A is also the only option whose cost is bounded by something
 already verified — the two sites are rare, and the event that would add an `info`
 line is precisely the event the rollout exists to observe. C is excluded because
 its central mechanism is unverified here and because a restart-scoped env var is
@@ -137,8 +156,11 @@ restart. If a restart-independent total is also wanted, B is a reasonable
 follow-up — but not without the counter-epoch field, and it does not remove the
 need for A.
 
-Out of scope for the resulting slice: splitting counters per `site` or adding one
-for the binding conjunct (reasonable, but not required by the formula as
-written), making the counters durable or cluster-aggregated, and any change to
+Out of scope for the resulting slice: splitting the counters per `site` or adding
+one for the binding conjunct. Not because the formula does not want the split —
+P4 requires it — but because A satisfies P4 from the log line's own `site` field
+without touching a counter; the split becomes mandatory only for a B that is
+meant to stand alone. Also out of scope: making the counters durable or
+cluster-aggregated, and any change to
 what the fence decides — every option here is observation-only, and
 `ExecutionIdentityMode::denies_on_incarnation_mismatch` is untouched.

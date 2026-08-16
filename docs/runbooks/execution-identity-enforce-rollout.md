@@ -95,8 +95,23 @@ A deny is a refusal, never a partial mutation. Both sites run their flock-held
 pin verification before the registry CAS, and after T3-A1 those callbacks are
 pure (`|_| Ok(CommitEvidence::…)`): `inflight::commit_destructive_cancel_locked`
 verifies identity, `updated_at` and `save_generation` and returns an outcome
-without writing the row, so a deny leaves the inflight row untouched, the watcher
-registered, and `cancel` unset.
+without writing the row. So the guarantee is a **no-write** one, and it is about
+this path: **a deny does not change the inflight row, the registry entry, or the
+handle's `cancel` value.**
+
+That is not a liveness statement about the watcher. The CAS conjunct is
+`Arc::ptr_eq(&entry.cancel, expected_cancel)` — pointer identity, never the
+boolean — so a pin still compares equal to a handle whose `cancel` another path
+already stored `true` on while leaving it registered.
+`inflight_heartbeat_sweeper::cancel_watcher_by_session_name` is exactly that
+path in production: it iterates `shared.tmux_watchers`, stores `true` on the
+matching entry's `cancel`, and removes nothing. (Every other production
+`cancel.store(true)` — the idle-tmux-reattach branch of `relay_recovery::apply`,
+the two `health::recovery` sites, `turn_bridge::runtime_handoff_loop` and its
+`watcher_handoff` sibling — removes the registry entry first, so a pin taken
+before it would have failed the pointer CAS.) After a deny you may state that
+this path wrote nothing; you may **not** state that the incumbent watcher is
+still relaying.
 
 **`relay_recovery_dead_frontier_cancel`** — `cancel_and_remove_channel_if_current`
 returns `false`, logging `relay recovery skipped finalizer after committed
@@ -110,17 +125,26 @@ reachable only from `RelayRecoveryApplySource::Manual` — see
 
 **`tui_direct_stale_foreign_cancel`** — `remove_tmux_session_if_current` returns
 `None`, logging `tui_direct_pending_start: stale FOREIGN cancel committed but
-watcher incarnation changed; finalizer skipped` at `info` and returning `false`
-**without storing `cancel`**, so the incumbent watcher keeps relaying.
+watcher incarnation changed; finalizer skipped` at `info` and returning `false`.
+The `pinned.cancel.store(true, …)` in `submit_stale_foreign_inflight_cancel` sits
+**after** that `is_none()` early return, so this path leaves the registration and
+the handle's `cancel` value as it found them.
 `demote_stale_foreign_inflight_if_current` then returns `false`, the caller's
 `reclaim_orphan_fn` reports `ReclaimStaleForeignOutcome::None`, and the worker
 falls into bounded escalation instead of re-evaluating. After
 `PENDING_START_MAX_BACKSTOP_CYCLES` it takes the ABORT branch
 (`event = tui_direct_pending_start.backstop_abort_foreign_inflight_live`): the
 synthetic turn-start claim is dropped, the anchor keeps its `⏳`, and reconcile
-lands `✅` via the prior owner's completion or `⚠` via the TTL fallback. The
-prompt was already submitted, so no output is lost; ownership bookkeeping is what
-degrades.
+lands `✅` via the prior owner's completion or `⚠` via the TTL fallback.
+
+The submitted input is not retracted — the prompt reached the pane before this
+branch, and the ABORT branch's own comment records that only the synthetic
+ownership claim is dropped while "the watcher/bridge still relays its output".
+That last clause holds for as long as the incumbent watcher is alive, which this
+path neither disturbs nor guarantees: per the pointer-CAS note above, a deny is
+consistent with a watcher the heartbeat sweeper has already cancelled in place.
+Ownership bookkeeping is what degrades by construction; output delivery degrades
+only in that residual case, and the `⚠` TTL fallback is where it surfaces.
 
 **This is the primary regression signal after the flip.** A rise in
 `backstop_abort_foreign_inflight_live` on channels that previously self-healed is
@@ -135,34 +159,124 @@ measured marker-absent population.
 
 ### 2. Enumerate marker-absent live sessions
 
-No API does this. Run on every dcserver host, as the user owning the runtime root:
+No API and no CLI does this. `read_spawn_nonce` has exactly one non-test caller,
+`tmux_session_files::session_panel_instance_key`, which feeds the Discord status
+panel and prints no path; `execution_identity::observation_counts` is
+`#[cfg(test)]`. So the check below **re-implements** the reader rather than
+reusing it, and step 2a exists because a re-implementation can be wrong.
+
+**Match the reader's semantics, not a filename glob.** What the fence calls
+`Unknown` is `read_spawn_nonce` returning `None`, and that is three conditions,
+only the first of which a glob sees:
+
+1. `tmux_common::resolve_session_temp_path` finds neither the **exact**
+   persistent path nor the **exact** legacy `$TMPDIR` path. The path is exact,
+   not suffixed: `<agentdesk_temp_dir()>/<session_temp_prefix(name)>.spawn_nonce`
+   where `session_temp_prefix` is
+   `agentdesk-<sha256(current_tmux_owner_marker() + "|" + host)[..12]>-<host>-<session>`.
+   A suffix glob (`*-<session>.spawn_nonce`) matches a marker minted under a
+   **stale prefix hash** — a prior runtime root or host namespace — which the
+   reader will never open. That is exactly category A, and a glob reports it
+   `ok`.
+2. `std::fs::read_to_string` on that one path fails. `resolve_session_temp_path`
+   returns the persistent path as soon as it *exists*; `read_spawn_nonce` then
+   reads **only** that path and does **not** fall back to `$TMPDIR`. An existing
+   but unreadable persistent marker is `None` even when a readable legacy one
+   sits beside it.
+3. The content is empty after `str::trim`. Presence of the file is not presence
+   of a nonce.
+
+#### 2a. Derive and validate the prefix inputs
+
+`current_tmux_owner_marker()` is `config::runtime_root()` rendered by
+`Path::display` — `$AGENTDESK_ROOT_DIR` verbatim when set and non-blank after
+trim (**including any trailing slash**), else `<home>/.adk/release` — and
+`tmux_common::host_temp_namespace()` is `$HOSTNAME`, else `$COMPUTERNAME`, else
+the literal `unknown-host`, taking the first that is non-empty after trim and
+hashing it **untrimmed**.
+
+Both must be read from **the dcserver's environment, not your shell's**.
+`HOSTNAME` is a bash shell variable that bash does not export, so an interactive
+shell normally has it while a launchd-spawned dcserver does not — and the two
+then hash to different prefixes, which would report every live session `ABSENT`.
 
 ```bash
 ROOT="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"
-SESS_DIR="$ROOT/runtime/sessions"
+ps eww -p "$(cat "$ROOT/runtime/dcserver.pid")" | tr ' ' '\n' \
+  | grep -E '^(AGENTDESK_ROOT_DIR|HOSTNAME|COMPUTERNAME|TMPDIR)='
+```
+
+Set `ROOT`/`HOST` below from that output — `HOST` to the first of
+`HOSTNAME`/`COMPUTERNAME` present and non-blank, otherwise the literal
+`unknown-host`.
+
+#### 2b. Read every live session the way the fence does
+
+Run on every dcserver host, as the user owning the runtime root:
+
+```bash
+set -u
+ROOT="…"                    # from 2a — verbatim, trailing slash included
+HOST="…"                    # from 2a, or the literal unknown-host
+SESS_DIR="$ROOT/runtime/sessions"     # tmux_common::SESSIONS_SUBDIR
+LEGACY_DIR="${TMPDIR:-/tmp}"          # std::env::temp_dir()
+
+# session_temp_prefix(): agentdesk-<sha256("<root>|<host>")[..12]>-<host>-<session>
+sha256() { command -v sha256sum >/dev/null && sha256sum || shasum -a 256; }
+HASH="$(printf '%s|%s' "$ROOT" "$HOST" | sha256 | cut -c1-12)"
+prefix() { printf 'agentdesk-%s-%s-%s' "$HASH" "$HOST" "$1"; }
+
+# read_spawn_nonce(): resolve_session_temp_path → read_to_string → trim → non-empty
+probe() {
+  local new="$SESS_DIR/$(prefix "$1").spawn_nonce"
+  local legacy="$LEGACY_DIR/$(prefix "$1").spawn_nonce"
+  local path=""
+  [ -e "$new" ] && path="$new" || { [ -e "$legacy" ] && path="$legacy"; }
+  [ -n "$path" ] || { echo "ABSENT  $1  (no marker at either exact path)"; return; }
+  local raw
+  raw="$(cat "$path" 2>/dev/null)" \
+    || { echo "ABSENT  $1  (unreadable: $path)"; return; }
+  if [ -z "$(printf '%s' "$raw" | tr -d '[:space:]')" ]; then
+    echo "ABSENT  $1  (empty after trim: $path)"
+  else
+    echo "ok      $1  $path"
+  fi
+}
 
 tmux list-sessions -F '#{session_name}' 2>/dev/null \
   | grep '^AgentDesk-' \
-  | while read -r s; do
-      # session_temp_prefix() hashes the runtime root and host, so match the
-      # suffix rather than recomputing the prefix.
-      if ls "$SESS_DIR"/*-"$s".spawn_nonce >/dev/null 2>&1 \
-         || ls "${TMPDIR:-/tmp}"/*-"$s".spawn_nonce >/dev/null 2>&1; then
-        echo "ok      $s"
-      else
-        echo "ABSENT  $s"
-      fi
-    done
+  | while read -r s; do probe "$s"; done
 ```
 
 `AgentDesk-` is the prefix the runtime itself tests for
-(`relay_recovery::decision::is_agentdesk_tmux_session`); the second `ls` covers
-the legacy `$TMPDIR` fallback `resolve_session_temp_path` still honours.
+(`relay_recovery::decision::is_agentdesk_tmux_session`). The `LEGACY_DIR` arm
+covers the legacy `$TMPDIR` fallback `resolve_session_temp_path` still honours,
+in the same order and with the same no-second-chance behaviour as the reader.
 
-Record with the result that this proves marker presence, not that the marker will
-equal a future capture (a respawn in between re-mints it — fine, both sides
-re-read), and that it does not distinguish A/B/C, which it need not, because the
-remedy is identical.
+The whitespace-stripped comparison is the emptiness predicate only, not the
+value: `read_spawn_nonce` decides on `str::trim`, and the two differ only for
+content with interior whitespace, which no minted nonce has
+(`write_spawn_nonce` writes a `Uuid::simple` hex string).
+
+#### 2c. Prove the derivation before trusting an `ABSENT`
+
+An `ABSENT` row from a wrong `ROOT`/`HOST` is indistinguishable from a real one.
+Every session temp file shares the same prefix, so a session **spawned under the
+currently running dcserver** must have `<prefix>.owner`
+(`tmux_common::tmux_owner_path`) at the derived path:
+
+```bash
+ls -l "$SESS_DIR/$(prefix "<a-session-spawned-since-the-current-dcserver-started>").owner"
+```
+
+If that misses, `ROOT`/`HOST` are wrong and every row above is a false `ABSENT`.
+Re-derive before acting; do not treat the list as evidence until this passes.
+
+Record with the result that this proves `read_spawn_nonce` would have returned
+`Some` **at the instant of the check, under the derived namespace** — not that
+the marker will equal a future capture (a respawn in between re-mints it — fine,
+both sides re-read), and not which of A/B/C applies, which it need not, because
+the remedy is identical.
 
 ### 3. Clear every `ABSENT` session before the flip
 
@@ -199,11 +313,13 @@ list from step 2, even if empty.
 1. Set `runtime.execution_identity_mode: enforce` in the live `agentdesk.yaml`.
 2. Do not restart; the next fenced decision reads the new value. Note there is
    **no cheap production proof that the flip took effect** — a
-   `POST /api/channels/{id}/relay-recovery` dry run (`apply=false`) returns
-   `mode: "dry_run"` from `run_relay_recovery` before any fence is captured, so
-   it confirms the decision shape and nothing about the mode, which is only
-   observable when a fenced decision reaches a registry CAS. Confirm the config
-   value and rely on step 3 for behaviour.
+   `POST /api/channels/{id}/relay-recovery` dry run (the JSON body field
+   `"apply": false`, which is also the default; see
+   [the manual-recovery runbook](execution-identity-manual-recovery-under-enforce.md#how-to-actually-set-apply))
+   returns `mode: "dry_run"` from `run_relay_recovery` before any fence is
+   captured, so it confirms the decision shape and nothing about the mode, which
+   is only observable when a fenced decision reaches a registry CAS. Confirm the
+   config value and rely on step 3 for behaviour.
 3. Watch the two signals from step 5 for the first full turn cycle on the busiest
    channel before widening.
 
