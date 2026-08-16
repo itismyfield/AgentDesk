@@ -98,7 +98,16 @@ static EXECUTION_IDENTITY_MODE_OVERRIDE: std::sync::Mutex<Option<ExecutionIdenti
 /// Read per decision through `config_live_reload::current()` so an
 /// `agentdesk.yaml` edit applies without a restart, and `Legacy` before the boot
 /// config is installed. `Legacy` is also the compiled-in default, so an
-/// untouched deployment keeps the pre-existing pointer/output CAS verbatim.
+/// untouched deployment keeps each converted call site's pre-existing registry
+/// CAS verbatim — the channel binding, session name, output path and cancel
+/// pointer for `cancel_and_remove_channel_if_current`; the session key and the
+/// cancel pointer alone for `remove_tmux_session_if_current`.
+///
+/// `Legacy` is NOT "this PR's behaviour reverted": #5071 T3-A1 deleted the two
+/// #5067 in-flight emission fences outright, in every mode, and no value of this
+/// switch brings them back. The switch only chooses whether the identity
+/// conjuncts below are ignored, counted, or enforced. Restoring the fenced
+/// baseline means reverting the T3-A1 PR.
 pub(in crate::services::discord) fn execution_identity_mode() -> ExecutionIdentityMode {
     #[cfg(test)]
     if let Some(mode) = *EXECUTION_IDENTITY_MODE_OVERRIDE
@@ -140,9 +149,24 @@ pub(in crate::services::discord) fn set_execution_identity_mode_for_tests(
     ExecutionIdentityModeGuard { previous }
 }
 
+/// The registry row a caller pinned before its CAS, for the T3-R2 conjuncts its
+/// removal helper does not compare on its own.
+///
+/// `remove_tmux_session_if_current` compares the session key and the cancel
+/// pointer and nothing else, so T3-R2's `(owner_channel, tmux_session_name,
+/// output_path, Arc::ptr_eq(cancel))` tuple is complete at that call site only
+/// when the caller pins the owner channel and the output path here. The
+/// canceling sibling `cancel_and_remove_channel_if_current` already compares
+/// both itself, so it pins nothing and this stays `None` there.
+struct PinnedWatcherBinding {
+    owner_channel_id: ChannelId,
+    output_path: String,
+}
+
 /// #5071 T3-A1: the execution-identity conjunct the two H6 registry CAS sites
 /// add on top of the existing `(channel, session, output_path, cancel pointer)`
-/// comparison.
+/// comparison, plus the [`PinnedWatcherBinding`] half of that comparison for the
+/// call site whose helper does not make it.
 ///
 /// The nonce is captured once at decision time and re-read inside the registry
 /// lock immediately before the removal, so the re-read cannot interleave with
@@ -156,6 +180,7 @@ pub(in crate::services::discord) struct WatcherIdentityFence {
     site: &'static str,
     tmux_session_name: String,
     captured_spawn_nonce: Option<String>,
+    pinned_binding: Option<PinnedWatcherBinding>,
 }
 
 impl WatcherIdentityFence {
@@ -169,16 +194,74 @@ impl WatcherIdentityFence {
             site,
             tmux_session_name: tmux_session_name.to_string(),
             captured_spawn_nonce: capture_session_spawn_nonce(tmux_session_name),
+            pinned_binding: None,
         }
     }
 
-    fn permits_destruction(&self) -> bool {
-        destruction_permitted_under_identity(
+    /// Carry the owner channel and output path the caller read off the same
+    /// live registry row it pinned its cancel pointer from, so the CAS can
+    /// re-compare them.
+    pub(in crate::services::discord) fn with_pinned_binding(
+        mut self,
+        owner_channel_id: ChannelId,
+        output_path: &str,
+    ) -> Self {
+        self.pinned_binding = Some(PinnedWatcherBinding {
+            owner_channel_id,
+            output_path: output_path.to_string(),
+        });
+        self
+    }
+
+    fn permits_destruction(
+        &self,
+        live_owner_channel_id: Option<ChannelId>,
+        live_output_path: &str,
+    ) -> bool {
+        // Evaluate both conjuncts before either can veto, so `Observe` records
+        // the same pair of outcomes `Enforce` decides on.
+        let binding_permits = self.permits_pinned_binding(live_owner_channel_id, live_output_path);
+        let identity_permits = destruction_permitted_under_identity(
             self.mode,
             self.site,
             &self.tmux_session_name,
             self.captured_spawn_nonce.as_deref(),
-        )
+        );
+        binding_permits && identity_permits
+    }
+
+    /// The owner-channel/output-path half of T3-R2. A caller that pinned no
+    /// binding always passes here, because its own helper made this comparison.
+    ///
+    /// The mode ladder matches the nonce conjunct's: `Legacy` neither records
+    /// nor refuses, so the pre-A1 answer at the pinning call site — the session
+    /// key plus `Arc::ptr_eq(cancel)`, and nothing more — is what `Legacy` still
+    /// gives; `Observe` records; only `Enforce` refuses.
+    fn permits_pinned_binding(
+        &self,
+        live_owner_channel_id: Option<ChannelId>,
+        live_output_path: &str,
+    ) -> bool {
+        let Some(pinned) = self.pinned_binding.as_ref() else {
+            return true;
+        };
+        if live_owner_channel_id == Some(pinned.owner_channel_id)
+            && live_output_path == pinned.output_path
+        {
+            return true;
+        }
+        if self.mode.records_identity_observations() {
+            tracing::info!(
+                counter = "execution_identity_binding_mismatch",
+                site = self.site,
+                session_key = self.tmux_session_name.as_str(),
+                pinned_owner_channel_id = pinned.owner_channel_id.get(),
+                live_owner_channel_id = live_owner_channel_id.map(ChannelId::get).unwrap_or(0),
+                output_path_changed = live_output_path != pinned.output_path,
+                "pinned watcher binding no longer matches the live registry row"
+            );
+        }
+        !self.mode.denies_on_incarnation_mismatch()
     }
 }
 
@@ -383,6 +466,11 @@ impl TmuxWatcherRegistry {
     /// #5071 T3-A1 conjunct: it is evaluated INSIDE the registry lock and only
     /// after the cancel-pointer CAS already matched, so a fence miss and a
     /// pointer miss produce the same answer — nothing removed, nothing stored.
+    ///
+    /// The unfenced spelling compares the session key and the cancel pointer
+    /// only. The live owner channel and output path read here complete T3-R2's
+    /// tuple for a fence that pinned them; without a fence they are read and
+    /// discarded, leaving the unfenced answer unchanged.
     fn remove_tmux_session_if_current_locked(
         &self,
         guard: &TmuxWatcherRegistryGuard,
@@ -390,14 +478,17 @@ impl TmuxWatcherRegistry {
         expected_cancel: &Arc<std::sync::atomic::AtomicBool>,
         identity: Option<&WatcherIdentityFence>,
     ) -> Option<(ChannelId, TmuxWatcherHandle)> {
-        let is_current = self
+        let live_output_path = self
             .by_tmux_session
             .get(tmux_session_name)
-            .is_some_and(|entry| Arc::ptr_eq(&entry.cancel, expected_cancel));
-        if !is_current {
-            return None;
-        }
-        if identity.is_some_and(|identity| !identity.permits_destruction()) {
+            .filter(|entry| Arc::ptr_eq(&entry.cancel, expected_cancel))
+            .map(|entry| entry.output_path.clone())?;
+        if let Some(identity) = identity
+            && !identity.permits_destruction(
+                self.owner_channel_for_tmux_session(tmux_session_name),
+                &live_output_path,
+            )
+        {
             return None;
         }
         self.remove_tmux_session_locked(guard, tmux_session_name)
@@ -455,7 +546,12 @@ impl TmuxWatcherRegistry {
         if !matches_current {
             return false;
         }
-        if identity.is_some_and(|identity| !identity.permits_destruction()) {
+        if let Some(identity) = identity
+            && !identity.permits_destruction(
+                self.owner_channel_for_tmux_session(&tmux_session_name),
+                expected_output_path,
+            )
+        {
             return false;
         }
         let Some((_, handle)) = self.remove_locked(guard, channel_id) else {

@@ -1649,8 +1649,14 @@ fn is_off_intake_delivery_settlement(stage: &IntakeDeliverySettlementStage) -> b
 /// (`services::discord::execution_identity::SessionIncarnationRef`) only reads
 /// the per-spawn `.spawn_nonce` marker that provider spawns already write; no
 /// mode introduces a durable row, a new marker, or a new file format. T3-A0
-/// lands that model with NO destructive consumer, so all three modes are
-/// behaviourally identical until T3-A1 converts real call sites.
+/// landed that model with no destructive consumer; T3-A1 converted the call
+/// sites, so the modes are no longer behaviourally identical — `Enforce` now
+/// refuses at the two automatic watcher-registry CAS removals described on that
+/// variant.
+///
+/// This switch does not restore anything T3-A1 deleted. The two #5067 in-flight
+/// emission fences are gone in every mode; only a revert of that PR brings them
+/// back.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionIdentityMode {
@@ -1659,13 +1665,20 @@ pub enum ExecutionIdentityMode {
     /// untouched.
     #[default]
     Legacy,
-    /// Legacy behaviour plus captured-vs-current nonce counters and logs. Still
+    /// Legacy behaviour plus captured-vs-current nonce counters and logs, and a
+    /// log whenever a pinned registry row no longer matches the live one. Still
     /// never denies.
     Observe,
-    /// Reserved for T3-A1: the converted automatic cancel/remove paths will
-    /// refuse to act unless a positive owner/handle match is accompanied by an
-    /// exact `Some(nonce)` match, with absent and mismatched nonces both a deny.
-    /// Operator/CLI resets and the paths T3 does not convert are out of scope.
+    /// Refuse the two automatic watcher-registry removals T3-A1 converted — the
+    /// relay-recovery dead-frontier cancel and the TUI stale-FOREIGN demote —
+    /// unless the pinned registry row still matches AND the captured
+    /// `Some(nonce)` equals the marker re-read inside the registry lock. Absent
+    /// and mismatched nonces are both a deny, so on a platform with no tmux
+    /// marker store at all this mode refuses both paths unconditionally.
+    ///
+    /// Nothing else changes: operator/CLI resets, tmux and process kills, and
+    /// every registry removal T3 did not convert are out of scope, and refusing
+    /// is the only thing this mode does.
     Enforce,
 }
 
@@ -1678,8 +1691,12 @@ impl ExecutionIdentityMode {
     }
 
     /// Only `Enforce` may turn a non-matching observation into a refusal, and
-    /// only at the call sites T3-A1 converts. No call site reads this yet.
-    #[allow(dead_code)] // #5071 T3-A0: the deny predicate lands before T3-A1's call sites.
+    /// only at the call sites T3-A1 converted. Two consumers read this: the
+    /// nonce deny predicate `destruction_permitted_under_identity` in
+    /// `services::discord::execution_identity` (with a shim of the same name in
+    /// `tmux_watcher_registry` for platforms that host no tmux marker), and the
+    /// pinned-binding conjunct on `tmux_watcher_registry`'s identity-fenced
+    /// registry view.
     pub const fn denies_on_incarnation_mismatch(self) -> bool {
         matches!(self, Self::Enforce)
     }

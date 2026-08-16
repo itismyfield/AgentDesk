@@ -882,25 +882,29 @@ async fn submit_stale_foreign_inflight_cancel(
         );
         return false;
     }
-    let expected_cancel = probe
+    // #5071 T3-A1: pin the live execution identity alongside the cancel
+    // pointer, the owner channel and the output path, so the registry CAS below
+    // re-reads all of them as conjuncts. This helper compares only the session
+    // key and the cancel pointer itself, so the owner/output half of T3-R2 rides
+    // on the fence; the relay-recovery sibling's helper makes that comparison
+    // internally and pins no binding.
+    let pinned = probe
         .pin
         .tmux_session_name
         .as_deref()
         .and_then(|tmux_session| {
-            watcher_cancel::cancel_for_tmux_session(&shared.tmux_watchers, tmux_session)
+            watcher_cancel::pin_watcher_for_tmux_session(&shared.tmux_watchers, tmux_session)
+        })
+        .map(|pinned| {
+            let identity_fence = WatcherIdentityFence::capture(
+                execution_identity_mode(),
+                STALE_FOREIGN_CANCEL_IDENTITY_SITE,
+                &pinned.tmux_session_name,
+            )
+            .with_pinned_binding(pinned.owner_channel_id, &pinned.output_path);
+            (pinned, identity_fence)
         });
-    // #5071 T3-A1: pin the live execution identity alongside the cancel pointer
-    // so the registry CAS below re-reads it as one more conjunct. `Some` exactly
-    // when the pin names a session, which is also the only case in which
-    // `expected_cancel` can be `Some`.
-    let identity_fence = probe.pin.tmux_session_name.as_deref().map(|tmux_session| {
-        WatcherIdentityFence::capture(
-            execution_identity_mode(),
-            STALE_FOREIGN_CANCEL_IDENTITY_SITE,
-            tmux_session,
-        )
-    });
-    let pinned_watcher = expected_cancel.is_some();
+    let pinned_watcher = pinned.is_some();
     let commit_outcome = super::inflight::commit_destructive_cancel_locked(
         provider,
         channel_id.get(),
@@ -934,32 +938,31 @@ async fn submit_stale_foreign_inflight_cancel(
     #[cfg(test)]
     run_destructive_cancel_post_gate_hook_for_tests(DestructiveCancelHookPoint::PreRegistryCas);
     // The flock is released before registry CAS; the two lock domains never overlap.
-    if let (Some(tmux_session), Some(cancel), Some(identity_fence)) = (
-        probe.pin.tmux_session_name.as_deref(),
-        expected_cancel.as_ref(),
-        identity_fence,
-    ) {
+    if let Some((pinned, identity_fence)) = pinned {
         // #5071 T3-A1: unlike the relay-recovery sibling, this helper only
         // REMOVES — it never writes `cancel` — so the store belongs here, after
-        // the CAS (cancel pointer plus captured/live spawn nonce) proved the
-        // registry entry is still the incarnation this path pinned. A failed CAS
+        // the CAS (cancel pointer, plus the pinned owner channel, output path
+        // and captured/live spawn nonce carried by the fence) proved the
+        // registry entry is still the row this path pinned. A failed CAS
         // therefore leaves `cancel` unset and the watcher relaying, rather than
         // silencing a watcher the registry still lists.
         if shared
             .tmux_watchers
             .under_identity_fence(identity_fence)
-            .remove_tmux_session_if_current(tmux_session, cancel)
+            .remove_tmux_session_if_current(&pinned.tmux_session_name, &pinned.cancel)
             .is_none()
         {
             tracing::info!(
                 provider = %provider.as_str(),
                 channel_id = channel_id.get(),
-                tmux_session,
+                tmux_session = pinned.tmux_session_name.as_str(),
                 "tui_direct_pending_start: stale FOREIGN cancel committed but watcher incarnation changed; finalizer skipped"
             );
             return false;
         }
-        cancel.store(true, std::sync::atomic::Ordering::Release);
+        pinned
+            .cancel
+            .store(true, std::sync::atomic::Ordering::Release);
     }
     // E1 closes the watcher left behind at destruction time. It does not close a
     // last pre-cancel self-heal iteration or later restoration/reclaim recreation
@@ -3066,6 +3069,195 @@ mod tests {
             );
             assert!(shared.tmux_watchers.has_live_watcher_handle(tmux));
             assert!(!token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+        });
+    }
+
+    /// What the T3-R2 tuple looked like after one run of
+    /// [`stale_foreign_demote_with_replaced_binding`].
+    #[cfg(unix)]
+    struct ReplacedBindingOutcome {
+        demoted: bool,
+        cancelled: bool,
+        session_still_registered: bool,
+        replacement_still_owner: bool,
+        turn_cancelled: bool,
+        inflight_present: bool,
+    }
+
+    /// Drive one stale-FOREIGN demote in which a replacement watcher claims the
+    /// same tmux NAME for a DIFFERENT owner channel with a DIFFERENT output path
+    /// between the pin capture and the registry CAS, while REUSING the pinned
+    /// cancel pointer and leaving `.spawn_nonce` untouched.
+    ///
+    /// Every conjunct the pre-A1 helper compared — the session key and
+    /// `Arc::ptr_eq(cancel)` — still matches, and so does the nonce, because the
+    /// session is spawned exactly once. Only the owner channel and the output
+    /// path moved, so the outcome isolates that conjunct.
+    #[cfg(unix)]
+    async fn stale_foreign_demote_with_replaced_binding(
+        root: &std::path::Path,
+        channel_id: u64,
+        replacement_channel_id: u64,
+        label: &str,
+    ) -> ReplacedBindingOutcome {
+        let shared = super::super::make_shared_data_for_tests();
+        let provider = crate::services::provider::ProviderKind::Claude;
+        let channel = poise::serenity_prelude::ChannelId::new(channel_id);
+        let replacement_channel = poise::serenity_prelude::ChannelId::new(replacement_channel_id);
+        let stale_msg = channel_id + 100;
+        let tmux = format!("tmux-4030-a1-{label}");
+        let output_path = root.join(format!("ready-a1-{label}.jsonl"));
+        let replacement_output_path = root.join(format!("ready-a1-{label}-replacement.jsonl"));
+        for path in [&output_path, &replacement_output_path] {
+            std::fs::write(
+                path,
+                r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+            )
+            .expect("write ready output");
+        }
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+        assert!(
+            super::super::mailbox_try_start_turn(
+                &shared,
+                channel,
+                token.clone(),
+                poise::serenity_prelude::UserId::new(1),
+                poise::serenity_prelude::MessageId::new(stale_msg),
+            )
+            .await
+        );
+        shared
+            .restart
+            .global_active
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+        let mut state =
+            stale_foreign_state(provider.clone(), channel_id, stale_msg, &tmux, &output_path);
+        stamp_claude_ready_for_input_evidence(&mut state, &output_path);
+        write_inflight_fixture(root, &provider, &state);
+        let (watcher, watcher_cancel) = test_watcher_handle(&tmux, &output_path);
+        watcher
+            .last_heartbeat_ts_ms
+            .store(1, std::sync::atomic::Ordering::Release);
+        shared.tmux_watchers.insert(channel, watcher);
+        let mut rec = record("claude", channel_id, channel_id + 200);
+        rec.tmux_session_name = tmux.clone();
+        // Spawned once and never respawned, so the nonce conjunct matches at
+        // the CAS and cannot be what decides this run.
+        super::super::write_spawn_nonce(&tmux).expect("spawn nonce");
+
+        let (mut replacement, _replacement_cancel) =
+            test_watcher_handle(&tmux, &replacement_output_path);
+        // Reusing the pinned pointer is what makes this a counterexample rather
+        // than an ordinary replacement: `Arc::ptr_eq` still holds, so a store
+        // after the CAS would silence the NEW owner's watcher.
+        replacement.cancel = watcher_cancel.clone();
+        replacement
+            .last_heartbeat_ts_ms
+            .store(1, std::sync::atomic::Ordering::Release);
+        let hook_shared = Arc::clone(&shared);
+        let replacement_slot = Mutex::new(Some(replacement));
+        let _hook = set_destructive_cancel_post_gate_hook_for_tests(Arc::new(move |point| {
+            if point != DestructiveCancelHookPoint::PreRegistryCas {
+                return;
+            }
+            if let Some(replacement) = replacement_slot
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .take()
+            {
+                hook_shared
+                    .tmux_watchers
+                    .insert(replacement_channel, replacement);
+            }
+        }));
+
+        let demoted = demote_stale_foreign_inflight_if_current(&shared, &rec).await;
+        ReplacedBindingOutcome {
+            demoted,
+            cancelled: watcher_cancel.load(std::sync::atomic::Ordering::Acquire),
+            session_still_registered: shared.tmux_watchers.has_live_watcher_handle(&tmux),
+            replacement_still_owner: shared.tmux_watchers.owner_channel_for_tmux_session(&tmux)
+                == Some(replacement_channel),
+            turn_cancelled: token.cancelled.load(std::sync::atomic::Ordering::Relaxed),
+            inflight_present: super::super::inflight::load_inflight_state(&provider, channel_id)
+                .is_some(),
+        }
+    }
+
+    /// #5071 T3-A1 r2 fixed mutation gate for the owner/output conjunct: under
+    /// `Enforce`, a registry row that moved to another owner channel and another
+    /// output path must not be removed, and the pointer it shares with the pin
+    /// must not be stored. Deleting the pinned-binding conjunct from the fenced
+    /// CAS fails here — the nonce and the cancel pointer both still match, so
+    /// nothing else in the tuple can refuse this.
+    #[cfg(unix)]
+    #[test]
+    fn enforce_mode_stale_foreign_demote_refuses_a_replaced_owner_and_output() {
+        let _guard = worker_test_lock();
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::TempDir::new().expect("runtime root");
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
+        let _mode = super::super::tmux_watcher_registry::set_execution_identity_mode_for_tests(
+            crate::config::ExecutionIdentityMode::Enforce,
+        );
+        current_thread_rt().block_on(async {
+            let outcome = stale_foreign_demote_with_replaced_binding(
+                root.path(),
+                4_030_120,
+                4_030_121,
+                "replaced-binding-enforce",
+            )
+            .await;
+            assert!(!outcome.demoted);
+            assert!(
+                !outcome.cancelled,
+                "Enforce must not cancel a pointer the new owner's watcher shares"
+            );
+            assert!(
+                outcome.session_still_registered && outcome.replacement_still_owner,
+                "the replacement row must survive a refused removal"
+            );
+            assert!(!outcome.turn_cancelled);
+            assert!(outcome.inflight_present);
+        });
+    }
+
+    /// The other half of the same gate: `Legacy` keeps the pre-A1 answer at this
+    /// call site verbatim — the session key plus `Arc::ptr_eq(cancel)`, with no
+    /// owner, output or nonce conjunct — so the very same race still removes and
+    /// cancels. Making the owner/output conjunct unconditional fails here.
+    #[cfg(unix)]
+    #[test]
+    fn legacy_mode_stale_foreign_demote_keeps_its_pre_a1_session_and_pointer_check() {
+        let _guard = worker_test_lock();
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::TempDir::new().expect("runtime root");
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
+        let _mode = super::super::tmux_watcher_registry::set_execution_identity_mode_for_tests(
+            crate::config::ExecutionIdentityMode::Legacy,
+        );
+        current_thread_rt().block_on(async {
+            let outcome = stale_foreign_demote_with_replaced_binding(
+                root.path(),
+                4_030_122,
+                4_030_123,
+                "replaced-binding-legacy",
+            )
+            .await;
+            assert!(outcome.demoted);
+            assert!(outcome.cancelled);
+            assert!(
+                !outcome.session_still_registered,
+                "Legacy still removes on a session-key plus cancel-pointer match alone"
+            );
+            assert!(outcome.turn_cancelled);
+            assert!(!outcome.inflight_present);
         });
     }
 

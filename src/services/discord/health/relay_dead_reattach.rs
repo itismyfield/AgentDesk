@@ -34,11 +34,18 @@ fn run_reattach_apply_hook_for_tests(point: ReattachApplyHookPoint) {
 }
 
 /// #5071 T3-A1 retired the #5067 `relay_emission_in_flight` conjunct that used
-/// to lead this predicate. Its sibling read in `relay_recovery/apply.rs` — the
-/// same origin commit, the same call chain — went with it, because the reattach
-/// this lane requests is non-destructive and the destructive branch downstream
-/// now carries the registry identity CAS instead. That CAS is not an emission
-/// lease, so the same-incarnation emission race stays a declared non-guarantee.
+/// to lead this predicate, together with its sibling read in
+/// `relay_recovery/apply.rs` — the same origin commit, the same call chain. The
+/// reattach this lane requests is itself non-destructive, and the one branch
+/// downstream that destroys under the retired fence's old cover — the
+/// dead-frontier watcher cancel in `relay_recovery::apply` — carries the
+/// registry identity CAS in its place. That CAS is not an emission lease, so the
+/// same-incarnation emission race stays a declared non-guarantee.
+///
+/// That replacement covers the dead-frontier branch and nothing else in this
+/// lane. When the reattach instead rebinds an existing claim,
+/// `watchers::lifecycle::claims` removes through `remove_tmux_session_locked`,
+/// which carries no identity conjunct and is left to T5.
 fn should_reattach_relay_dead_watcher(
     snapshot: &WatcherStateSnapshot,
     channel_id: ChannelId,
