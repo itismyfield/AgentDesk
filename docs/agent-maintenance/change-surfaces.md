@@ -1896,6 +1896,35 @@ time for diagnostics; neither is a stored approval value.
 - tests: `src/high_risk_recovery.rs` cancel/recovery suites.
 - related_issues: #964, #1112, #1138, #1222, #1223, #1283.
 
+### `execution_identity_fence`
+
+- canonical_modules: `src/services/discord/execution_identity.rs` (the
+  `.spawn_nonce` read model, mounted at
+  `services::discord::tmux::execution_identity` by a `#[path]` declaration in
+  `tmux.rs`, so it inherits that file's unix gate) and the
+  `WatcherIdentityFence` / `IdentityFencedRegistry` pair in
+  `tmux_watcher_registry.rs`, which is NOT unix-gated and carries its own
+  `#[cfg(not(unix))]` shim pair. Switch: `config::ExecutionIdentityMode` +
+  `RuntimeSettingsConfig.execution_identity_mode`, read live per decision by
+  `tmux_watcher_registry::execution_identity_mode`.
+- converted call sites: exactly two, both keeping their unfenced helper NAMES so
+  the #5071 T3-A4 destructive-call-site ratchet keeps counting them —
+  `relay_recovery/apply.rs` (`DEAD_FRONTIER_CANCEL_IDENTITY_SITE`) and
+  `tui_direct_pending_start.rs` (`STALE_FOREIGN_CANCEL_IDENTITY_SITE`). The other
+  14 production entries in the `registry_remove` category of
+  `scripts/destructive_call_site_baseline.json` stay unfenced in every mode.
+- invariants, non_guarantees, rollout procedure and tests: NOT restated here.
+  The runbooks are the source of truth and are anchored to the same symbols —
+  [promotion criteria](../runbooks/execution-identity-promotion-criteria.md)
+  (Legacy → Observe → Enforce formula, what Observe records),
+  [Enforce rollout](../runbooks/execution-identity-enforce-rollout.md)
+  (fail-closed contract, marker-absent pre-flight, revert, coverage limits),
+  [Manual recovery under Enforce](../runbooks/execution-identity-manual-recovery-under-enforce.md)
+  (why `RelayRecoveryApplySource::Manual` is fenced while process reset is not),
+  and the counter-exposure decision proposal
+  [5399-observe-exposure-options](../design/5399-observe-exposure-options.md).
+- related_issues: #5071 (T3-A0 #5394, T3-A1 #5398), #5396, #5399, #5411.
+
 ### `relay_reachability`
 
 - canonical_modules: `src/services/discord/health/reachability.rs` (module root)
