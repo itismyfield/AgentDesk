@@ -38,6 +38,9 @@ a Rust parser and not a resolver:
     — a bare trailing `inflight` segment and an `as` rename;
   * `#[path = "..."]` redirections are not followed. The scan set is the tree's
     files as they sit on disk;
+  * future-slice markers are associated lexically: `not yet on disk` exempts
+    only the concrete `src/**.rs` path immediately before it in the same bullet,
+    before another concrete path appears;
   * it says nothing about runtime reachability, only about source text.
 
 The neutralizer is `scripts/check_clippy_allow_ratchet.py`'s, not a second copy:
@@ -286,11 +289,20 @@ def scan_change_surface(repo_root: Path) -> list[Violation]:
                 )
             )
 
-    # Ghost paths: a concrete file the surface names that is not on disk and not
-    # marked as a future slice's landing.
+    # Ghost paths: each future-slice marker qualifies only the concrete path
+    # immediately before it. A marker elsewhere in the bullet must not exempt
+    # unrelated missing paths that happen to share that bullet.
     for offset, bullet in split_bullets(section):
-        for path in SURFACE_PATH.findall(bullet):
-            if (repo_root / path).is_file() or FUTURE_SLICE_MARKER.search(bullet):
+        path_matches = list(SURFACE_PATH.finditer(bullet))
+        for index, path_match in enumerate(path_matches):
+            path = path_match.group(1)
+            qualifier_end = (
+                path_matches[index + 1].start()
+                if index + 1 < len(path_matches)
+                else len(bullet)
+            )
+            qualifier = bullet[path_match.end() : qualifier_end]
+            if (repo_root / path).is_file() or FUTURE_SLICE_MARKER.search(qualifier):
                 continue
             violations.append(
                 Violation(
