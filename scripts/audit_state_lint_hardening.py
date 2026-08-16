@@ -15,6 +15,11 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    from rust_cfg import find_test_only_cfg_attribute
+except ModuleNotFoundError:  # imported from a repo-root unittest
+    from scripts.rust_cfg import find_test_only_cfg_attribute
+
 
 PRODUCTION_PREFIXES = (
     "src/db/",
@@ -75,7 +80,6 @@ RISKY_INTEGER_SUFFIXES = (
     "_seq",
 )
 
-CFG_TEST_ATTRIBUTE_RE = re.compile(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]")
 MODULE_DECLARATION_RE = re.compile(
     r"(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{"
 )
@@ -276,6 +280,20 @@ def strip_rust_non_code(source: str) -> str:
 
 
 def test_region_lines(path: str) -> set[int]:
+    """Return lines inside lexically test-only inline modules.
+
+    A cfg/cfg_attr gate counts only when the shared Boolean classifier proves
+    that it cannot enable the module with ``test`` disabled.  Merely mentioning
+    the token is insufficient: ``not(test)``, ``any(test, unix)``, string
+    values such as ``feature = "test-tools"``, and non-gating forms such as
+    ``cfg_attr(test, allow(dead_code))`` remain production-visible.  For
+    ``cfg_attr``, only nested cfg/cfg_attr payloads contribute gating semantics.
+
+    This is deliberately a lexical inline-module classifier, not rustc cfg
+    evaluation.  Unsupported/malformed predicates and attributes spanning
+    multiple source lines stay production-visible.
+    """
+
     if path in _TEST_REGION_CACHE:
         return _TEST_REGION_CACHE[path]
     result: set[int] = set()
@@ -297,9 +315,11 @@ def test_region_lines(path: str) -> set[int]:
         opens = code_line.count("{")
         closes = code_line.count("}")
         module_text = stripped
-        cfg_test_attribute = CFG_TEST_ATTRIBUTE_RE.match(module_text)
+        cfg_test_attribute = find_test_only_cfg_attribute(module_text)
+        if cfg_test_attribute is not None and cfg_test_attribute.start() != 0:
+            cfg_test_attribute = None
         if cfg_test_attribute:
-            module_text = module_text[cfg_test_attribute.end() :].lstrip()
+            module_text = module_text[cfg_test_attribute.attribute_end() :].lstrip()
         module_declaration = MODULE_DECLARATION_RE.match(module_text)
         starts_test_module = module_declaration and (
             module_declaration.group(1) == "tests"

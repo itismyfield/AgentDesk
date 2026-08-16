@@ -31,6 +31,62 @@ class TestRegionTests(unittest.TestCase):
 
         self.assertIn(3, lines)
 
+    def test_cfg_all_test_attribute_marks_module_as_test_region(self) -> None:
+        lines = self.classified_lines(
+            "#[cfg(all(test, unix))]\nmod platform_probes {\n    probe().unwrap();\n}\n"
+        )
+
+        self.assertIn(3, lines)
+
+    def test_cfg_any_test_only_attribute_marks_module_as_test_region(self) -> None:
+        lines = self.classified_lines(
+            "#[cfg(any(test))]\nmod alternate_probes {\n    probe().unwrap();\n}\n"
+        )
+
+        self.assertIn(3, lines)
+
+    def test_nested_all_any_test_attribute_marks_module_as_test_region(self) -> None:
+        lines = self.classified_lines(
+            "#[cfg(all(unix, any(test)))]\n"
+            "mod nested_probes {\n    probe().unwrap();\n}\n"
+        )
+
+        self.assertIn(3, lines)
+
+    def test_cfg_attr_with_effective_test_gate_marks_test_region(self) -> None:
+        lines = self.classified_lines(
+            "#[cfg_attr(not(test), cfg(test))]\n"
+            "mod conditional_probes {\n    probe().unwrap();\n}\n"
+        )
+
+        self.assertIn(3, lines)
+
+    def test_cfg_attr_test_non_gate_remains_production_visible(self) -> None:
+        lines = self.classified_lines(
+            "#[cfg_attr(test, allow(dead_code))]\n"
+            "mod conditional_lints {\n    production_probe().unwrap();\n}\n"
+        )
+
+        self.assertNotIn(3, lines)
+
+    def test_not_test_predicates_remain_production_visible(self) -> None:
+        for predicate in ("not(test)", "all(not(test), unix)"):
+            with self.subTest(predicate=predicate):
+                lines = self.classified_lines(
+                    f"#[cfg({predicate})]\n"
+                    "mod production_probes {\n    production_probe().unwrap();\n}\n"
+                )
+
+                self.assertNotIn(3, lines)
+
+    def test_test_like_feature_string_remains_production_visible(self) -> None:
+        lines = self.classified_lines(
+            '#[cfg(feature = "test-tools")]\n'
+            "mod feature_probes {\n    production_probe().unwrap();\n}\n"
+        )
+
+        self.assertNotIn(3, lines)
+
     def test_tests_module_name_remains_a_test_region(self) -> None:
         lines = self.classified_lines("mod tests {\n    probe().unwrap();\n}\n")
 
