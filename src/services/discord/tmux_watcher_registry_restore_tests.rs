@@ -304,6 +304,69 @@ fn value_cas_declared_non_guarantee_readmitted_identical_row_passes_enforce() {
     );
 }
 
+// #5399: a destruction decision routed through the fence used to cost two
+// `.spawn_nonce` reads in EVERY mode — the up-front capture plus a re-read
+// inside the registry lock — and `Legacy` threw both answers away. This drives a
+// whole Legacy decision over a session whose marker exists and is readable, and
+// asserts the read tally for that session never moves while the removal still
+// happens. Removing either short-circuit (`WatcherIdentityFence::capture` or the
+// top of `destruction_permitted_under_identity`) fails the tally assertion.
+//
+// The `Enforce` half is the control: the same decision on a second session still
+// makes both reads and still permits, so the short-circuits did not silence the
+// modes that consume the comparison.
+//
+// `cfg(unix)`: off unix there is no marker store to read or skip reading.
+#[cfg(unix)]
+#[test]
+fn legacy_decision_reads_no_spawn_nonce_marker_and_still_removes() {
+    use super::tmux::execution_identity::spawn_nonce_reads_for;
+    use super::tmux_watcher_registry::WatcherIdentityFence;
+    use crate::config::ExecutionIdentityMode;
+
+    const SITE: &str = "t3a1_legacy_dead_io";
+
+    let root = tempfile::tempdir().expect("isolated runtime root");
+    let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+
+    for (mode, tmux, expected_reads) in [
+        (ExecutionIdentityMode::Legacy, "AgentDesk-5399-dead-io-legacy", 0),
+        (ExecutionIdentityMode::Enforce, "AgentDesk-5399-dead-io-enforce", 2),
+    ] {
+        let registry = TmuxWatcherRegistry::new();
+        let owner = ChannelId::new(5_399_000_000_000_000_001);
+
+        let handle = live_watcher_handle(tmux);
+        let pinned_output_path = handle.output_path.clone();
+        let pinned_cancel = handle.cancel.clone();
+        registry.insert(owner, handle);
+        // A readable marker, so a read that happens is visible as a tally move
+        // and a read that is skipped cannot be excused by an absent marker.
+        super::write_spawn_nonce(tmux).expect("spawn nonce");
+        let baseline = spawn_nonce_reads_for(tmux);
+
+        let fence = WatcherIdentityFence::capture(mode, SITE, tmux)
+            .with_pinned_binding(owner, &pinned_output_path);
+        assert!(
+            registry
+                .under_identity_fence(fence)
+                .remove_tmux_session_if_current(tmux, &pinned_cancel)
+                .is_some(),
+            "{mode:?} must still permit an untouched row: nothing about the CAS answer changed"
+        );
+        assert_eq!(
+            registry.owner_channel_for_tmux_session(tmux),
+            None,
+            "the permitted removal must actually drop the row"
+        );
+        assert_eq!(
+            spawn_nonce_reads_for(tmux) - baseline,
+            expected_reads,
+            "{mode:?} must make exactly {expected_reads} marker read(s) across capture and CAS"
+        );
+    }
+}
+
 // #5071 T4-B0 (#4987 S0): `channel_binding` is the only ChannelId-keyed view of
 // a watcher slot, and until this slice it returned the owner channel and the
 // session name only — so #4986's second transcript coordinate, which the handle

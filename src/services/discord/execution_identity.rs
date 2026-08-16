@@ -31,6 +31,11 @@ use crate::config::ExecutionIdentityMode;
 
 use super::tmux_session_files::read_spawn_nonce;
 
+/// #5399: re-exported here because `tmux_session_files` is private to `tmux`,
+/// while the fence whose reads it tallies lives in `tmux_watcher_registry`.
+#[cfg(test)]
+pub(in crate::services::discord) use super::tmux_session_files::spawn_nonce_reads_for;
+
 /// One tmux session's execution identity as the on-disk markers describe it.
 ///
 /// `spawn_nonce` is `None` whenever the marker is missing, unreadable, or empty
@@ -208,6 +213,10 @@ pub(in crate::services::discord) fn capture_spawn_nonce(tmux_session_name: &str)
 /// keeps the pre-existing `(session, output_path, cancel pointer)` CAS as the
 /// whole check outside `Enforce`.
 ///
+/// #5399: a mode that neither counts nor refuses returns before the re-read, so
+/// `Legacy` does no marker I/O here. That is a cost change, not an answer
+/// change — the comparison it skips could only have been discarded.
+///
 /// The re-read runs inside the watcher-registry lock at both call sites, which
 /// orders it against other registry mutations. It is NOT ordered against a
 /// concurrent spawn's marker rename — no lock is shared with the spawn path — so
@@ -218,6 +227,9 @@ pub(in crate::services::discord) fn destruction_permitted_under_identity(
     tmux_session_name: &str,
     captured_spawn_nonce: Option<&str>,
 ) -> bool {
+    if !mode.consults_spawn_nonce() {
+        return true;
+    }
     let captured = SessionIncarnationRef::from_parts(
         tmux_session_name,
         captured_spawn_nonce.map(str::to_string),
@@ -399,6 +411,60 @@ mod tests {
                 ),
                 matches,
                 "Enforce permits only an exact captured/live nonce match ({shape})"
+            );
+        }
+    }
+
+    /// #5399: `Legacy` discards the comparison, so it must not pay for the
+    /// marker read that produces it. Deleting the mode short-circuit at the top
+    /// of `destruction_permitted_under_identity` moves this session's read
+    /// tally and fails the first assertion; the `Observe`/`Enforce` arms are the
+    /// control that the short-circuit did not silence the read for the modes
+    /// that consume it.
+    ///
+    /// The tally is keyed by session name, so this test needs no exclusive hold
+    /// on the process-global observation counters.
+    #[test]
+    fn legacy_makes_no_marker_read_at_the_decision_point() {
+        let (_root, _env) = isolated_runtime_root();
+        let session = unique_session("legacy-dead-io");
+        let nonce = write_spawn_nonce(&session).expect("spawn nonce");
+        let baseline = spawn_nonce_reads_for(&session);
+
+        for _ in 0..3 {
+            assert!(
+                destruction_permitted_under_identity(
+                    ExecutionIdentityMode::Legacy,
+                    "t3a1_test",
+                    &session,
+                    Some(nonce.as_str()),
+                ),
+                "Legacy permits regardless of the nonce, exactly as before #5399"
+            );
+        }
+        assert_eq!(
+            spawn_nonce_reads_for(&session),
+            baseline,
+            "Legacy must not read a marker whose comparison it throws away"
+        );
+
+        for (mode, reads_after) in [
+            (ExecutionIdentityMode::Observe, baseline + 1),
+            (ExecutionIdentityMode::Enforce, baseline + 2),
+        ] {
+            assert!(
+                destruction_permitted_under_identity(
+                    mode,
+                    "t3a1_test",
+                    &session,
+                    Some(nonce.as_str()),
+                ),
+                "{mode:?} still permits a matching nonce"
+            );
+            assert_eq!(
+                spawn_nonce_reads_for(&session),
+                reads_after,
+                "{mode:?} consumes the comparison, so it must still re-read the marker"
             );
         }
     }

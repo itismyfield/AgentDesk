@@ -1016,6 +1016,104 @@ async fn dead_frontier_registry_cas_fails_closed_on_replacement_and_respawn() {
     assert!(super::super::inflight::load_inflight_state(&provider, channel.get()).is_some());
 }
 
+/// #5399 item 6: the `Enforce` PERMIT side of the dead-frontier cancel, end to
+/// end. Until now only the deny side reached this call site — the mode x
+/// observation matrix in `tmux::execution_identity` covers permitting, but as a
+/// direct call on the predicate, not through
+/// `apply_relay_recovery_decision` -> gate -> commit -> fenced registry CAS.
+///
+/// Both arms run the same fixture under `Enforce` and differ only in whether the
+/// session has a `.spawn_nonce` marker when the decision starts, so the nonce is
+/// the only thing that can decide them. The marker-less arm is the control: it
+/// fails closed (`Unknown` is a deny, T3-R2), which is what makes the second
+/// arm's success attributable to the matching nonce rather than to a fence that
+/// was never consulted.
+#[cfg(unix)]
+#[tokio::test]
+async fn enforce_permits_the_dead_frontier_cancel_when_the_spawn_nonce_still_matches() {
+    let _guard = auto_heal_test_lock().lock().await;
+    let (_root_guard, root_dir) = isolated_agentdesk_root();
+    let provider = ProviderKind::Codex;
+    let _mode = super::super::tmux_watcher_registry::set_execution_identity_mode_for_tests(
+        crate::config::ExecutionIdentityMode::Enforce,
+    );
+
+    // Control: no marker was ever written for this session, so the captured and
+    // live sides are both unreadable and `Enforce` refuses.
+    clear_auto_heal_attempts_for_tests();
+    let (registry, shared) = registry_with_shared(provider.clone()).await;
+    let channel = ChannelId::new(5_399_006);
+    let unmarked = dead_frontier_fixture(
+        &shared,
+        &root_dir,
+        &provider,
+        channel,
+        MessageId::new(5_399_106),
+        "AgentDesk-codex-5399-enforce-unmarked",
+        "enforce-unmarked",
+    )
+    .await;
+    let _ = apply_relay_recovery_decision(
+        &registry,
+        &shared,
+        &provider,
+        &unmarked.decision,
+        None,
+        RelayRecoveryApplySource::ProbeAutoHeal,
+    )
+    .await;
+    assert!(
+        !unmarked.watcher_cancel.load(Ordering::Acquire),
+        "Enforce must refuse a session whose incarnation no marker can prove"
+    );
+    assert!(shared.tmux_watchers.contains_key(&channel));
+
+    // The permit: one spawn, no respawn, so the marker the fence captures is
+    // still the marker it re-reads inside the registry lock.
+    clear_auto_heal_attempts_for_tests();
+    let (registry, shared) = registry_with_shared(provider.clone()).await;
+    let channel = ChannelId::new(5_399_007);
+    let tmux = "AgentDesk-codex-5399-enforce-matching";
+    let fixture = dead_frontier_fixture(
+        &shared,
+        &root_dir,
+        &provider,
+        channel,
+        MessageId::new(5_399_107),
+        tmux,
+        "enforce-matching",
+    )
+    .await;
+    super::super::write_spawn_nonce(tmux).expect("spawn nonce");
+
+    let _ = apply_relay_recovery_decision(
+        &registry,
+        &shared,
+        &provider,
+        &fixture.decision,
+        None,
+        RelayRecoveryApplySource::ProbeAutoHeal,
+    )
+    .await;
+
+    assert!(
+        fixture.watcher_cancel.load(Ordering::Acquire),
+        "a matching nonce must let the committed watcher cancel through under Enforce"
+    );
+    assert!(
+        !shared.tmux_watchers.contains_key(&channel),
+        "the permitted CAS must remove the watcher slot it cancelled"
+    );
+    assert!(
+        fixture.token.cancelled.load(Ordering::Relaxed),
+        "the turn behind the dead frontier must be cancelled once the CAS commits"
+    );
+    assert!(
+        super::super::inflight::load_inflight_state(&provider, channel.get()).is_none(),
+        "the permitted repair must clear the inflight row the denied arm keeps"
+    );
+}
+
 #[tokio::test]
 async fn reattach_idle_tmux_clear_release_publishes_completion_event() {
     let _guard = auto_heal_test_lock().lock().await;

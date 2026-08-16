@@ -201,6 +201,8 @@ pub(crate) fn write_spawn_nonce(tmux_session_name: &str) -> std::io::Result<Stri
 /// the key is simply unavailable — never a colliding key that would suppress a
 /// real reset (#3087 Edge 3).
 pub(in crate::services::discord) fn read_spawn_nonce(tmux_session_name: &str) -> Option<String> {
+    #[cfg(test)]
+    tally_spawn_nonce_read(tmux_session_name);
     let path = crate::services::tmux_common::resolve_session_temp_path(
         tmux_session_name,
         SPAWN_NONCE_SUFFIX,
@@ -211,6 +213,40 @@ pub(in crate::services::discord) fn read_spawn_nonce(tmux_session_name: &str) ->
         return None;
     }
     Some(nonce.to_string())
+}
+
+/// #5399: per-session tally of `read_spawn_nonce` entries, so a test can assert
+/// that a mode which would discard the answer makes no marker read at all.
+///
+/// Keyed by session name rather than kept as one process-wide counter: the lib
+/// suite runs tests in parallel and other marker readers do not hold the shared
+/// test env lock, so a global tally would drift under an unrelated test. Every
+/// entry is counted, including one whose path does not resolve — the assertion
+/// is about the attempt, not about finding a marker.
+#[cfg(test)]
+static SPAWN_NONCE_READS_BY_SESSION: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, u64>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+fn tally_spawn_nonce_read(tmux_session_name: &str) {
+    *SPAWN_NONCE_READS_BY_SESSION
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .entry(tmux_session_name.to_string())
+        .or_default() += 1;
+}
+
+/// How many times `read_spawn_nonce` has been entered for `tmux_session_name`
+/// in this process.
+#[cfg(test)]
+pub(in crate::services::discord) fn spawn_nonce_reads_for(tmux_session_name: &str) -> u64 {
+    SPAWN_NONCE_READS_BY_SESSION
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .get(tmux_session_name)
+        .copied()
+        .unwrap_or(0)
 }
 
 /// Build the stable session-INSTANCE key the status panel uses to detect a
