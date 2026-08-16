@@ -303,3 +303,81 @@ fn value_cas_declared_non_guarantee_readmitted_identical_row_passes_enforce() {
         "the readmitted row is removed, which is exactly the limit being declared"
     );
 }
+
+// #5071 T4-B0 (#4987 S0): `channel_binding` is the only ChannelId-keyed view of
+// a watcher slot, and until this slice it returned the owner channel and the
+// session name only — so #4986's second transcript coordinate, which the handle
+// has always held, had no route out of the registry. These two fix that route:
+// a binding that resolves the channel but drops the path, or that reports a
+// path the handle no longer has, fails here.
+#[test]
+fn channel_binding_exposes_the_live_watcher_output_path() {
+    let registry = TmuxWatcherRegistry::new();
+    let tmux = "AgentDesk-5071-t4b0-binding-path";
+    let channel = ChannelId::new(5_071_000_000_000_000_040);
+
+    let mut handle = live_watcher_handle(tmux);
+    handle.output_path = format!("/tmp/{tmux}-native.jsonl");
+    let native_output_path = handle.output_path.clone();
+    registry.insert(channel, handle);
+
+    let binding = registry
+        .channel_binding(&channel)
+        .expect("a live watcher slot must resolve a binding for its owner channel");
+    assert_eq!(binding.tmux_session_name, tmux);
+    assert_eq!(
+        binding.output_path.as_deref(),
+        Some(native_output_path.as_str()),
+        "the binding must carry the handle's transcript, not None"
+    );
+    assert_eq!(
+        binding.output_path,
+        registry.watcher_output_path(tmux),
+        "the binding and the session-keyed accessor must never disagree"
+    );
+}
+
+// The wrapper -> provider-native promotion is the state #4986 was observed in,
+// and it is reached by replacing the handle. A binding that cached the first
+// path would keep reporting the wrapper file after the watcher left it.
+#[test]
+fn channel_binding_output_path_follows_the_native_transcript_handoff() {
+    let registry = TmuxWatcherRegistry::new();
+    let tmux = "AgentDesk-5071-t4b0-binding-handoff";
+    let channel = ChannelId::new(5_071_000_000_000_000_041);
+
+    let mut wrapper = live_watcher_handle(tmux);
+    wrapper.output_path = format!("/tmp/{tmux}-wrapper.jsonl");
+    let wrapper_output_path = wrapper.output_path.clone();
+    registry.insert(channel, wrapper);
+    assert_eq!(
+        registry
+            .channel_binding(&channel)
+            .and_then(|binding| binding.output_path)
+            .as_deref(),
+        Some(wrapper_output_path.as_str())
+    );
+
+    let mut native = live_watcher_handle(tmux);
+    native.output_path = format!("/tmp/{tmux}-native.jsonl");
+    let native_output_path = native.output_path.clone();
+    registry.insert(channel, native);
+
+    assert_eq!(
+        registry
+            .channel_binding(&channel)
+            .and_then(|binding| binding.output_path)
+            .as_deref(),
+        Some(native_output_path.as_str()),
+        "the binding must track the live handle, not the transcript it started on"
+    );
+
+    // Removing the slot removes the coordinate with it: the binding never
+    // outlives the handle it read the path from.
+    let cancel = registry
+        .get(&channel)
+        .map(|entry| entry.cancel.clone())
+        .expect("the live handle must still be registered");
+    registry.remove_tmux_session_if_current(tmux, &cancel);
+    assert!(registry.channel_binding(&channel).is_none());
+}
