@@ -2499,6 +2499,7 @@ services::discord::health::relay_auto_heal::tests::frontier_reset_rearms_capped_
 services::discord::health::relay_auto_heal::tests::redrive_actions_and_cap_alarm_continue_while_producer_is_vouched_4615
 services::discord::health::relay_auto_heal::tests::redrive_cap_resets_only_for_progress_identity_or_watcher_4299
 services::discord::health::relay_auto_heal::tests::redrive_frozen_backlog_backs_off_and_caps_once_4299
+services::discord::health::relay_auto_heal::tests::redrive_non_applied_reattach_response_cools_down_instead_of_committing_5021
 services::discord::health::relay_auto_heal::tests::redrive_nudge_requires_matching_output_path
 services::discord::health::relay_auto_heal::tests::redrive_nudge_skips_healthy_advancing_backlog
 services::discord::health::relay_auto_heal::tests::redrive_nudge_skips_if_live_frontier_advanced_after_snapshot
@@ -3878,6 +3879,7 @@ services::discord::relay_owner_observability::tests::turn_identity_string_format
 services::discord::relay_owner_observability::tests::ui_outcome_committed_when_gate_emits_and_not_stale
 services::discord::relay_owner_observability::tests::ui_outcome_gate_suppressed_when_gate_does_not_emit
 services::discord::relay_owner_observability::tests::ui_outcome_stale_identity_takes_precedence_over_gate
+services::discord::relay_recovery::auto_heal_apply::tests::no_transition_apply_reports_not_ok_and_not_applied_end_to_end
 services::discord::relay_recovery::auto_heal_apply::tests::relay_recovery_emission_in_flight_consumes_budget_until_frontier_progress
 services::discord::relay_recovery::auto_heal_apply::tests::relay_recovery_manual_apply_succeeds_after_probe_budget_is_exhausted
 services::discord::relay_recovery::auto_heal_apply::tests::relay_recovery_repeated_reuse_no_transition_opens_failure_backoff

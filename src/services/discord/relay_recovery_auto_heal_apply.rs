@@ -282,9 +282,12 @@ fn settle_auto_heal_confirmation(
         }
         ReattachConfirmation::NotRequired | ReattachConfirmation::Confirmed => {
             // #5021: `reuse_existing_live_watcher` settles here with the
-            // no-repair statuses. Reusing a live incumbent transitions nothing
-            // and skips the spawned-watcher probe, so the attempt carries no
-            // confirmation evidence to commit. `commit_auto_heal_attempt`
+            // no-repair statuses. Reusing a live incumbent leaves the watcher
+            // registry as it was — nothing spawned, nothing replaced, so
+            // `classify_reattach_confirmation` returns `NotRequired` without
+            // probing — and the attempt therefore carries no confirmation
+            // evidence to commit. (The rebind's own episode side effects still
+            // ran; it is the registry that did not move.) `commit_auto_heal_attempt`
             // clears `consecutive_refunds` and the pending retry window, so
             // committing a repeating no-op reset the failure backoff on every
             // pass and the reattach loop could neither converge nor give up.
@@ -583,6 +586,144 @@ mod tests {
             Err("auto_heal_rate_limited"),
             "startup grace must not refund an automatic reattach reservation"
         );
+    }
+
+    /// #5021 end to end (#5396 item 4): the three tests above settle
+    /// `settle_auto_heal_confirmation` by hand, so nothing pinned the fields the
+    /// auto-heal callers actually branch on — `RelayRecoveryResponse.ok` and
+    /// `.applied`. Drive the whole production chain instead — a real
+    /// `plan_relay_recovery` decision through budget reserve, durable episode
+    /// reserve, apply, confirmation, and settlement — to a no-transition status,
+    /// and assert the response reports it as neither ok nor applied while the
+    /// reservation goes back to the budget as a refund. `skipped` stays false,
+    /// so a caller can still tell this apart from the pre-apply refusals and
+    /// from the episode-changed confirmation.
+    #[tokio::test]
+    async fn no_transition_apply_reports_not_ok_and_not_applied_end_to_end() {
+        let _guard = auto_heal_test_lock().lock().await;
+        clear_auto_heal_attempts_for_tests();
+        let root = tempfile::tempdir().expect("isolated AgentDesk root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let provider = ProviderKind::Codex;
+        let registry = HealthRegistry::new();
+        let shared = super::super::super::make_shared_data_for_tests();
+        let channel = ChannelId::new(5_396_401);
+        let tmux = "AgentDesk-codex-5396-no-transition";
+        let output_path = root.path().join("relay-5396-no-transition.jsonl");
+        std::fs::write(&output_path, r#"{"type":"thread.started","thread_id":"t"}"#)
+            .expect("output fixture");
+        let output_len = std::fs::metadata(&output_path)
+            .expect("output metadata")
+            .len();
+        let mut state = super::super::super::inflight::InflightTurnState::new(
+            provider.clone(),
+            channel.get(),
+            None,
+            343_742_347,
+            5_396_411,
+            5_396_421,
+            "no transition".to_string(),
+            Some("provider-session-5396".to_string()),
+            Some(tmux.to_string()),
+            Some(output_path.display().to_string()),
+            None,
+            output_len,
+        );
+        state.finalizer_turn_id = state.user_msg_id;
+        state.turn_nonce = Some("nonce-5396".to_string());
+        state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui);
+        state.set_relay_owner_kind(super::super::super::inflight::RelayOwnerKind::Watcher);
+        super::super::super::inflight::save_inflight_state(&state).expect("seed episode");
+        let snapshot = RelayHealthSnapshot {
+            provider: provider.as_str().to_string(),
+            channel_id: channel.get(),
+            active_turn: RelayActiveTurn::Foreground,
+            tmux_session: Some(tmux.to_string()),
+            tmux_alive: Some(true),
+            watcher_attached: true,
+            watcher_attached_stale: true,
+            watcher_owner_channel_id: Some(channel.get()),
+            watcher_owns_live_relay: true,
+            bridge_inflight_present: true,
+            bridge_current_msg_id: Some(state.current_msg_id),
+            mailbox_has_cancel_token: true,
+            mailbox_active_user_msg_id: Some(state.user_msg_id),
+            mailbox_turn_started_at_ms: None,
+            mailbox_turn_age_secs: None,
+            queue_depth: 0,
+            pending_discord_callback_msg_id: None,
+            pending_thread_proof: false,
+            parent_channel_id: None,
+            thread_channel_id: None,
+            last_relay_ts_ms: None,
+            last_relay_age_secs: None,
+            last_outbound_activity_ms: None,
+            last_capture_offset: Some(128),
+            last_relay_offset: 0,
+            unread_bytes: Some(128),
+            desynced: true,
+            stale_thread_proof: false,
+            unpaired_active_token_reconfirmed: false,
+        };
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut decision =
+            plan_relay_recovery(&snapshot, RelayStallState::TmuxAliveRelayDead, now_ms);
+        assert!(
+            decision.auto_heal.eligible,
+            "the fixture must reach the apply, not a plan skip"
+        );
+        decision.affected.finalizer_turn_id = Some(state.effective_finalizer_turn_id());
+        let key = auto_heal_key(
+            &decision.provider,
+            decision.channel_id,
+            decision.action,
+            RelayRecoveryApplySource::ProbeAutoHeal,
+        );
+
+        // No runtime is registered for this provider, so the rebind adapter
+        // resolves no runtime and reports `provider_unavailable`: an apply that
+        // ran and transitioned nothing.
+        let response = apply_relay_recovery_plan_with_seams(
+            &registry,
+            &shared,
+            &provider,
+            decision,
+            now_ms,
+            RelayRecoveryApplySource::ProbeAutoHeal,
+            &NeverAlert,
+            &ImmediateApplyBoundary,
+        )
+        .await;
+
+        assert_eq!(
+            response.apply_result.as_ref().map(|result| result.status),
+            Some("provider_unavailable"),
+            "the apply must be the one that produced this response"
+        );
+        assert!(
+            !response.applied,
+            "a no-transition apply must not report itself applied to its callers"
+        );
+        assert!(
+            !response.ok,
+            "this arm sets `ok` from the same verdict as `applied`, so it is not ok either"
+        );
+        assert!(
+            !response.skipped,
+            "the pre-apply refusals and the episode-changed confirmation are the skips; \
+             a no-transition apply status is not one of them"
+        );
+        let counters = auto_heal_attempt_counters_for_tests(&key).expect("reserved budget window");
+        assert_eq!(
+            counters.attempts, 0,
+            "a no-transition apply must return its reservation"
+        );
+        assert_eq!(
+            counters.consecutive_refunds, 1,
+            "the returned reservation must register exactly one refund"
+        );
+
+        super::super::super::inflight::clear_inflight_state(&provider, channel.get());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

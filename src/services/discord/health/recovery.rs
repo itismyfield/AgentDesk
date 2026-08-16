@@ -1725,7 +1725,7 @@ pub(crate) async fn run_stall_watchdog_pass(
             now_unix_secs,
             now_mono_secs,
         );
-        if relay_dead_reattach::try_apply(
+        let reattach_lane = relay_dead_reattach::try_apply(
             registry,
             shared.clone(),
             provider,
@@ -1733,9 +1733,13 @@ pub(crate) async fn run_stall_watchdog_pass(
             &snapshot,
             now_unix_secs,
         )
-        .await
-        {
-            cleaned += 1;
+        .await;
+        if reattach_lane.handled_tick() {
+            // A reused live incumbent owns the tick without repairing anything,
+            // so it stops the remaining branches but adds nothing to `cleaned`.
+            if reattach_lane.counts_as_cleaned() {
+                cleaned += 1;
+            }
             continue;
         }
         // #3668 F2: if JSONL still holds an unrelayed final answer after

@@ -1323,6 +1323,147 @@ mod tests {
         (false, None)
     }
 
+    /// #5021's second consumer of `RelayRecoveryResponse.applied` (#5396 item
+    /// 1). When the reattach lane answers a redrive with `applied == false` —
+    /// the shape `reuse_existing_live_watcher` carries since #5021 dropped it
+    /// from the applied allowlist (pinned by
+    /// `relay_recovery::tests::reused_live_watcher_status_is_not_counted_applied`)
+    /// — this pass must post the response cooldown through `note_redrive_noop`
+    /// instead of `commit_redrive_success`. Committing a no-repair response
+    /// would consume one of the six bounded attempts and arm the placeholder
+    /// shield, so a repeating no-op would walk the whole backoff schedule into
+    /// the capped operator alarm without a single repair.
+    ///
+    /// The fixture pauses the incumbent watcher so the nudge arm declines and
+    /// the pass takes the reattach arm this test is about; the recovery lane
+    /// itself is the production one.
+    #[tokio::test(flavor = "current_thread")]
+    async fn redrive_non_applied_reattach_response_cools_down_instead_of_committing_5021() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tmp.path(),
+        );
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(5_396_001);
+        let tmux_session = "AgentDesk-codex-5396-redrive-noop";
+        let output_path = tmp.path().join("agentdesk-5396-redrive-noop.jsonl");
+        std::fs::File::create(&output_path)
+            .expect("create capture fixture")
+            .set_len(301_613)
+            .expect("size capture fixture");
+        let output_path = output_path.to_string_lossy().into_owned();
+        let _ = std::process::Command::new("tmux")
+            .args(["kill-session", "-t", tmux_session])
+            .status();
+        assert!(
+            std::process::Command::new("tmux")
+                .args(["new-session", "-d", "-s", tmux_session])
+                .status()
+                .expect("start tmux fixture")
+                .success(),
+            "production snapshot must observe a live producer tmux session"
+        );
+
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let watcher = watcher_handle(
+            tmux_session,
+            &output_path,
+            Arc::new(Mutex::new(None)),
+            Arc::new(AtomicBool::new(true)),
+        );
+        // Pausing is the nudge refusal that leaves the snapshot alone: the
+        // health snapshot never reads `paused`, so the channel still presents as
+        // an attached watcher while the nudge arm declines and the pass falls
+        // through to the reattach arm.
+        watcher.paused.store(true, Ordering::Release);
+        shared.tmux_watchers.insert(channel_id, watcher);
+        let frontier = 128u64;
+        shared
+            .tmux_relay_coord(channel_id)
+            .confirmed_end_offset
+            .store(frontier, Ordering::Release);
+        let started_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let mut inflight = InflightTurnState::new(
+            provider.clone(),
+            channel_id.get(),
+            None,
+            0,
+            5_396_011,
+            0,
+            "test".to_string(),
+            None,
+            Some(tmux_session.to_string()),
+            Some(output_path.clone()),
+            None,
+            frontier,
+        );
+        inflight.started_at = started_at.clone();
+        inflight.updated_at = started_at;
+        crate::services::discord::inflight::save_inflight_state(&inflight)
+            .expect("seed authoritative inflight");
+        clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
+
+        let registry = HealthRegistry::new();
+        let base = chrono::Utc::now().timestamp();
+        assert!(
+            !registry
+                .redrive_undelivered_backlog_at(
+                    &provider,
+                    shared.clone(),
+                    channel_id,
+                    base - stall_liveness::STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64,
+                )
+                .await
+                .expect("seed redrive grace"),
+            "the initial observation seeds the no-progress grace"
+        );
+        assert!(
+            !registry
+                .redrive_undelivered_backlog_at(&provider, shared.clone(), channel_id, base)
+                .await
+                .expect("production redrive entrypoint"),
+            "a reattach response that applied nothing must not report a redrive action"
+        );
+
+        let snapshot = registry
+            .snapshot_watcher_state_for_shared(&provider, shared.clone(), channel_id.get())
+            .await
+            .expect("post-action snapshot");
+        // The 599/600 boundary below is the cooldown the recovery response
+        // itself carried (`decision.auto_heal.window_secs`) into
+        // `note_redrive_noop`, reproduced by these two probes.
+        assert_eq!(
+            shared
+                .redrive_attempt_decision(&provider, channel_id, &snapshot, base + 599)
+                .attempt,
+            None,
+            "the no-op cooldown must hold the lane off for the response's window"
+        );
+        assert_eq!(
+            shared
+                .redrive_attempt_decision(&provider, channel_id, &snapshot, base + 600)
+                .attempt,
+            Some(1),
+            "a no-op must leave the first bounded attempt unconsumed"
+        );
+        assert!(
+            shared
+                .redrive_placeholder_shield_context(&provider, channel_id)
+                .is_none(),
+            "only a committed attempt arms the placeholder shield"
+        );
+
+        crate::services::discord::inflight::clear_inflight_state(&provider, channel_id.get());
+        clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
+        let _ = std::process::Command::new("tmux")
+            .args(["kill-session", "-t", tmux_session])
+            .status();
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn redrive_actions_and_cap_alarm_continue_while_producer_is_vouched_4615() {
         let _env_lock = crate::config::shared_test_env_lock()
