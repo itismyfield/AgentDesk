@@ -234,6 +234,7 @@ db::auto_queue::entries::tests::failed_dispatch_is_rechecked_before_late_attachm
 db::auto_queue::entries::tests::paused_run_allows_dispatched_transition_pg
 db::auto_queue::entries::tests::pool_status_retry_absorbs_competing_status_change_pg
 db::auto_queue::entries::tests::pool_status_retry_distinguishes_null_and_empty_dispatch_identity_pg
+db::auto_queue::entries::tests::pool_status_retry_reattaches_after_racing_done_pg
 db::auto_queue::entries::tests::pool_status_retry_rejects_competing_dispatch_identity_pg
 db::auto_queue::entries::tests::reactivate_completed_run_waits_for_token_and_records_history_pg
 db::auto_queue::entries::tests::reactivate_done_entry_rejects_unapproved_transition_source_pg
