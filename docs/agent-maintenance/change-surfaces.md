@@ -1907,9 +1907,12 @@ time for diagnostics; neither is a stored approval value.
   equivalent.
 - status: **inactive library.** #5071 T4-B1 landed the verdict vocabulary, the
   row-independent transcript resolution ladder, and the bounded incremental tail
-  reader with no consumer at all — no tick, no task, no health field, no
-  recovery input. Production verdicts are unchanged, and this surface does not
-  count as "4987 S1 active" until T4-B2 wires the observation task.
+  reader; #5071 T4-B2a added the canonical obligation framing and the machine
+  that proves the Rust and Python definitions of it agree. There is still no
+  consumer at all — no tick, no task, no health field, no recovery input.
+  Production verdicts are unchanged, and this surface does not count as
+  "4987 S1 active": T4-B2b lands the durable obligation ledger, T4-B2c wires the
+  observation task, and observation starts there.
 - invariants: obligation production is independent of the inflight row
   (4987 §-1.5 I14), and no verdict authorizes a destructive action or a
   redelivery (4987 §7.1 I15, S7 stays NO-GO). `TransportUnknown` is neither
@@ -1922,9 +1925,19 @@ time for diagnostics; neither is a stored approval value.
   `scripts/relay_watchdog.py` (`assistant_blocks_from_lines` /
   `is_harness_control_assistant_record`) and the golden fixture corpus in the
   same PR. 4987 §2.4: two implementations of "assistant text block" are two
-  oracles, and one of them is then always wrong. The Rust↔Python canonical
-  `(generation, start, end, identity, reason)` equivalence and its mutation
-  runner land with T4-B2.
+  oracles, and one of them is then always wrong. Since #5071 T4-B2a that is
+  enforced rather than requested: both halves are compared byte for byte against
+  the golden corpus in `tests/fixtures/relay_obligation/` — Python by
+  `scripts/check_reachability_canonical_equivalence.py`, Rust by
+  `services::discord::health::reachability::obligation::tests` — over the
+  canonical `(generation, start, end, identity, reason)` schema plus its
+  `next_offset` trailer. The trailer is inside the compared bytes because every
+  framing rule is a cursor rule; measured on this corpus, omitting it lets the
+  "a partial line advances the cursor" mutation survive every case. The corpus
+  is a THIRD PARTY to both, so a change applied identically to the two
+  implementations still turns it red. Editing either framing rule means running
+  `just reachability-mutation-runner`, which applies each declared one-sided
+  mutation and requires it to die.
 - non_guarantees: `scripts/check_reachability_row_independence.py` (run by
   `scripts/ci-script-checks.sh`) enforces I14 as a source **lint, not a type
   proof** — `InflightTurnState` is `pub(in crate::services::discord)`, so the
@@ -1942,10 +1955,22 @@ time for diagnostics; neither is a stored approval value.
   must not be added to `health/recovery.rs`, which is registry-tracked — 4987
   §9.4 puts the future reachability tick in `runtime_bootstrap/spawns.rs` as an
   independent task).
-- active_callsite_coverage: n/a (no consumer exists yet, by design).
-- tests: `services::discord::health::reachability::{verdict,discovery,tail}::tests`
-  in the `test-non-pg` lane; `tests/test_reachability_row_independence.py` for
-  the gate itself.
+- active_callsite_coverage: n/a (no consumer exists yet, by design). Since
+  #5071 T4-B2a that "by design" is machine-checked: exactly one file outside the
+  tree may name the module — `src/services/discord/health.rs`, the `mod`
+  declaration — and `scripts/check_reachability_canonical_equivalence.py` also
+  rejects a `warn_bound`/`fail_bound` appearing inside the tree, because 4987
+  §10 makes a hardcoded threshold at S1 a NO-GO: the bounds are the OUTPUT of
+  the 30-day observation. Both are source lints, not type proofs. The
+  destructive half is not duplicated there: a destructive call site added to
+  this tree moves `scripts/check_destructive_call_site_ratchet.py`, whose four
+  categories are exactly 4987's destructive surfaces. The observation task's
+  spawn joins the allowlist in T4-B2c.
+- tests: `services::discord::health::reachability::{verdict,discovery,tail,obligation}::tests`
+  in the `test-non-pg` lane; `tests/test_reachability_row_independence.py` and
+  `tests/test_reachability_canonical_equivalence.py` for the gates themselves;
+  `just reachability-mutation-runner` for the Rust half of the mutation runner,
+  which needs a compiler and is therefore out of the fast lane.
 - related_issues: #5071, #4987, #4986, #4974.
 
 ### `dashboard_routes`

@@ -1,0 +1,7 @@
+not json at all
+{"type":"assistant",
+[]
+"a string"
+123
+null
+{"type":"assistant","timestamp":"2026-08-17T01:02:03","message":{"model":"m","content":[{"type":"text","text":"ÿþ bad utf8"}]}}
