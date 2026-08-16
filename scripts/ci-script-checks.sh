@@ -70,6 +70,10 @@ echo "=== SQL execution surface inventory baseline (#5358) ==="
 git diff --exit-code HEAD -- scripts/sql_execution_surface_inventory.json
 "$PYTHON" -m unittest tests.test_sql_execution_surface_inventory
 
+echo "=== Destructive call-site per-file ratchet (#5071 T3-A4) ==="
+"$PYTHON" scripts/check_destructive_call_site_ratchet.py --check
+"$PYTHON" -m unittest tests.test_destructive_call_site_ratchet
+
 echo "=== Merge automation policy tests (#4250) ==="
 node --test policies/__tests__/merge-automation.test.js
 
