@@ -1660,9 +1660,13 @@ fn is_off_intake_delivery_settlement(stage: &IntakeDeliverySettlementStage) -> b
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionIdentityMode {
-    /// Do not consult the spawn nonce and do not count observations. The
-    /// pre-existing `(session, output_path, cancel pointer)` registry CAS is
-    /// untouched.
+    /// Never consult the spawn nonce for a deny decision and do not count
+    /// observations. The fenced call sites still *read* the nonce marker in
+    /// every mode (`WatcherIdentityFence` captures it up front and re-reads it
+    /// once inside the registry lock) — Legacy discards the result, so the
+    /// destructive outcome matches the pre-A1 CAS while the marker-file I/O is
+    /// new (short-circuiting it is tracked in #5399). The pre-existing
+    /// `(session, output_path, cancel pointer)` registry CAS is untouched.
     #[default]
     Legacy,
     /// Legacy behaviour plus captured-vs-current nonce counters and logs, and a
@@ -2114,7 +2118,7 @@ mod runtime_hook_registry_config_tests {
     }
 
     // #5071 T3-A0: an operator who never writes the key must land on `Legacy`,
-    // which reads no nonce and records no observation. The serde-deserialization
+    // which consults no nonce for a deny and records no observation. The serde-deserialization
     // path is asserted separately from the `Default` impl because the two are
     // independent, and `is_empty` must account for the new field or a config
     // that sets ONLY this key loses it on a round-trip.
