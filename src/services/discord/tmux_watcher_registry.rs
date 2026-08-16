@@ -392,6 +392,37 @@ pub(in crate::services) struct TmuxWatcherRegistry {
 pub(in crate::services::discord) struct TmuxWatcherBinding {
     pub(in crate::services::discord) owner_channel_id: ChannelId,
     pub(in crate::services::discord) tmux_session_name: String,
+    /// #5071 T4-B0 (#4987 S0): the transcript the LIVE watcher handle for this
+    /// session is tailing, read off the same registry lookup that resolved the
+    /// binding.
+    ///
+    /// [`TmuxWatcherHandle::output_path`] has always carried this, and two
+    /// existing reads already reach it: [`TmuxWatcherRegistry::watcher_output_path`]
+    /// for a caller who already knows the tmux session name, and
+    /// [`TmuxWatcherRegistry::get`] for one keyed by `ChannelId` —
+    /// `health::relay_auto_heal` gates its redrive nudge on exactly that
+    /// `get(&owner_channel_id)` → `.output_path` hop. So the claim here is
+    /// narrower than "no route existed": what `channel_binding` did not carry
+    /// was the coordinate. It is the lock-free VALUE snapshot of a watcher slot
+    /// — owner channel and session name, cloned out, holding nothing borrowed
+    /// once it returns — whereas `get` hands back a `dashmap::mapref::one::Ref`
+    /// that borrows the entry and holds a read guard on its shard for as long
+    /// as the caller keeps it. This field puts the transcript on the snapshot
+    /// side of that split; it is populated by, and stays equal to,
+    /// `watcher_output_path` for the same session.
+    ///
+    /// It is worth its own coordinate because it is sourced independently of
+    /// the in-flight row's `output_path`. `watchers::lifecycle::claims` keeps a
+    /// watcher that has been promoted to a provider-native TUI transcript from
+    /// being demoted back to the prelaunch wrapper file; the row carries no
+    /// such guard, so the two can name different files for one channel.
+    ///
+    /// `None` means no live handle was keyed under `tmux_session_name` at the
+    /// instant of the read, NOT that the watcher has no output path — a live
+    /// handle always has one. The mutating helpers keep the channel index and
+    /// the handle map in step under the registry mutex, but `channel_binding`
+    /// takes no lock, so its two reads can straddle a concurrent mutation.
+    pub(in crate::services::discord) output_path: Option<String>,
 }
 
 #[rustfmt::skip]
@@ -634,9 +665,11 @@ impl TmuxWatcherRegistry {
             .get(&tmux_session_name)
             .map(|entry| *entry.value())
             .unwrap_or(*channel_id);
+        let output_path = self.watcher_output_path(&tmux_session_name);
         Some(TmuxWatcherBinding {
             owner_channel_id,
             tmux_session_name,
+            output_path,
         })
     }
 

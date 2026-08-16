@@ -525,6 +525,11 @@ mod tests {
             watcher_attached_stale: false,
             has_relay_coord: attached,
             watcher_owner_channel_id: attached.then_some(42),
+            // #5071 T4-B0: an attached fixture's watcher tails the same
+            // transcript the in-flight row names, which is the non-diverged
+            // shape every assertion in this suite already assumes.
+            watcher_output_path: attached
+                .then(|| "/tmp/stall-verdict-fixture.jsonl".to_string()),
             tmux_session: attached.then(|| "AgentDesk-codex-fixture".to_string()),
             inflight_state_present: updated_at.is_some(),
             tmux_session_mismatch: false,

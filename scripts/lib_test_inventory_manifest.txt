@@ -2516,8 +2516,14 @@ services::discord::health::runtime_resolve::direct_meeting_candidate_tests::mult
 services::discord::health::runtime_resolve::direct_meeting_candidate_tests::no_candidates_resolves_to_none
 services::discord::health::runtime_resolve::direct_meeting_candidate_tests::single_explicit_match_wins_over_live_matches
 services::discord::health::runtime_resolve::direct_meeting_candidate_tests::single_live_match_is_selected_without_explicit_match
+services::discord::health::session_enrichment::tests::health_load_carries_the_live_watcher_transcript_into_the_enrichment
+services::discord::health::session_enrichment::tests::health_load_records_transcript_source_divergence_only_when_the_paths_split
+services::discord::health::session_enrichment::tests::health_reads_the_live_watcher_transcript_off_the_channel_binding
+services::discord::health::session_enrichment::tests::health_reports_no_watcher_transcript_for_a_channel_without_a_binding
 services::discord::health::session_enrichment::tests::inflight_a_alive_watcher_b_dead_mismatch_probes_a
 services::discord::health::session_enrichment::tests::only_exact_dead_or_absent_maps_to_dead
+services::discord::health::session_enrichment::tests::transcript_discovery_falls_back_to_the_inflight_row_and_then_to_nothing
+services::discord::health::session_enrichment::tests::transcript_discovery_prefers_the_live_watcher_over_the_inflight_row
 services::discord::health::snapshot::tests::bound_selector_absent_when_no_source_and_omitted_from_json
 services::discord::health::snapshot::tests::bound_selector_falls_back_to_runtime_binding
 services::discord::health::snapshot::tests::bound_selector_prefers_inflight_over_binding
@@ -5215,6 +5221,8 @@ services::discord::tmux_restart_handoff::notice_target_tests::restart_handoff_no
 services::discord::tmux_restart_handoff::notice_target_tests::restart_handoff_takeover_forgets_registered_completion_footer_target
 services::discord::tmux_watcher_registry_restore_tests::base_and_thread_suffixed_names_resolve_independently
 services::discord::tmux_watcher_registry_restore_tests::cancel_and_remove_channel_if_current_only_rolls_back_matching_claim
+services::discord::tmux_watcher_registry_restore_tests::channel_binding_exposes_the_live_watcher_output_path
+services::discord::tmux_watcher_registry_restore_tests::channel_binding_output_path_follows_the_native_transcript_handoff
 services::discord::tmux_watcher_registry_restore_tests::clear_restored_owner_drops_binding
 services::discord::tmux_watcher_registry_restore_tests::live_watcher_handle_overrides_and_evicts_restored_owner
 services::discord::tmux_watcher_registry_restore_tests::restore_is_noop_when_live_watcher_owns_session
