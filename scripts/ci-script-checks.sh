@@ -74,6 +74,20 @@ echo "=== Destructive call-site per-file ratchet (#5071 T3-A4) ==="
 "$PYTHON" scripts/check_destructive_call_site_ratchet.py --check
 "$PYTHON" -m unittest tests.test_destructive_call_site_ratchet
 
+echo "=== Reachability row-independence + change-surface gate (#5071 T4-B1) ==="
+# 4987 §-1.5 withdrew the claim that I14 ("obligation production is independent
+# of the inflight row") is compiler-enforced: InflightTurnState is
+# pub(in crate::services::discord), so the compiler accepts an import from
+# health/reachability/** without complaint. This is the source gate that
+# replaces it, and it is a LINT, NOT A TYPE PROOF -- real enforcement needs a
+# crate boundary, which is out of this series' scope. The second half enforces
+# the relay_reachability change surface of 4987 §9.4, so a tree with no owner
+# entry cannot grow a file nobody reviews as part of this surface. The unittest
+# below is the gate's own mutation proof: it reproduces each violation shape,
+# and each false-positive shape, against a synthetic repo root.
+"$PYTHON" scripts/check_reachability_row_independence.py
+"$PYTHON" -m unittest tests.test_reachability_row_independence
+
 echo "=== Merge automation policy tests (#4250) ==="
 node --test policies/__tests__/merge-automation.test.js
 

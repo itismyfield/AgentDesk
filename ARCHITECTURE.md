@@ -534,6 +534,10 @@ src/
 │   │   ├── gateway/
 │   │   │   └── outbound_messages.rs
 │   │   ├── health/
+│   │   │   ├── reachability/
+│   │   │   │   ├── discovery.rs
+│   │   │   │   ├── tail.rs
+│   │   │   │   └── verdict.rs
 │   │   │   ├── recovery/
 │   │   │   │   ├── leak_recovery_ledger.rs
 │   │   │   │   ├── self_watchdog.rs
@@ -545,6 +549,7 @@ src/
 │   │   │   ├── liveness_authority.rs
 │   │   │   ├── mailbox.rs
 │   │   │   ├── provider_probe.rs
+│   │   │   ├── reachability.rs
 │   │   │   ├── rebind_request.rs
 │   │   │   ├── recovery.rs
 │   │   │   ├── redaction.rs

@@ -38,6 +38,14 @@ test-non-pg:
     cargo test --lib delivery_lease_key -- --skip _pg --skip pg_ --skip postgres
     # #5071 T0: keep the delivery-writer/terminal-fold contract seam in a curated lane.
     cargo test --lib services::discord::session_relay_sink::delivery_orchestration_tests -- --skip _pg --skip pg_ --skip postgres
+    # #5071 T4-B1 (4987 S1): the reachability library is inactive, so these are
+    # its ONLY execution. verdict pins the polarity (TransportUnknown is neither
+    # health nor a redelivery warrant); discovery pins fail-closed resolution and
+    # same-size/different-inode divergence; tail pins the 1 MiB per-tick cap and
+    # cursor identity revalidation.
+    cargo test --lib services::discord::health::reachability::verdict::tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib services::discord::health::reachability::discovery::tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib services::discord::health::reachability::tail::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::discord::e2e_control::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib server::routes::e2e_control::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib formatting -- --skip _pg --skip pg_ --skip postgres
