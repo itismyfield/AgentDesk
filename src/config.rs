@@ -1643,6 +1643,52 @@ fn is_off_intake_delivery_settlement(stage: &IntakeDeliverySettlementStage) -> b
     *stage == IntakeDeliverySettlementStage::Off
 }
 
+/// Rollout stage for the #5071 T3 execution-identity fence.
+///
+/// The read model behind this switch
+/// (`services::discord::execution_identity::SessionIncarnationRef`) only reads
+/// the per-spawn `.spawn_nonce` marker that provider spawns already write; no
+/// mode introduces a durable row, a new marker, or a new file format. T3-A0
+/// lands that model with NO destructive consumer, so all three modes are
+/// behaviourally identical until T3-A1 converts real call sites.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionIdentityMode {
+    /// Do not consult the spawn nonce and do not count observations. The
+    /// pre-existing `(session, output_path, cancel pointer)` registry CAS is
+    /// untouched.
+    #[default]
+    Legacy,
+    /// Legacy behaviour plus captured-vs-current nonce counters and logs. Still
+    /// never denies.
+    Observe,
+    /// Reserved for T3-A1: the converted automatic cancel/remove paths will
+    /// refuse to act unless a positive owner/handle match is accompanied by an
+    /// exact `Some(nonce)` match, with absent and mismatched nonces both a deny.
+    /// Operator/CLI resets and the paths T3 does not convert are out of scope.
+    Enforce,
+}
+
+impl ExecutionIdentityMode {
+    /// Both post-`Legacy` modes count the comparison outcome; counting is not a
+    /// decision, so `Enforce` shares the observation path rather than replacing
+    /// it.
+    pub const fn records_identity_observations(self) -> bool {
+        matches!(self, Self::Observe | Self::Enforce)
+    }
+
+    /// Only `Enforce` may turn a non-matching observation into a refusal, and
+    /// only at the call sites T3-A1 converts. No call site reads this yet.
+    #[allow(dead_code)] // #5071 T3-A0: the deny predicate lands before T3-A1's call sites.
+    pub const fn denies_on_incarnation_mismatch(self) -> bool {
+        matches!(self, Self::Enforce)
+    }
+}
+
+fn is_legacy_execution_identity_mode(mode: &ExecutionIdentityMode) -> bool {
+    *mode == ExecutionIdentityMode::Legacy
+}
+
 /// A conservative bound that stays within chrono's duration and UTC datetime
 /// ranges while remaining far above any operational sweep TTL.
 pub(crate) const MAX_INTAKE_SWEEP_CUTOFF_SECS: u64 = i64::MAX as u64 / 1_000_000_000;
@@ -1663,6 +1709,8 @@ pub struct RuntimeSettingsConfig {
     pub delivery_journal_internal_channel_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "is_off_intake_delivery_settlement")]
     pub intake_delivery_settlement: IntakeDeliverySettlementStage,
+    #[serde(default, skip_serializing_if = "is_legacy_execution_identity_mode")]
+    pub execution_identity_mode: ExecutionIdentityMode,
     /// Heartbeat-absence TTL for stale dispatched debt; unset defaults to 1800 seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intake_delivery_sweep_dispatched_cutoff_secs: Option<u64>,
@@ -1842,6 +1890,7 @@ impl RuntimeSettingsConfig {
             && self.delivery_journal_cohort_percent == 0
             && self.delivery_journal_internal_channel_ids.is_empty()
             && self.intake_delivery_settlement == IntakeDeliverySettlementStage::Off
+            && self.execution_identity_mode == ExecutionIdentityMode::Legacy
             && self.intake_delivery_sweep_dispatched_cutoff_secs.is_none()
             && self.intake_delivery_sweep_spawned_cutoff_secs.is_none()
             && self.intake_delivery_sweep_batch_limit.is_none()
@@ -2030,6 +2079,71 @@ mod runtime_hook_registry_config_tests {
             let parsed: RuntimeSettingsConfig =
                 serde_yaml::from_str(&yaml).expect("parse settlement stage");
             assert_eq!(parsed.intake_delivery_settlement, stage);
+            assert_eq!(
+                serde_yaml::from_str::<RuntimeSettingsConfig>(
+                    &serde_yaml::to_string(&parsed).expect("serialize runtime")
+                )
+                .expect("reparse runtime"),
+                parsed
+            );
+        }
+    }
+
+    // #5071 T3-A0: an operator who never writes the key must land on `Legacy`,
+    // which reads no nonce and records no observation. The serde-deserialization
+    // path is asserted separately from the `Default` impl because the two are
+    // independent, and `is_empty` must account for the new field or a config
+    // that sets ONLY this key loses it on a round-trip.
+    #[test]
+    fn execution_identity_mode_defaults_legacy_and_round_trips() {
+        let default = RuntimeSettingsConfig::default();
+        assert_eq!(
+            default.execution_identity_mode,
+            ExecutionIdentityMode::Legacy
+        );
+        assert!(
+            !serde_yaml::to_string(&default)
+                .expect("serialize default runtime")
+                .contains("execution_identity_mode")
+        );
+
+        let absent: RuntimeSettingsConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(
+            absent.execution_identity_mode,
+            ExecutionIdentityMode::Legacy
+        );
+        assert!(
+            !absent
+                .execution_identity_mode
+                .records_identity_observations()
+        );
+        assert!(
+            !absent
+                .execution_identity_mode
+                .denies_on_incarnation_mismatch()
+        );
+        assert!(absent.is_empty());
+
+        for mode in [
+            ExecutionIdentityMode::Legacy,
+            ExecutionIdentityMode::Observe,
+            ExecutionIdentityMode::Enforce,
+        ] {
+            let yaml = format!(
+                "execution_identity_mode: {}\n",
+                serde_yaml::to_value(mode)
+                    .expect("serialize mode")
+                    .as_str()
+                    .expect("mode serializes as a string")
+            );
+            let parsed: RuntimeSettingsConfig =
+                serde_yaml::from_str(&yaml).expect("parse execution identity mode");
+            assert_eq!(parsed.execution_identity_mode, mode);
+            assert_eq!(
+                parsed.is_empty(),
+                mode == ExecutionIdentityMode::Legacy,
+                "a non-Legacy mode must keep the runtime section serialized"
+            );
             assert_eq!(
                 serde_yaml::from_str::<RuntimeSettingsConfig>(
                     &serde_yaml::to_string(&parsed).expect("serialize runtime")

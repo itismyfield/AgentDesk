@@ -1137,6 +1137,7 @@ src/
 │   │   ├── discord_io.rs
 │   │   ├── dispatch_policy.rs
 │   │   ├── e2e_control.rs
+│   │   ├── execution_identity.rs
 │   │   ├── formatting.rs
 │   │   ├── gateway.rs
 │   │   ├── gateway_voice_queue.rs
