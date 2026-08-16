@@ -32,8 +32,7 @@ modules/items (balanced-brace tracked). Suffixed variants
 skipped.
 
 String/comment handling: a cross-line lexer (`StripState` / `strip_line`,
-ported verbatim from `scripts/check_log_key_drift.py`, #4218 — kept as a copy
-so both guards stay dependency-free single-file scripts) blanks string literals
+imported from `scripts/rust_lex.py`) blanks string literals
 (normal strings with escapes, `b"…"`, and `r"…"` / `r#"…"#` raw strings — all
 of which may span lines), char literals, `//` line comments, and nested
 `/* … */` block comments BEFORE the cfg(test) brace tracking and call matching

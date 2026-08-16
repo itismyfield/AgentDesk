@@ -110,18 +110,19 @@ def strip_source(text: str) -> str:
     """Blank comments and strings while preserving braces and newlines.
 
     Uses the shared cross-line lexer from rust_lex module to maintain
-    consistency with other guard scripts.
+    consistency with other guard scripts. Splits on \\n only (not other
+    line-separation control characters like \\u2028) so line-comment
+    boundaries remain intact within strip_line's break behavior.
     """
     state = StripState()
-    lines = text.splitlines(keepends=True)
+    lines = text.split('\n')
     result = []
-    for line in lines:
-        stripped = strip_line(line.rstrip('\n'), state)
-        # Preserve newlines
-        if line.endswith('\n'):
-            result.append(stripped + '\n')
-        else:
-            result.append(stripped)
+    for i, line in enumerate(lines):
+        stripped = strip_line(line, state)
+        result.append(stripped)
+        # Preserve \n boundaries except after the last line
+        if i < len(lines) - 1:
+            result.append('\n')
     return "".join(result)
 
 
