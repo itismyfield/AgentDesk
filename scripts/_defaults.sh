@@ -1371,11 +1371,6 @@ _preflight_cpu_count() {
   # because a guessed count fed into the load ceiling would fail CLOSED and
   # falsely block a high-core host whose hw.ncpu happens to be unreadable. The
   # load probe skips itself instead when no count is available (#4255 review).
-  # Test injection (#5315): _PREFLIGHT_TEST_CPU_COUNT overrides the system value.
-  if [ -n "${_PREFLIGHT_TEST_CPU_COUNT:-}" ]; then
-    printf '%s' "$_PREFLIGHT_TEST_CPU_COUNT"
-    return 0
-  fi
   local n=""
   if command -v sysctl >/dev/null 2>&1; then
     n="$(sysctl -n hw.ncpu 2>/dev/null || true)"
@@ -1404,11 +1399,6 @@ _preflight_default_max_loadavg() {
 _preflight_loadavg_1min() {
   # 1-minute load average as a bare number, or nothing when unreadable.
   # `sysctl -n vm.loadavg` → "{ 3.70 3.15 3.03 }"; the first token is the 1-min.
-  # Test injection (#5315): _PREFLIGHT_TEST_LOADAVG overrides the system value.
-  if [ -n "${_PREFLIGHT_TEST_LOADAVG:-}" ]; then
-    printf '%s' "$_PREFLIGHT_TEST_LOADAVG"
-    return 0
-  fi
   local raw field
   if command -v sysctl >/dev/null 2>&1; then
     raw="$(sysctl -n vm.loadavg 2>/dev/null || true)"
@@ -1431,11 +1421,6 @@ _preflight_mem_pressure_level() {
   # macOS memory-pressure level: 1 = normal, 2 = warn, 4 = critical
   # (kern.memorystatus_vm_pressure_level). Prints the integer, or nothing when
   # the sysctl is unavailable (e.g. Linux CI) so the memory gate is skipped.
-  # Test injection (#5315): _PREFLIGHT_TEST_PRESSURE overrides the system value.
-  if [ -n "${_PREFLIGHT_TEST_PRESSURE:-}" ]; then
-    printf '%s' "$_PREFLIGHT_TEST_PRESSURE"
-    return 0
-  fi
   command -v sysctl >/dev/null 2>&1 || return 0
   local lvl
   lvl="$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null || true)"
@@ -1476,11 +1461,6 @@ _preflight_high_cpu_processes() {
   # (the 07-07 zombie ugrep, pegged for its whole life) from a legitimate burst
   # (#4255 review round 2). Neither duration contains spaces, so comm — which
   # may be a path with spaces — stays the final, greedily-joined column.
-  # Test injection (#5315): _PREFLIGHT_TEST_HIGHCPU overrides the live process scan.
-  if [ -n "${_PREFLIGHT_TEST_HIGHCPU:-}" ]; then
-    printf '%s\n' "$_PREFLIGHT_TEST_HIGHCPU"
-    return 0
-  fi
   local threshold="$1"
   case "$threshold" in ''|*[!0-9.]*) return 0 ;; esac
   command -v ps >/dev/null 2>&1 || return 0

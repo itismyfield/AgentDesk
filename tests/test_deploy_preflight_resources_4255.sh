@@ -96,7 +96,6 @@ reset_clean_stubs() {
   PGREP_LOG=""
   STUB_NCPU=8
   unset STUB_LOADAVG STUB_PRESSURE STUB_HIGHCPU STUB_TARGET_PIDS 2>/dev/null || true
-  unset _PREFLIGHT_TEST_CPU_COUNT _PREFLIGHT_TEST_LOADAVG _PREFLIGHT_TEST_PRESSURE _PREFLIGHT_TEST_HIGHCPU 2>/dev/null || true
   unset AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT \
         AGENTDESK_DEPLOY_MAX_LOADAVG \
         AGENTDESK_DEPLOY_MAX_MEM_PRESSURE_LEVEL \
@@ -106,17 +105,19 @@ reset_clean_stubs() {
   # _preflight_release_binary in the sourced _defaults.sh, not by this file.
   # shellcheck disable=SC2034
   ADK_REL="/tmp/adk-preflight-test-release"
-  _preflight_cpu_count() { printf '%s' "${_PREFLIGHT_TEST_CPU_COUNT:-${STUB_NCPU:-8}}"; }
-  _preflight_loadavg_1min() { printf '%s' "${_PREFLIGHT_TEST_LOADAVG:-${STUB_LOADAVG:-1.00}}"; }
-  _preflight_mem_pressure_level() { printf '%s' "${_PREFLIGHT_TEST_PRESSURE:-${STUB_PRESSURE:-1}}"; }
+  # Contract mirror for the production probes in scripts/_defaults.sh: these
+  # three are zero-argument functions that print one bare metric (or nothing),
+  # while _preflight_high_cpu_processes accepts the threshold and prints zero or
+  # more tab-separated pid/cpu/etime/time/comm rows. Keep the signatures and
+  # output shapes aligned when changing either side; only data acquisition is
+  # replaced here so the orchestrator remains under deterministic test.
+  _preflight_cpu_count() { printf '%s' "${STUB_NCPU:-8}"; }
+  _preflight_loadavg_1min() { printf '%s' "${STUB_LOADAVG:-1.00}"; }
+  _preflight_mem_pressure_level() { printf '%s' "${STUB_PRESSURE:-1}"; }
   # Deterministic: never shell out to the host's real launchctl.
   _preflight_deploy_target_pids() { [ -n "${STUB_TARGET_PIDS:-}" ] && printf '%s\n' "$STUB_TARGET_PIDS"; return 0; }
   _preflight_high_cpu_processes() {
-    # (#5315): prefer _PREFLIGHT_TEST_HIGHCPU if set, then fall back to STUB_HIGHCPU for
-    # backward compatibility with tests that use stubs.
-    if [ -n "${_PREFLIGHT_TEST_HIGHCPU:-}" ]; then
-      printf '%s\n' "$_PREFLIGHT_TEST_HIGHCPU"
-    elif [ -n "${STUB_HIGHCPU:-}" ]; then
+    if [ -n "${STUB_HIGHCPU:-}" ]; then
       printf '%s\n' "$STUB_HIGHCPU"
     fi
     return 0
@@ -318,22 +319,17 @@ echo "== Corroboration path preserved: hot+BURSTY still refuses under system pre
 # A BURSTY hot process (ratio 0.1, NOT a sustained runaway) refuses only when the
 # machine is under system-wide pressure — proving the multi-process saturation
 # path still fires independently of the runaway rule.
-# (#5315 determinism: inject load/CPU test fixtures via environment, not via
-# stubs, so the gate always uses injected values and never depends on host load).
 export AGENTDESK_DEPLOY_MAX_LOADAVG="10"
-export _PREFLIGHT_TEST_LOADAVG="25.0"
-_PREFLIGHT_TEST_HIGHCPU="$(printf '4321\t95.0\t02:00:00\t12:00\tbursty-hog')"
-export _PREFLIGHT_TEST_HIGHCPU
+STUB_LOADAVG="25.0"
+STUB_HIGHCPU="$(printf '4321\t95.0\t02:00:00\t12:00\tbursty-hog')"
 assert_rc "bursty hot proc + load over ceiling → refuse" 1 _preflight_resource_contention
 assert_out_contains "load-corroborated refusal names the proc" "bursty-hog" _preflight_resource_contention
 assert_out_contains "load-corroborated refusal cites system pressure" "system-wide" _preflight_resource_contention
-unset _PREFLIGHT_TEST_LOADAVG _PREFLIGHT_TEST_HIGHCPU
-export _PREFLIGHT_TEST_PRESSURE="4"
-_PREFLIGHT_TEST_HIGHCPU="$(printf '4321\t95.0\t02:00:00\t12:00\tbursty-hog')"
-export _PREFLIGHT_TEST_HIGHCPU
+reset_clean_stubs
+STUB_PRESSURE="4"
+STUB_HIGHCPU="$(printf '4321\t95.0\t02:00:00\t12:00\tbursty-hog')"
 assert_rc "bursty hot proc + critical memory pressure → refuse" 1 _preflight_resource_contention
 assert_out_contains "mem-corroborated refusal names the proc" "bursty-hog" _preflight_resource_contention
-unset _PREFLIGHT_TEST_PRESSURE _PREFLIGHT_TEST_HIGHCPU _PREFLIGHT_TEST_LOADAVG
 reset_clean_stubs
 
 echo "== Force escape hatch → proceed past a real finding (still warns) =="
