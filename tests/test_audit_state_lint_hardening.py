@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -14,6 +15,58 @@ AUDIT = importlib.util.module_from_spec(_SPEC)
 assert _SPEC.loader is not None
 sys.modules[_SPEC.name] = AUDIT
 _SPEC.loader.exec_module(AUDIT)
+
+
+class TestRegionTests(unittest.TestCase):
+    def classified_lines(self, source: str) -> set[int]:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixture.rs"
+            path.write_text(source, encoding="utf-8")
+            return AUDIT.test_region_lines(str(path))
+
+    def test_cfg_test_attribute_marks_non_tests_module_as_test_region(self) -> None:
+        lines = self.classified_lines(
+            "#[cfg(test)]\nmod postgres_tests {\n    probe().unwrap();\n}\n"
+        )
+
+        self.assertIn(3, lines)
+
+    def test_tests_module_name_remains_a_test_region(self) -> None:
+        lines = self.classified_lines("mod tests {\n    probe().unwrap();\n}\n")
+
+        self.assertIn(2, lines)
+
+    def test_production_module_without_cfg_test_is_not_a_test_region(self) -> None:
+        lines = self.classified_lines(
+            "#[cfg(test)] fn inline_test_helper() {}\n"
+            "mod production {\n    production_probe().unwrap();\n}\n"
+        )
+
+        self.assertNotIn(3, lines)
+
+    def test_non_code_braces_do_not_extend_test_region(self) -> None:
+        lines = self.classified_lines(
+            "#[cfg(test)]\n"
+            "mod postgres_tests {\n"
+            "    let normal = \"{\";\n"
+            "    let raw = r#\"}\"#;\n"
+            "    let byte_raw = br#\"{\"#;\n"
+            "    let character = '{';\n"
+            "    // }\n"
+            "    /* { */\n"
+            "}\n"
+            "fn production() {\n    production_probe().unwrap();\n}\n"
+        )
+
+        self.assertNotIn(11, lines)
+
+    def test_single_line_test_module_does_not_extend_test_region(self) -> None:
+        lines = self.classified_lines(
+            "#[cfg(test)] mod inline_tests { fn probe() {} }\n"
+            "fn production() {\n    production_probe().unwrap();\n}\n"
+        )
+
+        self.assertNotIn(3, lines)
 
 
 class MigrationIntegerAuditTests(unittest.TestCase):
