@@ -352,12 +352,17 @@ async fn auto_apply_relay_recovery_for_shared_at(
     Ok(apply_relay_recovery_plan(registry, &shared, provider, decision, now_ms, source).await)
 }
 
+/// Only statuses whose apply performed a real transition belong here. #5021:
+/// `reuse_existing_live_watcher` used to be listed, but it reports that
+/// `apply_rebind` left a live incumbent untouched — no repair happened — so
+/// counting it applied made every watchdog pass look like a successful heal and
+/// the auto-heal budget never reached its failure backoff. That status settles
+/// through the refund arm of `settle_auto_heal_confirmation` instead.
 fn relay_recovery_status_counts_as_applied(status: &'static str) -> bool {
     matches!(
         status,
         "applied"
             | "reattached_watcher"
-            | "reuse_existing_live_watcher"
             | "reattach_confirm_startup_grace"
             | "reattach_confirm_emission_in_flight"
             | "cleared_idle_tmux_stale_turn"
@@ -381,6 +386,18 @@ fn reattach_apply_status(watcher_spawned: bool) -> &'static str {
     } else {
         "reuse_existing_live_watcher"
     }
+}
+
+/// #5021: the reuse no-op stopped counting as an applied heal so the auto-heal
+/// budget can back off on a repeating no-transition. The relay-dead watchdog
+/// asks a different question — did its reattach lane already run for this
+/// channel on this tick — so give it a separate predicate instead of letting it
+/// read `applied` for both. Derived from `reattach_apply_status` so the status
+/// literal stays in one place.
+pub(in crate::services::discord) fn relay_recovery_status_reused_live_watcher(
+    status: &str,
+) -> bool {
+    status == reattach_apply_status(false)
 }
 
 fn relay_frontier_dead_reattach_owner(decision: &RelayRecoveryDecision) -> Option<ChannelId> {

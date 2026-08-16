@@ -204,6 +204,28 @@ pub(super) fn max_attempts_per_window_for_snapshot(
     AUTO_HEAL_DEFAULT_MAX_ATTEMPTS_PER_WINDOW
 }
 
+/// The two budget counters #5021 turns on: `attempts` is the reservations the
+/// current window still counts as consumed, and `consecutive_refunds` is the
+/// streak `refund_auto_heal_attempt` grows and `commit_auto_heal_attempt`
+/// clears.
+#[cfg(test)]
+pub(super) struct AutoHealAttemptCounters {
+    pub(super) attempts: u32,
+    pub(super) consecutive_refunds: u32,
+}
+
+#[cfg(test)]
+pub(super) fn auto_heal_attempt_counters_for_tests(key: &str) -> Option<AutoHealAttemptCounters> {
+    auto_heal_attempts()
+        .lock()
+        .expect("relay recovery attempt map poisoned")
+        .get(key)
+        .map(|window| AutoHealAttemptCounters {
+            attempts: window.attempts,
+            consecutive_refunds: window.consecutive_refunds,
+        })
+}
+
 #[cfg(test)]
 pub(super) fn clear_auto_heal_attempts_for_tests() {
     auto_heal_attempts()

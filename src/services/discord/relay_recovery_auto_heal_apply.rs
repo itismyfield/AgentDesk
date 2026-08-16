@@ -281,9 +281,19 @@ fn settle_auto_heal_confirmation(
             record_auto_heal_confirm_failure(&key, now_ms);
         }
         ReattachConfirmation::NotRequired | ReattachConfirmation::Confirmed => {
+            // #5021: `reuse_existing_live_watcher` settles here with the
+            // no-repair statuses. Reusing a live incumbent transitions nothing
+            // and skips the spawned-watcher probe, so the attempt carries no
+            // confirmation evidence to commit. `commit_auto_heal_attempt`
+            // clears `consecutive_refunds` and the pending retry window, so
+            // committing a repeating no-op reset the failure backoff on every
+            // pass and the reattach loop could neither converge nor give up.
             if matches!(
                 apply_result.status,
-                "rebind_failed" | "provider_unavailable" | "reattach_episode_changed"
+                "rebind_failed"
+                    | "provider_unavailable"
+                    | "reattach_episode_changed"
+                    | "reuse_existing_live_watcher"
             ) {
                 refund_auto_heal_attempt(&key, now_ms);
             } else {
@@ -300,11 +310,27 @@ mod tests {
     use poise::serenity_prelude::{ChannelId, Http, MessageId, UserId};
 
     use super::super::auto_heal_attempts::{
-        auto_heal_key, auto_heal_test_lock, clear_auto_heal_attempts_for_tests,
-        reserve_auto_heal_attempt,
+        auto_heal_attempt_counters_for_tests, auto_heal_key, auto_heal_test_lock,
+        clear_auto_heal_attempts_for_tests, reserve_auto_heal_attempt,
     };
     use super::*;
     use crate::services::provider::CancelToken;
+
+    /// What `apply_rebind` reports when it reused a live same-session incumbent:
+    /// nothing spawned, nothing replaced, no error.
+    fn reused_live_watcher_apply_result() -> RelayRecoveryApplyResult {
+        RelayRecoveryApplyResult {
+            status: reattach_apply_status(false),
+            removed_thread_proofs: 0,
+            removed_mailbox_token: false,
+            post_mailbox_has_cancel_token: None,
+            post_mailbox_queue_depth: None,
+            reattach_watcher_spawned: Some(false),
+            reattach_watcher_replaced: Some(false),
+            reattach_initial_offset: Some(0),
+            reattach_error: None,
+        }
+    }
 
     struct NeverAlert;
 
@@ -357,6 +383,128 @@ mod tests {
             .await
         );
         token
+    }
+
+    /// #5021 accounting: a reused live incumbent repaired nothing, so it returns
+    /// its reservation instead of committing it — the apply count does not grow
+    /// and exactly one refund is registered. Putting the status back into the
+    /// `relay_recovery_status_counts_as_applied` allowlist fails this test.
+    #[tokio::test]
+    async fn relay_recovery_reuse_existing_live_watcher_refunds_instead_of_counting_applied() {
+        let _guard = auto_heal_test_lock().lock().await;
+        clear_auto_heal_attempts_for_tests();
+        let key = auto_heal_key(
+            "claude",
+            5_021_001,
+            RelayRecoveryActionKind::ReattachWatcher,
+            RelayRecoveryApplySource::StallWatchdog,
+        );
+        assert_eq!(reserve_auto_heal_attempt(&key, 1_000, 1), Ok(0));
+        let mut apply_result = reused_live_watcher_apply_result();
+
+        settle_auto_heal_confirmation(
+            &mut apply_result,
+            ReattachConfirmation::NotRequired,
+            &key,
+            2_000,
+        );
+
+        assert_eq!(apply_result.status, "reuse_existing_live_watcher");
+        assert!(
+            !relay_recovery_status_counts_as_applied(apply_result.status),
+            "a reattach that transitioned nothing must not be counted applied"
+        );
+        let counters = auto_heal_attempt_counters_for_tests(&key).expect("reserved budget window");
+        assert_eq!(
+            counters.attempts, 0,
+            "a no-transition reuse must not consume an apply reservation"
+        );
+        assert_eq!(
+            counters.consecutive_refunds, 1,
+            "a no-transition reuse must register exactly one refund"
+        );
+    }
+
+    /// The other side of #5021: a reattach that really spawned a watcher still
+    /// counts as applied and still commits, clearing an earlier refund streak.
+    /// The accounting fix must not over-block the healing path it protects.
+    #[tokio::test]
+    async fn relay_recovery_spawned_reattach_still_counts_applied_and_commits() {
+        let _guard = auto_heal_test_lock().lock().await;
+        clear_auto_heal_attempts_for_tests();
+        let key = auto_heal_key(
+            "claude",
+            5_021_002,
+            RelayRecoveryActionKind::ReattachWatcher,
+            RelayRecoveryApplySource::StallWatchdog,
+        );
+        assert_eq!(reserve_auto_heal_attempt(&key, 1_000, 2), Ok(1));
+        let mut reused = reused_live_watcher_apply_result();
+        settle_auto_heal_confirmation(&mut reused, ReattachConfirmation::NotRequired, &key, 1_000);
+        assert_eq!(reserve_auto_heal_attempt(&key, 2_000, 2), Ok(1));
+        let mut apply_result = RelayRecoveryApplyResult {
+            status: reattach_apply_status(true),
+            reattach_watcher_spawned: Some(true),
+            reattach_watcher_replaced: Some(true),
+            ..reused_live_watcher_apply_result()
+        };
+
+        settle_auto_heal_confirmation(
+            &mut apply_result,
+            ReattachConfirmation::Confirmed,
+            &key,
+            2_000,
+        );
+
+        assert_eq!(apply_result.status, "reattached_watcher");
+        assert!(relay_recovery_status_counts_as_applied(apply_result.status));
+        let counters = auto_heal_attempt_counters_for_tests(&key).expect("reserved budget window");
+        assert_eq!(
+            counters.attempts, 1,
+            "a real reattach must keep its reservation consumed"
+        );
+        assert_eq!(
+            counters.consecutive_refunds, 0,
+            "a real reattach must clear the refund streak"
+        );
+    }
+
+    /// #5021 loop break: the no-op reattach repeated indefinitely because
+    /// committing it reset the refund streak and the pending retry window on
+    /// every watchdog pass, so `reserve_auto_heal_attempt` never returned a
+    /// backoff error. With the reuse status refunded, the third consecutive
+    /// no-transition opens the failure backoff and the lane stops re-applying.
+    #[tokio::test]
+    async fn relay_recovery_repeated_reuse_no_transition_opens_failure_backoff() {
+        let _guard = auto_heal_test_lock().lock().await;
+        clear_auto_heal_attempts_for_tests();
+        let key = auto_heal_key(
+            "claude",
+            5_021_003,
+            RelayRecoveryActionKind::ReattachWatcher,
+            RelayRecoveryApplySource::StallWatchdog,
+        );
+
+        for now_ms in [1_000, 2_000, 3_000] {
+            assert_eq!(
+                reserve_auto_heal_attempt(&key, now_ms, 1),
+                Ok(0),
+                "a refunded no-transition must leave the next pass a reservation"
+            );
+            let mut apply_result = reused_live_watcher_apply_result();
+            settle_auto_heal_confirmation(
+                &mut apply_result,
+                ReattachConfirmation::NotRequired,
+                &key,
+                now_ms,
+            );
+        }
+
+        assert_eq!(
+            reserve_auto_heal_attempt(&key, 4_000, 1),
+            Err("auto_heal_failure_backoff"),
+            "consecutive no-transition reuses must reach the refund backoff instead of looping"
+        );
     }
 
     #[tokio::test]

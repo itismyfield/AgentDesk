@@ -505,6 +505,25 @@ fn reattach_status_reports_live_incumbent_reuse_honestly() {
     assert_eq!(reattach_apply_status(false), "reuse_existing_live_watcher");
 }
 
+/// #5021 allowlist gate: reusing a live incumbent transitions nothing, so its
+/// status must stay out of `relay_recovery_status_counts_as_applied`. Putting
+/// the literal back into that allowlist fails here.
+#[test]
+fn reused_live_watcher_status_is_not_counted_applied() {
+    assert!(!relay_recovery_status_counts_as_applied(
+        reattach_apply_status(false)
+    ));
+    assert!(relay_recovery_status_counts_as_applied(
+        reattach_apply_status(true)
+    ));
+    assert!(relay_recovery_status_reused_live_watcher(
+        reattach_apply_status(false)
+    ));
+    assert!(!relay_recovery_status_reused_live_watcher(
+        reattach_apply_status(true)
+    ));
+}
+
 #[test]
 fn live_agentdesk_tmux_relay_dead_without_mailbox_token_can_adopt_ownerless_inflight() {
     let decision = plan_relay_recovery(
