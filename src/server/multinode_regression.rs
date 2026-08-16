@@ -153,10 +153,65 @@ mod multinode_regression_pg_tests {
         );
         let claim_a = claim_a.unwrap();
         let claim_b = claim_b.unwrap();
+        let contended_claims = claim_a.claimed.len() + claim_b.claimed.len();
+        let mut trace = vec![
+            describe_claim_outcome("contended mac-mini-release", &claim_a),
+            describe_claim_outcome("contended mac-book-release", &claim_b),
+        ];
+
+        // Safety half of exactly-once: under real contention the same dispatch
+        // must never be handed to both workers. Unconditional — no interleaving
+        // may relax it.
+        assert!(
+            contended_claims <= 1,
+            "two workers sharing PG must never claim one dispatch twice; {}",
+            trace.join(" | ")
+        );
+
+        // Liveness half. Both fixture nodes satisfy the dispatch's required
+        // capabilities, so `select_capability_route` elects a single route owner
+        // (mac-book-release — it is inserted second, so it carries the later
+        // heartbeat, and the instance_id tie-break favours it as well) and the
+        // other worker skips as "not preferred route owner". A contended round
+        // therefore claims nothing whenever the *non-elected* worker wins the
+        // `FOR UPDATE SKIP LOCKED` race in `claim_task_dispatches`: it holds the
+        // row for the length of its transaction while the elected worker's
+        // select comes back empty. That is a lock-race artifact, not a claim
+        // leak — the dispatch stays pending and the next poll takes it.
+        //
+        // The old single-round `== 1` assertion made the ubuntu PG lane depend
+        // on winning that race. Stalling the claim transaction by 5ms right
+        // after its select turned this test from 20/20 green into 5/5 red
+        // locally, which reproduces the CI signature (claims=0) exactly (#5387).
+        // So settle the round without contention and require the total to still
+        // be exactly one.
+        let settled_claims = if contended_claims == 0 {
+            let settle = claim_task_dispatches(&pool_b, &request_b).await.unwrap();
+            trace.push(describe_claim_outcome("settling mac-book-release", &settle));
+            settle.claimed.len()
+        } else {
+            0
+        };
         assert_eq!(
-            claim_a.claimed.len() + claim_b.claimed.len(),
+            contended_claims + settled_claims,
             1,
-            "two workers sharing PG must claim one dispatch exactly once"
+            "two workers sharing PG must claim one dispatch exactly once; {}",
+            trace.join(" | ")
+        );
+
+        // Exactly-once at the row itself: one owner holds the lease, not two
+        // rounds' worth of overlapping claims.
+        let claim_owner: Option<String> = sqlx::query_scalar(
+            "SELECT claim_owner FROM task_dispatches WHERE id = 'dispatch-multinode-1'",
+        )
+        .fetch_one(&pool_a)
+        .await
+        .unwrap();
+        assert_eq!(
+            claim_owner.as_deref(),
+            Some("mac-book-release"),
+            "claimed dispatch must be held by the elected route owner alone; {}",
+            trace.join(" | ")
         );
 
         sqlx::query(
@@ -171,7 +226,8 @@ mod multinode_regression_pg_tests {
         assert_eq!(
             reclaimed.claimed.len(),
             1,
-            "expired dispatch lease must be reclaimable by a different worker"
+            "expired dispatch lease must be reclaimable by a different worker; {}",
+            describe_claim_outcome("reclaim mac-book-release", &reclaimed)
         );
         assert_eq!(reclaimed.claimed[0].id, "dispatch-multinode-1");
 
@@ -383,6 +439,33 @@ mod multinode_regression_pg_tests {
 
         pool.close().await;
         pg_db.drop().await;
+    }
+
+    /// Renders a claim outcome for assert messages. The skip reasons are the
+    /// part that matters: they say *why* a worker claimed nothing, which is what
+    /// #5387 could not tell from `claims=0` alone. The reasons discriminate the
+    /// candidates — "not preferred route owner; selected <instance>" means
+    /// another node was elected (and an empty `skipped` alongside it means this
+    /// worker's `FOR UPDATE SKIP LOCKED` select found the row already locked),
+    /// "selected unknown" means no node was eligible at all (offline heartbeat
+    /// or capability mismatch), and semaphore text points at cluster config.
+    fn describe_claim_outcome(
+        label: &str,
+        outcome: &crate::server::task_dispatch_claims::TaskDispatchClaimOutcome,
+    ) -> String {
+        let claimed = outcome
+            .claimed
+            .iter()
+            .map(|claim| format!("{} -> {}", claim.id, claim.claim_owner))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let skipped = outcome
+            .skipped
+            .iter()
+            .map(|skip| format!("{}: {}", skip.id, skip.reasons.join("; ")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{label} claimed=[{claimed}] skipped=[{skipped}]")
     }
 
     async fn insert_claim_fixture(pool: &sqlx::PgPool) {
