@@ -768,23 +768,23 @@ mod restart_lifecycle_characterization_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
+    struct RuntimeRootIsolationGuard {
+        _env: crate::config::TestEnvVarGuard,
+    }
 
-    struct EnvGuard;
-
-    impl Drop for EnvGuard {
+    impl Drop for RuntimeRootIsolationGuard {
         fn drop(&mut self) {
-            unsafe {
-                std::env::remove_var(AGENTDESK_ROOT_DIR_ENV);
-            }
+            runtime_store::set_process_generation_for_tests(None);
         }
     }
 
-    fn isolate_runtime_root(tmp: &std::path::Path) -> EnvGuard {
-        unsafe {
-            std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.to_str().unwrap());
+    fn isolate_runtime_root(tmp: &std::path::Path) -> RuntimeRootIsolationGuard {
+        RuntimeRootIsolationGuard {
+            _env: crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+                "AGENTDESK_ROOT_DIR",
+                tmp,
+            ),
         }
-        EnvGuard
     }
 
     /// Build a `SharedData` through the production constructor
