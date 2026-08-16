@@ -105,6 +105,12 @@ reset_clean_stubs() {
   # _preflight_release_binary in the sourced _defaults.sh, not by this file.
   # shellcheck disable=SC2034
   ADK_REL="/tmp/adk-preflight-test-release"
+  # Contract mirror for the production probes in scripts/_defaults.sh: these
+  # three are zero-argument functions that print one bare metric (or nothing),
+  # while _preflight_high_cpu_processes accepts the threshold and prints zero or
+  # more tab-separated pid/cpu/etime/time/comm rows. Keep the signatures and
+  # output shapes aligned when changing either side; only data acquisition is
+  # replaced here so the orchestrator remains under deterministic test.
   _preflight_cpu_count() { printf '%s' "${STUB_NCPU:-8}"; }
   _preflight_loadavg_1min() { printf '%s' "${STUB_LOADAVG:-1.00}"; }
   _preflight_mem_pressure_level() { printf '%s' "${STUB_PRESSURE:-1}"; }
