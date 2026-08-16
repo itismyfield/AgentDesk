@@ -2090,6 +2090,58 @@ mod tests {
             pg_db.drop().await;
         }
 
+        /// #5356 S4 (r3, P2): measured against the real activate entry point,
+        /// explicit `active_only=true` leaves a promotable run unpromoted and
+        /// returns a harmless zero-dispatch success for both pre-active states.
+        #[tokio::test]
+        async fn active_only_explicit_promotable_run_is_harmless_no_op_pg() {
+            for promotable_status in ["generated", "pending"] {
+                let pg_db = TestPostgresDb::create().await;
+                let pool = pg_db.connect_and_migrate_with_max_connections(8).await;
+                seed_activate_state(&pool).await;
+                set_run_status(&pool, promotable_status).await;
+
+                let deps = activate_deps(&pool);
+                let body = ActivateBody {
+                    active_only: Some(true),
+                    ..activate_body()
+                };
+                let (status, payload) = activate_with_deps_pg(&deps, body)
+                    .await
+                    .expect("active_only promotable run must remain a harmless no-op");
+
+                assert_eq!(status, axum::http::StatusCode::OK);
+                assert_eq!(
+                    payload.0,
+                    serde_json::json!({
+                        "dispatched": [],
+                        "count": 0,
+                        "active_groups": 0,
+                        "active_turn_count": 0,
+                        "pending_groups": 1,
+                    })
+                );
+                assert_eq!(
+                    run_status(&pool).await,
+                    promotable_status,
+                    "active_only must skip promotion"
+                );
+                assert_eq!(
+                    entry_status(&pool).await,
+                    "pending",
+                    "active_only must not dispatch the promotable run's entry"
+                );
+                assert_eq!(
+                    activate_state(&pool).await.3,
+                    0,
+                    "active_only must not create a dispatch for a promotable run"
+                );
+
+                pool.close().await;
+                pg_db.drop().await;
+            }
+        }
+
         #[tokio::test]
         async fn terminal_race_rejects_after_activate_lock_without_side_effects_pg() {
             let pg_db = TestPostgresDb::create().await;

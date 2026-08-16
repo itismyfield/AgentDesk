@@ -582,6 +582,7 @@ services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::replay_sk
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::session_clear_failure_stays_retry_eligible_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::session_clear_is_a_structural_no_op_after_the_cancel_commit_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::slot_release_and_its_durable_record_commit_together_pg
+services::auto_queue::route::activate_command::tests::activate_upstream_eligibility_gate_pg_tests::active_only_explicit_promotable_run_is_harmless_no_op_pg
 services::auto_queue::route::activate_command::tests::activate_upstream_eligibility_gate_pg_tests::explicit_run_id_admits_eligible_and_rejects_terminal_statuses_pg
 services::auto_queue::route::activate_command::tests::activate_upstream_eligibility_gate_pg_tests::explicit_unknown_run_id_is_not_found_pg
 services::auto_queue::route::activate_command::tests::activate_upstream_eligibility_gate_pg_tests::generated_run_explicit_activate_promotes_and_dispatches_pg

@@ -66,30 +66,17 @@ mod tests {
 
     #[test]
     fn activate_eligible_status_contract_admits_promotable_runs() {
-        // The pre-promotion states activate exists to promote, plus the live set.
-        for status in ["generated", "pending", "active", "paused", "restoring"] {
-            assert!(
-                is_activate_eligible_run_status(status),
-                "{status} must be activate-eligible"
-            );
-        }
-        // `completed` / `cancelled` are the terminal run statuses production
-        // actually writes; the rest are non-run statuses that must still be
-        // refused, because the predicate is a deny-by-default allowlist.
-        for status in ["completed", "cancelled", "failed", "user_cancelled", ""] {
-            assert!(
-                !is_activate_eligible_run_status(status),
-                "{status:?} must not be activate-eligible"
-            );
-        }
-        // The live set must remain a subset: the downstream dispatch choke point
-        // admits every live status, so an upstream refusal of one would deny an
-        // activate the authoritative gate accepts.
-        for status in LIVE_RUN_STATUSES {
-            assert!(
-                is_activate_eligible_run_status(status),
-                "live status {status} must stay activate-eligible"
-            );
-        }
+        let actual = ACTIVATE_ELIGIBLE_RUN_STATUSES
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = ["active", "paused", "restoring", "generated", "pending"]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(
+            actual, expected,
+            "activate eligibility domain must be exact"
+        );
     }
 }
