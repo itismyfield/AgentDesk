@@ -430,6 +430,13 @@ pub async fn update_entry_status_on_pg(
 ) -> Result<EntryStatusUpdateResult, String> {
     let normalized = normalize_entry_status(new_status).map_err(|error| error.to_string())?;
     let mut current = load_entry_status_row_pg(pool, entry_id).await?;
+    // #5356 S2: the write target is fixed once, before the retry loop, so a
+    // stale reload cannot silently redirect what this call attaches. The pin is
+    // defensive rather than load-bearing — the 0-row drift branch below only
+    // `continue`s while the row still carries the identity this attempt
+    // observed, so recomputing `options.or(current.*)` per iteration would
+    // yield the same value. Its declaration site is locked structurally by
+    // `pinned_dispatch_identity_is_declared_before_the_stale_retry_loop`.
     let pinned_dispatch_id = options
         .dispatch_id
         .clone()
@@ -648,7 +655,41 @@ pub async fn update_entry_status_on_pg(
                     changed: false,
                 });
             }
-            if latest.dispatch_id != pinned_dispatch_id || latest.slot_index != pinned_slot_index {
+            // #5356 S2: the relatch defense is this branch and the CAS above
+            // together, not either alone — and neither of them is the hoisted
+            // pin. The dispatched arm's CAS carries the identity condition
+            // (`dispatch_id`/`slot_index IS NOT DISTINCT FROM` the observed
+            // values), so a competing owner's row fails to match and this
+            // attempt writes nothing; this branch is what then stops the retry
+            // from re-reading the winner's row and overwriting its identity,
+            // returning `changed: true` with the requested dispatch attached.
+            // On the other five arms, whose CAS matches on id + status alone,
+            // this branch is the only identity check the 0-row path has: it
+            // keeps a stale retry of any status update — not just of a new
+            // attachment — off a row a new owner claimed after the reload.
+            //
+            // Drift is judged against the observed pre-state (`current.*`), not
+            // against the write target (`pinned_*`); on the dispatched arm
+            // those observed values are also the ones that arm's CAS bound in
+            // its WHERE. A new attachment (`options.dispatch_id = Some(..)`)
+            // differs from the row by construction, so comparing the target
+            // would also reject pure-status races — the very reloads this retry
+            // loop exists to absorb.
+            //
+            // `reactivate_done_entry_on_pg` splits acceptance and drift the
+            // same way (acceptance against the expected identity, drift against
+            // the observed one), yet the siblings deliberately disagree on one
+            // race: with the run live and a competitor moving the entry
+            // `done -> dispatched` while leaving the identity NULL, this helper
+            // absorbs the reload and attaches, while that helper's dispatched
+            // branch measures the still-NULL identity against the requested one
+            // and errors. That asymmetry is the intended contract, not drift to
+            // unify — reactivation refuses to revive an entry another actor
+            // concurrently dispatched and takes only an already-identical
+            // re-dispatch as idempotent, whereas a status update exists to
+            // absorb its own stale reloads.
+            if latest.dispatch_id != current.dispatch_id || latest.slot_index != current.slot_index
+            {
                 return Err(format!(
                     "auto-queue entry {entry_id} dispatch identity changed during status update"
                 ));
@@ -747,10 +788,12 @@ pub async fn update_entry_status_on_pg(
 /// dispatch-history bookkeeping, transition recording, and conditional run
 /// finalization — but operates inside a caller-owned transaction.
 ///
-/// Unlike the pool-scoped helper this is single-shot: on stale-row mismatch
-/// it returns `changed: false` rather than re-reading state and looping. The
-/// caller composes this into a wider atomic operation, so observed state is
-/// already a stable snapshot inside the transaction.
+/// Unlike the pool-scoped helper this is single-shot: on stale-row mismatch it
+/// returns `changed: false`. The pool-scoped helper re-reads and loops only
+/// while the reloaded row still carries the dispatch identity it observed; once
+/// that identity drifts it returns an error instead of looping. The caller
+/// composes this into a wider atomic operation, so observed state is already a
+/// stable snapshot inside the transaction.
 pub async fn update_entry_status_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     entry_id: &str,
@@ -1651,7 +1694,11 @@ async fn record_entry_transition_on_pg(
 mod tests {
     use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
-    use sqlx::{Connection, Executor, PgConnection, PgPool};
+    use sqlx::{Connection, PgConnection, PgPool};
+
+    /// This module's own source, read by the declaration-site lock on the
+    /// pinned dispatch identity.
+    const MODULE_SOURCE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/", file!()));
 
     async fn setup_entry(pool: &PgPool, run_status: &str, entry_status: &str) {
         sqlx::query(
@@ -1932,19 +1979,19 @@ mod tests {
             .await
         });
         wait_for_run_token_waiter(&mut token_holder).await;
-        token_holder
-            .execute(
-                "UPDATE auto_queue_entries
+        sqlx::query(
+            "UPDATE auto_queue_entries
              SET status = 'dispatched',
                  dispatch_id = 'dispatch-competing-status-update',
                  slot_index = 1,
                  completed_at = NULL
              WHERE id = 'gate-entry'",
-            )
-            .await
-            .expect("attach competing dispatch during pool status update");
-        token_holder
-            .execute("COMMIT")
+        )
+        .execute(&mut token_holder)
+        .await
+        .expect("attach competing dispatch during pool status update");
+        sqlx::query("COMMIT")
+            .execute(&mut token_holder)
             .await
             .expect("commit competing dispatch and release run token");
 
@@ -1953,7 +2000,10 @@ mod tests {
             .expect("pool status update finishes after competing attachment")
             .expect("join pool status update")
             .expect_err("pool status retry must reject a competing dispatch identity");
-        assert!(error.contains("dispatch identity"), "{error}");
+        assert!(
+            error.contains("dispatch identity changed during status update"),
+            "{error}"
+        );
         let identity = load_entry_status_row_pg(&pool, "gate-entry")
             .await
             .expect("load preserved competing dispatch identity");
@@ -1987,18 +2037,18 @@ mod tests {
             .await
         });
         wait_for_run_token_waiter(&mut token_holder).await;
-        token_holder
-            .execute(
-                "UPDATE auto_queue_entries
+        sqlx::query(
+            "UPDATE auto_queue_entries
              SET status = 'dispatched',
                  dispatch_id = '',
                  completed_at = NULL
              WHERE id = 'gate-entry'",
-            )
-            .await
-            .expect("replace NULL dispatch identity with empty text");
-        token_holder
-            .execute("COMMIT")
+        )
+        .execute(&mut token_holder)
+        .await
+        .expect("replace NULL dispatch identity with empty text");
+        sqlx::query("COMMIT")
+            .execute(&mut token_holder)
             .await
             .expect("commit empty dispatch identity and release run token");
 
@@ -2007,7 +2057,10 @@ mod tests {
             .expect("pool status update finishes after empty identity wins")
             .expect("join pool status update")
             .expect_err("pool status retry must not accept empty text as the pinned NULL identity");
-        assert!(error.contains("dispatch identity"), "{error}");
+        assert!(
+            error.contains("dispatch identity changed during status update"),
+            "{error}"
+        );
         let identity = load_entry_status_row_pg(&pool, "gate-entry")
             .await
             .expect("load preserved empty dispatch identity");
@@ -2016,6 +2069,273 @@ mod tests {
         drop(token_holder);
         pool.close().await;
         pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pool_status_retry_absorbs_competing_status_change_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        setup_entry(&pool, "active", ENTRY_STATUS_PENDING).await;
+        seed_dispatch(&pool, "dispatch-requested-status-race").await;
+        let mut token_holder = begin_run_token_holder(&pg_db.database_url).await;
+
+        let update_pool = pool.clone();
+        let update = tokio::spawn(async move {
+            update_entry_status_on_pg(
+                &update_pool,
+                "gate-entry",
+                ENTRY_STATUS_DISPATCHED,
+                "test_pool_status_retry",
+                &EntryStatusUpdateOptions {
+                    dispatch_id: Some("dispatch-requested-status-race".to_string()),
+                    slot_index: Some(0),
+                },
+            )
+            .await
+        });
+        wait_for_run_token_waiter(&mut token_holder).await;
+        // Only the status moves; the row keeps the NULL dispatch identity this
+        // attempt observed, so the retry must converge instead of aborting.
+        sqlx::query(
+            "UPDATE auto_queue_entries
+             SET status = 'skipped',
+                 completed_at = NOW()
+             WHERE id = 'gate-entry'",
+        )
+        .execute(&mut token_holder)
+        .await
+        .expect("race the status only during pool status update");
+        sqlx::query("COMMIT")
+            .execute(&mut token_holder)
+            .await
+            .expect("commit racing status and release run token");
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), update)
+            .await
+            .expect("pool status update finishes after the racing status commits")
+            .expect("join pool status update")
+            .expect("pool status retry must absorb a pure status race");
+        assert!(result.changed);
+        assert_eq!(result.from_status, ENTRY_STATUS_SKIPPED);
+        let identity = load_entry_status_row_pg(&pool, "gate-entry")
+            .await
+            .expect("load attached dispatch identity");
+        assert_eq!(identity.status, ENTRY_STATUS_DISPATCHED);
+        assert_eq!(
+            identity.dispatch_id.as_deref(),
+            Some("dispatch-requested-status-race")
+        );
+        assert_eq!(identity.slot_index, Some(0));
+
+        drop(token_holder);
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    struct RacedDoneAttachment {
+        result: Result<EntryStatusUpdateResult, String>,
+        row: EntryStatusRow,
+        transitions: Vec<(String, String, String)>,
+        dispatch_history: Vec<String>,
+    }
+
+    /// Stage the reattachment race #5356 S2 opened: a new attachment is in
+    /// flight when a competitor moves the entry to `done` without touching the
+    /// dispatch identity the attempt observed. Judging drift against the write
+    /// target aborted this; judging it against the observed pre-state lets the
+    /// retry converge from `done`.
+    async fn race_entry_to_done_during_new_attachment(
+        trigger_source: &str,
+        requested_dispatch_status: &str,
+    ) -> RacedDoneAttachment {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        setup_entry(&pool, "active", ENTRY_STATUS_PENDING).await;
+        seed_dispatch(&pool, "dispatch-requested-done-race").await;
+        sqlx::query(
+            "UPDATE task_dispatches
+             SET status = $1, updated_at = NOW()
+             WHERE id = 'dispatch-requested-done-race'",
+        )
+        .bind(requested_dispatch_status)
+        .execute(&pool)
+        .await
+        .expect("seed requested dispatch status");
+        let mut token_holder = begin_run_token_holder(&pg_db.database_url).await;
+
+        let trigger_source = trigger_source.to_string();
+        let update_pool = pool.clone();
+        let update = tokio::spawn(async move {
+            update_entry_status_on_pg(
+                &update_pool,
+                "gate-entry",
+                ENTRY_STATUS_DISPATCHED,
+                &trigger_source,
+                &EntryStatusUpdateOptions {
+                    dispatch_id: Some("dispatch-requested-done-race".to_string()),
+                    slot_index: Some(0),
+                },
+            )
+            .await
+        });
+        // Waiting here is the run-token gate itself: the dispatched arm cannot
+        // reach its CAS until this holder commits, so the racing `done` is
+        // guaranteed to land between the attempt's reload and its write.
+        wait_for_run_token_waiter(&mut token_holder).await;
+        sqlx::query(
+            "UPDATE auto_queue_entries
+             SET status = 'done',
+                 completed_at = NOW()
+             WHERE id = 'gate-entry'",
+        )
+        .execute(&mut token_holder)
+        .await
+        .expect("race the entry to done during the new attachment");
+        sqlx::query("COMMIT")
+            .execute(&mut token_holder)
+            .await
+            .expect("commit racing done status and release run token");
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), update)
+            .await
+            .expect("pool status update finishes after the racing done commits")
+            .expect("join pool status update");
+        let row = load_entry_status_row_pg(&pool, "gate-entry")
+            .await
+            .expect("load entry state after the racing done");
+        let transitions = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT from_status, to_status, trigger_source
+             FROM auto_queue_entry_transitions
+             WHERE entry_id = 'gate-entry'
+             ORDER BY id ASC",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("load transitions recorded during the reattachment race");
+        let dispatch_history = list_entry_dispatch_history_pg(&pool, "gate-entry")
+            .await
+            .expect("load dispatch history recorded during the reattachment race");
+
+        drop(token_holder);
+        pool.close().await;
+        pg_db.drop().await;
+        RacedDoneAttachment {
+            result,
+            row,
+            transitions,
+            dispatch_history,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pool_status_retry_reattaches_after_racing_done_pg() {
+        let reattached = race_entry_to_done_during_new_attachment("pmd_reopen", "dispatched").await;
+        let result = reattached
+            .result
+            .expect("pool status retry must converge onto the raced done row");
+        assert!(result.changed);
+        assert_eq!(result.from_status, ENTRY_STATUS_DONE);
+        assert_eq!(reattached.row.status, ENTRY_STATUS_DISPATCHED);
+        assert_eq!(
+            reattached.row.dispatch_id.as_deref(),
+            Some("dispatch-requested-done-race")
+        );
+        assert_eq!(reattached.row.slot_index, Some(0));
+        assert!(reattached.row.completed_at.is_none());
+        // Convergence runs through the canonical bookkeeping, not around it.
+        assert_eq!(
+            reattached.transitions,
+            vec![(
+                ENTRY_STATUS_DONE.to_string(),
+                ENTRY_STATUS_DISPATCHED.to_string(),
+                "pmd_reopen".to_string()
+            )]
+        );
+        assert_eq!(
+            reattached.dispatch_history,
+            vec!["dispatch-requested-done-race".to_string()]
+        );
+
+        // The approved-source gate is real: the same race under a source the
+        // done -> dispatched transition table does not name is refused, and the
+        // competitor's row is left untouched.
+        let unapproved =
+            race_entry_to_done_during_new_attachment("test_pool_status_retry", "dispatched").await;
+        let error = unapproved
+            .result
+            .expect_err("an unapproved source must not reattach a raced done entry");
+        assert!(
+            error
+                .contains("invalid auto-queue entry transition for gate-entry: done -> dispatched"),
+            "{error}"
+        );
+        assert_eq!(unapproved.row.status, ENTRY_STATUS_DONE);
+        assert_eq!(unapproved.row.dispatch_id, None);
+        assert_eq!(unapproved.row.slot_index, None);
+        assert!(unapproved.transitions.is_empty());
+        assert!(unapproved.dispatch_history.is_empty());
+
+        // The attachment guard is real too. It runs before the CAS, so this
+        // leg is refused on the first attempt rather than at the retry — which
+        // is what shows the converging leg above was granted by a live
+        // dispatch, not by an absent liveness check.
+        let terminal_dispatch =
+            race_entry_to_done_during_new_attachment("pmd_reopen", "failed").await;
+        let error = terminal_dispatch
+            .result
+            .expect_err("a terminal dispatch must not be attached to a raced done entry");
+        assert!(error.contains("is failed: refusing to attach"), "{error}");
+        assert_eq!(terminal_dispatch.row.status, ENTRY_STATUS_DONE);
+        assert_eq!(terminal_dispatch.row.dispatch_id, None);
+        assert!(terminal_dispatch.transitions.is_empty());
+        assert!(terminal_dispatch.dispatch_history.is_empty());
+    }
+
+    fn pool_status_update_body(source: &str) -> &str {
+        source
+            .split_once("pub async fn update_entry_status_on_pg(")
+            .expect("module must declare update_entry_status_on_pg")
+            .1
+            .split_once("\n}\n")
+            .expect("update_entry_status_on_pg must close at column zero")
+            .0
+    }
+
+    fn pins_declared_before_retry_loop(source: &str) -> bool {
+        let body = pool_status_update_body(source);
+        let Some(retry_loop) = body.find("\n    loop {") else {
+            return false;
+        };
+        let declarations: Vec<_> = body.match_indices("let pinned_").collect();
+        declarations.len() == 2 && declarations.iter().all(|(offset, _)| *offset < retry_loop)
+    }
+
+    #[test]
+    fn pinned_dispatch_identity_is_declared_before_the_stale_retry_loop() {
+        assert!(
+            pins_declared_before_retry_loop(MODULE_SOURCE),
+            "both pinned_* bindings must be declared before the stale-retry loop"
+        );
+
+        // The shape this lock rejects: the pin recomputed per iteration. It is
+        // behaviorally indistinguishable from the hoist, because the drift
+        // branch only lets an iteration `continue` while the reloaded identity
+        // still equals the observed one — so the recomputed value would always
+        // match. The declaration site is therefore the only checkable surface.
+        const RECOMPUTED_INSIDE_LOOP: &str = "\
+pub async fn update_entry_status_on_pg(
+) -> Result<EntryStatusUpdateResult, String> {
+    let mut current = load_entry_status_row_pg(pool, entry_id).await?;
+    loop {
+        let pinned_dispatch_id = options.dispatch_id.clone();
+        let pinned_slot_index = options.slot_index;
+    }
+}
+";
+        assert!(
+            !pins_declared_before_retry_loop(RECOMPUTED_INSIDE_LOOP),
+            "the lock must reject pins recomputed inside the retry loop"
+        );
     }
 
     #[tokio::test]
