@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "4c5261be98b00d0c96ed28ac0ab8407b19d19829",
+  "measured_at_sha": "8350e61b7563f5923b9161498f630dea53aa5db2",
   "records": [
     {
       "root": "migrations/postgres",
@@ -18297,7 +18297,25 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:174fd77d0a889c3250590afbcb3e9d9c7d85f36121d80274ed1fec32f9160c79"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/task_dispatch_claims.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:1c6ffe5e7ce16513891313b8bb4c8684bcb9b7ca2dfbe360ee3594bb82fd90a3"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/task_dispatch_claims.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:394bdf90955d17db5c3b2e786dc4eb6706aeda624397fd3b95d3f809a7297f8e"
     },
     {
       "root": "src",
@@ -18325,6 +18343,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:67aec3afe4b8d5ba8c2f507121238709985e0f6a280be41f04386b852fe81308"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/task_dispatch_claims.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:8a8babe1581c0b0b6d6d6d6c9d1bcdf5f800fb7f268aadcecedf658da09f43bd"
     },
     {
       "root": "src",
@@ -18420,6 +18447,24 @@
       "root": "src",
       "kind": "RUST",
       "path": "src/server/task_dispatch_claims.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:23e6efee35ffb7c064dd8cf88a2a64eae6dd356cb79677d08d6a5a2b289d8819"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/task_dispatch_claims.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:309531697aeacc43f4d04e24e89eb0e392f1418f92342d77febcfdad4026d526"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/task_dispatch_claims.rs",
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
@@ -18487,6 +18532,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:a454998cc4b64feeadc90b2dc8de946c868a61438f909480985dcb204eddf84f"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/task_dispatch_claims.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:af307eba0d6274a583ac5b9de6662886550ef5fd2f783840c8a5c5b30890755b"
     },
     {
       "root": "src",

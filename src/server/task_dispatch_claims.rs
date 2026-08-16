@@ -143,43 +143,27 @@ async fn claim_task_dispatches_with_cluster_config(
                 .find(|candidate| candidate.decision.eligible);
             let selected =
                 selected_candidate.and_then(|candidate| candidate.decision.instance_id.as_deref());
+            let owner_node = worker_nodes.iter().find(|node| {
+                node.get("instance_id").and_then(|value| value.as_str())
+                    == Some(claim_owner.as_str())
+            });
             let mut owner_decision = candidates
                 .iter()
                 .find(|candidate| candidate.decision.instance_id.as_deref() == Some(&claim_owner))
                 .map(|candidate| candidate.decision.clone())
                 .or_else(|| {
-                    worker_nodes
-                        .iter()
-                        .find(|node| {
-                            node.get("instance_id").and_then(|value| value.as_str())
-                                == Some(claim_owner.as_str())
-                        })
-                        .map(|node| {
-                            crate::server::cluster::explain_capability_match(node, required)
-                        })
+                    owner_node.map(|node| {
+                        crate::server::cluster::explain_capability_match(node, required)
+                    })
                 })
                 .unwrap_or_else(|| crate::server::cluster::CapabilityRouteDecision {
                     instance_id: Some(claim_owner.clone()),
                     eligible: false,
-                    reasons: if candidates.is_empty() {
-                        vec![
-                            "no online worker node satisfies required capabilities or semaphore constraints"
-                                .to_string(),
-                        ]
-                    } else {
-                        vec![format!(
-                            "claim owner is not preferred route owner; selected {}",
-                            selected.unwrap_or("unknown")
-                        )]
-                    },
+                    reasons: Vec::new(),
                 });
+            merge_worker_registry_reasons(&mut owner_decision, owner_node, lease_ttl_secs);
             if selected != Some(claim_owner.as_str()) {
-                if owner_decision.eligible && owner_decision.reasons.is_empty() {
-                    owner_decision.reasons.push(format!(
-                        "claim owner is not preferred route owner; selected {}",
-                        selected.unwrap_or("unknown")
-                    ));
-                }
+                merge_route_selection_reason(&mut owner_decision, selected);
                 let diagnostics = json!({
                     "claim_owner": claim_owner,
                     "decision": owner_decision,
@@ -316,6 +300,74 @@ async fn semaphore_aware_route_candidates_on_pg_tx(
     }
 
     Ok(candidates)
+}
+
+/// Folds the worker-registry facts that capability matching cannot see into
+/// the claim owner's skip reasons.
+///
+/// `explain_capability_match` answers exactly one question — do this node's
+/// advertised labels/providers/MCP endpoints cover the requirement — and never
+/// reads the node's computed `status`. So the fallback that consults it for an
+/// owner absent from `select_capability_route`'s (online-only) candidate list
+/// returned `eligible: true, reasons: []` for an owner that had stopped
+/// heart-beating, and the operator was left with only
+/// `claim owner is not preferred route owner; selected unknown` while the real
+/// cause was an offline node (#5403).
+///
+/// Diagnostics only. The claim verdict is decided by `selected ==
+/// claim_owner`, and neither an offline nor an unregistered owner can ever be
+/// `selected`, because `select_capability_route` keeps `status = 'online'`
+/// nodes only — so nothing here can flip a claim into or out of existence.
+fn merge_worker_registry_reasons(
+    decision: &mut crate::server::cluster::CapabilityRouteDecision,
+    owner_node: Option<&Value>,
+    lease_ttl_secs: u64,
+) {
+    let Some(node) = owner_node else {
+        decision.eligible = false;
+        decision
+            .reasons
+            .push("claim owner is not registered in worker_nodes".to_string());
+        return;
+    };
+    let status = node
+        .get("status")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    if status == "online" {
+        return;
+    }
+    decision.eligible = false;
+    decision.reasons.push(format!(
+        "claim owner worker node is not online (status '{status}'; {lease_ttl_secs}s heartbeat lease)"
+    ));
+}
+
+/// Explains the route selection behind a skip.
+///
+/// `None` means no online node cleared the capability and semaphore checks at
+/// all — the cluster-wide reason, which before #5403 was written only on the
+/// unregistered-owner path and was therefore unreachable whenever the owner
+/// was a registered node. It is appended even when the owner already carries
+/// its own reasons: "you are offline" and "so is everyone else" are different
+/// facts and the operator needs both.
+fn merge_route_selection_reason(
+    decision: &mut crate::server::cluster::CapabilityRouteDecision,
+    selected: Option<&str>,
+) {
+    match selected {
+        Some(instance_id) => {
+            if decision.eligible && decision.reasons.is_empty() {
+                decision.reasons.push(format!(
+                    "claim owner is not preferred route owner; selected {instance_id}"
+                ));
+            }
+        }
+        None => decision.reasons.push(
+            "no online worker node satisfies required capabilities or semaphore constraints"
+                .to_string(),
+        ),
+    }
 }
 
 fn required_capabilities_empty(required: Option<&Value>) -> bool {
@@ -935,6 +987,312 @@ mod task_dispatch_claims_pg_tests {
 
         pool.close().await;
         pg_db.drop().await;
+    }
+
+    /// #5403 regression: an owner that is registered but has stopped
+    /// heart-beating must say so in the skip reason. Before the fix the
+    /// fallback ran `explain_capability_match`, which never reads the node's
+    /// computed `status`, so the offline owner came back `eligible: true,
+    /// reasons: []` and the operator was handed only "claim owner is not
+    /// preferred route owner; selected unknown" — a route-preference story for
+    /// a cluster that had no online node at all.
+    #[tokio::test]
+    async fn claim_skip_reason_reports_offline_claim_owner_instead_of_route_preference() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+        seed_agent_and_card(&pool).await;
+        seed_worker_node(&pool, "mac-mini-release", "mac-mini", 600).await;
+        seed_dispatch_with_required_capabilities(
+            &pool,
+            "disp-offline-owner",
+            "Offline owner",
+            json!({"required": {"providers": ["codex"]}}),
+            "pending",
+        )
+        .await;
+
+        let outcome = claim_task_dispatches_with_cluster_config(
+            &pool,
+            &TaskDispatchClaimRequest {
+                claim_owner: "mac-mini-release".to_string(),
+                ttl_secs: Some(60),
+                limit: Some(10),
+                to_agent_id: None,
+                dispatch_type: None,
+                lease_ttl_secs: Some(60),
+            },
+            &crate::config::ClusterConfig::default(),
+        )
+        .await
+        .unwrap(); // agentdesk-audit: allow-unwrap — PG test fixture; a broken step must fail the test
+
+        assert!(outcome.claimed.is_empty());
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(outcome.skipped[0].id, "disp-offline-owner");
+        let reasons = &outcome.skipped[0].reasons;
+        assert!(
+            reasons.iter().any(|reason| reason.contains("offline")),
+            "skip reason must name the offline owner node; got {reasons:?}"
+        );
+        assert!(
+            reasons
+                .iter()
+                .any(|reason| reason.contains("no online worker node satisfies")),
+            "an all-offline cluster must reach the no-online-node reason; got {reasons:?}"
+        );
+        assert!(
+            !reasons
+                .iter()
+                .any(|reason| reason.contains("not preferred route owner")),
+            "no route owner was selected, so the preference story must not be told; got {reasons:?}"
+        );
+
+        let (status, claim_owner): (String, Option<String>) =
+            sqlx::query_as("SELECT status, claim_owner FROM task_dispatches WHERE id = $1")
+                .bind("disp-offline-owner")
+                .fetch_one(&pool)
+                .await
+                .unwrap(); // agentdesk-audit: allow-unwrap — PG test fixture; a broken step must fail the test
+        assert_eq!(status, "pending");
+        assert_eq!(claim_owner, None);
+        let diagnostics: Option<Value> =
+            sqlx::query_scalar("SELECT routing_diagnostics FROM task_dispatches WHERE id = $1")
+                .bind("disp-offline-owner")
+                .fetch_one(&pool)
+                .await
+                .unwrap(); // agentdesk-audit: allow-unwrap — PG test fixture; a broken step must fail the test
+        let diagnostics = diagnostics.expect("offline-owner skip must persist routing diagnostics"); // agentdesk-audit: allow-unwrap — the skip path must have persisted diagnostics
+        assert_eq!(
+            diagnostics
+                .get("decision")
+                .and_then(|decision| decision.get("eligible")),
+            Some(&Value::Bool(false)),
+            "an offline owner is not an eligible route target; got {diagnostics}"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #5403 guard: the skip-reason work is diagnostics only. Every claim
+    /// verdict below was captured against the pre-fix binary and must stay
+    /// byte-identical — reasons may gain detail, but who claims what may not
+    /// move.
+    #[tokio::test]
+    async fn claim_selection_verdicts_are_unchanged_by_skip_reason_diagnostics() {
+        let Some(pg_db) = TestPostgresDb::create().await else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+        seed_agent_and_card(&pool).await;
+
+        let claimed_by_online_eligible_owner = run_claim_scenario(
+            &pool,
+            "disp-online-owner",
+            json!({"required": {"providers": ["codex"]}}),
+            &[("mac-mini-release", "mac-mini", 0)],
+            "mac-mini-release",
+        )
+        .await;
+        assert_eq!(
+            claimed_by_online_eligible_owner,
+            ScenarioVerdict::claimed_by("mac-mini-release"),
+            "online eligible owner must still claim"
+        );
+
+        let offline_owner_alone = run_claim_scenario(
+            &pool,
+            "disp-offline-owner-alone",
+            json!({"required": {"providers": ["codex"]}}),
+            &[("mac-mini-release", "mac-mini", 600)],
+            "mac-mini-release",
+        )
+        .await;
+        assert_eq!(
+            offline_owner_alone,
+            ScenarioVerdict::skipped(),
+            "offline owner must still skip and leave the dispatch pending"
+        );
+
+        let offline_owner_with_online_peer = run_claim_scenario(
+            &pool,
+            "disp-offline-owner-online-peer",
+            json!({"required": {"providers": ["codex"]}}),
+            &[
+                ("mac-mini-release", "mac-mini", 600),
+                ("mac-book-release", "mac-book", 0),
+            ],
+            "mac-mini-release",
+        )
+        .await;
+        assert_eq!(
+            offline_owner_with_online_peer,
+            ScenarioVerdict::skipped(),
+            "offline owner must still skip while an online peer is the route owner"
+        );
+
+        let unregistered_owner = run_claim_scenario(
+            &pool,
+            "disp-unregistered-owner",
+            json!({"required": {"providers": ["codex"]}}),
+            &[("mac-book-release", "mac-book", 0)],
+            "ghost-release",
+        )
+        .await;
+        assert_eq!(
+            unregistered_owner,
+            ScenarioVerdict::skipped(),
+            "owner missing from worker_nodes must still skip"
+        );
+
+        let capability_mismatch = run_claim_scenario(
+            &pool,
+            "disp-capability-mismatch",
+            json!({"required": {"labels": ["mac-mini"]}}),
+            &[("mac-book-release", "mac-book", 0)],
+            "mac-book-release",
+        )
+        .await;
+        assert_eq!(
+            capability_mismatch,
+            ScenarioVerdict::skipped(),
+            "capability mismatch must still skip"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ScenarioVerdict {
+        claimed_ids: Vec<String>,
+        skipped_ids: Vec<String>,
+        status: String,
+        claim_owner: Option<String>,
+    }
+
+    impl ScenarioVerdict {
+        fn claimed_by(owner: &str) -> Self {
+            Self {
+                claimed_ids: vec!["<scenario>".to_string()],
+                skipped_ids: Vec::new(),
+                status: "dispatched".to_string(),
+                claim_owner: Some(owner.to_string()),
+            }
+        }
+
+        fn skipped() -> Self {
+            Self {
+                claimed_ids: Vec::new(),
+                skipped_ids: vec!["<scenario>".to_string()],
+                status: "pending".to_string(),
+                claim_owner: None,
+            }
+        }
+    }
+
+    /// Runs one claim round against a freshly seeded registry and returns the
+    /// verdict only — dispatch ids are normalized to `<scenario>` so the
+    /// expectations read as the routing outcome rather than as fixture names.
+    async fn run_claim_scenario(
+        pool: &PgPool,
+        dispatch_id: &str,
+        required_capabilities: Value,
+        nodes: &[(&str, &str, i64)],
+        claim_owner: &str,
+    ) -> ScenarioVerdict {
+        sqlx::query("DELETE FROM task_dispatches")
+            .execute(pool)
+            .await
+            .unwrap(); // agentdesk-audit: allow-unwrap — PG test fixture; a broken step must fail the test
+        sqlx::query("DELETE FROM worker_nodes")
+            .execute(pool)
+            .await
+            .unwrap(); // agentdesk-audit: allow-unwrap — PG test fixture; a broken step must fail the test
+        for (instance_id, label, heartbeat_age_secs) in nodes {
+            seed_worker_node(pool, instance_id, label, *heartbeat_age_secs).await;
+        }
+        seed_dispatch_with_required_capabilities(
+            pool,
+            dispatch_id,
+            "Scenario",
+            required_capabilities,
+            "pending",
+        )
+        .await;
+
+        let outcome = claim_task_dispatches_with_cluster_config(
+            pool,
+            &TaskDispatchClaimRequest {
+                claim_owner: claim_owner.to_string(),
+                ttl_secs: Some(60),
+                limit: Some(10),
+                to_agent_id: None,
+                dispatch_type: None,
+                lease_ttl_secs: Some(60),
+            },
+            &crate::config::ClusterConfig::default(),
+        )
+        .await
+        .unwrap(); // agentdesk-audit: allow-unwrap — PG test fixture; a broken step must fail the test
+
+        let (status, claim_owner): (String, Option<String>) =
+            sqlx::query_as("SELECT status, claim_owner FROM task_dispatches WHERE id = $1")
+                .bind(dispatch_id)
+                .fetch_one(pool)
+                .await
+                .unwrap(); // agentdesk-audit: allow-unwrap — PG test fixture; a broken step must fail the test
+        let normalize = |ids: Vec<String>| {
+            ids.into_iter()
+                .map(|id| {
+                    if id == dispatch_id {
+                        "<scenario>".to_string()
+                    } else {
+                        id
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        ScenarioVerdict {
+            claimed_ids: normalize(
+                outcome
+                    .claimed
+                    .iter()
+                    .map(|claim| claim.id.clone())
+                    .collect(),
+            ),
+            skipped_ids: normalize(outcome.skipped.iter().map(|skip| skip.id.clone()).collect()),
+            status,
+            claim_owner,
+        }
+    }
+
+    async fn seed_worker_node(
+        pool: &PgPool,
+        instance_id: &str,
+        label: &str,
+        heartbeat_age_secs: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO worker_nodes (
+                instance_id, hostname, role, effective_role, status, labels, capabilities,
+                last_heartbeat_at, started_at, updated_at
+             )
+             VALUES (
+                $1, $2, 'worker', 'worker', 'online',
+                jsonb_build_array($3::TEXT), '{\"providers\":[\"codex\"]}'::jsonb,
+                NOW() - ($4::BIGINT * INTERVAL '1 second'), NOW(), NOW()
+             )",
+        )
+        .bind(instance_id)
+        .bind(label)
+        .bind(label)
+        .bind(heartbeat_age_secs)
+        .execute(pool)
+        .await
+        .unwrap(); // agentdesk-audit: allow-unwrap — PG test fixture; a broken step must fail the test
     }
 
     async fn seed_two_worker_nodes(pool: &PgPool) {
