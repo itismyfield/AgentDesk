@@ -1753,9 +1753,30 @@ mod managed_root_recursion_tests {
     // `cleanup_managed_worktree` resolves the managed root via the PROCESS-GLOBAL
     // `AGENTDESK_ROOT_DIR` env var (`managed_worktrees_root`), so the tests that
     // drive it must serialize against every env-mutating test in the crate.
+    //
+    // #5400: `AGENTDESK_ROOT_DIR` is not the only process-global these tests
+    // depend on. Every helper below shells out to git, and on non-Windows
+    // `binary_resolver::git_binary` resolves to the bare name `git` — so each
+    // spawn does its own `PATH` lookup at spawn time. A test on another harness
+    // thread that REPLACES `PATH` (binary_resolver's
+    // `resolve_provider_binary_redacts_claude_paths_in_attempts` points it at a
+    // temp dir holding only a `claude` stub) makes those spawns fail with
+    // `ENOENT` for the length of its override. That is why EVERY git-spawning
+    // test in this module holds `shared_test_env_lock` across its git calls,
+    // not merely across the `AGENTDESK_ROOT_DIR` write.
+
+    /// Acquire the crate-wide test-env lock. Held across the git subprocesses
+    /// below, not just across the env writes — see the module note on `PATH`.
+    fn env_lock() -> crate::config::test_env_lock::SharedTestEnvLockGuard {
+        crate::config::test_env_lock::acquire_shared_test_env_lock()
+    }
 
     /// Run `git <args>` in `repo` via the centralised `GitCommand` helper (the
     /// audit gate forbids raw `Command::new("git")` outside `src/services/git`).
+    ///
+    /// Both failure arms name the underlying cause: a spawn error here means the
+    /// git binary could not be resolved/launched at all (the #5400 `PATH` race),
+    /// which is a very different fault from git running and rejecting the args.
     fn git(repo: &Path, args: &[&str]) {
         let output = GitCommand::new()
             .repo(repo)
@@ -1765,8 +1786,12 @@ mod managed_root_recursion_tests {
             .env("GIT_COMMITTER_NAME", "t")
             .env("GIT_COMMITTER_EMAIL", "t@t")
             .run_output()
-            .expect("run git");
-        assert!(output.status.success(), "git {args:?} failed");
+            .unwrap_or_else(|error| panic!("git {args:?} could not be spawned: {error}"));
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
 
     /// Build a repo with `main`, an `origin/main` ref (so the mainline-merged
@@ -1806,7 +1831,12 @@ mod managed_root_recursion_tests {
     #[test]
     fn managed_root_child_is_classified_and_worktree_is_not() {
         let tmp = tempfile::tempdir().unwrap();
-        let (_root, managed_root, wt) = setup_repo_with_managed_worktree(tmp.path());
+        // #5400: the lock only has to cover the git subprocesses in setup — the
+        // classifier itself reads the filesystem and no process-global state.
+        let (_root, managed_root, wt) = {
+            let _lock = env_lock();
+            setup_repo_with_managed_worktree(tmp.path())
+        };
         // The managed root has no `.git` file but contains a child worktree.
         assert!(
             is_managed_root_child(&managed_root),
@@ -1822,14 +1852,18 @@ mod managed_root_recursion_tests {
     /// Build the repo with the managed root resolving to `tmp` (so
     /// `is_managed_worktree_path` recognizes the worktree) under the env lock,
     /// then run `body` with the lock still held.
+    ///
+    /// The lock must span `body` — not just the `set_var` — for two independent
+    /// reasons: `body` reads `AGENTDESK_ROOT_DIR` back through
+    /// `managed_worktrees_root`, and (#5400) every git subprocess it launches
+    /// resolves the bare name `git` against the process-global `PATH`.
     fn with_managed_root_env<R>(body: impl FnOnce(&Path, &Path, &Path, &Path) -> R) -> R {
-        let _guard = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = env_lock();
         let tmp = tempfile::tempdir().unwrap();
         // managed_worktrees_root(repo) = $AGENTDESK_ROOT_DIR/worktrees/<repo_name>.
         // Point the runtime root at tmp so it equals our on-disk managed root.
-        // SAFETY: serialized by ENV_LOCK; restored before the lock is released.
+        // SAFETY: serialized by the shared test env lock; restored before the
+        // lock is released.
         unsafe {
             std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path());
         }
@@ -1854,9 +1888,25 @@ mod managed_root_recursion_tests {
                 repo.to_str().unwrap(),
                 wt.to_str().unwrap(),
             );
+            // #5400: report WHICH guard held the worktree back. `removed == 0`
+            // alone is ambiguous — every `cleanup_managed_worktree` guard is
+            // fail-closed, so an environment fault (a git subprocess that could
+            // not be spawned) is indistinguishable from a genuine KEEP decision
+            // unless the skip counters are printed. `skipped_dirty` on a tree
+            // this test never wrote to, or `skipped_unmerged` on a detached HEAD
+            // that IS the mainline commit, means git did not run at all.
             assert_eq!(
-                cleanup.removed, 1,
-                "clean+merged managed worktree is removed"
+                cleanup.removed,
+                1,
+                "clean+merged managed worktree is removed \
+                 (skipped_dirty={} skipped_unmerged={} skipped_unmanaged={} failed={} \
+                 AGENTDESK_ROOT_DIR={:?} wt={})",
+                cleanup.skipped_dirty,
+                cleanup.skipped_unmerged,
+                cleanup.skipped_unmanaged,
+                cleanup.failed,
+                std::env::var("AGENTDESK_ROOT_DIR").ok(),
+                wt.display(),
             );
             assert!(!wt.exists(), "managed worktree dir is gone after cleanup");
             assert!(worktrees_root.exists());
@@ -1884,7 +1934,13 @@ mod managed_root_recursion_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn no_pg_is_noop_even_with_managed_orphans() {
         let tmp = tempfile::tempdir().unwrap();
-        let (worktrees_root, _managed_root, wt) = setup_repo_with_managed_worktree(tmp.path());
+        // #5400: scope the env lock to setup's git subprocesses so it is released
+        // before the `.await` below (the no-PG sweep spawns no git of its own),
+        // keeping this off the `await_holding_lock` surface.
+        let (worktrees_root, _managed_root, wt) = {
+            let _lock = env_lock();
+            setup_repo_with_managed_worktree(tmp.path())
+        };
         // No PG → the whole sweep is a no-op (fail-closed): nothing is deleted.
         let config = Config {
             worktrees_root,
