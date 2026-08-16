@@ -396,12 +396,19 @@ pub(in crate::services::discord) struct TmuxWatcherBinding {
     /// session is tailing, read off the same registry lookup that resolved the
     /// binding.
     ///
-    /// [`TmuxWatcherHandle::output_path`] has always carried this, and
-    /// [`TmuxWatcherRegistry::watcher_output_path`] has always returned it for a
-    /// caller who already knows the tmux session name. What did not exist was a
-    /// path from a `ChannelId` to that value in one read: `channel_binding`
-    /// returned the owner channel and the session name only. This field is that
-    /// missing hop and nothing more — it is populated by, and stays equal to,
+    /// [`TmuxWatcherHandle::output_path`] has always carried this, and two
+    /// existing reads already reach it: [`TmuxWatcherRegistry::watcher_output_path`]
+    /// for a caller who already knows the tmux session name, and
+    /// [`TmuxWatcherRegistry::get`] for one keyed by `ChannelId` —
+    /// `health::relay_auto_heal` gates its redrive nudge on exactly that
+    /// `get(&owner_channel_id)` → `.output_path` hop. So the claim here is
+    /// narrower than "no route existed": what `channel_binding` did not carry
+    /// was the coordinate. It is the lock-free VALUE snapshot of a watcher slot
+    /// — owner channel and session name, cloned out, holding nothing borrowed
+    /// once it returns — whereas `get` hands back a `dashmap::mapref::one::Ref`
+    /// that borrows the entry and holds a read guard on its shard for as long
+    /// as the caller keeps it. This field puts the transcript on the snapshot
+    /// side of that split; it is populated by, and stays equal to,
     /// `watcher_output_path` for the same session.
     ///
     /// It is worth its own coordinate because it is sourced independently of

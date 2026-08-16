@@ -28,8 +28,12 @@ pub(super) struct SessionEnrichment {
     /// the in-flight row's `output_path`, because the row is not independently
     /// sourced from the watcher and #4986 observed the two disagreeing — the
     /// watcher had followed the provider-native TUI transcript while the row
-    /// still named the prelaunch wrapper file. Until this slice health could
-    /// not see the watcher's side of that split at all.
+    /// still named the prelaunch wrapper file. Health code was not blind to the
+    /// watcher's path before this slice — `health::relay_auto_heal` reads it
+    /// straight off the handle to gate its redrive nudge, fixed by
+    /// `redrive_nudge_requires_matching_output_path`. What no enrichment field
+    /// carried was the path itself, so the snapshot health hands out could not
+    /// name the watcher's side of the split.
     ///
     /// `None` when the channel has no live watcher binding. Read-only: nothing
     /// here treats it as an authority, and no existing health field changed
@@ -385,27 +389,28 @@ mod tests {
     const NATIVE_TRANSCRIPT: &str = "/tmp/agentdesk-b0-native.jsonl";
     const WRAPPER_TRANSCRIPT: &str = "/tmp/agentdesk-b0-wrapper.jsonl";
 
+    fn watcher_handle(tmux_session_name: &str, output_path: &str) -> discord::TmuxWatcherHandle {
+        discord::TmuxWatcherHandle {
+            tmux_session_name: tmux_session_name.to_string(),
+            output_path: output_path.to_string(),
+            paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            resume_offset: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pause_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            turn_delivered: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_heartbeat_ts_ms: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(
+                discord::tmux_watcher_now_ms(),
+            )),
+        }
+    }
+
     fn registry_with_watcher(
         tmux_session_name: &str,
         channel: ChannelId,
         output_path: &str,
     ) -> discord::TmuxWatcherRegistry {
         let registry = discord::TmuxWatcherRegistry::new();
-        registry.insert(
-            channel,
-            discord::TmuxWatcherHandle {
-                tmux_session_name: tmux_session_name.to_string(),
-                output_path: output_path.to_string(),
-                paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                resume_offset: std::sync::Arc::new(std::sync::Mutex::new(None)),
-                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                pause_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-                turn_delivered: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                last_heartbeat_ts_ms: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(
-                    discord::tmux_watcher_now_ms(),
-                )),
-            },
-        );
+        registry.insert(channel, watcher_handle(tmux_session_name, output_path));
         registry
     }
 
@@ -463,5 +468,184 @@ mod tests {
             Some(NATIVE_TRANSCRIPT)
         );
         assert_eq!(transcript_discovery_path(None, None), None);
+    }
+
+    #[derive(Clone)]
+    struct CapturingWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Install an INFO-level capturing subscriber for the duration of `run`.
+    ///
+    /// `set_default` is thread-local, and the divergence record is emitted on
+    /// the same thread that polls the future, so every test using this must
+    /// stay on `flavor = "current_thread"`.
+    async fn capture_info<F, R>(run: F) -> (R, String)
+    where
+        F: std::future::Future<Output = R>,
+    {
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(CapturingWriter(buffer.clone()))
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let result = run.await;
+        let output =
+            String::from_utf8_lossy(&buffer.lock().unwrap_or_else(|poison| poison.into_inner()))
+                .into_owned();
+        (result, output)
+    }
+
+    fn divergence_record_count(logs: &str) -> usize {
+        logs.lines()
+            .filter(|line| line.contains("counter=\"relay_transcript_source_divergence\""))
+            .count()
+    }
+
+    fn inflight_row_naming(
+        provider: &ProviderKind,
+        channel: ChannelId,
+        tmux_session_name: &str,
+        output_path: &str,
+    ) {
+        let state = discord::inflight::InflightTurnState::new(
+            provider.clone(),
+            channel.get(),
+            None,
+            5_071_000_000_000_000,
+            5_071_000_000_000_001,
+            5_071_000_000_000_002,
+            "t4-b0 divergence fixture".to_string(),
+            None,
+            Some(tmux_session_name.to_string()),
+            Some(output_path.to_string()),
+            None,
+            0,
+        );
+        discord::inflight::save_inflight_state(&state).expect("persist inflight fixture");
+    }
+
+    // #5071 T4-B0 r2 (M2): `load` must actually carry the binding's transcript
+    // into the enrichment. The helper-level tests above prove the binding hop
+    // in isolation, so severing the one `load` line that consumes it — pinning
+    // `watcher_output_path` to `None` — left them all green. This drives the
+    // real `load` and fails on exactly that cut.
+    #[tokio::test(flavor = "current_thread")]
+    async fn health_load_carries_the_live_watcher_transcript_into_the_enrichment() {
+        let channel = ChannelId::new(5_071_000_000_000_042);
+        let tmux_session_name = "AgentDesk-claude-adk-b0-load-wiring";
+        let shared = discord::make_shared_data_for_tests();
+        shared.tmux_watchers.insert(
+            channel,
+            watcher_handle(tmux_session_name, NATIVE_TRANSCRIPT),
+        );
+
+        // No provider kind: the in-flight row stays out of this assertion so
+        // the only surviving source for the field is the registry binding.
+        let enrichment = SessionEnrichment::load(&shared, None, channel).await;
+
+        assert!(
+            enrichment.watcher_attached,
+            "the fixture must resolve a live watcher binding for the channel"
+        );
+        assert_eq!(
+            enrichment.watcher_output_path.as_deref(),
+            Some(NATIVE_TRANSCRIPT),
+            "load must carry the live watcher's transcript, not None"
+        );
+    }
+
+    // #5071 T4-B0 r2 (M4): the divergence record must actually be emitted from
+    // `load`. Deleting the `record_transcript_source_divergence` call left the
+    // suite green because nothing observed the emit. Both halves matter — the
+    // split fires exactly once, and the agreeing fixture stays silent, which is
+    // what makes the record a divergence signal rather than a per-poll log.
+    #[tokio::test(flavor = "current_thread")]
+    async fn health_load_records_transcript_source_divergence_only_when_the_paths_split() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tmp.path(),
+        );
+
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(5_071_000_000_000_043);
+        let tmux_session_name = "AgentDesk-codex-adk-b0-divergence";
+        let shared = discord::make_shared_data_for_tests();
+        shared.tmux_watchers.insert(
+            channel,
+            watcher_handle(tmux_session_name, NATIVE_TRANSCRIPT),
+        );
+
+        // #4986 shape: the watcher followed the provider-native transcript
+        // while the row still names the prelaunch wrapper file.
+        inflight_row_naming(&provider, channel, tmux_session_name, WRAPPER_TRANSCRIPT);
+        let (diverged, diverged_logs) =
+            capture_info(SessionEnrichment::load(&shared, Some(&provider), channel)).await;
+        assert_eq!(
+            diverged.watcher_output_path.as_deref(),
+            Some(NATIVE_TRANSCRIPT)
+        );
+        assert_eq!(
+            diverged
+                .inflight
+                .as_ref()
+                .and_then(|state| state.output_path.as_deref()),
+            Some(WRAPPER_TRANSCRIPT),
+            "the fixture must present the two sources naming different files"
+        );
+        assert_eq!(
+            divergence_record_count(&diverged_logs),
+            1,
+            "a split must emit exactly one divergence record per load; got:\n{diverged_logs}"
+        );
+        assert!(
+            diverged_logs.contains(NATIVE_TRANSCRIPT) && diverged_logs.contains(WRAPPER_TRANSCRIPT),
+            "the record must name both sides of the split; got:\n{diverged_logs}"
+        );
+
+        // Same channel, same watcher, row realigned onto the watcher's file.
+        inflight_row_naming(&provider, channel, tmux_session_name, NATIVE_TRANSCRIPT);
+        let (agreed, agreed_logs) =
+            capture_info(SessionEnrichment::load(&shared, Some(&provider), channel)).await;
+        assert_eq!(
+            agreed
+                .inflight
+                .as_ref()
+                .and_then(|state| state.output_path.as_deref()),
+            Some(NATIVE_TRANSCRIPT),
+            "the realigned fixture must be observed, otherwise the silence is vacuous"
+        );
+        assert_eq!(
+            divergence_record_count(&agreed_logs),
+            0,
+            "agreeing sources must stay silent; got:\n{agreed_logs}"
+        );
     }
 }
