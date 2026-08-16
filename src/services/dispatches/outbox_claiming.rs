@@ -136,6 +136,11 @@ pub(crate) async fn claim_pending_dispatch_outbox_batch_with_cluster_config_pg(
                         .reasons
                         .push("no route candidate is currently available".to_string());
                 }
+                merge_offline_claim_owner_reason(
+                    &mut decision,
+                    owner_node.as_ref(),
+                    lease_ttl_secs,
+                );
                 let diagnostics = routing_diagnostics(
                     claim_owner,
                     &decision,
@@ -181,6 +186,11 @@ pub(crate) async fn claim_pending_dispatch_outbox_batch_with_cluster_config_pg(
                         .reasons
                         .push("no route candidate is currently available".to_string());
                 }
+                merge_offline_claim_owner_reason(
+                    &mut decision,
+                    owner_node.as_ref(),
+                    lease_ttl_secs,
+                );
                 let diagnostics = routing_diagnostics(
                     claim_owner,
                     &decision,
@@ -454,6 +464,52 @@ pub(crate) fn capability_decision_for_claim_owner(
         })
 }
 
+/// Folds the claim owner's live registry status into a skip's reasons.
+///
+/// `capability_decision_for_claim_owner` explains the owner through
+/// `explain_capability_match`, which answers exactly one question — do this
+/// node's advertised labels/providers/MCP endpoints cover the requirement —
+/// and never reads the node's computed `status`. An owner that had stopped
+/// heart-beating therefore reached the skip payload as `eligible: true,
+/// reasons: []`, so the operator was told only that some peer was the preferred
+/// route owner and never that the owner itself was offline (#5407, the
+/// `dispatch_outbox` twin of #5403).
+///
+/// Deliberately narrower than the #5403 fix in `claim_task_dispatches`. There
+/// the owner decision fed nothing but the diagnostics payload; here what
+/// `capability_decision_for_claim_owner` returns is one of the flags deciding
+/// whether the row is skipped at all, and an offline owner still claims its own
+/// outbox rows — it is, after all, the process running this code, whatever its
+/// heartbeat says. So this merges into the cloned decision the diagnostics
+/// payload is built from, once the skip has already been decided: reasons and
+/// the recorded `eligible` gain the registry fact, no row changes hands.
+///
+/// Appends rather than prepends because `wait_reason_from_routing_diagnostics`
+/// persists the first reason into `dispatch_outbox.wait_reason`, which gates
+/// which rows the next claim round even looks at.
+fn merge_offline_claim_owner_reason(
+    decision: &mut CapabilityRouteDecision,
+    owner_node: Option<&Value>,
+    lease_ttl_secs: u64,
+) {
+    // An owner absent from `worker_nodes` already says so through
+    // `capability_decision_for_claim_owner`; only the online check was missing.
+    let Some(node) = owner_node else {
+        return;
+    };
+    let status = node
+        .get("status")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    if status == "online" {
+        return;
+    }
+    decision.eligible = false;
+    decision.reasons.push(format!(
+        "claim owner worker node is not online (status '{status}'; {lease_ttl_secs}s heartbeat lease)"
+    ));
+}
+
 fn routing_diagnostics(
     claim_owner: &str,
     decision: &CapabilityRouteDecision,
@@ -538,6 +594,79 @@ mod tests {
         assert_eq!(decision.instance_id.as_deref(), Some("missing-node"));
         assert_eq!(
             decision.reasons,
+            vec!["claim owner is not registered in worker_nodes".to_string()]
+        );
+    }
+
+    /// #5407: capability matching cannot see a node's computed `status`, so the
+    /// offline fact has to be merged in afterwards. What this pins is the merge's
+    /// own contract and nothing more — the order of the reason vector, which is
+    /// all a unit test can reach. That the appended order is what leaves
+    /// `dispatch_outbox.wait_reason` on the pre-existing reason is a claim about
+    /// a persisted column, and it is pinned by the
+    /// `offline_owner_capability_mismatch_without_peer` scenario in
+    /// `outbox_claim_verdicts_are_unchanged_by_skip_reason_diagnostics`.
+    #[test]
+    fn offline_claim_owner_reason_names_status_and_heartbeat_lease() {
+        let owner_node = json!({
+            "instance_id": "mac-mini-release",
+            "status": "offline",
+            "labels": ["mac-mini"],
+            "capabilities": {"providers": ["codex"]},
+        });
+        let mut decision = capability_decision_for_claim_owner(
+            Some(&owner_node),
+            "mac-mini-release",
+            &json!({"required": {"providers": ["codex"]}}),
+        );
+        assert!(
+            decision.eligible && decision.reasons.is_empty(),
+            "capability matching alone cannot see the node status; got {decision:?}"
+        );
+        decision.reasons.push(
+            "claim owner is not preferred route owner; selected mac-book-release".to_string(),
+        );
+
+        merge_offline_claim_owner_reason(&mut decision, Some(&owner_node), 30);
+
+        assert!(!decision.eligible);
+        assert_eq!(
+            decision.reasons,
+            vec![
+                "claim owner is not preferred route owner; selected mac-book-release".to_string(),
+                "claim owner worker node is not online (status 'offline'; 30s heartbeat lease)"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn online_and_unregistered_claim_owners_keep_their_reasons() {
+        let online_node = json!({
+            "instance_id": "mac-mini-release",
+            "status": "online",
+            "labels": ["mac-mini"],
+            "capabilities": {"providers": ["codex"]},
+        });
+        let mut online = capability_decision_for_claim_owner(
+            Some(&online_node),
+            "mac-mini-release",
+            &json!({"required": {"labels": ["mac-book"]}}),
+        );
+        merge_offline_claim_owner_reason(&mut online, Some(&online_node), 30);
+        assert!(!online.eligible);
+        assert_eq!(online.reasons, vec!["missing label 'mac-book'".to_string()]);
+
+        // The registration reason is already there; merging must not double it.
+        let mut unregistered = capability_decision_for_claim_owner(
+            None,
+            "ghost-release",
+            &json!({"required": {"providers": ["codex"]}}),
+        );
+        merge_offline_claim_owner_reason(&mut unregistered, None, 30);
+        assert!(!unregistered.eligible);
+        assert_eq!(
+            unregistered.reasons,
             vec!["claim owner is not registered in worker_nodes".to_string()]
         );
     }
@@ -811,6 +940,351 @@ mod tests {
             .execute(pool)
             .await
             .expect("seed worker node");
+        }
+
+        async fn seed_pending_outbox_row(
+            pool: &PgPool,
+            dispatch_id: &str,
+            required_capabilities: serde_json::Value,
+        ) {
+            sqlx::query(
+                "INSERT INTO dispatch_outbox (
+                dispatch_id, action, status, claim_owner, required_capabilities
+             ) VALUES ($1, 'notify', 'pending', NULL, $2)",
+            )
+            .bind(dispatch_id)
+            .bind(required_capabilities)
+            .execute(pool)
+            .await
+            .expect("seed pending outbox row");
+        }
+
+        /// The `dispatch_outbox` row state a claim round left behind, which is
+        /// what "the verdict" means on this path: the claim function returns
+        /// only the rows it took, and a skip is recorded on the row itself.
+        #[derive(Debug, PartialEq, Eq)]
+        struct ScenarioVerdict {
+            claimed_dispatch_ids: Vec<String>,
+            status: String,
+            claim_owner: Option<String>,
+            wait_reason: Option<String>,
+        }
+
+        /// Runs one claim round against a freshly seeded registry and returns
+        /// the verdict only — never the reasons, which are the part #5407 is
+        /// allowed to change.
+        async fn run_claim_scenario(
+            pool: &PgPool,
+            dispatch_id: &str,
+            required_capabilities: serde_json::Value,
+            nodes: &[(&str, serde_json::Value, i64)],
+            claim_owner: &str,
+            cluster_config: &crate::config::ClusterConfig,
+        ) -> ScenarioVerdict {
+            sqlx::query("DELETE FROM dispatch_outbox")
+                .execute(pool)
+                .await
+                .expect("reset dispatch_outbox");
+            sqlx::query("DELETE FROM worker_nodes")
+                .execute(pool)
+                .await
+                .expect("reset worker_nodes");
+            for (instance_id, labels, heartbeat_age_secs) in nodes {
+                seed_worker_node(pool, instance_id, labels.clone(), *heartbeat_age_secs).await;
+            }
+            seed_pending_outbox_row(pool, dispatch_id, required_capabilities).await;
+
+            let claimed = claim_pending_dispatch_outbox_batch_with_cluster_config_pg(
+                pool,
+                claim_owner,
+                cluster_config,
+            )
+            .await;
+
+            let (status, claim_owner, wait_reason): (String, Option<String>, Option<String>) =
+                sqlx::query_as(
+                    "SELECT status, claim_owner, wait_reason
+                       FROM dispatch_outbox
+                      WHERE dispatch_id = $1",
+                )
+                .bind(dispatch_id)
+                .fetch_one(pool)
+                .await
+                .expect("read back scenario outbox row");
+            ScenarioVerdict {
+                claimed_dispatch_ids: claimed.into_iter().map(|row| row.1).collect(),
+                status,
+                claim_owner,
+                wait_reason,
+            }
+        }
+
+        fn cluster_config_capping_node_at(
+            instance_id: &str,
+            cap: u32,
+        ) -> crate::config::ClusterConfig {
+            let mut config = crate::config::ClusterConfig::default();
+            config.nodes.insert(
+                instance_id.to_string(),
+                crate::config::ClusterNodeConfig {
+                    max_concurrent_dispatches: Some(cap),
+                    ..Default::default()
+                },
+            );
+            config
+        }
+
+        /// #5407 regression: an owner that is registered but has stopped
+        /// heart-beating must say so in the skip reason. Before the fix the
+        /// owner decision came from `explain_capability_match`, which never
+        /// reads the node's computed `status`, so an offline owner reached the
+        /// payload as `eligible: true, reasons: []` and the operator was handed
+        /// a route-preference story for a node that was simply offline.
+        #[tokio::test]
+        async fn outbox_skip_reason_reports_offline_claim_owner_beside_route_preference() {
+            let Some(pg_db) = TestPostgresDb::create().await else {
+                return;
+            };
+            let pool = pg_db.connect_and_migrate().await;
+            seed_worker_node(&pool, "mac-mini-release", json!(["mac-mini"]), 600).await;
+            seed_worker_node(&pool, "mac-book-release", json!(["mac-mini"]), 0).await;
+            seed_pending_outbox_row(
+                &pool,
+                "dispatch-offline-owner",
+                json!({"required": {"providers": ["codex"]}}),
+            )
+            .await;
+
+            let claimed = claim_pending_dispatch_outbox_batch_with_cluster_config_pg(
+                &pool,
+                "mac-mini-release",
+                &crate::config::ClusterConfig::default(),
+            )
+            .await;
+            assert!(claimed.is_empty());
+
+            let diagnostics: serde_json::Value = sqlx::query_scalar(
+                "SELECT routing_diagnostics
+                   FROM dispatch_outbox
+                  WHERE dispatch_id = 'dispatch-offline-owner'",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("offline-owner skip must persist routing diagnostics");
+            let reasons = diagnostics["decision"]["reasons"]
+                .as_array()
+                .expect("skip diagnostics must carry reasons")
+                .iter()
+                .filter_map(|reason| reason.as_str())
+                .collect::<Vec<_>>();
+            assert!(
+                reasons.iter().any(|reason| *reason
+                    == "claim owner worker node is not online (status 'offline'; 30s heartbeat lease)"),
+                "skip reason must name the offline owner node; got {reasons:?}"
+            );
+            assert!(
+                reasons.iter().any(|reason| *reason
+                    == "claim owner is not preferred route owner; selected mac-book-release"),
+                "the route-preference reason must survive alongside it; got {reasons:?}"
+            );
+            assert_eq!(
+                diagnostics["decision"]["eligible"],
+                serde_json::Value::Bool(false),
+                "an offline owner is not an eligible route target; got {diagnostics}"
+            );
+
+            pool.close().await;
+            pg_db.drop().await;
+        }
+
+        /// #5407 guard: the skip-reason work is diagnostics only. Every verdict
+        /// below was captured against the pre-fix binary and must stay
+        /// byte-identical — reasons may gain detail, but who claims what, and
+        /// the `wait_reason` that decides which rows the next round looks at,
+        /// may not move.
+        ///
+        /// Pinning `wait_reason` only constrains the merge order in one shape.
+        /// `wait_reason_from_routing_diagnostics` reads `constraint_results`
+        /// first and only falls back to `decision.reasons[0]`, so the appended
+        /// offline reason can reach the column solely in a scenario that leaves
+        /// `constraint_results` without a wait/reject outcome *and* has the
+        /// owner offline. That is `offline_owner_capability_mismatch_without_peer`
+        /// below; without it every scenario here is green with the merge
+        /// prepending, and this test pins the claim verdicts but not the column.
+        #[tokio::test]
+        async fn outbox_claim_verdicts_are_unchanged_by_skip_reason_diagnostics() {
+            let Some(pg_db) = TestPostgresDb::create().await else {
+                return;
+            };
+            let pool = pg_db.connect_and_migrate().await;
+            let default_config = crate::config::ClusterConfig::default();
+
+            let online_eligible_owner = run_claim_scenario(
+                &pool,
+                "dispatch-online-owner",
+                json!({"required": {"providers": ["codex"]}}),
+                &[("mac-mini-release", json!(["mac-mini"]), 0)],
+                "mac-mini-release",
+                &default_config,
+            )
+            .await;
+            assert_eq!(
+                online_eligible_owner,
+                ScenarioVerdict {
+                    claimed_dispatch_ids: vec!["dispatch-online-owner".to_string()],
+                    status: "processing".to_string(),
+                    claim_owner: Some("mac-mini-release".to_string()),
+                    wait_reason: None,
+                },
+                "online eligible owner must still claim"
+            );
+
+            // The load-bearing one: a stale heartbeat does not stop the process
+            // that is running this code from claiming its own outbox rows.
+            let offline_owner_alone = run_claim_scenario(
+                &pool,
+                "dispatch-offline-owner-alone",
+                json!({"required": {"providers": ["codex"]}}),
+                &[("mac-mini-release", json!(["mac-mini"]), 600)],
+                "mac-mini-release",
+                &default_config,
+            )
+            .await;
+            assert_eq!(
+                offline_owner_alone,
+                ScenarioVerdict {
+                    claimed_dispatch_ids: vec!["dispatch-offline-owner-alone".to_string()],
+                    status: "processing".to_string(),
+                    claim_owner: Some("mac-mini-release".to_string()),
+                    wait_reason: None,
+                },
+                "offline owner must still claim its own outbox rows"
+            );
+
+            let offline_owner_with_online_peer = run_claim_scenario(
+                &pool,
+                "dispatch-offline-owner-online-peer",
+                json!({"required": {"providers": ["codex"]}}),
+                &[
+                    ("mac-mini-release", json!(["mac-mini"]), 600),
+                    ("mac-book-release", json!(["mac-mini"]), 0),
+                ],
+                "mac-mini-release",
+                &default_config,
+            )
+            .await;
+            assert_eq!(
+                offline_owner_with_online_peer,
+                ScenarioVerdict {
+                    claimed_dispatch_ids: Vec::new(),
+                    status: "pending".to_string(),
+                    claim_owner: Some("mac-book-release".to_string()),
+                    wait_reason: None,
+                },
+                "offline owner must still skip while an online peer is the route owner"
+            );
+
+            let unregistered_owner = run_claim_scenario(
+                &pool,
+                "dispatch-unregistered-owner",
+                json!({"required": {"providers": ["codex"]}}),
+                &[("mac-book-release", json!(["mac-book"]), 0)],
+                "ghost-release",
+                &default_config,
+            )
+            .await;
+            assert_eq!(
+                unregistered_owner,
+                ScenarioVerdict {
+                    claimed_dispatch_ids: Vec::new(),
+                    status: "pending".to_string(),
+                    claim_owner: Some("mac-book-release".to_string()),
+                    wait_reason: None,
+                },
+                "owner missing from worker_nodes must still skip"
+            );
+
+            let capability_mismatch = run_claim_scenario(
+                &pool,
+                "dispatch-capability-mismatch",
+                json!({"required": {"labels": ["mac-mini"]}}),
+                &[("mac-book-release", json!(["mac-book"]), 0)],
+                "mac-book-release",
+                &default_config,
+            )
+            .await;
+            assert_eq!(
+                capability_mismatch,
+                ScenarioVerdict {
+                    claimed_dispatch_ids: Vec::new(),
+                    status: "pending".to_string(),
+                    claim_owner: None,
+                    wait_reason: Some("missing label 'mac-mini'".to_string()),
+                },
+                "capability mismatch must still skip"
+            );
+
+            // The skip path where the merge order is actually observable in the
+            // column: the owner is offline *and* capability-mismatched, and no
+            // peer survives capability selection, so `constraint_results` is
+            // empty and `decision.reasons[0]` is the only source
+            // `wait_reason_from_routing_diagnostics` has left. The offline
+            // reason is appended behind the capability reason, so the column
+            // keeps naming the mismatch; prepending it would rewrite
+            // `wait_reason` and change which rows the next round looks at.
+            let offline_owner_capability_mismatch_without_peer = run_claim_scenario(
+                &pool,
+                "dispatch-offline-owner-capability-mismatch",
+                json!({"required": {"labels": ["mac-mini"]}}),
+                &[("mac-book-release", json!(["mac-book"]), 600)],
+                "mac-book-release",
+                &default_config,
+            )
+            .await;
+            assert_eq!(
+                offline_owner_capability_mismatch_without_peer,
+                ScenarioVerdict {
+                    claimed_dispatch_ids: Vec::new(),
+                    status: "pending".to_string(),
+                    claim_owner: None,
+                    wait_reason: Some("missing label 'mac-mini'".to_string()),
+                },
+                "an offline, capability-mismatched owner with no selectable peer must still wait on the mismatch"
+            );
+
+            // Sourced from `constraint_results`, which
+            // `wait_reason_from_routing_diagnostics` consults ahead of
+            // `decision.reasons` — so the owner's reasons, the appended offline
+            // one included, never reach the column here. Pinned to show the
+            // capacity wait survives the extra reason, not to guard its order.
+            let offline_owner_with_capped_peer = run_claim_scenario(
+                &pool,
+                "dispatch-offline-owner-capped-peer",
+                json!({"required": {"providers": ["codex"]}}),
+                &[
+                    ("mac-mini-release", json!(["mac-mini"]), 600),
+                    ("mac-book-release", json!(["mac-mini"]), 0),
+                ],
+                "mac-mini-release",
+                &cluster_config_capping_node_at("mac-book-release", 0),
+            )
+            .await;
+            assert_eq!(
+                offline_owner_with_capped_peer,
+                ScenarioVerdict {
+                    claimed_dispatch_ids: Vec::new(),
+                    status: "pending".to_string(),
+                    claim_owner: None,
+                    wait_reason: Some(
+                        "node_concurrency_cap: node mac-book-release active dispatches 0/0 at capacity"
+                            .to_string()
+                    ),
+                },
+                "an offline owner whose only peer is at capacity must still skip and wait"
+            );
+
+            pool.close().await;
+            pg_db.drop().await;
         }
 
         #[tokio::test]
