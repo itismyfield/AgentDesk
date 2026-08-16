@@ -599,8 +599,13 @@ mod tests {
     }
 
     /// #5407: capability matching cannot see a node's computed `status`, so the
-    /// offline fact has to be merged in afterwards — and it is appended, so the
-    /// reason `wait_reason_from_routing_diagnostics` persists stays put.
+    /// offline fact has to be merged in afterwards. What this pins is the merge's
+    /// own contract and nothing more — the order of the reason vector, which is
+    /// all a unit test can reach. That the appended order is what leaves
+    /// `dispatch_outbox.wait_reason` on the pre-existing reason is a claim about
+    /// a persisted column, and it is pinned by the
+    /// `offline_owner_capability_mismatch_without_peer` scenario in
+    /// `outbox_claim_verdicts_are_unchanged_by_skip_reason_diagnostics`.
     #[test]
     fn offline_claim_owner_reason_names_status_and_heartbeat_lease() {
         let owner_node = json!({
@@ -1097,6 +1102,15 @@ mod tests {
         /// byte-identical — reasons may gain detail, but who claims what, and
         /// the `wait_reason` that decides which rows the next round looks at,
         /// may not move.
+        ///
+        /// Pinning `wait_reason` only constrains the merge order in one shape.
+        /// `wait_reason_from_routing_diagnostics` reads `constraint_results`
+        /// first and only falls back to `decision.reasons[0]`, so the appended
+        /// offline reason can reach the column solely in a scenario that leaves
+        /// `constraint_results` without a wait/reject outcome *and* has the
+        /// owner offline. That is `offline_owner_capability_mismatch_without_peer`
+        /// below; without it every scenario here is green with the merge
+        /// prepending, and this test pins the claim verdicts but not the column.
         #[tokio::test]
         async fn outbox_claim_verdicts_are_unchanged_by_skip_reason_diagnostics() {
             let Some(pg_db) = TestPostgresDb::create().await else {
@@ -1210,9 +1224,39 @@ mod tests {
                 "capability mismatch must still skip"
             );
 
-            // The only skip path where an offline owner's reasons reach
-            // `wait_reason`: the appended offline reason must not displace the
-            // first entry the column is taken from.
+            // The skip path where the merge order is actually observable in the
+            // column: the owner is offline *and* capability-mismatched, and no
+            // peer survives capability selection, so `constraint_results` is
+            // empty and `decision.reasons[0]` is the only source
+            // `wait_reason_from_routing_diagnostics` has left. The offline
+            // reason is appended behind the capability reason, so the column
+            // keeps naming the mismatch; prepending it would rewrite
+            // `wait_reason` and change which rows the next round looks at.
+            let offline_owner_capability_mismatch_without_peer = run_claim_scenario(
+                &pool,
+                "dispatch-offline-owner-capability-mismatch",
+                json!({"required": {"labels": ["mac-mini"]}}),
+                &[("mac-book-release", json!(["mac-book"]), 600)],
+                "mac-book-release",
+                &default_config,
+            )
+            .await;
+            assert_eq!(
+                offline_owner_capability_mismatch_without_peer,
+                ScenarioVerdict {
+                    claimed_dispatch_ids: Vec::new(),
+                    status: "pending".to_string(),
+                    claim_owner: None,
+                    wait_reason: Some("missing label 'mac-mini'".to_string()),
+                },
+                "an offline, capability-mismatched owner with no selectable peer must still wait on the mismatch"
+            );
+
+            // Sourced from `constraint_results`, which
+            // `wait_reason_from_routing_diagnostics` consults ahead of
+            // `decision.reasons` — so the owner's reasons, the appended offline
+            // one included, never reach the column here. Pinned to show the
+            // capacity wait survives the extra reason, not to guard its order.
             let offline_owner_with_capped_peer = run_claim_scenario(
                 &pool,
                 "dispatch-offline-owner-capped-peer",
