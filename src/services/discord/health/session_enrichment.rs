@@ -416,9 +416,9 @@ mod tests {
 
     // #5071 T4-B0 (#4987 S0): the health load reaches the live watcher's
     // transcript through the channel binding. A binding that resolves the
-    // channel but drops the path leaves health exactly as blind as it was
-    // before this slice, so that omission must fail here and not merely inside
-    // the registry's own suite.
+    // channel but drops the path leaves the enrichment/load snapshot without
+    // the watcher path coordinate again, so that omission must fail here and
+    // not merely inside the registry's own suite.
     #[test]
     fn health_reads_the_live_watcher_transcript_off_the_channel_binding() {
         let tmux_session_name = "AgentDesk-claude-adk-b0-enrichment";
