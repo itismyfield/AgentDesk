@@ -3970,6 +3970,7 @@ services::discord::relay_recovery::tests::dead_frontier_reattach_gets_one_bounde
 services::discord::relay_recovery::tests::dead_frontier_registry_cas_fails_closed_on_replacement_and_respawn
 services::discord::relay_recovery::tests::dead_frontier_watcher_cancel_finalizes_owner_and_releases_inflight
 services::discord::relay_recovery::tests::dry_run_plans_safe_stale_thread_proof_cleanup
+services::discord::relay_recovery::tests::enforce_permits_the_dead_frontier_cancel_when_the_spawn_nonce_still_matches
 services::discord::relay_recovery::tests::fresh_orphan_shape_is_guarded_by_admission_grace
 services::discord::relay_recovery::tests::fresh_watcher_heartbeat_blocks_destructive_cancel_before_reattach
 services::discord::relay_recovery::tests::frozen_busy_jsonl_keeps_deny_when_pane_still_busy
@@ -4754,6 +4755,7 @@ services::discord::tmux::active_bridge_turn_guard_tests::session_bound_relay_own
 services::discord::tmux::buffer_offset_tests::advance_buffer_start_offset_tracks_drained_leftover_tail
 services::discord::tmux::execution_identity::tests::absent_spawn_nonce_is_never_observed_as_a_match
 services::discord::tmux::execution_identity::tests::execution_identity_modes_keep_a0_non_destructive
+services::discord::tmux::execution_identity::tests::legacy_makes_no_marker_read_at_the_decision_point
 services::discord::tmux::execution_identity::tests::observation_counters_record_only_outside_legacy_mode
 services::discord::tmux::execution_identity::tests::only_enforce_denies_and_only_on_a_non_matching_incarnation
 services::discord::tmux::execution_identity::tests::spawn_nonce_mismatch_under_the_same_session_name_is_observed_as_mismatch
@@ -5258,6 +5260,7 @@ services::discord::tmux_watcher_registry_restore_tests::cancel_and_remove_channe
 services::discord::tmux_watcher_registry_restore_tests::channel_binding_exposes_the_live_watcher_output_path
 services::discord::tmux_watcher_registry_restore_tests::channel_binding_output_path_follows_the_native_transcript_handoff
 services::discord::tmux_watcher_registry_restore_tests::clear_restored_owner_drops_binding
+services::discord::tmux_watcher_registry_restore_tests::legacy_decision_reads_no_spawn_nonce_marker_and_still_removes
 services::discord::tmux_watcher_registry_restore_tests::live_watcher_handle_overrides_and_evicts_restored_owner
 services::discord::tmux_watcher_registry_restore_tests::restore_is_noop_when_live_watcher_owns_session
 services::discord::tmux_watcher_registry_restore_tests::restored_owner_makes_missing_registry_resolve_for_live_session

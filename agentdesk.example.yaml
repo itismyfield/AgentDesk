@@ -406,12 +406,13 @@ runtime:
   # counters and logs without ever denying, and enforce refuses the two
   # automatic watcher-registry removals T3-A1 converted (the relay-recovery
   # dead-frontier cancel and the TUI stale-FOREIGN demote) unless every pinned
-  # value still matches the live one. Caveats: the fenced call sites read the
-  # per-spawn .spawn_nonce marker in every mode — legacy just discards the
-  # result — so the marker I/O is not opt-in; a missing or unreadable nonce is
-  # a deny under enforce, which means a host with no tmux marker store refuses
-  # both paths unconditionally; and no mode restores the #5067 in-flight
-  # emission fences T3-A1 removed.
+  # value still matches the live one. Caveats: observe and enforce each read the
+  # per-spawn .spawn_nonce marker twice per destruction decision, so leaving
+  # legacy is what turns that marker I/O on (#5399 stopped legacy from paying
+  # for a comparison it discards); a missing or unreadable nonce is a deny under
+  # enforce, which means a host with no tmux marker store refuses both paths
+  # unconditionally; and no mode restores the #5067 in-flight emission fences
+  # T3-A1 removed.
   execution_identity_mode: legacy
   requested_timeout_min: 45
   in_progress_stale_min: 120

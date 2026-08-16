@@ -169,12 +169,13 @@ struct PinnedWatcherBinding {
 /// comparison, plus the [`PinnedWatcherBinding`] half of that comparison for the
 /// call site whose helper does not make it.
 ///
-/// The nonce is captured once at decision time and re-read inside the registry
-/// lock immediately before the removal, so the re-read cannot interleave with
-/// another registry mutation. The spawn path does not take that lock, so a
-/// marker rename racing the re-read is still possible; the design records that
-/// as a non-guarantee rather than papering over it. This is an identity
-/// re-check, not an emission lease.
+/// For a mode that consumes the comparison, the nonce is captured once at
+/// decision time and re-read inside the registry lock immediately before the
+/// removal, so the re-read cannot interleave with another registry mutation.
+/// The spawn path does not take that lock, so a marker rename racing the
+/// re-read is still possible; the design records that as a non-guarantee rather
+/// than papering over it. This is an identity re-check, not an emission lease.
+/// `Legacy` consumes neither read and so makes neither (#5399).
 ///
 /// # What the completed tuple establishes
 ///
@@ -231,16 +232,23 @@ pub(in crate::services::discord) struct WatcherIdentityFence {
 }
 
 impl WatcherIdentityFence {
+    /// #5399: the marker is read only for a mode that will use the comparison.
+    /// `Legacy` captures `None` without touching the disk, which is the same
+    /// pin it would have discarded — the answer at the CAS below is unchanged.
     pub(in crate::services::discord) fn capture(
         mode: ExecutionIdentityMode,
         site: &'static str,
         tmux_session_name: &str,
     ) -> Self {
+        let captured_spawn_nonce = mode
+            .consults_spawn_nonce()
+            .then(|| capture_session_spawn_nonce(tmux_session_name))
+            .flatten();
         Self {
             mode,
             site,
             tmux_session_name: tmux_session_name.to_string(),
-            captured_spawn_nonce: capture_session_spawn_nonce(tmux_session_name),
+            captured_spawn_nonce,
             pinned_binding: None,
         }
     }
