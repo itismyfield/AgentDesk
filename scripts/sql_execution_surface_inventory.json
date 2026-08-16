@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "8350e61b7563f5923b9161498f630dea53aa5db2",
+  "measured_at_sha": "7921d80fbca0ee1933e8914f67128abcf28abe40",
   "records": [
     {
       "root": "migrations/postgres",
@@ -26541,6 +26541,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:055261e90299aedd7858345d85ce8bb2c5f2ef12be344827f932b47005e8eec2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/dispatches/outbox_claiming.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:6cd4fe0e96db8cbb2e7f56bd6d5502ce4a34d8c555826c08291d86a8cc2e5902"
     },
     {
@@ -26550,7 +26559,25 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:789af9a6713f4ebc010b3d23f8b6d3779768fc6f809dca4e86c98d61674b7c66"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/dispatches/outbox_claiming.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:b407f797c259156379bfeec16a6db6830352d5f8021e0a06ccc6b9ce5b3acb96"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/dispatches/outbox_claiming.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:c566efec7814a72967e1413aefd57e4a87f19458817eb799a9d1fd4144c33a65"
     },
     {
       "root": "src",
@@ -26574,6 +26601,15 @@
       "root": "src",
       "kind": "RUST",
       "path": "src/services/dispatches/outbox_claiming.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:ea318314ab9376cc19f2d028441a8290d37e71b5401420fb2e778d87a724abd5"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/dispatches/outbox_claiming.rs",
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
@@ -26587,6 +26623,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:a43ed5a2df15dc4c0c96ba3cde40df551bc7ffc4939fab205f4e109cee040647"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/dispatches/outbox_claiming.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:fcb8afd607f6cbb8ba7353d6e0f37e6f82642c8110cbece3a56736ba16f314f2"
     },
     {
       "root": "src",

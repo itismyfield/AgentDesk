@@ -819,6 +819,8 @@ services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests:
 services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests::finalize_delivery_guard_shadow_updates_failed_event_without_notified_marker
 services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests::finalize_delivery_guard_shadow_updates_sent_event_and_kv_meta
 services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests::kv_meta_markers_remain_authoritative_when_typed_shadow_missing
+services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests::outbox_claim_verdicts_are_unchanged_by_skip_reason_diagnostics
+services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests::outbox_skip_reason_reports_offline_claim_owner_beside_route_preference
 services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests::reassign_stale_claim_owner_clears_owner_when_no_live_candidate_matches
 services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests::reassign_stale_claim_owners_moves_100_pending_rows_to_live_label_match
 services::dispatches::wait_queue::tests::wake_waiting_dispatch_outbox_pg_reassigns_wait_rows_fifo
