@@ -1896,6 +1896,55 @@ time for diagnostics; neither is a stored approval value.
 - tests: `src/high_risk_recovery.rs` cancel/recovery suites.
 - related_issues: #964, #1112, #1138, #1222, #1223, #1283.
 
+### `relay_reachability`
+
+- canonical_modules: `src/services/discord/health/reachability.rs` (module root)
+  and everything under `src/services/discord/health/reachability/**`. The
+  receipt-index read path `src/services/discord/outbound/receipt_index.rs`
+  belongs to this surface too and is **not yet on disk** — #5071 T4-B3 lands it.
+  The tree is unix-gated: its transcript coordinate is the `(dev, ino)` file
+  identity of 4987 §-1.3, and `std::fs::Metadata` exposes no stable Windows
+  equivalent.
+- status: **inactive library.** #5071 T4-B1 landed the verdict vocabulary, the
+  row-independent transcript resolution ladder, and the bounded incremental tail
+  reader with no consumer at all — no tick, no task, no health field, no
+  recovery input. Production verdicts are unchanged, and this surface does not
+  count as "4987 S1 active" until T4-B2 wires the observation task.
+- invariants: obligation production is independent of the inflight row
+  (4987 §-1.5 I14), and no verdict authorizes a destructive action or a
+  redelivery (4987 §7.1 I15, S7 stays NO-GO). `TransportUnknown` is neither
+  health nor a redelivery warrant: it contributes to degraded and its alarm text
+  must carry the explicit "do not redeliver by hand" notice, because the
+  success→commit crash window looks like a loss and is not one (4987 §-1.3b).
+  `ReachabilityVerdict != Reachable` denies GREEN whatever the structural
+  signals say (4987 §4.1); the converse does not hold.
+- companion edits: changing the obligation rule REQUIRES changing
+  `scripts/relay_watchdog.py` (`assistant_blocks_from_lines` /
+  `is_harness_control_assistant_record`) and the golden fixture corpus in the
+  same PR. 4987 §2.4: two implementations of "assistant text block" are two
+  oracles, and one of them is then always wrong. The Rust↔Python canonical
+  `(generation, start, end, identity, reason)` equivalence and its mutation
+  runner land with T4-B2.
+- non_guarantees: `scripts/check_reachability_row_independence.py` (run by
+  `scripts/ci-script-checks.sh`) enforces I14 as a source **lint, not a type
+  proof** — `InflightTurnState` is `pub(in crate::services::discord)`, so the
+  compiler accepts an import this gate rejects. The scan is lexical over
+  neutralized Rust: it does not follow `#[path]`, does not resolve macros, and
+  cannot see an inflight module laundered through a third file's `as` alias.
+  Real enforcement needs a crate boundary and is out of this series' scope.
+  I15 is likewise a convention plus a lint: 4987 §-1.5 records the decision not
+  to move the destructive `RelayRecoveryActionKind` variants behind a private
+  constructor.
+- do_not_edit_without_migration_plan: n/a (new surface, no giant file; the tick
+  must not be added to `health/recovery.rs`, which is registry-tracked — 4987
+  §9.4 puts the future reachability tick in `runtime_bootstrap/spawns.rs` as an
+  independent task).
+- active_callsite_coverage: n/a (no consumer exists yet, by design).
+- tests: `services::discord::health::reachability::{verdict,discovery,tail}::tests`
+  in the `test-non-pg` lane; `tests/test_reachability_row_independence.py` for
+  the gate itself.
+- related_issues: #5071, #4987, #4986, #4974.
+
 ### `dashboard_routes`
 
 - canonical_modules: `src/server/routes/*.rs` (per-domain route module), including

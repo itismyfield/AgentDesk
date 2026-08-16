@@ -24,6 +24,14 @@ mod headless_turn;
 pub(in crate::services::discord) mod liveness_authority;
 pub(in crate::services::discord) mod mailbox;
 mod provider_probe;
+// #5071 T4-B1 (4987 S1, first half): the relay-reachability observation
+// library. Unix-gated because its transcript coordinate is the `(dev, ino)`
+// file identity of 4987 §-1.3, and no stable Windows equivalent exists through
+// `std::fs::Metadata`; the relay transport it observes (`session_relay_sink`)
+// is `#[cfg(unix)]` already. INACTIVE — nothing constructs or consumes it until
+// T4-B2 wires the observation task, so production verdicts are unchanged.
+#[cfg(unix)]
+pub(in crate::services::discord) mod reachability;
 #[path = "health/rebind_request.rs"]
 mod rebind_request;
 mod recovery;
