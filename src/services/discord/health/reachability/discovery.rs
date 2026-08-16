@@ -394,6 +394,34 @@ mod tests {
         assert_eq!(resolved.binding_comparison, BindingComparison::Unresolvable);
     }
 
+    /// Rank 1 resolves and no rank-2 path was offered at all. The comparison
+    /// must record `NotOffered`, not `SameFile`: `BindingComparison` is the
+    /// datum T4-B4 reads, and "there was nothing to compare" is a different
+    /// fact from "we compared two coordinates and they agreed". This case
+    /// exists because the arm was otherwise unpinned — swapping its
+    /// `NotOffered` for `SameFile` left all nine other discovery tests green.
+    /// It pins the rank-1 arm only; rank 3 spells `NotOffered` at its own site.
+    #[test]
+    fn registry_only_resolution_records_that_no_binding_was_offered() {
+        let dir = TempDir::new().expect("tempdir");
+        let registry = dir.path().join("registry.jsonl");
+        write(&registry, "{\"type\":\"assistant\"}\n");
+
+        let roots: Vec<PathBuf> = Vec::new();
+        let resolution = resolve_transcript(candidates(Some(&registry), None, &roots));
+
+        let TranscriptResolution::Resolved(resolved) = resolution else {
+            panic!("expected a resolution, got {resolution:?}");
+        };
+        assert_eq!(resolved.source, TranscriptSource::RegistryOutputPath);
+        assert_eq!(
+            resolved.binding_comparison,
+            BindingComparison::NotOffered,
+            "no rank-2 path was offered, so nothing was compared"
+        );
+        assert_eq!(resolved.path, registry);
+    }
+
     #[test]
     fn binding_resolves_only_when_registry_produced_nothing() {
         let dir = TempDir::new().expect("tempdir");

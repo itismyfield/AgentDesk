@@ -2437,6 +2437,7 @@ services::discord::health::reachability::discovery::tests::binding_resolves_only
 services::discord::health::reachability::discovery::tests::dead_binding_beside_live_registry_resolves_and_records_unresolvable
 services::discord::health::reachability::discovery::tests::equal_mtimes_break_the_tie_deterministically
 services::discord::health::reachability::discovery::tests::filesystem_discovery_picks_the_newest_jsonl_and_ignores_other_extensions
+services::discord::health::reachability::discovery::tests::registry_only_resolution_records_that_no_binding_was_offered
 services::discord::health::reachability::discovery::tests::same_file_through_two_paths_is_not_divergence
 services::discord::health::reachability::discovery::tests::same_size_different_inode_is_coordinate_divergence
 services::discord::health::reachability::discovery::tests::unreadable_discovery_root_is_skipped_not_fatal
@@ -2449,7 +2450,7 @@ services::discord::health::reachability::tail::tests::in_place_truncation_rewind
 services::discord::health::reachability::tail::tests::incremental_read_returns_only_the_new_bytes_and_advances
 services::discord::health::reachability::tail::tests::one_tick_reads_at_most_the_cap_and_reports_truncation
 services::discord::health::reachability::tail::tests::rotation_to_a_different_inode_diverges
-services::discord::health::reachability::verdict::tests::every_unknown_reason_is_distinct
+services::discord::health::reachability::verdict::tests::every_unknown_reason_is_named_exactly_once
 services::discord::health::reachability::verdict::tests::no_verdict_authorizes_redelivery_or_destruction
 services::discord::health::reachability::verdict::tests::only_reachable_permits_green_health
 services::discord::health::reachability::verdict::tests::only_transport_unknown_carries_the_manual_redelivery_ban_notice

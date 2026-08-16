@@ -25,7 +25,7 @@
 //! §-1.3b introduced it for the POST-succeeded/receipt-write-failed crash
 //! window, because round 1 sent that window straight to `Unreachable`, a human
 //! then redelivered by hand, and that produced the duplicate #4986 was refusing
-//! to create. So it is false for both [`ReachabilityVerdict::declares_health`]
+//! to create. So it is false for both [`ReachabilityVerdict::permits_health`]
 //! (§-1.3b puts it on the degraded side) and
 //! [`ReachabilityVerdict::authorizes_redelivery`], and it is the only variant
 //! that sets [`ReachabilityVerdict::requires_manual_redelivery_ban_notice`].
@@ -110,9 +110,11 @@ pub(in crate::services::discord) enum ReachabilityUnknownReason {
 impl ReachabilityVerdict {
     /// Whether this verdict permits a GREEN final health verdict — 4987 §4.1.
     /// True for `Reachable` only; `TransportUnknown` is false here by the same
-    /// rule as `Unreachable`. It asks whether health is *permitted*, not whether
-    /// it is *declared*: B6 owns the product, and nothing calls this yet.
-    pub(in crate::services::discord) fn declares_health(&self) -> bool {
+    /// rule as `Unreachable`. Permission is not a declaration: §-1.4 still
+    /// requires positive incarnation-alive evidence before a producer may spell
+    /// `Reachable` at all, B6 owns the product this feeds, and nothing calls
+    /// this yet.
+    pub(in crate::services::discord) fn permits_health(&self) -> bool {
         match self {
             Self::Reachable => true,
             Self::Degraded { .. }
@@ -242,7 +244,7 @@ mod tests {
         for verdict in every_verdict() {
             let expected = matches!(verdict, ReachabilityVerdict::Reachable);
             assert_eq!(
-                verdict.declares_health(),
+                verdict.permits_health(),
                 expected,
                 "4987 §4.1 polarity broken for {verdict:?}"
             );
@@ -259,7 +261,7 @@ mod tests {
             since_secs: 30,
             evidence: TransportUnknownEvidence::RestartBoundaryCrossed,
         };
-        assert!(!verdict.declares_health());
+        assert!(!verdict.permits_health());
     }
 
     /// 4987 §-1.3b + S7 NO-GO: `TransportUnknown` is not a redelivery warrant
@@ -328,21 +330,68 @@ mod tests {
         );
     }
 
-    /// The five reasons of 4987 §4.1 are all present and distinct. A slice that
-    /// later needs a sixth has to add it here, in front of a reviewer.
+    /// How many reasons 4987 §4.1 defines, and therefore how many distinct
+    /// indices [`unknown_reason_index`] may hand out.
+    const UNKNOWN_REASON_COUNT: usize = 5;
+
+    /// Give each `Unknown` reason its own index.
+    ///
+    /// This `match` is the mechanism, not the table it feeds: it has no `_` arm
+    /// and no or-pattern, so a sixth `ReachabilityUnknownReason` variant makes
+    /// this test module stop compiling until someone names it here — the same
+    /// spelled-out-arms device [`ReachabilityVerdict::authorizes_redelivery`]
+    /// uses in production. A hand-written list of reasons could not do that: a
+    /// new variant would simply not appear in it, and every assertion over it
+    /// would keep passing.
+    fn unknown_reason_index(reason: ReachabilityUnknownReason) -> usize {
+        match reason {
+            ReachabilityUnknownReason::TranscriptUnresolved => 0,
+            ReachabilityUnknownReason::TranscriptCoordinateDivergence => 1,
+            ReachabilityUnknownReason::RowlessActiveTurn => 2,
+            ReachabilityUnknownReason::ReadTruncated => 3,
+            ReachabilityUnknownReason::ReceiptStoreUnreadable => 4,
+        }
+    }
+
+    /// The table below enumerates every `ReachabilityUnknownReason` exactly
+    /// once — none listed twice, none left out.
+    ///
+    /// That is all the body proves, and it proves it indirectly: it checks that
+    /// the table's [`unknown_reason_index`] values cover every index below
+    /// [`UNKNOWN_REASON_COUNT`] without collision, which they can only do if
+    /// the table is a permutation of the `match`'s arms. What forces a *future*
+    /// reason through this file is the exhaustiveness of that `match` — a
+    /// compiler obligation, which holds whether or not anyone reads this test.
+    /// The guarantee stops at this module: nothing here constrains how B2..B6
+    /// later choose to produce or consume the reasons.
     #[test]
-    fn every_unknown_reason_is_distinct() {
-        let reasons = [
+    fn every_unknown_reason_is_named_exactly_once() {
+        let every_reason = [
             ReachabilityUnknownReason::TranscriptUnresolved,
             ReachabilityUnknownReason::TranscriptCoordinateDivergence,
             ReachabilityUnknownReason::RowlessActiveTurn,
             ReachabilityUnknownReason::ReadTruncated,
             ReachabilityUnknownReason::ReceiptStoreUnreadable,
         ];
-        for (i, left) in reasons.iter().enumerate() {
-            for (j, right) in reasons.iter().enumerate() {
-                assert_eq!(i == j, left == right, "{left:?} vs {right:?}");
-            }
+
+        // Deliberately no `every_reason.len() == UNKNOWN_REASON_COUNT` assert:
+        // it would make the coverage loop below unreachable, and a check that
+        // cannot fail is what this test was rewritten to stop shipping.
+        let mut claimed: [Option<ReachabilityUnknownReason>; UNKNOWN_REASON_COUNT] =
+            [None; UNKNOWN_REASON_COUNT];
+        for reason in every_reason {
+            let slot = &mut claimed[unknown_reason_index(reason)];
+            assert_eq!(
+                *slot, None,
+                "{reason:?} wants an index {slot:?} already claimed"
+            );
+            *slot = Some(reason);
+        }
+        for (index, slot) in claimed.iter().enumerate() {
+            assert!(
+                slot.is_some(),
+                "index {index} is unclaimed: the table above is missing a reason"
+            );
         }
     }
 }
