@@ -430,6 +430,13 @@ pub async fn update_entry_status_on_pg(
 ) -> Result<EntryStatusUpdateResult, String> {
     let normalized = normalize_entry_status(new_status).map_err(|error| error.to_string())?;
     let mut current = load_entry_status_row_pg(pool, entry_id).await?;
+    // #5356 S2: the write target is fixed once, before the retry loop, so a
+    // stale reload cannot silently redirect what this call attaches. The pin is
+    // defensive rather than load-bearing — the 0-row drift branch below only
+    // `continue`s while the row still carries the identity this attempt
+    // observed, so recomputing `options.or(current.*)` per iteration would
+    // yield the same value. Its declaration site is locked structurally by
+    // `pinned_dispatch_identity_is_declared_before_the_stale_retry_loop`.
     let pinned_dispatch_id = options
         .dispatch_id
         .clone()
@@ -648,7 +655,21 @@ pub async fn update_entry_status_on_pg(
                     changed: false,
                 });
             }
-            if latest.dispatch_id != pinned_dispatch_id || latest.slot_index != pinned_slot_index {
+            // #5356 S2: this branch — not the pin above — is what stops a lost
+            // CAS from taking a competing owner's row. Without it the retry
+            // re-read the winner's row and overwrote its identity, returning
+            // `changed: true` with the requested dispatch attached.
+            //
+            // Drift is judged against the observed pre-state (`current.*`, the
+            // values the CAS matched on), not the write target
+            // (`pinned_*`). A new attachment (`options.dispatch_id = Some(..)`)
+            // differs from the row by construction, so comparing the target
+            // would also reject pure-status races — the very reloads this retry
+            // loop exists to absorb. `reactivate_done_entry_on_pg` splits the
+            // same way: acceptance against the expected identity, drift against
+            // the observed one.
+            if latest.dispatch_id != current.dispatch_id || latest.slot_index != current.slot_index
+            {
                 return Err(format!(
                     "auto-queue entry {entry_id} dispatch identity changed during status update"
                 ));
@@ -747,10 +768,12 @@ pub async fn update_entry_status_on_pg(
 /// dispatch-history bookkeeping, transition recording, and conditional run
 /// finalization — but operates inside a caller-owned transaction.
 ///
-/// Unlike the pool-scoped helper this is single-shot: on stale-row mismatch
-/// it returns `changed: false` rather than re-reading state and looping. The
-/// caller composes this into a wider atomic operation, so observed state is
-/// already a stable snapshot inside the transaction.
+/// Unlike the pool-scoped helper this is single-shot: on stale-row mismatch it
+/// returns `changed: false`. The pool-scoped helper re-reads and loops only
+/// while the reloaded row still carries the dispatch identity it observed; once
+/// that identity drifts it returns an error instead of looping. The caller
+/// composes this into a wider atomic operation, so observed state is already a
+/// stable snapshot inside the transaction.
 pub async fn update_entry_status_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     entry_id: &str,
@@ -1651,7 +1674,11 @@ async fn record_entry_transition_on_pg(
 mod tests {
     use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
-    use sqlx::{Connection, Executor, PgConnection, PgPool};
+    use sqlx::{Connection, PgConnection, PgPool};
+
+    /// This module's own source, read by the declaration-site lock on the
+    /// pinned dispatch identity.
+    const MODULE_SOURCE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/", file!()));
 
     async fn setup_entry(pool: &PgPool, run_status: &str, entry_status: &str) {
         sqlx::query(
@@ -1932,19 +1959,19 @@ mod tests {
             .await
         });
         wait_for_run_token_waiter(&mut token_holder).await;
-        token_holder
-            .execute(
-                "UPDATE auto_queue_entries
+        sqlx::query(
+            "UPDATE auto_queue_entries
              SET status = 'dispatched',
                  dispatch_id = 'dispatch-competing-status-update',
                  slot_index = 1,
                  completed_at = NULL
              WHERE id = 'gate-entry'",
-            )
-            .await
-            .expect("attach competing dispatch during pool status update");
-        token_holder
-            .execute("COMMIT")
+        )
+        .execute(&mut token_holder)
+        .await
+        .expect("attach competing dispatch during pool status update");
+        sqlx::query("COMMIT")
+            .execute(&mut token_holder)
             .await
             .expect("commit competing dispatch and release run token");
 
@@ -1953,7 +1980,10 @@ mod tests {
             .expect("pool status update finishes after competing attachment")
             .expect("join pool status update")
             .expect_err("pool status retry must reject a competing dispatch identity");
-        assert!(error.contains("dispatch identity"), "{error}");
+        assert!(
+            error.contains("dispatch identity changed during status update"),
+            "{error}"
+        );
         let identity = load_entry_status_row_pg(&pool, "gate-entry")
             .await
             .expect("load preserved competing dispatch identity");
@@ -1987,18 +2017,18 @@ mod tests {
             .await
         });
         wait_for_run_token_waiter(&mut token_holder).await;
-        token_holder
-            .execute(
-                "UPDATE auto_queue_entries
+        sqlx::query(
+            "UPDATE auto_queue_entries
              SET status = 'dispatched',
                  dispatch_id = '',
                  completed_at = NULL
              WHERE id = 'gate-entry'",
-            )
-            .await
-            .expect("replace NULL dispatch identity with empty text");
-        token_holder
-            .execute("COMMIT")
+        )
+        .execute(&mut token_holder)
+        .await
+        .expect("replace NULL dispatch identity with empty text");
+        sqlx::query("COMMIT")
+            .execute(&mut token_holder)
             .await
             .expect("commit empty dispatch identity and release run token");
 
@@ -2007,7 +2037,10 @@ mod tests {
             .expect("pool status update finishes after empty identity wins")
             .expect("join pool status update")
             .expect_err("pool status retry must not accept empty text as the pinned NULL identity");
-        assert!(error.contains("dispatch identity"), "{error}");
+        assert!(
+            error.contains("dispatch identity changed during status update"),
+            "{error}"
+        );
         let identity = load_entry_status_row_pg(&pool, "gate-entry")
             .await
             .expect("load preserved empty dispatch identity");
@@ -2016,6 +2049,114 @@ mod tests {
         drop(token_holder);
         pool.close().await;
         pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pool_status_retry_absorbs_competing_status_change_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        setup_entry(&pool, "active", ENTRY_STATUS_PENDING).await;
+        seed_dispatch(&pool, "dispatch-requested-status-race").await;
+        let mut token_holder = begin_run_token_holder(&pg_db.database_url).await;
+
+        let update_pool = pool.clone();
+        let update = tokio::spawn(async move {
+            update_entry_status_on_pg(
+                &update_pool,
+                "gate-entry",
+                ENTRY_STATUS_DISPATCHED,
+                "test_pool_status_retry",
+                &EntryStatusUpdateOptions {
+                    dispatch_id: Some("dispatch-requested-status-race".to_string()),
+                    slot_index: Some(0),
+                },
+            )
+            .await
+        });
+        wait_for_run_token_waiter(&mut token_holder).await;
+        // Only the status moves; the row keeps the NULL dispatch identity this
+        // attempt observed, so the retry must converge instead of aborting.
+        sqlx::query(
+            "UPDATE auto_queue_entries
+             SET status = 'skipped',
+                 completed_at = NOW()
+             WHERE id = 'gate-entry'",
+        )
+        .execute(&mut token_holder)
+        .await
+        .expect("race the status only during pool status update");
+        sqlx::query("COMMIT")
+            .execute(&mut token_holder)
+            .await
+            .expect("commit racing status and release run token");
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), update)
+            .await
+            .expect("pool status update finishes after the racing status commits")
+            .expect("join pool status update")
+            .expect("pool status retry must absorb a pure status race");
+        assert!(result.changed);
+        assert_eq!(result.from_status, ENTRY_STATUS_SKIPPED);
+        let identity = load_entry_status_row_pg(&pool, "gate-entry")
+            .await
+            .expect("load attached dispatch identity");
+        assert_eq!(identity.status, ENTRY_STATUS_DISPATCHED);
+        assert_eq!(
+            identity.dispatch_id.as_deref(),
+            Some("dispatch-requested-status-race")
+        );
+        assert_eq!(identity.slot_index, Some(0));
+
+        drop(token_holder);
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    fn pool_status_update_body(source: &str) -> &str {
+        source
+            .split_once("pub async fn update_entry_status_on_pg(")
+            .expect("module must declare update_entry_status_on_pg")
+            .1
+            .split_once("\n}\n")
+            .expect("update_entry_status_on_pg must close at column zero")
+            .0
+    }
+
+    fn pins_declared_before_retry_loop(source: &str) -> bool {
+        let body = pool_status_update_body(source);
+        let Some(retry_loop) = body.find("\n    loop {") else {
+            return false;
+        };
+        let declarations: Vec<_> = body.match_indices("let pinned_").collect();
+        declarations.len() == 2 && declarations.iter().all(|(offset, _)| *offset < retry_loop)
+    }
+
+    #[test]
+    fn pinned_dispatch_identity_is_declared_before_the_stale_retry_loop() {
+        assert!(
+            pins_declared_before_retry_loop(MODULE_SOURCE),
+            "both pinned_* bindings must be declared before the stale-retry loop"
+        );
+
+        // The shape this lock rejects: the pin recomputed per iteration. It is
+        // behaviorally indistinguishable from the hoist, because the drift
+        // branch only lets an iteration `continue` while the reloaded identity
+        // still equals the observed one — so the recomputed value would always
+        // match. The declaration site is therefore the only checkable surface.
+        const RECOMPUTED_INSIDE_LOOP: &str = "\
+pub async fn update_entry_status_on_pg(
+) -> Result<EntryStatusUpdateResult, String> {
+    let mut current = load_entry_status_row_pg(pool, entry_id).await?;
+    loop {
+        let pinned_dispatch_id = options.dispatch_id.clone();
+        let pinned_slot_index = options.slot_index;
+    }
+}
+";
+        assert!(
+            !pins_declared_before_retry_loop(RECOMPUTED_INSIDE_LOOP),
+            "the lock must reject pins recomputed inside the retry loop"
+        );
     }
 
     #[tokio::test]
