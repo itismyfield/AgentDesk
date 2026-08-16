@@ -1,6 +1,6 @@
 use super::*;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 /// #4229 S5: post-stream-exit finalize tail of `tmux_output_watcher_with_restore`
 /// (DashMap slot removal, dispatch-protection resolve + dead-session dispatch fail,
@@ -26,12 +26,15 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
         watcher_instance_id,
     } = ctx;
 
-    // Cleanup: only remove from DashMap if we weren't cancelled/replaced.
+    // Cleanup: release this watcher's registry slot.
     // #243: When a watcher is cancelled (replaced by a new watcher or shutdown),
     // the replacement already occupies the slot — removing would delete the new entry.
-    if !cancel.load(Ordering::Relaxed) {
-        shared.tmux_watchers.remove(&channel_id);
-    }
+    release_registry_slot_at_exit(
+        &shared.tmux_watchers,
+        channel_id,
+        &tmux_session_name,
+        &cancel,
+    );
 
     let api_port = shared.api_port;
     let provider = shared.settings.read().await.provider.clone();
@@ -251,4 +254,149 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
     tracing::info!(
         "  [{ts}] 👁 tmux watcher stopped for #{tmux_session_name} (instance {watcher_instance_id})"
     );
+}
+
+/// #5071 T3-A2: drop this watcher's live registry slot at post-stream exit, but
+/// only while the registered handle is still this watcher's own.
+///
+/// The previous `!cancel` boolean was not that proof. A replacement claims the
+/// slot through `insert_locked`, which never touches the outgoing watcher's
+/// cancel flag, so a late stale exit could read `false` here and remove the new
+/// entry by channel key — exactly the #243 hazard the boolean was meant to
+/// avoid. `remove_tmux_session_if_current` compares the registered handle's
+/// cancel `Arc` pointer under the registry lock instead, so a replaced slot is
+/// preserved.
+///
+/// This is a duplicate, not new machinery: the `Drop` guard
+/// (`task_supervisor::TmuxWatcherTaskGuard`) already makes the identical helper
+/// call immediately after this function returns, and T3-A2 places that same
+/// call at the post-stream exit once more.
+fn release_registry_slot_at_exit(
+    tmux_watchers: &TmuxWatcherRegistry,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    cancel: &Arc<AtomicBool>,
+) {
+    let Some((owner_channel_id, _handle)) =
+        tmux_watchers.remove_tmux_session_if_current(tmux_session_name, cancel)
+    else {
+        return;
+    };
+    tracing::debug!(
+        channel_id = channel_id.get(),
+        owner_channel_id = owner_channel_id.get(),
+        tmux_session_name,
+        "post-stream exit removed its own watcher registry entry"
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn watcher_handle(tmux_session_name: &str) -> TmuxWatcherHandle {
+        TmuxWatcherHandle {
+            tmux_session_name: tmux_session_name.to_string(),
+            output_path: format!("/tmp/{tmux_session_name}.jsonl"),
+            paused: Arc::new(AtomicBool::new(false)),
+            resume_offset: Arc::new(std::sync::Mutex::new(None)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            turn_delivered: Arc::new(AtomicBool::new(false)),
+            last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                crate::services::discord::tmux_watcher_now_ms(),
+            )),
+        }
+    }
+
+    fn registered_cancel(
+        registry: &TmuxWatcherRegistry,
+        tmux_session_name: &str,
+    ) -> Option<Arc<AtomicBool>> {
+        registry
+            .by_tmux_session
+            .get(tmux_session_name)
+            .map(|entry| entry.cancel.clone())
+    }
+
+    // #5071 T3-A2 mutation gate: an old watcher that reaches post-stream exit
+    // AFTER its slot was re-claimed must leave the new handle alone. Reverting
+    // the body of `release_registry_slot_at_exit` to the channel-keyed
+    // `tmux_watchers.remove(&channel_id)` kills this test.
+    #[test]
+    fn stale_post_stream_exit_preserves_a_replacement_watcher_entry() {
+        let registry = TmuxWatcherRegistry::new();
+        let channel = ChannelId::new(1_504_468_805_772_902_471);
+        let tmux = "AgentDesk-claude-adk-cc";
+
+        let old_handle = watcher_handle(tmux);
+        let old_cancel = old_handle.cancel.clone();
+        registry.insert(channel, old_handle);
+
+        // The replacement claims the same slot through `insert_locked` without
+        // ever setting the outgoing watcher's cancel flag.
+        let new_handle = watcher_handle(tmux);
+        let new_cancel = new_handle.cancel.clone();
+        registry.insert(channel, new_handle);
+        assert!(!old_cancel.load(std::sync::atomic::Ordering::Relaxed));
+
+        release_registry_slot_at_exit(&registry, channel, tmux, &old_cancel);
+
+        let still_registered = registered_cancel(&registry, tmux)
+            .expect("the replacement watcher entry must survive the stale exit");
+        assert!(
+            Arc::ptr_eq(&still_registered, &new_cancel),
+            "the stale exit must not evict the replacement handle"
+        );
+        assert_eq!(registry.owner_channel_for_tmux_session(tmux), Some(channel));
+    }
+
+    // The same stale exit must also keep a slot the channel was rebound to
+    // under a different tmux session name — the channel-keyed remove tore that
+    // entry down even though it never belonged to the exiting watcher.
+    #[test]
+    fn stale_post_stream_exit_preserves_a_rebound_channel_entry() {
+        let registry = TmuxWatcherRegistry::new();
+        let channel = ChannelId::new(4794);
+        let old_tmux = "AgentDesk-claude-adk-cc";
+        let new_tmux = "AgentDesk-claude-adk-cc-t4794";
+
+        let old_handle = watcher_handle(old_tmux);
+        let old_cancel = old_handle.cancel.clone();
+        registry.insert(channel, old_handle);
+
+        let new_handle = watcher_handle(new_tmux);
+        let new_cancel = new_handle.cancel.clone();
+        registry.insert(channel, new_handle);
+
+        release_registry_slot_at_exit(&registry, channel, old_tmux, &old_cancel);
+
+        let still_registered = registered_cancel(&registry, new_tmux)
+            .expect("the rebound session's entry must survive the stale exit");
+        assert!(Arc::ptr_eq(&still_registered, &new_cancel));
+        assert_eq!(
+            registry.owner_channel_for_tmux_session(new_tmux),
+            Some(channel)
+        );
+    }
+
+    // The non-stale case still releases the slot, so the guard is a fence and
+    // not a blanket no-op: a mutation that deletes the helper call survives the
+    // two tests above but dies here.
+    #[test]
+    fn post_stream_exit_releases_its_own_registry_entry() {
+        let registry = TmuxWatcherRegistry::new();
+        let channel = ChannelId::new(5071);
+        let tmux = "AgentDesk-codex-adk-cc";
+
+        let handle = watcher_handle(tmux);
+        let cancel = handle.cancel.clone();
+        registry.insert(channel, handle);
+
+        release_registry_slot_at_exit(&registry, channel, tmux, &cancel);
+
+        assert!(registered_cancel(&registry, tmux).is_none());
+        assert_eq!(registry.owner_channel_for_tmux_session(tmux), None);
+        assert!(!registry.contains_key(&channel));
+    }
 }

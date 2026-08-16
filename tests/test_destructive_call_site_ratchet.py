@@ -35,17 +35,21 @@ class SourceContractTests(unittest.TestCase):
         self.assertEqual(ratchet.growth_errors(self.actual, self.baseline), [])
 
     def test_registry_remeasurement_and_p2_1_classification_are_explicit(self) -> None:
+        # #5071 T3-A2 re-pin: post_stream_exit.rs moved its one call site from
+        # `tmux_watchers.remove(&channel_id)` to `remove_tmux_session_if_current`,
+        # so 9/2 became 8/3 within the same 10-file set. The category total, the
+        # per-file counts, and the P2-1 classification below are unchanged.
         self.assertEqual(
             self.registry_subcounts,
             {
-                "direct_channel_remove": 9,
-                "remove_if_current": 2,
+                "direct_channel_remove": 8,
+                "remove_if_current": 3,
                 "cancel_and_remove_if_current": 3,
                 "remove_locked_helper": 2,
             },
         )
         comment = self.payload["categories"]["registry_remove"]["comment"]
-        self.assertIn("9/2/3/2 (total 16)", comment)
+        self.assertIn("8/3/3/2 (total 16)", comment)
         self.assertIn("10/2/3/2=17", comment)
         self.assertIn("health/recovery.rs remove_locked", comment)
         watcher_backstop = ROOT / "src/services/discord/turn_finalizer/watcher_backstop.rs"
