@@ -260,42 +260,39 @@ mod tests {
         assert_eq!(outcome.unknown_reason(), None);
     }
 
-    /// The design row's third mandated pure test: one tick reads at most
-    /// [`TAIL_READ_CAP_BYTES`], reports the truncation, and still advances by
-    /// exactly what it read.
+    /// The design row's third mandated pure test: the three adjacent sizes at
+    /// the cap distinguish a complete read from a truncated one, and every
+    /// outcome advances by exactly what it read.
     #[test]
-    fn one_tick_reads_at_most_the_cap_and_reports_truncation() {
+    fn one_tick_pins_the_read_cap_boundary() {
         let dir = TempDir::new().expect("tempdir");
-        let path = dir.path().join("transcript.jsonl");
-        let over_cap = (TAIL_READ_CAP_BYTES + 4_096) as usize;
-        write(&path, &vec![b'x'; over_cap]);
+        let cases = [
+            (TAIL_READ_CAP_BYTES - 1, false),
+            (TAIL_READ_CAP_BYTES, false),
+            (TAIL_READ_CAP_BYTES + 1, true),
+        ];
 
-        let cursor = cursor_at(&path, 0);
-        let TailOutcome::Read {
-            bytes,
-            start,
-            end,
-            cap_truncated,
-        } = read_incremental(&path, cursor)
-        else {
-            panic!("expected a read");
-        };
-        assert_eq!(bytes.len() as u64, TAIL_READ_CAP_BYTES);
-        assert_eq!((start, end), (0, TAIL_READ_CAP_BYTES));
-        assert!(cap_truncated, "over-cap tail must mark itself truncated");
+        for (available, expected_truncated) in cases {
+            let path = dir.path().join(format!("transcript-{available}.jsonl"));
+            write(&path, &vec![b'x'; available as usize]);
 
-        // Exactly at the cap is not truncated: the boundary is `>`, not `>=`.
-        let remainder = read_incremental(&path, cursor.advanced_to(end));
-        let TailOutcome::Read {
-            bytes,
-            cap_truncated,
-            ..
-        } = remainder
-        else {
-            panic!("expected the remainder read");
-        };
-        assert_eq!(bytes.len(), 4_096);
-        assert!(!cap_truncated);
+            let TailOutcome::Read {
+                bytes,
+                start,
+                end,
+                cap_truncated,
+            } = read_incremental(&path, cursor_at(&path, 0))
+            else {
+                panic!("expected a read for {available} available bytes");
+            };
+            let expected_read = available.min(TAIL_READ_CAP_BYTES);
+            assert_eq!(bytes.len() as u64, expected_read);
+            assert_eq!((start, end), (0, expected_read));
+            assert_eq!(
+                cap_truncated, expected_truncated,
+                "unexpected truncation at {available} available bytes"
+            );
+        }
     }
 
     #[test]

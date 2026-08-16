@@ -2453,7 +2453,7 @@ services::discord::health::reachability::tail::tests::a_quiet_file_reads_zero_by
 services::discord::health::reachability::tail::tests::cap_truncation_is_read_truncated_unknown
 services::discord::health::reachability::tail::tests::in_place_truncation_rewinds_instead_of_reading
 services::discord::health::reachability::tail::tests::incremental_read_returns_only_the_new_bytes_and_advances
-services::discord::health::reachability::tail::tests::one_tick_reads_at_most_the_cap_and_reports_truncation
+services::discord::health::reachability::tail::tests::one_tick_pins_the_read_cap_boundary
 services::discord::health::reachability::tail::tests::rotation_to_a_different_inode_diverges
 services::discord::health::reachability::verdict::tests::every_unknown_reason_is_named_exactly_once
 services::discord::health::reachability::verdict::tests::no_verdict_authorizes_redelivery_or_destruction

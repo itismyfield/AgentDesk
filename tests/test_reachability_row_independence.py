@@ -328,6 +328,29 @@ class ChangeSurfaceOwnershipTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             self.assertEqual(GATE.run(_build_root(tmp, surface=surface)), [])
 
+    def test_future_slice_marker_does_not_exempt_an_unmarked_peer_path(self) -> None:
+        surface = GOOD_SURFACE.replace(
+            "- companion edits:",
+            "- also: `src/services/discord/outbound/receipt_index.rs`, which is\n"
+            "  not yet on disk (T4-B3), and\n"
+            "  `src/services/discord/outbound/unrelated_missing.rs`.\n"
+            "- companion edits:",
+        )
+        with TemporaryDirectory() as tmp:
+            violations = GATE.run(_build_root(tmp, surface=surface))
+        self.assertEqual(_kinds(violations), ["ghost-path"])
+        self.assertIn("unrelated_missing.rs", violations[0].detail)
+
+    def test_future_slice_marker_still_exempts_the_path_it_follows(self) -> None:
+        surface = GOOD_SURFACE.replace(
+            "- companion edits:",
+            "- also: `src/services/discord/outbound/future_index.rs` belongs to\n"
+            "  a later slice and is not yet on disk (T4-B4).\n"
+            "- companion edits:",
+        )
+        with TemporaryDirectory() as tmp:
+            self.assertEqual(GATE.run(_build_root(tmp, surface=surface)), [])
+
     def test_a_tree_file_no_glob_covers_is_reported(self) -> None:
         surface = GOOD_SURFACE.replace(
             "everything under `src/services/discord/health/reachability/**`.",

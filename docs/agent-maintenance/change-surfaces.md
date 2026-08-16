@@ -1931,6 +1931,9 @@ time for diagnostics; neither is a stored approval value.
   compiler accepts an import this gate rejects. The scan is lexical over
   neutralized Rust: it does not follow `#[path]`, does not resolve macros, and
   cannot see an inflight module laundered through a third file's `as` alias.
+  Its ghost-path check is lexical too: `not yet on disk` exempts only the
+  concrete source path immediately before the marker in the same bullet,
+  before another concrete path appears.
   Real enforcement needs a crate boundary and is out of this series' scope.
   I15 is likewise a convention plus a lint: 4987 §-1.5 records the decision not
   to move the destructive `RelayRecoveryActionKind` variants behind a private
