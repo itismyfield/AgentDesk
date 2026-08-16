@@ -15,6 +15,11 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    from rust_cfg import find_test_only_cfg_attribute
+except ModuleNotFoundError:  # imported from a repo-root unittest
+    from scripts.rust_cfg import find_test_only_cfg_attribute
+
 
 PRODUCTION_PREFIXES = (
     "src/db/",
@@ -73,6 +78,14 @@ RISKY_INTEGER_SUFFIXES = (
     "_duration_ms",
     "_offset",
     "_seq",
+)
+
+MODULE_DECLARATION_RE = re.compile(
+    r"(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{"
+)
+RAW_STRING_OPEN_RE = re.compile(r'(?:b|c)?r(#*)"')
+CHAR_LITERAL_RE = re.compile(
+    r"'(?:\\(?:u\{[0-9a-fA-F_]{1,6}\}|x[0-9a-fA-F]{2}|.)|[^'\\\n])'"
 )
 
 _TEST_REGION_CACHE: dict[str, set[int]] = {}
@@ -190,30 +203,141 @@ def is_test_path(path: str) -> bool:
     )
 
 
+def strip_rust_non_code(source: str) -> str:
+    result: list[str] = []
+    block_comment_depth = 0
+    in_string = False
+    raw_string_hashes: int | None = None
+    idx = 0
+    while idx < len(source):
+        if block_comment_depth:
+            if source.startswith("/*", idx):
+                block_comment_depth += 1
+                result.extend("  ")
+                idx += 2
+            elif source.startswith("*/", idx):
+                block_comment_depth -= 1
+                result.extend("  ")
+                idx += 2
+            else:
+                result.append("\n" if source[idx] == "\n" else " ")
+                idx += 1
+            continue
+        if raw_string_hashes is not None:
+            closer = '"' + "#" * raw_string_hashes
+            if source.startswith(closer, idx):
+                raw_string_hashes = None
+                result.extend(" " * len(closer))
+                idx += len(closer)
+            else:
+                result.append("\n" if source[idx] == "\n" else " ")
+                idx += 1
+            continue
+        if in_string:
+            if source[idx] == "\\" and idx + 1 < len(source):
+                result.extend(" \n" if source[idx + 1] == "\n" else "  ")
+                idx += 2
+            else:
+                if source[idx] == '"':
+                    in_string = False
+                result.append("\n" if source[idx] == "\n" else " ")
+                idx += 1
+            continue
+
+        if source.startswith("//", idx):
+            end = source.find("\n", idx)
+            if end < 0:
+                result.extend(" " * (len(source) - idx))
+                break
+            result.extend(" " * (end - idx))
+            idx = end
+            continue
+        if source.startswith("/*", idx):
+            block_comment_depth = 1
+            result.extend("  ")
+            idx += 2
+            continue
+        raw_string = RAW_STRING_OPEN_RE.match(source, idx)
+        if raw_string:
+            raw_string_hashes = len(raw_string.group(1))
+            result.extend(" " * (raw_string.end() - idx))
+            idx = raw_string.end()
+            continue
+        if source[idx] == '"':
+            in_string = True
+            result.append(" ")
+            idx += 1
+            continue
+        if source[idx] == "'":
+            char_literal = CHAR_LITERAL_RE.match(source, idx)
+            if char_literal:
+                result.extend(" " * (char_literal.end() - idx))
+                idx = char_literal.end()
+                continue
+        result.append(source[idx])
+        idx += 1
+    return "".join(result)
+
+
 def test_region_lines(path: str) -> set[int]:
+    """Return lines inside lexically test-only inline modules.
+
+    A cfg/cfg_attr gate counts only when the shared Boolean classifier proves
+    that it cannot enable the module with ``test`` disabled.  Merely mentioning
+    the token is insufficient: ``not(test)``, ``any(test, unix)``, string
+    values such as ``feature = "test-tools"``, and non-gating forms such as
+    ``cfg_attr(test, allow(dead_code))`` remain production-visible.  For
+    ``cfg_attr``, only nested cfg/cfg_attr payloads contribute gating semantics.
+
+    This is deliberately a lexical inline-module classifier, not rustc cfg
+    evaluation.  Unsupported/malformed predicates and attributes spanning
+    multiple source lines stay production-visible.
+    """
+
     if path in _TEST_REGION_CACHE:
         return _TEST_REGION_CACHE[path]
     result: set[int] = set()
     try:
-        lines = Path(path).read_text(encoding="utf-8").splitlines()
+        source = Path(path).read_text(encoding="utf-8")
     except OSError:
         _TEST_REGION_CACHE[path] = result
         return result
+    code_lines = strip_rust_non_code(source).splitlines()
 
     depth = 0
     active_depth: int | None = None
-    for idx, line in enumerate(lines, start=1):
+    pending_cfg_test_depth: int | None = None
+    for idx, code_line in enumerate(code_lines, start=1):
         if active_depth is not None:
             result.add(idx)
 
-        stripped = line.strip()
-        opens = line.count("{")
-        closes = line.count("}")
-        starts_test_module = re.match(r"(?:pub(?:\(crate\))?\s+)?mod\s+tests\s*\{", stripped)
+        stripped = code_line.strip()
+        opens = code_line.count("{")
+        closes = code_line.count("}")
+        module_text = stripped
+        cfg_test_attribute = find_test_only_cfg_attribute(module_text)
+        if cfg_test_attribute is not None and cfg_test_attribute.start() != 0:
+            cfg_test_attribute = None
+        if cfg_test_attribute:
+            module_text = module_text[cfg_test_attribute.attribute_end() :].lstrip()
+        module_declaration = MODULE_DECLARATION_RE.match(module_text)
+        starts_test_module = module_declaration and (
+            module_declaration.group(1) == "tests"
+            or cfg_test_attribute is not None
+            or pending_cfg_test_depth == depth
+        )
         depth_after = depth + opens - closes
         if active_depth is None and starts_test_module:
-            active_depth = depth_after
+            active_depth = depth + 1
+            pending_cfg_test_depth = None
             result.add(idx)
+        elif active_depth is None:
+            if cfg_test_attribute is not None and not module_text:
+                pending_cfg_test_depth = depth
+            elif module_declaration is not None:
+                pending_cfg_test_depth = None
+            elif stripped and not stripped.startswith(("#[", "//")):
+                pending_cfg_test_depth = None
 
         depth = depth_after
         if active_depth is not None and depth < active_depth:
