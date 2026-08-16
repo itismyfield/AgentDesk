@@ -45,6 +45,10 @@ use super::tmux_restart_handoff::{
 use super::{
     SharedData, TmuxWatcherHandle, TmuxWatcherRegistry, lock_tmux_watcher_registry, rate_limit_wait,
 };
+// #5071 T3-A0: `.spawn_nonce` read model, registered here so it sits beside the
+// `tmux_session_files` reader it reuses and inherits this file's unix gate.
+#[path = "execution_identity.rs"]
+mod execution_identity;
 #[path = "tmux_placeholder_suppression/mod.rs"]
 mod placeholder_suppression;
 #[path = "tmux_reattach_offsets.rs"]
