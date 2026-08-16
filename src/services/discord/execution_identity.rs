@@ -62,7 +62,7 @@ pub(in crate::services::discord) enum IncarnationObservation {
 /// A readable nonce on BOTH sides is the only way to reach `Match`. Either side
 /// being `None` yields `Unknown`, so a missing marker can never be mistaken for
 /// proof that the captured spawn is still the live one — that widening is
-/// exactly the `#{name}#0` collision `.spawn_nonce` was introduced to avoid.
+/// exactly the `{name}#0` collision `.spawn_nonce` was introduced to avoid.
 pub(in crate::services::discord) fn compare_spawn_nonce(
     captured: Option<&str>,
     current: Option<&str>,

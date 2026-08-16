@@ -1646,7 +1646,7 @@ fn is_off_intake_delivery_settlement(stage: &IntakeDeliverySettlementStage) -> b
 /// Rollout stage for the #5071 T3 execution-identity fence.
 ///
 /// The read model behind this switch
-/// (`services::discord::execution_identity::SessionIncarnationRef`) only reads
+/// (`services::discord::tmux::execution_identity::SessionIncarnationRef`) only reads
 /// the per-spawn `.spawn_nonce` marker that provider spawns already write; no
 /// mode introduces a durable row, a new marker, or a new file format. T3-A0
 /// landed that model with no destructive consumer; T3-A1 converted the call
@@ -1704,7 +1704,7 @@ impl ExecutionIdentityMode {
     /// Only `Enforce` may turn a non-matching observation into a refusal, and
     /// only at the call sites T3-A1 converted. Two consumers read this: the
     /// nonce deny predicate `destruction_permitted_under_identity` in
-    /// `services::discord::execution_identity` (with a shim of the same name in
+    /// `services::discord::tmux::execution_identity` (with a shim of the same name in
     /// `tmux_watcher_registry` for platforms that host no tmux marker), and the
     /// pinned-binding conjunct on `tmux_watcher_registry`'s identity-fenced
     /// registry view.

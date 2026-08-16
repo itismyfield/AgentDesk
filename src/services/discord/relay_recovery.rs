@@ -354,10 +354,14 @@ async fn auto_apply_relay_recovery_for_shared_at(
 
 /// Only statuses whose apply performed a real transition belong here. #5021:
 /// `reuse_existing_live_watcher` used to be listed, but it reports that
-/// `apply_rebind` left a live incumbent untouched — no repair happened — so
-/// counting it applied made every watchdog pass look like a successful heal and
-/// the auto-heal budget never reached its failure backoff. That status settles
-/// through the refund arm of `settle_auto_heal_confirmation` instead.
+/// `apply_rebind` left the watcher registry as it found it — nothing spawned,
+/// nothing replaced — so counting it applied made every watchdog pass look like
+/// a successful heal and the auto-heal budget never reached its failure backoff.
+/// That status settles through the refund arm of `settle_auto_heal_confirmation`
+/// instead. The watcher registry is all this status reports on: the rebind that
+/// produced it still committed its episode side effects — `DiscordSession`
+/// re-registration and the existing-inflight re-adoption in
+/// `commit_episode_side_effects` — before the claim reused the incumbent.
 fn relay_recovery_status_counts_as_applied(status: &'static str) -> bool {
     matches!(
         status,

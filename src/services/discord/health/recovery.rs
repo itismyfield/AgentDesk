@@ -1725,7 +1725,7 @@ pub(crate) async fn run_stall_watchdog_pass(
             now_unix_secs,
             now_mono_secs,
         );
-        if relay_dead_reattach::try_apply(
+        let reattach_lane = relay_dead_reattach::try_apply(
             registry,
             shared.clone(),
             provider,
@@ -1733,9 +1733,13 @@ pub(crate) async fn run_stall_watchdog_pass(
             &snapshot,
             now_unix_secs,
         )
-        .await
-        {
-            cleaned += 1;
+        .await;
+        if reattach_lane.handled_tick() {
+            // A reused live incumbent owns the tick without repairing anything,
+            // so it stops the remaining branches but adds nothing to `cleaned`.
+            if reattach_lane.counts_as_cleaned() {
+                cleaned += 1;
+            }
             continue;
         }
         // #3668 F2: if JSONL still holds an unrelayed final answer after
@@ -5229,6 +5233,230 @@ mod stall_watchdog_auto_heal_tests {
         );
         assert!(!next_token.cancelled.load(Ordering::Relaxed));
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+    }
+
+    /// #5396 item 5, call-site lock. `run_stall_watchdog_pass` asks the
+    /// relay-dead reattach lane `handled_tick()` — NOT `counts_as_cleaned()` —
+    /// before `continue`ing. The two answers differ for exactly one outcome,
+    /// `HandledWithoutRepair`: the #5021 reuse no-op owns the tick without
+    /// repairing anything, so it must add nothing to `cleaned` (that part is
+    /// `counts_as_cleaned`) while still stopping the tick before the remaining
+    /// branches — several of them destructive.
+    ///
+    /// The fixture arms the first of those destructive branches, the #2965
+    /// idle-foreground stale-turn repair: the pre-pass assertions prove both of
+    /// its own gates (`stale_idle_foreground_queue_detected` on the snapshot
+    /// the pass itself will take, and `idle_tmux_repair_ready_for_input`) are
+    /// satisfied going into the tick, so the ONLY thing keeping
+    /// `clear_idle_tmux_stale_turn` from clearing this live turn's inflight row
+    /// and mailbox token is the reattach lane's short-circuit. Swapping that
+    /// call site to `counts_as_cleaned()` drops the tick into that branch and
+    /// fires its clear-candidate hook, failing this test.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reuse_no_op_reattach_tick_still_skips_the_destructive_branches_5396() {
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let tempdir = tempfile::tempdir().expect("runtime root tempdir");
+        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tempdir.path(),
+        );
+        if !crate::services::platform::tmux::is_available() {
+            eprintln!("skipping #5396 reuse-no-op short-circuit: tmux unavailable");
+            return;
+        }
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(5_396_004);
+        let user_msg = MessageId::new(5_396_014);
+        let tmux_session = format!("AgentDesk-claude-5396tick-{}-cc", std::process::id());
+        let _ = crate::services::platform::tmux::kill_session(
+            &tmux_session,
+            "#5396 reuse-no-op tick fixture reset",
+        );
+        assert!(
+            crate::services::platform::tmux::create_session(&tmux_session, None, "sleep 60")
+                .expect("start tmux fixture")
+                .status
+                .success(),
+            "the reattach lane probes a real producer tmux session"
+        );
+        crate::services::tmux_common::write_tmux_runtime_kind_marker(
+            &tmux_session,
+            crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+        )
+        .expect("runtime kind marker");
+        let output_path = tempdir.path().join("relay-5396-reuse-tick.jsonl");
+        // A session-start marker: at-rest for `jsonl_ready_for_input` (so the
+        // idle-repair branch is armed) but NOT a `result`, so the unrelayed
+        // tail-answer branch above it stays out of the way.
+        std::fs::write(
+            &output_path,
+            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
+        )
+        .expect("seed at-rest transcript");
+
+        let mut registry = HealthRegistry::new();
+        registry.started_at_unix = chrono::Utc::now().timestamp()
+            - super::watchdog_decisions::STALL_WATCHDOG_THRESHOLD_SECS as i64
+            - 300;
+        let shared = super::super::super::make_shared_data_for_tests();
+        registry
+            .register(provider.as_str().to_string(), shared.clone())
+            .await;
+        registry
+            .register_http(
+                provider.as_str().to_string(),
+                Arc::new(poise::serenity_prelude::Http::new("Bot test-token")),
+            )
+            .await;
+
+        // Live incumbent on the same tmux session and output path with a fresh
+        // heartbeat: the reattach apply's claim reuses it instead of spawning,
+        // which is what makes the lane answer `HandledWithoutRepair`.
+        let watcher_cancel = Arc::new(AtomicBool::new(false));
+        shared.tmux_watchers.insert(
+            channel,
+            super::super::super::TmuxWatcherHandle {
+                tmux_session_name: tmux_session.clone(),
+                output_path: output_path.to_string_lossy().to_string(),
+                paused: Arc::new(AtomicBool::new(false)),
+                resume_offset: Arc::new(std::sync::Mutex::new(None)),
+                cancel: watcher_cancel.clone(),
+                pause_epoch: Arc::new(AtomicU64::new(0)),
+                turn_delivered: Arc::new(AtomicBool::new(false)),
+                last_heartbeat_ts_ms: Arc::new(AtomicI64::new(
+                    super::super::super::tmux_watcher_now_ms(),
+                )),
+            },
+        );
+        let token = seed_active_mailbox_and_session(&shared, channel, user_msg).await;
+        let stale_at = (chrono::Local::now() - chrono::Duration::seconds(900))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        let mut state = crate::services::discord::inflight::InflightTurnState::new(
+            provider.clone(),
+            channel.get(),
+            None,
+            343_742_347,
+            user_msg.get(),
+            5_396_024,
+            "reuse no-op watchdog tick".to_string(),
+            Some("provider-session-5396-tick".to_string()),
+            Some(tmux_session.clone()),
+            Some(output_path.to_string_lossy().to_string()),
+            None,
+            0,
+        );
+        state.started_at = stale_at.clone();
+        state.updated_at = stale_at.clone();
+        state.turn_nonce = Some("nonce-5396-tick".to_string());
+        state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+        state.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+        crate::services::discord::inflight::save_inflight_state(&state)
+            .expect("seed authoritative inflight");
+        // `save_inflight_state` restamps `updated_at` to now on every write, so
+        // the staleness the #2965 branch keys on has to be applied to the row
+        // ON DISK afterwards. `started_at` survives the save untouched and is
+        // what the reattach lane's own force-clean gate reads.
+        {
+            let root = crate::services::discord::inflight::inflight_runtime_root()
+                .expect("inflight runtime root");
+            let path = crate::services::discord::inflight::inflight_state_path(
+                &root,
+                &provider,
+                channel.get(),
+            );
+            let mut row: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(&path).expect("read seeded inflight row"),
+            )
+            .expect("parse seeded inflight row");
+            row["updated_at"] = serde_json::Value::String(stale_at.clone());
+            std::fs::write(
+                &path,
+                serde_json::to_string_pretty(&row).expect("re-serialize inflight row"),
+            )
+            .expect("age the seeded inflight row");
+        }
+
+        // Non-vacuity, measured on the same inputs the pass itself will read.
+        // `run_stall_watchdog_pass` takes ONE snapshot per channel before the
+        // reattach lane runs and feeds that snapshot to
+        // `stale_idle_foreground_queue_detected`, so the armed-ness of the
+        // destructive branch is a property of this pre-tick snapshot — the
+        // reattach apply readopts the row and refreshes `updated_at`, which is
+        // why a post-tick re-snapshot would answer a different question.
+        let pre = registry
+            .snapshot_watcher_state_for_shared(&provider, shared.clone(), channel.get())
+            .await
+            .expect("pre-tick snapshot");
+        assert!(
+            super::watchdog_decisions::stale_idle_foreground_queue_detected(
+                pre.relay_health.active_turn,
+                pre.relay_health.mailbox_has_cancel_token,
+                pre.relay_health.queue_depth,
+                pre.inflight_state_present,
+                pre.inflight_updated_at.as_deref(),
+                pre.tmux_session_alive,
+                pre.relay_health.last_outbound_activity_ms,
+                chrono::Utc::now().timestamp(),
+                super::watchdog_decisions::STALL_WATCHDOG_THRESHOLD_SECS,
+            ),
+            "the idle-foreground destructive branch must be armed for this fixture"
+        );
+        assert!(
+            crate::services::discord::relay_recovery::idle_tmux_repair_ready_for_input(
+                &provider,
+                channel.get(),
+                &tmux_session,
+            ),
+            "the idle-repair readiness gate must be open for this fixture"
+        );
+
+        let destructive_branch_entered = Arc::new(AtomicBool::new(false));
+        let hook_flag = Arc::clone(&destructive_branch_entered);
+        let _hook = set_idle_tmux_candidate_hook(Arc::new(move |_state| {
+            hook_flag.store(true, Ordering::Release);
+        }));
+
+        let cleaned = super::run_stall_watchdog_pass(&registry, &provider).await;
+
+        let _ = crate::services::platform::tmux::kill_session(
+            &tmux_session,
+            "#5396 reuse-no-op tick fixture cleanup",
+        );
+        assert!(
+            !destructive_branch_entered.load(Ordering::Acquire),
+            "a reuse no-op owns the tick, so the destructive idle-repair branch must never load its clear candidate"
+        );
+        assert_eq!(
+            cleaned, 0,
+            "owning the tick without repairing anything adds nothing to the pass's cleaned total"
+        );
+        let survivor = crate::services::discord::inflight::load_inflight_state_read_only(
+            &provider,
+            channel.get(),
+        )
+        .expect("the live turn's inflight row must survive the tick");
+        assert_eq!(survivor.user_msg_id, user_msg.get());
+        assert!(
+            survivor.readopted_from_inflight,
+            "the readoption marker proves the reattach apply really ran on this tick"
+        );
+        // The mailbox authority the destructive branch would have torn down.
+        // (The runtime `DiscordSession` is deliberately not asserted here: the
+        // reattach apply legitimately re-registers it with the adopted row's
+        // session id.)
+        let mailbox = super::super::super::mailbox_snapshot(&shared, channel).await;
+        assert_eq!(mailbox.active_user_message_id, Some(user_msg));
+        assert!(mailbox.cancel_token.is_some());
+        assert!(!token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+        assert!(
+            !watcher_cancel.load(Ordering::Relaxed),
+            "the reused incumbent must survive the tick uncancelled"
+        );
+
+        crate::services::discord::inflight::clear_inflight_state(&provider, channel.get());
     }
 }
 

@@ -206,8 +206,11 @@ pub(super) fn max_attempts_per_window_for_snapshot(
 
 /// The two budget counters #5021 turns on: `attempts` is the reservations the
 /// current window still counts as consumed, and `consecutive_refunds` is the
-/// streak `refund_auto_heal_attempt` grows and `commit_auto_heal_attempt`
-/// clears.
+/// streak `refund_auto_heal_attempt` grows. Two settlements clear that streak:
+/// `commit_auto_heal_attempt` (a real transition, which also drops the pending
+/// retry window) and `record_auto_heal_confirm_failure`, which resets it to zero
+/// while opening its own `AUTO_HEAL_WINDOW_SECS` retry window and leaving the
+/// reservation consumed.
 #[cfg(test)]
 pub(super) struct AutoHealAttemptCounters {
     pub(super) attempts: u32,

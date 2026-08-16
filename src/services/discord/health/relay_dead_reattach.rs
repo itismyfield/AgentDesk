@@ -88,6 +88,34 @@ fn should_reattach_relay_dead_watcher(
     )
 }
 
+/// What the relay-dead reattach lane did with one stall-watchdog tick.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ReattachLaneOutcome {
+    /// This channel is not the lane's candidate, or the recovery call reported
+    /// nothing the lane can stand behind. The tick walks on into its remaining
+    /// branches.
+    Untouched,
+    /// The reattach reused a live incumbent. The lane still owns this tick, but
+    /// nothing was repaired.
+    HandledWithoutRepair,
+    /// The reattach reported a real transition.
+    Repaired,
+}
+
+impl ReattachLaneOutcome {
+    /// Whether the tick stops here. The stall-watchdog pass skips its remaining
+    /// branches — several of them destructive — for anything but `Untouched`.
+    pub(super) fn handled_tick(self) -> bool {
+        !matches!(self, Self::Untouched)
+    }
+
+    /// Whether the pass may add this channel to the `cleaned` total it logs.
+    /// Owning the tick is not the same as having repaired something.
+    pub(super) fn counts_as_cleaned(self) -> bool {
+        matches!(self, Self::Repaired)
+    }
+}
+
 pub(super) async fn try_apply(
     registry: &HealthRegistry,
     shared: Arc<SharedData>,
@@ -95,13 +123,13 @@ pub(super) async fn try_apply(
     channel_id: ChannelId,
     snapshot: &WatcherStateSnapshot,
     now_unix_secs: i64,
-) -> bool {
+) -> ReattachLaneOutcome {
     let Some(latest_activity_unix_nanos) = snapshot
         .tmux_session
         .as_deref()
         .map(crate::services::dispatched_sessions::latest_runtime_activity_unix_nanos)
     else {
-        return false;
+        return ReattachLaneOutcome::Untouched;
     };
     if !should_reattach_relay_dead_watcher(
         snapshot,
@@ -110,7 +138,7 @@ pub(super) async fn try_apply(
         now_unix_secs,
         registry.started_at_unix(),
     ) {
-        return false;
+        return ReattachLaneOutcome::Untouched;
     }
     #[cfg(test)]
     run_reattach_apply_hook_for_tests(ReattachApplyHookPoint::CandidateAccepted);
@@ -124,7 +152,7 @@ pub(super) async fn try_apply(
     )
     .await
     {
-        Ok(response) => reattach_lane_handled_tick(
+        Ok(response) => reattach_lane_outcome(
             response.applied,
             response.apply_result.as_ref().map(|result| result.status),
         ),
@@ -137,22 +165,32 @@ pub(super) async fn try_apply(
                 body = %error.body(),
                 "relay-dead watcher reattach skipped"
             );
-            false
+            ReattachLaneOutcome::Untouched
         }
     }
 }
 
-/// The stall-watchdog tick reads this as "the reattach lane handled this channel
-/// on this pass" and skips its remaining branches, several of which are
-/// destructive. #5021 stopped counting `reuse_existing_live_watcher` as an
-/// applied heal so the auto-heal budget can back off on a repeating no-op; that
-/// accounting correction must not, as a side effect, drop a live turn into those
-/// destructive branches. So the reuse status keeps the short-circuit it already
-/// had while its budget settles as a refund.
-fn reattach_lane_handled_tick(applied: bool, apply_status: Option<&str>) -> bool {
-    applied
-        || apply_status
-            .is_some_and(discord::relay_recovery::relay_recovery_status_reused_live_watcher)
+/// Split the recovery response into the two questions the stall-watchdog tick
+/// asks separately.
+///
+/// #5021 stopped counting `reuse_existing_live_watcher` as an applied heal so
+/// the auto-heal budget can back off on a repeating no-op; that accounting
+/// correction must not, as a side effect, drop a live turn into the destructive
+/// branches that follow this lane. So the reuse status keeps the short-circuit
+/// it already had while its budget settles as a refund — but it is not a repair,
+/// and #5396 stopped letting it inflate the pass's `cleaned` total, whose one
+/// production consumer is the `stall-watchdog (provider): cleaned=N` operator
+/// log line in `spawn_stall_watchdog`.
+fn reattach_lane_outcome(applied: bool, apply_status: Option<&str>) -> ReattachLaneOutcome {
+    if applied {
+        ReattachLaneOutcome::Repaired
+    } else if apply_status
+        .is_some_and(discord::relay_recovery::relay_recovery_status_reused_live_watcher)
+    {
+        ReattachLaneOutcome::HandledWithoutRepair
+    } else {
+        ReattachLaneOutcome::Untouched
+    }
 }
 
 #[cfg(test)]
@@ -266,15 +304,33 @@ mod tests {
     /// #5021: the budget correction is accounting-only. The relay-dead lane must
     /// still report the reuse no-op as handled so this tick keeps skipping the
     /// destructive branches that follow the reattach call.
+    ///
+    /// #5396 item 5: owning the tick is where that stops. The reuse no-op
+    /// repaired nothing, so it must not be added to the pass's `cleaned` total.
+    /// Making `HandledWithoutRepair` count as cleaned fails this test.
     #[test]
     fn reuse_no_op_keeps_the_relay_dead_tick_short_circuit() {
-        assert!(reattach_lane_handled_tick(
-            false,
-            Some("reuse_existing_live_watcher")
-        ));
-        assert!(reattach_lane_handled_tick(true, Some("reattached_watcher")));
-        assert!(!reattach_lane_handled_tick(false, Some("rebind_failed")));
-        assert!(!reattach_lane_handled_tick(false, None));
+        let reuse = reattach_lane_outcome(false, Some("reuse_existing_live_watcher"));
+        assert_eq!(reuse, ReattachLaneOutcome::HandledWithoutRepair);
+        assert!(reuse.handled_tick());
+        assert!(
+            !reuse.counts_as_cleaned(),
+            "a reused live incumbent repaired nothing and must not be counted cleaned"
+        );
+
+        let repaired = reattach_lane_outcome(true, Some("reattached_watcher"));
+        assert_eq!(repaired, ReattachLaneOutcome::Repaired);
+        assert!(repaired.handled_tick());
+        assert!(repaired.counts_as_cleaned());
+
+        for untouched in [
+            reattach_lane_outcome(false, Some("rebind_failed")),
+            reattach_lane_outcome(false, None),
+        ] {
+            assert_eq!(untouched, ReattachLaneOutcome::Untouched);
+            assert!(!untouched.handled_tick());
+            assert!(!untouched.counts_as_cleaned());
+        }
     }
 
     /// #5071 T3-A1 fixed mutation gate (c), fence site 1 of 2: the #5067
