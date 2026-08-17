@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
-import os
 import re
 import sys
 from collections import Counter
@@ -28,13 +27,17 @@ TEST_FILE_NAMES = {"integration_tests.rs", "tests.rs"}
 GIANT_FILE_REGISTRY = REPO_ROOT / "scripts" / "giant_file_registry.toml"
 GIANT_FILE_REGISTRY_DOC = GENERATED_DOCS_DIR / "giant-file-registry.md"
 GIANT_FILE_ISSUE_SNAPSHOT_MAX_AGE = timedelta(days=30)
-GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV = (
-    "GIANT_FILE_REGISTRY_ENFORCE_CLOSED_ISSUES"
-)
 GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST = (
     REPO_ROOT / "scripts" / "giant_file_closed_issue_transition_list.txt"
 )
-GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST_MAX = 80  # Ratchet: size can only shrink (slice B reduces)
+GIANT_FILE_ISSUE_RATCHET_KEYS = (
+    "closed_deadline_entries",
+    "transition_list_entries",
+)
+GIANT_FILE_ISSUE_RATCHET_WRITER = (
+    "python3 scripts/refresh_giant_file_issue_metadata.py && "
+    "git add scripts/giant_file_issue_metadata.json"
+)
 
 # Only whole test *modules* count as test LoC — inline `#[cfg(test)]` guards on
 # production struct fields, conditional logic, or test-only helper fns left in
@@ -934,7 +937,8 @@ def _is_real_decompose_issue(value: str) -> bool:
     return match is not None and value.strip() != _DECOMPOSE_ISSUE_SELF_REFERENCE
 
 
-def load_giant_file_issue_metadata() -> dict[int, dict[str, object]]:
+def load_giant_file_issue_snapshot(
+) -> tuple[dict[int, dict[str, object]], dict[str, int]]:
     """Load and freshness-check the issue snapshot used by the offline CI gate.
 
     The 30-day maximum age limits how long this checked-in snapshot can hide
@@ -951,8 +955,19 @@ def load_giant_file_issue_metadata() -> dict[int, dict[str, object]]:
         raise ParseError(f"invalid giant-file issue metadata: {error}") from error
     if not isinstance(payload, dict):
         raise ParseError("giant-file issue metadata must be a JSON object")
-    if payload.get("schema_version") != 1 or not isinstance(payload.get("issues"), list):
-        raise ParseError("giant-file issue metadata must use schema_version 1 and an issues list")
+    if payload.get("schema_version") != 2 or not isinstance(payload.get("issues"), list):
+        raise ParseError("giant-file issue metadata must use schema_version 2 and an issues list")
+    raw_ratchets = payload.get("ratchets")
+    if not isinstance(raw_ratchets, dict):
+        raise ParseError("giant-file issue metadata must include a ratchets object")
+    ratchets: dict[str, int] = {}
+    for key in GIANT_FILE_ISSUE_RATCHET_KEYS:
+        value = raw_ratchets.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ParseError(
+                f"giant-file issue metadata ratchets.{key} must be a non-negative integer"
+            )
+        ratchets[key] = value
     refreshed_at = payload.get("refreshed_at")
     if not isinstance(refreshed_at, str):
         raise ParseError("giant-file issue metadata must include a refreshed_at UTC timestamp")
@@ -1007,31 +1022,23 @@ def load_giant_file_issue_metadata() -> dict[int, dict[str, object]]:
         ):
             raise ParseError(f"invalid or duplicate giant-file issue metadata record: {issue!r}")
         issues[number] = issue
+    return issues, ratchets
+
+
+def load_giant_file_issue_metadata() -> dict[int, dict[str, object]]:
+    """Return checked-in open/closed issue truth after snapshot validation."""
+    issues, _ratchets = load_giant_file_issue_snapshot()
     return issues
 
 
-def closed_issue_enforcement_enabled() -> bool:
-    """Return whether closed issue pointers are fatal for this invocation."""
-    value = os.environ.get(GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV, "0")
-    if value in {"", "0"}:
-        return False
-    if value == "1":
-        return True
-    raise ParseError(
-        f"{GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV} must be unset, 0, or 1"
-    )
+def load_giant_file_issue_ratchets() -> dict[str, int]:
+    """Return checked-in closed-deadline and transition-list baselines."""
+    _issues, ratchets = load_giant_file_issue_snapshot()
+    return ratchets
 
 
 def load_giant_file_closed_issue_transition_list() -> set[str]:
-    """Load the ratchet list of registry entries (file paths) with closed decompose_issue.
-
-    This list is a ratchet: size can only shrink or stay same. Entries in this list
-    are permitted (with a warning) until slice B (#5234) processes them. Any NEW
-    closed-issue pointer not already in this list will cause CI to fail. Size
-    increase is fatal (ratchet enforcement).
-
-    Returns a set of file paths for O(1) membership checking.
-    """
+    """Load registry paths temporarily allowed to retain closed deadlines."""
     if not GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST.is_file():
         raise ParseError(
             f"giant-file closed-issue transition list missing: "
@@ -1046,15 +1053,42 @@ def load_giant_file_closed_issue_transition_list() -> set[str]:
         if line.startswith("src/"):
             allowed_paths.add(line)
 
-    # Ratchet enforcement: size can only shrink or stay same
-    if len(allowed_paths) > GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST_MAX:
-        raise ParseError(
-            f"giant-file closed-issue transition list has grown to {len(allowed_paths)} "
-            f"(max {GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST_MAX}); ratchet violation. "
-            f"Slice B must reduce this list; new entries cannot be added."
-        )
-
     return allowed_paths
+
+
+def giant_file_issue_ratchet_problems(
+    *,
+    closed_deadline_entries: int,
+    transition_list_entries: int,
+    baselines: dict[str, int],
+) -> list[str]:
+    """Describe any growth or unrecorded shrink against snapshot baselines."""
+    measured = {
+        "closed_deadline_entries": closed_deadline_entries,
+        "transition_list_entries": transition_list_entries,
+    }
+    labels = {
+        "closed_deadline_entries": "closed deadline entries",
+        "transition_list_entries": "closed-issue transition-list entries",
+    }
+    problems: list[str] = []
+    for key in GIANT_FILE_ISSUE_RATCHET_KEYS:
+        current = measured[key]
+        baseline = baselines[key]
+        if current > baseline:
+            problems.append(
+                f"giant-file {labels[key]} grew from snapshot baseline {baseline} "
+                f"to {current}; ratchet violation. The baseline is recorded in "
+                f"{rel_posix(GIANT_FILE_ISSUE_METADATA)} and the writer does not raise it; "
+                "resolve the newly closed deadline or transition-list addition"
+            )
+        elif current < baseline:
+            problems.append(
+                f"giant-file {labels[key]} shrank from snapshot baseline {baseline} "
+                f"to {current}; record the lower baseline with "
+                f"`{GIANT_FILE_ISSUE_RATCHET_WRITER}`"
+            )
+    return problems
 
 
 def validate_decompose_issue_metadata(
@@ -1116,7 +1150,7 @@ def categorize_closed_issue_problem(
     dead pointer (fatal).
     """
     if path in transition_list:
-        return True, f"WARNING: {problem}; kept in transition until slice B (#5234)"
+        return True, f"WARNING: {problem}; kept in transition pending deadline reclassification"
     return False, f"FATAL: {problem}; fix the decompose_issue to reference an open GitHub issue, or remove the entry and decompose the file"
 
 
@@ -1239,6 +1273,7 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
     grandfathered, entries, baseline_paths = load_giant_file_registry()
     issue_metadata = load_giant_file_issue_metadata()
     transition_list = load_giant_file_closed_issue_transition_list()
+    issue_ratchets = load_giant_file_issue_ratchets()
     prod_giants = {
         entry.file_path: entry.prod_line_count
         for entry in modules
@@ -1248,6 +1283,7 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
     problems: list[str] = []
     closed_issue_allowed_problems: list[str] = []
     closed_issue_forbidden_problems: list[str] = []
+    closed_deadline_entries = 0
     seen: set[str] = set()
 
     # Closed baseline: `grandfathered` must be a subset of the frozen
@@ -1316,6 +1352,7 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
                     path, decompose_issue, issue_metadata
                 )
                 if closed_issue_problem:
+                    closed_deadline_entries += 1
                     is_allowed, categorized_problem = categorize_closed_issue_problem(
                         path, closed_issue_problem, transition_list
                     )
@@ -1396,12 +1433,6 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
             "to an explicit [[entry]] decision: " + ", ".join(sorted(awaiting_backfill))
         )
 
-    # #5234 slice 1 reports every dead deadline without making unrelated PRs
-    # fail while AC3 still has entry-specific disposition decisions open.
-    # Enforce ratchet on closed-issue pointers (#5234):
-    #   - Entries in the transition list (slice A) are warned but allowed (transition to slice B)
-    #   - NEW entries not in the list are always fatal (no slip-through of unexpected dead pointers)
-
     # Validate transition list entries exist in registry (no orphans)
     if transition_list:
         registry_paths = {reg.file_path for reg in registrations}
@@ -1412,14 +1443,22 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
                 "remove it from the transition list or add it to the registry"
             )
 
+    problems.extend(
+        giant_file_issue_ratchet_problems(
+            closed_deadline_entries=closed_deadline_entries,
+            transition_list_entries=len(transition_list),
+            baselines=issue_ratchets,
+        )
+    )
+
     if closed_issue_forbidden_problems:
         problems.extend(sorted(closed_issue_forbidden_problems))
     if closed_issue_allowed_problems:
         for problem in sorted(closed_issue_allowed_problems):
             print(f"giant-file registry: {problem}", file=sys.stderr)
         print(
-            "giant-file: 80 registry entries have closed decompose_issue deadlines; "
-            "slice B (#5234) must process each entry (keep-alive, grandfather, or retire)",
+            f"giant-file: {closed_deadline_entries} registry entries have closed "
+            "decompose_issue deadlines and remain on the checked-in transition list",
             file=sys.stderr,
         )
 

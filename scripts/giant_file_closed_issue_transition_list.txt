@@ -1,21 +1,15 @@
-# Giant-file Closed-Issue Transition List — Slice A
+# Giant-file Closed-Issue Transition List — Ratchet Baseline
 
-This file enumerates the 80 registry entries (file paths) that currently point
-to closed decompose_issue deadlines (#4710, #4711, #4712). The entry count per issue
-is a ratchet: the list size can only decrease or stay the same as slice B (#5234)
-processes each entry (decide to keep-alive, grandfather, or retire).
+This file enumerates registry entries (file paths) that currently point to
+closed decompose_issue deadlines (#4710, #4711, #4712). Its measured count is
+ratcheted against `scripts/giant_file_issue_metadata.json`.
 
 Any NEW closed-issue pointer not already in this list will cause CI to fail.
-Entries already listed here are permitted (with a warning) until processed in slice B.
+Entries already listed here are permitted (with a warning) until their deadlines are
+reclassified in a follow-up.
 
-CONTRACT: slice B must reduce this list to zero by handling all 80 entries.
-Do not add entries to this list—only remove them.
-
-COUNTS (slice A snapshot):
-  #4710: 36 entries
-  #4711: 23 entries
-  #4712: 21 entries
-  Total: 80 entries
+When entries are removed, run the snapshot writer to lower the checked-in
+baseline. Growth above that baseline is rejected; the writer never raises it.
 
 ---
 
@@ -107,4 +101,3 @@ src/services/discord/turn_bridge/stream_tick.rs
 src/services/discord/turn_finalizer.rs
 src/services/discord_config_audit.rs
 src/services/tmux_common.rs
-
