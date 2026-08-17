@@ -56,6 +56,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/commands/inspect/tests.rs",
         "src/services/discord/formatting/replace_long_message_tests.rs",
         "src/services/discord/formatting/status_panel_v2_formatter_tests.rs",
+        "src/services/discord/health/reachability/composite_tests.rs",
         "src/services/discord/health/reachability/ledger_tests.rs",
         "src/services/discord/health/reachability/obligation_tests.rs",
         "src/services/discord/inflight/save_store/bridge_entry_guard_tests.rs",
