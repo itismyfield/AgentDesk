@@ -283,7 +283,7 @@ async fn persist_iteration_outcome_pg_rolls_back_when_card_is_inactive() {
 }
 
 #[tokio::test]
-async fn materialize_dedupe_prefers_ready_child_over_review_parent() {
+async fn materialize_dedupe_prefers_ready_child_over_review_parent_pg() {
     let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
     let dedupe_key = "candidate-review:dedupe-tie";

@@ -27,7 +27,7 @@ use self::validation::{
 
 #[tokio::test]
 #[ignore = "requires a local PostgreSQL test server; run scripts/e2e/auto-queue-preflight.sh"]
-async fn auto_queue_preflight_fixture_sandbox_roundtrip() -> Result<(), String> {
+async fn auto_queue_preflight_fixture_sandbox_roundtrip_pg() -> Result<(), String> {
     let fixture_path = fixture_path_from_env();
     let report_path = report_path_from_env();
     let fixture = load_fixture(&fixture_path)

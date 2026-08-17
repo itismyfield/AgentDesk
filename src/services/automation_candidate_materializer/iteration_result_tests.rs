@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn submit_iteration_result_rejects_cards_outside_active_loop_state() {
+async fn submit_iteration_result_rejects_cards_outside_active_loop_state_pg() {
     let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
     let card_id = "review-candidate-card";
@@ -73,7 +73,7 @@ async fn submit_iteration_result_rejects_cards_outside_active_loop_state() {
 }
 
 #[tokio::test]
-async fn prepare_worktree_rejects_cards_outside_active_loop_state() {
+async fn prepare_worktree_rejects_cards_outside_active_loop_state_pg() {
     let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
     let card_id = "review-worktree-card";
@@ -118,7 +118,7 @@ async fn prepare_worktree_rejects_cards_outside_active_loop_state() {
 }
 
 #[tokio::test]
-async fn prepare_worktree_rejects_future_iterations_before_touching_git() {
+async fn prepare_worktree_rejects_future_iterations_before_touching_git_pg() {
     let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
     let card_id = "future-worktree-card";

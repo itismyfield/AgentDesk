@@ -513,7 +513,7 @@ async fn boot_reconcile_terminalizes_cancelled_run_entry_after_partial_legacy_ca
 }
 
 #[tokio::test]
-async fn restart_recovery_does_not_repost_prior_typed_dispatch_delivery() {
+async fn restart_recovery_does_not_repost_prior_typed_dispatch_delivery_pg() {
     let Some(pg_db) = PgRecoveryTestDatabase::create().await else {
         return;
     };
@@ -668,7 +668,7 @@ async fn restart_recovery_does_not_repost_prior_typed_dispatch_delivery() {
 }
 
 #[tokio::test]
-async fn runtime_reconcile_auto_queue_pending_delivery_orphans_requeues_notify_outbox() {
+async fn runtime_reconcile_auto_queue_pending_delivery_orphans_requeues_notify_outbox_pg() {
     let Some(pg_db) = PgRecoveryTestDatabase::create().await else {
         return;
     };
@@ -1050,7 +1050,7 @@ async fn boot_reconcile_pg_refires_missing_review_dispatch() {
 }
 
 #[tokio::test]
-async fn completed_queue_review_drift_reconcile_promotes_only_stale_done_entries() {
+async fn completed_queue_review_drift_reconcile_promotes_only_stale_done_entries_pg() {
     let Some(pg_db) = PgRecoveryTestDatabase::create().await else {
         return;
     };

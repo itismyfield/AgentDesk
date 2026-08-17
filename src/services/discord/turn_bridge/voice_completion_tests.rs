@@ -92,7 +92,7 @@ async fn background_completion_target_returns_marker_recorded_voice_channel() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn background_completion_target_prefers_voice_turn_link_by_dispatch_id() {
+async fn background_completion_target_prefers_voice_turn_link_by_dispatch_id_pg() {
     let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
     let user_msg_id = MessageId::new(7_350_001);
@@ -130,7 +130,7 @@ async fn background_completion_target_prefers_voice_turn_link_by_dispatch_id() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn voice_turn_link_playback_lookup_falls_back_to_announce_message() {
+async fn voice_turn_link_playback_lookup_falls_back_to_announce_message_pg() {
     let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
     let user_msg_id = MessageId::new(7_360_001);
@@ -297,7 +297,7 @@ async fn background_completion_target_falls_back_to_durable_pg_row() {
 /// runs. The pre-publish durable reservation plus prompt correlation
 /// marker must still let terminal delivery claim the handoff exactly once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn background_completion_target_claims_pre_publish_reservation_by_correlation() {
+async fn background_completion_target_claims_pre_publish_reservation_by_correlation_pg() {
     let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
     let user_msg_id = MessageId::new(7_750_001);
@@ -427,7 +427,7 @@ async fn background_completion_target_pg_authoritative_under_two_local_holders()
 /// memory. Verify the in-memory expiry roughly matches the remaining
 /// durable TTL rather than getting reset.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rehydrate_preserves_remaining_ttl_for_aged_rows() {
+async fn rehydrate_preserves_remaining_ttl_for_aged_rows_pg() {
     use crate::voice::announce_meta::{
         DURABLE_HANDOFF_META_TTL_SECS, VoiceBackgroundHandoffMeta, persist_handoff_durable,
         rehydrate_handoffs_from_pg,
@@ -487,7 +487,7 @@ async fn rehydrate_preserves_remaining_ttl_for_aged_rows() {
 ///   3. The `voice_background_handoff_local_only_fallback` warn fires
 ///      and carries the marker context.
 #[tokio::test(flavor = "current_thread")]
-async fn background_completion_target_consumes_legacy_flagged_local_only_fallback() {
+async fn background_completion_target_consumes_legacy_flagged_local_only_fallback_pg() {
     use std::{
         io::{self, Write},
         sync::{Arc, Mutex},
