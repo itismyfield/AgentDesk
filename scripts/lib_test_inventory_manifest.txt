@@ -2495,6 +2495,7 @@ services::discord::health::reachability::tail::tests::in_place_truncation_rewind
 services::discord::health::reachability::tail::tests::incremental_read_returns_only_the_new_bytes_and_advances
 services::discord::health::reachability::tail::tests::one_tick_pins_the_read_cap_boundary
 services::discord::health::reachability::tail::tests::rotation_to_a_different_inode_diverges
+services::discord::health::reachability::tail::tests::the_read_cap_measures_the_unread_remainder_not_the_file_length
 services::discord::health::reachability::verdict::tests::every_unknown_reason_is_named_exactly_once
 services::discord::health::reachability::verdict::tests::no_verdict_authorizes_redelivery_or_destruction
 services::discord::health::reachability::verdict::tests::only_reachable_permits_green_health

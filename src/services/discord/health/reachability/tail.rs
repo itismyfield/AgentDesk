@@ -311,6 +311,49 @@ mod tests {
         }
     }
 
+    /// The cap bounds the UNREAD REMAINDER, not the file.
+    ///
+    /// Every case above starts at offset 0, where `len - next_offset` and `len`
+    /// are the same number, so the whole boundary is pinned in the one position
+    /// that cannot tell them apart. Measured: with the cases above as the only
+    /// coverage, reading the cap against `len` instead of `available` leaves the
+    /// suite green. A second tick — the shape every real tick after the first
+    /// has — separates them, and re-pins `>` against `>=` at that offset.
+    #[test]
+    fn the_read_cap_measures_the_unread_remainder_not_the_file_length() {
+        let dir = TempDir::new().expect("tempdir");
+        // Consumed by an earlier tick, so `len` overshoots `available` by this
+        // much in every case below.
+        const CONSUMED: u64 = 10;
+        let cases = [
+            (TAIL_READ_CAP_BYTES - 1, false),
+            (TAIL_READ_CAP_BYTES, false),
+            (TAIL_READ_CAP_BYTES + 1, true),
+        ];
+
+        for (remaining, expected_truncated) in cases {
+            let path = dir.path().join(format!("transcript-{remaining}.jsonl"));
+            write(&path, &vec![b'x'; (CONSUMED + remaining) as usize]);
+
+            let TailOutcome::Read {
+                bytes,
+                start,
+                end,
+                cap_truncated,
+            } = read_incremental(&path, cursor_at(&path, CONSUMED))
+            else {
+                panic!("expected a read with {remaining} bytes remaining");
+            };
+            let expected_read = remaining.min(TAIL_READ_CAP_BYTES);
+            assert_eq!(bytes.len() as u64, expected_read);
+            assert_eq!((start, end), (CONSUMED, CONSUMED + expected_read));
+            assert_eq!(
+                cap_truncated, expected_truncated,
+                "unexpected truncation with {remaining} bytes remaining"
+            );
+        }
+    }
+
     #[test]
     fn cap_truncation_is_read_truncated_unknown() {
         let outcome = TailOutcome::Read {
