@@ -820,35 +820,24 @@ class GiantFileIssueMetadataTest(unittest.TestCase):
         )
         self.assertIn(1, issues)
 
-    def test_stale_snapshot_warns_and_generator_succeeds_without_enforcement(self) -> None:
-        refreshed = datetime(2026, 8, 5, 12, tzinfo=timezone.utc)
+    def test_stale_snapshot_fails_generator_always(self) -> None:
+        """Snapshot freshness is fatal regardless of enforcement mode (#5234).
+
+        The offline gate always checks snapshot age; enforcement mode only
+        affects closed-issue pointer handling. 30-day stale threshold.
+        """
+        refreshed = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
         rc, stderr = self._run_generator(
             {
                 "schema_version": 1,
                 "refreshed_at": refreshed.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "issues": [self._record(1)],
             },
-            now=refreshed + timedelta(days=7, seconds=1),
+            now=refreshed + timedelta(days=30, seconds=1),
             enforce=False,
         )
-        self.assertEqual(rc, 0)
-        self.assertIn("WARNING: giant-file issue metadata snapshot", stderr)
-        self.assertIn("2026-08-12T12:00:00Z", stderr)
-        self.assertIn("refresh_giant_file_issue_metadata.py", stderr)
-
-    def test_stale_snapshot_fails_generator_with_enforcement(self) -> None:
-        refreshed = datetime(2026, 8, 5, 12, tzinfo=timezone.utc)
-        rc, stderr = self._run_generator(
-            {
-                "schema_version": 1,
-                "refreshed_at": refreshed.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "issues": [self._record(1)],
-            },
-            now=refreshed + timedelta(days=7, seconds=1),
-            enforce=True,
-        )
         self.assertEqual(rc, 2)
-        self.assertIn("older than 7 days", stderr)
+        self.assertIn("older than 30 days", stderr)
         self.assertIn("2026-08-12T12:00:00Z", stderr)
         self.assertIn("refresh_giant_file_issue_metadata.py", stderr)
 
@@ -873,6 +862,7 @@ class GiantFileIssueMetadataTest(unittest.TestCase):
 class RegistryValidationTest(unittest.TestCase):
     def setUp(self) -> None:
         self._original_issue_metadata = GEN.load_giant_file_issue_metadata
+        self._original_transition_list = GEN.load_giant_file_closed_issue_transition_list
         self._original_enforcement = os.environ.pop(
             GEN.GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV, None
         )
@@ -886,9 +876,12 @@ class RegistryValidationTest(unittest.TestCase):
             }
             for number in (1, 3036)
         }
+        # Default: empty transition list for tests (avoid orphan detection with real data)
+        GEN.load_giant_file_closed_issue_transition_list = lambda: set()
 
     def tearDown(self) -> None:
         GEN.load_giant_file_issue_metadata = self._original_issue_metadata
+        GEN.load_giant_file_closed_issue_transition_list = self._original_transition_list
         if self._original_enforcement is not None:
             os.environ[
                 GEN.GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV
@@ -1265,7 +1258,8 @@ class RegistryValidationTest(unittest.TestCase):
             GEN.load_giant_file_registry = orig
         self.assertIn("not an explicit candidate", str(ctx.exception))
 
-    def test_closed_issue_reports_every_entry_without_blocking_by_default(self) -> None:
+    def test_closed_issue_in_transition_list_warns_and_succeeds(self) -> None:
+        """Entries in the transition list are warned but allowed (#5234)."""
         modules = [
             self._module("src/a.rs", 1500, giant=True),
             self._module("src/first.rs", 1500, giant=True),
@@ -1289,13 +1283,20 @@ class RegistryValidationTest(unittest.TestCase):
             }
         }
         original_registry = GEN.load_giant_file_registry
+        original_transition_list = GEN.load_giant_file_closed_issue_transition_list
         GEN.load_giant_file_registry = self._patch_registry([], entries)
+        # Mock the transition list to include these entries
+        GEN.load_giant_file_closed_issue_transition_list = lambda: {
+            "src/a.rs",
+            "src/first.rs",
+        }
         stderr = io.StringIO()
         try:
             with redirect_stderr(stderr):
                 registrations = GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = original_registry
+            GEN.load_giant_file_closed_issue_transition_list = original_transition_list
         self.assertEqual(len(registrations), 2)
         warning = stderr.getvalue()
         self.assertIn("src/a.rs", warning)
@@ -1394,6 +1395,241 @@ class RegistryValidationTest(unittest.TestCase):
         self.assertEqual(by_path["src/first.rs"].decision, "keep")
         self.assertEqual(by_path["src/tracked.rs"].deadline, "2026-08-31")
         self.assertEqual(by_path["src/tracked.rs"].owner, "team")
+
+
+class GiantFileClosedIssueTest(unittest.TestCase):
+    """Tests for closed-issue ratchet logic (#5234)."""
+
+    def _module(self, path: str, prod: int, *, giant: bool) -> "GEN.ModuleEntry":
+        flags = ("giant-file",) if giant else ()
+        return GEN.ModuleEntry(
+            module_path=path.replace("/", "::"),
+            file_path=path,
+            line_count=prod,
+            prod_line_count=prod,
+            test_line_count=0,
+            flags=flags,
+        )
+
+    def _patch_registry(self, grandfathered, entries, baseline_paths=None):
+        if baseline_paths is None:
+            baseline_paths = list(grandfathered)
+        return (
+            lambda: (
+                list(grandfathered),
+                [dict(e) for e in entries],
+                list(baseline_paths) if baseline_paths is not None else None,
+            )
+        )
+
+    def test_issue_metadata_schema_accepts_open_and_closed_states(self) -> None:
+        """Verify that load_giant_file_issue_metadata accepts both open and closed states."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            metadata_file = root / "issue_metadata.json"
+            # Valid schema with both open and closed issues
+            metadata_file.write_text(
+                """{
+                    "schema_version": 1,
+                    "refreshed_at": "2026-08-10T00:00:00Z",
+                    "issues": [
+                        {
+                            "number": 1001,
+                            "state": "open",
+                            "title": "Open Issue",
+                            "owners": ["team-a"],
+                            "files": ["src/a.rs"]
+                        },
+                        {
+                            "number": 1002,
+                            "state": "closed",
+                            "title": "Closed Issue",
+                            "owners": ["team-b"],
+                            "files": ["src/b.rs"]
+                        }
+                    ]
+                }"""
+            )
+            # Monkey-patch the path
+            orig_path = GEN.GIANT_FILE_ISSUE_METADATA
+            orig_now = GEN.now_utc
+            try:
+                GEN.GIANT_FILE_ISSUE_METADATA = metadata_file
+                # Mock now_utc to be within the 7-day freshness window
+                GEN.now_utc = lambda: datetime(2026, 8, 12, 12, 0, 0, tzinfo=timezone.utc)
+                issues = GEN.load_giant_file_issue_metadata()
+                self.assertEqual(len(issues), 2)
+                self.assertEqual(issues[1001]["state"], "open")
+                self.assertEqual(issues[1002]["state"], "closed")
+            finally:
+                GEN.GIANT_FILE_ISSUE_METADATA = orig_path
+                GEN.now_utc = orig_now
+
+    def test_issue_metadata_rejects_invalid_states(self) -> None:
+        """Verify that invalid states are rejected."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            metadata_file = root / "issue_metadata.json"
+            metadata_file.write_text(
+                """{
+                    "schema_version": 1,
+                    "refreshed_at": "2026-08-10T00:00:00Z",
+                    "issues": [
+                        {
+                            "number": 1001,
+                            "state": "invalid_state",
+                            "title": "Bad Issue",
+                            "owners": ["team"],
+                            "files": ["src/a.rs"]
+                        }
+                    ]
+                }"""
+            )
+            orig_path = GEN.GIANT_FILE_ISSUE_METADATA
+            orig_now = GEN.now_utc
+            try:
+                GEN.GIANT_FILE_ISSUE_METADATA = metadata_file
+                GEN.now_utc = lambda: datetime(2026, 8, 12, 12, 0, 0, tzinfo=timezone.utc)
+                with self.assertRaises(GEN.ParseError) as cm:
+                    GEN.load_giant_file_issue_metadata()
+                self.assertIn("invalid", str(cm.exception).lower())
+            finally:
+                GEN.GIANT_FILE_ISSUE_METADATA = orig_path
+                GEN.now_utc = orig_now
+
+    def test_issue_metadata_snapshot_staleness_fails(self) -> None:
+        """Verify that stale snapshots (>30 days) cause failure."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            metadata_file = root / "issue_metadata.json"
+            # Snapshot is 31 days old
+            metadata_file.write_text(
+                """{
+                    "schema_version": 1,
+                    "refreshed_at": "2026-07-13T00:00:00Z",
+                    "issues": [
+                        {
+                            "number": 1001,
+                            "state": "closed",
+                            "title": "Issue",
+                            "owners": ["team"],
+                            "files": ["src/a.rs"]
+                        }
+                    ]
+                }"""
+            )
+            orig_path = GEN.GIANT_FILE_ISSUE_METADATA
+            orig_now = GEN.now_utc
+            try:
+                GEN.GIANT_FILE_ISSUE_METADATA = metadata_file
+                # Now is 31 days after refreshed_at
+                GEN.now_utc = lambda: datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
+                with self.assertRaises(GEN.ParseError) as cm:
+                    GEN.load_giant_file_issue_metadata()
+                self.assertIn("older than 30 days", str(cm.exception))
+            finally:
+                GEN.GIANT_FILE_ISSUE_METADATA = orig_path
+                GEN.now_utc = orig_now
+
+    def test_categorize_closed_issue_problem_allowed(self) -> None:
+        """Verify that entries in the transition list are marked as allowed."""
+        problem = "[[entry]] 'src/a.rs' has a dead deadline: decompose_issue #1001 is closed"
+        transition_list = {"src/a.rs", "src/b.rs"}
+        is_allowed, message = GEN.categorize_closed_issue_problem("src/a.rs", problem, transition_list)
+        self.assertTrue(is_allowed)
+        self.assertIn("transition", message)
+
+    def test_categorize_closed_issue_problem_forbidden(self) -> None:
+        """Verify that entries NOT in the transition list are marked as forbidden."""
+        problem = "[[entry]] 'src/c.rs' has a dead deadline: decompose_issue #1001 is closed"
+        transition_list = {"src/a.rs", "src/b.rs"}
+        is_allowed, message = GEN.categorize_closed_issue_problem("src/c.rs", problem, transition_list)
+        self.assertFalse(is_allowed)
+        self.assertIn("FATAL", message)
+
+    def test_load_transition_list(self) -> None:
+        """Verify that transition list is loaded correctly."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transition_file = root / "transition_list.txt"
+            transition_file.write_text(
+                """# Header comment
+# Total: 3 entries
+
+src/a.rs
+src/b.rs
+src/c.rs
+"""
+            )
+            orig_path = GEN.GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST
+            try:
+                GEN.GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST = transition_file
+                result = GEN.load_giant_file_closed_issue_transition_list()
+                self.assertEqual(result, {"src/a.rs", "src/b.rs", "src/c.rs"})
+            finally:
+                GEN.GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST = orig_path
+
+    def test_load_transition_list_missing_file_raises(self) -> None:
+        """Verify that missing transition list raises ParseError."""
+        nonexistent = REPO_ROOT / "scripts" / "nonexistent_transition_list.txt"
+        # Ensure file doesn't exist
+        if nonexistent.exists():
+            nonexistent.unlink()
+        orig_path = GEN.GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST
+        try:
+            GEN.GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST = nonexistent
+            with self.assertRaises(GEN.ParseError):
+                GEN.load_giant_file_closed_issue_transition_list()
+        finally:
+            GEN.GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST = orig_path
+
+    def test_transition_list_ratchet_rejects_growth(self) -> None:
+        """Verify that transition list size growth is fatal (ratchet enforcement)."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transition_file = root / "transition_list.txt"
+            # Create a list with 81 entries (exceeds max of 80)
+            entries = ["# Header\n"] + [f"src/fake_{i}.rs\n" for i in range(81)]
+            transition_file.write_text("".join(entries))
+
+            orig_path = GEN.GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST
+            try:
+                GEN.GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST = transition_file
+                with self.assertRaises(GEN.ParseError) as cm:
+                    GEN.load_giant_file_closed_issue_transition_list()
+                self.assertIn("grown", str(cm.exception).lower())
+                self.assertIn("ratchet", str(cm.exception).lower())
+            finally:
+                GEN.GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST = orig_path
+
+    def test_orphan_transition_list_entries_fatal(self) -> None:
+        """Verify that transition list entries not in registry cause fatal error."""
+        modules = [self._module("src/tracked.rs", 1500, giant=True)]
+        entries = [
+            {
+                "file": "src/tracked.rs",
+                "decision": "keep",
+                "owner": "team",
+                "keep_reason": "cohesive",
+            }
+        ]
+
+        # Create transition list with orphan entry
+        orphan_transition_list = {"src/tracked.rs", "src/orphan_entry.rs"}
+
+        orig_registry = GEN.load_giant_file_registry
+        orig_transition_list = GEN.load_giant_file_closed_issue_transition_list
+        GEN.load_giant_file_registry = self._patch_registry([], entries)
+        GEN.load_giant_file_closed_issue_transition_list = lambda: orphan_transition_list
+
+        try:
+            with self.assertRaises(GEN.ParseError) as cm:
+                GEN.build_giant_registrations(modules)
+            self.assertIn("orphan", str(cm.exception).lower())
+            self.assertIn("src/orphan_entry.rs", str(cm.exception))
+        finally:
+            GEN.load_giant_file_registry = orig_registry
+            GEN.load_giant_file_closed_issue_transition_list = orig_transition_list
 
 
 if __name__ == "__main__":

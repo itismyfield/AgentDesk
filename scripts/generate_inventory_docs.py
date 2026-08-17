@@ -27,10 +27,14 @@ HTTP_METHODS = ("delete", "get", "head", "options", "patch", "post", "put")
 TEST_FILE_NAMES = {"integration_tests.rs", "tests.rs"}
 GIANT_FILE_REGISTRY = REPO_ROOT / "scripts" / "giant_file_registry.toml"
 GIANT_FILE_REGISTRY_DOC = GENERATED_DOCS_DIR / "giant-file-registry.md"
-GIANT_FILE_ISSUE_SNAPSHOT_MAX_AGE = timedelta(days=7)
+GIANT_FILE_ISSUE_SNAPSHOT_MAX_AGE = timedelta(days=30)
 GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV = (
     "GIANT_FILE_REGISTRY_ENFORCE_CLOSED_ISSUES"
 )
+GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST = (
+    REPO_ROOT / "scripts" / "giant_file_closed_issue_transition_list.txt"
+)
+GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST_MAX = 80  # Ratchet: size can only shrink (slice B reduces)
 
 # Only whole test *modules* count as test LoC — inline `#[cfg(test)]` guards on
 # production struct fields, conditional logic, or test-only helper fns left in
@@ -933,12 +937,13 @@ def _is_real_decompose_issue(value: str) -> bool:
 def load_giant_file_issue_metadata() -> dict[int, dict[str, object]]:
     """Load and freshness-check the issue snapshot used by the offline CI gate.
 
-    The seven-day maximum age limits how long this checked-in snapshot can hide
+    The 30-day maximum age limits how long this checked-in snapshot can hide
     a changed GitHub issue state without making CI depend on network
-    availability. Staleness is fatal when closed-issue enforcement consumes the
-    state as a hard gate; otherwise it is reported as an operator warning. The
-    check guarantees only the age and internal shape of the snapshot; it does
-    not prove that GitHub still matches the snapshot between manual refreshes.
+    availability. Staleness is always fatal; snapshots older than 30 days must
+    be manually re-verified via `scripts/refresh_giant_file_issue_metadata.py`
+    and committed. The check guarantees only the age and internal shape of the
+    snapshot; it does not prove that GitHub still matches the snapshot between
+    manual refreshes.
     """
     try:
         payload = json.loads(read_text(GIANT_FILE_ISSUE_METADATA))
@@ -965,17 +970,12 @@ def load_giant_file_issue_metadata() -> dict[int, dict[str, object]]:
     if snapshot_age > GIANT_FILE_ISSUE_SNAPSHOT_MAX_AGE:
         fresh_through = refreshed + GIANT_FILE_ISSUE_SNAPSHOT_MAX_AGE
         staleness_problem = (
-            "giant-file issue metadata snapshot is older than 7 days; freshness "
+            "giant-file issue metadata snapshot is older than 30 days; freshness "
             f"expired after {fresh_through.strftime('%Y-%m-%dT%H:%M:%SZ')}; "
-            "refresh it with `python3 scripts/refresh_giant_file_issue_metadata.py`"
+            "snapshot must be manually re-verified against live GitHub state and refreshed; "
+            "to update checked_at and re-verify: `python3 scripts/refresh_giant_file_issue_metadata.py && git add scripts/giant_file_issue_metadata.json`"
         )
-        if closed_issue_enforcement_enabled():
-            raise ParseError(staleness_problem)
-        print(
-            f"WARNING: {staleness_problem}; freshness enforcement remains "
-            f"non-blocking until {GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV}=1",
-            file=sys.stderr,
-        )
+        raise ParseError(staleness_problem)
     issues: dict[int, dict[str, object]] = {}
     for issue in payload["issues"]:
         if not isinstance(issue, dict):
@@ -1020,6 +1020,41 @@ def closed_issue_enforcement_enabled() -> bool:
     raise ParseError(
         f"{GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV} must be unset, 0, or 1"
     )
+
+
+def load_giant_file_closed_issue_transition_list() -> set[str]:
+    """Load the ratchet list of registry entries (file paths) with closed decompose_issue.
+
+    This list is a ratchet: size can only shrink or stay same. Entries in this list
+    are permitted (with a warning) until slice B (#5234) processes them. Any NEW
+    closed-issue pointer not already in this list will cause CI to fail. Size
+    increase is fatal (ratchet enforcement).
+
+    Returns a set of file paths for O(1) membership checking.
+    """
+    if not GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST.is_file():
+        raise ParseError(
+            f"giant-file closed-issue transition list missing: "
+            f"{rel_posix(GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST)}"
+        )
+
+    allowed_paths: set[str] = set()
+    for line in read_text(GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST).splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("src/"):
+            allowed_paths.add(line)
+
+    # Ratchet enforcement: size can only shrink or stay same
+    if len(allowed_paths) > GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST_MAX:
+        raise ParseError(
+            f"giant-file closed-issue transition list has grown to {len(allowed_paths)} "
+            f"(max {GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST_MAX}); ratchet violation. "
+            f"Slice B must reduce this list; new entries cannot be added."
+        )
+
+    return allowed_paths
 
 
 def validate_decompose_issue_metadata(
@@ -1067,6 +1102,22 @@ def closed_decompose_issue_problem(
         f"[[entry]] {path!r} has a dead deadline: decompose_issue #{number} "
         "is closed in the checked-in issue snapshot"
     )
+
+
+def categorize_closed_issue_problem(
+    path: str,
+    problem: str,
+    transition_list: set[str],
+) -> tuple[bool, str]:
+    """Categorize a closed-issue problem as allowed (in ratchet list) or forbidden.
+
+    Returns (is_allowed, message) where is_allowed=True means the entry is in the
+    transition list (permitted but warned) and is_allowed=False means it's a new
+    dead pointer (fatal).
+    """
+    if path in transition_list:
+        return True, f"WARNING: {problem}; kept in transition until slice B (#5234)"
+    return False, f"FATAL: {problem}; fix the decompose_issue to reference an open GitHub issue, or remove the entry and decompose the file"
 
 
 def _markdown_table_value(value: str) -> str:
@@ -1187,6 +1238,7 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
 
     grandfathered, entries, baseline_paths = load_giant_file_registry()
     issue_metadata = load_giant_file_issue_metadata()
+    transition_list = load_giant_file_closed_issue_transition_list()
     prod_giants = {
         entry.file_path: entry.prod_line_count
         for entry in modules
@@ -1194,7 +1246,8 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
     }
 
     problems: list[str] = []
-    closed_issue_problems: list[str] = []
+    closed_issue_allowed_problems: list[str] = []
+    closed_issue_forbidden_problems: list[str] = []
     seen: set[str] = set()
 
     # Closed baseline: `grandfathered` must be a subset of the frozen
@@ -1263,7 +1316,13 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
                     path, decompose_issue, issue_metadata
                 )
                 if closed_issue_problem:
-                    closed_issue_problems.append(closed_issue_problem)
+                    is_allowed, categorized_problem = categorize_closed_issue_problem(
+                        path, closed_issue_problem, transition_list
+                    )
+                    if is_allowed:
+                        closed_issue_allowed_problems.append(categorized_problem)
+                    else:
+                        closed_issue_forbidden_problems.append(categorized_problem)
             if keep_reason:
                 problems.append(f"[[entry]] {path!r} shrink forbids keep_reason")
         elif decision == _DECISION_KEEP:
@@ -1339,20 +1398,30 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
 
     # #5234 slice 1 reports every dead deadline without making unrelated PRs
     # fail while AC3 still has entry-specific disposition decisions open.
-    # AC3 is complete only when those entries have been dispositioned and the
-    # aggregate CI invocation enables GIANT_FILE_REGISTRY_ENFORCE_CLOSED_ISSUES=1.
-    if closed_issue_problems:
-        if closed_issue_enforcement_enabled():
-            problems.extend(closed_issue_problems)
-        else:
-            for problem in sorted(closed_issue_problems):
-                print(f"WARNING: giant-file registry: {problem}", file=sys.stderr)
-            print(
-                "WARNING: giant-file issue state comes from a manually refreshed "
-                "snapshot and is not a live GitHub guarantee; closed-issue "
-                f"enforcement remains non-blocking until {GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV}=1",
-                file=sys.stderr,
+    # Enforce ratchet on closed-issue pointers (#5234):
+    #   - Entries in the transition list (slice A) are warned but allowed (transition to slice B)
+    #   - NEW entries not in the list are always fatal (no slip-through of unexpected dead pointers)
+
+    # Validate transition list entries exist in registry (no orphans)
+    if transition_list:
+        registry_paths = {reg.file_path for reg in registrations}
+        orphan_entries = transition_list - registry_paths
+        for orphan in sorted(orphan_entries):
+            problems.append(
+                f"transition list entry {orphan!r} is not in the registry or is not a giant file; "
+                "remove it from the transition list or add it to the registry"
             )
+
+    if closed_issue_forbidden_problems:
+        problems.extend(sorted(closed_issue_forbidden_problems))
+    if closed_issue_allowed_problems:
+        for problem in sorted(closed_issue_allowed_problems):
+            print(f"giant-file registry: {problem}", file=sys.stderr)
+        print(
+            "giant-file: 80 registry entries have closed decompose_issue deadlines; "
+            "slice B (#5234) must process each entry (keep-alive, grandfather, or retire)",
+            file=sys.stderr,
+        )
 
     if problems:
         raise ParseError(

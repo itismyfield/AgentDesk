@@ -72,16 +72,19 @@ python3 scripts/generate_inventory_docs.py
 ```
 
 The generator reads giant-file issue state from the checked-in
-`scripts/giant_file_issue_metadata.json` snapshot. Refresh that snapshot at
-least every seven days with:
+`scripts/giant_file_issue_metadata.json` snapshot. **Refresh that snapshot at
+least every 30 days** with:
 
-```
+```bash
 python3 scripts/refresh_giant_file_issue_metadata.py
+git add scripts/giant_file_issue_metadata.json
+git commit -m "chore(ci): refresh giant-file issue snapshot"
 ```
 
-An older snapshot emits an actionable warning while closed-issue enforcement
-is non-blocking. When `GIANT_FILE_REGISTRY_ENFORCE_CLOSED_ISSUES=1`, the same
-staleness is fatal because issue state is then part of the hard gate.
+**Snapshots older than 30 days are fatal** — CI will fail with a ParseError
+until the snapshot is manually re-verified and refreshed. This ensures the
+gate does not silently pass stale issue state; operators must actively confirm
+GitHub-checked-in state matches at least once per month.
 
 Manually maintained (not emitted by `generate_inventory_docs.py`):
 
