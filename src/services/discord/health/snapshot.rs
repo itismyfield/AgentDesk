@@ -4,6 +4,13 @@ use serde::Serialize;
 use super::liveness_authority::CaptureCoordinateObservation;
 use super::mailbox::MailboxHealthSnapshot;
 use super::provider_probe::{self, ProviderHealthSnapshot};
+// #5071 T4-B6: `health::reachability` is `#[cfg(unix)]` (see the `mod` decl in
+// `health.rs`), so the composition wiring built on it — this import,
+// `composite_governs_polarity`, `observe_relay_verdict`, the
+// `RelayVerdictReport` published on the mailbox entry, and
+// `apply_relay_verdict_polarity` — carries the same gate. Windows keeps the
+// pre-B6 snapshot: no composed verdict, no polarity from one.
+#[cfg(unix)]
 use super::reachability::composite::{
     RelayVerdict, RelayVerdictProbe, RelayVerdictReport, observe_relay_verdict,
     relay_verdict_source,
@@ -692,6 +699,7 @@ async fn build_health_snapshot_with_options(
     // #5071 T4-B6: read the 4987 §5.1 switch once per snapshot, so every entry
     // in one response answers under the same authority even if the live config
     // is edited mid-poll.
+    #[cfg(unix)]
     let composite_governs_polarity = relay_verdict_source().governs_health_polarity();
 
     if providers.is_empty() {
@@ -787,6 +795,7 @@ async fn build_health_snapshot_with_options(
                 // read once per poll below. The row's `output_path` is passed
                 // to the divergence comparison only, matching the descriptive
                 // call above it; nothing here resolves or tails through it.
+                #[cfg(unix)]
                 let relay_verdict = observe_relay_verdict(RelayVerdictProbe {
                     provider: provider_kind.as_ref(),
                     channel_id: channel.get(),
@@ -842,6 +851,7 @@ async fn build_health_snapshot_with_options(
                         .saturating_mul(1_000)
                         as u64,
                 });
+                #[cfg(unix)]
                 apply_relay_verdict_polarity(
                     composite_governs_polarity,
                     &relay_verdict,
@@ -850,6 +860,7 @@ async fn build_health_snapshot_with_options(
                     &mut degraded_reasons,
                     &mut status,
                 );
+                #[cfg(unix)]
                 let reachability =
                     RelayVerdictReport::of(&relay_verdict, composite_governs_polarity);
                 mailbox_entries.push(MailboxHealthSnapshot {
@@ -870,6 +881,7 @@ async fn build_health_snapshot_with_options(
                     process_present,
                     active_dispatch_present: session.active_dispatch_present(),
                     stall_shadow_verdict,
+                    #[cfg(unix)]
                     reachability,
                     relay_stall_state,
                     relay_health,
@@ -956,6 +968,7 @@ async fn build_health_snapshot_with_options(
 /// before this it was reachable only by building a full `HealthRegistry`, which
 /// left both the `composite_governs_polarity` conjunct and the direction of the
 /// `permits_health` test unpinned.
+#[cfg(unix)]
 fn apply_relay_verdict_polarity(
     composite_governs_polarity: bool,
     relay_verdict: &RelayVerdict,
@@ -1082,13 +1095,20 @@ mod tests {
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
     use super::{
-        HealthRegistry, HealthStatus, RelayVerdict, apply_relay_verdict_polarity,
-        authoritative_tmux_session, build_health_snapshot, rebind_origin_inflight_is_idle,
-        relay_active_turn_from_inflight, resolve_bound_selector,
+        HealthRegistry, authoritative_tmux_session, build_health_snapshot,
+        rebind_origin_inflight_is_idle, relay_active_turn_from_inflight, resolve_bound_selector,
     };
+    // #5071 T4-B6: the polarity tests below name the `#[cfg(unix)]` reachability
+    // tree, so they are gated with the seam they exercise. `HealthStatus` rides
+    // the same gate because those tests are its only readers here.
+    #[cfg(unix)]
+    use super::{HealthStatus, RelayVerdict, apply_relay_verdict_polarity};
     use crate::services::agent_protocol::RuntimeHandoffKind;
+    #[cfg(unix)]
     use crate::services::discord::health::reachability::composite::compose_relay_verdict;
+    #[cfg(unix)]
     use crate::services::discord::health::reachability::external_verdict::ExternalRelayVerdict;
+    #[cfg(unix)]
     use crate::services::discord::health::reachability::verdict::{
         ReachabilityUnknownReason, ReachabilityVerdict,
     };
@@ -1109,12 +1129,15 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     const POLARITY_PROVIDER: &str = "claude";
+    #[cfg(unix)]
     const POLARITY_CHANNEL: u64 = 4_987_000_000_071;
 
     /// An `Unknown{TranscriptUnresolved}` composed with a sidecar that said
     /// nothing: 4987 §4.1's "an unobservable relay is not a healthy one", and
     /// the plainest verdict that does not permit health.
+    #[cfg(unix)]
     fn not_green() -> RelayVerdict {
         let composed = compose_relay_verdict(
             ReachabilityVerdict::unknown(ReachabilityUnknownReason::TranscriptUnresolved, 0),
@@ -1131,6 +1154,7 @@ mod tests {
     /// `composite_governs_polarity` conjunct makes the `Structural` half fail —
     /// which is the mutation the r1 review ran green against every gate before
     /// this test existed.
+    #[cfg(unix)]
     #[test]
     fn only_composite_mode_degrades_the_snapshot_for_a_non_green_relay_verdict() {
         let verdict = not_green();
@@ -1175,6 +1199,7 @@ mod tests {
     /// verdict that does NOT permit health, so a verdict that does must leave
     /// the snapshot alone. Without this, inverting the `permits_health` test
     /// still passes the case above.
+    #[cfg(unix)]
     #[test]
     fn a_green_relay_verdict_degrades_the_snapshot_in_neither_mode() {
         let green =
@@ -1203,6 +1228,7 @@ mod tests {
     /// The worsen is a floor, not an assignment: a snapshot already `Unhealthy`
     /// for an unrelated reason (no providers registered, say) must not be
     /// improved to `Degraded` by a non-green relay verdict landing after it.
+    #[cfg(unix)]
     #[test]
     fn a_non_green_relay_verdict_never_improves_an_unhealthy_snapshot() {
         let mut reasons = vec!["no_providers_registered".to_string()];

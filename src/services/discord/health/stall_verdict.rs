@@ -430,10 +430,16 @@ mod tests {
         StallWatchdogLivenessAction, StallWatchdogLivenessDecision, StallWatchdogLivenessEvidence,
     };
     use super::*;
+    // #5071 T4-B6: `health::reachability` is `#[cfg(unix)]`, and so is the
+    // `MailboxHealthSnapshot::reachability` field these build. Windows keeps the
+    // pre-B6 detail entry, which carried no composed verdict to assert on.
+    #[cfg(unix)]
     use crate::services::discord::health::reachability::composite::{
         RelayVerdictReport, compose_relay_verdict,
     };
+    #[cfg(unix)]
     use crate::services::discord::health::reachability::external_verdict::ExternalRelayVerdict;
+    #[cfg(unix)]
     use crate::services::discord::health::reachability::verdict::{
         ReachabilityUnknownReason, ReachabilityVerdict,
     };
@@ -1358,6 +1364,7 @@ mod tests {
             process_present: false,
             active_dispatch_present: false,
             stall_shadow_verdict: None,
+            #[cfg(unix)]
             reachability: RelayVerdictReport::of(
                 &compose_relay_verdict(
                     ReachabilityVerdict::unknown(
@@ -1377,14 +1384,17 @@ mod tests {
         // #5071 T4-B6 (4987 §4.4): the composed verdict is published on the
         // same detail entry, and under `Structural` it announces that it
         // decided nothing.
-        assert_eq!(serialized["reachability"]["verdict"], "unknown");
-        assert_eq!(
-            serialized["reachability"]["reason"],
-            "transcript_unresolved"
-        );
-        assert_eq!(
-            serialized["reachability"]["governs_health_polarity"],
-            serde_json::Value::Bool(false)
-        );
+        #[cfg(unix)]
+        {
+            assert_eq!(serialized["reachability"]["verdict"], "unknown");
+            assert_eq!(
+                serialized["reachability"]["reason"],
+                "transcript_unresolved"
+            );
+            assert_eq!(
+                serialized["reachability"]["governs_health_polarity"],
+                serde_json::Value::Bool(false)
+            );
+        }
     }
 }

@@ -9,6 +9,10 @@ use crate::services::turn_orchestrator::ChannelMailboxSnapshot;
 use crate::services::turn_orchestrator::registry_purge::MailboxPurgeOutcome;
 
 use super::HealthRegistry;
+// #5071 T4-B6: `health::reachability` is `#[cfg(unix)]`, so every item this file
+// takes from it — the `RelayVerdictReport` import and the field typed by it — is
+// gated the same way. Windows keeps the pre-B6 entry, which had no such field.
+#[cfg(unix)]
 use super::reachability::composite::RelayVerdictReport;
 use super::recovery::ProviderMailboxState;
 use super::stall_verdict::StallVerdict;
@@ -32,6 +36,7 @@ pub(super) struct MailboxHealthSnapshot {
     /// #5071 T4-B6 (4987 §4.4): the composed relay verdict for this channel.
     /// Published in both `RelayVerdictSource` modes; its
     /// `governs_health_polarity` field says whether it also decided anything.
+    #[cfg(unix)]
     pub(super) reachability: RelayVerdictReport,
     pub(super) relay_stall_state: RelayStallState,
     pub(super) relay_health: RelayHealthSnapshot,

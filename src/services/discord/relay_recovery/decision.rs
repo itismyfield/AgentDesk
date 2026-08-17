@@ -1,5 +1,11 @@
 use super::*;
 
+// #5071 T4-B6: `health::reachability` is `#[cfg(unix)]`, so the reachability
+// operand and everything typed by it — this import,
+// `plan_relay_recovery_under_reachability` and its authority tests — is gated
+// the same way. No production path calls that planner in either configuration;
+// windows simply keeps only the structural `plan_relay_recovery`.
+#[cfg(unix)]
 use crate::services::discord::health::reachability::verdict::ReachabilityVerdict;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -474,6 +480,7 @@ pub(in crate::services::discord) fn plan_relay_recovery(
 /// operand at those call sites, which is a later slice. Until then the runtime
 /// keeps calling [`plan_relay_recovery`] and the reachability tier changes no
 /// recovery action at all.
+#[cfg(unix)]
 pub(in crate::services::discord) fn plan_relay_recovery_under_reachability(
     snapshot: &RelayHealthSnapshot,
     relay_stall_state: RelayStallState,
@@ -493,7 +500,7 @@ pub(in crate::services::discord) fn plan_relay_recovery_under_reachability(
     decision
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod reachability_authority_tests {
     use super::*;
     use crate::services::discord::health::reachability::verdict::{
