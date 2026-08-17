@@ -367,15 +367,14 @@ echo "=== Generate inventory docs (refresh workspace; gate source-of-truth invar
 # scripts/giant_file_registry.toml. The following git diff is the PR-time
 # drift gate: generation updates snapshots, then CI rejects changes to tracked
 # source-of-truth docs instead of comparing the generated workspace to itself.
-# The #5234 gate reads only scripts/giant_file_issue_metadata.json. Snapshot
-# staleness and closed issue pointers are individually reported but remain
-# non-blocking during AC3 disposition; operators refresh the snapshot with
-# `python3 scripts/refresh_giant_file_issue_metadata.py`.
-# AC3 is complete only when every reported entry has a decided replacement or
-# keep policy and this aggregate invocation sets
-# GIANT_FILE_REGISTRY_ENFORCE_CLOSED_ISSUES=1. That setting makes both snapshot
-# staleness and closed issue pointers fatal; until then the gate deliberately
-# does not claim that closed deadline pointers are absent.
+# The #5234 gate (#5234 slice A) enforces both snapshot staleness and closed
+# issue pointers as fatal errors (#5327 schema accepts closed state, slice A
+# adds 30-day staleness gate + 80-entry transition ratchet). Operators must
+# refresh the snapshot at least every 30 days with:
+# `python3 scripts/refresh_giant_file_issue_metadata.py && git add ... && git commit ...`
+# Entries in the transition list (#5234 slice A) warn but pass; new dead
+# pointers fail immediately (ratchet: list size can only shrink as slice B
+# processes entries).
 "$PYTHON" scripts/generate_inventory_docs.py
 git diff --exit-code -- ARCHITECTURE.md docs/generated/route-inventory.md docs/generated/worker-inventory.md
 

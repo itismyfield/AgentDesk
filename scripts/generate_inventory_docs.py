@@ -34,6 +34,7 @@ GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV = (
 GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST = (
     REPO_ROOT / "scripts" / "giant_file_closed_issue_transition_list.txt"
 )
+GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST_MAX = 80  # Ratchet: size can only shrink (slice B reduces)
 
 # Only whole test *modules* count as test LoC — inline `#[cfg(test)]` guards on
 # production struct fields, conditional logic, or test-only helper fns left in
@@ -936,12 +937,13 @@ def _is_real_decompose_issue(value: str) -> bool:
 def load_giant_file_issue_metadata() -> dict[int, dict[str, object]]:
     """Load and freshness-check the issue snapshot used by the offline CI gate.
 
-    The seven-day maximum age limits how long this checked-in snapshot can hide
+    The 30-day maximum age limits how long this checked-in snapshot can hide
     a changed GitHub issue state without making CI depend on network
-    availability. Staleness is fatal when closed-issue enforcement consumes the
-    state as a hard gate; otherwise it is reported as an operator warning. The
-    check guarantees only the age and internal shape of the snapshot; it does
-    not prove that GitHub still matches the snapshot between manual refreshes.
+    availability. Staleness is always fatal; snapshots older than 30 days must
+    be manually re-verified via `scripts/refresh_giant_file_issue_metadata.py`
+    and committed. The check guarantees only the age and internal shape of the
+    snapshot; it does not prove that GitHub still matches the snapshot between
+    manual refreshes.
     """
     try:
         payload = json.loads(read_text(GIANT_FILE_ISSUE_METADATA))
@@ -1023,9 +1025,10 @@ def closed_issue_enforcement_enabled() -> bool:
 def load_giant_file_closed_issue_transition_list() -> set[str]:
     """Load the ratchet list of registry entries (file paths) with closed decompose_issue.
 
-    This list is a ratchet: it can only shrink. Entries in this list are permitted
-    (with a warning) until slice B (#5234) processes them. Any NEW closed-issue
-    pointer not already in this list will cause CI to fail.
+    This list is a ratchet: size can only shrink or stay same. Entries in this list
+    are permitted (with a warning) until slice B (#5234) processes them. Any NEW
+    closed-issue pointer not already in this list will cause CI to fail. Size
+    increase is fatal (ratchet enforcement).
 
     Returns a set of file paths for O(1) membership checking.
     """
@@ -1042,6 +1045,14 @@ def load_giant_file_closed_issue_transition_list() -> set[str]:
             continue
         if line.startswith("src/"):
             allowed_paths.add(line)
+
+    # Ratchet enforcement: size can only shrink or stay same
+    if len(allowed_paths) > GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST_MAX:
+        raise ParseError(
+            f"giant-file closed-issue transition list has grown to {len(allowed_paths)} "
+            f"(max {GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST_MAX}); ratchet violation. "
+            f"Slice B must reduce this list; new entries cannot be added."
+        )
 
     return allowed_paths
 
@@ -1106,7 +1117,7 @@ def categorize_closed_issue_problem(
     """
     if path in transition_list:
         return True, f"WARNING: {problem}; kept in transition until slice B (#5234)"
-    return False, f"FATAL: {problem}; not in ratchet list (add to transition list if intentional)"
+    return False, f"FATAL: {problem}; fix the decompose_issue to reference an open GitHub issue, or remove the entry and decompose the file"
 
 
 def _markdown_table_value(value: str) -> str:
@@ -1390,6 +1401,17 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
     # Enforce ratchet on closed-issue pointers (#5234):
     #   - Entries in the transition list (slice A) are warned but allowed (transition to slice B)
     #   - NEW entries not in the list are always fatal (no slip-through of unexpected dead pointers)
+
+    # Validate transition list entries exist in registry (no orphans)
+    if transition_list:
+        registry_paths = {reg.file_path for reg in registrations}
+        orphan_entries = transition_list - registry_paths
+        for orphan in sorted(orphan_entries):
+            problems.append(
+                f"transition list entry {orphan!r} is not in the registry or is not a giant file; "
+                "remove it from the transition list or add it to the registry"
+            )
+
     if closed_issue_forbidden_problems:
         problems.extend(sorted(closed_issue_forbidden_problems))
     if closed_issue_allowed_problems:
