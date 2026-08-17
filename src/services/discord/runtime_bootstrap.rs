@@ -273,6 +273,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             // Standby intake can execute a full turn, so it gets the same
             // marker fence and acknowledgement path as a gateway runtime.
             spawns::run_bot_spawn_deferred_restart_poller(&shared, &provider);
+            #[cfg(unix)]
+            spawns::run_bot_spawn_reachability_observation(&shared, &provider);
             run_bot_maybe_spawn_intake_worker(&shared, token, &provider);
             spawn_standby_gateway_retry(shared.clone(), token_hash.clone(), provider.clone()).await;
             // Keep this provider's shutdown-barrier slot: the marker poller
@@ -290,6 +292,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         .register(provider.as_str().to_string(), shared.clone())
         .await;
     spawns::run_bot_spawn_deferred_restart_poller(&shared, &provider);
+    #[cfg(unix)]
+    spawns::run_bot_spawn_reachability_observation(&shared, &provider);
     run_bot_maybe_spawn_intake_worker(&shared, token, &provider);
 
     run_bot_start_gateway_runtime(

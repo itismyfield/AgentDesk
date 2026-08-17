@@ -3,8 +3,8 @@
 //! This file is vocabulary and polarity. It deliberately holds no composition
 //! rule, no threshold, no clock read, and no I/O:
 //!
-//! * choosing `Degraded` vs `Unreachable` is the `warn_bound`/`fail_bound`
-//!   subtraction T4-B2 adds on top of the obligation ledger;
+//! * choosing `Degraded` vs `Unreachable` from `warn_bound`/`fail_bound` is
+//!   deferred composition; T4-B2c only records observations in the ledger;
 //! * the final product `worst(ReachabilityVerdict, ExternalRelayVerdict)` is
 //!   T4-B6, and turning it on is gated behind `G-T4`.
 //!
@@ -18,7 +18,8 @@
 //!
 //! The converse does NOT hold: `Reachable` does not *declare* health, it only
 //! fails to deny it — §-1.4 additionally requires positive incarnation-alive
-//! evidence before a producer may spell it, and producing verdicts is B2's job.
+//! evidence before a producer may spell it, and producing verdicts remains the
+//! later B6 composition task.
 //!
 //! # `TransportUnknown` is neither health nor a redelivery warrant
 //!

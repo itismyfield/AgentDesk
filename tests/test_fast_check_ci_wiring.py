@@ -42,6 +42,8 @@ EXPECTED_TEST_NON_PG_COMMANDS = (
     "cargo test --lib services::discord::health::reachability::verdict::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib services::discord::health::reachability::discovery::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib services::discord::health::reachability::tail::tests -- --skip _pg --skip pg_ --skip postgres",
+    "cargo test --lib services::discord::health::reachability::ledger::tests -- --skip _pg --skip pg_ --skip postgres",
+    "cargo test --lib services::discord::health::reachability::observation::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib services::discord::health::reachability::obligation::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib services::discord::e2e_control::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib server::routes::e2e_control::tests -- --skip _pg --skip pg_ --skip postgres",

@@ -357,9 +357,10 @@ fn read_bootstrapped_ledger_at(path: &Path) -> Result<ReachabilityLedger, String
 /// flock-guarded explicit ledger bootstrap.
 ///
 /// A missing ledger is created at `bootstrap_offset`. An existing valid ledger
-/// is retired and re-bootstrapped so its monotone counters survive. An existing
-/// unreadable or schema-incompatible file is left untouched and returns an
-/// error rather than being replaced with an empty observation claim.
+/// already bound to `incarnation` is left exactly as-is; a different valid
+/// incarnation is retired and re-bootstrapped so its monotone counters survive.
+/// An existing unreadable or schema-incompatible file is left untouched and
+/// returns an error rather than being replaced with an empty observation claim.
 pub(in crate::services::discord) fn bootstrap_ledger_at(
     path: &Path,
     incarnation: LedgerIncarnation,
@@ -370,12 +371,54 @@ pub(in crate::services::discord) fn bootstrap_ledger_at(
     }
     let _lock = delivery_record::lock_record_path(path)?;
     let ledger = if ledger_file_exists(path) {
-        read_bootstrapped_ledger_at(path)?.retire_and_rebootstrap(incarnation, bootstrap_offset)
+        let current = read_bootstrapped_ledger_at(path)?;
+        if current.binds_to(&incarnation) {
+            return Ok(());
+        }
+        current.retire_and_rebootstrap(incarnation, bootstrap_offset)
     } else {
         ReachabilityLedger::bootstrap(incarnation, bootstrap_offset, LedgerCounters::default())
     };
     let data = serde_json::to_string_pretty(&ledger).map_err(|error| error.to_string())?;
     runtime_store::atomic_write(path, &data)
+}
+
+/// Re-bootstrap an existing ledger only while the caller's watcher snapshot is
+/// still the live incarnation.
+///
+/// Returns `Ok(false)` without changing the ledger when revalidation rejects a
+/// stale caller. The callback runs while the ledger file lock is held so a
+/// concurrent observation cannot retire the newly selected incarnation after
+/// the revalidation but before this transition commits.
+pub(in crate::services::discord) fn rebootstrap_ledger_at_if_snapshot_current<F>(
+    path: &Path,
+    incarnation: LedgerIncarnation,
+    bootstrap_offset: u64,
+    revalidate_live_incarnation: F,
+) -> Result<bool, String>
+where
+    F: FnOnce() -> Option<LedgerIncarnation>,
+{
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let _lock = delivery_record::lock_record_path(path)?;
+    let current = read_bootstrapped_ledger_at(path)?;
+    if current.binds_to(&incarnation) {
+        return Ok(true);
+    }
+
+    // The lock provides serialization only; it does not reject a stale caller.
+    // Authority for this destructive transition comes from revalidating the
+    // live watcher incarnation while the lock is held.
+    if revalidate_live_incarnation().as_ref() != Some(&incarnation) {
+        return Ok(false);
+    }
+
+    let ledger = current.retire_and_rebootstrap(incarnation, bootstrap_offset);
+    let data = serde_json::to_string_pretty(&ledger).map_err(|error| error.to_string())?;
+    runtime_store::atomic_write(path, &data)?;
+    Ok(true)
 }
 
 /// flock-guarded read-modify-write: append obligations to the durable ledger,
@@ -397,6 +440,79 @@ pub(in crate::services::discord) fn append_ledger_at(
     let data = serde_json::to_string_pretty(&ledger).map_err(|error| error.to_string())?;
     runtime_store::atomic_write(path, &data)?;
     Ok(extinctions)
+}
+
+/// Result of one observation transaction. This is telemetry only: neither the
+/// appended count nor an extinction authorizes a relay or recovery decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::services::discord) struct ObservationCommit {
+    pub obligations_appended: usize,
+    pub extinctions: Vec<ObligationExtinction>,
+}
+
+/// Persist one framed transcript observation and its resume cursor together.
+///
+/// The lock revalidates both incarnation and cursor because a tick may have
+/// read while another process committed first. Every record must also carry
+/// the same transcript identity and generation as the ledger incarnation.
+///
+/// Ordering is deliberately indivisible: obligations are appended in memory,
+/// then the cursor is advanced in that same JSON snapshot, and one atomic
+/// rename publishes both. A crash before the rename publishes neither, so the
+/// bytes are read once again; a crash after it publishes both, so they are not
+/// counted twice. There is no interval where only one side is durable.
+pub(in crate::services::discord) fn record_observation_at(
+    path: &Path,
+    incarnation: &LedgerIncarnation,
+    expected_cursor: u64,
+    records: impl IntoIterator<Item = CanonicalRecord>,
+    next_offset: u64,
+    observed_len: u64,
+    observation_incomplete: bool,
+    observed_at_epoch_ms: u64,
+) -> Result<ObservationCommit, String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let _lock = delivery_record::lock_record_path(path)?;
+    let mut ledger = read_bootstrapped_ledger_at(path)?;
+    if !ledger.binds_to(incarnation) {
+        return Err("ledger incarnation changed during observation".to_string());
+    }
+    if ledger.cursor_offset != expected_cursor {
+        return Err("ledger cursor changed during observation".to_string());
+    }
+    if next_offset < expected_cursor || next_offset > observed_len {
+        return Err("observation cursor is outside the observed transcript".to_string());
+    }
+
+    let records: Vec<_> = records.into_iter().collect();
+    if records.iter().any(|record| {
+        record.generation_mtime_ns != incarnation.generation_mtime_ns
+            || record.identity != incarnation.identity()
+            || record.start < expected_cursor
+            || record.end < record.start
+            || record.end > observed_len
+    }) {
+        return Err("observation record does not bind to the ledger incarnation".to_string());
+    }
+
+    let before = ledger.counters.total_obligations;
+    let extinctions = ledger.append_obligations(records, observed_at_epoch_ms);
+    ledger.cursor_offset = next_offset;
+    ledger.last_observed_len = observed_len;
+    ledger.counters.ticks = ledger.counters.ticks.saturating_add(1);
+    if observation_incomplete {
+        ledger.counters.incomplete_observations =
+            ledger.counters.incomplete_observations.saturating_add(1);
+    }
+    let obligations_appended = ledger.counters.total_obligations.saturating_sub(before) as usize;
+    let data = serde_json::to_string_pretty(&ledger).map_err(|error| error.to_string())?;
+    runtime_store::atomic_write(path, &data)?;
+    Ok(ObservationCommit {
+        obligations_appended,
+        extinctions,
+    })
 }
 
 /// flock-guarded read-modify-write: retire the current incarnation and

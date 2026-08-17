@@ -60,12 +60,14 @@ WHAT THIS GATE RUNS
    in-process every time. The Rust mutations need a compiler and run under
    ``--with-rust``; in ordinary CI the Rust side is held by the corpus test in
    the ``test-non-pg`` obligation lane.
-3. **No judgment authority** — the source half of the T4-B2a invariant. This
-   tree is INACTIVE: nothing outside it may read it, and no bound may appear
-   inside it. An ALIAS counts as reading it, both at the call site
+3. **No judgment authority** — the source half of the T4-B2a/T4-B2c invariant.
+   The B2c runtime task may call the observation and ledger APIs, but nothing
+   may read a verdict and no bound may appear inside the tree. An ALIAS counts
+   as reading it, both at the call site
    (``use super::reachability as rx;``) and one hop out, where the allowlisted
    file re-exports a tree item under a new name and a sibling imports that; the
-   allowlist therefore grants the right to DECLARE the module, not to use it.
+   allowlist therefore grants narrowly different rights to the declaration and
+   observation wiring files; it does not exempt either file from inspection.
    The DESTRUCTIVE half is not duplicated here: it is already enforced per file
    by ``scripts/check_destructive_call_site_ratchet.py``, whose four categories
    are exactly 4987's destructive surfaces, so a destructive call site appearing
@@ -78,18 +80,14 @@ which is `check_clippy_allow_ratchet.py`'s, so this repository keeps ONE Rust
 lexical pre-pass rather than three. What stays outside its reach is what stays
 outside any lexical scan: a path a macro assembles from string fragments, and a
 ``#[path = "..."]`` redirection, which it does not follow. Those are the shapes
-in which "zero consumers" is a claim about source text rather than about the
-crate graph.
+in which "observation-only consumer" is a claim about source text rather than
+about the crate graph.
 
 SCOPE OF THIS SLICE
 -------------------
 T4-B2a is the canonical framing plus this machine. The durable obligation
-ledger is T4-B2b and the observation task is T4-B2c, so the non-vacuous
-test-selection check of #5071 §4.1 gate 3 — every curated lane filter naming
-the tree must match at least one row of
-``scripts/lib_test_inventory_manifest.txt`` — is assigned to T4-B2c, which is
-where the design row puts it. Until then the obligation lane's selection count
-is recorded by hand in the PR body, not by this file.
+ledger is T4-B2b and T4-B2c adds the observation task as the tree's first
+runtime consumer. A reader of verdicts remains T4-B6 work behind ``G-T4``.
 """
 
 from __future__ import annotations
@@ -121,17 +119,18 @@ RUST_CORPUS_TEST = (
     "::canonical_output_matches_the_golden_corpus_byte_for_byte"
 )
 
-# Any file naming the tree in CODE is a consumer this slice did not sanction.
-# T4-B2a inherits T4-B1's inactive contract literally: the ONLY file outside the
-# tree allowed to name it is the one that declares the module, and it may name
-# it ONLY there — `declaration_only_problems` holds it to that, because an
-# allowlisted file is exactly where a re-export would launder the tree past the
-# scan below. The observation task's spawn joins this set in T4-B2c, and a
-# reader of the verdicts lands in T4-B6 behind `G-T4` — until then, "one entry"
-# here means "zero callers".
-ALLOWED_TREE_REFERENCES = {
+# Each allowlist grants a specific spelling, not blanket permission to consume
+# the tree. The declaration file may only declare the module. The B2c spawn may
+# directly call ledger/observation APIs; verdict consumption remains T4-B6.
+DECLARATION_ONLY_TREE_REFERENCES = {
     "src/services/discord/health.rs",
 }
+OBSERVATION_ONLY_TREE_REFERENCES = {
+    "src/services/discord/runtime_bootstrap/spawns.rs",
+}
+ALLOWED_TREE_REFERENCES = (
+    DECLARATION_ONLY_TREE_REFERENCES | OBSERVATION_ONLY_TREE_REFERENCES
+)
 # A module reference, not a word: an identifier that merely contains the
 # substring (`run_bot_spawn_reachability_observation`, say) is not a reader, and
 # matching it would make the allowlist a list of names rather than of readers.
@@ -151,6 +150,9 @@ TREE_REFERENCE_RE = re.compile(r"\breachability\s*::|\bmod\s+reachability\b")
 # character.
 TREE_NAME_RE = re.compile(r"\breachability\b")
 MODULE_DECLARATION_RE = re.compile(r"\bmod\s+reachability\b")
+OBSERVATION_REFERENCE_RE = re.compile(
+    r"reachability\s*::\s*(?:ledger|observation)\s*::"
+)
 # `check_reachability_row_independence.py` splits `use` items exactly this way,
 # and for the same reason: the launderings a lexical scan CAN see are a bare
 # trailing segment and an `as` rename, and both live inside a `use` item.
@@ -552,6 +554,28 @@ def declaration_only_problems(rel: str, cleaned: str) -> list[str]:
     return problems
 
 
+def observation_only_problems(rel: str, cleaned: str) -> list[str]:
+    """Permit direct B2c recording calls while rejecting judgment access.
+
+    Every occurrence of the module name must begin a qualified path into the
+    ledger or observation module. This deliberately rejects aliases and
+    re-exports: either could hide a later verdict read from this lexical gate.
+    """
+
+    problems: list[str] = []
+    for match in TREE_NAME_RE.finditer(cleaned):
+        if OBSERVATION_REFERENCE_RE.match(cleaned, match.start()) is not None:
+            continue
+        line = cleaned.count("\n", 0, match.start()) + 1
+        problems.append(
+            f"{rel}:{line}: the T4-B2c wiring may name only direct "
+            "`reachability::ledger::` and `reachability::observation::` paths. "
+            "Aliases, re-exports, and verdict reads can hide judgment authority; "
+            "verdict consumption remains T4-B6 behind `G-T4`"
+        )
+    return problems
+
+
 def check_no_judgment_authority(repo_root: Path) -> list[str]:
     problems: list[str] = []
 
@@ -586,25 +610,26 @@ def check_no_judgment_authority(repo_root: Path) -> list[str]:
         if not names_tree(cleaned):
             continue
         consumers.add(rel)
-        if rel in ALLOWED_TREE_REFERENCES:
+        if rel in DECLARATION_ONLY_TREE_REFERENCES:
             problems += declaration_only_problems(rel, cleaned)
+        if rel in OBSERVATION_ONLY_TREE_REFERENCES:
+            problems += observation_only_problems(rel, cleaned)
 
     unexpected = sorted(consumers - ALLOWED_TREE_REFERENCES)
     if unexpected:
         problems.append(
             "the reachability tree grew a consumer: "
             + ", ".join(unexpected)
-            + ". #5071 T4-B2a is an inactive library: it frames bytes and proves "
-            "the two implementations agree. The observation task is T4-B2c and a "
-            "reader of the verdicts is T4-B6, behind `G-T4`"
+            + ". #5071 T4-B2c permits only its explicit observation-task wiring; "
+            "a reader of verdicts is T4-B6, behind `G-T4`"
         )
     missing = sorted(ALLOWED_TREE_REFERENCES - consumers)
     if missing:
         problems.append(
             "the expected wiring is gone: "
             + ", ".join(missing)
-            + ". If the module declaration was removed, remove its allowance here "
-            "in the same change"
+            + ". If an expected declaration or observation consumer was removed, "
+            "remove its allowance here in the same change"
         )
     return problems
 
@@ -643,8 +668,9 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"reachability canonical equivalence OK: {len(cases)} corpus cases match "
         f"byte for byte, {len(PYTHON_MUTATIONS)} python mutations killed, "
-        f"{rust_note}; the tree has no consumer beyond its module declaration, "
-        "aliases and re-exports included (source lint, not a type proof)"
+        f"{rust_note}; the tree has exactly its declaration and B2c observation "
+        "consumer, with aliases, re-exports, and verdict reads rejected "
+        "(source lint, not a type proof)"
     )
     return 0
 

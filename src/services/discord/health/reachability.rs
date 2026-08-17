@@ -1,14 +1,9 @@
-//! Relay reachability observation library (#5071 T4-B1 = 4987 S1, first half).
+//! Relay reachability observation (#5071 T4-B2c = 4987 S1 observation task).
 //!
-//! # This module is INACTIVE
-//!
-//! Nothing in production constructs, reads, or consumes anything below. There
-//! is no tick, no task, no health field, and no recovery input wired to it —
-//! T4-B2 adds the observation task, T4-B6 adds the health composition, and each
-//! of those is a separate reviewable landing. Consequently this slice changes
-//! **zero** production verdicts and must not be counted as "4987 S1 active".
-//! The `#![allow(dead_code)]` below is the honest spelling of exactly that: the
-//! blanket comes off when B2 lands the first consumer.
+//! Production now resolves and tails each registered watcher transcript and
+//! records canonical obligations plus its resume cursor in the durable ledger.
+//! This is observation only: no value here changes relay delivery, recovery,
+//! or health. T4-B6 owns composition and judgment authority.
 //!
 //! What lands here is the vocabulary plus the file-facing primitives every
 //! later slice reads through:
@@ -45,13 +40,9 @@
 //! surface here is `authorizes_destructive_action()` returning false on every
 //! variant, and a source lint. It is not a sealed capability.
 
-// See the module docs: this is an inactive library by design, so every item is
-// unreachable from production until T4-B2 wires the observation task. Remove
-// this blanket in that slice rather than letting it outlive the wiring.
-#![allow(dead_code)]
-
 pub(in crate::services::discord) mod discovery;
 pub(in crate::services::discord) mod ledger;
 pub(in crate::services::discord) mod obligation;
+pub(in crate::services::discord) mod observation;
 pub(in crate::services::discord) mod tail;
 pub(in crate::services::discord) mod verdict;

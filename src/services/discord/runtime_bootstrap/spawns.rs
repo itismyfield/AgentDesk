@@ -177,6 +177,165 @@ fn restart_request_is_superseded(root: &std::path::Path, nonce: &str) -> bool {
     marker.exists() && !restart_request_matches(root, "restart_pending", nonce)
 }
 
+#[cfg(unix)]
+fn capture_reachability_watcher_incarnation(
+    shared: &SharedData,
+    tmux_session_name: &str,
+) -> Option<(
+    crate::services::discord::tmux_watcher_registry::TmuxWatcherBinding,
+    Option<health::reachability::observation::WatcherIncarnationCapture>,
+)> {
+    // Reuse the registry's existing handoff mutex so the binding identity,
+    // generation, and spawn nonce are captured from one live watcher view.
+    let _registry_guard =
+        crate::services::discord::tmux_watcher_registry::lock_tmux_watcher_registry();
+    let channel = shared
+        .tmux_watchers
+        .owner_channel_for_tmux_session(tmux_session_name)?;
+    let binding = shared.tmux_watchers.channel_binding(&channel)?;
+    if binding.tmux_session_name != tmux_session_name {
+        return None;
+    }
+    let snapshot = binding.output_path.as_deref().map(|transcript_path| {
+        health::reachability::observation::capture_watcher_incarnation(
+            std::path::Path::new(transcript_path),
+            &binding.tmux_session_name,
+            outbound::delivery_record::current_generation_mtime_ns(&binding.tmux_session_name),
+            tmux::execution_identity::capture_spawn_nonce(&binding.tmux_session_name),
+        )
+    });
+    Some((binding, snapshot))
+}
+
+/// Observe every canonical watcher binding on the stall-watchdog cadence.
+///
+/// This task owns no relay or recovery authority. File and ledger failures are
+/// reduced to observation state and logs, so they cannot stop either provider
+/// runtime or its intake worker.
+#[cfg(unix)]
+pub(super) fn run_bot_spawn_reachability_observation(
+    shared_for_tmux: &Arc<SharedData>,
+    provider_for_setup: &ProviderKind,
+) {
+    let shared = shared_for_tmux.clone();
+    let provider = provider_for_setup.clone();
+    tokio::spawn(async move {
+        let cadence = std::time::Duration::from_secs(health::STALL_WATCHDOG_INTERVAL_SECS);
+        loop {
+            tokio::time::sleep(cadence).await;
+
+            // Clone keys before resolving channel snapshots: retaining a
+            // DashMap guard while consulting another index can deadlock.
+            let sessions: Vec<_> = shared
+                .tmux_watchers
+                .iter()
+                .map(|entry| entry.key().clone())
+                .collect();
+            let provider_for_tick = provider.clone();
+            let shared_for_tick = shared.clone();
+
+            let tick = tokio::task::spawn_blocking(move || {
+                for session in sessions {
+                    let Some((binding, snapshot)) = capture_reachability_watcher_incarnation(
+                        &shared_for_tick,
+                        &session,
+                    ) else {
+                        continue;
+                    };
+                    if binding.output_path.is_none() {
+                        tracing::warn!(
+                            provider = provider_for_tick.as_str(),
+                            channel_id = binding.owner_channel_id.get(),
+                            "reachability observation has no watcher transcript"
+                        );
+                        continue;
+                    }
+                    let Some(ledger_path) = health::reachability::ledger::ledger_path(
+                        &provider_for_tick,
+                        binding.owner_channel_id.get(),
+                    ) else {
+                        tracing::warn!(
+                            provider = provider_for_tick.as_str(),
+                            channel_id = binding.owner_channel_id.get(),
+                            "reachability observation has no runtime ledger path"
+                        );
+                        continue;
+                    };
+                    let snapshot = match snapshot.expect("output path checked above") {
+                        Ok(snapshot) => snapshot,
+                        Err(reason) => {
+                            tracing::warn!(
+                                provider = provider_for_tick.as_str(),
+                                channel_id = binding.owner_channel_id.get(),
+                                ?reason,
+                                "reachability observation unavailable; provider runtime continues"
+                            );
+                            continue;
+                        }
+                    };
+                    let observed_at_epoch_ms =
+                        chrono::Utc::now().timestamp_millis().max(0) as u64;
+                    let session_for_revalidation = binding.tmux_session_name.clone();
+                    let state = health::reachability::observation::observe_channel_at(
+                        &ledger_path,
+                        snapshot,
+                        observed_at_epoch_ms,
+                        || {
+                            capture_reachability_watcher_incarnation(
+                                &shared_for_tick,
+                                &session_for_revalidation,
+                            )
+                            .and_then(|(_, snapshot)| snapshot.and_then(Result::ok))
+                        },
+                    );
+
+                    match state {
+                        health::reachability::observation::ReachabilityObservationState::Bootstrapped => {
+                            tracing::debug!(
+                                provider = provider_for_tick.as_str(),
+                                channel_id = binding.owner_channel_id.get(),
+                                "reachability observation bootstrapped"
+                            );
+                        }
+                        health::reachability::observation::ReachabilityObservationState::Recorded {
+                            commit,
+                            unknown_reason,
+                        } => {
+                            tracing::debug!(
+                                provider = provider_for_tick.as_str(),
+                                channel_id = binding.owner_channel_id.get(),
+                                obligations_appended = commit.obligations_appended,
+                                extinctions = commit.extinctions.len(),
+                                ?unknown_reason,
+                                "reachability observation recorded"
+                            );
+                        }
+                        health::reachability::observation::ReachabilityObservationState::SkippedStaleIncarnation { .. } => {}
+                        health::reachability::observation::ReachabilityObservationState::Unknown {
+                            reason,
+                        } => {
+                            tracing::warn!(
+                                provider = provider_for_tick.as_str(),
+                                channel_id = binding.owner_channel_id.get(),
+                                ?reason,
+                                "reachability observation unavailable; provider runtime continues"
+                            );
+                        }
+                    }
+                }
+            })
+            .await;
+            if let Err(error) = tick {
+                tracing::warn!(
+                    provider = provider.as_str(),
+                    error = %error,
+                    "reachability observation task join failed; provider runtime continues"
+                );
+            }
+        }
+    });
+}
+
 /// Background: poll for the deferred restart marker for gateway and standby
 /// runtimes. The marker first fences admissions and cancels intake polling;
 /// health counters then provide the drain proof before the wrapper boots out.
