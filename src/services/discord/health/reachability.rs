@@ -2,8 +2,9 @@
 //!
 //! Production now resolves and tails each registered watcher transcript and
 //! records canonical obligations plus its resume cursor in the durable ledger.
-//! This is observation only: no value here changes relay delivery, recovery,
-//! or health. T4-B6 owns composition and judgment authority.
+//! `health/snapshot.rs` additionally reads [`divergence`] for a descriptive
+//! log record. This is observation only: no value here changes relay delivery,
+//! recovery, or health. T4-B6 owns composition and judgment authority.
 //!
 //! What lands here is the vocabulary plus the file-facing primitives every
 //! later slice reads through:
@@ -20,6 +21,10 @@
 //!   with it is gated byte for byte against the golden corpus in
 //!   `tests/fixtures/relay_obligation/`. It frames bytes a caller already
 //!   read; it opens no file and reads no clock.
+//! * [`divergence`] — the 4987 §-1.5 row-coordinate ↔ resolved-coordinate
+//!   file-identity comparison (#5071 T4-B4). The ONE place in this tree that
+//!   sees the in-flight row's path, as a comparison operand only (I14);
+//!   descriptive outcomes, no verdict.
 //!
 //! # Row independence (4987 §-1.5 I14)
 //!
@@ -41,6 +46,7 @@
 //! variant, and a source lint. It is not a sealed capability.
 
 pub(in crate::services::discord) mod discovery;
+pub(in crate::services::discord) mod divergence;
 pub(in crate::services::discord) mod ledger;
 pub(in crate::services::discord) mod obligation;
 pub(in crate::services::discord) mod observation;

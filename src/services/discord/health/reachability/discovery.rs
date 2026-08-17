@@ -121,8 +121,14 @@ pub(in crate::services::discord) struct TranscriptCandidates<'a> {
     pub(in crate::services::discord) discovery_roots: &'a [PathBuf],
 }
 
-/// Stat one candidate path, returning `None` for anything that is not a
-/// readable regular file (missing, a directory, a broken symlink, EACCES).
+/// Stat one candidate path, returning `None` for anything that is not an
+/// existing regular file (missing, a directory, a broken symlink, or a stat
+/// that fails outright — e.g. EACCES from an unsearchable parent directory).
+///
+/// Readability is NOT checked, and nothing downstream may assume it: `metadata`
+/// needs no read permission on the file itself, so a mode-000 transcript stats
+/// clean and comes back `Some` (measured). Whether the tail can actually be
+/// read is the reader's problem, not this ladder's.
 pub(in crate::services::discord) fn stat_transcript(path: &Path) -> Option<TranscriptStat> {
     // `metadata` follows symlinks on purpose: a transcript reached through a
     // symlink is the same file, and identity is taken from the target.

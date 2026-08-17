@@ -66,6 +66,10 @@ test-non-pg:
     # equivalence, so a Rust-only change to the obligation rule dies here in
     # ordinary CI; the Python half is in `scripts/ci-script-checks.sh`.
     cargo test --lib services::discord::health::reachability::obligation::tests -- --skip _pg --skip pg_ --skip postgres
+    # #5071 T4-B4 (4987 S4): row-vs-registry transcript divergence is compared
+    # by file identity, so the same-size/different-inode counterexample
+    # (4987 -1.4 #4) and the fail-closed stat arms are pinned in this lane.
+    cargo test --lib services::discord::health::reachability::divergence::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::discord::e2e_control::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib server::routes::e2e_control::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib formatting -- --skip _pg --skip pg_ --skip postgres
