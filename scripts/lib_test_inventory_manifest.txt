@@ -1127,10 +1127,13 @@ services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::a_poison_
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::an_already_emitted_task_is_never_re_emitted_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::an_unrecordable_attempt_is_reported_instead_of_looking_like_a_retry_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::attempt_cap_dead_letter_is_counted_and_surfaced_on_health_pg
+services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::card_rollback_crash_window_retries_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::crash_after_cancel_commit_converges_on_replay_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::drain_with_health_registry_clears_slot_thread_sessions_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::drain_with_health_registry_tears_down_provider_runtime_pg
+services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::end_run_does_not_change_card_state_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::enqueue_is_atomic_with_the_state_change_pg
+services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::generation_mismatch_skips_card_rollback_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::poison_and_exhausted_tasks_dead_letter_instead_of_blocking_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::repeatedly_failing_task_dead_letters_at_the_attempt_cap_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::replay_skips_slot_threads_after_slot_reassignment_pg
