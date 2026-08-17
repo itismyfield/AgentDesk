@@ -699,6 +699,15 @@ deadline = "2026-10-31"
 decompose_issue = "#4712"
 
 [[entry]]
+# Crossed the threshold when #5071 T4-B6 wired the composed relay verdict
+# (RelayVerdictSource polarity switch) into the per-channel snapshot composer.
+file = "src/services/discord/health/snapshot.rs"
+decision = "shrink"
+owner = "discord-relay"
+deadline = "2027-02-28"
+decompose_issue = "#5447"
+
+[[entry]]
 # #3721 first-batch promotion: health recovery surface combines stop/cancel,
 # rebind, stall-watchdog, queue drain, and leak-recovery behavior.
 file = "src/services/discord/health/recovery.rs"

@@ -425,16 +425,25 @@ pub(super) async fn apply_relay_recovery_decision(
                 reattach_error: None,
             }
         }
-        RelayRecoveryActionKind::ObserveOnly => RelayRecoveryApplyResult {
-            status: "skipped",
-            removed_thread_proofs: 0,
-            removed_mailbox_token: false,
-            post_mailbox_has_cancel_token: None,
-            post_mailbox_queue_depth: None,
-            reattach_watcher_spawned: None,
-            reattach_watcher_replaced: None,
-            reattach_initial_offset: None,
-            reattach_error: None,
-        },
+        // #5071 T4-B6: `ReportRelayUnreachable` shares `ObserveOnly`'s apply
+        // path — "skipped", nothing written — because 4987 §7.1 / I15 keeps the
+        // reachability tier out of every destructive step. The two actions are
+        // separate KINDS so the operator-facing decision says which observation
+        // it is; they are deliberately not separate BEHAVIOURS here, and this
+        // arm is spelled beside its twin rather than merged so that giving the
+        // T4-B6 action an effect is a visible edit.
+        RelayRecoveryActionKind::ObserveOnly | RelayRecoveryActionKind::ReportRelayUnreachable => {
+            RelayRecoveryApplyResult {
+                status: "skipped",
+                removed_thread_proofs: 0,
+                removed_mailbox_token: false,
+                post_mailbox_has_cancel_token: None,
+                post_mailbox_queue_depth: None,
+                reattach_watcher_spawned: None,
+                reattach_watcher_replaced: None,
+                reattach_initial_offset: None,
+                reattach_error: None,
+            }
+        }
     }
 }

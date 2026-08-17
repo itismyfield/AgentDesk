@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "refreshed_at": "2026-08-17T11:35:25Z",
+  "refreshed_at": "2026-08-17T19:01:15Z",
   "ratchets": {
     "closed_deadline_entries": 79,
     "transition_list_entries": 79
@@ -125,6 +125,17 @@
         "src/services/tmux_common.rs",
         "src/services/discord/recovery_engine/manual_rebind/mod.rs",
         "src/services/discord/catch_up.rs"
+      ]
+    },
+    {
+      "number": 5447,
+      "state": "open",
+      "title": "Decompose src/services/discord/health/snapshot.rs (prod-giant: 1022 LoC after T4-B6)",
+      "owners": [
+        "discord-relay"
+      ],
+      "files": [
+        "src/services/discord/health/snapshot.rs"
       ]
     }
   ]

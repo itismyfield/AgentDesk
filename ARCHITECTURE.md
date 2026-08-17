@@ -535,6 +535,8 @@ src/
 │   │   │   └── outbound_messages.rs
 │   │   ├── health/
 │   │   │   ├── reachability/
+│   │   │   │   ├── composite.rs
+│   │   │   │   ├── composite_tests.rs
 │   │   │   │   ├── discovery.rs
 │   │   │   │   ├── divergence.rs
 │   │   │   │   ├── external_verdict.rs

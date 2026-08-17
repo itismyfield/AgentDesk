@@ -4,6 +4,17 @@ use serde::Serialize;
 use super::liveness_authority::CaptureCoordinateObservation;
 use super::mailbox::MailboxHealthSnapshot;
 use super::provider_probe::{self, ProviderHealthSnapshot};
+// #5071 T4-B6: `health::reachability` is `#[cfg(unix)]` (see the `mod` decl in
+// `health.rs`), so the composition wiring built on it — this import,
+// `composite_governs_polarity`, `observe_relay_verdict`, the
+// `RelayVerdictReport` published on the mailbox entry, and
+// `apply_relay_verdict_polarity` — carries the same gate. Windows keeps the
+// pre-B6 snapshot: no composed verdict, no polarity from one.
+#[cfg(unix)]
+use super::reachability::composite::{
+    RelayVerdict, RelayVerdictProbe, RelayVerdictReport, observe_relay_verdict,
+    relay_verdict_source,
+};
 use super::redaction;
 use super::session_enrichment::SessionEnrichment;
 use super::stall_verdict;
@@ -685,6 +696,11 @@ async fn build_health_snapshot_with_options(
     let mut recovery_duration = 0.0f64;
     let mut mailbox_entries = Vec::new();
     let mut provider_active_turns = 0usize;
+    // #5071 T4-B6: read the 4987 §5.1 switch once per snapshot, so every entry
+    // in one response answers under the same authority even if the live config
+    // is edited mid-poll.
+    #[cfg(unix)]
+    let composite_governs_polarity = relay_verdict_source().governs_health_polarity();
 
     if providers.is_empty() {
         degraded_reasons.push("no_providers_registered".to_string());
@@ -772,6 +788,81 @@ async fn build_health_snapshot_with_options(
                     &relay_health,
                     registry.started_at_unix(),
                 );
+                // #5071 T4-B6 (4987 §4.3/§4.4): compose the relay verdict from
+                // the durable T4-B2c ledger, the T4-B3 receipt projection and
+                // the T4-B5 sidecar, and publish it. Whether it may also change
+                // this entry's polarity is the `RelayVerdictSource` switch,
+                // read once per poll below. The row's `output_path` is passed
+                // to the divergence comparison only, matching the descriptive
+                // call above it; nothing here resolves or tails through it.
+                #[cfg(unix)]
+                let relay_verdict = observe_relay_verdict(RelayVerdictProbe {
+                    provider: provider_kind.as_ref(),
+                    channel_id: channel.get(),
+                    row_output_path: session
+                        .inflight
+                        .as_ref()
+                        .and_then(|state| state.output_path.as_deref()),
+                    registry_output_path: session.watcher_output_path.as_deref(),
+                    // 4987 §-1.4's second alive witness: the pane is up, the
+                    // mailbox holds no turn, and the tail has nothing waiting,
+                    // so a transcript that is not growing is idle rather than
+                    // gone.
+                    //
+                    // The third term is weaker than it reads. `unread_bytes`
+                    // is derived in `SessionEnrichment::load` from the capture
+                    // coordinate of the IN-FLIGHT ROW's `output_path`, so a
+                    // channel with no in-flight row has no coordinate and the
+                    // field is `None` — and `unwrap_or(0)` reads `None` as
+                    // "nothing waiting". On an idle channel, which is the case
+                    // this witness exists for, the term is therefore satisfied
+                    // without measuring anything, and the effective gate is the
+                    // first two: the pane is up and the mailbox holds no turn.
+                    //
+                    // That fold runs the opposite way from
+                    // `RelayHealthSnapshot::relay_frontier_never_advanced_with_unread_tail`,
+                    // where the same field is read as `is_some_and(|b| b > 0)`.
+                    // There an unmeasured tail declines to assert a FAILURE;
+                    // here it helps assert liveness, so the residual risk is
+                    // GREEN-permitting: an unmeasurable tail cannot withhold
+                    // this witness. It is left this way deliberately. Requiring
+                    // `Some(0)` would deny the witness to every rowless idle
+                    // channel, and one with no held obligation and a transcript
+                    // that is not growing would then classify
+                    // `Unknown{TranscriptUnresolved}`
+                    // (`composite_tests::nothing_observed_is_not_green` pins
+                    // that verdict) — a degraded reason for each such channel
+                    // once `RelayVerdictSource` is `Composite`. Tightening this
+                    // needs evidence about that population first.
+                    pane_idle_confirmed: tmux_present
+                        && matches!(relay_health.active_turn, RelayActiveTurn::None)
+                        && relay_health.unread_bytes.unwrap_or(0) == 0,
+                    // The RECONFIRMED unpaired token, not the raw one: a second
+                    // mailbox snapshot and inflight read still saw the same
+                    // active episode without a durable row, so an ordinary
+                    // start-of-turn race between the token and the row write
+                    // does not spend a tick as `Unknown{RowlessActiveTurn}`.
+                    rowless_active_turn: unpaired_active_token_reconfirmed,
+                    placeholder_present: relay_health.pending_discord_callback_msg_id.is_some(),
+                    now_epoch_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
+                    process_started_at_epoch_ms: registry
+                        .started_at_unix()
+                        .max(0)
+                        .saturating_mul(1_000)
+                        as u64,
+                });
+                #[cfg(unix)]
+                apply_relay_verdict_polarity(
+                    composite_governs_polarity,
+                    &relay_verdict,
+                    &entry.name,
+                    channel.get(),
+                    &mut degraded_reasons,
+                    &mut status,
+                );
+                #[cfg(unix)]
+                let reachability =
+                    RelayVerdictReport::of(&relay_verdict, composite_governs_polarity);
                 mailbox_entries.push(MailboxHealthSnapshot {
                     provider: entry.name.clone(),
                     channel_id: channel.get(),
@@ -790,6 +881,8 @@ async fn build_health_snapshot_with_options(
                     process_present,
                     active_dispatch_present: session.active_dispatch_present(),
                     stall_shadow_verdict,
+                    #[cfg(unix)]
+                    reachability,
                     relay_stall_state,
                     relay_health,
                 });
@@ -853,6 +946,43 @@ async fn build_health_snapshot_with_options(
         degraded_reasons,
         providers: provider_entries,
         mailboxes: mailbox_entries,
+    }
+}
+
+/// The only place 4987 §5.1's switch changes a snapshot's polarity (#5071 T4-B6).
+///
+/// The switch is also visible in the response as
+/// `RelayVerdictReport::governs_health_polarity`, published on the mailbox entry
+/// in both modes; what it does NOT do anywhere else is change the aggregate the
+/// caller reads as the process's health. Under `Structural` this returns having
+/// touched neither output — that is what makes the shadow mode a shadow.
+///
+/// One reason per non-green CHANNEL, not per provider: the channel is what an
+/// operator has to look at, and the same response already carries one mailbox
+/// entry per channel. `Degraded`, never `Unhealthy`: 4987 §4.4 asks a
+/// non-`Reachable` relay to set the degraded flag, and taking the process out of
+/// HTTP readiness is authority this switch was not given.
+///
+/// Split out of the per-channel loop so the switch has a seam a test can call.
+/// The polarity is the whole of what T4-B6 granted the composed verdict, and
+/// before this it was reachable only by building a full `HealthRegistry`, which
+/// left both the `composite_governs_polarity` conjunct and the direction of the
+/// `permits_health` test unpinned.
+#[cfg(unix)]
+fn apply_relay_verdict_polarity(
+    composite_governs_polarity: bool,
+    relay_verdict: &RelayVerdict,
+    provider: &str,
+    channel_id: u64,
+    degraded_reasons: &mut Vec<String>,
+    status: &mut HealthStatus,
+) {
+    if composite_governs_polarity && !relay_verdict.permits_health() {
+        degraded_reasons.push(format!(
+            "relay_verdict_{}_{provider}_{channel_id}",
+            relay_verdict.label(),
+        ));
+        *status = status.worsen(HealthStatus::Degraded);
     }
 }
 
@@ -968,7 +1098,20 @@ mod tests {
         HealthRegistry, authoritative_tmux_session, build_health_snapshot,
         rebind_origin_inflight_is_idle, relay_active_turn_from_inflight, resolve_bound_selector,
     };
+    // #5071 T4-B6: the polarity tests below name the `#[cfg(unix)]` reachability
+    // tree, so they are gated with the seam they exercise. `HealthStatus` rides
+    // the same gate because those tests are its only readers here.
+    #[cfg(unix)]
+    use super::{HealthStatus, RelayVerdict, apply_relay_verdict_polarity};
     use crate::services::agent_protocol::RuntimeHandoffKind;
+    #[cfg(unix)]
+    use crate::services::discord::health::reachability::composite::compose_relay_verdict;
+    #[cfg(unix)]
+    use crate::services::discord::health::reachability::external_verdict::ExternalRelayVerdict;
+    #[cfg(unix)]
+    use crate::services::discord::health::reachability::verdict::{
+        ReachabilityUnknownReason, ReachabilityVerdict,
+    };
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::discord::relay_health::RelayActiveTurn;
     use crate::services::provider::{CancelToken, ProviderKind};
@@ -984,6 +1127,126 @@ mod tests {
         fn drop(&mut self) {
             unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
         }
+    }
+
+    #[cfg(unix)]
+    const POLARITY_PROVIDER: &str = "claude";
+    #[cfg(unix)]
+    const POLARITY_CHANNEL: u64 = 4_987_000_000_071;
+
+    /// An `Unknown{TranscriptUnresolved}` composed with a sidecar that said
+    /// nothing: 4987 §4.1's "an unobservable relay is not a healthy one", and
+    /// the plainest verdict that does not permit health.
+    #[cfg(unix)]
+    fn not_green() -> RelayVerdict {
+        let composed = compose_relay_verdict(
+            ReachabilityVerdict::unknown(ReachabilityUnknownReason::TranscriptUnresolved, 0),
+            ExternalRelayVerdict::Unknown,
+        );
+        assert!(!composed.permits_health());
+        composed
+    }
+
+    /// #5071 T4-B6: the switch's one effect, locked from both sides.
+    ///
+    /// The same verdict is pushed through `apply_relay_verdict_polarity` in both
+    /// modes and only `Composite` may move the snapshot. Dropping the
+    /// `composite_governs_polarity` conjunct makes the `Structural` half fail —
+    /// which is the mutation the r1 review ran green against every gate before
+    /// this test existed.
+    #[cfg(unix)]
+    #[test]
+    fn only_composite_mode_degrades_the_snapshot_for_a_non_green_relay_verdict() {
+        let verdict = not_green();
+
+        let mut composite_reasons = Vec::new();
+        let mut composite_status = HealthStatus::Healthy;
+        apply_relay_verdict_polarity(
+            true,
+            &verdict,
+            POLARITY_PROVIDER,
+            POLARITY_CHANNEL,
+            &mut composite_reasons,
+            &mut composite_status,
+        );
+        assert_eq!(
+            composite_reasons,
+            vec![format!(
+                "relay_verdict_unknown_{POLARITY_PROVIDER}_{POLARITY_CHANNEL}"
+            )],
+            "Composite must name the non-green channel in the degraded reasons"
+        );
+        assert_eq!(composite_status, HealthStatus::Degraded);
+
+        let mut shadow_reasons = Vec::new();
+        let mut shadow_status = HealthStatus::Healthy;
+        apply_relay_verdict_polarity(
+            false,
+            &verdict,
+            POLARITY_PROVIDER,
+            POLARITY_CHANNEL,
+            &mut shadow_reasons,
+            &mut shadow_status,
+        );
+        assert!(
+            shadow_reasons.is_empty(),
+            "Structural is a shadow: the same verdict must move no reason, got {shadow_reasons:?}"
+        );
+        assert_eq!(shadow_status, HealthStatus::Healthy);
+    }
+
+    /// The other direction of the same conditional: `Composite` degrades on a
+    /// verdict that does NOT permit health, so a verdict that does must leave
+    /// the snapshot alone. Without this, inverting the `permits_health` test
+    /// still passes the case above.
+    #[cfg(unix)]
+    #[test]
+    fn a_green_relay_verdict_degrades_the_snapshot_in_neither_mode() {
+        let green =
+            compose_relay_verdict(ReachabilityVerdict::Reachable, ExternalRelayVerdict::NoLoss);
+        assert!(green.permits_health());
+
+        for composite_governs_polarity in [false, true] {
+            let mut reasons = Vec::new();
+            let mut status = HealthStatus::Healthy;
+            apply_relay_verdict_polarity(
+                composite_governs_polarity,
+                &green,
+                POLARITY_PROVIDER,
+                POLARITY_CHANNEL,
+                &mut reasons,
+                &mut status,
+            );
+            assert!(
+                reasons.is_empty(),
+                "a health-permitting verdict degraded nothing to report, got {reasons:?}"
+            );
+            assert_eq!(status, HealthStatus::Healthy);
+        }
+    }
+
+    /// The worsen is a floor, not an assignment: a snapshot already `Unhealthy`
+    /// for an unrelated reason (no providers registered, say) must not be
+    /// improved to `Degraded` by a non-green relay verdict landing after it.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_green_relay_verdict_never_improves_an_unhealthy_snapshot() {
+        let mut reasons = vec!["no_providers_registered".to_string()];
+        let mut status = HealthStatus::Unhealthy;
+        apply_relay_verdict_polarity(
+            true,
+            &not_green(),
+            POLARITY_PROVIDER,
+            POLARITY_CHANNEL,
+            &mut reasons,
+            &mut status,
+        );
+        assert_eq!(status, HealthStatus::Unhealthy);
+        assert_eq!(
+            reasons.len(),
+            2,
+            "the relay reason is added, not substituted"
+        );
     }
 
     /// #3631: a rebind-origin row with NO cancel token is idle (so the channel

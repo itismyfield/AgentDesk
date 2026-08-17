@@ -70,7 +70,9 @@
 //!   an in-place rewrite can shorten a transcript without rotating its path.
 //!   This index takes no EOF input and applies no such bound, so a stale-high
 //!   same-generation frontier over-reports coverage. A consumer that needs the
-//!   EOF guard has to apply it on its own inputs.
+//!   EOF guard has to apply it on its own inputs — [`ReceiptIndex::with_frontier_clamped_to_eof`]
+//!   is the opt-in adapter for that, and `read_receipt_index_at` still does not
+//!   apply it on its own because it has no transcript to measure.
 //! - No cross-session frontier separation. Two different sessions' `.generation`
 //!   markers carry no ordering relation to each other, so generation-only
 //!   attribution conflates them if their marker mtimes coincide exactly.
@@ -189,6 +191,32 @@ impl ReceiptIndex {
             }
         }
         false
+    }
+
+    /// Bound the frontier operand by the transcript's current length, the guard
+    /// the module docs above name as this index's missing EOF input (#4188).
+    ///
+    /// An in-place rewrite can shorten a transcript without rotating its path,
+    /// which leaves a same-generation frontier pointing past the end of the file
+    /// it was stamped against. [`ReceiptIndex::covers`] would then advance its
+    /// sweep cursor over bytes that no longer exist and report them covered.
+    /// Clamping shrinks the frontier operand only, so it can turn a covered
+    /// answer into an uncovered one and never the reverse — the direction 4987
+    /// §7 asks a consumer to prefer.
+    ///
+    /// This bounds the frontier operand alone. Individual receipt ranges are
+    /// left as recorded: they carry their own confirmation, and no consumer has
+    /// asked for them to be clipped. It also does not detect the rewrite — a
+    /// transcript that shrank and then regrew past the old frontier presents the
+    /// same length as one that never shrank.
+    pub(in crate::services::discord) fn with_frontier_clamped_to_eof(
+        mut self,
+        transcript_len: u64,
+    ) -> Self {
+        if let Some(frontier) = self.frontier.as_mut() {
+            frontier.end = frontier.end.min(transcript_len);
+        }
+        self
     }
 
     /// Pure adapter from the durable record shape into the projection.
@@ -478,6 +506,42 @@ mod tests {
         .expect("fused index");
         assert!(covered(&index, GENERATION, (0, 400)));
         assert!(!covered(&index, GENERATION, (0, 401)));
+    }
+
+    // #5071 T4-B6 consumer obligation: the frontier operand can outlive the
+    // bytes it was stamped against when an in-place rewrite shortens the
+    // transcript without rotating its path (#4188). The clamp is opt-in, so
+    // this pins both halves — unclamped over-reports, clamped does not.
+    #[test]
+    fn clamping_the_frontier_to_the_transcript_eof_withdraws_the_bytes_past_it() {
+        let stale_high =
+            ReceiptIndex::from_record(&record(vec![], Some(frontier((100, 300), GENERATION))))
+                .expect("frontier-only index");
+        assert!(covered(&stale_high, GENERATION, (250, 300)));
+
+        let clamped = stale_high.clone().with_frontier_clamped_to_eof(200);
+        assert!(!covered(&clamped, GENERATION, (250, 300)));
+        // Only the bytes above the new EOF are withdrawn; the prefix below it
+        // still answers.
+        assert!(covered(&clamped, GENERATION, (0, 200)));
+
+        // An EOF at or above the frontier end changes nothing.
+        assert_eq!(
+            stale_high.clone().with_frontier_clamped_to_eof(300),
+            stale_high
+        );
+        assert_eq!(
+            stale_high.clone().with_frontier_clamped_to_eof(u64::MAX),
+            stale_high
+        );
+
+        // A receipt-only index has no frontier to clamp, and its receipts are
+        // left alone.
+        let receipts_only = index(vec![receipt((250, 300), GENERATION, "turn-a")]);
+        assert_eq!(
+            receipts_only.clone().with_frontier_clamped_to_eof(0),
+            receipts_only
+        );
     }
 
     #[test]
