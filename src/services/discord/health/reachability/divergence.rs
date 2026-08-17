@@ -33,8 +33,11 @@
 //!
 //! * **The independently resolved side fails to stat** (or both sides do).
 //!   An equality claim between two identities needs both identities in hand,
-//!   so `(_, Unresolvable)` is [`RowCoordinateDivergence::Unknown`], maps to
-//!   no reason, and stays silent — `discovery`'s fail-closed discipline.
+//!   so `(Unresolvable | Resolved(_), Unresolvable)` is
+//!   [`RowCoordinateDivergence::Unknown`], maps to no reason, and stays
+//!   silent — `discovery`'s fail-closed discipline. (A row that offered no
+//!   coordinate at all is [`RowCoordinateDivergence::NoRowCoordinate`],
+//!   regardless of the independent side.)
 //! * **The row side fails to stat while the independent side is alive.** This
 //!   is not a retreat, it is the designed detection. `(Unresolvable,
 //!   Resolved)` is
