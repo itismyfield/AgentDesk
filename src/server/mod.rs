@@ -620,6 +620,7 @@ async fn policy_tick_loop(
                             drained = stats.drained,
                             completed = stats.completed,
                             dead_lettered = stats.dead_lettered,
+                            unrecorded_failures = stats.unrecorded_failures,
                             "[policy-tick] replayed auto-queue run cleanup tasks left by an earlier process"
                         );
                     }
