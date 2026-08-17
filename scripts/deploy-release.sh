@@ -1425,8 +1425,25 @@ git merge --quiet --ff-only origin/main"
         return 1
     fi
 
+    # Send _extract_yaml_server_port_shell function to remote, use it to extract port from config.
+    # This ensures single-source maintenance of YAML parsing logic across local and remote paths.
     if ! peer_info="$(ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" \
-        'bash -lc '"$(printf '%q' 'adk_rel="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"; port=8791; if [ -f "$adk_rel/config/agentdesk.yaml" ]; then port=$(grep -oE "port: [0-9]+" "$adk_rel/config/agentdesk.yaml" | sed "s/[^0-9]//g" || echo "8791"); fi; echo "$adk_rel"; echo "$port"')"'')"; then
+        'bash -lc '"$(printf '%q' "$(declare -f _extract_yaml_server_port_shell)
+adk_rel=\"\${AGENTDESK_ROOT_DIR:-\$HOME/.adk/release}\"
+# Try primary path first, then fallback to secondary
+if [ -f \"\$adk_rel/config/agentdesk.yaml\" ]; then
+    port=\$(_extract_yaml_server_port_shell \"\$adk_rel/config/agentdesk.yaml\")
+elif [ -f \"\$adk_rel/agentdesk.yaml\" ]; then
+    port=\$(_extract_yaml_server_port_shell \"\$adk_rel/agentdesk.yaml\")
+else
+    port=\"\"
+fi
+if [ -z \"\$port\" ]; then
+    echo \"✗ [peer:\$peer] could not extract server.port: no config found or port unreadable\" >&2
+    exit 1
+fi
+echo \"\$adk_rel\"
+echo \"\$port\"")"'')"; then
         echo "✗ [peer:$peer] could not resolve remote AGENTDESK_ROOT_DIR and server port"
         return 1
     fi

@@ -207,9 +207,10 @@ esac
 # that when _wait_for_peer_deploy_verdict fails (rc=1), _deploy_to_one_peer also fails.
 eval "$(extract_function _deploy_to_one_peer)"
 
-# Stub git to return a valid commit hash
+# Stub git to match actual invocation: git -C "$REPO" rev-parse HEAD
+# $1="-C", $2=$REPO path, $3="rev-parse", $4="HEAD"
 git() {
-    if [ "$2" = "rev-parse" ]; then
+    if [ "$3" = "rev-parse" ] && [ "$4" = "HEAD" ]; then
         echo "abc1234567890def"
     else
         return 0
@@ -229,7 +230,7 @@ ssh() {
     fi
 }
 
-# Stub rsync to succeed (return 0)
+# Stub rsync (invoked only when routines directory exists on local machine)
 rsync() {
     return 0
 }
@@ -250,10 +251,13 @@ export ADK_REL="/stub/.adk/release"
 export DEPLOY_SSH_CONNECT_TIMEOUT=10
 
 # Test: _deploy_to_one_peer with failing verdict should return non-zero
+# Verify rc propagates from verdict call, not from an earlier failure path.
 peer_deploy_rc=0
-_deploy_to_one_peer "test-peer" 2>/dev/null || peer_deploy_rc=$?
+peer_deploy_out=$(_deploy_to_one_peer "test-peer" 2>&1) || peer_deploy_rc=$?
 if [ "$peer_deploy_rc" -eq 0 ]; then
     fail_test "_deploy_to_one_peer must fail (rc≠0) when _wait_for_peer_deploy_verdict fails; got rc=$peer_deploy_rc"
+elif grep -q 'deploy verified' <<<"$peer_deploy_out"; then
+    fail_test "_deploy_to_one_peer failure must not claim verified success; got: $peer_deploy_out"
 fi
 
 if grep -q 'Cluster Deploy Complete (all peers healthy)' "$DEPLOY_SH"; then
