@@ -2026,9 +2026,6 @@ time for diagnostics; neither is a stored approval value.
   finalize) under #3038 — the added doc-commented scaffolding nets a small
   file-LoC increase while shrinking the god-function from ~1158 to ~559 lines.
   Further growth requires a split issue.
-  `src/services/auto_queue/cancel_run.rs` (frozen giant surface) is the canonical
-  auto-queue cancellation and run-stop command surface; split before adding
-  non-bugfix behavior.
   `src/services/auto_queue/cleanup_tasks.rs` (frozen giant surface, #5142) is the
   canonical run-cleanup transactional outbox: `enqueue_run_cleanup_task_on_tx`
   writes the task in the same transaction that commits the cancel/end state
@@ -2238,8 +2235,6 @@ these contextual numbers to match ordinary LoC churn.
   `src/services/auto_queue/activate_command.rs` (frozen giant surface); auto-queue route
   behavior is split across `src/services/auto_queue/*` slices, with
   `activate_command.rs` now giant-file territory.
-  `src/services/auto_queue/cancel_run.rs` (frozen giant surface) is also giant-file territory;
-  split before further non-bugfix growth.
 - `src/services/onboarding/mod.rs` (frozen giant surface),
   `src/services/dispatched_sessions.rs` (frozen giant surface; #4091 r2 adds the two-sample
   growth-evidence selector cross-check wiring, claude_tui transcript-mtime
