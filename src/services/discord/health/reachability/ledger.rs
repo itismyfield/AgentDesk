@@ -357,9 +357,10 @@ fn read_bootstrapped_ledger_at(path: &Path) -> Result<ReachabilityLedger, String
 /// flock-guarded explicit ledger bootstrap.
 ///
 /// A missing ledger is created at `bootstrap_offset`. An existing valid ledger
-/// is retired and re-bootstrapped so its monotone counters survive. An existing
-/// unreadable or schema-incompatible file is left untouched and returns an
-/// error rather than being replaced with an empty observation claim.
+/// already bound to `incarnation` is left exactly as-is; a different valid
+/// incarnation is retired and re-bootstrapped so its monotone counters survive.
+/// An existing unreadable or schema-incompatible file is left untouched and
+/// returns an error rather than being replaced with an empty observation claim.
 pub(in crate::services::discord) fn bootstrap_ledger_at(
     path: &Path,
     incarnation: LedgerIncarnation,
@@ -370,7 +371,11 @@ pub(in crate::services::discord) fn bootstrap_ledger_at(
     }
     let _lock = delivery_record::lock_record_path(path)?;
     let ledger = if ledger_file_exists(path) {
-        read_bootstrapped_ledger_at(path)?.retire_and_rebootstrap(incarnation, bootstrap_offset)
+        let current = read_bootstrapped_ledger_at(path)?;
+        if current.binds_to(&incarnation) {
+            return Ok(());
+        }
+        current.retire_and_rebootstrap(incarnation, bootstrap_offset)
     } else {
         ReachabilityLedger::bootstrap(incarnation, bootstrap_offset, LedgerCounters::default())
     };

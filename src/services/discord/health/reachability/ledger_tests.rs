@@ -52,6 +52,35 @@ fn a_written_ledger_round_trips_through_the_sidecar() {
     assert_eq!(read_ledger_at(&path).expect("read back"), expected);
 }
 
+/// A startup-time ensure-bootstrapped call must not retire the live ledger on
+/// every process restart. In particular, a later bootstrap offset is not a
+/// reason to erase obligations or advance the durable cursor while the full
+/// incarnation identity still matches.
+#[test]
+fn bootstrap_is_a_byte_preserving_noop_for_the_bound_incarnation() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("provider/123.json");
+    let bound = incarnation("adk-chan", 42, Some("nonce-a"), 900);
+
+    bootstrap_ledger_at(&path, bound.clone(), 100).expect("first bootstrap");
+    append_ledger_at(&path, vec![obligation_record(100, 200)], 1_700).expect("append");
+    let before = std::fs::read(&path).expect("read before ensure");
+    let ledger_before = read_ledger_at(&path).expect("ledger before ensure");
+
+    bootstrap_ledger_at(&path, bound, 999).expect("ensure same incarnation");
+
+    assert_eq!(
+        std::fs::read(&path).expect("read after ensure"),
+        before,
+        "same-incarnation bootstrap must not rewrite the sidecar"
+    );
+    assert_eq!(
+        read_ledger_at(&path).expect("ledger after ensure"),
+        ledger_before,
+        "same-incarnation bootstrap must preserve obligations and cursor"
+    );
+}
+
 /// 4987 §-1.4 counterexample 7: an unreadable store is `Unknown`, never a
 /// conclusion. The reader therefore reports an ABSENCE, and it is the caller's
 /// job to notice that a file was nonetheless present — hence the separate
