@@ -1497,7 +1497,7 @@ def check_analysis(
         new = sorted(analysis.debts[section] - baseline[section])
         stale = sorted(baseline[section] - analysis.debts[section])
         if new or stale:
-            level = "FAIL" if new else "WARN"
+            level = "FAIL"
             print(f"{level}: [{section}] baseline drift: {len(new)} new, {len(stale)} stale.", file=sys.stderr)
             for entry in new:
                 print(f"  + {entry}", file=sys.stderr)
@@ -1513,7 +1513,7 @@ def check_analysis(
                 "every entry requires an inline reason comment.",
                 file=sys.stderr,
             )
-            if new:
+            if new or stale:
                 failed = True
     counts = analysis.debts
     # rule5: no ratchet, and the allowlist cannot reach it. Both halves are
@@ -1579,9 +1579,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__.splitlines()[0],
         epilog=(
-            "During T0, new live debt is warn-only. Manifest drift, candidate "
-            "baseline growth, and stale baseline entries return rc=1; T1 promotes "
-            "new debt to enforcement."
+            "Newly discovered live debt (baseline drift) is enforced; existing baseline "
+            "entries are maintained as a ledger. Return code 1 is reserved for manifest "
+            "drift, candidate baseline growth, and any baseline drift (new or stale); "
+            "malformed inputs and configuration errors return code 2."
         ),
     )
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)

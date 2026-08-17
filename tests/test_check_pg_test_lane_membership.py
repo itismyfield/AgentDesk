@@ -1259,14 +1259,14 @@ class BaselineAndEnforcement(FixtureCase):
             )
         return rc, stdout.getvalue(), stderr.getvalue()
 
-    def test_repair_passes_and_stale_warns_only(self) -> None:
+    def test_repair_passes_and_stale_baseline_fails(self) -> None:
         old = empty_debts()
         old["rule3"] = {"src/db/service.rs"}
-        rc, _, error = self.run_check(self.analysis(), empty_debts(), old)
+        rc, _, _ = self.run_check(self.analysis(), empty_debts(), old)
         self.assertEqual(rc, 0)
         rc, _, error = self.run_check(self.analysis(), old, old)
-        self.assertEqual(rc, 0)
-        self.assertIn("WARN: [rule3] baseline drift", error)
+        self.assertEqual(rc, 1)
+        self.assertIn("FAIL: [rule3] baseline drift", error)
         self.assertIn("Remove '-' entries", error)
 
     def test_new_violation_fails_even_with_no_baseline(self) -> None:
