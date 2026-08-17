@@ -84,6 +84,7 @@ from scripts.relay_watchdog import (
     permanent_loss_total,
     project_slug,
     recheck_selected_transcript,
+    revalidate_incarnation_identity,
     save_state,
     select_watch_transcript,
     select_watch_transcript_with_reason,
@@ -9550,6 +9551,44 @@ class HaystackReadCompletenessTests(unittest.TestCase):
         self.assertIsNotNone(out, "partial data still beats blindness")
         self.assertFalse(complete)
 
+    def test_a_dict_payload_carrying_neither_key_never_reads_as_complete(self):
+        # `{}` passes every shape check by accident: `.get("messages",
+        # .get("data", []))` hands back `[]`, which is indistinguishable from a
+        # genuinely empty channel — returned=0, skipped=0, `read_complete=true`.
+        # A response that broke the contract must not inherit an empty channel's
+        # whole-history authority (r1 review, #5071 T4-B5).
+        out, complete, _ = self._probe("{}")
+        self.assertEqual(out, "", "the haystack stays best-effort")
+        self.assertFalse(complete)
+
+    def test_a_dict_payload_under_either_key_still_reads_as_complete(self):
+        # The narrowing above is about the keys being ABSENT, not about the dict
+        # form. Both accepted keys must keep earning an honest True.
+        for key in ("messages", "data"):
+            with self.subTest(key=key):
+                page = json.loads(self._page(DISCORD_READ_LIMIT - 1))
+                out, complete, _ = self._probe(json.dumps({key: page}))
+                self.assertIsNotNone(out)
+                self.assertTrue(complete)
+
+    def test_entries_without_comparable_fields_leave_the_read_incomplete(self):
+        # Each of these parses, so it survives to the matcher — as ''. An entry
+        # compared as '' is an entry that was never compared, so it cannot count
+        # toward "this page was judged in full" even though it raises nothing.
+        for entry in (
+            {"author": None, "content": None},
+            {"author": {"bot": True}, "content": None},
+            {"author": {"bot": True}},
+            {"content": "no author"},
+            {},
+        ):
+            with self.subTest(entry=entry):
+                out, complete, _ = self._probe(
+                    json.dumps([{"author": {"bot": True}, "content": "kept"}, entry])
+                )
+                self.assertEqual(out, "kept", "partial data still beats blindness")
+                self.assertFalse(complete)
+
     def test_every_read_failure_path_resets_a_previous_true(self):
         for stdout, returncode in (
             ("", 1),
@@ -9887,6 +9926,195 @@ class ExternalVerdictSidecarTickTests(unittest.TestCase):
             rt.log_lines,
         )
         self.assertTrue(rt.alerts, "the gap alert must still go out")
+
+    def _swap_transcript_during_judgment(self):
+        """Replace the transcript with a fresh inode between read and publish.
+
+        `evaluate` is the first thing the judgment loop does after reading the
+        candidate and snapshotting its identity, so a swap here reproduces the
+        window the publish site has to close: the verdict describes the inode that
+        was read, while a path re-stat at publish time would see the new one.
+        """
+        real_evaluate = relay_watchdog.evaluate
+        swapped: list[int] = []
+
+        def swap_then_evaluate(*args, **kwargs):
+            if not swapped:
+                replacement = self.proj_dir / "s.jsonl.replacement"
+                replacement.write_text(
+                    self.transcript.read_text(encoding="utf-8"), encoding="utf-8"
+                )
+                replacement.replace(self.transcript)
+                swapped.append(self.transcript.stat().st_ino)
+            return real_evaluate(*args, **kwargs)
+
+        return swapped, mock.patch.object(
+            relay_watchdog, "evaluate", side_effect=swap_then_evaluate
+        )
+
+    def test_a_transcript_swapped_before_publish_loses_its_authority(self):
+        rt = self.gap_rt()
+        rt.last_read_complete = True
+        judged_ino = self.transcript.stat().st_ino
+        swapped, patch = self._swap_transcript_during_judgment()
+        with patch:
+            tick_channel(rt, TICK_CHANNEL, {}, self.now)
+        self.assertNotEqual(
+            swapped[0], judged_ino, "the fixture has to really replace the inode"
+        )
+        record = self.sidecar(rt)
+        # The verdict itself is still published — this tier only ever loses
+        # authority, never the observation.
+        self.assertEqual(record["verdict"], "unreachable")
+        self.assertIsNone(
+            record["transcript_file_id"],
+            "the new inode must not inherit the retired file's verdict",
+        )
+        self.assertIsNone(record["generation_mtime_ns"])
+        self.assertIsNone(record["spawn_nonce"])
+        self.assertFalse(
+            record["read_complete"],
+            "a verdict that cannot name its subject keeps no read authority",
+        )
+        self.assertTrue(
+            any(
+                "external-verdict-identity-superseded" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+
+    def test_an_untouched_transcript_keeps_its_identity_through_publish(self):
+        # The negative half: revalidation must not strip identity from the
+        # ordinary tick, where nothing moves between judgment and publish.
+        rt = self.gap_rt()
+        rt.last_read_complete = True
+        tick_channel(rt, TICK_CHANNEL, {}, self.now)
+        record = self.sidecar(rt)
+        self.assertEqual(
+            record["transcript_file_id"],
+            {
+                "dev": self.transcript.stat().st_dev,
+                "ino": self.transcript.stat().st_ino,
+            },
+        )
+        self.assertTrue(record["read_complete"])
+        self.assertFalse(
+            any(
+                "external-verdict-identity-superseded" in line
+                for line in rt.log_lines
+            ),
+            rt.log_lines,
+        )
+
+
+class RevalidateIncarnationIdentityTests(unittest.TestCase):
+    """`revalidate_incarnation_identity` has to separate "no identity known" from
+    "the identity moved", because only the second one may also revoke
+    `read_complete`."""
+
+    SESSION = "AgentDesk-claude-adk-cc"
+    SNAPSHOT = {
+        "generation_mtime_ns": 1785321000000000000,
+        "spawn_nonce": "nonce-a",
+        "transcript_file_id": {"dev": 17, "ino": 4242},
+    }
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.sessions = self.root / "runtime" / "sessions"
+        self.sessions.mkdir(parents=True)
+        env = mock.patch.dict(
+            os.environ,
+            {"AGENTDESK_ROOT_DIR": str(self.root), "TMPDIR": str(self.root)},
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        (self.sessions / f"agentdesk-abc-h-{self.SESSION}.generation").write_text(
+            "1", encoding="utf-8"
+        )
+        (self.sessions / f"agentdesk-abc-h-{self.SESSION}.spawn_nonce").write_text(
+            "nonce-a\n", encoding="utf-8"
+        )
+        self.transcript = self.root / "s.jsonl"
+        self.transcript.write_text("{}\n", encoding="utf-8")
+
+    def live_snapshot(self):
+        transcript_stat = self.transcript.stat()
+        file_id = (transcript_stat.st_dev, transcript_stat.st_ino)
+        snapshot = session_incarnation_identity(
+            self.SESSION, self.transcript, expected_file_id=file_id
+        )
+        self.assertIsNotNone(snapshot, "fixture must produce a full identity")
+        return file_id, snapshot
+
+    def test_an_unchanged_incarnation_republishes_its_snapshot(self):
+        file_id, snapshot = self.live_snapshot()
+        result = revalidate_incarnation_identity(
+            self.SESSION, self.transcript, file_id, snapshot
+        )
+        self.assertEqual(result.identity, snapshot)
+        self.assertFalse(result.superseded)
+
+    def test_an_absent_snapshot_is_unknown_and_not_superseded(self):
+        result = revalidate_incarnation_identity(
+            self.SESSION, self.transcript, (17, 4242), None
+        )
+        self.assertIsNone(result.identity)
+        self.assertFalse(
+            result.superseded, "nothing contradicted the bounded Discord read"
+        )
+
+    def test_a_replaced_transcript_inode_is_superseded(self):
+        file_id, snapshot = self.live_snapshot()
+        replacement = self.root / "s.jsonl.replacement"
+        replacement.write_text("{}\n", encoding="utf-8")
+        replacement.replace(self.transcript)
+        self.assertNotEqual(self.transcript.stat().st_ino, file_id[1])
+        result = revalidate_incarnation_identity(
+            self.SESSION, self.transcript, file_id, snapshot
+        )
+        self.assertIsNone(result.identity)
+        self.assertTrue(result.superseded)
+
+    def test_a_restamped_generation_marker_is_superseded(self):
+        # A respawn inside the tick moves the generation leg while the transcript
+        # inode can stay put; identity is the three legs together, so this is a
+        # different incarnation too.
+        file_id, snapshot = self.live_snapshot()
+        result = revalidate_incarnation_identity(
+            self.SESSION,
+            self.transcript,
+            file_id,
+            {**snapshot, "generation_mtime_ns": snapshot["generation_mtime_ns"] - 1},
+        )
+        self.assertIsNone(result.identity)
+        self.assertTrue(result.superseded)
+
+    def test_a_read_without_a_descriptor_identity_is_superseded(self):
+        # `file_id is None` means the blocks came from a read that never reached a
+        # descriptor, so there is nothing to pin the snapshot to. Fail closed.
+        _, snapshot = self.live_snapshot()
+        result = revalidate_incarnation_identity(
+            self.SESSION, self.transcript, None, snapshot
+        )
+        self.assertIsNone(result.identity)
+        self.assertTrue(result.superseded)
+
+    def test_the_identity_leg_is_pinned_to_the_descriptor_that_was_read(self):
+        # `session_incarnation_identity` reaches the transcript by PATH. Given a
+        # descriptor identity that no longer matches that path, it must decline to
+        # name the file rather than describe the replacement.
+        transcript_stat = self.transcript.stat()
+        self.assertIsNone(
+            session_incarnation_identity(
+                self.SESSION,
+                self.transcript,
+                expected_file_id=(transcript_stat.st_dev, transcript_stat.st_ino + 1),
+            )
+        )
 
 
 if __name__ == "__main__":

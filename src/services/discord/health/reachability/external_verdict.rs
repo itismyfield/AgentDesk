@@ -39,13 +39,29 @@
 //!
 //! # Why the identity fields are trusted
 //!
-//! `generation_mtime_ns` works as an incarnation key because
-//! `super::super::super::tmux_session_files::stamp_session_generation_marker`
-//! pushes a freshly stamped `.generation` inode strictly past the previous
+//! Identity here is the comparison of ALL THREE legs — `transcript_file_id`,
+//! `spawn_nonce` and `generation_mtime_ns` — against the [`LedgerIncarnation`] the
+//! caller framed: a match needs every leg, while a mismatch on any single one is
+//! enough to reject.
+//!
+//! `generation_mtime_ns` contributes an incarnation key stamped by
+//! `super::super::super::tmux_session_files::stamp_session_generation_marker`,
+//! which TRIES to push a freshly stamped `.generation` inode past the previous
 //! incarnation's mtime, escalating through `GENERATION_MTIME_BUMP_STEPS_NS`
-//! until it lands there (#5437, and #5439 for same-tick respawns). This module
-//! only READS that stamp; it does not make it monotone, and if that writer
-//! regressed, two incarnations could compare equal here.
+//! (#5437, and #5439 for same-tick respawns). That push is best-effort, so
+//! generation monotonicity is not a property this module may lean on:
+//! `bump_generation_mtime_past_previous` warns and publishes the mtime it
+//! OBSERVED — which may still equal the previous incarnation's — when `set_times`
+//! fails, when re-reading the bumped mtime fails, or when every bump step is
+//! truncated back onto the previous value, and the spawn continues either way
+//! (`tmux_session_files::tests::unbumpable_generation_mtime_still_publishes_the_marker_and_warns_5437`
+//! pins that path).
+//!
+//! What that leaves unguaranteed: two incarnations of the same session name can
+//! reach this module with an EQUAL generation key, and separating them then rests
+//! on the nonce and transcript-inode legs. An incarnation that also reused the
+//! transcript inode and the nonce would compare equal here. This module only
+//! READS the stamp; it does not make it monotone.
 //!
 //! # What this does not do
 //!

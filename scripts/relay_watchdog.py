@@ -718,6 +718,10 @@ class TranscriptReadResult:
     observed_size: int = 0
     block_source_ids: list[str] = field(default_factory=list)
     identity_fallbacks: int = 0
+    # `(st_dev, st_ino)` of the DESCRIPTOR these blocks were read from, or None
+    # when no descriptor was reached. A later path re-stat can return a different
+    # file; this is the one the verdict is actually about.
+    file_id: tuple[int, int] | None = None
 
 
 def transcript_candidates(dirs: list[Path]) -> list[TranscriptCandidate]:
@@ -1937,8 +1941,10 @@ def assistant_blocks(
         if opened is None:
             return TranscriptReadResult([], "UnsafePath")
         descriptor = opened
-        if not stat_mode.S_ISREG(os.fstat(descriptor).st_mode):
+        descriptor_stat = os.fstat(descriptor)
+        if not stat_mode.S_ISREG(descriptor_stat.st_mode):
             return TranscriptReadResult([], "UnsafePath")
+        file_id = (descriptor_stat.st_dev, descriptor_stat.st_ino)
         if fcntl is not None and getattr(os, "O_NONBLOCK", 0):
             current_flags = fcntl.fcntl(descriptor, fcntl.F_GETFL)
             fcntl.fcntl(
@@ -1992,6 +1998,7 @@ def assistant_blocks(
                 observed_size=byte_offset,
                 block_source_ids=block_source_ids,
                 identity_fallbacks=identity_fallbacks,
+                file_id=file_id,
             )
     except (OSError, UnicodeError, ValueError) as exc:
         return TranscriptReadResult([], type(exc).__name__)
@@ -2952,7 +2959,9 @@ def session_marker_candidates(session_name: str, suffix: str) -> list[Path]:
 
 
 def session_incarnation_identity(
-    session_name: str, transcript: Path
+    session_name: str,
+    transcript: Path,
+    expected_file_id: tuple[int, int] | None = None,
 ) -> dict[str, Any] | None:
     """The `(generation, nonce, transcript file id)` legs of one incarnation.
 
@@ -2961,12 +2970,26 @@ def session_incarnation_identity(
     the reader match on whichever legs arrived, and 4987 §-1.5 wants an
     unmatched incarnation IGNORED rather than half-accepted.
 
-    `generation_mtime_ns` is usable as an incarnation key because
-    `tmux_session_files::stamp_session_generation_marker` pushes a freshly
-    stamped `.generation` inode strictly past the previous incarnation's mtime,
-    escalating through `GENERATION_MTIME_BUMP_STEPS_NS` until it lands there
-    (#5437, and #5439 for two respawns inside one filesystem tick). This side
-    only reads that stamp; it does not make it monotone.
+    `expected_file_id` pins the transcript leg to a `(st_dev, st_ino)` the caller
+    already read from — `TranscriptReadResult.file_id`. This function reaches the
+    transcript by PATH, so without the pin it can describe a file that replaced
+    the one a verdict was computed from; a mismatch returns None rather than
+    naming the new inode. None means "no read to pin against" and skips the
+    check, which is what the marker-only callers want.
+
+    Identity is the comparison of all three legs together, and the reader matches
+    it that way. `generation_mtime_ns` contributes an incarnation key stamped by
+    `tmux_session_files::stamp_session_generation_marker`, which tries to push a
+    freshly stamped `.generation` inode past the previous incarnation's mtime
+    (#5437, and #5439 for two respawns inside one filesystem tick). That push is
+    BEST-EFFORT: `bump_generation_mtime_past_previous` warns and publishes the
+    mtime it observed — which may equal the previous incarnation's — when
+    `set_times` fails, when re-reading the bumped mtime fails, or when every bump
+    step is truncated back onto the previous value, and the spawn continues
+    either way. So generation monotonicity is not a property this side may lean
+    on: two incarnations of the SAME session name can carry an equal generation
+    key, and what separates them then is the nonce and transcript legs. This side
+    only reads the stamp; it does not make it monotone.
 
     An absent or unreadable `.spawn_nonce` yields None for that leg, matching
     `tmux_session_files::read_spawn_nonce`. The reader does not treat a None
@@ -2980,6 +3003,11 @@ def session_incarnation_identity(
     if generation_stat is None or transcript_stat is None:
         return None
     if generation_stat.st_mtime_ns <= 0:
+        return None
+    if (
+        expected_file_id is not None
+        and (transcript_stat.st_dev, transcript_stat.st_ino) != expected_file_id
+    ):
         return None
     nonce_files = session_marker_candidates(session_name, "spawn_nonce")
     if len(nonce_files) > 1:
@@ -2998,6 +3026,55 @@ def session_incarnation_identity(
             "ino": transcript_stat.st_ino,
         },
     }
+
+
+@dataclass(frozen=True)
+class PublishableIncarnationIdentity:
+    """What the publish site may still claim about the transcript it judged.
+
+    `identity` is None whenever no incarnation can be named. `superseded` records
+    WHY it is None in the one case that is not merely unknown: the tick HAD a full
+    identity when it judged, and the incarnation underneath it changed before the
+    sidecar was written.
+    """
+
+    identity: dict[str, Any] | None
+    superseded: bool = False
+
+
+def revalidate_incarnation_identity(
+    session_name: str,
+    transcript: Path,
+    read_file_id: tuple[int, int] | None,
+    snapshot: dict[str, Any] | None,
+) -> PublishableIncarnationIdentity:
+    """Re-confirm a judgment-time identity snapshot against a fresh stat.
+
+    A tick judges a transcript from a descriptor opened early and writes the
+    sidecar late. Building the identity from a path re-stat at publish time
+    therefore attributes the EARLIER file's verdict to whatever inode now sits at
+    that path — an `unreachable` about a retired incarnation lands on the live
+    one. So compare every leg of `snapshot` (captured against the descriptor the
+    blocks came from) with a fresh read, and on any difference publish no
+    identity at all: 4987 §-1.5 ① treats an absent identity leg as no authority,
+    which is the outcome an unattributable verdict should get.
+
+    `snapshot is None` is the ordinary "this session has no usable markers" case
+    and reports `superseded=False`; the caller leaves `read_complete` alone there,
+    because the bounded Discord read is a separate claim that nothing contradicted.
+    A `read_file_id` of None cannot be pinned to anything, so it fails closed with
+    the mismatch case rather than passing unchecked.
+    """
+    if snapshot is None:
+        return PublishableIncarnationIdentity(None)
+    if read_file_id is None:
+        return PublishableIncarnationIdentity(None, superseded=True)
+    fresh = session_incarnation_identity(
+        session_name, transcript, expected_file_id=read_file_id
+    )
+    if fresh is None or fresh != snapshot:
+        return PublishableIncarnationIdentity(None, superseded=True)
+    return PublishableIncarnationIdentity(fresh)
 
 
 def next_external_verdict_epoch(chs: dict[str, Any]) -> int:
@@ -3440,8 +3517,19 @@ class Runtime:
         # the prober silently blind (r4 review, PR #4399).
         if isinstance(d, list):
             msgs = d
+            payload_is_listed = True
         elif isinstance(d, dict):
             msgs = d.get("messages", d.get("data", []))
+            # The haystack keeps the best-effort `[]`, but the COMPLETENESS claim
+            # below may not: `.get(..., [])` cannot tell an empty page from a dict
+            # carrying neither key, so a contract-breaking `{}` used to read as
+            # returned=0/skipped=0 and earn `read_complete=true` — full-history
+            # authority for a response that carried no history at all (r1 review,
+            # #5071 T4-B5). Ask separately whether either key actually ARRIVED as
+            # a list; this deliberately does not re-pick which key feeds `msgs`.
+            payload_is_listed = any(
+                isinstance(d.get(key), list) for key in ("messages", "data")
+            )
         else:
             return None
         if not isinstance(msgs, list):
@@ -3462,6 +3550,25 @@ class Runtime:
             content = m.get("content")
             return content is None or isinstance(content, str)
 
+        def carries_compared_fields(m: object) -> bool:
+            """Whether an entry actually gave the matcher something to compare.
+
+            Stricter than `well_formed`, and used ONLY for the completeness
+            count. `well_formed` accepts an absent or null `author`/`content`
+            because such an entry still traverses the code below without raising
+            — it contributes '' to the haystack. But an entry the matcher
+            compared as '' is an entry it never really compared, which is what
+            `bounded_read_is_complete` counts as skipped. Requiring both fields
+            present and correctly typed keeps a page of `{"author": null,
+            "content": null}` from reading as a fully judged page (r1 review,
+            #5071 T4-B5).
+            """
+            if not isinstance(m, dict):
+                return False
+            return isinstance(m.get("author"), dict) and isinstance(
+                m.get("content"), str
+            )
+
         ok_msgs = [m for m in msgs if well_formed(m)]
         if msgs and not ok_msgs:
             # A NON-EMPTY payload with ZERO parseable entries is schema drift,
@@ -3478,8 +3585,9 @@ class Runtime:
                 f"discord read: skipped {skipped} malformed message "
                 f"entries (schema drift?)"
             )
-        self.last_read_complete = bounded_read_is_complete(
-            len(msgs), DISCORD_READ_LIMIT, skipped
+        uncompared = sum(1 for m in msgs if not carries_compared_fields(m))
+        self.last_read_complete = payload_is_listed and bounded_read_is_complete(
+            len(msgs), DISCORD_READ_LIMIT, uncompared
         )
         bot = [m for m in ok_msgs if (m.get("author") or {}).get("bot")]
         return norm(" ".join((m.get("content") or "") for m in bot))
@@ -4645,6 +4753,12 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     stranded_since = _validated_orphan_stranded_since(chs)
     retired_transcripts = _validated_retired_transcripts(chs)
     read_cache: dict[str, TranscriptReadResult] = {}
+    # Judgment-time identity, per path, captured against the descriptor the
+    # blocks were read from. The sidecar publish below revalidates against it
+    # instead of re-deriving identity from a path that may have been swapped
+    # since — see `revalidate_incarnation_identity`.
+    identity_at_judgment: dict[str, dict[str, Any] | None] = {}
+    verdict_session_name = expected_tmux_session_name(ch)
 
     def read_candidate(candidate: TranscriptCandidate) -> TranscriptReadResult:
         path = str(candidate.path)
@@ -5207,6 +5321,16 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             unreadable_paths.append(path)
             continue
         pending_failures.pop(path, None)
+        if path not in identity_at_judgment:
+            # Snapshot the incarnation NOW, while the descriptor these blocks came
+            # from is still the file at this path, and pin the transcript leg to
+            # that descriptor. The publish site can then tell "the markers never
+            # named an incarnation" apart from "the file moved under us".
+            identity_at_judgment[path] = session_incarnation_identity(
+                verdict_session_name,
+                candidate.path,
+                expected_file_id=read_result.file_id,
+            )
         prior_delivered_ts = delivered_watermark_for_path(chs, candidate.path)
         # Advance the health watermark from the unfiltered source before removing
         # permanent-loss tombstones. Elapsed time must describe real transport
@@ -5832,16 +5956,38 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     # ABOUT — not `selected`, so a reader that framed a different incarnation
     # ignores the claim instead of attributing it to the wrong one. Publishing is
     # observation: it changes no alert, no threshold, and no branch below it.
+    #
+    # The legs come from the judgment-time snapshot re-confirmed here, not from a
+    # fresh derivation: the verdict above was computed from a descriptor opened
+    # earlier in this tick, and a replacement at this path between then and now
+    # would otherwise stamp the retired file's verdict with the live inode (r1
+    # review, #5071 T4-B5).
+    verdict_read = read_cache.get(verdict_path)
+    publishable = revalidate_incarnation_identity(
+        verdict_session_name,
+        verdict_candidate.path,
+        verdict_read.file_id if verdict_read is not None else None,
+        identity_at_judgment.get(verdict_path),
+    )
+    if publishable.superseded:
+        rt.log(
+            f"[{cid}] external-verdict-identity-superseded path={verdict_path} "
+            "(transcript changed between judgment and publish; publishing "
+            "without authority)"
+        )
     rt.publish_external_verdict(
         cid,
         build_external_verdict_record(
             v,
             int(now * 1000),
             next_external_verdict_epoch(chs),
-            rt.last_read_complete,
-            session_incarnation_identity(
-                expected_tmux_session_name(ch), verdict_candidate.path
-            ),
+            # A merely UNKNOWN identity leaves this alone — the bounded Discord
+            # read is a separate claim, which
+            # `test_a_missing_generation_marker_publishes_null_identity_legs`
+            # pins. A SUPERSEDED one drops it too: the reader then has to discard
+            # the record on either gate rather than on the identity gate alone.
+            rt.last_read_complete and not publishable.superseded,
+            publishable.identity,
         ),
     )
     raw_unannounced = chs.get(PERMANENT_LOSS_UNANNOUNCED_KEY, 0)
