@@ -1427,6 +1427,9 @@ git merge --quiet --ff-only origin/main"
 
     # Send _extract_yaml_server_port_shell function to remote, use it to extract port from config.
     # This ensures single-source maintenance of YAML parsing logic across local and remote paths.
+    # Every `\$` below is deliberately left for the remote shell EXCEPT `$peer` in the failure
+    # message: the peer name exists only here, so escaping it printed a bare `[peer:]` and a
+    # multi-peer deploy could not be told which peer had the unreadable config.
     if ! peer_info="$(ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" \
         'bash -lc '"$(printf '%q' "$(declare -f _extract_yaml_server_port_shell)
 adk_rel=\"\${AGENTDESK_ROOT_DIR:-\$HOME/.adk/release}\"
@@ -1439,7 +1442,7 @@ else
     port=\"\"
 fi
 if [ -z \"\$port\" ]; then
-    echo \"✗ [peer:\$peer] could not extract server.port: no config found or port unreadable\" >&2
+    echo \"✗ [peer:$peer] could not extract server.port: no config found or port unreadable\" >&2
     exit 1
 fi
 echo \"\$adk_rel\"

@@ -240,8 +240,21 @@ _deploy_peer_env_prelude() {
     echo ""
 }
 
-# Stub _wait_for_peer_deploy_verdict to FAIL (return 1)
+# Stub _wait_for_peer_deploy_verdict to FAIL (return 1) and record that it was
+# REACHED, with the arguments it was handed.
+#
+# The marker is what gives this case its discrimination. `_deploy_to_one_peer`
+# returns 1 from six earlier paths too -- the pre-sync ssh, the port-resolving
+# ssh, the empty-root and non-numeric-port validations, the routine rsync, and
+# the ssh that launches the remote deploy -- so `rc != 0` alone is satisfied by a
+# run in which the verdict call is never reached at all. Any stub going stale (an ssh invocation this stub does not
+# answer, a new validation the fixture does not satisfy) would then leave the
+# assertion below green while testing nothing. A file is used rather than a
+# variable because the call under test runs inside a command substitution, and a
+# subshell's variables do not survive.
+PEER_VERDICT_STUB_MARKER="$TMP_ROOT/peer-verdict-reached"
 _wait_for_peer_deploy_verdict() {
+    printf '%s\n' "$*" >"$PEER_VERDICT_STUB_MARKER"
     return 1
 }
 
@@ -258,6 +271,18 @@ if [ "$peer_deploy_rc" -eq 0 ]; then
     fail_test "_deploy_to_one_peer must fail (rc≠0) when _wait_for_peer_deploy_verdict fails; got rc=$peer_deploy_rc"
 elif grep -q 'deploy verified' <<<"$peer_deploy_out"; then
     fail_test "_deploy_to_one_peer failure must not claim verified success; got: $peer_deploy_out"
+elif [ ! -f "$PEER_VERDICT_STUB_MARKER" ]; then
+    fail_test "the rc≠0 above must come FROM the verdict call: the verdict stub was never reached, so an earlier failure path produced it; got: $peer_deploy_out"
+else
+    # The rc is the verdict's, and the values the verdict was judged against are
+    # the ones the earlier steps actually resolved -- the peer, the port from the
+    # remote config read, and the local repo head. A stub drifting into returning
+    # nothing would surface here rather than as a still-green rc check.
+    peer_verdict_args="$(cat "$PEER_VERDICT_STUB_MARKER")"
+    case "$peer_verdict_args" in
+        'test-peer '*' 8791 abc1234567890def') : ;;
+        *) fail_test "the verdict must be handed the resolved peer, port, and expected repo head; got: $peer_verdict_args" ;;
+    esac
 fi
 
 if grep -q 'Cluster Deploy Complete (all peers healthy)' "$DEPLOY_SH"; then
