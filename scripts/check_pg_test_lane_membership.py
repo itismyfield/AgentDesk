@@ -3,9 +3,10 @@
 
 The gate identifies PG-dependent Rust tests only inside test regions, checks four
 lane contracts, and ratchets existing violations through a sectioned baseline.
-During T0, newly discovered live debt is warn-only. Return code 1 is reserved for
-manifest drift, candidate baseline growth, and stale baseline entries; malformed
-inputs and configuration errors return code 2. T1 promotes new debt to enforcement.
+Newly discovered live debt (baseline drift) is enforced; existing baseline entries
+are maintained as a ledger. Return code 1 is reserved for manifest drift, candidate
+baseline growth, and any baseline drift (new or stale); malformed inputs and
+configuration errors return code 2.
 """
 
 from __future__ import annotations
@@ -1496,7 +1497,7 @@ def check_analysis(
         new = sorted(analysis.debts[section] - baseline[section])
         stale = sorted(baseline[section] - analysis.debts[section])
         if new or stale:
-            level = "FAIL" if stale else "WARN"
+            level = "FAIL" if new else "WARN"
             print(f"{level}: [{section}] baseline drift: {len(new)} new, {len(stale)} stale.", file=sys.stderr)
             for entry in new:
                 print(f"  + {entry}", file=sys.stderr)
@@ -1512,7 +1513,7 @@ def check_analysis(
                 "every entry requires an inline reason comment.",
                 file=sys.stderr,
             )
-            if stale:
+            if new:
                 failed = True
     counts = analysis.debts
     # rule5: no ratchet, and the allowlist cannot reach it. Both halves are
@@ -1533,8 +1534,8 @@ def check_analysis(
             print(f"  ! {entry}", file=sys.stderr)
         print(
             "Give that job `./scripts/ci/postgres-service.sh start` plus the "
-            "`AGENTDESK_REQUIRE_PG: \"1\"` env rule4 tracks (rule4 only WARNs "
-            "on a missing one -- it is a ledger, not a guard), or narrow its "
+            "`AGENTDESK_REQUIRE_PG: \"1\"` env rule4 tracks (rule4 enforces new "
+            "violations but maintains existing debt as a ledger), or narrow its "
             "selection so it stops choosing these ids. Those two are the "
             "fixes this rule accepts; the two levers that talk other rules "
             "down do not reach it. It has no baseline section, and it reads "

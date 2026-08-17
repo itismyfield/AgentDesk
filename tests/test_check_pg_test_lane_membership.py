@@ -1259,22 +1259,23 @@ class BaselineAndEnforcement(FixtureCase):
             )
         return rc, stdout.getvalue(), stderr.getvalue()
 
-    def test_repair_passes_and_stale_baseline_fails(self) -> None:
+    def test_repair_passes_and_stale_warns_only(self) -> None:
         old = empty_debts()
         old["rule3"] = {"src/db/service.rs"}
-        rc, _, _ = self.run_check(self.analysis(), empty_debts(), old)
+        rc, _, error = self.run_check(self.analysis(), empty_debts(), old)
         self.assertEqual(rc, 0)
         rc, _, error = self.run_check(self.analysis(), old, old)
-        self.assertEqual(rc, 1)
+        self.assertEqual(rc, 0)
+        self.assertIn("WARN: [rule3] baseline drift", error)
         self.assertIn("Remove '-' entries", error)
 
-    def test_new_violation_warns_and_baseline_coverup_fails(self) -> None:
+    def test_new_violation_fails_even_with_no_baseline(self) -> None:
         empty = empty_debts()
         current = empty_debts()
         current["rule1"] = {"service::tests::case"}
         rc, _, error = self.run_check(self.analysis(current), empty, empty)
-        self.assertEqual(rc, 0)
-        self.assertIn("WARN: [rule1] baseline drift", error)
+        self.assertEqual(rc, 1)
+        self.assertIn("FAIL: [rule1] baseline drift", error)
         self.assertIn("Fix '+' violations", error)
         rc, _, error = self.run_check(self.analysis(current), current, empty)
         self.assertEqual(rc, 1)
