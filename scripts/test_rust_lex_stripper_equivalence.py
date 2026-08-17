@@ -1,33 +1,54 @@
 #!/usr/bin/env python3
-"""Stripper-level byte-equivalent verification for rust_lex extraction.
+"""One-time PR verifier for the ``rust_lex`` extraction.
 
-This test proves that the extracted rust_lex.StripState/strip_line produce
-identical stripper output to the previous implementations in each consumer,
-by restoring the original implementations from git history and comparing
-line-by-line stripping on real Rust files in the current tree.
+This tool loads the four pre-extraction guard implementations from an explicit
+git ``--base`` and sweeps every ``src/**/*.rs`` file in the current tree.  It
+is intentionally not a CI test: after the PR merges and the base branch moves,
+the historical side can become the extracted implementation itself, making
+the proof vacuous.
 
-Why "stripper level" not "pipeline level": production_text/production_lines
-add cfg-region state machines on top of stripper output, and their
-definitions of "end of line" differ (some split on str.splitlines(),
-others on \n only, some append newlines). Stripper output (raw
-strip_line(...) bytes) is the unit of code motion and is comparable.
+The durable, inflight, and log-key implementations were verbatim copies, so
+their per-line output must be byte-for-byte identical to ``rust_lex``.  The
+older intake whole-source stripper is reported separately.  The shared
+stripper's trailing line-comment truncation is padded back to the historical
+intake width before comparison; that is a representation difference outside
+the extracted per-line unit.
+Every remaining intake difference must match one of two known signatures:
+
+* a source line containing ``b\"`` (the old opener regex left the ``b`` byte
+  visible while the shared implementation blanks the whole byte string); or
+* an output line-count mismatch corresponding to a source ``'`` + newline +
+  ``'`` span (the old char-literal regex incorrectly matched across a newline
+  and replaced that line boundary with a space).
+
+The intake classifier is deliberately narrow and lexical.  It proves only
+that every observed mismatch on this tree has one of those signatures; it
+does not prove semantic equivalence for arbitrary Rust, distinguish a real
+byte string from the same spelling in every malformed context, or generally
+validate Rust syntax.  Any unclassified difference fails the run.
 """
 
 from __future__ import annotations
 
-import importlib.util
+import argparse
+import re
 import subprocess
 import sys
-import tempfile
+import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+STRICT_IMPLEMENTATIONS = {
+    "old_durable": "scripts/check_durable_frontier_writer_call_sites.py",
+    "old_inflight": "scripts/check_inflight_blind_save_ratchet.py",
+    "old_log_key": "scripts/check_log_key_drift.py",
+}
+INTAKE_PATH = "scripts/check_intake_outbox_done_writer_call_sites.py"
+CHAR_NEWLINE_SPAN_RE = re.compile(r"'\n'")
 
 
-def load_module_from_git(
-    base_ref: str, file_rel_path: str, module_name: str
-) -> object | None:
-    """Load a module from git history (base_ref), returning None on failure."""
+def load_module_from_git(base_ref: str, file_rel_path: str, module_name: str) -> object:
+    """Execute one historical module with its original path as ``__file__``."""
     try:
         content = subprocess.run(
             ["git", "show", f"{base_ref}:{file_rel_path}"],
@@ -36,165 +57,195 @@ def load_module_from_git(
             text=True,
             check=True,
         ).stdout
-
-        # Write to temp file and load
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".py", delete=False, dir="/tmp"
-        ) as f:
-            f.write(content)
-            temp_path = f.name
-
-        spec = importlib.util.spec_from_file_location(
-            module_name, temp_path
-        )
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        module = types.ModuleType(module_name)
+        module.__file__ = str(ROOT / file_rel_path)
+        module.__package__ = ""
+        sys.modules[module_name] = module
+        exec(compile(content, module.__file__, "exec"), module.__dict__)
         return module
-    except Exception as e:
-        print(f"Warning: could not load {module_name} from {base_ref}: {e}")
-        return None
+    except Exception as exc:
+        raise RuntimeError(
+            f"could not load {module_name} from {base_ref}:{file_rel_path}: {exc}"
+        ) from exc
 
 
-def compare_stripper_output(base_ref: str = "origin/main") -> dict[str, object]:
-    """Compare stripper output across consumers and rust_lex.
+def strip_with_line_implementation(module: object, lines: list[str]) -> list[str]:
+    """Run a historical or current ``StripState``/``strip_line`` pair."""
+    state = module.StripState()
+    return [module.strip_line(line, state) for line in lines]
 
-    Returns dict with:
-      - 'results': list of (file_path, impl_name, stripped_lines) tuples
-      - 'stats': dict with 'files_tested', 'total_lines', 'differences'
-      - 'matched': bool, true if all implementations produce identical output
-    """
-    results = {}
 
-    # Load implementations from git history
-    print("Loading implementations...", file=sys.stderr)
-    old_durable = load_module_from_git(
-        base_ref, "scripts/check_durable_frontier_writer_call_sites.py",
-        "old_durable"
+def intake_compatible_current_output(module: object, lines: list[str]) -> str:
+    """Run rust_lex and restore only old intake's trailing comment padding."""
+    state = module.StripState()
+    output: list[str] = []
+    for line in lines:
+        stripped = module.strip_line(line, state)
+        output.append(stripped + " " * (len(line) - len(stripped)))
+    return "\n".join(output)
+
+
+def source_line_number(text: str, offset: int) -> int:
+    """Return the one-based source line containing ``offset``."""
+    return text.count("\n", 0, offset) + 1
+
+
+def classify_intake_differences(
+    source: str, old_output: str, new_output: str
+) -> tuple[set[int], int, list[int]]:
+    """Classify intake mismatch offsets; return byte lines, spans, unknowns."""
+    if len(old_output) != len(new_output) or len(new_output) != len(source):
+        return set(), 0, [-1]
+
+    mismatch_offsets = {
+        offset
+        for offset, (old_char, new_char) in enumerate(zip(old_output, new_output))
+        if old_char != new_char
+    }
+    byte_string_lines: set[int] = set()
+    classified_offsets: set[int] = set()
+
+    line_start = 0
+    for line_number, line in enumerate(source.split("\n"), start=1):
+        line_end = line_start + len(line)
+        line_offsets = {
+            offset
+            for offset in mismatch_offsets
+            if line_start <= offset < line_end
+        }
+        if line_offsets and 'b"' in line:
+            byte_string_lines.add(line_number)
+            classified_offsets.update(line_offsets)
+        line_start = line_end + 1
+
+    span_count = 0
+    old_line_count = len(old_output.split("\n"))
+    new_line_count = len(new_output.split("\n"))
+    if old_line_count != new_line_count:
+        for match in CHAR_NEWLINE_SPAN_RE.finditer(source):
+            span_offsets = set(range(match.start(), match.end()))
+            if mismatch_offsets & span_offsets:
+                span_count += 1
+                classified_offsets.update(mismatch_offsets & span_offsets)
+
+    return (
+        byte_string_lines,
+        span_count,
+        sorted(mismatch_offsets - classified_offsets),
     )
-    old_inflight = load_module_from_git(
-        base_ref, "scripts/check_inflight_blind_save_ratchet.py",
-        "old_inflight"
-    )
-    old_log_key = load_module_from_git(
-        base_ref, "scripts/check_log_key_drift.py", "old_log_key"
-    )
-    old_intake = load_module_from_git(
-        base_ref, "scripts/check_intake_outbox_done_writer_call_sites.py",
-        "old_intake"
-    )
 
-    # Load current implementations
+
+def compare_stripper_output(base_ref: str) -> dict[str, object]:
+    """Sweep all Rust files and return strict and classified intake totals."""
     sys.path.insert(0, str(ROOT / "scripts"))
-    from rust_lex import StripState as RustLexState, strip_line as lex_strip
+    import rust_lex
 
-    print("Collecting Rust files...", file=sys.stderr)
-    rs_files = list((ROOT / "src").rglob("*.rs"))
-    print(f"  {len(rs_files)} files found", file=sys.stderr)
+    print(f"Loading historical implementations from {base_ref}...")
+    strict_modules = {
+        name: load_module_from_git(base_ref, path, name)
+        for name, path in STRICT_IMPLEMENTATIONS.items()
+    }
+    old_intake = load_module_from_git(base_ref, INTAKE_PATH, "old_intake")
 
-    # Sample: test first 10 files to keep runtime reasonable
-    sample_size = min(10, len(rs_files))
-    test_files = rs_files[:sample_size]
+    rs_files = sorted((ROOT / "src").rglob("*.rs"))
+    print(f"Sweeping all Rust files: {len(rs_files)} files")
 
-    print(f"Testing stripper equivalence on {sample_size} files...",
-          file=sys.stderr)
+    strict_diff_lines = {name: 0 for name in strict_modules}
+    intake_byte_lines = 0
+    intake_char_spans = 0
+    intake_unclassified: list[str] = []
+    total_lines = 0
 
-    stats = {"files_tested": 0, "total_lines": 0, "differences": 0}
-    differences = []
+    for rs_file in rs_files:
+        source = rs_file.read_text(encoding="utf-8")
+        lines = source.split("\n")
+        total_lines += len(lines)
+        current_lines = strip_with_line_implementation(rust_lex, lines)
 
-    for rs_file in test_files:
-        try:
-            content = rs_file.read_text(encoding="utf-8", errors="ignore")
-            lines = content.split('\n')
-            stats["total_lines"] += len(lines)
+        for name, module in strict_modules.items():
+            old_lines = strip_with_line_implementation(module, lines)
+            diff_count = sum(
+                old_line != current_line
+                for old_line, current_line in zip(old_lines, current_lines)
+            ) + abs(len(old_lines) - len(current_lines))
+            strict_diff_lines[name] += diff_count
 
-            # Test each implementation
-            implementations = {}
-
-            # Old durable
-            if old_durable and hasattr(old_durable, 'StripState'):
-                state = old_durable.StripState()
-                stripped = [old_durable.strip_line(line, state)
-                            for line in lines]
-                implementations['old_durable'] = stripped
-
-            # Old inflight
-            if old_inflight and hasattr(old_inflight, 'StripState'):
-                state = old_inflight.StripState()
-                stripped = [old_inflight.strip_line(line, state)
-                            for line in lines]
-                implementations['old_inflight'] = stripped
-
-            # Old log_key
-            if old_log_key and hasattr(old_log_key, 'StripState'):
-                state = old_log_key.StripState()
-                stripped = [old_log_key.strip_line(line, state)
-                            for line in lines]
-                implementations['old_log_key'] = stripped
-
-            # Old intake (if it has a strip_source or strip_line)
-            if old_intake:
-                if hasattr(old_intake, 'strip_source'):
-                    stripped_text = old_intake.strip_source(content)
-                    stripped = stripped_text.split('\n')
-                    implementations['old_intake'] = stripped
-                elif hasattr(old_intake, 'StripState'):
-                    state = old_intake.StripState()
-                    stripped = [old_intake.strip_line(line, state)
-                                for line in lines]
-                    implementations['old_intake'] = stripped
-
-            # Current rust_lex
-            state = RustLexState()
-            stripped = [lex_strip(line, state) for line in lines]
-            implementations['rust_lex'] = stripped
-
-            # Compare: old implementations should match current rust_lex
-            base_output = implementations.get('rust_lex')
-            if base_output is None:
-                continue
-
-            for impl_name, impl_output in implementations.items():
-                if impl_name == 'rust_lex':
-                    continue
-                if impl_output != base_output:
-                    stat_str = (
-                        f"{rs_file.relative_to(ROOT)}: {impl_name} != "
-                        f"rust_lex on {len([l for l, o in zip(impl_output, "
-                        f"base_output) if l != o])} lines"
-                    )
-                    differences.append(stat_str)
-                    stats["differences"] += 1
-
-            stats["files_tested"] += 1
-
-        except Exception as e:
-            print(f"Error processing {rs_file}: {e}", file=sys.stderr)
+        old_intake_output = old_intake.strip_source(source)
+        current_intake_output = intake_compatible_current_output(rust_lex, lines)
+        if old_intake_output == current_intake_output:
             continue
 
-    matched = stats["differences"] == 0
+        byte_lines, char_spans, unknown_offsets = classify_intake_differences(
+            source, old_intake_output, current_intake_output
+        )
+        intake_byte_lines += len(byte_lines)
+        intake_char_spans += char_spans
+        if unknown_offsets:
+            rel = rs_file.relative_to(ROOT).as_posix()
+            rendered = ", ".join(
+                "length mismatch"
+                if offset == -1
+                else f"line {source_line_number(source, offset)} offset {offset}"
+                for offset in unknown_offsets[:10]
+            )
+            intake_unclassified.append(f"{rel}: {rendered}")
+
     return {
-        "stats": stats,
-        "differences": differences,
-        "matched": matched,
+        "files_tested": len(rs_files),
+        "total_lines": total_lines,
+        "strict_diff_lines": strict_diff_lines,
+        "intake_byte_string_diff_lines": intake_byte_lines,
+        "intake_char_newline_spans": intake_char_spans,
+        "intake_unclassified": intake_unclassified,
     }
 
 
-if __name__ == "__main__":
-    result = compare_stripper_output()
-    stats = result["stats"]
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--base",
+        required=True,
+        help="git ref containing the four pre-extraction implementations",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        stats = compare_stripper_output(args.base)
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
 
     print(
-        f"Stripper equivalence test: {stats['files_tested']} files, "
-        f"{stats['total_lines']} lines",
-        file=sys.stderr,
+        f"Tree sweep: {stats['files_tested']} files, "
+        f"{stats['total_lines']} lines"
     )
-    if result["matched"]:
-        print(f"✓ All implementations match on {stats['files_tested']} samples",
-              file=sys.stderr)
-        sys.exit(0)
-    else:
-        print(f"✗ Differences found: {stats['differences']}",
-              file=sys.stderr)
-        for diff in result["differences"][:5]:
-            print(f"  {diff}", file=sys.stderr)
-        sys.exit(1)
+    print("Strict verbatim-copy equivalence (differing lines):")
+    for name, count in stats["strict_diff_lines"].items():
+        print(f"  {name}: {count}")
+    print("Old intake classified differences:")
+    print(
+        '  byte-string lines (source contains b"): '
+        f"{stats['intake_byte_string_diff_lines']}"
+    )
+    print(
+        "  char-newline spans (old output deleted a line boundary): "
+        f"{stats['intake_char_newline_spans']}"
+    )
+    unclassified = stats["intake_unclassified"]
+    print(f"  unclassified: {len(unclassified)}")
+    for difference in unclassified[:20]:
+        print(f"    {difference}")
+
+    strict_ok = all(count == 0 for count in stats["strict_diff_lines"].values())
+    if strict_ok and not unclassified:
+        print("PASS: strict copies match and every intake difference is classified")
+        return 0
+    print("FAIL: strict mismatch or unclassified intake difference", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
