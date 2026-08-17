@@ -4892,10 +4892,12 @@ services::discord::tmux::tmux_session_files::tests::committed_frontier_gated_on_
 services::discord::tmux::tmux_session_files::tests::every_spawn_site_uses_the_combined_marker_gate
 services::discord::tmux::tmux_session_files::tests::generation_write_failure_emits_exactly_one_warn_and_still_writes_nonce
 services::discord::tmux::tmux_session_files::tests::orphan_sweep_multidot_marker_uses_canonical_source_authority_key_5264
+services::discord::tmux::tmux_session_files::tests::respawn_inside_one_filesystem_tick_bumps_the_generation_key_5437
 services::discord::tmux::tmux_session_files::tests::spawn_markers_log_fixture_legacy_paths_unchanged
 services::discord::tmux::tmux_session_files::tests::spawn_markers_stamp_generation_before_nonce
 services::discord::tmux::tmux_session_files::tests::spawn_stamp_replaces_the_inode
 services::discord::tmux::tmux_session_files::tests::stamp_spawn_markers_returns_nonce_result_verbatim
+services::discord::tmux::tmux_session_files::tests::unbumpable_generation_mtime_still_publishes_the_marker_and_warns_5437
 services::discord::tmux::tmux_watcher::commit_decisions::runtime_binding_offset_tests::acknowledged_session_bound_delivery_is_not_missing_inflight_fallback
 services::discord::tmux::tmux_watcher::commit_decisions::runtime_binding_offset_tests::busy_observation_without_delivery_still_advances_runtime_binding
 services::discord::tmux::tmux_watcher::commit_decisions::runtime_binding_offset_tests::busy_observation_without_terminal_delivery_allows_cleanup
