@@ -15,6 +15,12 @@ defect at a time:
   * a mutation the implementation no longer kills;
   * a consumer added outside the tree, and the tree's module declaration
     removed;
+  * the two ways a consumer can reach the tree WITHOUT writing `reachability::`
+    — an `as` alias at the call site, and a re-export from the allowlisted file
+    — each with the control that keeps the widened scan from reporting every
+    local that happens to be called `reachability`. A gate whose central claim
+    is "zero consumers, machine-checked" is worth exactly what its weakest
+    spelling catches;
   * a `warn_bound` introduced inside the tree (4987 §10 NO-GO).
 
 The live-repo cases at the end pin that the gate is wired into
@@ -177,6 +183,84 @@ class SyntheticRootTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertProblem(_run(root), "grew a consumer")
+
+    def test_a_consumer_reaching_the_tree_through_an_alias_is_reported(self):
+        """The bypass a qualified-path scan cannot see.
+
+        `use super::reachability as rx;` reads the tree without the substring
+        `reachability::` ever appearing at the call site, so a gate that only
+        knows qualified paths prints "no consumer" over a file that has one.
+        The claim this gate makes is "machine-checked zero consumers", and an
+        alias is a name."""
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            intruder = root / "src/services/discord/health/snapshot.rs"
+            intruder.write_text(
+                "#[cfg(unix)]\n"
+                "use super::reachability as rx;\n"
+                "\n"
+                "#[cfg(unix)]\n"
+                "fn peek() -> &'static str {\n"
+                "    rx::obligation::CANONICAL_SCHEMA_HEADER\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            self.assertProblem(_run(root), "grew a consumer")
+
+    def test_a_reexport_from_the_allowlisted_file_is_reported(self):
+        """The same bypass one hop further out, and the reason the allowlist
+        grants the right to DECLARE the module rather than to use it.
+
+        The allowlisted file may name the tree, so it can republish a tree item
+        under a name the consumer scan has no way to recognise — and then every
+        other file in `src/` reads the tree while the gate reports zero
+        consumers. Neither file below is reported by the qualified-path scan:
+        one is allowlisted, and the other never spells the module."""
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            wiring = root / "src/services/discord/health.rs"
+            wiring.write_text(
+                wiring.read_text(encoding="utf-8")
+                + "\npub(in crate::services::discord) use reachability::obligation"
+                "::CANONICAL_SCHEMA_HEADER as CANON_HEADER;\n",
+                encoding="utf-8",
+            )
+            consumer = root / "src/services/discord/health/snapshot.rs"
+            consumer.write_text(
+                "#[cfg(unix)]\n"
+                "fn peek() -> &'static str {\n"
+                "    super::CANON_HEADER\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            self.assertProblem(_run(root), "allowlisted to DECLARE")
+
+    def test_an_identifier_that_merely_contains_the_name_is_not_a_consumer(self):
+        """The control for the two cases above.
+
+        Widening the scan to the bare module name is what catches an alias, and
+        it is also how a gate starts reporting every local called
+        `reachability`. So the bare name is only looked for inside a `use` item
+        (and inside the allowlisted file, which may name it in its `mod` line
+        and nowhere else); a binding, a field, and a longer identifier that
+        merely contains the substring are not readers of the tree."""
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            bystander = root / "src/services/discord/health/snapshot.rs"
+            bystander.write_text(
+                "use std::time::Duration;\n"
+                "\n"
+                "struct Probe {\n"
+                "    reachability: bool,\n"
+                "}\n"
+                "\n"
+                "fn run_bot_spawn_reachability_observation() -> Duration {\n"
+                "    let reachability = Duration::from_secs(1);\n"
+                "    reachability\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(_run(root), [])
 
     def test_prose_and_string_literals_are_not_consumers(self):
         with TemporaryDirectory() as tmp:

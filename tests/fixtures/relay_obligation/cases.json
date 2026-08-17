@@ -99,6 +99,15 @@
     "why": "A text block that trims to nothing is not an obligation; one non-blank block among many is."
   },
   {
+    "name": "schema_type_blocks",
+    "generation_mtime_ns": 1786000000123456789,
+    "dev": 16777232,
+    "ino": 90210123,
+    "base_offset": 0,
+    "oversized_line_limit": 1048576,
+    "why": "Off-schema `text`/`content` types. Rust reads them as absent; Python must not raise."
+  },
+  {
     "name": "rotation_identity",
     "generation_mtime_ns": 1786000999888777666,
     "dev": 16777233,

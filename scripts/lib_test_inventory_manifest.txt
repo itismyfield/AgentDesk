@@ -2464,6 +2464,7 @@ services::discord::health::reachability::obligation::tests::one_non_blank_block_
 services::discord::health::reachability::obligation::tests::only_one_carriage_return_is_stripped
 services::discord::health::reachability::obligation::tests::ranges_are_byte_offsets_not_character_counts
 services::discord::health::reachability::obligation::tests::the_corpus_exercises_every_canonical_reason
+services::discord::health::reachability::obligation::tests::the_json_parsers_disagree_about_the_non_rfc_literals
 services::discord::health::reachability::obligation::tests::the_oversized_limit_measures_the_remainder_not_the_chunk
 services::discord::health::reachability::obligation::tests::the_timestamp_rung_accepts_what_the_python_half_accepts
 services::discord::health::reachability::tail::tests::a_directory_is_unreadable

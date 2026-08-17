@@ -24,7 +24,7 @@ a way through.
 
 **This proves equality over the corpus, not over all inputs.** The two runtimes
 do not share a JSON parser or a Unicode whitespace table. Known residual
-differences, neither of which any corpus case can reach:
+differences, none of which any corpus case can reach:
 
 * ``str.strip()`` treats U+001C..U+001F as whitespace and Rust's ``str::trim``
   does not, so a text block consisting ONLY of those code points would classify
@@ -32,7 +32,21 @@ differences, neither of which any corpus case can reach:
 * the timestamp rung runs ``time.strptime`` on one side and ``chrono`` on the
   other. The corpus pins the shapes that matter (ISO with millis and Z, exactly
   19 characters, single-digit fields, out-of-range month, short, empty,
-  garbage); an exotic shape outside those is unproven.
+  garbage); an exotic shape outside those is unproven;
+* Python's ``json`` accepts the non-RFC-8259 literals ``NaN``/``Infinity``/
+  ``-Infinity`` and `serde_json`'s value parser rejects them, so a line that is
+  one of those alone classifies ``NON_ASSISTANT_RECORD`` in Python and
+  ``MALFORMED_JSON`` in Rust. Measured, not assumed — see
+  ``obligation::tests::the_json_parsers_disagree_about_the_non_rfc_literals``,
+  which pins the Rust side of that sentence so this list cannot quietly rot.
+
+The schema-TYPE hazard used to belong on that list and no longer does. A JSONL
+transcript is not a schema-checked channel, and Rust reads a wrong-typed
+``message.content``/``text`` as ABSENT while Python's ``.strip()`` raised on it
+— one side classifying while the other unwinds. `relay_watchdog.py`'s
+``_canonical_typed_content`` narrows those two fields on the canonical path to
+exactly what Rust's typed accessors see, and the ``schema_type_blocks`` corpus
+case pins the agreement instead of asserting it.
 
 Say what is measured, not what is hoped: adding a case is how the guarantee
 grows.
@@ -48,16 +62,24 @@ WHAT THIS GATE RUNS
    the ``test-non-pg`` obligation lane.
 3. **No judgment authority** — the source half of the T4-B2a invariant. This
    tree is INACTIVE: nothing outside it may read it, and no bound may appear
-   inside it. The DESTRUCTIVE half is not duplicated here: it is already
-   enforced per file by ``scripts/check_destructive_call_site_ratchet.py``,
-   whose four categories are exactly 4987's destructive surfaces, so a
-   destructive call site appearing in this tree moves that ratchet.
+   inside it. An ALIAS counts as reading it, both at the call site
+   (``use super::reachability as rx;``) and one hop out, where the allowlisted
+   file re-exports a tree item under a new name and a sibling imports that; the
+   allowlist therefore grants the right to DECLARE the module, not to use it.
+   The DESTRUCTIVE half is not duplicated here: it is already enforced per file
+   by ``scripts/check_destructive_call_site_ratchet.py``, whose four categories
+   are exactly 4987's destructive surfaces, so a destructive call site appearing
+   in this tree moves that ratchet.
 
 Check 3 is a LINT OVER SOURCE TEXT, not a proof — the same downgrade
 ``scripts/check_reachability_row_independence.py`` carries, for the same reason
 (real enforcement needs a crate boundary). It reuses that gate's neutralizer,
 which is `check_clippy_allow_ratchet.py`'s, so this repository keeps ONE Rust
-lexical pre-pass rather than three.
+lexical pre-pass rather than three. What stays outside its reach is what stays
+outside any lexical scan: a path a macro assembles from string fragments, and a
+``#[path = "..."]`` redirection, which it does not follow. Those are the shapes
+in which "zero consumers" is a claim about source text rather than about the
+crate graph.
 
 SCOPE OF THIS SLICE
 -------------------
@@ -101,9 +123,12 @@ RUST_CORPUS_TEST = (
 
 # Any file naming the tree in CODE is a consumer this slice did not sanction.
 # T4-B2a inherits T4-B1's inactive contract literally: the ONLY file outside the
-# tree allowed to name it is the one that declares the module. The observation
-# task's spawn joins this set in T4-B2c, and a reader of the verdicts lands in
-# T4-B6 behind `G-T4` — until then, "one entry" here means "zero callers".
+# tree allowed to name it is the one that declares the module, and it may name
+# it ONLY there — `declaration_only_problems` holds it to that, because an
+# allowlisted file is exactly where a re-export would launder the tree past the
+# scan below. The observation task's spawn joins this set in T4-B2c, and a
+# reader of the verdicts lands in T4-B6 behind `G-T4` — until then, "one entry"
+# here means "zero callers".
 ALLOWED_TREE_REFERENCES = {
     "src/services/discord/health.rs",
 }
@@ -111,6 +136,25 @@ ALLOWED_TREE_REFERENCES = {
 # substring (`run_bot_spawn_reachability_observation`, say) is not a reader, and
 # matching it would make the allowlist a list of names rather than of readers.
 TREE_REFERENCE_RE = re.compile(r"\breachability\s*::|\bmod\s+reachability\b")
+
+# The bare module NAME. An ALIAS is a name too: `use super::reachability as rx;`
+# followed by `rx::obligation::CANONICAL_SCHEMA_HEADER` consumes the tree without
+# the substring `reachability::` ever appearing at the call site, and a scan that
+# only knows qualified paths reports "no consumer" on a file that reads one. The
+# same laundering works one hop further out — the allowlisted file re-exports a
+# tree item under a new name and a sibling imports THAT — which is why the
+# allowlist below grants the right to DECLARE the module, not to use it.
+#
+# Searched only where a false positive cannot come from an unrelated local
+# called `reachability`: inside a `use` item, and inside the allowlisted files.
+# `\b` already excludes `..._reachability_...` identifiers, since `_` is a word
+# character.
+TREE_NAME_RE = re.compile(r"\breachability\b")
+MODULE_DECLARATION_RE = re.compile(r"\bmod\s+reachability\b")
+# `check_reachability_row_independence.py` splits `use` items exactly this way,
+# and for the same reason: the launderings a lexical scan CAN see are a bare
+# trailing segment and an `as` rename, and both live inside a `use` item.
+USE_ITEM_RE = re.compile(r"\buse\b[^;]*;", re.DOTALL)
 
 # 4987 §10 lists hardcoding a threshold at S1 as NO-GO: the bounds are the
 # OUTPUT of the 30-day observation this series starts.
@@ -280,6 +324,16 @@ PYTHON_MUTATIONS: tuple[tuple[str, str, str], ...] = (
         'f"{generation}\\t{start}\\t{end}\\t{dev}:{ino}\\t{reason}"',
         'f"{generation}\\t{start}\\t{end}\\t0:0\\t{reason}"',
     ),
+    (
+        # A wrong-typed `text` must read as ABSENT, which is what Rust's
+        # `unwrap_or_default()` produces. Narrowing it to a NON-blank string
+        # instead would turn `{"type":"text","text":1}` into an obligation on
+        # one side only — the narrowing is a rung of the ladder, not a
+        # crash-avoidance detail, so it is pinned like every other rung.
+        "wrong-typed-text-narrowed-to-present",
+        '                block = {**block, "text": ""}',
+        '                block = {**block, "text": "?"}',
+    ),
 )
 
 RUST_MUTATIONS: tuple[tuple[str, str, str], ...] = (
@@ -307,6 +361,20 @@ RUST_MUTATIONS: tuple[tuple[str, str, str], ...] = (
         "blank-line-reason-respelled",
         'Self::BlankLine => "BLANK_LINE",',
         'Self::BlankLine => "MALFORMED_JSON",',
+    ),
+    (
+        # The Rust half of the same rung: a `text` that is not a string reads as
+        # absent because `as_str()` yields None. Handing that None a non-blank
+        # default makes an off-schema row an obligation here and nowhere else.
+        # `.unwrap_or_default()` also ends the timestamp expression, so the
+        # anchor carries the two lines above it to stay unique.
+        "wrong-typed-text-defaulted-to-present",
+        "                            .and_then(serde_json::Value::as_str)\n"
+        "                            .unwrap_or_default()\n"
+        "                            .trim()",
+        "                            .and_then(serde_json::Value::as_str)\n"
+        '                            .unwrap_or("?")\n'
+        "                            .trim()",
     ),
 )
 
@@ -403,6 +471,55 @@ def tree_files(repo_root: Path) -> list[Path]:
     return files
 
 
+def names_tree(cleaned: str) -> bool:
+    """Whether this file's CODE names the reachability module, alias included.
+
+    Three spellings, because all three make the file a reader: a qualified path,
+    the module declaration, and a `use` item carrying the bare segment — which
+    covers `use super::reachability as rx;` and `use super::{reachability};`,
+    the two shapes that consume the tree without writing `reachability::`.
+    """
+
+    if TREE_REFERENCE_RE.search(cleaned):
+        return True
+    return any(
+        TREE_NAME_RE.search(item.group(0)) for item in USE_ITEM_RE.finditer(cleaned)
+    )
+
+
+def declaration_only_problems(rel: str, cleaned: str) -> list[str]:
+    """Hold an allowlisted file to declaring the module and nothing more.
+
+    The allowlist exists so the `mod` item that brings the tree into the crate
+    is not itself reported as a consumer. It is NOT a licence to use the tree:
+    a `pub use reachability::obligation::X as Y;`, a `type Y = reachability::
+    ...;`, or a function returning a tree type republishes it under a name the
+    consumer scan cannot recognise, and every other file in `src/` can then read
+    the tree while this gate prints "no consumer". The contract T4-B2a signs is
+    "machine-checked zero consumers", so the laundering has to die at the source
+    of the alias rather than at each of its uses.
+    """
+
+    problems: list[str] = []
+    declarations = list(MODULE_DECLARATION_RE.finditer(cleaned))
+    for match in TREE_NAME_RE.finditer(cleaned):
+        if any(
+            declaration.start() <= match.start() < declaration.end()
+            for declaration in declarations
+        ):
+            continue
+        line = cleaned.count("\n", 0, match.start()) + 1
+        problems.append(
+            f"{rel}:{line}: this file is allowlisted to DECLARE `mod "
+            "reachability`, not to use it. Naming the tree anywhere else here "
+            "re-exports it under a name the consumer scan cannot see, and "
+            "#5071 T4-B2a's inactivity is then unenforced. The observation "
+            "task lands its own reader in T4-B2c; widen this gate there, in "
+            "the same change"
+        )
+    return problems
+
+
 def check_no_judgment_authority(repo_root: Path) -> list[str]:
     problems: list[str] = []
 
@@ -434,8 +551,11 @@ def check_no_judgment_authority(repo_root: Path) -> list[str]:
         if ambiguous:
             problems.append(f"{rel}: unlexable source; failing closed")
             continue
-        if TREE_REFERENCE_RE.search(cleaned):
-            consumers.add(rel)
+        if not names_tree(cleaned):
+            continue
+        consumers.add(rel)
+        if rel in ALLOWED_TREE_REFERENCES:
+            problems += declaration_only_problems(rel, cleaned)
 
     unexpected = sorted(consumers - ALLOWED_TREE_REFERENCES)
     if unexpected:
@@ -491,8 +611,8 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"reachability canonical equivalence OK: {len(cases)} corpus cases match "
         f"byte for byte, {len(PYTHON_MUTATIONS)} python mutations killed, "
-        f"{rust_note}; the tree has no consumer beyond its module declaration "
-        "(source lint, not a type proof)"
+        f"{rust_note}; the tree has no consumer beyond its module declaration, "
+        "aliases and re-exports included (source lint, not a type proof)"
     )
     return 0
 

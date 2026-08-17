@@ -398,3 +398,25 @@ fn a_line_that_is_not_utf8_is_malformed_json() {
     let scan = scan_bytes(b"{\"type\":\"assistant\",\"t\":\"\xff\xfe\"}\n");
     assert_eq!(reasons(&scan), vec![ObligationReason::MalformedJson]);
 }
+
+/// A residual difference, pinned rather than asserted.
+///
+/// `scripts/check_reachability_canonical_equivalence.py` lists the shapes on
+/// which the two halves are known NOT to agree, and one of them is that
+/// Python's `json` accepts the non-RFC-8259 literals while `serde_json`'s value
+/// parser rejects them: `NaN` alone on a line is a float — hence a
+/// `NON_ASSISTANT_RECORD` — over there, and unparsable here. No corpus case can
+/// reach it, so this test is what keeps the claim measured. If serde_json ever
+/// starts accepting these, this goes red and the residual list is corrected in
+/// the same change rather than rotting into a false statement.
+#[test]
+fn the_json_parsers_disagree_about_the_non_rfc_literals() {
+    for line in [&b"NaN\n"[..], b"Infinity\n", b"-Infinity\n"] {
+        assert_eq!(
+            reasons(&scan_bytes(line)),
+            vec![ObligationReason::MalformedJson],
+            "line {:?}",
+            String::from_utf8_lossy(line)
+        );
+    }
+}

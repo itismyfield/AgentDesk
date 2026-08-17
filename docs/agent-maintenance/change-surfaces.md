@@ -1957,15 +1957,22 @@ time for diagnostics; neither is a stored approval value.
   independent task).
 - active_callsite_coverage: n/a (no consumer exists yet, by design). Since
   #5071 T4-B2a that "by design" is machine-checked: exactly one file outside the
-  tree may name the module — `src/services/discord/health.rs`, the `mod`
-  declaration — and `scripts/check_reachability_canonical_equivalence.py` also
-  rejects a `warn_bound`/`fail_bound` appearing inside the tree, because 4987
-  §10 makes a hardcoded threshold at S1 a NO-GO: the bounds are the OUTPUT of
-  the 30-day observation. Both are source lints, not type proofs. The
-  destructive half is not duplicated there: a destructive call site added to
-  this tree moves `scripts/check_destructive_call_site_ratchet.py`, whose four
-  categories are exactly 4987's destructive surfaces. The observation task's
-  spawn joins the allowlist in T4-B2c.
+  tree may name the module — `src/services/discord/health.rs`, and only in the
+  `mod` declaration. Naming it anywhere else there would re-export it under an
+  alias the consumer scan cannot recognise, which is also why the scan reads the
+  bare module name inside `use` items rather than only qualified
+  `reachability::` paths: `use super::reachability as rx;` is a consumer.
+  `scripts/check_reachability_canonical_equivalence.py` also rejects a
+  `warn_bound`/`fail_bound` appearing inside the tree, because 4987 §10 makes a
+  hardcoded threshold at S1 a NO-GO: the bounds are the OUTPUT of the 30-day
+  observation. Both are source lints, not type proofs — the alias shapes they
+  catch are the lexically visible ones, and a path a macro assembles from string
+  fragments or a `#[path]` redirection still passes. The destructive half is not
+  duplicated there: a destructive call site added to this tree moves
+  `scripts/check_destructive_call_site_ratchet.py`, whose four categories are
+  exactly 4987's destructive surfaces. The observation task's spawn joins the
+  allowlist in T4-B2c, and widening it means widening the declaration-only rule
+  in the same change.
 - tests: `services::discord::health::reachability::{verdict,discovery,tail,obligation}::tests`
   in the `test-non-pg` lane; `tests/test_reachability_row_independence.py` and
   `tests/test_reachability_canonical_equivalence.py` for the gates themselves;

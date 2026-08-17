@@ -1725,6 +1725,47 @@ CANONICAL_REASONS = (
 )
 
 
+def _canonical_typed_content(record: dict) -> dict:
+    """Return ``record`` with its content blocks narrowed to the types the Rust
+    half accepts, so a wrong-typed field classifies instead of raising.
+
+    A JSONL transcript is not a schema-checked channel, and the two halves read
+    an off-schema field very differently. `obligation.rs` reads this shape
+    through typed accessors -- ``as_array`` for ``message.content``, ``as_str``
+    for a block's ``text`` -- where a value of the wrong type reads as ABSENT,
+    i.e. as no surviving text block. `_assistant_blocks_from_record` instead
+    iterates whatever ``content`` is and calls ``.strip()`` on whatever ``text``
+    is, so exactly two shapes make it raise where Rust answers
+    ``NO_ASSISTANT_TEXT``:
+
+    * ``{"type": "text", "text": 1}`` (any truthy non-string) -> ``AttributeError``;
+    * a non-iterable ``content`` such as ``5`` -> ``TypeError``.
+
+    One side classifying while the other unwinds is the divergence this whole
+    section exists to prevent, and it is the loudest kind: the comparison never
+    reaches a verdict at all.
+
+    The narrowing lives HERE, on the canonical path, and NOT in
+    `_assistant_blocks_from_record`: the watchdog's own callers keep the
+    behaviour they have today, and the rule for WHICH blocks count is still
+    asked exactly once, of that function. The empty string is not a choice made
+    here either -- it is what Rust's ``unwrap_or_default()`` already produces on
+    the same input. Pinned by the ``schema_type_blocks`` corpus case.
+    """
+
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return record
+    content = message.get("content")
+    blocks: list = []
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and not isinstance(block.get("text"), str):
+                block = {**block, "text": ""}
+            blocks.append(block)
+    return {**record, "message": {**message, "content": blocks}}
+
+
 def classify_canonical_line(line: bytes) -> str:
     """Classify one line's bytes, terminator and one optional ``\\r`` removed.
 
@@ -1743,7 +1784,9 @@ def classify_canonical_line(line: bytes) -> str:
 
     Rungs 3-7 are `_assistant_blocks_from_record` read as a decision tree
     instead of as a filter: that function answers "which blocks", this one
-    answers "and if none, why not".
+    answers "and if none, why not". Rung 6 asks it through
+    `_canonical_typed_content`, which is where an off-schema ``content``/``text``
+    stops being an exception and becomes the same answer Rust gives.
     """
     if not line:
         return "BLANK_LINE"
@@ -1759,7 +1802,7 @@ def classify_canonical_line(line: bytes) -> str:
         return "UNPARSABLE_TIMESTAMP"
     # The one call that keeps this a decision tree over the SAME rule rather
     # than a second implementation of it.
-    if not _assistant_blocks_from_record(record):
+    if not _assistant_blocks_from_record(_canonical_typed_content(record)):
         return "NO_ASSISTANT_TEXT"
     return "ASSISTANT_TEXT"
 

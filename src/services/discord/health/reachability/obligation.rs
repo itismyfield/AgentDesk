@@ -242,6 +242,14 @@ impl ObligationScan {
 /// a decision tree instead of as a filter — that function answers "which
 /// blocks", this one answers "and if none, why not", which is the half the
 /// canonical schema needs and the watchdog never had to name.
+///
+/// The typed accessors below are part of the agreement, not a Rust convenience:
+/// `as_array` on `message.content` and `as_str` on a block's `text` make a
+/// wrong-typed field read as ABSENT, and a JSONL transcript is not a
+/// schema-checked channel, so those rows arrive. `relay_watchdog.py`'s
+/// `_canonical_typed_content` narrows the same two fields for the same reason —
+/// without it Python raises where this classifies — and the
+/// `schema_type_blocks` corpus case pins the two answers together.
 fn classify_line(line: &[u8]) -> ObligationReason {
     if line.is_empty() {
         return ObligationReason::BlankLine;
