@@ -22,8 +22,10 @@ defect at a time:
     is "only the named observation and sanctioned consumers, machine-checked"
     is worth exactly what its weakest spelling catches;
   * a SANCTIONED consumer (#5071 T4-B4) that drifts off its contract — naming
-    the tree in a `use` item (the alias/re-export laundering shape), or no
-    longer naming the tree at all (a stale sanction nobody would notice);
+    the tree in a `use` item (the alias/re-export laundering shape), reading a
+    tree path other than the sanctioned `divergence::` one (a fully-qualified
+    verdict read), or no longer naming the tree at all (a stale sanction
+    nobody would notice);
   * a `warn_bound` introduced inside the tree (4987 §10 NO-GO).
 
 The live-repo cases at the end pin that the gate is wired into
@@ -241,6 +243,33 @@ class SyntheticRootTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertProblem(_run(root), "fully-qualified paths only")
+
+    def test_the_sanctioned_consumer_cannot_read_a_verdict(self):
+        """The sanction names ONE read — the descriptive `divergence` record.
+
+        A fully-qualified `verdict` read contains no `use` item, so the alias
+        scan alone would pass it, and the gate's summary ("verdict reads
+        rejected") would be claiming more than the code enforces. This is the
+        mutation that keeps that sentence honest: the qualified read that IS
+        sanctioned stays clean, the sibling path is reported."""
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            sanctioned = sorted(GATE.SANCTIONED_TREE_CONSUMERS)[0]
+            (root / sanctioned).write_text(
+                "#[cfg(unix)]\n"
+                "fn observe() -> &'static str {\n"
+                "    super::reachability::divergence::RowCoordinateDivergence"
+                "::Unknown.as_str()\n"
+                "}\n"
+                "\n"
+                "#[cfg(unix)]\n"
+                "fn forbidden() {\n"
+                "    let _ = super::reachability::verdict::ReachabilityVerdict"
+                "::Unknown;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            self.assertProblem(_run(root), "this sanction covers exactly")
 
     def test_a_stale_consumer_sanction_is_reported(self):
         """The sanction and the read it sanctions must move together, exactly
