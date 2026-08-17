@@ -5,10 +5,12 @@
 
 use std::path::Path;
 
-use super::discovery::{TranscriptCandidates, TranscriptResolution, resolve_transcript};
+use super::discovery::{
+    ResolvedTranscript, TranscriptCandidates, TranscriptResolution, resolve_transcript,
+};
 use super::ledger::{
     LedgerIncarnation, ObservationCommit, bootstrap_ledger_at, ledger_file_exists, read_ledger_at,
-    record_observation_at,
+    rebootstrap_ledger_at_if_snapshot_current, record_observation_at,
 };
 use super::obligation::scan_canonical;
 use super::tail::{TAIL_READ_CAP_BYTES, TailCursor, TailOutcome, read_incremental};
@@ -26,33 +28,47 @@ pub(in crate::services::discord) enum ReachabilityObservationState {
         commit: ObservationCommit,
         unknown_reason: Option<ReachabilityUnknownReason>,
     },
+    /// A watcher handoff superseded this tick before it could retire the
+    /// currently live ledger incarnation.
+    SkippedStaleIncarnation { skipped_observations: u64 },
     /// Observation could not safely advance. Relay execution remains separate.
     Unknown { reason: ReachabilityUnknownReason },
 }
+
+/// One coherent watcher incarnation consumed by an observation tick.
+///
+/// Both the initial acquisition and the under-lock revalidation build this
+/// value through [`capture_watcher_incarnation`], keeping transcript identity,
+/// generation, and spawn nonce in one comparison domain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::services::discord) struct WatcherIncarnationSnapshot {
+    transcript: ResolvedTranscript,
+    incarnation: LedgerIncarnation,
+}
+
+pub(in crate::services::discord) type WatcherIncarnationCapture =
+    Result<WatcherIncarnationSnapshot, ReachabilityUnknownReason>;
 
 fn unknown(reason: ReachabilityUnknownReason) -> ReachabilityObservationState {
     ReachabilityObservationState::Unknown { reason }
 }
 
-/// Resolve, tail, frame, and durably record one channel observation.
-pub(in crate::services::discord) fn observe_channel_at(
-    ledger_path: &Path,
+pub(in crate::services::discord) fn capture_watcher_incarnation(
     transcript_path: &Path,
     tmux_session_name: &str,
     generation_mtime_ns: i64,
     spawn_nonce: Option<String>,
-    observed_at_epoch_ms: u64,
-) -> ReachabilityObservationState {
+) -> WatcherIncarnationCapture {
     let transcript = match resolve_transcript(TranscriptCandidates {
         registry_output_path: Some(transcript_path),
         runtime_binding_path: None,
         discovery_roots: &[],
     }) {
         TranscriptResolution::Resolved(transcript) => transcript,
-        TranscriptResolution::Unresolved(reason) => return unknown(reason),
+        TranscriptResolution::Unresolved(reason) => return Err(reason),
     };
     if generation_mtime_ns <= 0 {
-        return unknown(ReachabilityUnknownReason::TranscriptUnresolved);
+        return Err(ReachabilityUnknownReason::TranscriptUnresolved);
     }
 
     let incarnation = LedgerIncarnation::new(
@@ -61,6 +77,26 @@ pub(in crate::services::discord) fn observe_channel_at(
         spawn_nonce,
         transcript.stat.file_id,
     );
+    Ok(WatcherIncarnationSnapshot {
+        transcript,
+        incarnation,
+    })
+}
+
+/// Resolve, tail, frame, and durably record one channel observation.
+pub(in crate::services::discord) fn observe_channel_at<F>(
+    ledger_path: &Path,
+    snapshot: WatcherIncarnationSnapshot,
+    observed_at_epoch_ms: u64,
+    revalidate_live_snapshot: F,
+) -> ReachabilityObservationState
+where
+    F: FnOnce() -> Option<WatcherIncarnationSnapshot>,
+{
+    let WatcherIncarnationSnapshot {
+        transcript,
+        incarnation,
+    } = snapshot;
     let ledger = match read_ledger_at(ledger_path) {
         Some(ledger) => ledger,
         None if ledger_file_exists(ledger_path) => {
@@ -77,10 +113,24 @@ pub(in crate::services::discord) fn observe_channel_at(
     };
 
     if !ledger.binds_to(&incarnation) {
-        // A valid, different incarnation is retired explicitly and starts at
-        // its current EOF. `bootstrap_ledger_at` rechecks under the file lock.
-        return match bootstrap_ledger_at(ledger_path, incarnation, transcript.stat.len) {
-            Ok(()) => ReachabilityObservationState::Bootstrapped,
+        let tmux_session_name = incarnation.tmux_session_name.clone();
+        return match rebootstrap_ledger_at_if_snapshot_current(
+            ledger_path,
+            incarnation,
+            transcript.stat.len,
+            || revalidate_live_snapshot().map(|snapshot| snapshot.incarnation),
+        ) {
+            Ok(true) => ReachabilityObservationState::Bootstrapped,
+            Ok(false) => {
+                tracing::warn!(
+                    tmux_session_name,
+                    skipped_observations = 1_u64,
+                    "reachability observation skipped stale watcher incarnation"
+                );
+                ReachabilityObservationState::SkippedStaleIncarnation {
+                    skipped_observations: 1,
+                }
+            }
             Err(_) => unknown(ReachabilityUnknownReason::ReceiptStoreUnreadable),
         };
     }
@@ -104,7 +154,7 @@ pub(in crate::services::discord) fn observe_channel_at(
     let scan = scan_canonical(
         &bytes,
         start,
-        generation_mtime_ns,
+        incarnation.generation_mtime_ns,
         incarnation.identity(),
         TAIL_READ_CAP_BYTES,
     );
@@ -131,9 +181,11 @@ pub(in crate::services::discord) fn observe_channel_at(
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::io::Write;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
 
     use tempfile::TempDir;
+    use tracing_subscriber::fmt::MakeWriter;
 
     use super::super::ledger::read_ledger_at;
     use super::*;
@@ -150,14 +202,15 @@ mod tests {
     }
 
     fn observe(transcript: &Path, ledger: &Path, now: u64) -> ReachabilityObservationState {
-        observe_channel_at(
-            ledger,
+        let snapshot = capture_watcher_incarnation(
             transcript,
             "agent-session",
             GENERATION,
             Some("nonce".to_string()),
-            now,
         )
+        .expect("capture watcher incarnation");
+        let live_snapshot = snapshot.clone();
+        observe_channel_at(ledger, snapshot, now, || Some(live_snapshot))
     }
 
     fn append(path: &Path, bytes: &[u8]) {
@@ -167,6 +220,28 @@ mod tests {
             .expect("open transcript")
             .write_all(bytes)
             .expect("append transcript");
+    }
+
+    #[derive(Clone)]
+    struct CapturingWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CapturingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("log buffer").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for CapturingWriter {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
     }
 
     #[test]
@@ -232,5 +307,113 @@ mod tests {
         assert_eq!(ledger.cursor_offset, (ASSISTANT_ROW.len() * 2) as u64);
         assert_eq!(ledger.live_obligations().len(), 2);
         assert_eq!(ledger.counters.total_obligations, 2);
+    }
+
+    #[test]
+    fn stale_snapshot_cannot_retire_the_live_handoff_ledger() {
+        let (_dir, stale_transcript, ledger_path) = fixture();
+        let live_transcript = stale_transcript.with_file_name("live.jsonl");
+        fs::write(&live_transcript, b"").expect("create live transcript");
+
+        assert_eq!(
+            observe(&live_transcript, &ledger_path, 1),
+            ReachabilityObservationState::Bootstrapped
+        );
+        append(&live_transcript, ASSISTANT_ROW);
+        assert!(matches!(
+            observe(&live_transcript, &ledger_path, 2),
+            ReachabilityObservationState::Recorded { .. }
+        ));
+        let ledger_before = read_ledger_at(&ledger_path).expect("read live ledger");
+        let bytes_before = fs::read(&ledger_path).expect("read live ledger bytes");
+        assert_eq!(ledger_before.live_obligations().len(), 1);
+
+        // This is the leg-B interleaving: X is paired with G2/N2 after the
+        // watcher already handed off to Y, whose ledger is now live.
+        let stale_snapshot = capture_watcher_incarnation(
+            &stale_transcript,
+            "agent-session",
+            GENERATION,
+            Some("nonce".to_string()),
+        )
+        .expect("capture stale X/G2/N2 snapshot");
+        let live_snapshot = capture_watcher_incarnation(
+            &live_transcript,
+            "agent-session",
+            GENERATION,
+            Some("nonce".to_string()),
+        )
+        .expect("capture live Y/G2/N2 snapshot");
+        let log_buffer = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(CapturingWriter(log_buffer.clone()))
+            .finish();
+        let state = tracing::subscriber::with_default(subscriber, || {
+            observe_channel_at(&ledger_path, stale_snapshot, 3, || Some(live_snapshot))
+        });
+
+        assert_eq!(
+            state,
+            ReachabilityObservationState::SkippedStaleIncarnation {
+                skipped_observations: 1,
+            }
+        );
+        assert_eq!(
+            fs::read(&ledger_path).expect("re-read live ledger bytes"),
+            bytes_before,
+            "a stale tick must not write the live ledger"
+        );
+        assert_eq!(
+            read_ledger_at(&ledger_path).expect("re-read live ledger"),
+            ledger_before,
+            "the Y ledger and its live obligation must remain unchanged"
+        );
+        let logs =
+            String::from_utf8(log_buffer.lock().expect("log buffer").clone()).expect("utf8 logs");
+        assert_eq!(
+            logs.matches("reachability observation skipped stale watcher incarnation")
+                .count(),
+            1,
+            "one stale-snapshot log expected; logs={logs}"
+        );
+        assert!(logs.contains("skipped_observations=1"), "logs={logs}");
+    }
+
+    #[test]
+    fn matching_handoff_snapshot_retires_and_rebootstraps() {
+        let (_dir, old_transcript, ledger_path) = fixture();
+        assert_eq!(
+            observe(&old_transcript, &ledger_path, 1),
+            ReachabilityObservationState::Bootstrapped
+        );
+        append(&old_transcript, ASSISTANT_ROW);
+        assert!(matches!(
+            observe(&old_transcript, &ledger_path, 2),
+            ReachabilityObservationState::Recorded { .. }
+        ));
+
+        let live_transcript = old_transcript.with_file_name("handoff.jsonl");
+        fs::write(&live_transcript, b"").expect("create handoff transcript");
+        let handoff_snapshot = capture_watcher_incarnation(
+            &live_transcript,
+            "agent-session",
+            GENERATION,
+            Some("nonce".to_string()),
+        )
+        .expect("capture matching handoff snapshot");
+        let expected_incarnation = handoff_snapshot.incarnation.clone();
+        let live_snapshot = handoff_snapshot.clone();
+
+        assert_eq!(
+            observe_channel_at(&ledger_path, handoff_snapshot, 3, || Some(live_snapshot)),
+            ReachabilityObservationState::Bootstrapped
+        );
+        let ledger = read_ledger_at(&ledger_path).expect("read handoff ledger");
+        assert_eq!(ledger.incarnation, expected_incarnation);
+        assert_eq!(ledger.live_obligations().len(), 0);
+        assert_eq!(ledger.counters.retired_incarnation, 1);
     }
 }

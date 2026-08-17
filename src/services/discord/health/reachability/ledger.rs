@@ -383,6 +383,44 @@ pub(in crate::services::discord) fn bootstrap_ledger_at(
     runtime_store::atomic_write(path, &data)
 }
 
+/// Re-bootstrap an existing ledger only while the caller's watcher snapshot is
+/// still the live incarnation.
+///
+/// Returns `Ok(false)` without changing the ledger when revalidation rejects a
+/// stale caller. The callback runs while the ledger file lock is held so a
+/// concurrent observation cannot retire the newly selected incarnation after
+/// the revalidation but before this transition commits.
+pub(in crate::services::discord) fn rebootstrap_ledger_at_if_snapshot_current<F>(
+    path: &Path,
+    incarnation: LedgerIncarnation,
+    bootstrap_offset: u64,
+    revalidate_live_incarnation: F,
+) -> Result<bool, String>
+where
+    F: FnOnce() -> Option<LedgerIncarnation>,
+{
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let _lock = delivery_record::lock_record_path(path)?;
+    let current = read_bootstrapped_ledger_at(path)?;
+    if current.binds_to(&incarnation) {
+        return Ok(true);
+    }
+
+    // The lock provides serialization only; it does not reject a stale caller.
+    // Authority for this destructive transition comes from revalidating the
+    // live watcher incarnation while the lock is held.
+    if revalidate_live_incarnation().as_ref() != Some(&incarnation) {
+        return Ok(false);
+    }
+
+    let ledger = current.retire_and_rebootstrap(incarnation, bootstrap_offset);
+    let data = serde_json::to_string_pretty(&ledger).map_err(|error| error.to_string())?;
+    runtime_store::atomic_write(path, &data)?;
+    Ok(true)
+}
+
 /// flock-guarded read-modify-write: append obligations to the durable ledger,
 /// evicting oldest when capped, and atomically persist.
 ///
