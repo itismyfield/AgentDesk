@@ -66,6 +66,11 @@ from collections.abc import Iterable
 from collections import defaultdict
 from pathlib import Path
 
+try:
+    from rust_lex import StripState, strip_line
+except ModuleNotFoundError:  # imported from a repo-root unittest
+    from scripts.rust_lex import StripState, strip_line
+
 SCAN_ROOT = Path("src")
 PROOF_OWNER = "src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs"
 SYMBOL_MODULES = {
@@ -96,101 +101,29 @@ def _load_skip_pin_module():
 _SKIP_PIN = _load_skip_pin_module()
 PINNED_TEST_ONLY_MODULE_FILES = _SKIP_PIN.PINNED_TEST_ONLY_MODULE_FILES
 
-# Char literal (so `'"'` / `'{'` cannot desync the scanner). Lifetimes (`'a`)
-# do not match and fall through harmlessly.
-_CHAR_LITERAL = re.compile(r"'(\\.|[^'\\])'")
-
 
 def is_test_file(name: str) -> bool:
     return name == "tests.rs" or name.endswith("_tests.rs")
 
 
 def strip_source(text: str) -> str:
-    """Blank comments and strings while preserving braces and newlines."""
-    out: list[str] = []
-    i = 0
-    block_depth = 0
-    quote: str | None = None
-    raw_hashes: int | None = None
-    while i < len(text):
-        char = text[i]
-        next_char = text[i + 1] if i + 1 < len(text) else ""
-        if block_depth:
-            if char == "/" and next_char == "*":
-                block_depth += 1
-                out.extend("  ")
-                i += 2
-            elif char == "*" and next_char == "/":
-                block_depth -= 1
-                out.extend("  ")
-                i += 2
-            else:
-                out.append("\n" if char == "\n" else " ")
-                i += 1
-            continue
-        if raw_hashes is not None:
-            close = '"' + ('#' * raw_hashes)
-            if text.startswith(close, i):
-                out.extend(" " * len(close))
-                i += len(close)
-                raw_hashes = None
-            else:
-                out.append("\n" if char == "\n" else " ")
-                i += 1
-            continue
-        if quote is not None:
-            if char == "\\":
-                out.append(" ")
-                if i + 1 < len(text):
-                    out.append("\n" if text[i + 1] == "\n" else " ")
-                    i += 2
-                else:
-                    i += 1
-            elif char == quote:
-                out.append(" ")
-                quote = None
-                i += 1
-            else:
-                out.append("\n" if char == "\n" else " ")
-                i += 1
-            continue
-        if char == "/" and next_char == "/":
-            end = text.find("\n", i)
-            if end == -1:
-                out.extend(" " * (len(text) - i))
-                break
-            out.extend(" " * (end - i))
-            i = end
-        elif char == "/" and next_char == "*":
-            block_depth = 1
-            out.extend("  ")
-            i += 2
-        elif char == "'":
-            literal = _CHAR_LITERAL.match(text, i)
-            if literal:
-                out.extend(" " * (literal.end() - i))
-                i = literal.end()
-            else:
-                out.append(char)
-                i += 1
-        elif char == '"':
-            quote = char
-            out.append(" ")
-            i += 1
-        elif char in ("r", "b"):
-            opener = re.match(r"(?:br|r)(#*)\"", text[i:])
-            if opener:
-                token = opener.group(0)
-                raw_hashes = len(opener.group(1))
-                out.extend(" " * len(token))
-                i += len(token)
-            else:
-                out.append(char)
-                i += 1
-        else:
-            out.append(char)
-            i += 1
-    return "".join(out)
+    """Blank comments and strings while preserving braces and newlines.
+
+    Uses the shared cross-line lexer from rust_lex module to maintain
+    consistency with other guard scripts. Splits on \\n only (not other
+    line-separation control characters like \\u2028) so line-comment
+    boundaries remain intact within strip_line's break behavior.
+    """
+    state = StripState()
+    lines = text.split('\n')
+    result = []
+    for i, line in enumerate(lines):
+        stripped = strip_line(line, state)
+        result.append(stripped)
+        # Preserve \n boundaries except after the last line
+        if i < len(lines) - 1:
+            result.append('\n')
+    return "".join(result)
 
 
 def production_text(path: Path) -> str:

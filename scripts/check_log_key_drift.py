@@ -55,6 +55,11 @@ import re
 import sys
 from pathlib import Path
 
+try:
+    from rust_lex import StripState, strip_line
+except ModuleNotFoundError:  # imported from a repo-root unittest
+    from scripts.rust_lex import StripState, strip_line
+
 SCAN_ROOT = Path("src/services/discord")
 
 # Canonical replacements, surfaced in the failure message.
@@ -67,13 +72,6 @@ _KEY_ALT = "|".join(re.escape(k) for k in (*CHANNEL_KEYS, SESSION_KEY))
 # deliberately loose.
 KEY_ASSIGN = re.compile(rf"\b(?P<key>{_KEY_ALT})\s*=\s*(?P<rest>[^=].*)$")
 
-# Char literal (so `'"'` / `'\"'` cannot desync the quote scanner). Lifetimes
-# (`'a`) do not match and fall through harmlessly.
-_CHAR_LITERAL = re.compile(r"'(\\.|[^'\\])'")
-
-# Raw / byte string openers: r"…", r#"…"#, br"…", b"…" is handled separately.
-_RAW_STRING_OPEN = re.compile(r'(?:r|br)(#*)"')
-
 # `session_id` sites that log a genuinely different identifier than the relay
 # `adk_session_key`. Exempt by (path suffix, value expression after `=`).
 SESSION_ID_ALLOWLIST: set[tuple[str, str]] = {
@@ -84,92 +82,6 @@ SESSION_ID_ALLOWLIST: set[tuple[str, str]] = {
     # UserPromptSubmit hook — the provider's own session, not adk_session_key.
     ("services/discord/tui_prompt_relay.rs", "%event.session_id"),
 }
-
-
-class StripState:
-    """Cross-line lexer state: strings and block comments span lines."""
-
-    __slots__ = ("in_string", "raw_hashes", "block_depth")
-
-    def __init__(self) -> None:
-        self.in_string = False  # inside a normal "…" / b"…" string
-        self.raw_hashes: int | None = None  # inside r"…" / r#"…"# (hash count)
-        self.block_depth = 0  # nested /* … */ depth
-
-
-def strip_line(line: str, state: StripState) -> str:
-    """Blank out string-literal/comment content, preserving column positions.
-
-    Quote and comment delimiters themselves are blanked too — only real code
-    survives. `state` carries over between lines so multi-line strings
-    (including `\\`-newline continuations) and block comments stay stripped.
-    """
-    out: list[str] = []
-    i = 0
-    n = len(line)
-    while i < n:
-        if state.block_depth > 0:
-            if line.startswith("/*", i):
-                state.block_depth += 1
-                out.append("  ")
-                i += 2
-            elif line.startswith("*/", i):
-                state.block_depth -= 1
-                out.append("  ")
-                i += 2
-            else:
-                out.append(" ")
-                i += 1
-            continue
-        if state.raw_hashes is not None:
-            closer = '"' + "#" * state.raw_hashes
-            if line.startswith(closer, i):
-                state.raw_hashes = None
-                out.append(" " * len(closer))
-                i += len(closer)
-            else:
-                out.append(" ")
-                i += 1
-            continue
-        if state.in_string:
-            if line[i] == "\\" and i + 1 < n:
-                out.append("  ")
-                i += 2
-            else:
-                if line[i] == '"':
-                    state.in_string = False
-                out.append(" ")
-                i += 1
-            continue
-        # --- normal code ---
-        if line.startswith("//", i):
-            break  # line comment: drop the rest of the line
-        if line.startswith("/*", i):
-            state.block_depth = 1
-            out.append("  ")
-            i += 2
-            continue
-        raw = _RAW_STRING_OPEN.match(line, i)
-        if raw:
-            state.raw_hashes = len(raw.group(1))
-            out.append(" " * (raw.end() - i))
-            i = raw.end()
-            continue
-        if line[i] == '"' or line.startswith('b"', i):
-            skip = 2 if line[i] == "b" else 1
-            state.in_string = True
-            out.append(" " * skip)
-            i += skip
-            continue
-        if line[i] == "'":
-            m = _CHAR_LITERAL.match(line, i)
-            if m:
-                out.append(" " * (m.end() - i))
-                i = m.end()
-                continue
-        out.append(line[i])
-        i += 1
-    return "".join(out)
 
 
 def _field_violation(code: str, match: re.Match[str]) -> str | None:

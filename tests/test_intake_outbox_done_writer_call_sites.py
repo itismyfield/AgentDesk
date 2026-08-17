@@ -168,6 +168,10 @@ class DiscriminationTests(unittest.TestCase):
             ROOT / "scripts/generate_inventory_docs.py",
             root / "scripts/generate_inventory_docs.py",
         )
+        shutil.copy2(
+            ROOT / "scripts/rust_lex.py",
+            root / "scripts/rust_lex.py",
+        )
         declarations = []
         for index, rel in enumerate(sorted(guard.PINNED_TEST_ONLY_MODULE_FILES)):
             write(root, rel, "")
