@@ -697,6 +697,20 @@ class RegistryParseTest(unittest.TestCase):
 
 
 class GiantFileIssueMetadataTest(unittest.TestCase):
+    @staticmethod
+    def _snapshot(
+        issues: list[dict[str, object]], refreshed_at: str
+    ) -> dict[str, object]:
+        return {
+            "schema_version": 2,
+            "refreshed_at": refreshed_at,
+            "ratchets": {
+                "closed_deadline_entries": 0,
+                "transition_list_entries": 0,
+            },
+            "issues": issues,
+        }
+
     def _load(self, payload: object, *, now: datetime) -> dict[int, dict[str, object]]:
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "issues.json"
@@ -767,11 +781,10 @@ class GiantFileIssueMetadataTest(unittest.TestCase):
     def test_fresh_snapshot_accepts_open_and_closed_states(self) -> None:
         now = datetime(2026, 8, 12, 12, tzinfo=timezone.utc)
         issues = self._load(
-            {
-                "schema_version": 1,
-                "refreshed_at": "2026-08-12T11:00:00Z",
-                "issues": [self._record(1), self._record(2, "closed")],
-            },
+            self._snapshot(
+                [self._record(1), self._record(2, "closed")],
+                "2026-08-12T11:00:00Z",
+            ),
             now=now,
         )
         self.assertEqual(issues[1]["state"], "open")
@@ -782,11 +795,10 @@ class GiantFileIssueMetadataTest(unittest.TestCase):
         for state in ("merged", ["closed"]):
             with self.subTest(state=state), self.assertRaises(GEN.ParseError):
                 self._load(
-                    {
-                        "schema_version": 1,
-                        "refreshed_at": "2026-08-12T11:00:00Z",
-                        "issues": [{**self._record(1), "state": state}],
-                    },
+                    self._snapshot(
+                        [{**self._record(1), "state": state}],
+                        "2026-08-12T11:00:00Z",
+                    ),
                     now=now,
                 )
 
@@ -800,22 +812,16 @@ class GiantFileIssueMetadataTest(unittest.TestCase):
         for records in invalid_sets:
             with self.subTest(records=records), self.assertRaises(GEN.ParseError):
                 self._load(
-                    {
-                        "schema_version": 1,
-                        "refreshed_at": "2026-08-12T11:00:00Z",
-                        "issues": records,
-                    },
+                    self._snapshot(records, "2026-08-12T11:00:00Z"),
                     now=now,
                 )
 
     def test_snapshot_at_seven_day_boundary_is_fresh(self) -> None:
         refreshed = datetime(2026, 8, 5, 12, tzinfo=timezone.utc)
         issues = self._load(
-            {
-                "schema_version": 1,
-                "refreshed_at": refreshed.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "issues": [self._record(1)],
-            },
+            self._snapshot(
+                [self._record(1)], refreshed.strftime("%Y-%m-%dT%H:%M:%SZ")
+            ),
             now=refreshed + timedelta(days=7),
         )
         self.assertIn(1, issues)
@@ -828,11 +834,9 @@ class GiantFileIssueMetadataTest(unittest.TestCase):
         """
         refreshed = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
         rc, stderr = self._run_generator(
-            {
-                "schema_version": 1,
-                "refreshed_at": refreshed.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "issues": [self._record(1)],
-            },
+            self._snapshot(
+                [self._record(1)], refreshed.strftime("%Y-%m-%dT%H:%M:%SZ")
+            ),
             now=refreshed + timedelta(days=30, seconds=1),
             enforce=False,
         )
@@ -843,11 +847,9 @@ class GiantFileIssueMetadataTest(unittest.TestCase):
 
     def test_fresh_snapshot_never_warns_for_either_enforcement_mode(self) -> None:
         refreshed = datetime(2026, 8, 5, 12, tzinfo=timezone.utc)
-        payload = {
-            "schema_version": 1,
-            "refreshed_at": refreshed.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "issues": [self._record(1)],
-        }
+        payload = self._snapshot(
+            [self._record(1)], refreshed.strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
         for enforce in (False, True):
             with self.subTest(enforce=enforce):
                 rc, stderr = self._run_generator(
@@ -862,6 +864,7 @@ class GiantFileIssueMetadataTest(unittest.TestCase):
 class RegistryValidationTest(unittest.TestCase):
     def setUp(self) -> None:
         self._original_issue_metadata = GEN.load_giant_file_issue_metadata
+        self._original_issue_ratchets = GEN.load_giant_file_issue_ratchets
         self._original_transition_list = GEN.load_giant_file_closed_issue_transition_list
         self._original_enforcement = os.environ.pop(
             GEN.GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV, None
@@ -878,9 +881,16 @@ class RegistryValidationTest(unittest.TestCase):
         }
         # Default: empty transition list for tests (avoid orphan detection with real data)
         GEN.load_giant_file_closed_issue_transition_list = lambda: set()
+        GEN.load_giant_file_issue_ratchets = lambda: {
+            "closed_deadline_entries": 0,
+            "transition_list_entries": 0,
+        }
+        # Most registry-validation tests exercise contracts unrelated to #5234.
+        os.environ[GEN.GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV] = "0"
 
     def tearDown(self) -> None:
         GEN.load_giant_file_issue_metadata = self._original_issue_metadata
+        GEN.load_giant_file_issue_ratchets = self._original_issue_ratchets
         GEN.load_giant_file_closed_issue_transition_list = self._original_transition_list
         if self._original_enforcement is not None:
             os.environ[
@@ -1321,15 +1331,26 @@ class RegistryValidationTest(unittest.TestCase):
             }
         }
         original_registry = GEN.load_giant_file_registry
+        original_transition_list = GEN.load_giant_file_closed_issue_transition_list
+        original_ratchets = GEN.load_giant_file_issue_ratchets
         GEN.load_giant_file_registry = self._patch_registry([], [entry])
+        GEN.load_giant_file_closed_issue_transition_list = lambda: {"src/a.rs"}
+        GEN.load_giant_file_issue_ratchets = lambda: {
+            "closed_deadline_entries": 0,
+            "transition_list_entries": 1,
+        }
         os.environ[GEN.GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV] = "1"
         try:
             with self.assertRaises(GEN.ParseError) as ctx:
                 GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = original_registry
-        self.assertIn("src/a.rs", str(ctx.exception))
-        self.assertIn("#1 is closed", str(ctx.exception))
+            GEN.load_giant_file_closed_issue_transition_list = original_transition_list
+            GEN.load_giant_file_issue_ratchets = original_ratchets
+        self.assertIn(
+            "closed deadline entries grew from snapshot baseline 0 to 1",
+            str(ctx.exception),
+        )
 
     def test_checked_in_issue_metadata_covers_every_shrink_entry(self) -> None:
         GEN.load_giant_file_issue_metadata = self._original_issue_metadata
@@ -1430,8 +1451,12 @@ class GiantFileClosedIssueTest(unittest.TestCase):
             # Valid schema with both open and closed issues
             metadata_file.write_text(
                 """{
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "refreshed_at": "2026-08-10T00:00:00Z",
+                    "ratchets": {
+                        "closed_deadline_entries": 1,
+                        "transition_list_entries": 1
+                    },
                     "issues": [
                         {
                             "number": 1001,
@@ -1472,8 +1497,12 @@ class GiantFileClosedIssueTest(unittest.TestCase):
             metadata_file = root / "issue_metadata.json"
             metadata_file.write_text(
                 """{
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "refreshed_at": "2026-08-10T00:00:00Z",
+                    "ratchets": {
+                        "closed_deadline_entries": 0,
+                        "transition_list_entries": 0
+                    },
                     "issues": [
                         {
                             "number": 1001,
@@ -1505,8 +1534,12 @@ class GiantFileClosedIssueTest(unittest.TestCase):
             # Snapshot is 31 days old
             metadata_file.write_text(
                 """{
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "refreshed_at": "2026-07-13T00:00:00Z",
+                    "ratchets": {
+                        "closed_deadline_entries": 1,
+                        "transition_list_entries": 1
+                    },
                     "issues": [
                         {
                             "number": 1001,
@@ -1583,24 +1616,46 @@ src/c.rs
         finally:
             GEN.GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST = orig_path
 
-    def test_transition_list_ratchet_rejects_growth(self) -> None:
-        """Verify that transition list size growth is fatal (ratchet enforcement)."""
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            transition_file = root / "transition_list.txt"
-            # Create a list with 81 entries (exceeds max of 80)
-            entries = ["# Header\n"] + [f"src/fake_{i}.rs\n" for i in range(81)]
-            transition_file.write_text("".join(entries))
+    def test_ratchets_reject_growth_in_both_counts(self) -> None:
+        for key in GEN.GIANT_FILE_ISSUE_RATCHET_KEYS:
+            measured = {
+                "closed_deadline_entries": 5,
+                "transition_list_entries": 5,
+            }
+            baselines = {
+                "closed_deadline_entries": 5,
+                "transition_list_entries": 5,
+            }
+            measured[key] = 6
+            with self.subTest(key=key):
+                problems = GEN.giant_file_issue_ratchet_problems(
+                    **measured, baselines=baselines
+                )
+                self.assertEqual(len(problems), 1)
+                self.assertIn("grew from snapshot baseline 5 to 6", problems[0])
+                self.assertIn("ratchet violation", problems[0])
 
-            orig_path = GEN.GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST
-            try:
-                GEN.GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST = transition_file
-                with self.assertRaises(GEN.ParseError) as cm:
-                    GEN.load_giant_file_closed_issue_transition_list()
-                self.assertIn("grown", str(cm.exception).lower())
-                self.assertIn("ratchet", str(cm.exception).lower())
-            finally:
-                GEN.GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST = orig_path
+    def test_ratchets_require_writer_after_shrink_in_both_counts(self) -> None:
+        for key in GEN.GIANT_FILE_ISSUE_RATCHET_KEYS:
+            measured = {
+                "closed_deadline_entries": 5,
+                "transition_list_entries": 5,
+            }
+            baselines = {
+                "closed_deadline_entries": 5,
+                "transition_list_entries": 5,
+            }
+            measured[key] = 4
+            with self.subTest(key=key):
+                problems = GEN.giant_file_issue_ratchet_problems(
+                    **measured, baselines=baselines
+                )
+                self.assertEqual(len(problems), 1)
+                self.assertIn("shrank from snapshot baseline 5 to 4", problems[0])
+                self.assertIn(
+                    "python3 scripts/refresh_giant_file_issue_metadata.py",
+                    problems[0],
+                )
 
     def test_orphan_transition_list_entries_fatal(self) -> None:
         """Verify that transition list entries not in registry cause fatal error."""
