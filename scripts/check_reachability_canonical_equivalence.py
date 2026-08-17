@@ -158,6 +158,21 @@ OBSERVATION_ONLY_TREE_REFERENCES = {
 ALLOWED_TREE_REFERENCES = (
     DECLARATION_ONLY_TREE_REFERENCES | OBSERVATION_ONLY_TREE_REFERENCES
 )
+# Files sanctioned to READ the tree, each landed by a named slice. Unlike the
+# allowances above, these may spell `reachability::` in code — but only as
+# fully-qualified paths: `qualified_read_only_problems` reports any `use` item
+# here naming the tree, because an alias (`use ... as rx;`) and a re-export
+# (`pub use ...;`) both republish it under a name this scan cannot recognise. A
+# qualified `type` alias republishing a tree type stays invisible to this
+# lexical gate — the same lint-not-type-proof downgrade 4987 §-1.5 records for
+# row independence.
+#
+#   * `health/snapshot.rs` — #5071 T4-B4 (4987 S4): the descriptive
+#     row-coordinate divergence record. It reads `divergence` only; no verdict
+#     reader exists until T4-B6, behind `G-T4`.
+SANCTIONED_TREE_CONSUMERS = {
+    "src/services/discord/health/snapshot.rs",
+}
 # A module reference, not a word: an identifier that merely contains the
 # substring (`run_bot_spawn_reachability_observation`, say) is not a reader, and
 # matching it would make the allowlist a list of names rather than of readers.
@@ -603,6 +618,32 @@ def observation_only_problems(rel: str, cleaned: str) -> list[str]:
     return problems
 
 
+def qualified_read_only_problems(rel: str, cleaned: str) -> list[str]:
+    """Hold a sanctioned consumer to fully-qualified reads.
+
+    A sanctioned consumer may call into the tree, so its laundering rule is
+    narrower than declaration-only: no `use` item may name the tree. An alias
+    (`use super::reachability as rx;`) and a re-export (`pub use super::
+    reachability::...;`) both live in `use` items and both republish the tree
+    under a name the consumer scan cannot recognise; a fully-qualified path at
+    each read site is the one spelling this scan keeps seeing.
+    """
+
+    problems: list[str] = []
+    for item in USE_ITEM_RE.finditer(cleaned):
+        match = TREE_NAME_RE.search(item.group(0))
+        if match is None:
+            continue
+        line = cleaned.count("\n", 0, item.start() + match.start()) + 1
+        problems.append(
+            f"{rel}:{line}: a sanctioned consumer must read the tree through "
+            "fully-qualified paths only. A `use` item naming it is an alias "
+            "or re-export this gate cannot track past; spell the path at the "
+            "call site"
+        )
+    return problems
+
+
 def check_no_judgment_authority(repo_root: Path) -> list[str]:
     problems: list[str] = []
 
@@ -641,21 +682,26 @@ def check_no_judgment_authority(repo_root: Path) -> list[str]:
             problems += declaration_only_problems(rel, cleaned)
         if rel in OBSERVATION_ONLY_TREE_REFERENCES:
             problems += observation_only_problems(rel, cleaned)
+        if rel in SANCTIONED_TREE_CONSUMERS:
+            problems += qualified_read_only_problems(rel, cleaned)
 
-    unexpected = sorted(consumers - ALLOWED_TREE_REFERENCES)
+    unexpected = sorted(consumers - ALLOWED_TREE_REFERENCES - SANCTIONED_TREE_CONSUMERS)
     if unexpected:
         problems.append(
             "the reachability tree grew a consumer: "
             + ", ".join(unexpected)
-            + ". #5071 T4-B2c permits only its explicit observation-task wiring; "
-            "a reader of verdicts is T4-B6, behind `G-T4`"
+            + ". Every reader joins its own allowance deliberately, in its own "
+            "reviewed slice: T4-B2c wired the observation task and T4-B4 "
+            "sanctioned the descriptive divergence record. A reader of the "
+            "verdicts is T4-B6, behind `G-T4`"
         )
-    missing = sorted(ALLOWED_TREE_REFERENCES - consumers)
+    missing = sorted((ALLOWED_TREE_REFERENCES | SANCTIONED_TREE_CONSUMERS) - consumers)
     if missing:
         problems.append(
             "the expected wiring is gone: "
             + ", ".join(missing)
-            + ". If an expected declaration or observation consumer was removed, "
+            + ". If an expected declaration, observation consumer, or "
+            "sanctioned read was removed, "
             "remove its allowance here in the same change"
         )
     return problems
@@ -695,9 +741,10 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"reachability canonical equivalence OK: {len(cases)} corpus cases match "
         f"byte for byte, {len(PYTHON_MUTATIONS)} python mutations killed, "
-        f"{rust_note}; the tree has exactly its declaration and B2c observation "
-        "consumer, with aliases, re-exports, and verdict reads rejected "
-        "(source lint, not a type proof)"
+        f"{rust_note}; the tree has exactly its declaration, its B2c "
+        f"observation consumer, and {len(SANCTIONED_TREE_CONSUMERS)} sanctioned "
+        "qualified-path reader(s), with aliases, re-exports, and verdict reads "
+        "rejected (source lint, not a type proof)"
     )
     return 0
 

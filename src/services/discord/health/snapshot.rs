@@ -573,6 +573,22 @@ async fn watcher_state_snapshot_for_shared(
         tmux_session_alive,
         session.inflight_state_present,
     );
+    // #5071 T4-B4 (4987 S4): compare the row's transcript coordinate against
+    // the registry's independently resolved one by FILE IDENTITY, upgrading
+    // T4-B0's path-string record in `SessionEnrichment`. Descriptive record
+    // only — the outcome feeds no verdict, no classifier, and no recovery
+    // here; T4-B6 owns composition. Unix-gated with the reachability tree
+    // because identity is the `(dev, ino)` pair.
+    #[cfg(unix)]
+    super::reachability::divergence::observe_row_coordinate_divergence(
+        provider_name,
+        channel.get(),
+        session
+            .inflight
+            .as_ref()
+            .and_then(|state| state.output_path.as_deref()),
+        session.watcher_output_path.as_deref(),
+    );
     Some(WatcherStateSnapshot {
         provider: provider_name.to_string(),
         attached: session.attached,
@@ -1275,5 +1291,153 @@ mod tests {
                     active_user_msg_id
                 );
             });
+    }
+
+    /// #5071 T4-B4 (4987 S4): the divergence observe call in
+    /// `watcher_state_snapshot_for_shared` is severable without any of
+    /// `reachability::divergence`'s own tests failing (they are pure/local),
+    /// so this drives the real builder end to end — registry binding on a live
+    /// file, in-flight row on a dead path — and asserts the record it emits.
+    #[cfg(unix)]
+    mod row_coordinate_divergence_wiring {
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+
+        use poise::serenity_prelude::ChannelId;
+
+        use crate::services::provider::ProviderKind;
+
+        #[derive(Clone)]
+        struct CapturingWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+        impl std::io::Write for CapturingWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturingWriter {
+            type Writer = CapturingWriter;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        /// Install a WARN-level capturing subscriber for the duration of `run`.
+        /// `set_default` is thread-local and the record is emitted on the
+        /// polling thread, so callers must stay on `flavor = "current_thread"`.
+        async fn capture_warn<F, R>(run: F) -> (R, String)
+        where
+            F: std::future::Future<Output = R>,
+        {
+            let buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::WARN)
+                .with_ansi(false)
+                .without_time()
+                .with_writer(CapturingWriter(buffer.clone()))
+                .finish();
+            let _guard = tracing::subscriber::set_default(subscriber);
+            let result = run.await;
+            let output = String::from_utf8_lossy(
+                &buffer.lock().unwrap_or_else(|poison| poison.into_inner()),
+            )
+            .into_owned();
+            (result, output)
+        }
+
+        fn watcher_handle(
+            tmux_session_name: &str,
+            output_path: &str,
+        ) -> crate::services::discord::TmuxWatcherHandle {
+            crate::services::discord::TmuxWatcherHandle {
+                tmux_session_name: tmux_session_name.to_string(),
+                output_path: output_path.to_string(),
+                paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                resume_offset: Arc::new(std::sync::Mutex::new(None)),
+                cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                    crate::services::discord::tmux_watcher_now_ms(),
+                )),
+            }
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn watcher_state_snapshot_records_row_vs_registry_identity_divergence() {
+            let tmp = tempfile::tempdir().expect("temp runtime root");
+            let _env =
+                crate::config::TestEnvVarGuard::set_path(super::AGENTDESK_ROOT_DIR_ENV, tmp.path());
+
+            let provider = ProviderKind::Codex;
+            let channel =
+                ChannelId::new(super::NEXT_ABSENT_MAILBOX_CHANNEL.fetch_add(1, Ordering::Relaxed));
+            let tmux_session_name = "AgentDesk-codex-adk-t4b4-wiring";
+            let shared = crate::services::discord::make_shared_data_for_tests();
+
+            // #4986 형상1 fixture: the registry tails a live native transcript
+            // while the row still names a path that does not stat.
+            let native = tmp.path().join("t4b4-registry-native.jsonl");
+            std::fs::write(&native, "{\"type\":\"assistant\"}\n").expect("write registry fixture");
+            shared.tmux_watchers.insert(
+                channel,
+                watcher_handle(tmux_session_name, native.to_str().expect("utf8 path")),
+            );
+            let missing_wrapper = tmp.path().join("t4b4-row-wrapper-missing.jsonl");
+            let row = crate::services::discord::inflight::InflightTurnState::new(
+                provider.clone(),
+                channel.get(),
+                None,
+                5_071_000_000_004_000,
+                5_071_000_000_004_001,
+                5_071_000_000_004_002,
+                "t4-b4 wiring fixture".to_string(),
+                None,
+                Some(tmux_session_name.to_string()),
+                Some(missing_wrapper.to_str().expect("utf8 path").to_string()),
+                None,
+                0,
+            );
+            crate::services::discord::inflight::save_inflight_state(&row)
+                .expect("persist row fixture");
+
+            let (snapshot, logs) = capture_warn(super::super::watcher_state_snapshot_for_shared(
+                provider.as_str(),
+                shared,
+                channel,
+            ))
+            .await;
+
+            let snapshot = snapshot.expect("a channel with a live watcher and a row snapshots");
+            assert_eq!(
+                snapshot.inflight_output_path.as_deref(),
+                missing_wrapper.to_str(),
+                "the fixture row must be the one the builder observed"
+            );
+            let records: Vec<&str> = logs
+                .lines()
+                .filter(|line| line.contains("counter=\"reachability_row_coordinate_divergence\""))
+                .collect();
+            assert_eq!(
+                records.len(),
+                1,
+                "one build must emit exactly one divergence record; got:\n{logs}"
+            );
+            assert!(
+                records[0].contains("outcome=\"row_path_unresolvable_while_registry_live\""),
+                "the record must carry the #4986 형상1 outcome; got:\n{}",
+                records[0]
+            );
+        }
     }
 }

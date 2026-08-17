@@ -2447,6 +2447,13 @@ services::discord::health::reachability::discovery::tests::same_file_through_two
 services::discord::health::reachability::discovery::tests::same_size_different_inode_is_coordinate_divergence
 services::discord::health::reachability::discovery::tests::unreadable_discovery_root_is_skipped_not_fatal
 services::discord::health::reachability::discovery::tests::unresolved_when_every_rung_fails
+services::discord::health::reachability::divergence::tests::absent_or_blank_operands_are_not_comparable_and_not_signals
+services::discord::health::reachability::divergence::tests::only_the_two_divergence_shapes_are_non_green_and_map_to_a_reason
+services::discord::health::reachability::divergence::tests::reachability_detects_row_path_vs_resolved_transcript_divergence
+services::discord::health::reachability::divergence::tests::same_file_through_different_path_strings_is_not_divergence
+services::discord::health::reachability::divergence::tests::same_size_different_inode_is_divergence
+services::discord::health::reachability::divergence::tests::stat_failure_is_unknown_not_divergence
+services::discord::health::reachability::divergence::tests::the_comparison_matrix_is_fail_closed
 services::discord::health::reachability::ledger::tests::a_ledger_from_another_schema_version_is_rejected_without_migration
 services::discord::health::reachability::ledger::tests::a_malformed_ledger_reads_as_absent_while_the_file_still_reports_present
 services::discord::health::reachability::ledger::tests::a_written_ledger_round_trips_through_the_sidecar
@@ -2605,6 +2612,7 @@ services::discord::health::snapshot::tests::health_detail_marks_same_episode_gua
 services::discord::health::snapshot::tests::mailbox_snapshot_absent_channel_is_peek_only_for_health
 services::discord::health::snapshot::tests::provider_scoped_snapshot_timeout_does_not_fallback_to_provider_scan
 services::discord::health::snapshot::tests::rebind_origin_idle_only_without_cancel_token
+services::discord::health::snapshot::tests::row_coordinate_divergence_wiring::watcher_state_snapshot_records_row_vs_registry_identity_divergence
 services::discord::health::snapshot::tests::stale_ownerless_external_input_inflight_is_not_foreground_even_with_cancel_token
 services::discord::health::stall_liveness::redrive_grace::tests::redrive_durable_baseline_rejects_same_second_synthetic_successor_4181
 services::discord::health::stall_liveness::redrive_grace::tests::redrive_durable_baseline_rejects_successor_episode_4181

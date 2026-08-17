@@ -19,8 +19,11 @@ defect at a time:
     — an `as` alias at the call site, and a re-export from the allowlisted file
     — each with the control that keeps the widened scan from reporting every
     local that happens to be called `reachability`. A gate whose central claim
-    is "only the named observation consumer, machine-checked" is worth exactly
-    what its weakest spelling catches;
+    is "only the named observation and sanctioned consumers, machine-checked"
+    is worth exactly what its weakest spelling catches;
+  * a SANCTIONED consumer (#5071 T4-B4) that drifts off its contract — naming
+    the tree in a `use` item (the alias/re-export laundering shape), or no
+    longer naming the tree at all (a stale sanction nobody would notice);
   * a `warn_bound` introduced inside the tree (4987 §10 NO-GO).
 
 The live-repo cases at the end pin that the gate is wired into
@@ -82,12 +85,18 @@ def _mirror_repo(tmp: str) -> Path:
         REPO_ROOT / "src/services/discord/health/reachability",
         root / "src/services/discord/health/reachability",
     )
-    for rel in GATE.ALLOWED_TREE_REFERENCES:
+    for rel in sorted(GATE.ALLOWED_TREE_REFERENCES | GATE.SANCTIONED_TREE_CONSUMERS):
         source = REPO_ROOT / rel
         target = root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(source, target)
     return root
+
+
+# An unsanctioned sibling path for synthetic intruders and bystanders. It must
+# not appear in either allowance set, or the cases below would be testing the
+# allowances instead of the scan.
+INTRUDER_REL = "src/services/discord/health/stall_liveness.rs"
 
 
 def _run(root: Path) -> list[str]:
@@ -177,7 +186,7 @@ class SyntheticRootTests(unittest.TestCase):
     def test_a_consumer_outside_the_tree_is_reported(self):
         with TemporaryDirectory() as tmp:
             root = _mirror_repo(tmp)
-            intruder = root / "src/services/discord/health/snapshot.rs"
+            intruder = root / INTRUDER_REL
             intruder.write_text(
                 "fn peek() {\n"
                 "    let _ = super::reachability::obligation::CANONICAL_SCHEMA_HEADER;\n"
@@ -192,11 +201,11 @@ class SyntheticRootTests(unittest.TestCase):
         `use super::reachability as rx;` reads the tree without the substring
         `reachability::` ever appearing at the call site, so a gate that only
         knows qualified paths prints "no consumer" over a file that has one.
-        The claim this gate makes is "machine-checked zero consumers", and an
-        alias is a name."""
+        The claim this gate makes is "no unsanctioned consumer, machine-
+        checked", and an alias is a name."""
         with TemporaryDirectory() as tmp:
             root = _mirror_repo(tmp)
-            intruder = root / "src/services/discord/health/snapshot.rs"
+            intruder = root / INTRUDER_REL
             intruder.write_text(
                 "#[cfg(unix)]\n"
                 "use super::reachability as rx;\n"
@@ -208,6 +217,43 @@ class SyntheticRootTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertProblem(_run(root), "grew a consumer")
+
+    def test_a_sanctioned_consumer_naming_the_tree_in_a_use_item_is_reported(self):
+        """#5071 T4-B4's sanction is for fully-qualified reads only.
+
+        The same alias laundering as above, launched from INSIDE the sanctioned
+        file: `use super::reachability as rx;` would let every later read hide
+        behind `rx::`, and a `pub use` would republish the tree to files the
+        scan then reports as clean. Both spellings live in `use` items, so a
+        sanctioned file with a tree-naming `use` item must be reported even
+        though its qualified reads are allowed."""
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            sanctioned = sorted(GATE.SANCTIONED_TREE_CONSUMERS)[0]
+            (root / sanctioned).write_text(
+                "#[cfg(unix)]\n"
+                "use super::reachability as rx;\n"
+                "\n"
+                "#[cfg(unix)]\n"
+                "fn observe() -> &'static str {\n"
+                "    rx::divergence::RowCoordinateDivergence::Unknown.as_str()\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            self.assertProblem(_run(root), "fully-qualified paths only")
+
+    def test_a_stale_consumer_sanction_is_reported(self):
+        """The sanction and the read it sanctions must move together, exactly
+        as the module declaration and its allowance must: a sanctioned file
+        that no longer names the tree is an allowance nobody would notice had
+        gone stale."""
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            sanctioned = sorted(GATE.SANCTIONED_TREE_CONSUMERS)[0]
+            (root / sanctioned).write_text(
+                "// the divergence record was removed\n", encoding="utf-8"
+            )
+            self.assertProblem(_run(root), "the expected wiring is gone")
 
     def test_a_reexport_from_the_allowlisted_file_is_reported(self):
         """The same bypass one hop further out, and the reason the allowlist
@@ -227,7 +273,7 @@ class SyntheticRootTests(unittest.TestCase):
                 "::CANONICAL_SCHEMA_HEADER as CANON_HEADER;\n",
                 encoding="utf-8",
             )
-            consumer = root / "src/services/discord/health/snapshot.rs"
+            consumer = root / INTRUDER_REL
             consumer.write_text(
                 "#[cfg(unix)]\n"
                 "fn peek() -> &'static str {\n"
@@ -271,7 +317,7 @@ class SyntheticRootTests(unittest.TestCase):
         merely contains the substring are not readers of the tree."""
         with TemporaryDirectory() as tmp:
             root = _mirror_repo(tmp)
-            bystander = root / "src/services/discord/health/snapshot.rs"
+            bystander = root / INTRUDER_REL
             bystander.write_text(
                 "use std::time::Duration;\n"
                 "\n"
@@ -290,7 +336,7 @@ class SyntheticRootTests(unittest.TestCase):
     def test_prose_and_string_literals_are_not_consumers(self):
         with TemporaryDirectory() as tmp:
             root = _mirror_repo(tmp)
-            bystander = root / "src/services/discord/health/snapshot.rs"
+            bystander = root / INTRUDER_REL
             bystander.write_text(
                 "// The reachability::obligation tree is deliberately not read here.\n"
                 'const NOTE: &str = "reachability::obligation";\n',
