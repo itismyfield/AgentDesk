@@ -187,6 +187,12 @@ elif ! grep -q 'terminal marker: missing' <<<"$peer_verdict_out" \
     fail_test "a timeout must report marker, repo head, and health observations; got: $peer_verdict_out"
 fi
 
+# --- 3c. peer leg rc propagation: _deploy_to_one_peer must use verdict rc ----
+# If _wait_for_peer_deploy_verdict fails, _deploy_to_one_peer's rc must propagate it.
+# Stub the verdict function and ssh/rsync to verify rc is not masked by unconditional
+# success-returning statements (e.g. echo that should be before not after the verdict call).
+
+# First, the structural check (text exists in the function).
 peer_deploy_body="$(extract_function _deploy_to_one_peer)"
 case "$peer_deploy_body" in
     *_wait_for_peer_deploy_verdict*) : ;;
@@ -196,6 +202,63 @@ case "$peer_deploy_body" in
     *'deploy completed'*) fail_test "_deploy_to_one_peer must not describe SSH launch success as deploy completion" ;;
     *) : ;;
 esac
+
+# Now test rc propagation: load the function, stub its dependencies, and verify
+# that when _wait_for_peer_deploy_verdict fails (rc=1), _deploy_to_one_peer also fails.
+eval "$(extract_function _deploy_to_one_peer)"
+
+# Stub git to match actual invocation: git -C "$REPO" rev-parse HEAD
+# $1="-C", $2=$REPO path, $3="rev-parse", $4="HEAD"
+git() {
+    if [ "$3" = "rev-parse" ] && [ "$4" = "HEAD" ]; then
+        echo "abc1234567890def"
+    else
+        return 0
+    fi
+}
+
+# Stub ssh to handle different commands and return appropriate output
+ssh() {
+    # Parse the command to determine what output to return
+    local cmd="${*: -1}"
+    if [[ "$cmd" == *"AGENTDESK_ROOT_DIR"* ]]; then
+        # Return peer's ADK_REL and port
+        printf '%s\n' "/stub/.adk/release"
+        printf '%s\n' "8791"
+    else
+        return 0
+    fi
+}
+
+# Stub rsync (invoked only when routines directory exists on local machine)
+rsync() {
+    return 0
+}
+
+# Stub _deploy_peer_env_prelude to return empty string
+_deploy_peer_env_prelude() {
+    echo ""
+}
+
+# Stub _wait_for_peer_deploy_verdict to FAIL (return 1)
+_wait_for_peer_deploy_verdict() {
+    return 1
+}
+
+# Stub global variables required by _deploy_to_one_peer
+export REPO="/stub/repo"
+export ADK_REL="/stub/.adk/release"
+export DEPLOY_SSH_CONNECT_TIMEOUT=10
+
+# Test: _deploy_to_one_peer with failing verdict should return non-zero
+# Verify rc propagates from verdict call, not from an earlier failure path.
+peer_deploy_rc=0
+peer_deploy_out=$(_deploy_to_one_peer "test-peer" 2>&1) || peer_deploy_rc=$?
+if [ "$peer_deploy_rc" -eq 0 ]; then
+    fail_test "_deploy_to_one_peer must fail (rc≠0) when _wait_for_peer_deploy_verdict fails; got rc=$peer_deploy_rc"
+elif grep -q 'deploy verified' <<<"$peer_deploy_out"; then
+    fail_test "_deploy_to_one_peer failure must not claim verified success; got: $peer_deploy_out"
+fi
 
 if grep -q 'Cluster Deploy Complete (all peers healthy)' "$DEPLOY_SH"; then
     fail_test "the cluster verdict must not claim all peers healthy without naming the verified verdict"

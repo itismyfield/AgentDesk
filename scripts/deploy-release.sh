@@ -1295,11 +1295,15 @@ _report_peer_verdict_failure() {
     local repo_detail="$7"
     local health_status="$8"
     local health_detail="$9"
+    local peer_health_port="${10:-}"
 
     echo "✗ [peer:$peer] verdict failed: $reason"
     echo "  terminal marker: $marker_status ($marker_detail)"
     echo "  repo head: expected=$expected_repo_head observed=$observed_repo_head ($repo_detail)"
     echo "  health: ok=$health_status ($health_detail)"
+    if [ -n "$peer_health_port" ]; then
+        echo "  health check port: $peer_health_port"
+    fi
 }
 
 _wait_for_peer_deploy_verdict() {
@@ -1358,7 +1362,7 @@ _wait_for_peer_deploy_verdict() {
         if [ "$marker_status" = "failure" ]; then
             _report_peer_verdict_failure "$peer" "peer log ended in failure" \
                 "$marker_status" "$marker_detail" "$expected_repo_head" \
-                "$observed_repo_head" "$repo_detail" "$health_status" "$health_detail"
+                "$observed_repo_head" "$repo_detail" "$health_status" "$health_detail" "$peer_health_port"
             return 1
         fi
 
@@ -1367,14 +1371,14 @@ _wait_for_peer_deploy_verdict() {
             && [ "$observed_repo_head" != "$expected_repo_head" ]; then
             _report_peer_verdict_failure "$peer" "repo head does not match the deploy target" \
                 "$marker_status" "$marker_detail" "$expected_repo_head" \
-                "$observed_repo_head" "$repo_detail" "$health_status" "$health_detail"
+                "$observed_repo_head" "$repo_detail" "$health_status" "$health_detail" "$peer_health_port"
             return 1
         fi
 
         if [ "$SECONDS" -ge "$deadline" ]; then
             _report_peer_verdict_failure "$peer" "timed out after ${timeout_secs}s" \
                 "$marker_status" "$marker_detail" "$expected_repo_head" \
-                "$observed_repo_head" "$repo_detail" "$health_status" "$health_detail"
+                "$observed_repo_head" "$repo_detail" "$health_status" "$health_detail" "$peer_health_port"
             return 1
         fi
 
@@ -1421,19 +1425,40 @@ git merge --quiet --ff-only origin/main"
         return 1
     fi
 
-    if ! peer_adk_rel="$(ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" \
-        'bash -lc '"$(printf '%q' 'echo "${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"')"'')"; then
-        echo "✗ [peer:$peer] could not resolve remote AGENTDESK_ROOT_DIR"
+    # Send _extract_yaml_server_port_shell function to remote, use it to extract port from config.
+    # This ensures single-source maintenance of YAML parsing logic across local and remote paths.
+    if ! peer_info="$(ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" \
+        'bash -lc '"$(printf '%q' "$(declare -f _extract_yaml_server_port_shell)
+adk_rel=\"\${AGENTDESK_ROOT_DIR:-\$HOME/.adk/release}\"
+# Try primary path first, then fallback to secondary
+if [ -f \"\$adk_rel/config/agentdesk.yaml\" ]; then
+    port=\$(_extract_yaml_server_port_shell \"\$adk_rel/config/agentdesk.yaml\")
+elif [ -f \"\$adk_rel/agentdesk.yaml\" ]; then
+    port=\$(_extract_yaml_server_port_shell \"\$adk_rel/agentdesk.yaml\")
+else
+    port=\"\"
+fi
+if [ -z \"\$port\" ]; then
+    echo \"✗ [peer:\$peer] could not extract server.port: no config found or port unreadable\" >&2
+    exit 1
+fi
+echo \"\$adk_rel\"
+echo \"\$port\"")"'')"; then
+        echo "✗ [peer:$peer] could not resolve remote AGENTDESK_ROOT_DIR and server port"
         return 1
     fi
-    peer_adk_rel="$(printf '%s' "$peer_adk_rel" | tr -d '\r')"
+    peer_adk_rel="$(printf '%s' "$peer_info" | head -1 | tr -d '\r')"
+    peer_health_port="$(printf '%s' "$peer_info" | tail -1 | tr -d '\r')"
     if [ -z "$peer_adk_rel" ]; then
         echo "✗ [peer:$peer] remote AGENTDESK_ROOT_DIR resolved empty"
         return 1
     fi
+    if [ -z "$peer_health_port" ] || ! echo "$peer_health_port" | grep -qE '^[0-9]+$'; then
+        echo "✗ [peer:$peer] remote server port resolved empty or invalid"
+        return 1
+    fi
     peer_log_path="$peer_adk_rel/logs/deploy-release.cluster-${expected_repo_head}.$$.log"
     peer_manifest_path="$peer_adk_rel/runtime/release-source.json"
-    peer_health_port="${REL_PORT:-${AGENTDESK_REL_PORT:-$ADK_DEFAULT_PORT}}"
     remote_deploy_command="${remote_cd_command} && ${env_prelude} AGENTDESK_DEPLOY_LOG=$(printf '%q' "$peer_log_path") bash scripts/deploy-release.sh${quoted_args}"
 
     # Operator-private routines are excluded from the repo (.gitignore:50), so the
