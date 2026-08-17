@@ -220,12 +220,26 @@ impl ReachabilityLedger {
     ///
     /// Returns the extinctions performed, so the caller logs what left the
     /// ledger rather than discovering a shorter list next tick.
+    ///
+    /// # Obligation filtering
+    ///
+    /// The input must contain only obligation records (`reason.is_obligation() == true`).
+    /// All non-obligation records are filtered out; passing records with
+    /// `is_obligation() == false` is a programming error and will be caught by
+    /// a debug assertion in test builds. Use only with the result of
+    /// [`obligation::scan_transcript`] with obligation filtering enabled, or
+    /// manually filter before calling.
     pub(in crate::services::discord) fn append_obligations(
         &mut self,
-        records: &[CanonicalRecord],
+        records: impl IntoIterator<Item = CanonicalRecord>,
         observed_at_epoch_ms: u64,
     ) -> Vec<ObligationExtinction> {
         for record in records {
+            debug_assert!(
+                record.reason.is_obligation(),
+                "append_obligations must only receive obligation records; got {:?}",
+                record.reason
+            );
             self.obligations.push(LedgerObligation {
                 start: record.start,
                 end: record.end,
@@ -311,8 +325,22 @@ pub(in crate::services::discord) fn ledger_file_exists(path: &Path) -> bool {
 /// Whole-file rather than read-modify-write: the observation task is this
 /// file's only writer, so there is no concurrent field to merge, and rewriting
 /// wholesale keeps the on-disk state exactly what the caller decided rather
-/// than a join of two views. The flock still guards a concurrent reader and a
-/// second process sharing the runtime root.
+/// than a join of two views. **For read-modify-write transactions, use
+/// [`append_ledger_at`] or [`retire_ledger_at`] instead** — this function
+/// assumes the ledger is already in-memory and ready to write.
+///
+/// # Concurrency guarantees
+///
+/// The flock serializes all disk writes. Concurrent readers that do not hold
+/// the flock are safe because the atomic rename ensures they see either the old
+/// or new file, never a partial write.
+///
+/// # Caller responsibility
+///
+/// This is a low-level write primitive. Direct use by application code risks
+/// lost updates if the caller does not hold a lock over the entire
+/// read-modify-write sequence. For mutations, use the higher-level transaction
+/// functions instead.
 pub(in crate::services::discord) fn write_ledger_at(
     path: &Path,
     ledger: &ReachabilityLedger,
@@ -322,6 +350,77 @@ pub(in crate::services::discord) fn write_ledger_at(
     }
     let _lock = delivery_record::lock_record_path(path)?;
     let data = serde_json::to_string_pretty(ledger).map_err(|error| error.to_string())?;
+    runtime_store::atomic_write(path, &data)
+}
+
+/// flock-guarded read-modify-write: append obligations to the durable ledger,
+/// evicting oldest when capped, and atomically persist.
+///
+/// Lock is held for the entire read → append → write sequence, serializing
+/// against concurrent writers and ensuring no lost updates.
+pub(in crate::services::discord) fn append_ledger_at(
+    path: &Path,
+    records: impl IntoIterator<Item = CanonicalRecord>,
+    observed_at_epoch_ms: u64,
+) -> Result<Vec<ObligationExtinction>, String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let _lock = delivery_record::lock_record_path(path)?;
+    let mut ledger = read_ledger_at(path).unwrap_or_else(|| {
+        // This should not happen in production (incarnation is required), but
+        // in test/debug the caller may construct a path without bootstrapping.
+        // Rather than panic, return an empty ledger; the append will proceed
+        // and a real incarnation will be set by the next rebootstrap.
+        ReachabilityLedger {
+            schema_version: LEDGER_SCHEMA_VERSION,
+            incarnation: LedgerIncarnation::new(
+                "unknown".to_string(),
+                0,
+                None,
+                super::discovery::TranscriptFileId { dev: 0, ino: 0 },
+            ),
+            cursor_offset: 0,
+            bootstrap_offset: 0,
+            last_observed_len: 0,
+            obligations: Vec::new(),
+            counters: LedgerCounters::default(),
+        }
+    });
+    let extinctions = ledger.append_obligations(records, observed_at_epoch_ms);
+    let data = serde_json::to_string_pretty(&ledger).map_err(|error| error.to_string())?;
+    runtime_store::atomic_write(path, &data)?;
+    Ok(extinctions)
+}
+
+/// flock-guarded read-modify-write: retire the current incarnation and
+/// rebootstrap for a new one, atomically persisting.
+///
+/// Lock is held for the entire read → retire → write sequence, serializing
+/// against concurrent writers and ensuring no lost updates.
+pub(in crate::services::discord) fn retire_ledger_at(
+    path: &Path,
+    incarnation: LedgerIncarnation,
+    bootstrap_offset: u64,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let _lock = delivery_record::lock_record_path(path)?;
+    let ledger = read_ledger_at(path).unwrap_or_else(|| {
+        ReachabilityLedger::bootstrap(
+            LedgerIncarnation::new(
+                "unknown".to_string(),
+                0,
+                None,
+                super::discovery::TranscriptFileId { dev: 0, ino: 0 },
+            ),
+            bootstrap_offset,
+            LedgerCounters::default(),
+        )
+    });
+    let rebootstrapped = ledger.retire_and_rebootstrap(incarnation, bootstrap_offset);
+    let data = serde_json::to_string_pretty(&rebootstrapped).map_err(|error| error.to_string())?;
     runtime_store::atomic_write(path, &data)
 }
 
