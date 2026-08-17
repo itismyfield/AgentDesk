@@ -63,22 +63,51 @@
 //! transcript inode and the nonce would compare equal here. This module only
 //! READS the stamp; it does not make it monotone.
 //!
-//! # What this does not do
+//! # Who reads this, and what it may move
+//!
+//! #5071 T4-B6 wired the intake. [`super::composite::observe_relay_verdict`] is
+//! the only caller outside this module's own tests: it resolves
+//! [`external_verdict_path`] for the channel and hands that file to
+//! [`classify_external_verdict_at`] with the incarnation the T4-B2c ledger
+//! framed. It reaches this module only when that ledger read succeeded — a
+//! channel with no readable ledger contributes
+//! [`ExternalRelayVerdict::Unknown`] without the sidecar being opened at all.
+//! `health/snapshot.rs` runs that composition once per mailbox channel while it
+//! builds a DETAIL snapshot, so this code executes on the detail poll and
+//! nowhere else in production.
+//!
+//! What the resulting [`ExternalRelayVerdict`] is then allowed to do depends on
+//! the 4987 §5.1 `RelayVerdictSource` switch that `health/snapshot.rs` reads:
+//!
+//! * Under `Structural` — the compiled default — the composed verdict is
+//!   published on the detail surface and changes no health polarity. The values
+//!   this module produces are observable there and move nothing.
+//! * Under `Composite` a composed verdict that does not permit health adds a
+//!   `relay_verdict_*` entry to the snapshot's degraded reasons and worsens its
+//!   status to `Degraded`. This module's value reaches that outcome whenever
+//!   [`super::composite::compose_relay_verdict`] takes it as the deciding tier,
+//!   which happens only on a STRICTLY worse rung than the in-band verdict.
+//!
+//! # What this still does not do
 //!
 //! * It composes nothing. 4987 §4.3-1's `RelayVerdict = worst(ReachabilityVerdict,
-//!   ExternalRelayVerdict)` is T4-B6's, and [`ExternalRelayVerdict`] is
-//!   deliberately a separate type from [`super::verdict::ReachabilityVerdict`] so
-//!   a caller cannot reach a final health verdict through this module alone.
-//! * It authorizes no redelivery and no destructive action, and it is not wired
-//!   into final health or recovery. The slice is shadow by construction: no
-//!   production path reads any item here, so these values cannot move a relay
-//!   decision. Consuming them is T4-B6's, and 4987 §7.1 / I15 keep destructive
-//!   actions out of this tree by the convention plus source lint `super`
-//!   describes.
+//!   ExternalRelayVerdict)` lives in [`super::composite`], and
+//!   [`ExternalRelayVerdict`] is deliberately a separate type from
+//!   [`super::verdict::ReachabilityVerdict`] so a caller cannot reach a final
+//!   health verdict through this module alone.
+//! * It authorizes no redelivery and no destructive action. The polarity above is
+//!   the whole of the authority T4-B6 gave it: nothing here or in
+//!   [`super::composite`] cancels a turn, kills a pane or process, or force-cleans
+//!   a mailbox or in-flight row, and
+//!   [`super::composite::RelayVerdict::authorizes_destructive_action`] returns
+//!   false for the external tier by an exhaustive match rather than by
+//!   convention. 4987 §7.1 / I15 keep destructive actions out of this tree by the
+//!   convention plus source lint `super` describes.
 //! * It never asserts health. §5.3 gives the out-of-band tier the power to assert
 //!   failure and not the power to assert it away, which is why `ok` arrives here
-//!   as [`ExternalRelayVerdict::NoLoss`] rather than as `Reachable`.
-//! * Nothing calls it yet.
+//!   as [`ExternalRelayVerdict::NoLoss`] rather than as `Reachable`, and why
+//!   `compose_relay_verdict` lets this tier displace the in-band one only
+//!   upward.
 
 use std::fs;
 use std::path::{Path, PathBuf};

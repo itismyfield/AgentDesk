@@ -2644,12 +2644,15 @@ services::discord::health::session_enrichment::tests::inflight_a_alive_watcher_b
 services::discord::health::session_enrichment::tests::only_exact_dead_or_absent_maps_to_dead
 services::discord::health::session_enrichment::tests::transcript_discovery_falls_back_to_the_inflight_row_and_then_to_nothing
 services::discord::health::session_enrichment::tests::transcript_discovery_prefers_the_live_watcher_over_the_inflight_row
+services::discord::health::snapshot::tests::a_green_relay_verdict_degrades_the_snapshot_in_neither_mode
+services::discord::health::snapshot::tests::a_non_green_relay_verdict_never_improves_an_unhealthy_snapshot
 services::discord::health::snapshot::tests::bound_selector_absent_when_no_source_and_omitted_from_json
 services::discord::health::snapshot::tests::bound_selector_falls_back_to_runtime_binding
 services::discord::health::snapshot::tests::bound_selector_prefers_inflight_over_binding
 services::discord::health::snapshot::tests::enriched_tmux_identity_precedes_mailbox_fallback
 services::discord::health::snapshot::tests::health_detail_marks_same_episode_guarded_finish_occupancy_residual
 services::discord::health::snapshot::tests::mailbox_snapshot_absent_channel_is_peek_only_for_health
+services::discord::health::snapshot::tests::only_composite_mode_degrades_the_snapshot_for_a_non_green_relay_verdict
 services::discord::health::snapshot::tests::provider_scoped_snapshot_timeout_does_not_fallback_to_provider_scan
 services::discord::health::snapshot::tests::rebind_origin_idle_only_without_cancel_token
 services::discord::health::snapshot::tests::row_coordinate_divergence_wiring::watcher_state_snapshot_records_row_vs_registry_identity_divergence

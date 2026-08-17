@@ -9,10 +9,12 @@
 use tempfile::tempdir;
 
 use super::*;
+use crate::services::discord::health::liveness_authority::CaptureCoordinateObservation;
 use crate::services::discord::health::reachability::discovery::TranscriptFileId;
 use crate::services::discord::health::reachability::ledger::{
     LedgerIncarnation, LedgerObligation, ReachabilityLedger,
 };
+use crate::services::discord::health::session_enrichment::SessionEnrichment;
 use crate::services::discord::outbound::delivery_record::{
     ConfirmedDeliveryReceipt, DeliveredCommit, DeliveryRecord, ExactJsonlSourceIdentity,
 };
@@ -246,8 +248,10 @@ fn counterexample_3_zero_obligations_is_reachable() {
 }
 
 /// #4 — the row's coordinate and the independently resolved one name different
-/// files. §-1.4 notes that equal SIZE cannot mask this because the comparison
-/// is on file identity; the sizes here are equal on purpose. Expected
+/// files. §-1.4's point is that equal SIZE cannot mask this, and here that holds
+/// structurally rather than by fixture: `TranscriptFileId` carries `dev` and
+/// `ino` and no length at all, so there is no size for these two to agree on and
+/// none for the comparison to consult. Expected
 /// `Unknown{TranscriptCoordinateDivergence}`.
 #[test]
 fn counterexample_4_same_size_different_inode_is_divergence() {
@@ -595,16 +599,66 @@ fn coverage_under_an_unproven_generation_is_not_promoted_to_green() {
 // 4987 §6.2's two residual assertion clauses
 // ---------------------------------------------------------------------------
 
+/// The §6.2 enrichment shape, as [`SessionEnrichment::desynced`] sees it.
+///
+/// That predicate reads exactly four fields — `capture_lagged`,
+/// `inflight_state_present`, `relay_stale` and `tmux_session_mismatch` — plus
+/// its two arguments; the rest of this literal is inert for it and is set to
+/// what `SessionEnrichment::load` would carry in this shape.
+///
+/// The shape is §6.2's: an in-flight row exists and names an `output_path` that
+/// no longer stats, while the registry's transcript resolves. `load` derives
+/// `last_capture_offset` from that failed stat, so it is `None`, and its
+/// `capture_lagged` term is `unwrap_or(false)` over exactly that `Option` —
+/// which is why `capture_lagged` is a parameter here rather than a constant:
+/// `false` is the §6.2 value, and `true` is passed only to show the predicate
+/// can still answer. That derivation belongs to `load` and is not re-asserted
+/// here; this builds the record `load` would hand `desynced`.
+///
+/// `relay_stale` is set even though §6.2 does not pin it, because it is the one
+/// inert-looking field that could make `false` a lucky answer: it is the last
+/// conjunct of the orphan term, so setting it leaves the `attached` ARGUMENT as
+/// the only thing holding that term down. `health/snapshot.rs` passes
+/// `watcher_attached` for that argument, which is what the caller below passes
+/// too — the same-named `attached` field is not read by `desynced` at all.
+///
+/// `inflight` stays `None` while `inflight_state_present` is `true`: 4987 I14
+/// forbids this tree from naming the in-flight row type at all, and `desynced`
+/// reads the flag, never the row.
+fn section_6_2_enrichment(capture_lagged: bool) -> SessionEnrichment {
+    let row_output_path = "/nonexistent/agentdesk/b6-row-transcript.jsonl";
+    SessionEnrichment {
+        inflight: None,
+        attached: true,
+        watcher_attached: true,
+        watcher_attached_stale: false,
+        has_relay_coord: true,
+        watcher_owner_channel_id: None,
+        watcher_output_path: Some("/nonexistent/agentdesk/b6-registry.jsonl".to_string()),
+        tmux_session: Some(SESSION.to_string()),
+        inflight_state_present: true,
+        tmux_session_mismatch: false,
+        last_relay_offset: 0,
+        last_relay_ts_ms: 0,
+        reconnect_count: 0,
+        last_capture_offset: None,
+        capture_coordinate: CaptureCoordinateObservation::missing(Some(row_output_path)),
+        unread_bytes: None,
+        relay_stale: true,
+        capture_lagged,
+    }
+}
+
 /// 4987 §6.2's mutation test carries four clauses. Its first two — the shape of
 /// the divergence input and the `Unknown{TranscriptCoordinateDivergence}` it
 /// produces — landed with T4-B4. These are the remaining two: the pre-existing
 /// structural signal is STILL blind (`desynced == false`), and the composed
 /// verdict is nevertheless not healthy.
 ///
-/// `desynced` is asserted as the literal §6.2 pass-through it names — the
-/// `fs::metadata` failure on the row's path leaves `last_capture_offset` unset,
-/// so the structural classifier's capture-lag term never fires. This composition
-/// does not change that value; it adds a second authority beside it.
+/// Clause 3 calls [`SessionEnrichment::desynced`] on the §6.2 shape
+/// [`section_6_2_enrichment`] builds, so a change that made that predicate fire
+/// on this shape fails here. This composition does not change that value; it
+/// adds a second authority beside it.
 #[test]
 fn section_6_2_divergence_leaves_desynced_false_and_the_relay_verdict_not_healthy() {
     let row_path_missing_while_registry_live = divergence(
@@ -626,11 +680,21 @@ fn section_6_2_divergence_leaves_desynced_false_and_the_relay_verdict_not_health
         Some(ReachabilityUnknownReason::TranscriptCoordinateDivergence)
     );
 
-    // Clause 3: the structural signal this design says is blind here.
-    let desynced = false;
+    // Clause 3: the structural signal this design says is blind here, read out
+    // of the production predicate for this shape rather than restated.
+    let tmux_present = true;
+    let session = section_6_2_enrichment(false);
     assert!(
-        !desynced,
+        !session.desynced(tmux_present, session.watcher_attached),
         "§6.2 asserts the pre-existing desynced term stays false in this shape"
+    );
+    // The same call with the capture-lag term set answers `true`, so the line
+    // above is this predicate's answer to THIS shape and not a predicate that
+    // cannot say anything else.
+    let lagging = section_6_2_enrichment(true);
+    assert!(
+        lagging.desynced(tmux_present, lagging.watcher_attached),
+        "the desynced predicate must still fire when its capture-lag term is set"
     );
 
     // Clause 4: the composed verdict is not healthy anyway — and stays that way

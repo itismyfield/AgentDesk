@@ -31,6 +31,15 @@ defect at a time:
     outside the four T4-B6 unlocks (the ledger above all) — next to the
     allowance itself: a plain `use` plus a fully-qualified verdict read is
     exactly what T4-B6 landed, and must scan clean;
+  * the TWO-STEP form of that laundering, which the r1 review reproduced
+    against the live gate with a real compile: a judgment consumer imports a
+    tree item with a plain `use` (allowed), then publishes it as a `pub type`
+    alias or a `pub use` of the imported name, and the sibling that reads it
+    never writes `reachability`. Both steps are legal on their own, which is
+    why the gate has to see the pair. The private-alias control sits beside
+    them: a `type` alias with no `pub` binds a spelling inside one file and
+    must stay allowed, or the rule would be refusing readability rather than
+    republication;
   * an allowance whose file no longer names the tree at all (a stale allowance
     nobody would notice);
   * a `warn_bound` introduced inside the tree (4987 §10 NO-GO).
@@ -349,6 +358,80 @@ class SyntheticRootTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertProblem(_run(root), "may not re-export it")
+
+    def test_a_judgment_consumer_publishing_an_imported_tree_type_is_reported(self):
+        """The r1 two-step laundering, reproduced: import plainly, republish.
+
+        Both halves pass the pre-r1 rules. The `use` names the tree but neither
+        renames nor re-exports it, and the alias never spells `reachability`, so
+        the sibling that imports `LaunderedRelayVerdictReport` is not a consumer
+        by `names_tree` — the gate ran green on exactly this pair, with the
+        crate compiling.
+        """
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            (root / JUDGMENT_CONSUMER_REL).write_text(
+                "#[cfg(unix)]\n"
+                "use super::reachability::composite::RelayVerdictReport;\n"
+                "\n"
+                "pub(super) type LaunderedRelayVerdictReport = RelayVerdictReport;\n",
+                encoding="utf-8",
+            )
+            sibling = root / INTRUDER_REL
+            sibling.write_text(
+                "use super::snapshot::LaunderedRelayVerdictReport;\n"
+                "\n"
+                "fn read(report: &LaunderedRelayVerdictReport) -> bool {\n"
+                "    report.governs_health_polarity\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            problems = _run(root)
+            self.assertProblem(problems, "republishes `RelayVerdictReport`")
+            # The sibling is still invisible to the consumer scan; that is the
+            # point of killing the alias at its declaration rather than at the
+            # reads it enables.
+            self.assertNotIn(INTRUDER_REL, " ".join(problems))
+
+    def test_a_judgment_consumer_reexporting_an_imported_tree_name_is_reported(self):
+        """The same two-step bypass with a `pub use` as its second step.
+
+        `pub use self::RelayVerdictProbe;` names no tree path at all, so the
+        existing `pub use` rule — which only inspects items naming the tree —
+        does not see it."""
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            (root / JUDGMENT_CONSUMER_REL).write_text(
+                "#[cfg(unix)]\n"
+                "use super::reachability::composite::RelayVerdictProbe;\n"
+                "\n"
+                "pub(super) use self::RelayVerdictProbe;\n",
+                encoding="utf-8",
+            )
+            self.assertProblem(_run(root), "re-exports `RelayVerdictProbe`")
+
+    def test_a_judgment_consumer_may_alias_an_imported_tree_type_privately(self):
+        """The control the rule above must not swallow.
+
+        A private `type` alias binds a shorter spelling inside one file. No
+        sibling can import it, so nothing is republished and the file is still
+        counted as the consumer it is. Rejecting this would make the gate a
+        style rule about naming rather than a rule about reach."""
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            (root / JUDGMENT_CONSUMER_REL).write_text(
+                "#[cfg(unix)]\n"
+                "use super::reachability::composite::RelayVerdictReport;\n"
+                "\n"
+                "type Report = RelayVerdictReport;\n"
+                "\n"
+                "#[cfg(unix)]\n"
+                "fn governs(report: &Report) -> bool {\n"
+                "    report.governs_health_polarity\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(_run(root), [])
 
     def test_a_judgment_consumer_reading_the_ledger_is_reported(self):
         """T4-B6 unlocks four paths; the ledger is not one of them.
