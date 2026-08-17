@@ -64,11 +64,12 @@ SEED_PATTERNS = tuple(_seed_pattern(seed) for seed in SEEDS)
 CONNECT_SEED_PATTERNS = tuple(_seed_pattern(seed) for seed in CONNECT_SEEDS)
 SECTIONS = ("rule1", "rule2", "rule3", "rule4")
 # rule5 is deliberately NOT a baseline section. Every section in SECTIONS is
-# ratcheted: existing entries are tolerated and only growth is refused, which
-# makes a rule warn-only for a tree that already carries the debt. rule5 admits
-# no debt at all, so it has nothing to ratchet and is enforced directly in
-# `check_analysis`. Adding it to SECTIONS would also make the checked-in
-# baseline unparseable against `origin/main`, which has no `[rule5]` section.
+# an exact ledger: candidate growth against the reference fails, and both new
+# and stale live-debt drift against the candidate fail. An unchanged ledger may
+# carry existing debt without output. rule5 admits no debt at all, so it has
+# nothing to ledger and is enforced directly in `check_analysis`. Adding it to
+# SECTIONS would also make the checked-in baseline unparseable against
+# `origin/main`, which has no `[rule5]` section.
 #
 # The baseline is only one of the two ways a gate gets talked down, and rule5
 # is closed against both. The other is the allowlist, and it used to be wide
@@ -1513,8 +1514,7 @@ def check_analysis(
                 "every entry requires an inline reason comment.",
                 file=sys.stderr,
             )
-            if new or stale:
-                failed = True
+            failed = True
     counts = analysis.debts
     # rule5: no ratchet, and the allowlist cannot reach it. Both halves are
     # properties of the code above rather than intentions -- `analyze` computes

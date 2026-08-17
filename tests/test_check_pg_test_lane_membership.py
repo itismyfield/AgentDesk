@@ -1269,6 +1269,14 @@ class BaselineAndEnforcement(FixtureCase):
         self.assertIn("FAIL: [rule3] baseline drift", error)
         self.assertIn("Remove '-' entries", error)
 
+    def test_matching_nonempty_live_debt_emits_no_drift_diagnostic(self) -> None:
+        debts = empty_debts()
+        debts["rule3"] = {"src/db/service.rs"}
+        rc, output, error = self.run_check(self.analysis(debts), debts, debts)
+        self.assertEqual(rc, 0)
+        self.assertIn("PG test-lane membership check passed", output)
+        self.assertEqual(error, "")
+
     def test_new_violation_fails_even_with_no_baseline(self) -> None:
         empty = empty_debts()
         current = empty_debts()
