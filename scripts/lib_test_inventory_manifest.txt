@@ -3232,6 +3232,7 @@ services::discord::outbound::manual_delivery::manual_v3_delivery_tests::voice_an
 services::discord::outbound::message::tests::legacy_outbound_envelope_defaults_create_nonce_fields
 services::discord::outbound::reaction_control::tests::queue_reaction_delivery_uses_fallback_only_on_failure
 services::discord::outbound::reaction_control::tests::reaction_control_reply_ids_are_stable_for_queued_card_failure
+services::discord::outbound::receipt_index::tests::a_contained_receipt_after_a_wider_one_does_not_shrink_the_merge
 services::discord::outbound::receipt_index::tests::a_default_valued_frontier_contributes_nothing
 services::discord::outbound::receipt_index::tests::a_frontier_from_another_generation_contributes_nothing
 services::discord::outbound::receipt_index::tests::a_malformed_present_store_is_unknown
