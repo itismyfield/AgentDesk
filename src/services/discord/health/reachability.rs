@@ -51,6 +51,7 @@
 #![allow(dead_code)]
 
 pub(in crate::services::discord) mod discovery;
+pub(in crate::services::discord) mod ledger;
 pub(in crate::services::discord) mod obligation;
 pub(in crate::services::discord) mod tail;
 pub(in crate::services::discord) mod verdict;

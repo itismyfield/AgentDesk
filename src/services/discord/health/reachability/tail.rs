@@ -53,6 +53,14 @@ impl TailCursor {
     }
 
     /// The cursor to use next tick after a read that ended at `end`.
+    ///
+    /// No production caller as of #5071 T4-B2, and not by oversight: the
+    /// observation task advances to `ObligationScan::next_offset`, which is
+    /// deliberately BEHIND the read end whenever the chunk ended mid-line, so
+    /// the partial line is re-read whole. This helper is the unconditional
+    /// advance, correct only where framing cannot defer, and it stays because
+    /// this file's own tests read through it.
+    #[allow(dead_code)]
     pub(in crate::services::discord) fn advanced_to(self, end: u64) -> Self {
         Self {
             file_id: self.file_id,
