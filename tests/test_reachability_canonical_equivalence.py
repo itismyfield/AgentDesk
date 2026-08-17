@@ -22,9 +22,16 @@ defect at a time:
     is "only the named observation and sanctioned consumers, machine-checked"
     is worth exactly what its weakest spelling catches;
   * a SANCTIONED consumer (#5071 T4-B4) that drifts off its contract — naming
-    the tree in a `use` item (the alias/re-export laundering shape), reading a
-    tree path other than the sanctioned `divergence::` one (a fully-qualified
-    verdict read), or no longer naming the tree at all (a stale sanction
+    the tree in a `use` item (the alias/re-export laundering shape) or reading
+    a tree path other than the sanctioned `divergence::` one (a fully-qualified
+    verdict read). The tier is empty since #5071 T4-B6 promoted its only
+    member, so a synthetic member patched into the set holds the rule;
+  * a JUDGMENT consumer (#5071 T4-B6) that drifts off its wider contract —
+    renaming the tree in a `use` item, re-exporting it, or reading a tree path
+    outside the four T4-B6 unlocks (the ledger above all) — next to the
+    allowance itself: a plain `use` plus a fully-qualified verdict read is
+    exactly what T4-B6 landed, and must scan clean;
+  * an allowance whose file no longer names the tree at all (a stale allowance
     nobody would notice);
   * a `warn_bound` introduced inside the tree (4987 §10 NO-GO).
 
@@ -87,7 +94,11 @@ def _mirror_repo(tmp: str) -> Path:
         REPO_ROOT / "src/services/discord/health/reachability",
         root / "src/services/discord/health/reachability",
     )
-    for rel in sorted(GATE.ALLOWED_TREE_REFERENCES | GATE.SANCTIONED_TREE_CONSUMERS):
+    for rel in sorted(
+        GATE.ALLOWED_TREE_REFERENCES
+        | GATE.SANCTIONED_TREE_CONSUMERS
+        | GATE.JUDGMENT_TREE_CONSUMERS
+    ):
         source = REPO_ROOT / rel
         target = root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -96,9 +107,19 @@ def _mirror_repo(tmp: str) -> Path:
 
 
 # An unsanctioned sibling path for synthetic intruders and bystanders. It must
-# not appear in either allowance set, or the cases below would be testing the
+# not appear in any allowance set, or the cases below would be testing the
 # allowances instead of the scan.
 INTRUDER_REL = "src/services/discord/health/stall_liveness.rs"
+
+# The sanctioned tier is empty since #5071 T4-B6 promoted its only member, so
+# the T4-B4 contract cases patch this synthetic member into the set. The path
+# must not exist in the repo and must not appear in any other allowance set.
+SANCTIONED_PROBE_REL = "src/services/discord/health/divergence_probe.rs"
+
+# A real judgment consumer (#5071 T4-B6) the judgment-contract cases overwrite.
+# Named literally rather than via `sorted(...)`: if it ever leaves the set, the
+# overwrite trips "grew a consumer" and the case fails loudly.
+JUDGMENT_CONSUMER_REL = "src/services/discord/health/snapshot.rs"
 
 
 def _run(root: Path) -> list[str]:
@@ -223,15 +244,19 @@ class SyntheticRootTests(unittest.TestCase):
     def test_a_sanctioned_consumer_naming_the_tree_in_a_use_item_is_reported(self):
         """#5071 T4-B4's sanction is for fully-qualified reads only.
 
-        The same alias laundering as above, launched from INSIDE the sanctioned
+        The same alias laundering as above, launched from INSIDE a sanctioned
         file: `use super::reachability as rx;` would let every later read hide
         behind `rx::`, and a `pub use` would republish the tree to files the
         scan then reports as clean. Both spellings live in `use` items, so a
         sanctioned file with a tree-naming `use` item must be reported even
-        though its qualified reads are allowed."""
+        though its qualified reads are allowed.
+
+        The tier is empty since #5071 T4-B6 promoted `health/snapshot.rs` to a
+        judgment consumer, so a synthetic member holds the rule for the next
+        divergence-only reader."""
         with TemporaryDirectory() as tmp:
             root = _mirror_repo(tmp)
-            sanctioned = sorted(GATE.SANCTIONED_TREE_CONSUMERS)[0]
+            sanctioned = SANCTIONED_PROBE_REL
             (root / sanctioned).write_text(
                 "#[cfg(unix)]\n"
                 "use super::reachability as rx;\n"
@@ -242,19 +267,24 @@ class SyntheticRootTests(unittest.TestCase):
                 "}\n",
                 encoding="utf-8",
             )
-            self.assertProblem(_run(root), "fully-qualified paths only")
+            with mock.patch.object(
+                GATE, "SANCTIONED_TREE_CONSUMERS", {sanctioned}
+            ):
+                problems = _run(root)
+            self.assertProblem(problems, "fully-qualified paths only")
 
     def test_the_sanctioned_consumer_cannot_read_a_verdict(self):
         """The sanction names ONE read — the descriptive `divergence` record.
 
         A fully-qualified `verdict` read contains no `use` item, so the alias
-        scan alone would pass it, and the gate's summary ("verdict reads
-        rejected") would be claiming more than the code enforces. This is the
-        mutation that keeps that sentence honest: the qualified read that IS
-        sanctioned stays clean, the sibling path is reported."""
+        scan alone would pass it, and the sanction would be covering more than
+        its slice landed. This is the mutation that keeps the tier honest: the
+        qualified read that IS sanctioned stays clean, the sibling path is
+        reported. Same synthetic member as above — the tier is empty since
+        #5071 T4-B6."""
         with TemporaryDirectory() as tmp:
             root = _mirror_repo(tmp)
-            sanctioned = sorted(GATE.SANCTIONED_TREE_CONSUMERS)[0]
+            sanctioned = SANCTIONED_PROBE_REL
             (root / sanctioned).write_text(
                 "#[cfg(unix)]\n"
                 "fn observe() -> &'static str {\n"
@@ -269,20 +299,96 @@ class SyntheticRootTests(unittest.TestCase):
                 "}\n",
                 encoding="utf-8",
             )
-            self.assertProblem(_run(root), "this sanction covers exactly")
+            with mock.patch.object(
+                GATE, "SANCTIONED_TREE_CONSUMERS", {sanctioned}
+            ):
+                problems = _run(root)
+            self.assertProblem(problems, "this sanction covers exactly")
 
-    def test_a_stale_consumer_sanction_is_reported(self):
-        """The sanction and the read it sanctions must move together, exactly
-        as the module declaration and its allowance must: a sanctioned file
+    def test_a_stale_consumer_allowance_is_reported(self):
+        """The allowance and the read it allows must move together, exactly
+        as the module declaration and its allowance must: an allowed file
         that no longer names the tree is an allowance nobody would notice had
-        gone stale."""
+        gone stale. Pinned on a judgment consumer, the union's live tier."""
         with TemporaryDirectory() as tmp:
             root = _mirror_repo(tmp)
-            sanctioned = sorted(GATE.SANCTIONED_TREE_CONSUMERS)[0]
-            (root / sanctioned).write_text(
-                "// the divergence record was removed\n", encoding="utf-8"
+            stale = sorted(GATE.JUDGMENT_TREE_CONSUMERS)[0]
+            (root / stale).write_text(
+                "// the composed verdict read was removed\n", encoding="utf-8"
             )
             self.assertProblem(_run(root), "the expected wiring is gone")
+
+    def test_a_judgment_consumer_renaming_the_tree_in_a_use_item_is_reported(self):
+        """#5071 T4-B6 lets a judgment consumer import the tree — not rename it.
+
+        An `as` alias is the laundering half the wider allowance keeps refusing:
+        every later read hides behind `rx::`, a spelling `names_tree` cannot
+        follow."""
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            (root / JUDGMENT_CONSUMER_REL).write_text(
+                "#[cfg(unix)]\n"
+                "use super::reachability as rx;\n"
+                "\n"
+                "#[cfg(unix)]\n"
+                "fn compose() {\n"
+                "    let _ = rx::verdict::ReachabilityVerdict::Unknown;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            self.assertProblem(_run(root), "may not rename it")
+
+    def test_a_judgment_consumer_reexporting_the_tree_is_reported(self):
+        """A `pub use` republishes a tree item to files holding no allowance —
+        the second laundering shape the T4-B6 allowance keeps refusing."""
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            (root / JUDGMENT_CONSUMER_REL).write_text(
+                "#[cfg(unix)]\n"
+                "pub use super::reachability::verdict::ReachabilityVerdict;\n",
+                encoding="utf-8",
+            )
+            self.assertProblem(_run(root), "may not re-export it")
+
+    def test_a_judgment_consumer_reading_the_ledger_is_reported(self):
+        """T4-B6 unlocks four paths; the ledger is not one of them.
+
+        A consumer that reads the ledger is rebuilding the classification
+        outside `composite`, which is exactly the judgment-authority sprawl the
+        four-path list exists to refuse."""
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            (root / JUDGMENT_CONSUMER_REL).write_text(
+                "#[cfg(unix)]\n"
+                "fn peek() {\n"
+                "    let _ = super::reachability::ledger::snapshot();\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            self.assertProblem(_run(root), "belongs to the composition module")
+
+    def test_a_judgment_consumer_may_import_and_read_the_verdict(self):
+        """The allowance itself, next to its three refusals.
+
+        A plain private `use` plus fully-qualified `verdict` and `divergence`
+        reads is exactly the shape T4-B6 landed in `health/snapshot.rs`; if
+        this scans dirty, the gate is refusing the slice it was amended to
+        admit."""
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            (root / JUDGMENT_CONSUMER_REL).write_text(
+                "#[cfg(unix)]\n"
+                "use super::reachability::verdict::ReachabilityVerdict;\n"
+                "\n"
+                "#[cfg(unix)]\n"
+                "fn compose() -> ReachabilityVerdict {\n"
+                "    let _ = super::reachability::divergence"
+                "::RowCoordinateDivergence::Unknown;\n"
+                "    ReachabilityVerdict::Unknown\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(_run(root), [])
 
     def test_a_reexport_from_the_allowlisted_file_is_reported(self):
         """The same bypass one hop further out, and the reason the allowlist

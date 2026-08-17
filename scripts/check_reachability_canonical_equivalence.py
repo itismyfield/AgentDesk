@@ -176,11 +176,14 @@ ALLOWED_TREE_REFERENCES = (
 # republishing a tree type stays invisible to this lexical gate — the same
 # lint-not-type-proof downgrade 4987 §-1.5 records for row independence.
 #
-#   * `health/snapshot.rs` — #5071 T4-B4 (4987 S4): the descriptive
-#     row-coordinate divergence record, plus #5071 T4-B6's composed verdict.
-SANCTIONED_TREE_CONSUMERS = {
-    "src/services/discord/health/snapshot.rs",
-}
+# Since #5071 T4-B6 this tier is EMPTY: its only member, `health/snapshot.rs`
+# (#5071 T4-B4, 4987 S4 — the descriptive row-coordinate divergence record),
+# was promoted to `JUDGMENT_TREE_CONSUMERS` below, and the consumer loop in
+# `check_no_judgment_authority` applies exactly one tier per file — a judgment
+# allowance supersedes this sanction rather than stacking with it. The tier
+# and `qualified_read_only_problems` stay: the next reader that needs only the
+# descriptive `divergence` record joins here, not below.
+SANCTIONED_TREE_CONSUMERS: set[str] = set()
 # #5071 T4-B6 (4987 S3): the slice that lands judgment authority. These files
 # may spell the composition, verdict, and external-verdict paths that every
 # earlier slice was refused, and — unlike the T4-B4 sanction above — they may
