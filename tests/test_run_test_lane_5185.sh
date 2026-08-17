@@ -1162,6 +1162,59 @@ if [ "$rc" -eq 0 ]; then
 else pass_test
 fi
 
+# --------------------------------------------------------------------------
+# 4g. THE BOUNDARY CASE CLOSED BY THIS ROUND (#5227).
+#     The lookahead `(?=ok|FAILED|ignored|\W|$)` keeps the two merged-write
+#     forms (`okok` and `OKok`) while refusing `okhttp:` and similar false
+#     greens where `ok` is followed by a word character (part of an identifier).
+#
+#     The first two cases (`okok` and `OKok`) are already tested above in §4c
+#     and §4f; they are listed here for completeness. New cases that were NOT
+#     tested before and that the lookahead closes are added below.
+# --------------------------------------------------------------------------
+
+# Test 4g-1: The lookahead must reject ok followed by word characters.
+#     `okhttp:` starts with ok but continues with word characters, so the
+#     ok at the start is not a verdict.
+write_manifest alpha::beta alpha::gamma >/dev/null
+EXTRA=$(grep -c '' "$PRELUDE")
+cat >"$LEDGER" <<'EOF'
+# no entries
+EOF
+
+OKHTTP_RUN="test alpha::beta ... ok
+test alpha::gamma ... okhttp://example.com
+$(summary_line 1 0 0)"
+run_gate "$OKHTTP_RUN" 0 --lane demo
+if [ "$rc" -eq 0 ]; then
+    fail_test "okhttp: prefix starting with ok must not be consumed as a verdict"
+else pass_test
+fi
+
+# Test 4g-2: The lookahead must also reject FAILED and ignored with word chars.
+write_manifest alpha::beta alpha::gamma >/dev/null
+EXTRA=$(grep -c '' "$PRELUDE")
+FAILEDBAR_RUN="test alpha::beta ... ok
+test alpha::gamma ... FAILED_upload_error
+$(summary_line 1 0 0)"
+run_gate "$FAILEDBAR_RUN" 0 --lane demo
+if [ "$rc" -eq 0 ]; then
+    fail_test "FAILED_something must not be consumed as a verdict"
+else pass_test
+fi
+
+# Test 4g-3: The lookahead ALLOWS ok/FAILED/ignored when followed by
+#     non-word characters or another verdict word (the whole point).
+write_manifest alpha::beta alpha::gamma >/dev/null
+EXTRA=$(grep -c '' "$PRELUDE")
+LOOKAHEAD_ALLOW_RUN="test alpha::beta ... test alpha::gamma ... okok
+$(summary_line 2 0 0)"
+run_gate "$LOOKAHEAD_ALLOW_RUN" 0 --lane demo
+if [ "$rc" -ne 0 ]; then
+    fail_test "lookahead must allow okok (two verdicts): $(grep -E '^(lane-missing|ERROR)' "$OUT" | head -1)"
+else pass_test
+fi
+
 if [ "$failures" -ne 0 ]; then
     printf '%s\n' "test_run_test_lane_5185: $failures assertion(s) failed, $passed passed" >&2
     exit 1
