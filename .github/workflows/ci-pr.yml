@@ -1090,12 +1090,11 @@ jobs:
       PGPASSWORD: postgres
       # #4979 S2 contract, and rule4 of check_pg_test_lane_membership.py: any
       # job that starts the service must also hard-fail on an unreachable
-      # database instead of soft-skipping to green. rule4 does not ENFORCE
-      # that. A newly appearing rule4 debt entry prints as `WARN` and the check
-      # still exits 0 -- only a *stale* baseline entry is `FAIL` -- so deleting
-      # this line turns no gate red; it quietly returns the PG-dependent tests
-      # this lane selects to soft-skip green. Treat rule4 as a ledger, and this
-      # line as load-bearing on its own.
+      # database instead of soft-skipping to green. rule4 enforces this.
+      # A newly appearing rule4 debt entry (missing this env var) prints as
+      # `FAIL` and the check exits 1. Deleting this line would turn this gate
+      # red before the PG-dependent tests selected by this lane could quietly
+      # soft-skip to green. This line is load-bearing on rule4 enforcement.
       AGENTDESK_REQUIRE_PG: "1"
       # Match the other test lanes: assertions and panic text are preserved,
       # only native debug symbols are dropped to cut link memory (#4245).

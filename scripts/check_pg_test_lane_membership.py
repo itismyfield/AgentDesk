@@ -3,9 +3,10 @@
 
 The gate identifies PG-dependent Rust tests only inside test regions, checks four
 lane contracts, and ratchets existing violations through a sectioned baseline.
-During T0, newly discovered live debt is warn-only. Return code 1 is reserved for
-manifest drift, candidate baseline growth, and stale baseline entries; malformed
-inputs and configuration errors return code 2. T1 promotes new debt to enforcement.
+Newly discovered live debt (baseline drift) is enforced; existing baseline entries
+are maintained as a ledger. Return code 1 is reserved for manifest drift, candidate
+baseline growth, and any baseline drift (new or stale); malformed inputs and
+configuration errors return code 2.
 """
 
 from __future__ import annotations
@@ -63,11 +64,12 @@ SEED_PATTERNS = tuple(_seed_pattern(seed) for seed in SEEDS)
 CONNECT_SEED_PATTERNS = tuple(_seed_pattern(seed) for seed in CONNECT_SEEDS)
 SECTIONS = ("rule1", "rule2", "rule3", "rule4")
 # rule5 is deliberately NOT a baseline section. Every section in SECTIONS is
-# ratcheted: existing entries are tolerated and only growth is refused, which
-# makes a rule warn-only for a tree that already carries the debt. rule5 admits
-# no debt at all, so it has nothing to ratchet and is enforced directly in
-# `check_analysis`. Adding it to SECTIONS would also make the checked-in
-# baseline unparseable against `origin/main`, which has no `[rule5]` section.
+# an exact ledger: candidate growth against the reference fails, and both new
+# and stale live-debt drift against the candidate fail. An unchanged ledger may
+# carry existing debt without output. rule5 admits no debt at all, so it has
+# nothing to ledger and is enforced directly in `check_analysis`. Adding it to
+# SECTIONS would also make the checked-in baseline unparseable against
+# `origin/main`, which has no `[rule5]` section.
 #
 # The baseline is only one of the two ways a gate gets talked down, and rule5
 # is closed against both. The other is the allowlist, and it used to be wide
@@ -1496,7 +1498,7 @@ def check_analysis(
         new = sorted(analysis.debts[section] - baseline[section])
         stale = sorted(baseline[section] - analysis.debts[section])
         if new or stale:
-            level = "FAIL" if stale else "WARN"
+            level = "FAIL"
             print(f"{level}: [{section}] baseline drift: {len(new)} new, {len(stale)} stale.", file=sys.stderr)
             for entry in new:
                 print(f"  + {entry}", file=sys.stderr)
@@ -1512,8 +1514,7 @@ def check_analysis(
                 "every entry requires an inline reason comment.",
                 file=sys.stderr,
             )
-            if stale:
-                failed = True
+            failed = True
     counts = analysis.debts
     # rule5: no ratchet, and the allowlist cannot reach it. Both halves are
     # properties of the code above rather than intentions -- `analyze` computes
@@ -1533,8 +1534,8 @@ def check_analysis(
             print(f"  ! {entry}", file=sys.stderr)
         print(
             "Give that job `./scripts/ci/postgres-service.sh start` plus the "
-            "`AGENTDESK_REQUIRE_PG: \"1\"` env rule4 tracks (rule4 only WARNs "
-            "on a missing one -- it is a ledger, not a guard), or narrow its "
+            "`AGENTDESK_REQUIRE_PG: \"1\"` env rule4 tracks (rule4 enforces new "
+            "violations but maintains existing debt as a ledger), or narrow its "
             "selection so it stops choosing these ids. Those two are the "
             "fixes this rule accepts; the two levers that talk other rules "
             "down do not reach it. It has no baseline section, and it reads "
@@ -1578,9 +1579,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__.splitlines()[0],
         epilog=(
-            "During T0, new live debt is warn-only. Manifest drift, candidate "
-            "baseline growth, and stale baseline entries return rc=1; T1 promotes "
-            "new debt to enforcement."
+            "Newly discovered live debt (baseline drift) is enforced; existing baseline "
+            "entries are maintained as a ledger. Return code 1 is reserved for manifest "
+            "drift, candidate baseline growth, and any baseline drift (new or stale); "
+            "malformed inputs and configuration errors return code 2."
         ),
     )
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)

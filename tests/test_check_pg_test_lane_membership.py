@@ -1111,7 +1111,7 @@ class ParserMutations(FixtureCase):
                 self.assertEqual(rc, 0)
                 self.assertNotIn("jobs-empty", stderr.getvalue())
 
-    def test_jobs_comment_rule4_debt_is_warn_only_with_real_analysis(self) -> None:
+    def test_jobs_comment_rule4_debt_fails_on_new_violation(self) -> None:
         workflow = self.root / ".github/workflows/ci-main.yml"
         workflow.write_text((FIXTURES / "jobs_comment.yml").read_text("utf-8"), "utf-8")
         analysis = self.fx.analysis()
@@ -1130,10 +1130,10 @@ class ParserMutations(FixtureCase):
                 reference_label="fixture base",
                 allowlist_label="fixture allowlist",
             )
-        self.assertEqual(rc, 0)
-        self.assertIn("WARN: [rule4] baseline drift: 1 new", stderr.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertIn("FAIL: [rule4] baseline drift: 1 new", stderr.getvalue())
 
-    def test_three_hop_rule_debt_is_warn_only_with_real_analysis(self) -> None:
+    def test_three_hop_rule_debt_fails_on_new_violations(self) -> None:
         self.fx.write_source(
             "src/xfile_a.rs",
             (FIXTURES / "xfile_a.rs").read_text("utf-8"),
@@ -1159,9 +1159,9 @@ class ParserMutations(FixtureCase):
                 reference_label="fixture base",
                 allowlist_label="fixture allowlist",
             )
-        self.assertEqual(rc, 0)
+        self.assertEqual(rc, 1)
         for section in ("rule1", "rule2", "rule3"):
-            self.assertIn(f"WARN: [{section}] baseline drift: 1 new", stderr.getvalue())
+            self.assertIn(f"FAIL: [{section}] baseline drift: 1 new", stderr.getvalue())
 
     def test_brace_cache_has_hits_and_preserves_counter_contract(self) -> None:
         membership._matching_brace_cached.cache_clear()
@@ -1266,15 +1266,24 @@ class BaselineAndEnforcement(FixtureCase):
         self.assertEqual(rc, 0)
         rc, _, error = self.run_check(self.analysis(), old, old)
         self.assertEqual(rc, 1)
+        self.assertIn("FAIL: [rule3] baseline drift", error)
         self.assertIn("Remove '-' entries", error)
 
-    def test_new_violation_warns_and_baseline_coverup_fails(self) -> None:
+    def test_matching_nonempty_live_debt_emits_no_drift_diagnostic(self) -> None:
+        debts = empty_debts()
+        debts["rule3"] = {"src/db/service.rs"}
+        rc, output, error = self.run_check(self.analysis(debts), debts, debts)
+        self.assertEqual(rc, 0)
+        self.assertIn("PG test-lane membership check passed", output)
+        self.assertEqual(error, "")
+
+    def test_new_violation_fails_even_with_no_baseline(self) -> None:
         empty = empty_debts()
         current = empty_debts()
         current["rule1"] = {"service::tests::case"}
         rc, _, error = self.run_check(self.analysis(current), empty, empty)
-        self.assertEqual(rc, 0)
-        self.assertIn("WARN: [rule1] baseline drift", error)
+        self.assertEqual(rc, 1)
+        self.assertIn("FAIL: [rule1] baseline drift", error)
         self.assertIn("Fix '+' violations", error)
         rc, _, error = self.run_check(self.analysis(current), current, empty)
         self.assertEqual(rc, 1)
