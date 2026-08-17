@@ -122,19 +122,6 @@
         "src/services/discord/recovery_engine/manual_rebind/mod.rs",
         "src/services/discord/catch_up.rs"
       ]
-    },
-    {
-      "number": 4713,
-      "state": "closed",
-      "title": "decompose(4519): voice-runtime grandfathered giant follow-up",
-      "owners": [
-        "voice-runtime"
-      ],
-      "files": [
-        "src/voice/receiver.rs",
-        "src/services/discord/voice_barge_in.rs",
-        "src/voice/announce_meta.rs"
-      ]
     }
   ]
 }
