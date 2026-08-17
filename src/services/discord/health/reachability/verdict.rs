@@ -113,8 +113,9 @@ impl ReachabilityVerdict {
     /// True for `Reachable` only; `TransportUnknown` is false here by the same
     /// rule as `Unreachable`. Permission is not a declaration: §-1.4 still
     /// requires positive incarnation-alive evidence before a producer may spell
-    /// `Reachable` at all, B6 owns the product this feeds, and nothing calls
-    /// this yet.
+    /// `Reachable` at all. T4-B6's composed `RelayVerdict::permits_health`
+    /// delegates to this for its in-band arm, where a false answer blocks a
+    /// health declaration and authorizes nothing else.
     pub(in crate::services::discord) fn permits_health(&self) -> bool {
         match self {
             Self::Reachable => true,

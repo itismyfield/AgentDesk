@@ -111,10 +111,11 @@ WHAT CHECK 3 DOES AND DOES NOT CATCH
 Republication is enforced by ENUMERATED SHAPE, not in general. What a
 judgment consumer is refused: an ``as`` rename of the tree, a ``pub use`` of a
 tree path, a ``pub`` ``type`` alias whose right-hand side names an item this
-file imported from the tree, and a ``pub use`` of such an imported name. The
-last two are the two-step form — a plain import here, a fresh public spelling
-next to it — which the first two rules do not see, because the second step
-never writes ``reachability``.
+file imported from the tree, and a ``pub use`` of such an imported name —
+with or without an ``as`` rebinding, since ``pub use self::X as Y;`` reads
+``X`` however it is rebound. The last two are the two-step form — a plain
+import here, a fresh public spelling next to it — which the first two rules
+do not see, because the second step never writes ``reachability``.
 
 What it still does NOT catch, and what a reviewer therefore still has to read:
 a public function whose RETURN TYPE or parameter is a tree type, a public
@@ -822,6 +823,34 @@ def imported_item_names(use_item: str) -> set[str]:
     return use_body_names(body)
 
 
+def use_body_source_names(body: str) -> set[str]:
+    """The names a `use` item body READS, before any `as` rebinding.
+
+    `use_body_names` answers "what does this item bind"; a republication check
+    also has to answer "what does it take" — `pub use self::X as Y;` binds `Y`
+    but takes `X`, and it is `X` that the file imported from the tree. Same
+    brace expansion, same glob caveat: a glob spells no source name either.
+    """
+
+    names: set[str] = set()
+    for part in split_top_level_use_parts(body):
+        if part.endswith("}") and "{" in part:
+            names |= use_body_source_names(part[part.index("{") + 1 : -1])
+            continue
+        source = re.split(r"\bas\b", part, maxsplit=1)[0]
+        leaf = source.rsplit("::", 1)[-1].strip()
+        if leaf and leaf not in {"self", "*", "_"} and IDENTIFIER_RE.fullmatch(leaf):
+            names.add(leaf)
+    return names
+
+
+def imported_item_source_names(use_item: str) -> set[str]:
+    """The names one whole `use` item reads, before any `as` rebinding."""
+
+    body = USE_ITEM_PREFIX_RE.sub("", use_item.strip(), count=1).rstrip().rstrip(";")
+    return use_body_source_names(body)
+
+
 def judgment_read_problems(rel: str, cleaned: str) -> list[str]:
     """Hold a #5071 T4-B6 judgment consumer to unlaundered tree reads.
 
@@ -896,7 +925,10 @@ def judgment_read_problems(rel: str, cleaned: str) -> list[str]:
         if PUB_USE_RE.search(item.group(0)) is None:
             continue
         republished = sorted(
-            imported_from_tree.intersection(imported_item_names(item.group(0)))
+            imported_from_tree.intersection(
+                imported_item_names(item.group(0))
+                | imported_item_source_names(item.group(0))
+            )
         )
         if not republished:
             continue

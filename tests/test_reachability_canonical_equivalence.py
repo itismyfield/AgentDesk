@@ -410,6 +410,26 @@ class SyntheticRootTests(unittest.TestCase):
             )
             self.assertProblem(_run(root), "re-exports `RelayVerdictProbe`")
 
+    def test_a_judgment_consumer_reexporting_an_imported_name_renamed_is_reported(self):
+        """The renamed variant of the `pub use` second step — the r2 bypass.
+
+        `pub use self::RelayVerdictProbe as Renamed;` binds `Renamed`, so a
+        scan that intersects only the BOUND names with the imported ones comes
+        back empty; what the item reads is `RelayVerdictProbe`, and the source
+        side is where the republication happens. (rustc happens to refuse this
+        exact spelling for a type imported at private visibility — E0364 — but
+        the gate's claim is about source text, and visibilities move.)"""
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            (root / JUDGMENT_CONSUMER_REL).write_text(
+                "#[cfg(unix)]\n"
+                "use super::reachability::composite::RelayVerdictProbe;\n"
+                "\n"
+                "pub(super) use self::RelayVerdictProbe as Renamed;\n",
+                encoding="utf-8",
+            )
+            self.assertProblem(_run(root), "re-exports `RelayVerdictProbe`")
+
     def test_a_judgment_consumer_may_alias_an_imported_tree_type_privately(self):
         """The control the rule above must not swallow.
 
