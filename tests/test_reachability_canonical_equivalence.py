@@ -36,10 +36,12 @@ from __future__ import annotations
 import importlib.util
 import json
 import shutil
+import subprocess
 import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "check_reachability_canonical_equivalence.py"
@@ -305,6 +307,41 @@ class SyntheticRootTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(_run(root), [])
+
+    def test_rust_preflight_reports_an_orphaned_mutation_signature(self):
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            target = root / GATE.OBLIGATION_REL
+            name, before, after = GATE.RUST_MUTATIONS[0]
+            _patch(target, before, after)
+
+            with mock.patch.object(GATE.subprocess, "run") as run:
+                problems = GATE.run_rust_mutations(root)
+
+            run.assert_not_called()
+            self.assertProblem(problems, f"rust mutation signature(s): {name!r}")
+            self.assertProblem(problems, "before anchor absent")
+            self.assertProblem(problems, "after text appears 1 time(s)")
+            self.assertProblem(problems, f"git diff -- {GATE.OBLIGATION_REL}")
+            self.assertProblem(problems, f"git checkout -- {GATE.OBLIGATION_REL}")
+
+    def test_rust_preflight_allows_an_unrelated_worktree_edit(self):
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            target = root / GATE.OBLIGATION_REL
+            edited = "// unrelated worktree note\n" + target.read_text(encoding="utf-8")
+            target.write_text(edited, encoding="utf-8")
+            killed = subprocess.CompletedProcess([], 1, stdout="", stderr="")
+            results = [
+                subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+                *([killed] * len(GATE.RUST_MUTATIONS)),
+            ]
+
+            with mock.patch.object(GATE.subprocess, "run", side_effect=results):
+                problems = GATE.run_rust_mutations(root)
+
+            self.assertEqual(problems, [])
+            self.assertEqual(target.read_text(encoding="utf-8"), edited)
 
     def test_an_absent_tree_is_not_a_clean_scan(self):
         with TemporaryDirectory() as tmp:

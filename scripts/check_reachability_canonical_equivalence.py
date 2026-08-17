@@ -100,7 +100,6 @@ import json
 import re
 import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -409,26 +408,22 @@ def run_python_mutations(repo_root: Path, cases: list[Case]) -> list[str]:
 
 def run_rust_mutations(repo_root: Path) -> list[str]:
     target = repo_root / OBLIGATION_REL
-
-    git_result = subprocess.run(
-        ["git", "show", f"HEAD:{OBLIGATION_REL}"],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if git_result.returncode != 0:
+    original = target.read_text(encoding="utf-8")
+    orphaned = [
+        (name, original.count(after))
+        for name, before, after in RUST_MUTATIONS
+        if original.count(before) == 0 and original.count(after) > 0
+    ]
+    if orphaned:
+        signatures = ", ".join(
+            f"{name!r} (before anchor absent, after text appears {count} time(s))"
+            for name, count in orphaned
+        )
         return [
-            f"cannot read {OBLIGATION_REL} from git HEAD"
-        ]
-    original = git_result.stdout
-
-    current = target.read_text(encoding="utf-8")
-    if current != original:
-        return [
-            f"target file {OBLIGATION_REL} has been modified (not at HEAD state). "
-            f"A previous run may have failed to clean up. Restore it: "
-            f"`git checkout {OBLIGATION_REL}`"
+            f"target file {OBLIGATION_REL} contains residual declared rust "
+            f"mutation signature(s): {signatures}. Inspect it with "
+            f"`git diff -- {OBLIGATION_REL}`; restore it with "
+            f"`git checkout -- {OBLIGATION_REL}`"
         ]
 
     survivors: list[str] = []
@@ -454,45 +449,32 @@ def run_rust_mutations(repo_root: Path) -> list[str]:
             )
             continue
 
-        with tempfile.TemporaryDirectory(prefix="rust_mut_") as tmpdir:
-            tmpwt = Path(tmpdir) / "wt"
-            try:
-                subprocess.run(
-                    ["git", "worktree", "add", "--detach", str(tmpwt), "HEAD"],
-                    cwd=repo_root,
-                    capture_output=True,
-                    check=True,
+        try:
+            target.write_text(original.replace(before, after), encoding="utf-8")
+            result = subprocess.run(
+                ["cargo", "test", "--lib", RUST_CORPUS_TEST, "--", "--exact"],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                survivors.append(
+                    f"rust mutation {name!r} SURVIVED: the corpus still matches "
+                    "with one implementation changed"
                 )
-                mut_target = tmpwt / OBLIGATION_REL
-                mut_target.write_text(original.replace(before, after), encoding="utf-8")
-                result = subprocess.run(
-                    ["cargo", "test", "--lib", RUST_CORPUS_TEST, "--", "--exact"],
-                    cwd=tmpwt,
-                    capture_output=True,
-                    text=True,
-                    check=False,
+            elif "error[E" in result.stderr or "error: could not compile" in result.stderr:
+                survivors.append(
+                    f"rust mutation {name!r} broke the BUILD rather than the "
+                    "assertion; #5071 §4.1 does not count a compile failure as "
+                    "behavioural evidence"
                 )
-                if result.returncode == 0:
-                    survivors.append(
-                        f"rust mutation {name!r} SURVIVED: the corpus still matches "
-                        "with one implementation changed"
-                    )
-                elif "error[E" in result.stderr or "error: could not compile" in result.stderr:
-                    survivors.append(
-                        f"rust mutation {name!r} broke the BUILD rather than the "
-                        "assertion; #5071 §4.1 does not count a compile failure as "
-                        "behavioural evidence"
-                    )
-                print(
-                    f"  rust mutation {name}: "
-                    + ("SURVIVED" if result.returncode == 0 else "killed")
-                )
-            finally:
-                subprocess.run(
-                    ["git", "worktree", "remove", "--force", str(tmpwt)],
-                    cwd=repo_root,
-                    capture_output=True,
-                )
+            print(
+                f"  rust mutation {name}: "
+                + ("SURVIVED" if result.returncode == 0 else "killed")
+            )
+        finally:
+            target.write_text(original, encoding="utf-8")
     return survivors
 
 
