@@ -574,11 +574,13 @@ async fn watcher_state_snapshot_for_shared(
         session.inflight_state_present,
     );
     // #5071 T4-B4 (4987 S4): compare the row's transcript coordinate against
-    // the registry's independently resolved one by FILE IDENTITY, upgrading
-    // T4-B0's path-string record in `SessionEnrichment`. Descriptive record
-    // only — the outcome feeds no verdict, no classifier, and no recovery
-    // here; T4-B6 owns composition. Unix-gated with the reachability tree
-    // because identity is the `(dev, ino)` pair.
+    // the registry's independently resolved one by FILE IDENTITY. This does
+    // NOT replace T4-B0's path-string record in `SessionEnrichment`: that one
+    // is untouched and has already fired for this poll inside the `load` at
+    // line 461, so on a split the two records coexist until a follow-up slice
+    // retires B0's. Descriptive record only — the outcome feeds no verdict, no
+    // classifier, and no recovery here; T4-B6 owns composition. Unix-gated
+    // with the reachability tree because identity is the `(dev, ino)` pair.
     #[cfg(unix)]
     super::reachability::divergence::observe_row_coordinate_divergence(
         provider_name,

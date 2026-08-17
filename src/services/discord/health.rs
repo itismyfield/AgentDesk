@@ -28,8 +28,12 @@ mod provider_probe;
 // task. Unix-gated because its transcript coordinate is the `(dev, ino)`
 // file identity of 4987 §-1.3, and no stable Windows equivalent exists through
 // `std::fs::Metadata`; the relay transport it observes (`session_relay_sink`)
-// is `#[cfg(unix)]` already. It records facts only; B6 remains the first slice
-// allowed to compose those facts into a production verdict.
+// is `#[cfg(unix)]` already. It records facts only: the B2c observation task
+// writes obligations to the ledger, and `snapshot.rs` calls
+// `reachability::divergence::observe_row_coordinate_divergence` on the
+// production `cfg(unix)` health-poll path (T4-B4) for a descriptive record.
+// B6 remains the first slice allowed to compose any of it into a production
+// verdict, so production verdicts are unchanged.
 #[cfg(unix)]
 pub(in crate::services::discord) mod reachability;
 #[path = "health/rebind_request.rs"]
