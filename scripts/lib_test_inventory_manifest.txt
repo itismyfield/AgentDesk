@@ -2451,10 +2451,12 @@ services::discord::health::reachability::ledger::tests::a_ledger_from_another_sc
 services::discord::health::reachability::ledger::tests::a_malformed_ledger_reads_as_absent_while_the_file_still_reports_present
 services::discord::health::reachability::ledger::tests::a_written_ledger_round_trips_through_the_sidecar
 services::discord::health::reachability::ledger::tests::append_obligations_filters_non_obligation_records
+services::discord::health::reachability::ledger::tests::bootstrap_is_a_byte_preserving_noop_for_the_bound_incarnation
 services::discord::health::reachability::ledger::tests::concurrent_append_ledger_at_calls_preserve_every_obligation
 services::discord::health::reachability::ledger::tests::every_incarnation_conjunct_must_match_and_none_is_absent_matches_some
 services::discord::health::reachability::ledger::tests::mutation_transactions_reject_absent_and_unreadable_ledgers_without_replacing_them
 services::discord::health::reachability::ledger::tests::nothing_in_this_slice_retires_an_obligation_as_receipt_covered
+services::discord::health::reachability::ledger::tests::observation_transaction_rejects_records_from_another_incarnation
 services::discord::health::reachability::ledger::tests::overflow_evicts_the_oldest_as_a_typed_classified_drop
 services::discord::health::reachability::ledger::tests::retiring_an_incarnation_counts_the_obligations_it_took_with_it
 services::discord::health::reachability::ledger::tests::sequential_append_ledger_at_calls_compose_without_lost_records
@@ -2480,6 +2482,9 @@ services::discord::health::reachability::obligation::tests::the_corpus_exercises
 services::discord::health::reachability::obligation::tests::the_json_parsers_disagree_about_the_non_rfc_literals
 services::discord::health::reachability::obligation::tests::the_oversized_limit_measures_the_remainder_not_the_chunk
 services::discord::health::reachability::obligation::tests::the_timestamp_rung_accepts_what_the_python_half_accepts
+services::discord::health::reachability::observation::tests::malformed_ledger_stops_recording_without_returning_an_error
+services::discord::health::reachability::observation::tests::observation_bootstraps_then_records_obligations_and_cursor
+services::discord::health::reachability::observation::tests::restarted_observer_resumes_cursor_without_double_counting
 services::discord::health::reachability::tail::tests::a_directory_is_unreadable
 services::discord::health::reachability::tail::tests::a_missing_file_is_unreadable_not_quiet
 services::discord::health::reachability::tail::tests::a_quiet_file_reads_zero_bytes_without_error
