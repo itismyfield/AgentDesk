@@ -576,6 +576,7 @@ services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::a_poison_
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::an_already_emitted_task_is_never_re_emitted_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::an_unrecordable_attempt_is_reported_instead_of_looking_like_a_retry_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::attempt_cap_dead_letter_is_counted_and_surfaced_on_health_pg
+services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::cancel_null_generation_snapshot_serializes_operator_transition_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::cancel_rolls_back_null_generation_in_tx_without_enrolling_it_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::crash_after_cancel_commit_converges_on_replay_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::drain_with_health_registry_clears_slot_thread_sessions_pg
