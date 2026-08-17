@@ -727,9 +727,10 @@ async fn terminalize_selected_runs_with_pg(
     let card_rollback_tasks = if should_rollback_cards && !rollback_candidate_card_ids.is_empty() {
         let card_generations = sqlx::query_as::<_, (String, Option<String>)>(
             "SELECT id, latest_dispatch_id
-             FROM kanban_cards
-             WHERE id = ANY($1)
-             ORDER BY id",
+     FROM kanban_cards
+     WHERE id = ANY($1)
+     ORDER BY id
+     FOR UPDATE",
         )
         .bind(&rollback_candidate_card_ids)
         .fetch_all(&mut *tx)
@@ -737,12 +738,14 @@ async fn terminalize_selected_runs_with_pg(
         .map_err(|error| format!("load postgres cancellation card generations: {error}"))?;
 
         let mut replay_safe_tasks = Vec::with_capacity(card_generations.len());
-        // `card_generations` is ordered by id, and the shared rollback body locks
-        // each NULL-generation card with FOR UPDATE in that order to retain the
-        // existing deadlock-avoidance contract. NULL generations are rare and
-        // arise on paths such as `clearLatestDispatch`. If any synchronous
-        // rollback fails, the entire cancel aborts under the advisory locks and
-        // can be retried; run, entry, dispatch, and card changes all roll back.
+        // This enrollment query returns and locks candidates in id order, so the
+        // Some/NULL partition below uses only generations read while those rows
+        // are locked. The shared rollback body repeats FOR UPDATE for a NULL row;
+        // this transaction already owns that row lock, so reacquisition is a
+        // no-op. NULL generations are rare and arise on paths such as
+        // `clearLatestDispatch`. If any synchronous rollback fails, the entire
+        // cancel aborts under the advisory locks and can be retried; run, entry,
+        // dispatch, and card changes all roll back.
         for (card_id, dispatch_id) in card_generations {
             match dispatch_id {
                 Some(dispatch_id) => {

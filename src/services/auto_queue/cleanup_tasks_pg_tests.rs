@@ -1811,6 +1811,212 @@ mod pg_tests {
         );
     }
 
+    /// #5357: generation enrollment and row locking must be one operation.
+    /// The sentinel lock pauses cancellation while it rolls back the first
+    /// candidate. At that point the ordered enrollment query must already hold
+    /// the second candidate, forcing an operator transition to serialize after
+    /// cancellation instead of letting cancellation erase that new lifecycle.
+    #[tokio::test]
+    async fn cancel_null_generation_snapshot_serializes_operator_transition_pg() {
+        use std::time::Duration;
+        use tokio::time::{Instant, sleep};
+
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate_with_max_connections(8).await;
+        let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "null-aba-a").await;
+        let first_card_id = "card-cleanup-null-aba-a";
+        let target_card_id = "card-cleanup-null-aba-b";
+        let target_dispatch_id = "dispatch-cleanup-null-aba-b";
+        let sentinel_card_id = "card-cleanup-null-aba-sentinel";
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id)
+             VALUES
+                 ($1, 'NULL ABA target', 'in_progress', NULL),
+                 ($2, 'NULL ABA sentinel', 'ready', 'agent-cleanup')",
+        )
+        .bind(target_card_id)
+        .bind(sentinel_card_id)
+        .execute(&pool)
+        .await
+        .expect("seed NULL ABA target and sentinel cards");
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, to_agent_id, dispatch_type, status, title)
+             VALUES ($1, $2, 'agent-cleanup', 'implementation', 'dispatched', 'NULL ABA target')",
+        )
+        .bind(target_dispatch_id)
+        .bind(target_card_id)
+        .execute(&pool)
+        .await
+        .expect("seed NULL ABA target dispatch");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, dispatch_id)
+             VALUES
+                ('entry-cleanup-null-aba-b', $1, $2, 'agent-cleanup', 'dispatched', $3)",
+        )
+        .bind(&run_id)
+        .bind(target_card_id)
+        .bind(target_dispatch_id)
+        .execute(&pool)
+        .await
+        .expect("seed NULL ABA target entry");
+
+        sqlx::query(
+            "CREATE FUNCTION block_first_null_aba_rollback_on_sentinel()
+             RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 IF OLD.id = 'card-cleanup-null-aba-a'
+                    AND OLD.status IN ('requested', 'in_progress')
+                    AND NEW.status = 'ready'
+                 THEN
+                     PERFORM id FROM kanban_cards
+                     WHERE id = 'card-cleanup-null-aba-sentinel'
+                     FOR UPDATE;
+                 END IF;
+                 RETURN NEW;
+             END
+             $$",
+        )
+        .execute(&pool)
+        .await
+        .expect("install NULL ABA blocking function");
+        sqlx::query(
+            "CREATE TRIGGER block_first_null_aba_rollback_on_sentinel
+             BEFORE UPDATE OF status ON kanban_cards
+             FOR EACH ROW EXECUTE FUNCTION block_first_null_aba_rollback_on_sentinel()",
+        )
+        .execute(&pool)
+        .await
+        .expect("install NULL ABA blocking trigger");
+
+        let mut blocker = pool.begin().await.expect("begin NULL ABA blocker");
+        sqlx::query("SELECT id FROM kanban_cards WHERE id = $1 FOR UPDATE")
+            .bind(sentinel_card_id)
+            .fetch_one(&mut *blocker)
+            .await
+            .expect("lock NULL ABA sentinel card");
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await
+            .expect("load NULL ABA blocker backend pid");
+
+        let cancel_pool = pool.clone();
+        let cancel_run_id = run_id.clone();
+        let cancel_task = tokio::spawn(async move {
+            cancel_selected_runs_with_pg(
+                None,
+                &cancel_pool,
+                &[cancel_run_id],
+                "test_cancel_null_aba",
+            )
+            .await
+        });
+
+        let wait_deadline = Instant::now() + Duration::from_secs(10);
+        let cancel_pid = loop {
+            let waiting_pid: Option<i32> = sqlx::query_scalar(
+                "SELECT pid
+                 FROM pg_stat_activity
+                 WHERE datname = current_database()
+                   AND wait_event_type = 'Lock'
+                   AND $1 = ANY(pg_blocking_pids(pid))
+                 ORDER BY pid
+                 LIMIT 1",
+            )
+            .bind(blocker_pid)
+            .fetch_optional(&pool)
+            .await
+            .expect("observe cancellation waiting on NULL ABA sentinel");
+            if let Some(pid) = waiting_pid {
+                break pid;
+            }
+            assert!(
+                Instant::now() < wait_deadline,
+                "cancellation never waited on the sentinel card lock"
+            );
+            sleep(Duration::from_millis(10)).await;
+        };
+
+        let transition_pool = pool.clone();
+        let engine = crate::engine::PolicyEngine::new_with_pg(
+            &crate::config::Config::default(),
+            Some(pool.clone()),
+        )
+        .expect("create NULL ABA transition engine");
+        let transition_engine = engine.clone();
+        let transition_task = tokio::spawn(async move {
+            crate::kanban::transition_status_with_opts_pg_only(
+                &transition_pool,
+                &transition_engine,
+                target_card_id,
+                "requested",
+                "test_force_transition_null_aba",
+                crate::engine::transition::ForceIntent::OperatorOverride,
+            )
+            .await
+        });
+
+        let transition_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let waiting_on_cancel: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                     SELECT 1
+                     FROM pg_stat_activity
+                     WHERE datname = current_database()
+                       AND wait_event_type = 'Lock'
+                       AND $1 = ANY(pg_blocking_pids(pid))
+                 )",
+            )
+            .bind(cancel_pid)
+            .fetch_one(&pool)
+            .await
+            .expect("observe operator transition serialization");
+            if waiting_on_cancel || transition_task.is_finished() {
+                break;
+            }
+            assert!(
+                Instant::now() < transition_deadline,
+                "operator transition neither committed nor waited on cancellation"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+
+        blocker
+            .commit()
+            .await
+            .expect("release NULL ABA sentinel card");
+        cancel_task
+            .await
+            .expect("join NULL ABA cancellation")
+            .expect("cancel NULL ABA run");
+        transition_task
+            .await
+            .expect("join NULL ABA operator transition")
+            .expect("force target card into a new requested lifecycle");
+
+        let target_card: (String, Option<String>) =
+            sqlx::query_as("SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = $1")
+                .bind(target_card_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load NULL ABA target after serialization");
+        assert_eq!(
+            target_card,
+            ("requested".to_string(), None),
+            "the authorized requested/NULL lifecycle must survive cancellation"
+        );
+
+        let first_card: (String, Option<String>) =
+            sqlx::query_as("SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = $1")
+                .bind(first_card_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load first NULL ABA cancellation card");
+        assert_eq!(first_card, ("ready".to_string(), None));
+    }
+
     /// The trigger fails specifically when the shared in-transaction rollback
     /// changes the NULL-generation card to ready. The resulting error must
     /// abort the enclosing cancel transaction, not leave any terminal run,
