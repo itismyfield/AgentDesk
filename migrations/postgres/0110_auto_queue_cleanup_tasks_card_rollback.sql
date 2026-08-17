@@ -9,9 +9,12 @@
 --
 -- P1-B: cards are identified by (card_id, dispatch_id) pairs. The dispatch_id
 -- is the card's post-terminalization latest_dispatch_id snapshot (including
--- NULL) and acts as a generation marker. During drain, a different current
--- latest_dispatch_id means a new lifecycle attached after enqueue, so rollback
--- is skipped. Equal NULL snapshots are a valid generation match.
+-- NULL) and acts as a generation marker. A successful rollback carrying Some
+-- clears latest_dispatch_id to NULL, so that token self-invalidates and a replay
+-- skips on mismatch. NULL cannot self-invalidate (NULL -> rollback -> NULL), so
+-- it is applied only by the initial inline drain; replay or lease-expiry reclaim
+-- dead-letters it without reapplying. Equality proves only that the current
+-- value matches the snapshot, not which lifecycle produced that value.
 
 ALTER TABLE auto_queue_run_cleanup_tasks
 ADD COLUMN card_rollback_tasks JSONB NOT NULL DEFAULT '[]',

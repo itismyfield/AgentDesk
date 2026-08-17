@@ -583,6 +583,7 @@ services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::drain_wit
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::end_run_does_not_change_card_state_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::enqueue_is_atomic_with_the_state_change_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::generation_mismatch_skips_card_rollback_pg
+services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::null_generation_crash_replay_dead_letters_without_overwriting_manual_lifecycle_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::poison_and_exhausted_tasks_dead_letter_instead_of_blocking_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::repeatedly_failing_task_dead_letters_at_the_attempt_cap_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::replay_skips_slot_threads_after_slot_reassignment_pg

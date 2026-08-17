@@ -25,6 +25,14 @@
 //! re-derived from the durable row and retried until it succeeds, so they are
 //! at-least-once and converge — up to the attempt cap described below.
 //!
+//! Card rollback has a narrower guarantee. A rollback carrying a non-NULL
+//! dispatch generation is replay-safe because a successful rollback clears
+//! `latest_dispatch_id`, making that generation self-invalidating. A rollback
+//! carrying a NULL generation is applied only by the initial inline drain. It
+//! has no replay guarantee: a replay or lease-expiry reclaim dead-letters that
+//! card instead of applying it, because NULL cannot distinguish the original
+//! lifecycle from a later manual lifecycle that also leaves the field NULL.
+//!
 //! The observability emit in step 1 is **not** covered by that guarantee and is
 //! deliberately at-most-once. `CancelTransitionMeta::emit` hands the event to an
 //! in-process worker channel and discards the result
@@ -92,8 +100,9 @@
 //!    the row at the cap. If this UPDATE fails, `attempts` never rises and the
 //!    row can never reach the cap. It reports [`AttemptRecord::Unrecorded`]
 //!    instead of returning `false`, and the sweep counts it.
-//! 2. `dead_letter_task_pg` — parks an undecodable (poison) row. If this UPDATE
-//!    fails the row is not parked, so it is re-claimed and re-decoded forever.
+//! 2. `dead_letter_task_pg` — parks an undecodable (poison) or policy-rejected
+//!    row. If this UPDATE fails the row is not parked, so it is re-claimed and
+//!    rejected again forever.
 //!    It returns whether it landed; when it did not, the sweep falls back to the
 //!    ordinary attempt bookkeeping so the row still backs off and still reaches
 //!    the terminal cap.
@@ -195,6 +204,18 @@ impl AttemptRecord {
 /// the single-row claim cannot drift apart.
 const TASK_COLUMNS: &str = "id, run_ids, dispatch_ids, released_slots, pending_emits, emitted, card_rollback_tasks, card_rollback_source";
 
+/// Why this process owns a cleanup row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DrainOrigin {
+    /// The cancel flow's first post-commit attempt, addressed by task id.
+    InitialInline,
+    /// A background sweep, including a reclaim after the claim lease expires.
+    ReplayOrReclaim,
+}
+
+const NULL_CARD_ROLLBACK_REPLAY_DEAD_LETTER_REASON: &str =
+    "card rollback replay rejected NULL dispatch_id generation token";
+
 /// Rows drained per replay sweep.
 const REPLAY_BATCH_LIMIT: i64 = 50;
 
@@ -287,6 +308,15 @@ pub(crate) async fn enqueue_run_cleanup_task_on_tx(
     .map_err(|error| format!("enqueue auto-queue run cleanup task: {error}"))
 }
 
+fn parse_card_rollback_dispatch_id(item: &serde_json::Value) -> Result<Option<String>, String> {
+    match item.get("dispatch_id") {
+        Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(dispatch_id)) => Ok(Some(dispatch_id.clone())),
+        None => Err("missing dispatch_id".to_string()),
+        Some(_) => Err("invalid dispatch_id: expected null or string".to_string()),
+    }
+}
+
 fn task_from_row(row: &sqlx::postgres::PgRow) -> Result<RunCleanupTask, String> {
     let released_slots: serde_json::Value = row
         .try_get("released_slots")
@@ -307,10 +337,7 @@ fn task_from_row(row: &sqlx::postgres::PgRow) -> Result<RunCleanupTask, String> 
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "missing or invalid card_id".to_string())?
                 .to_string();
-            let dispatch_id = item
-                .get("dispatch_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+            let dispatch_id = parse_card_rollback_dispatch_id(item)?;
             Ok((card_id, dispatch_id))
         })
         .collect::<Result<Vec<_>, String>>()
@@ -541,12 +568,12 @@ pub(crate) async fn dead_lettered_run_cleanup_task_count_pg(pool: &PgPool) -> Re
     .map_err(|error| format!("count dead-lettered auto-queue run cleanup tasks: {error}"))
 }
 
-/// Dead-letter a row whose payload cannot be decoded at all.
+/// Dead-letter a row whose payload cannot be decoded or cannot safely replay.
 ///
-/// A poison row can never succeed, so retrying it forever would starve the
-/// queue; deleting it would destroy the only evidence of the corruption. It is
-/// parked instead, and counted, so the sweep reports it rather than silently
-/// skipping it.
+/// A poison row can never succeed, and a policy-rejected row must not be
+/// re-applied. Retrying either forever would starve the queue; deleting it would
+/// destroy the only evidence. It is parked instead, and counted, so the sweep
+/// reports it rather than silently skipping it.
 ///
 /// Returns whether the park actually landed. This UPDATE used to swallow its own
 /// failure in a `tracing::warn!`, which made the sweep report a dead-letter that
@@ -573,7 +600,7 @@ async fn dead_letter_task_pg(pool: &PgPool, id: i64, error: &str) -> bool {
         tracing::warn!(
             task_id = id,
             error = %update_error,
-            "[auto-queue] failed to dead-letter undecodable cleanup task"
+            "[auto-queue] failed to dead-letter cleanup task"
         );
         return false;
     }
@@ -744,6 +771,7 @@ pub(crate) async fn drain_run_cleanup_task_pg(
     health_registry: Option<std::sync::Arc<crate::services::discord::health::HealthRegistry>>,
     pool: &PgPool,
     task: RunCleanupTask,
+    origin: DrainOrigin,
 ) -> RunCleanupDrainOutcome {
     let mut warnings = Vec::new();
 
@@ -890,15 +918,37 @@ pub(crate) async fn drain_run_cleanup_task_pg(
 
     // Step 3.5 — card rollback.
     //
-    // Retry safety: each card rollback is scoped to a specific card id, status
-    // (requested|in_progress), and post-terminalization latest_dispatch_id
-    // snapshot. If that generation changes after enqueue, the card has been
-    // reassigned to a new lifecycle and is skipped. Equal NULL snapshots match.
-    // For cards that match, the operation is naturally idempotent.
+    // Retry safety: a Some generation is self-invalidating: a successful
+    // rollback clears `latest_dispatch_id` to NULL, so a replay sees Some !=
+    // NULL and skips. A NULL generation cannot self-invalidate (NULL -> rollback
+    // -> NULL), so replay/reclaim cannot tell the cancelled lifecycle from a
+    // later manual lifecycle and dead-letters the card instead of reapplying it.
+    //
+    // The initial inline drain still applies NULL generations. A manual
+    // transition racing inside that cancel attempt is a cancel/operator race,
+    // not a stale replay, and remains governed by the cancel flow itself.
+    // The active-dispatch guard is a quiet permanent skip: it returns Ok, so the
+    // outbox row can complete and be deleted, and that rollback is not retried.
     let mut all_cards_handled = true;
+    let mut replay_rejected_null_cards = Vec::new();
     if !task.card_rollback_tasks.is_empty() {
         let source = task.card_rollback_source.as_deref().unwrap_or("auto_queue");
         for (card_id, expected_dispatch_id) in &task.card_rollback_tasks {
+            if origin == DrainOrigin::ReplayOrReclaim && expected_dispatch_id.is_none() {
+                let reason =
+                    format!("{NULL_CARD_ROLLBACK_REPLAY_DEAD_LETTER_REASON}: card_id={card_id}");
+                crate::auto_queue_log!(
+                    warn,
+                    "card_rollback_null_generation_replay_dead_lettered",
+                    crate::services::auto_queue::AutoQueueLogContext::new().card(card_id),
+                    "[auto-queue] dead-lettering postgres card rollback during cleanup task {}: {}",
+                    task.id,
+                    reason
+                );
+                warnings.push(reason.clone());
+                replay_rejected_null_cards.push(reason);
+                continue;
+            }
             match perform_card_rollback_on_pg(
                 pool,
                 card_id,
@@ -980,6 +1030,25 @@ pub(crate) async fn drain_run_cleanup_task_pg(
         cleared_slot_sessions,
         warnings,
     };
+    if !replay_rejected_null_cards.is_empty() {
+        let reason = replay_rejected_null_cards.join("; ");
+        if dead_letter_task_pg(pool, task.id, &reason).await {
+            return RunCleanupDrainOutcome {
+                slot_cleanup,
+                completed: false,
+                dead_lettered: true,
+                attempt_unrecorded: false,
+            };
+        }
+
+        let record = record_task_failure_pg(pool, task.id, &reason).await;
+        return RunCleanupDrainOutcome {
+            slot_cleanup,
+            completed: false,
+            dead_lettered: record.dead_lettered(),
+            attempt_unrecorded: record.unrecorded(),
+        };
+    }
     if !all_slots_handled || !all_cards_handled {
         let summary = slot_cleanup.warnings.join("; ");
         let record = record_task_failure_pg(pool, task.id, &summary).await;
@@ -1051,7 +1120,9 @@ pub(crate) async fn drain_run_cleanup_task_by_id_pg(
     task_id: i64,
 ) -> RunCleanupDrainOutcome {
     match claim_run_cleanup_task_pg(pool, task_id).await {
-        Ok(Some(task)) => drain_run_cleanup_task_pg(health_registry, pool, task).await,
+        Ok(Some(task)) => {
+            drain_run_cleanup_task_pg(health_registry, pool, task, DrainOrigin::InitialInline).await
+        }
         Ok(None) => match run_cleanup_task_exists_pg(pool, task_id).await {
             // Row gone: a concurrent drain already carried it to completion.
             Ok(false) => RunCleanupDrainOutcome {
@@ -1107,9 +1178,10 @@ pub(crate) async fn drain_run_cleanup_task_by_id_pg(
 pub(crate) struct RunCleanupReplayStats {
     pub(crate) drained: usize,
     pub(crate) completed: usize,
-    /// Rows this sweep parked and removed from the drain order for good — both
-    /// the undecodable payloads (poison) and the rows that burned through
-    /// `MAX_CLEANUP_ATTEMPTS`. Counted rather than silently skipped because a
+    /// Rows this sweep parked and removed from the drain order for good — the
+    /// undecodable payloads (poison), policy-rejected NULL-generation card
+    /// replays, and rows that burned through `MAX_CLEANUP_ATTEMPTS`. Counted
+    /// rather than silently skipped because a
     /// dead-letter is the one outcome the retry loop can never repair on its
     /// own, so it has to reach a human; the standing backlog is on `/api/health`
     /// and `/api/health/detail` under `auto_queue_cleanup.dead_lettered`.
@@ -1190,7 +1262,13 @@ pub(crate) async fn replay_pending_run_cleanup_tasks_pg(
             }
         };
         stats.drained += 1;
-        let outcome = drain_run_cleanup_task_pg(health_registry.clone(), pool, task).await;
+        let outcome = drain_run_cleanup_task_pg(
+            health_registry.clone(),
+            pool,
+            task,
+            DrainOrigin::ReplayOrReclaim,
+        )
+        .await;
         if outcome.completed {
             stats.completed += 1;
         }
@@ -1212,10 +1290,13 @@ pub(crate) async fn replay_pending_run_cleanup_tasks_pg(
 /// terminalized.
 ///
 /// Retry safety: the operation is scoped to a specific card, status
-/// (requested|in_progress), and post-terminalization latest_dispatch_id snapshot.
-/// If the current generation differs, the card has been reassigned after enqueue
-/// and is skipped (returned as Ok). Equal NULL snapshots match. For matching
-/// generations, the operation is naturally idempotent.
+/// (requested|in_progress), and post-terminalization `latest_dispatch_id`
+/// snapshot. A successful Some-token rollback clears the field to NULL and
+/// therefore self-invalidates before any replay. The caller permits a NULL token
+/// only for the initial inline drain; replay/reclaim rejects it before reaching
+/// this function. The active-dispatch guard is a quiet permanent skip: it
+/// returns Ok, so the outbox row can complete and be deleted, and that rollback
+/// is not retried.
 async fn perform_card_rollback_on_pg(
     pool: &PgPool,
     card_id: &str,
@@ -1238,8 +1319,9 @@ async fn perform_card_rollback_on_pg(
         return Ok(());
     }
 
-    // P1-B: generation guard. Option equality deliberately treats NULL-to-NULL
-    // as a match; only a changed latest_dispatch_id skips rollback.
+    // Generation equality proves only that the stored snapshot still matches;
+    // it does not by itself prove that this is the same lifecycle. NULL equality
+    // is accepted here solely for the caller's initial-inline path.
     let current_dispatch_deref: Option<&str> = current_dispatch_id.as_deref();
     if expected_dispatch_id != current_dispatch_deref {
         return Ok(()); // Card generation mismatch: skip this card.
@@ -1258,6 +1340,8 @@ async fn perform_card_rollback_on_pg(
         > 0;
 
     if has_active_dispatch {
+        // Quiet permanent give-up: Ok lets the outbox row complete and be
+        // deleted, so this card rollback receives no retry.
         return Ok(());
     }
 
@@ -1287,7 +1371,9 @@ async fn perform_card_rollback_on_pg(
         }
     }
 
-    // Final generation check under the lock. If it has changed, skip.
+    // Final generation check under the lock. A Some token that already rolled
+    // back now sees NULL and self-invalidates here; any other mismatch also
+    // skips without claiming what lifecycle produced it.
     let current_dispatch_deref_lock: Option<&str> = current_dispatch_id_lock.as_deref();
     if expected_dispatch_id != current_dispatch_deref_lock {
         tx.rollback()
@@ -1439,6 +1525,31 @@ async fn perform_card_rollback_on_pg(
     tx.commit()
         .await
         .map_err(|error| format!("commit card rollback for {card_id}: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_card_rollback_dispatch_id;
+
+    #[test]
+    fn card_rollback_dispatch_id_accepts_only_null_or_string() {
+        assert_eq!(
+            parse_card_rollback_dispatch_id(&serde_json::json!({"dispatch_id": null})),
+            Ok(None)
+        );
+        assert_eq!(
+            parse_card_rollback_dispatch_id(&serde_json::json!({"dispatch_id": "dispatch-1"})),
+            Ok(Some("dispatch-1".to_string()))
+        );
+
+        for invalid in [
+            serde_json::json!({}),
+            serde_json::json!({"dispatch_id": 7}),
+            serde_json::json!({"dispatch_id": {"id": "dispatch-1"}}),
+        ] {
+            assert!(parse_card_rollback_dispatch_id(&invalid).is_err());
+        }
+    }
 }
 
 #[cfg(test)]

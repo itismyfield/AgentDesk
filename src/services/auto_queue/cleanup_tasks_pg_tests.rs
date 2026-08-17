@@ -1808,8 +1808,9 @@ mod pg_tests {
             let mut tx = pool.begin().await.expect("begin cancel transaction");
 
             let cancelled_dispatch_ids = vec![dispatch_id.to_string()];
-            // The card's post-cancellation latest_dispatch_id is NULL. Persist that
-            // exact generation so NULL-to-NULL is treated as a valid match.
+            // The initial inline drain accepts the card's NULL generation. A
+            // manual transition inside this cancel attempt would be a
+            // cancel/operator race, not the stale-replay case guarded below.
             let card_rollback_tasks = vec![(card_id.to_string(), None)];
             let task_id = super::super::enqueue_run_cleanup_task_on_tx(
                 &mut tx,
@@ -1997,6 +1998,139 @@ mod pg_tests {
         pg_db.drop().await;
     }
 
+    /// #5357: a NULL generation token cannot distinguish the cancelled
+    /// lifecycle from a later manual lifecycle after the first rollback has
+    /// committed. A replay must park that card rollback instead of applying it
+    /// again.
+    #[tokio::test]
+    async fn null_generation_crash_replay_dead_letters_without_overwriting_manual_lifecycle_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let card_id = "card-null-generation-replay";
+        let dispatch_id = "dispatch-null-generation-replay";
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
+             VALUES ('agent-null-generation', 'NULL Generation Agent', 'claude', '5357')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed NULL-generation agent");
+        sqlx::query(
+            "INSERT INTO kanban_cards
+                (id, title, status, assigned_agent_id, latest_dispatch_id)
+             VALUES ($1, 'NULL Generation Card', 'in_progress',
+                     'agent-null-generation', $2)",
+        )
+        .bind(card_id)
+        .bind(dispatch_id)
+        .execute(&pool)
+        .await
+        .expect("seed NULL-generation card");
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, to_agent_id, dispatch_type, status, title)
+             VALUES ($1, $2, 'agent-null-generation', 'implementation',
+                     'cancelled', 'NULL Generation Dispatch')",
+        )
+        .bind(dispatch_id)
+        .bind(card_id)
+        .execute(&pool)
+        .await
+        .expect("seed terminal NULL-generation dispatch");
+
+        let engine = crate::engine::PolicyEngine::new_with_pg(
+            &crate::config::Config::default(),
+            Some(pool.clone()),
+        )
+        .expect("build PostgreSQL policy engine");
+        let card_json = serde_json::to_string(card_id).expect("encode card id");
+        let dispatch_json = serde_json::to_string(dispatch_id).expect("encode dispatch id");
+        let cleared: bool = engine
+            .eval_js(&format!(
+                "agentdesk.kanban.clearLatestDispatch({card_json}, {dispatch_json}).rows_affected === 1"
+            ))
+            .expect("clear latest dispatch through exposed kanban API");
+        assert!(cleared, "clearLatestDispatch must establish a NULL token");
+
+        let task_id = {
+            let mut tx = pool.begin().await.expect("begin NULL-token enqueue");
+            let task_id = super::super::enqueue_run_cleanup_task_on_tx(
+                &mut tx,
+                &[],
+                &[],
+                &[],
+                &[],
+                &[(card_id.to_string(), None)],
+                Some("test_null_generation_replay"),
+            )
+            .await
+            .expect("enqueue NULL-token card rollback");
+            tx.commit().await.expect("commit NULL-token enqueue");
+            task_id
+        };
+
+        // Crash simulation: the rollback transaction commits, but the process
+        // dies before deleting its durable outbox row.
+        super::super::perform_card_rollback_on_pg(
+            &pool,
+            card_id,
+            None,
+            "test_null_generation_replay",
+        )
+        .await
+        .expect("commit first NULL-token rollback");
+        let after_rollback: (String, Option<String>) =
+            sqlx::query_as("SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = $1")
+                .bind(card_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load card after first rollback");
+        assert_eq!(after_rollback, ("ready".to_string(), None));
+
+        let manually_requested: bool = engine
+            .eval_js(&format!(
+                "agentdesk.kanban.setStatus({card_json}, 'requested', true).changed === true"
+            ))
+            .expect("apply operator override through exposed kanban API");
+        assert!(
+            manually_requested,
+            "operator override must start a new lifecycle"
+        );
+
+        let stats = replay_pending_run_cleanup_tasks_pg(None, &pool)
+            .await
+            .expect("replay stranded NULL-token rollback");
+        assert_eq!(stats.drained, 1);
+        assert_eq!(stats.completed, 0);
+        assert_eq!(stats.dead_lettered, 1);
+
+        let after_replay: (String, Option<String>) =
+            sqlx::query_as("SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = $1")
+                .bind(card_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load card after replay");
+        assert_eq!(
+            after_replay,
+            ("requested".to_string(), None),
+            "replay must not overwrite the manual NULL-token lifecycle"
+        );
+
+        let (_attempts, last_error, parked) = task_retry_state(&pool, task_id).await;
+        assert!(parked, "the rejected card rollback must be dead-lettered");
+        let last_error = last_error.expect("dead-letter reason must be recorded");
+        assert!(
+            last_error.contains(NULL_CARD_ROLLBACK_REPLAY_DEAD_LETTER_REASON),
+            "unexpected dead-letter reason: {last_error}"
+        );
+        assert!(last_error.contains(card_id));
+
+        drop(engine);
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
     #[tokio::test]
     async fn generation_mismatch_skips_card_rollback_pg() {
         let pg_db = TestPostgresDb::create().await;
@@ -2040,8 +2174,8 @@ mod pg_tests {
         sqlx::query(
             "INSERT INTO task_dispatches
                 (id, kanban_card_id, to_agent_id, dispatch_type, status, title)
-             VALUES ($1, $2, 'agent-gen', 'implementation', 'dispatched', 'Gen Old Dispatch'),
-                    ($3, $2, 'agent-gen', 'implementation', 'dispatched', 'Gen New Dispatch')",
+             VALUES ($1, $2, 'agent-gen', 'implementation', 'cancelled', 'Gen Old Dispatch'),
+                    ($3, $2, 'agent-gen', 'implementation', 'cancelled', 'Gen New Dispatch')",
         )
         .bind(dispatch_id_old)
         .bind(card_id)
@@ -2126,11 +2260,11 @@ mod pg_tests {
 
         assert_eq!(
             status_after, status_before,
-            "P1-B: generation mismatch must skip rollback; card status unchanged"
+            "P1-A: generation mismatch must skip rollback; card status unchanged"
         );
         assert_eq!(
             review_round_after, review_round_before,
-            "P1-B: generation mismatch must skip rollback; card review_round unchanged"
+            "P1-A: generation mismatch must skip rollback; card review_round unchanged"
         );
 
         // After drain: cleanup task should be removed (drain completes despite skip)
