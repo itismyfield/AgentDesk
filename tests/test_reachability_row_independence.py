@@ -15,6 +15,12 @@ here against a synthetic repo root that reproduces exactly one defect at a time:
     `use` publishes nothing, a re-export path that merely contains "inflight"
     inside a longer identifier is not the module, and a tainted leaf does not
     taint the siblings sharing its brace list;
+  * the same launder route split across two items of one file — a private
+    `use ...::inflight as alias;` that publishes nothing, plus a `pub use
+    self::alias::…` that publishes a name whose own path never says
+    "inflight" — in both binding forms, with the controls that keep the
+    file-local rewrite from following an alias the re-export does not name and
+    from chasing a binding cycle forever;
   * the shapes that must NOT trip it — the same text inside a comment or a
     string literal, because this tree's own module docs discuss "the inflight
     row" in prose and a lint that reds on its own documentation gets deleted;
@@ -393,6 +399,123 @@ class ThirdFileReExportTest(unittest.TestCase):
                 )
             )
         self.assertEqual(_kinds(violations), ["inflight-path"])
+
+
+class FileLocalAliasLaunderTest(unittest.TestCase):
+    """A `pub use` laid over a PRIVATE alias bound in the same file.
+
+    Neither item spells the row's path in full: the private `use` names
+    `inflight` but publishes nothing, and the `pub use` publishes a name but
+    routes through `self::`, so a closure that only matches segments of `pub
+    use` paths sees no `inflight` and lets the name out. Both forms compile
+    (`pub(in crate::services::discord)` is a `pub` this gate counts), so both
+    are real routes, not hypotheticals.
+    """
+
+    LAUNDERER = "src/services/discord/rows.rs"
+    CHILD = "use crate::services::discord::rows::Row;\n\nfn probe(_row: Row) {}\n"
+
+    def test_a_re_export_over_a_renamed_private_alias_is_flagged(self) -> None:
+        """`use ...::inflight as private_rows;` + `pub use self::private_rows::…`."""
+
+        launderer = (
+            "use crate::services::discord::inflight as private_rows;\n"
+            "pub(in crate::services::discord) use self::private_rows::"
+            "InflightTurnState as Row;\n"
+        )
+        with TemporaryDirectory() as tmp:
+            violations = GATE.run(
+                _build_root(
+                    tmp, child=self.CHILD, extra_files={self.LAUNDERER: launderer}
+                )
+            )
+        self.assertEqual(set(_kinds(violations)), {"laundered-inflight-name"})
+        self.assertIn(self.LAUNDERER, violations[0].detail)
+
+    def test_a_re_export_over_a_bare_use_binding_is_flagged(self) -> None:
+        """The no-`as` form binds a name too: `use path::store;` binds `store`.
+
+        The binding has to name a MODULE inside inflight rather than the row
+        itself — re-exporting a private `use` binding of an ITEM is E0364, so
+        that shape is not a route; going THROUGH the binding to an item the
+        re-export's visibility already permits is, and it never spells
+        `inflight` in the `pub use` path.
+        """
+
+        launderer = (
+            "use crate::services::discord::inflight::store;\n"
+            "pub(in crate::services::discord) use self::store::"
+            "InflightTurnState as Row;\n"
+        )
+        with TemporaryDirectory() as tmp:
+            violations = GATE.run(
+                _build_root(
+                    tmp, child=self.CHILD, extra_files={self.LAUNDERER: launderer}
+                )
+            )
+        self.assertEqual(set(_kinds(violations)), {"laundered-inflight-name"})
+        self.assertIn(self.LAUNDERER, violations[0].detail)
+
+    def test_a_re_export_over_an_unrelated_alias_in_the_same_file_is_clean(self) -> None:
+        """The control: the rewrite follows the alias the `pub use` names, not
+        every alias in a file that happens to mention the row somewhere."""
+
+        launderer = textwrap.dedent(
+            """\
+            use crate::services::discord::inflight as private_rows;
+            use crate::services::discord::registry as safe_rows;
+
+            pub(in crate::services::discord) use self::safe_rows::Row;
+
+            fn hold(_row: private_rows::InflightTurnState) {}
+            """
+        )
+        with TemporaryDirectory() as tmp:
+            self.assertEqual(
+                GATE.run(
+                    _build_root(
+                        tmp, child=self.CHILD, extra_files={self.LAUNDERER: launderer}
+                    )
+                ),
+                [],
+            )
+
+    def test_an_alias_of_an_alias_resolves(self) -> None:
+        """Chained file-local bindings are followed to a fixpoint; stopping at
+        one hop would leave the same bypass one `use` line further out."""
+
+        launderer = (
+            "use crate::services::discord::inflight as first_hop;\n"
+            "use self::first_hop as second_hop;\n"
+            "pub(in crate::services::discord) use self::second_hop::"
+            "InflightTurnState as Row;\n"
+        )
+        with TemporaryDirectory() as tmp:
+            violations = GATE.run(
+                _build_root(
+                    tmp, child=self.CHILD, extra_files={self.LAUNDERER: launderer}
+                )
+            )
+        self.assertEqual(set(_kinds(violations)), {"laundered-inflight-name"})
+
+    def test_a_self_referential_binding_terminates(self) -> None:
+        """A cycle in the binding map must not hang the gate. This text does not
+        compile, but a lexical scan is pointed at whatever is on disk and has to
+        terminate on it — the chase is bounded by the paths it has visited."""
+
+        launderer = (
+            "use self::looped as looped;\n"
+            "pub(in crate::services::discord) use self::looped::Row;\n"
+        )
+        with TemporaryDirectory() as tmp:
+            self.assertEqual(
+                GATE.run(
+                    _build_root(
+                        tmp, child=self.CHILD, extra_files={self.LAUNDERER: launderer}
+                    )
+                ),
+                [],
+            )
 
 
 class IncludeExpansionTest(unittest.TestCase):

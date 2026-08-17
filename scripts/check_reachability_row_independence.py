@@ -43,11 +43,20 @@ a Rust parser and not a resolver:
     `inflight` publishes a forbidden name (its alias, where it is renamed), a
     `*` leaf forbids the laundering module's own name instead because its
     exports cannot be enumerated, and the set is closed transitively so a
-    second hop under a third name does not escape it. What still escapes: a
-    launderer outside `src/**`, one a macro generates, and a re-export this
-    lexical `use`-tree expander misreads. Symmetrically, a tree item that
-    merely SHARES a laundered name is a false positive this gate accepts
-    rather than a hole it leaves;
+    second `pub use` hop under a third name does not escape it. Exactly one
+    sub-resolution runs before that closure reads a leaf: a `self::<name>::…`
+    head is rewritten through the same FILE's own `use` bindings — `use path as
+    alias;` and the bare `use path::Name;` alike, chained to a fixpoint —
+    because `use ...::inflight as rows;` plus `pub use self::rows::Row as R;`
+    reaches the row without either item spelling `inflight` in one path. That
+    rewrite is file-local by construction and stops there. What still escapes:
+    a launderer outside `src/**`, one a macro generates, one that arrives
+    through a glob import (`use x::*;` binds a set this scan cannot enumerate,
+    so a `pub use` over a glob-bound name is not resolved) or a `#[path]`
+    redirection, and a re-export this lexical `use`-tree expander misreads —
+    this is a bounded lexical closure, not a name resolver. Symmetrically, a
+    tree item that merely SHARES a laundered name is a false positive this
+    gate accepts rather than a hole it leaves;
   * `#[path = "..."]` module redirections are NOT followed, so a `#[path]`
     aimed outside the tree is still invisible. Resolving one correctly depends
     on inline-module nesting and on whether the containing file is a `mod.rs`,
@@ -112,7 +121,10 @@ REQUIRED_SURFACE_MARKERS = (
 # say so in the same bullet, naming the slice that lands it.
 FUTURE_SLICE_MARKER = re.compile(r"not yet on disk")
 
-USE_ITEM = re.compile(r"\buse\b[^;]*;", re.DOTALL)
+# The body is captured because the launder closure reads a file's own `use`
+# bindings through the same expander it reads `pub use` items with; `segment_hits`
+# still matches on group(0).
+USE_ITEM = re.compile(r"\buse\b([^;]*);", re.DOTALL)
 # A re-export: only a `pub` one publishes a name a third file can be reached
 # through. `pub(crate)`/`pub(in path)` count — the tree is inside the crate.
 REEXPORT_ITEM = re.compile(r"\bpub\b(?:\s*\([^)]*\))?\s*\buse\b([^;]*);", re.DOTALL)
@@ -274,6 +286,61 @@ def expand_use_tree(
     return leaves
 
 
+def file_local_bindings(cleaned: str) -> dict[str, tuple[str, ...]]:
+    """Every name this file's own `use` items bind, mapped to the path it names.
+
+    Both spellings bind: `use path as alias;` binds `alias`, and the bare
+    `use path::Name;` binds `Name` just as much. A `*` leaf binds a set this
+    scan cannot enumerate and an `as _` leaf binds nothing nameable, so neither
+    is recorded. Private and `pub` items alike are read — a private `use` still
+    binds a name a `pub use` in the same file can be laid over, which is the
+    whole point of this map.
+    """
+
+    bindings: dict[str, tuple[str, ...]] = {}
+    for item in USE_ITEM.finditer(cleaned):
+        for full, name in expand_use_tree(item.group(1)):
+            if name is None or name == "_":
+                continue
+            bindings[name] = full
+    return bindings
+
+
+def resolve_file_local(
+    segments: tuple[str, ...], bindings: dict[str, tuple[str, ...]]
+) -> tuple[str, ...]:
+    """Rewrite a `use`-tree leaf's head through the bindings of its own file.
+
+    `use ...::inflight as rows;` followed by `pub use self::rows::Row as R;`
+    reaches the row without either item spelling `inflight` in one path, and the
+    closure below matches path SEGMENTS, so the head has to be substituted
+    before it looks. Only a `self::`-relative head is substituted: that is the
+    one form that names an item of THIS file, and Rust forbids a module from
+    binding the same name twice (E0255), so in source that compiles `self::X`
+    has exactly one meaning and the substitution is not a guess. Chained to a
+    fixpoint so an alias of an alias resolves too, with the visited set as the
+    cycle guard.
+
+    Every segment this splices in is literal text of the same file, which is
+    what keeps `collect_launderers`' raw-text prefilter a superset rather than
+    a miss. Deliberately NOT a resolver: a head that is not `self::`-relative
+    names another module, and a glob import binds an unenumerable set; neither
+    is followed.
+    """
+
+    seen: set[tuple[str, ...]] = set()
+    while segments not in seen:
+        seen.add(segments)
+        if segments[:1] != ("self",):
+            break
+        head = segments[1:]
+        target = bindings.get(head[0]) if head else None
+        if target is None:
+            break
+        segments = target + head[1:]
+    return segments
+
+
 def module_name_of(rel: str) -> str:
     """The module a source file declares, in this repo's `foo.rs` + `foo/` layout."""
 
@@ -338,11 +405,15 @@ def collect_launderers(repo_root: Path) -> tuple[list[Launder], list[Violation]]
             )
             leaf_cache[path] = []
             return []
+        # A re-export may be laid over a name the same file bound privately, so
+        # each leaf's head is rewritten through this file's own bindings before
+        # the closure matches segments against it.
+        bindings = file_local_bindings(cleaned)
         found: list[tuple[tuple[str, ...], str | None, int]] = []
         for item in REEXPORT_ITEM.finditer(cleaned):
             line = line_of(cleaned, item.start())
             for full, name in expand_use_tree(item.group(1)):
-                found.append((full, name, line))
+                found.append((resolve_file_local(full, bindings), name, line))
         leaf_cache[path] = found
         return found
 

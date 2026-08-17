@@ -1975,12 +1975,19 @@ time for diagnostics; neither is a stored approval value.
   `include!("...")` into the included file, transitively, and refuses an
   argument it cannot resolve to a file on disk; and it forbids every name a
   `pub use` anywhere under `src/**` launders out of the inflight module —
-  expanded leaf by leaf, closed transitively across further hops, with a `*`
-  re-export forbidding the laundering module's own name because its exports
-  cannot be enumerated. What it still does not see: `#[path = "..."]` module
+  expanded leaf by leaf, closed transitively across further `pub use` hops,
+  with a `*` re-export forbidding the laundering module's own name because its
+  exports cannot be enumerated, and with a `self::<name>` head first rewritten
+  through that same file's own `use` bindings (`use path as alias;` and the
+  bare `use path::Name;` alike, chained), so a re-export laid over a private
+  file-local alias is not a way out. That rewrite is file-local and stops
+  there — the gate is a bounded lexical closure, not a resolver. What it still
+  does not see: `#[path = "..."]` module
   redirections (resolving one depends on inline-module nesting, and this tree's
   own uses point inside its own directory, which the file scan already owns),
-  any other macro, a launderer outside `src/**`, and an inflight path a macro
+  glob imports (`use x::*;` binds a set this scan cannot enumerate, so a name
+  arriving through one is not resolved), any other macro, a launderer outside
+  `src/**`, and an inflight path a macro
   assembles from string fragments. The name closure is by spelling, so a tree
   item that merely shares a laundered name is a false positive it accepts
   rather than a hole it leaves.
