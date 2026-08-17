@@ -57,9 +57,9 @@ use crate::services::provider::ProviderKind;
 const REACHABILITY_LEDGER_DIR: &str = "discord_reachability_ledger";
 
 /// Schema version of the on-disk file. A file written by a different version is
-/// discarded rather than migrated: it is an observation record with no
-/// authority over anything, so re-bootstrapping costs one incarnation's history
-/// and risks nothing.
+/// rejected rather than migrated. Mutation entry points preserve that file and
+/// return an explicit error; they never replace unknown coverage with an empty
+/// observation claim.
 const LEDGER_SCHEMA_VERSION: u32 = 1;
 
 /// Maximum live obligations retained per channel. Sized against the per-tick
@@ -223,23 +223,17 @@ impl ReachabilityLedger {
     ///
     /// # Obligation filtering
     ///
-    /// The input must contain only obligation records (`reason.is_obligation() == true`).
-    /// All non-obligation records are filtered out; passing records with
-    /// `is_obligation() == false` is a programming error and will be caught by
-    /// a debug assertion in test builds. Use only with the result of
-    /// [`obligation::scan_transcript`] with obligation filtering enabled, or
-    /// manually filter before calling.
+    /// All non-obligation records (`reason.is_obligation() == false`) are
+    /// filtered out without changing the live set or monotone counters.
     pub(in crate::services::discord) fn append_obligations(
         &mut self,
         records: impl IntoIterator<Item = CanonicalRecord>,
         observed_at_epoch_ms: u64,
     ) -> Vec<ObligationExtinction> {
         for record in records {
-            debug_assert!(
-                record.reason.is_obligation(),
-                "append_obligations must only receive obligation records; got {:?}",
-                record.reason
-            );
+            if !record.reason.is_obligation() {
+                continue;
+            }
             self.obligations.push(LedgerObligation {
                 start: record.start,
                 end: record.end,
@@ -322,12 +316,11 @@ pub(in crate::services::discord) fn ledger_file_exists(path: &Path) -> bool {
 
 /// flock-guarded atomic write of the whole ledger.
 ///
-/// Whole-file rather than read-modify-write: the observation task is this
-/// file's only writer, so there is no concurrent field to merge, and rewriting
-/// wholesale keeps the on-disk state exactly what the caller decided rather
-/// than a join of two views. **For read-modify-write transactions, use
-/// [`append_ledger_at`] or [`retire_ledger_at`] instead** — this function
-/// assumes the ledger is already in-memory and ready to write.
+/// This overwrites an existing valid ledger with exactly the supplied in-memory
+/// snapshot; it does not merge fields from another writer's view. **For
+/// read-modify-write transactions, use [`append_ledger_at`] or
+/// [`retire_ledger_at`] instead** — this function assumes the ledger is already
+/// in-memory and ready to write. Only [`bootstrap_ledger_at`] creates a ledger.
 ///
 /// # Concurrency guarantees
 ///
@@ -349,7 +342,39 @@ pub(in crate::services::discord) fn write_ledger_at(
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     let _lock = delivery_record::lock_record_path(path)?;
+    read_bootstrapped_ledger_at(path)?;
     let data = serde_json::to_string_pretty(ledger).map_err(|error| error.to_string())?;
+    runtime_store::atomic_write(path, &data)
+}
+
+fn read_bootstrapped_ledger_at(path: &Path) -> Result<ReachabilityLedger, String> {
+    if !ledger_file_exists(path) {
+        return Err("ledger not bootstrapped".to_string());
+    }
+    read_ledger_at(path).ok_or_else(|| "ledger unreadable or schema incompatible".to_string())
+}
+
+/// flock-guarded explicit ledger bootstrap.
+///
+/// A missing ledger is created at `bootstrap_offset`. An existing valid ledger
+/// is retired and re-bootstrapped so its monotone counters survive. An existing
+/// unreadable or schema-incompatible file is left untouched and returns an
+/// error rather than being replaced with an empty observation claim.
+pub(in crate::services::discord) fn bootstrap_ledger_at(
+    path: &Path,
+    incarnation: LedgerIncarnation,
+    bootstrap_offset: u64,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let _lock = delivery_record::lock_record_path(path)?;
+    let ledger = if ledger_file_exists(path) {
+        read_bootstrapped_ledger_at(path)?.retire_and_rebootstrap(incarnation, bootstrap_offset)
+    } else {
+        ReachabilityLedger::bootstrap(incarnation, bootstrap_offset, LedgerCounters::default())
+    };
+    let data = serde_json::to_string_pretty(&ledger).map_err(|error| error.to_string())?;
     runtime_store::atomic_write(path, &data)
 }
 
@@ -367,26 +392,7 @@ pub(in crate::services::discord) fn append_ledger_at(
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     let _lock = delivery_record::lock_record_path(path)?;
-    let mut ledger = read_ledger_at(path).unwrap_or_else(|| {
-        // This should not happen in production (incarnation is required), but
-        // in test/debug the caller may construct a path without bootstrapping.
-        // Rather than panic, return an empty ledger; the append will proceed
-        // and a real incarnation will be set by the next rebootstrap.
-        ReachabilityLedger {
-            schema_version: LEDGER_SCHEMA_VERSION,
-            incarnation: LedgerIncarnation::new(
-                "unknown".to_string(),
-                0,
-                None,
-                super::discovery::TranscriptFileId { dev: 0, ino: 0 },
-            ),
-            cursor_offset: 0,
-            bootstrap_offset: 0,
-            last_observed_len: 0,
-            obligations: Vec::new(),
-            counters: LedgerCounters::default(),
-        }
-    });
+    let mut ledger = read_bootstrapped_ledger_at(path)?;
     let extinctions = ledger.append_obligations(records, observed_at_epoch_ms);
     let data = serde_json::to_string_pretty(&ledger).map_err(|error| error.to_string())?;
     runtime_store::atomic_write(path, &data)?;
@@ -407,18 +413,7 @@ pub(in crate::services::discord) fn retire_ledger_at(
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     let _lock = delivery_record::lock_record_path(path)?;
-    let ledger = read_ledger_at(path).unwrap_or_else(|| {
-        ReachabilityLedger::bootstrap(
-            LedgerIncarnation::new(
-                "unknown".to_string(),
-                0,
-                None,
-                super::discovery::TranscriptFileId { dev: 0, ino: 0 },
-            ),
-            bootstrap_offset,
-            LedgerCounters::default(),
-        )
-    });
+    let ledger = read_bootstrapped_ledger_at(path)?;
     let rebootstrapped = ledger.retire_and_rebootstrap(incarnation, bootstrap_offset);
     let data = serde_json::to_string_pretty(&rebootstrapped).map_err(|error| error.to_string())?;
     runtime_store::atomic_write(path, &data)

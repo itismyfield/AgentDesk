@@ -32,20 +32,24 @@ fn obligation_record(start: u64, end: u64) -> CanonicalRecord {
     }
 }
 
+fn bootstrap_test_ledger(path: &Path) {
+    bootstrap_ledger_at(path, incarnation("adk-chan", 42, None, 900), 0).expect("bootstrap ledger");
+}
+
 #[test]
 fn a_written_ledger_round_trips_through_the_sidecar() {
     let dir = TempDir::new().expect("tempdir");
     let path = dir.path().join("provider/123.json");
+    let expected_incarnation = incarnation("adk-chan", 42, Some("nonce-a"), 900);
+    let expected_record = obligation_record(4_096, 4_200);
 
-    let mut ledger = ReachabilityLedger::bootstrap(
-        incarnation("adk-chan", 42, Some("nonce-a"), 900),
-        4_096,
-        LedgerCounters::default(),
-    );
-    ledger.append_obligations(vec![obligation_record(4_096, 4_200)], 1_700);
+    bootstrap_ledger_at(&path, expected_incarnation.clone(), 4_096).expect("bootstrap");
+    append_ledger_at(&path, vec![expected_record.clone()], 1_700).expect("append");
 
-    write_ledger_at(&path, &ledger).expect("write");
-    assert_eq!(read_ledger_at(&path).expect("read back"), ledger);
+    let mut expected =
+        ReachabilityLedger::bootstrap(expected_incarnation, 4_096, LedgerCounters::default());
+    expected.append_obligations(vec![expected_record], 1_700);
+    assert_eq!(read_ledger_at(&path).expect("read back"), expected);
 }
 
 /// 4987 §-1.4 counterexample 7: an unreadable store is `Unknown`, never a
@@ -68,15 +72,10 @@ fn a_malformed_ledger_reads_as_absent_while_the_file_still_reports_present() {
 }
 
 #[test]
-fn a_ledger_from_another_schema_version_is_discarded_rather_than_migrated() {
+fn a_ledger_from_another_schema_version_is_rejected_without_migration() {
     let dir = TempDir::new().expect("tempdir");
     let path = dir.path().join("provider/9.json");
-    let ledger = ReachabilityLedger::bootstrap(
-        incarnation("adk-chan", 42, None, 900),
-        0,
-        LedgerCounters::default(),
-    );
-    write_ledger_at(&path, &ledger).expect("write");
+    bootstrap_test_ledger(&path);
     let bumped = std::fs::read_to_string(&path)
         .expect("read")
         .replace("\"schema_version\": 1", "\"schema_version\": 2");
@@ -85,7 +84,7 @@ fn a_ledger_from_another_schema_version_is_discarded_rather_than_migrated() {
     assert_eq!(
         read_ledger_at(&path),
         None,
-        "an observation record has no authority, so re-bootstrapping beats migrating"
+        "the reader must reject an unknown schema rather than invent coverage"
     );
 }
 
@@ -211,14 +210,14 @@ fn the_sidecar_path_is_keyed_by_provider_and_channel() {
     );
 }
 
-/// lock-guarded read-modify-write transaction: append and then read back
-/// through the flock-guarded API.
+/// Sequential read-modify-write composition: a later append reads and preserves
+/// the record written by the earlier append.
 #[test]
-fn append_ledger_at_acquires_lock_and_persists_atomically() {
+fn sequential_append_ledger_at_calls_compose_without_lost_records() {
     let dir = TempDir::new().expect("tempdir");
     let path = dir.path().join("provider/1001.json");
+    bootstrap_test_ledger(&path);
 
-    // First append — creates the ledger with a bootstrap incarnation.
     let extinctions =
         append_ledger_at(&path, vec![obligation_record(100, 200)], 5_000).expect("first append");
 
@@ -227,7 +226,6 @@ fn append_ledger_at_acquires_lock_and_persists_atomically() {
     assert_eq!(ledger.live_obligations().len(), 1);
     assert_eq!(ledger.counters.total_obligations, 1);
 
-    // Second append — lock serializes the RMW, so the first record is preserved.
     let extinctions =
         append_ledger_at(&path, vec![obligation_record(200, 300)], 5_001).expect("second append");
 
@@ -241,12 +239,13 @@ fn append_ledger_at_acquires_lock_and_persists_atomically() {
     assert_eq!(ledger.counters.total_obligations, 2);
 }
 
-/// Two sequential writes without intermediate reads: both must survive.
-/// This test demonstrates that the lock serializes writers correctly.
+/// Two sequential write transactions without an intermediate caller-side read
+/// both compose into the persisted ledger.
 #[test]
 fn sequential_appends_preserve_all_obligations() {
     let dir = TempDir::new().expect("tempdir");
     let path = dir.path().join("provider/2002.json");
+    bootstrap_test_ledger(&path);
 
     // Writer A appends.
     append_ledger_at(&path, vec![obligation_record(10, 20)], 1_000).expect("A's append");
@@ -263,8 +262,100 @@ fn sequential_appends_preserve_all_obligations() {
     assert_eq!(obls[1].start, 30);
 }
 
-/// Non-obligation records passed to append_obligations are filtered via
-/// debug_assert (in test builds). This test verifies the filtering logic works.
+/// Concurrent writers open independent flock file descriptors. The lock must
+/// cover each complete read-modify-write transaction so neither thread loses
+/// records read from the other's prior commit.
+#[test]
+fn concurrent_append_ledger_at_calls_preserve_every_obligation() {
+    const APPENDS_PER_THREAD: u64 = 128;
+
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("provider/3003.json");
+    bootstrap_test_ledger(&path);
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let mut writers = Vec::new();
+    for writer in 0..2_u64 {
+        let path = path.clone();
+        let barrier = std::sync::Arc::clone(&barrier);
+        writers.push(std::thread::spawn(move || {
+            barrier.wait();
+            for index in 0..APPENDS_PER_THREAD {
+                let start = (writer * APPENDS_PER_THREAD + index) * 10;
+                append_ledger_at(
+                    &path,
+                    vec![obligation_record(start, start + 10)],
+                    1_000 + index,
+                )
+                .expect("concurrent append");
+            }
+        }));
+    }
+    for writer in writers {
+        writer.join().expect("writer thread");
+    }
+
+    let ledger = read_ledger_at(&path).expect("ledger present");
+    assert_eq!(
+        ledger.live_obligations().len(),
+        2 * APPENDS_PER_THREAD as usize
+    );
+    assert_eq!(ledger.counters.total_obligations, 2 * APPENDS_PER_THREAD);
+}
+
+#[test]
+fn mutation_transactions_reject_absent_and_unreadable_ledgers_without_replacing_them() {
+    let dir = TempDir::new().expect("tempdir");
+    let absent_path = dir.path().join("provider/absent.json");
+
+    let absent_append_error = append_ledger_at(&absent_path, vec![obligation_record(0, 10)], 1_000)
+        .expect_err("append must reject an absent ledger");
+    let absent_retire_error =
+        retire_ledger_at(&absent_path, incarnation("adk-chan", 43, None, 901), 10)
+            .expect_err("retire must reject an absent ledger");
+    println!("absent append error: {absent_append_error}");
+    println!("absent retire error: {absent_retire_error}");
+    assert_eq!(absent_append_error, "ledger not bootstrapped");
+    assert_eq!(absent_retire_error, "ledger not bootstrapped");
+    assert!(!ledger_file_exists(&absent_path));
+    println!(
+        "absent file exists after mutations: {}",
+        ledger_file_exists(&absent_path)
+    );
+
+    let unreadable_path = dir.path().join("provider/unreadable.json");
+    let original = "{ definitely not a reachability ledger";
+    std::fs::write(&unreadable_path, original).expect("write malformed ledger");
+    let unreadable_append_error =
+        append_ledger_at(&unreadable_path, vec![obligation_record(0, 10)], 1_000)
+            .expect_err("append must reject an unreadable ledger");
+    let unreadable_retire_error =
+        retire_ledger_at(&unreadable_path, incarnation("adk-chan", 43, None, 901), 10)
+            .expect_err("retire must reject an unreadable ledger");
+    println!("unreadable append error: {unreadable_append_error}");
+    println!("unreadable retire error: {unreadable_retire_error}");
+    assert_eq!(
+        unreadable_append_error,
+        "ledger unreadable or schema incompatible"
+    );
+    assert_eq!(
+        unreadable_retire_error,
+        "ledger unreadable or schema incompatible"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&unreadable_path).expect("malformed source remains readable"),
+        original,
+        "failed mutations must leave the original file untouched"
+    );
+    println!(
+        "unreadable source preserved: {}",
+        std::fs::read_to_string(&unreadable_path).expect("malformed source remains readable")
+            == original
+    );
+}
+
+/// Non-obligation records passed to append_obligations are ignored without
+/// entering the live set or changing the monotone obligation counter.
 #[test]
 fn append_obligations_filters_non_obligation_records() {
     use crate::services::discord::health::reachability::obligation::ObligationReason;
@@ -293,28 +384,9 @@ fn append_obligations_filters_non_obligation_records() {
         },
     ];
 
-    // In debug builds, the non-obligation record will trigger a debug_assert.
-    // In release builds, it will be added anyway (the assert is debug-only).
-    // This test documents the intended filtering behavior.
-    #[cfg(debug_assertions)]
-    {
-        // We expect a panic in debug mode when a non-obligation is appended.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut ledger_copy = ledger.clone();
-            ledger_copy.append_obligations(records.clone(), 1_000);
-        }));
-        assert!(
-            result.is_err(),
-            "debug_assert should catch non-obligation records"
-        );
-    }
-
-    // For release mode or as a positive case: append only obligations.
-    let only_obligations: Vec<_> = records
-        .into_iter()
-        .filter(|r| r.reason.is_obligation())
-        .collect();
-    let extinctions = ledger.append_obligations(only_obligations, 1_000);
+    let extinctions = ledger.append_obligations(records, 1_000);
     assert!(extinctions.is_empty());
     assert_eq!(ledger.live_obligations().len(), 1);
+    assert_eq!(ledger.live_obligations()[0].start, 100);
+    assert_eq!(ledger.counters.total_obligations, 1);
 }
