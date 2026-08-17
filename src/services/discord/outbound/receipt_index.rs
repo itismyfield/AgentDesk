@@ -44,14 +44,26 @@
 //!   The provider and session axes of a frontier are therefore the CALLER's,
 //!   established by how the caller resolved `path` (see
 //!   `delivery_record::delivery_record_path`), not re-derived here.
-//! - **Generation distinctness is borrowed, per session.**
+//! - **Generation distinctness is borrowed, per session, best-effort.**
 //!   `GENERATION_MTIME_BUMP_STEPS_NS` in
-//!   [`crate::services::discord::tmux_session_files`] stamps a session's own
-//!   `.generation` marker strictly after that session's previous incarnation
-//!   (#5437, #5439). That is a within-one-marker-file relation.
+//!   [`crate::services::discord::tmux_session_files`] tries escalating bumps to
+//!   stamp a session's own `.generation` marker after that session's previous
+//!   incarnation (#5437, #5439), and gives up rather than fail the respawn:
+//!   `bump_generation_mtime_past_previous` returns the last OBSERVED mtime when
+//!   every escalation step fails, the caller publishes the marker anyway, and
+//!   `unbumpable_generation_mtime_still_publishes_the_marker_and_warns_5437`
+//!   pins that published-equal path. That is a within-one-marker-file,
+//!   best-effort relation.
 //!
 //! What this does NOT establish, kept explicit:
 //!
+//! - No same-session generation uniqueness on the bump-failure path. When the
+//!   escalating bump gives up, a new incarnation can publish the same
+//!   `generation_mtime_ns` as its predecessor, and this key cannot tell them
+//!   apart — the predecessor's receipts and frontier then cover the successor's
+//!   byte ranges (a false-covered residue, the direction 4987 §7 rules out for
+//!   verdicts). A consumer slice must not promote coverage from an unproven
+//!   generation to a green verdict without an additional witness.
 //! - No transcript-EOF bound. `delivery_record`'s own frontier reader
 //!   (`current_generation_durable_frontier_at`) additionally distrusts a
 //!   frontier whose end exceeds the current transcript length (#4188), because
@@ -412,6 +424,19 @@ mod tests {
         assert!(covered(&index, GENERATION, (0, 300)));
         assert!(covered(&index, GENERATION, (199, 201)));
         assert!(!covered(&index, GENERATION, (0, 301)));
+    }
+
+    #[test]
+    fn a_contained_receipt_after_a_wider_one_does_not_shrink_the_merge() {
+        // Sorted order puts the wide range first and the fully contained one
+        // second; a merge that took the later end instead of the max would
+        // silently shrink (0, 300) to (0, 200) and uncover the tail. Review
+        // r1 measured exactly that mutation surviving the previous fixtures.
+        let index = index(vec![
+            receipt((0, 300), GENERATION, "wide-turn"),
+            receipt((100, 200), GENERATION, "contained-turn"),
+        ]);
+        assert!(covered(&index, GENERATION, (250, 300)));
     }
 
     #[test]
