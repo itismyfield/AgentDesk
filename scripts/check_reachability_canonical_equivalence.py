@@ -344,13 +344,27 @@ RUST_MUTATIONS: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "harness-control-rung-removed",
-        "        return ObligationReason::HarnessControl;",
-        "        return ObligationReason::NoAssistantText;",
+        "        == Some(HARNESS_CONTROL_MODEL)\n"
+        "    {\n"
+        "        return ObligationReason::HarnessControl;\n"
+        "    }\n"
+        "    let timestamp = record",
+        "        == Some(HARNESS_CONTROL_MODEL)\n"
+        "    {\n"
+        "        return ObligationReason::NoAssistantText;\n"
+        "    }\n"
+        "    let timestamp = record",
     ),
     (
         "partial-line-advances-the-cursor",
-        "        next_offset: base_offset + line_start as u64,",
-        "        next_offset: base_offset + bytes.len() as u64,",
+        "        // Deliberately NOT past the partial line: the next read frames it whole.\n"
+        "        next_offset: base_offset + line_start as u64,\n"
+        "    }\n"
+        "}",
+        "        // Deliberately NOT past the partial line: the next read frames it whole.\n"
+        "        next_offset: base_offset + bytes.len() as u64,\n"
+        "    }\n"
+        "}",
     ),
     (
         "oversized-boundary-widened",
@@ -422,8 +436,8 @@ def run_rust_mutations(repo_root: Path) -> list[str]:
         return [
             f"target file {OBLIGATION_REL} contains residual declared rust "
             f"mutation signature(s): {signatures}. Inspect it with "
-            f"`git diff -- {OBLIGATION_REL}`; restore it with "
-            f"`git checkout -- {OBLIGATION_REL}`"
+            f"`git diff -- {OBLIGATION_REL}`; restore only the mutated line for "
+            "each detected signature named above to its declared before-anchor text"
         ]
 
     survivors: list[str] = []

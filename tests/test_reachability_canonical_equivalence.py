@@ -323,7 +323,11 @@ class SyntheticRootTests(unittest.TestCase):
             self.assertProblem(problems, "before anchor absent")
             self.assertProblem(problems, "after text appears 1 time(s)")
             self.assertProblem(problems, f"git diff -- {GATE.OBLIGATION_REL}")
-            self.assertProblem(problems, f"git checkout -- {GATE.OBLIGATION_REL}")
+            self.assertProblem(
+                problems,
+                "restore only the mutated line for each detected signature named above",
+            )
+            self.assertFalse(any("git checkout" in problem for problem in problems))
 
     def test_rust_preflight_allows_an_unrelated_worktree_edit(self):
         with TemporaryDirectory() as tmp:
@@ -376,6 +380,14 @@ class LiveRepoTests(unittest.TestCase):
                     f"rust mutation {name!r} must anchor on exactly one site",
                 )
                 self.assertNotEqual(before, after)
+
+    def test_every_declared_rust_mutation_satisfies_preflight_anchor_invariant(self):
+        source = (REPO_ROOT / GATE.OBLIGATION_REL).read_text(encoding="utf-8")
+        # This invariant is the premise of run_rust_mutations's orphan preflight predicate.
+        for name, before, after in GATE.RUST_MUTATIONS:
+            with self.subTest(mutation=name):
+                self.assertGreaterEqual(source.count(before), 1)
+                self.assertEqual(source.count(after), 0)
 
     def test_every_declared_python_mutation_still_anchors_on_real_source(self):
         source = (REPO_ROOT / GATE.WATCHDOG_REL).read_text(encoding="utf-8")
