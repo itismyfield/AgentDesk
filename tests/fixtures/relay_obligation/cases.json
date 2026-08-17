@@ -1,0 +1,146 @@
+[
+  {
+    "name": "empty_chunk",
+    "generation_mtime_ns": 1786000000123456789,
+    "dev": 16777232,
+    "ino": 90210123,
+    "base_offset": 0,
+    "oversized_line_limit": 1048576,
+    "why": "A quiet tick reads zero bytes. Header only: 'no records' must not look like 'no output'."
+  },
+  {
+    "name": "basic_assistant",
+    "generation_mtime_ns": 1786000000123456789,
+    "dev": 16777232,
+    "ino": 90210123,
+    "base_offset": 0,
+    "oversized_line_limit": 1048576,
+    "why": "One assistant text record -> exactly one ASSISTANT_TEXT obligation over the whole line."
+  },
+  {
+    "name": "mixed_records",
+    "generation_mtime_ns": 1786000000123456789,
+    "dev": 16777232,
+    "ino": 90210123,
+    "base_offset": 0,
+    "oversized_line_limit": 1048576,
+    "why": "The five shapes a real transcript interleaves. Skips are recorded, not dropped."
+  },
+  {
+    "name": "crlf_frames",
+    "generation_mtime_ns": 1786000000123456789,
+    "dev": 16777232,
+    "ino": 90210123,
+    "base_offset": 0,
+    "oversized_line_limit": 1048576,
+    "why": "CRLF terminators and a bare CRLF blank line. Both terminator bytes stay inside [start,end)."
+  },
+  {
+    "name": "blank_and_whitespace_lines",
+    "generation_mtime_ns": 1786000000123456789,
+    "dev": 16777232,
+    "ino": 90210123,
+    "base_offset": 0,
+    "oversized_line_limit": 1048576,
+    "why": "Empty is BLANK_LINE; whitespace-only is not empty, so it is MALFORMED_JSON, not BLANK_LINE."
+  },
+  {
+    "name": "partial_line",
+    "generation_mtime_ns": 1786000000123456789,
+    "dev": 16777232,
+    "ino": 90210123,
+    "base_offset": 0,
+    "oversized_line_limit": 1048576,
+    "why": "A chunk ending mid-record: PARTIAL_LINE, and next_offset stops at its first byte."
+  },
+  {
+    "name": "partial_line_multibyte",
+    "generation_mtime_ns": 1786000000123456789,
+    "dev": 16777232,
+    "ino": 90210123,
+    "base_offset": 0,
+    "oversized_line_limit": 1048576,
+    "why": "The chunk boundary lands inside a multi-byte sequence. Still one PARTIAL_LINE, no decode attempt."
+  },
+  {
+    "name": "multibyte_text",
+    "generation_mtime_ns": 1786000000123456789,
+    "dev": 16777232,
+    "ino": 90210123,
+    "base_offset": 0,
+    "oversized_line_limit": 1048576,
+    "why": "Ranges are byte offsets, so a multi-byte answer's end is past its character count."
+  },
+  {
+    "name": "malformed_and_nonobject",
+    "generation_mtime_ns": 1786000000123456789,
+    "dev": 16777232,
+    "ino": 90210123,
+    "base_offset": 0,
+    "oversized_line_limit": 1048576,
+    "why": "Non-JSON, truncated JSON, JSON that is not an object, and a line that is not UTF-8 at all."
+  },
+  {
+    "name": "timestamp_shapes",
+    "generation_mtime_ns": 1786000000123456789,
+    "dev": 16777232,
+    "ino": 90210123,
+    "base_offset": 0,
+    "oversized_line_limit": 1048576,
+    "why": "Both halves must agree on which of these parse. This is the corpus's most divergence-prone case."
+  },
+  {
+    "name": "empty_and_blank_text",
+    "generation_mtime_ns": 1786000000123456789,
+    "dev": 16777232,
+    "ino": 90210123,
+    "base_offset": 0,
+    "oversized_line_limit": 1048576,
+    "why": "A text block that trims to nothing is not an obligation; one non-blank block among many is."
+  },
+  {
+    "name": "schema_type_blocks",
+    "generation_mtime_ns": 1786000000123456789,
+    "dev": 16777232,
+    "ino": 90210123,
+    "base_offset": 0,
+    "oversized_line_limit": 1048576,
+    "why": "Off-schema `text`/`content` types. Rust reads them as absent; Python must not raise."
+  },
+  {
+    "name": "rotation_identity",
+    "generation_mtime_ns": 1786000999888777666,
+    "dev": 16777233,
+    "ino": 42,
+    "base_offset": 0,
+    "oversized_line_limit": 1048576,
+    "why": "Byte-identical to basic_assistant under a different incarnation: the output must differ."
+  },
+  {
+    "name": "base_offset_shift",
+    "generation_mtime_ns": 1786000000123456789,
+    "dev": 16777232,
+    "ino": 90210123,
+    "base_offset": 4096,
+    "oversized_line_limit": 1048576,
+    "why": "Offsets are absolute file coordinates, not chunk-relative."
+  },
+  {
+    "name": "oversized_line",
+    "generation_mtime_ns": 1786000000123456789,
+    "dev": 16777232,
+    "ino": 90210123,
+    "base_offset": 0,
+    "oversized_line_limit": 64,
+    "why": "An unterminated run at or over the limit: OVERSIZED_LINE, and the cursor DOES advance."
+  },
+  {
+    "name": "oversized_after_complete",
+    "generation_mtime_ns": 1786000000123456789,
+    "dev": 16777232,
+    "ino": 90210123,
+    "base_offset": 0,
+    "oversized_line_limit": 64,
+    "why": "The limit is measured on the unterminated remainder alone, not on the whole chunk."
+  }
+]

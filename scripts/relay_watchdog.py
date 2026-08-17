@@ -1683,6 +1683,207 @@ def assistant_blocks_from_lines(lines) -> list[tuple[float, str]]:
     return out
 
 
+# ── Canonical obligation schema (#5071 T4-B2a = 4987 §-1.5 blocker B1′) ───────
+#
+# 4987 §2.4 states the hazard this section exists to close: the obligation term
+# is computed here AND in dcserver's `health/reachability/obligation.rs`, and
+# two definitions of "assistant text block" are two oracles, one of which is
+# then always wrong. So there is exactly ONE rule in this file — the ladder
+# below routes every classification decision through the same
+# `is_harness_control_assistant_record` / `parse_transcript_ts` /
+# `_assistant_blocks_from_record` primitives `assistant_blocks_from_lines`
+# already uses. Extending, not forking, is the whole point.
+#
+# What the schema adds over `(epoch, text)` is the half the counter-review
+# found missing: byte offsets, the file identity and generation the bytes came
+# from, and a REASON for lines that produce no block. Recording the skips is
+# what makes the equivalence gate load-bearing — an implementation that
+# silently dropped harness-control rows would otherwise still agree on the
+# obligation lines.
+#
+# `scripts/check_reachability_canonical_equivalence.py` compares this output
+# byte for byte against `tests/fixtures/relay_obligation/*.expected`, and the
+# Rust half is compared against the same files.
+
+CANONICAL_SCHEMA_HEADER = "relay_obligation_canonical_v1"
+
+# Trailer key. Not a number, so it can never be mistaken for a record row.
+CANONICAL_NEXT_OFFSET_KEY = "next_offset"
+
+# Mirrors `ObligationReason` in `health/reachability/obligation.rs`. The
+# spellings ARE the wire format, so they live in one table on each side.
+CANONICAL_REASONS = (
+    "ASSISTANT_TEXT",
+    "PARTIAL_LINE",
+    "OVERSIZED_LINE",
+    "BLANK_LINE",
+    "MALFORMED_JSON",
+    "NON_ASSISTANT_RECORD",
+    "HARNESS_CONTROL",
+    "UNPARSABLE_TIMESTAMP",
+    "NO_ASSISTANT_TEXT",
+)
+
+
+def _canonical_typed_content(record: dict) -> dict:
+    """Return ``record`` with its content blocks narrowed to the types the Rust
+    half accepts, so a wrong-typed field classifies instead of raising.
+
+    A JSONL transcript is not a schema-checked channel, and the two halves read
+    an off-schema field very differently. `obligation.rs` reads this shape
+    through typed accessors -- ``as_array`` for ``message.content``, ``as_str``
+    for a block's ``text`` -- where a value of the wrong type reads as ABSENT,
+    i.e. as no surviving text block. `_assistant_blocks_from_record` instead
+    iterates whatever ``content`` is and calls ``.strip()`` on whatever ``text``
+    is, so exactly two shapes make it raise where Rust answers
+    ``NO_ASSISTANT_TEXT``:
+
+    * ``{"type": "text", "text": 1}`` (any truthy non-string) -> ``AttributeError``;
+    * a non-iterable ``content`` such as ``5`` -> ``TypeError``.
+
+    One side classifying while the other unwinds is the divergence this whole
+    section exists to prevent, and it is the loudest kind: the comparison never
+    reaches a verdict at all.
+
+    The narrowing lives HERE, on the canonical path, and NOT in
+    `_assistant_blocks_from_record`: the watchdog's own callers keep the
+    behaviour they have today, and the rule for WHICH blocks count is still
+    asked exactly once, of that function. The empty string is not a choice made
+    here either -- it is what Rust's ``unwrap_or_default()`` already produces on
+    the same input. Pinned by the ``schema_type_blocks`` corpus case.
+    """
+
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return record
+    content = message.get("content")
+    blocks: list = []
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and not isinstance(block.get("text"), str):
+                block = {**block, "text": ""}
+            blocks.append(block)
+    return {**record, "message": {**message, "content": blocks}}
+
+
+def classify_canonical_line(line: bytes) -> str:
+    """Classify one line's bytes, terminator and one optional ``\\r`` removed.
+
+    The ladder, in the order both implementations ask it — the order is part of
+    the schema, because a record can satisfy several rungs at once (a harness
+    row with a broken timestamp, say) and the two halves only agree if they ask
+    in the same sequence:
+
+    1. empty -> ``BLANK_LINE``;
+    2. not JSON, or not UTF-8 -> ``MALFORMED_JSON``;
+    3. not a JSON object, or ``type != "assistant"`` -> ``NON_ASSISTANT_RECORD``;
+    4. ``message.model == "<synthetic>"`` -> ``HARNESS_CONTROL``;
+    5. ``timestamp`` does not parse -> ``UNPARSABLE_TIMESTAMP``;
+    6. no surviving text block -> ``NO_ASSISTANT_TEXT``;
+    7. otherwise -> ``ASSISTANT_TEXT``.
+
+    Rungs 3-7 are `_assistant_blocks_from_record` read as a decision tree
+    instead of as a filter: that function answers "which blocks", this one
+    answers "and if none, why not". Rung 6 asks it through
+    `_canonical_typed_content`, which is where an off-schema ``content``/``text``
+    stops being an exception and becomes the same answer Rust gives.
+    """
+    if not line:
+        return "BLANK_LINE"
+    try:
+        record = json.loads(line)
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError):
+        return "MALFORMED_JSON"
+    if not isinstance(record, dict) or record.get("type") != "assistant":
+        return "NON_ASSISTANT_RECORD"
+    if is_harness_control_assistant_record(record):
+        return "HARNESS_CONTROL"
+    if parse_transcript_ts(record.get("timestamp", "")) is None:
+        return "UNPARSABLE_TIMESTAMP"
+    # The one call that keeps this a decision tree over the SAME rule rather
+    # than a second implementation of it.
+    if not _assistant_blocks_from_record(_canonical_typed_content(record)):
+        return "NO_ASSISTANT_TEXT"
+    return "ASSISTANT_TEXT"
+
+
+def canonical_obligation_records(
+    data: bytes,
+    base_offset: int,
+    generation_mtime_ns: int,
+    dev: int,
+    ino: int,
+    oversized_line_limit: int,
+) -> tuple[list[tuple[int, int, int, int, int, str]], int]:
+    """Frame ``data`` (read from ``base_offset``) into canonical records.
+
+    Returns ``(records, next_offset)`` where each record is
+    ``(generation, start, end, dev, ino, reason)`` and ``next_offset`` is the
+    first byte NOT consumed:
+
+    * a chunk ending mid-line leaves ``next_offset`` at that line's FIRST byte,
+      so the next read frames it whole — half a JSON record is evidence of
+      nothing, and a ``PARTIAL_LINE`` is never an obligation;
+    * unless the unterminated run has already reached ``oversized_line_limit``,
+      in which case no bounded read could ever see its terminator and refusing
+      to pass it would freeze the cursor permanently. It is passed, classified
+      ``OVERSIZED_LINE``, and the caller reports the tick as incomplete.
+
+    Splitting on ``0x0A`` cannot land inside a UTF-8 multi-byte sequence, so
+    framing is codepoint-safe by construction and every offset is a byte offset.
+    """
+    records: list[tuple[int, int, int, int, int, str]] = []
+    line_start = 0
+    while True:
+        terminator = data.find(b"\n", line_start)
+        if terminator < 0:
+            break
+        content_end = terminator
+        if content_end > line_start and data[content_end - 1 : content_end] == b"\r":
+            content_end -= 1
+        records.append((
+            generation_mtime_ns,
+            base_offset + line_start,
+            base_offset + terminator + 1,
+            dev,
+            ino,
+            classify_canonical_line(data[line_start:content_end]),
+        ))
+        line_start = terminator + 1
+
+    remainder = len(data) - line_start
+    if remainder == 0:
+        return records, base_offset + len(data)
+    if remainder >= oversized_line_limit:
+        records.append((generation_mtime_ns, base_offset + line_start,
+                        base_offset + len(data), dev, ino, "OVERSIZED_LINE"))
+        return records, base_offset + len(data)
+    records.append((generation_mtime_ns, base_offset + line_start,
+                    base_offset + len(data), dev, ino, "PARTIAL_LINE"))
+    return records, base_offset + line_start
+
+
+def encode_canonical_records(
+    records: list[tuple[int, int, int, int, int, str]],
+    next_offset: int,
+) -> bytes:
+    """Serialize to the canonical byte stream the equivalence gate compares.
+
+    Header and trailer are emitted even for an empty record list: to a gate
+    that compares whole files, "no records" and "no output" must not look
+    alike. ``next_offset`` is INSIDE the compared bytes because every framing
+    rule here is a cursor rule -- a partial line holds the cursor, an oversized
+    run passes it -- and an encoding of the records alone cannot tell those
+    apart. Measured: without the trailer, the mutation that makes a partial
+    line advance the cursor survived the entire corpus.
+    """
+    out = [CANONICAL_SCHEMA_HEADER]
+    for generation, start, end, dev, ino, reason in records:
+        out.append(f"{generation}\t{start}\t{end}\t{dev}:{ino}\t{reason}")
+    out.append(f"{CANONICAL_NEXT_OFFSET_KEY}\t{next_offset}")
+    return ("\n".join(out) + "\n").encode("utf-8")
+
+
 def assistant_blocks(
     transcript: Path, trusted_root: Path | None = None
 ) -> TranscriptReadResult:

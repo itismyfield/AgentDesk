@@ -1,0 +1,5 @@
+{"type":"assistant","timestamp":"2026-08-17T01:02:03.456Z","message":{"model":"claude-opus-5","content":[{"type":"text","text":"first answer"}]}}
+{"type":"user","timestamp":"2026-08-17T01:02:04","message":{"content":"hi"}}
+{"type":"assistant","timestamp":"2026-08-17T01:02:03.456Z","message":{"model":"<synthetic>","content":[{"type":"text","text":"synthetic banner"}]}}
+{"type":"assistant","timestamp":"2026-08-17T01:02:06","message":{"model":"claude-opus-5","content":[{"type":"tool_use","name":"Bash","input":{}}]}}
+{"type":"assistant","timestamp":"2026-08-17T01:02:03.456Z","message":{"model":"claude-opus-5","content":[{"type":"text","text":"second answer"}]}}

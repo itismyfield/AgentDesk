@@ -10,7 +10,7 @@
 //! The `#![allow(dead_code)]` below is the honest spelling of exactly that: the
 //! blanket comes off when B2 lands the first consumer.
 //!
-//! What lands here is the vocabulary plus the two file-facing primitives every
+//! What lands here is the vocabulary plus the file-facing primitives every
 //! later slice reads through:
 //!
 //! * [`verdict`] — the `ReachabilityVerdict` type set (4987 §-1.3b, §4.1) and
@@ -19,6 +19,12 @@
 //!   4987 §-1.3, fail-closed to `Unknown{TranscriptUnresolved}`.
 //! * [`tail`] — the bounded incremental byte reader the obligation prober will
 //!   sit on, with the 1 MiB/tick cap and file-identity revalidation.
+//! * [`obligation`] — the canonical `(generation, start, end, identity,
+//!   reason)` framing of 4987 §-1.5 (#5071 T4-B2a), whose Python twin is
+//!   `relay_watchdog.py::canonical_obligation_records` and whose equivalence
+//!   with it is gated byte for byte against the golden corpus in
+//!   `tests/fixtures/relay_obligation/`. It frames bytes a caller already
+//!   read; it opens no file and reads no clock.
 //!
 //! # Row independence (4987 §-1.5 I14)
 //!
@@ -45,5 +51,6 @@
 #![allow(dead_code)]
 
 pub(in crate::services::discord) mod discovery;
+pub(in crate::services::discord) mod obligation;
 pub(in crate::services::discord) mod tail;
 pub(in crate::services::discord) mod verdict;

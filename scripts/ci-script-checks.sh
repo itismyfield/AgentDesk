@@ -157,6 +157,25 @@ echo "=== Reachability row-independence + change-surface gate (#5071 T4-B1) ==="
 "$PYTHON" scripts/check_reachability_row_independence.py
 "$PYTHON" -m unittest tests.test_reachability_row_independence
 
+echo "=== Reachability canonical Rust<->Python equivalence gate (#5071 T4-B2a) ==="
+# 4987 blocker B1': the obligation rule has two implementations, and two
+# definitions of "assistant text block" are two oracles of which one is always
+# wrong. Both are compared byte for byte against the golden corpus in
+# tests/fixtures/relay_obligation/ -- this half checks Python, and the Rust half
+# is the obligation lane's corpus test in `just test-non-pg`. The corpus being a
+# THIRD PARTY to both is what stops "we drifted together" from passing.
+#
+# The invocation below also runs the PYTHON half of the mutation runner in
+# process (each declared mutation edits one implementation and must turn its
+# side red) and lints the T4-B2a inactivity invariant: no consumer outside the
+# tree beyond its module declaration, no warn/fail bound inside it. The RUST
+# half of the mutation runner needs a compiler and runs under `--with-rust`
+# (see `just reachability-mutation-runner`); what CI holds instead is the lane,
+# plus the unittest below, which fails if a declared Rust mutation stops
+# anchoring on real source and would therefore be silently skipped.
+"$PYTHON" scripts/check_reachability_canonical_equivalence.py
+"$PYTHON" -m unittest tests.test_reachability_canonical_equivalence
+
 echo "=== Merge automation policy tests (#4250) ==="
 node --test policies/__tests__/merge-automation.test.js
 
