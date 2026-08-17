@@ -311,7 +311,13 @@ fn delivery_owner_context_path(provider: &ProviderKind, channel_id: u64) -> Opti
 // dir, still outside the inflight scan path.
 // ---------------------------------------------------------------------------
 
-pub(in crate::services::discord::outbound) struct DeliveryRecordLock {
+// #5071 T4-B2 widened this pair from `outbound` to the discord module so the
+// reachability obligation ledger reuses this flock instead of introducing a
+// second lock mechanism (4987 §5.2 storage rule). Widening a visibility is not
+// a new caller contract: the lock's semantics, its `.json.lock` sidecar path
+// and its Drop-unlock are untouched, and the two existing writers are
+// unchanged.
+pub(in crate::services::discord) struct DeliveryRecordLock {
     _file: fs::File,
 }
 
@@ -326,7 +332,7 @@ impl Drop for DeliveryRecordLock {
     }
 }
 
-pub(in crate::services::discord::outbound) fn lock_record_path(
+pub(in crate::services::discord) fn lock_record_path(
     record_path: &Path,
 ) -> Result<DeliveryRecordLock, String> {
     let lock_path = record_path.with_extension("json.lock");
