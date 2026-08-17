@@ -3,12 +3,17 @@
 //! Production now resolves and tails each registered watcher transcript and
 //! records canonical obligations plus its resume cursor in the durable ledger.
 //! `health/snapshot.rs` additionally reads [`divergence`] for a descriptive
-//! log record. This is observation only: no value here changes relay delivery,
-//! recovery, or health. T4-B6 owns composition and judgment authority.
+//! log record. Everything except [`composite`] is observation: no value in the
+//! other modules changes relay delivery, recovery, or health on its own.
 //!
 //! What lands here is the vocabulary plus the file-facing primitives every
 //! later slice reads through:
 //!
+//! * [`composite`] — T4-B6's judgment layer: the Tier A producer, 4987
+//!   §4.3-1's `worst(ReachabilityVerdict, ExternalRelayVerdict)`, and the
+//!   `RelayVerdictSource` switch that decides whether the product may change
+//!   the reported health polarity. It is the only module here with any
+//!   authority, and that authority is over polarity alone.
 //! * [`verdict`] — the `ReachabilityVerdict` type set (4987 §-1.3b, §4.1) and
 //!   its polarity, with no composition rule and no threshold.
 //! * [`discovery`] — the row-independent transcript resolution ladder of
@@ -45,6 +50,7 @@
 //! surface here is `authorizes_destructive_action()` returning false on every
 //! variant, and a source lint. It is not a sealed capability.
 
+pub(in crate::services::discord) mod composite;
 pub(in crate::services::discord) mod discovery;
 pub(in crate::services::discord) mod divergence;
 pub(in crate::services::discord) mod external_verdict;

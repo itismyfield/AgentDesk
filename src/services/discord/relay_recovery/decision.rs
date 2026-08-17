@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::services::discord::health::reachability::verdict::ReachabilityVerdict;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(in crate::services::discord) enum RelayRecoveryActionKind {
@@ -8,6 +10,11 @@ pub(in crate::services::discord) enum RelayRecoveryActionKind {
     ClearOrphanPendingToken,
     ReattachWatcher,
     DrainPendingQueue,
+    /// #5071 T4-B6 (4987 §4.4 / §7.1): the relay looks unreachable while the
+    /// structural signals still read as a live foreground stream. Observation
+    /// with a distinct label, so the operator sees the contradiction; it
+    /// touches nothing and is never auto-heal eligible.
+    ReportRelayUnreachable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46,6 +53,31 @@ impl RelayRecoveryActionKind {
             Self::ClearOrphanPendingToken => "clear_orphan_pending_token",
             Self::ReattachWatcher => "reattach_watcher",
             Self::DrainPendingQueue => "drain_pending_queue",
+            Self::ReportRelayUnreachable => "report_relay_unreachable",
+        }
+    }
+
+    /// Whether applying this action mutates runtime state a live turn depends
+    /// on — 4987 §7.1's destructive set as this planner's actions map onto it.
+    ///
+    /// Conservative on purpose. `ReattachWatcher` and `DrainPendingQueue` are
+    /// counted as destructive because their `relay_recovery::apply` arms both
+    /// take effect on runtime state — a watcher respawn/rebind and a scheduled
+    /// queue drain — even though neither cancels a turn by itself. False is
+    /// reserved for the two arms whose apply path returns `"skipped"` and
+    /// writes nothing. The arms are spelled out rather than collapsed so a new
+    /// action has to choose a side before it compiles.
+    ///
+    /// This classifies the ACTION, not the apply path's own guards: an action
+    /// marked destructive here is still subject to every eligibility and budget
+    /// check in `relay_recovery::apply`.
+    pub(in crate::services::discord) fn is_destructive(self) -> bool {
+        match self {
+            Self::ObserveOnly | Self::ReportRelayUnreachable => false,
+            Self::ClearStaleThreadProof
+            | Self::ClearOrphanPendingToken
+            | Self::ReattachWatcher
+            | Self::DrainPendingQueue => true,
         }
     }
 }
@@ -415,5 +447,231 @@ pub(in crate::services::discord) fn plan_relay_recovery(
         evidence: evidence_from_snapshot(snapshot),
         affected: affected_from_snapshot(snapshot),
         auto_heal: auto_heal_metadata(snapshot, action, eligible, skipped_reason, now_ms),
+    }
+}
+
+/// 4987 §4.4's `(RelayStallState, ReachabilityVerdict)` planner — #5071 T4-B6.
+///
+/// Structured as an override on top of [`plan_relay_recovery`] rather than as a
+/// second decision tree, and the override has exactly one direction: it may
+/// replace the structural action with a NON-destructive one and drop
+/// eligibility. It never selects an action the structural planner did not, and
+/// it never raises eligibility. That shape is what makes the 4987 §7.1 / I15
+/// rule — reachability authorizes no destructive action — a property of the
+/// function instead of a property of the arms one at a time, and
+/// `reachability_never_selects_or_enables_a_destructive_action` asserts it over
+/// the full cross product.
+///
+/// The only combination that currently changes anything is 4987 §4.4's named
+/// one: a live-looking foreground stream whose relay verdict is `Unreachable`.
+/// That is the #4986 형상1 contradiction — the structural signals report a
+/// healthy stream while no obligation is being covered — and it earns a label,
+/// not a cleanup.
+///
+/// **No production path calls this yet.** T4-B6 lands the composed verdict on
+/// the health surface (`health::snapshot`) and this planner beside it; routing
+/// the recovery entry points in `relay_recovery` through it needs a reachability
+/// operand at those call sites, which is a later slice. Until then the runtime
+/// keeps calling [`plan_relay_recovery`] and the reachability tier changes no
+/// recovery action at all.
+pub(in crate::services::discord) fn plan_relay_recovery_under_reachability(
+    snapshot: &RelayHealthSnapshot,
+    relay_stall_state: RelayStallState,
+    reachability: &ReachabilityVerdict,
+    now_ms: i64,
+) -> RelayRecoveryDecision {
+    let mut decision = plan_relay_recovery(snapshot, relay_stall_state, now_ms);
+    let contradiction = matches!(relay_stall_state, RelayStallState::ActiveForegroundStream)
+        && matches!(reachability, ReachabilityVerdict::Unreachable { .. });
+    if contradiction {
+        decision.action = RelayRecoveryActionKind::ReportRelayUnreachable;
+        decision.reason =
+            "foreground stream looks live while no relay obligation is covered; observation only";
+        decision.auto_heal.eligible = false;
+        decision.auto_heal.skipped_reason = Some("reachability_observation_only");
+    }
+    decision
+}
+
+#[cfg(test)]
+mod reachability_authority_tests {
+    use super::*;
+    use crate::services::discord::health::reachability::verdict::{
+        ReachabilityUnknownReason, TransportUnknownEvidence,
+    };
+
+    fn every_stall_state() -> [RelayStallState; 8] {
+        [
+            RelayStallState::Healthy,
+            RelayStallState::ActiveForegroundStream,
+            RelayStallState::ExplicitBackgroundWork,
+            RelayStallState::TmuxAliveRelayDead,
+            RelayStallState::StaleThreadProof,
+            RelayStallState::OrphanPendingToken,
+            RelayStallState::UnpairedActiveToken,
+            RelayStallState::QueueBlocked,
+        ]
+    }
+
+    fn every_verdict() -> Vec<ReachabilityVerdict> {
+        vec![
+            ReachabilityVerdict::Reachable,
+            ReachabilityVerdict::Degraded {
+                oldest_unsatisfied_age_secs: 300,
+                uncovered_ranges: 2,
+            },
+            ReachabilityVerdict::TransportUnknown {
+                since_secs: 700,
+                evidence: TransportUnknownEvidence::RestartBoundaryCrossed,
+            },
+            ReachabilityVerdict::TransportUnknown {
+                since_secs: 700,
+                evidence: TransportUnknownEvidence::PlaceholderPresent,
+            },
+            ReachabilityVerdict::TransportUnknown {
+                since_secs: 700,
+                evidence: TransportUnknownEvidence::UnreleasedDeliveryLease,
+            },
+            ReachabilityVerdict::Unreachable {
+                oldest_unsatisfied_age_secs: 900,
+                uncovered_ranges: 4,
+            },
+            ReachabilityVerdict::unknown(ReachabilityUnknownReason::TranscriptUnresolved, 30),
+            ReachabilityVerdict::unknown(
+                ReachabilityUnknownReason::TranscriptCoordinateDivergence,
+                30,
+            ),
+            ReachabilityVerdict::unknown(ReachabilityUnknownReason::RowlessActiveTurn, 30),
+            ReachabilityVerdict::unknown(ReachabilityUnknownReason::ReadTruncated, 30),
+            ReachabilityVerdict::unknown(ReachabilityUnknownReason::ReceiptStoreUnreadable, 30),
+        ]
+    }
+
+    /// A snapshot deliberately shaped so the structural planner finds live
+    /// evidence everywhere: every destructive branch's eligibility predicate
+    /// reads this as "a turn is running", so any destructive action or raised
+    /// eligibility appearing in the reachability-aware planner came from the
+    /// reachability operand and nothing else.
+    fn live_snapshot() -> RelayHealthSnapshot {
+        let mut snapshot = quiet_snapshot();
+        snapshot.tmux_session = Some("agentdesk-codex-42".to_string());
+        snapshot.tmux_alive = Some(true);
+        snapshot.watcher_attached = true;
+        snapshot.watcher_owns_live_relay = true;
+        snapshot.bridge_inflight_present = true;
+        snapshot.mailbox_has_cancel_token = true;
+        snapshot.active_turn = RelayActiveTurn::Foreground;
+        snapshot
+    }
+
+    /// The mirror shape: nothing live anywhere, so the structural planner takes
+    /// its most permissive branches. Running the cross product over both ends
+    /// is what makes "reachability never enables anything" a claim about the
+    /// override rather than about one convenient fixture.
+    fn quiet_snapshot() -> RelayHealthSnapshot {
+        RelayHealthSnapshot {
+            provider: "codex".to_string(),
+            channel_id: 42,
+            active_turn: RelayActiveTurn::None,
+            tmux_session: None,
+            tmux_alive: None,
+            watcher_attached: false,
+            watcher_attached_stale: false,
+            watcher_owner_channel_id: None,
+            watcher_owns_live_relay: false,
+            bridge_inflight_present: false,
+            bridge_current_msg_id: None,
+            mailbox_has_cancel_token: false,
+            mailbox_active_user_msg_id: None,
+            mailbox_turn_started_at_ms: None,
+            mailbox_turn_age_secs: None,
+            queue_depth: 0,
+            pending_discord_callback_msg_id: None,
+            pending_thread_proof: false,
+            parent_channel_id: None,
+            thread_channel_id: None,
+            last_relay_ts_ms: None,
+            last_relay_age_secs: None,
+            last_outbound_activity_ms: None,
+            last_capture_offset: None,
+            last_relay_offset: 0,
+            unread_bytes: None,
+            desynced: false,
+            stale_thread_proof: false,
+            unpaired_active_token_reconfirmed: false,
+        }
+    }
+
+    /// The I15 mutation lock. Adding any branch that lets a reachability
+    /// verdict pick a destructive action — or re-enable one the structural
+    /// planner refused — fails here, for every (stall state, verdict) pair.
+    #[test]
+    fn reachability_never_selects_or_enables_a_destructive_action() {
+        for snapshot in [quiet_snapshot(), live_snapshot()] {
+            for stall_state in every_stall_state() {
+                let structural = plan_relay_recovery(&snapshot, stall_state, 1_000);
+                for verdict in every_verdict() {
+                    let composed = plan_relay_recovery_under_reachability(
+                        &snapshot,
+                        stall_state,
+                        &verdict,
+                        1_000,
+                    );
+                    if composed.action.is_destructive() {
+                        assert_eq!(
+                            composed.action, structural.action,
+                            "reachability introduced destructive {:?} for {stall_state:?}/{verdict:?}",
+                            composed.action
+                        );
+                    }
+                    assert!(
+                        !(composed.auto_heal.eligible && !structural.auto_heal.eligible),
+                        "reachability raised auto-heal eligibility for {stall_state:?}/{verdict:?}"
+                    );
+                    assert!(
+                        !verdict.authorizes_destructive_action(),
+                        "no reachability verdict may claim destructive authority"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 4987 §4.4's named combination, and its blast radius: only this pair
+    /// changes, and what it changes to writes nothing.
+    #[test]
+    fn foreground_stream_with_unreachable_relay_reports_without_acting() {
+        let snapshot = live_snapshot();
+        let unreachable = ReachabilityVerdict::Unreachable {
+            oldest_unsatisfied_age_secs: 900,
+            uncovered_ranges: 4,
+        };
+        let decision = plan_relay_recovery_under_reachability(
+            &snapshot,
+            RelayStallState::ActiveForegroundStream,
+            &unreachable,
+            1_000,
+        );
+        assert_eq!(
+            decision.action,
+            RelayRecoveryActionKind::ReportRelayUnreachable
+        );
+        assert!(!decision.action.is_destructive());
+        assert!(!decision.auto_heal.eligible);
+
+        // Every other stall state keeps the structural answer under the same
+        // verdict, so this override is one pair wide and not a general
+        // reachability veto.
+        for stall_state in every_stall_state() {
+            if matches!(stall_state, RelayStallState::ActiveForegroundStream) {
+                continue;
+            }
+            assert_eq!(
+                plan_relay_recovery_under_reachability(&snapshot, stall_state, &unreachable, 1_000)
+                    .action,
+                plan_relay_recovery(&snapshot, stall_state, 1_000).action,
+                "{stall_state:?} must keep its structural action"
+            );
+        }
     }
 }

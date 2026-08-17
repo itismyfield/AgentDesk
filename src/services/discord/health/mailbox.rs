@@ -9,6 +9,7 @@ use crate::services::turn_orchestrator::ChannelMailboxSnapshot;
 use crate::services::turn_orchestrator::registry_purge::MailboxPurgeOutcome;
 
 use super::HealthRegistry;
+use super::reachability::composite::RelayVerdictReport;
 use super::recovery::ProviderMailboxState;
 use super::stall_verdict::StallVerdict;
 
@@ -28,6 +29,10 @@ pub(super) struct MailboxHealthSnapshot {
     pub(super) process_present: bool,
     pub(super) active_dispatch_present: bool,
     pub(super) stall_shadow_verdict: Option<StallVerdict>,
+    /// #5071 T4-B6 (4987 §4.4): the composed relay verdict for this channel.
+    /// Published in both `RelayVerdictSource` modes; its
+    /// `governs_health_polarity` field says whether it also decided anything.
+    pub(super) reachability: RelayVerdictReport,
     pub(super) relay_stall_state: RelayStallState,
     pub(super) relay_health: RelayHealthSnapshot,
 }

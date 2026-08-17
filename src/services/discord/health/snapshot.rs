@@ -4,6 +4,9 @@ use serde::Serialize;
 use super::liveness_authority::CaptureCoordinateObservation;
 use super::mailbox::MailboxHealthSnapshot;
 use super::provider_probe::{self, ProviderHealthSnapshot};
+use super::reachability::composite::{
+    RelayVerdictProbe, RelayVerdictReport, observe_relay_verdict, relay_verdict_source,
+};
 use super::redaction;
 use super::session_enrichment::SessionEnrichment;
 use super::stall_verdict;
@@ -685,6 +688,10 @@ async fn build_health_snapshot_with_options(
     let mut recovery_duration = 0.0f64;
     let mut mailbox_entries = Vec::new();
     let mut provider_active_turns = 0usize;
+    // #5071 T4-B6: read the 4987 §5.1 switch once per snapshot, so every entry
+    // in one response answers under the same authority even if the live config
+    // is edited mid-poll.
+    let composite_governs_polarity = relay_verdict_source().governs_health_polarity();
 
     if providers.is_empty() {
         degraded_reasons.push("no_providers_registered".to_string());
@@ -772,6 +779,61 @@ async fn build_health_snapshot_with_options(
                     &relay_health,
                     registry.started_at_unix(),
                 );
+                // #5071 T4-B6 (4987 §4.3/§4.4): compose the relay verdict from
+                // the durable T4-B2c ledger, the T4-B3 receipt projection and
+                // the T4-B5 sidecar, and publish it. Whether it may also change
+                // this entry's polarity is the `RelayVerdictSource` switch,
+                // read once per poll below. The row's `output_path` is passed
+                // to the divergence comparison only, matching the descriptive
+                // call above it; nothing here resolves or tails through it.
+                let relay_verdict = observe_relay_verdict(RelayVerdictProbe {
+                    provider: provider_kind.as_ref(),
+                    channel_id: channel.get(),
+                    row_output_path: session
+                        .inflight
+                        .as_ref()
+                        .and_then(|state| state.output_path.as_deref()),
+                    registry_output_path: session.watcher_output_path.as_deref(),
+                    // 4987 §-1.4's second alive witness: the pane is up, the
+                    // mailbox holds no turn, and the tail has nothing waiting,
+                    // so a transcript that is not growing is idle rather than
+                    // gone. Anything short of all three leaves the growth
+                    // check as the only witness.
+                    pane_idle_confirmed: tmux_present
+                        && matches!(relay_health.active_turn, RelayActiveTurn::None)
+                        && relay_health.unread_bytes.unwrap_or(0) == 0,
+                    // The RECONFIRMED unpaired token, not the raw one: a second
+                    // mailbox snapshot and inflight read still saw the same
+                    // active episode without a durable row, so an ordinary
+                    // start-of-turn race between the token and the row write
+                    // does not spend a tick as `Unknown{RowlessActiveTurn}`.
+                    rowless_active_turn: unpaired_active_token_reconfirmed,
+                    placeholder_present: relay_health.pending_discord_callback_msg_id.is_some(),
+                    now_epoch_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
+                    process_started_at_epoch_ms: registry
+                        .started_at_unix()
+                        .max(0)
+                        .saturating_mul(1_000)
+                        as u64,
+                });
+                if composite_governs_polarity && !relay_verdict.permits_health() {
+                    // One reason per non-green CHANNEL, not per provider: the
+                    // channel is what an operator has to look at, and the same
+                    // response already carries one mailbox entry per channel.
+                    // `Degraded`, never `Unhealthy`: 4987 §4.4 asks a
+                    // non-`Reachable` relay to set the degraded flag, and taking
+                    // the process out of HTTP readiness is authority this switch
+                    // was not given.
+                    degraded_reasons.push(format!(
+                        "relay_verdict_{}_{}_{}",
+                        relay_verdict.label(),
+                        entry.name,
+                        channel.get()
+                    ));
+                    status = status.worsen(HealthStatus::Degraded);
+                }
+                let reachability =
+                    RelayVerdictReport::of(&relay_verdict, composite_governs_polarity);
                 mailbox_entries.push(MailboxHealthSnapshot {
                     provider: entry.name.clone(),
                     channel_id: channel.get(),
@@ -790,6 +852,7 @@ async fn build_health_snapshot_with_options(
                     process_present,
                     active_dispatch_present: session.active_dispatch_present(),
                     stall_shadow_verdict,
+                    reachability,
                     relay_stall_state,
                     relay_health,
                 });

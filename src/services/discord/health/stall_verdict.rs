@@ -430,6 +430,13 @@ mod tests {
         StallWatchdogLivenessAction, StallWatchdogLivenessDecision, StallWatchdogLivenessEvidence,
     };
     use super::*;
+    use crate::services::discord::health::reachability::composite::{
+        RelayVerdictReport, compose_relay_verdict,
+    };
+    use crate::services::discord::health::reachability::external_verdict::ExternalRelayVerdict;
+    use crate::services::discord::health::reachability::verdict::{
+        ReachabilityUnknownReason, ReachabilityVerdict,
+    };
     use crate::services::discord::inflight::{InflightTurnState, RelayOwnerKind, TurnSource};
     use crate::services::discord::relay_health::RelayStallState;
 
@@ -1351,11 +1358,33 @@ mod tests {
             process_present: false,
             active_dispatch_present: false,
             stall_shadow_verdict: None,
+            reachability: RelayVerdictReport::of(
+                &compose_relay_verdict(
+                    ReachabilityVerdict::unknown(
+                        ReachabilityUnknownReason::TranscriptUnresolved,
+                        30,
+                    ),
+                    ExternalRelayVerdict::Unknown,
+                ),
+                false,
+            ),
             relay_stall_state: RelayStallState::Healthy,
             relay_health: relay_fixture(),
         };
 
         let serialized = serde_json::to_value(mailbox).expect("serialize health mailbox");
         assert_eq!(serialized["stall_shadow_verdict"], serde_json::Value::Null);
+        // #5071 T4-B6 (4987 §4.4): the composed verdict is published on the
+        // same detail entry, and under `Structural` it announces that it
+        // decided nothing.
+        assert_eq!(serialized["reachability"]["verdict"], "unknown");
+        assert_eq!(
+            serialized["reachability"]["reason"],
+            "transcript_unresolved"
+        );
+        assert_eq!(
+            serialized["reachability"]["governs_health_polarity"],
+            serde_json::Value::Bool(false)
+        );
     }
 }

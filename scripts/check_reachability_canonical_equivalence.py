@@ -114,7 +114,15 @@ SCOPE OF THIS SLICE
 -------------------
 T4-B2a is the canonical framing plus this machine. The durable obligation
 ledger is T4-B2b and T4-B2c adds the observation task as the tree's first
-runtime consumer. A reader of verdicts remains T4-B6 work behind ``G-T4``.
+runtime consumer. T4-B4 sanctioned one descriptive `divergence` reader.
+
+T4-B6 is the slice that lands judgment: it names four ``JUDGMENT_TREE_CONSUMERS``
+that may read the composed verdict, and it gives the age bounds §10 deferred to
+``reachability/composite.rs`` alone. What check 3 keeps enforcing after that is
+narrower but not weaker — no file outside those allowances may name the tree, no
+allowance may rename or re-export it, no consumer may reach past ``composite``
+into the ledger or the resolution ladder, and no other module in the tree may
+carry a bound.
 """
 
 from __future__ import annotations
@@ -169,10 +177,34 @@ ALLOWED_TREE_REFERENCES = (
 # lint-not-type-proof downgrade 4987 §-1.5 records for row independence.
 #
 #   * `health/snapshot.rs` — #5071 T4-B4 (4987 S4): the descriptive
-#     row-coordinate divergence record. It reads `divergence` only; no verdict
-#     reader exists until T4-B6, behind `G-T4`.
+#     row-coordinate divergence record, plus #5071 T4-B6's composed verdict.
 SANCTIONED_TREE_CONSUMERS = {
     "src/services/discord/health/snapshot.rs",
+}
+# #5071 T4-B6 (4987 S3): the slice that lands judgment authority. These files
+# may spell the composition, verdict, and external-verdict paths that every
+# earlier slice was refused, and — unlike the T4-B4 sanction above — they may
+# name those paths in a `use` item, because a tree type appearing as a struct
+# FIELD has no fully-qualified spelling that survives `cargo fmt`.
+#
+# The two laundering shapes the T4-B4 rule was written against are still
+# refused: an `as` rename and a `pub use` re-export both republish a tree item
+# under a name `names_tree` cannot recognise, so a sibling could then read the
+# tree while this gate reports no consumer. A plain private `use` launders
+# nothing — the importing file is still counted as a consumer here, and the item
+# is not visible past it.
+#
+#   * `health/snapshot.rs` — composes and publishes the verdict per channel and
+#     applies the `RelayVerdictSource` polarity switch.
+#   * `health/mailbox.rs` — carries the published report as a detail field.
+#   * `health/stall_verdict.rs` — its detail-serialization test builds that field.
+#   * `relay_recovery/decision.rs` — the 4987 §4.4
+#     `(RelayStallState, ReachabilityVerdict)` planner and its I15 mutation lock.
+JUDGMENT_TREE_CONSUMERS = {
+    "src/services/discord/health/snapshot.rs",
+    "src/services/discord/health/mailbox.rs",
+    "src/services/discord/health/stall_verdict.rs",
+    "src/services/discord/relay_recovery/decision.rs",
 }
 # A module reference, not a word: an identifier that merely contains the
 # substring (`run_bot_spawn_reachability_observation`, say) is not a reader, and
@@ -197,6 +229,26 @@ OBSERVATION_REFERENCE_RE = re.compile(
     r"reachability\s*::\s*(?:ledger|observation)\s*::"
 )
 SANCTIONED_REFERENCE_RE = re.compile(r"reachability\s*::\s*divergence\s*::")
+# The submodules #5071 T4-B6 unlocks, on top of `divergence`. `ledger` and
+# `discovery` are absent on purpose: a judgment consumer reads the composed
+# product through `composite`, and reaching for the ledger or the resolution
+# ladder directly would rebuild the classification outside the one module that
+# owns it.
+JUDGMENT_REFERENCE_RE = re.compile(
+    r"reachability\s*::\s*(?:composite|verdict|external_verdict|divergence)\s*::"
+)
+# `use ... as name;` renames a segment; `pub use ...` re-exports it. Both are the
+# laundering the consumer scan cannot follow, so both stay refused even for a
+# judgment consumer.
+USE_RENAME_RE = re.compile(r"\bas\b")
+PUB_USE_RE = re.compile(r"\bpub\b")
+# `USE_ITEM_RE` starts at `use`, so a `pub use` item's visibility modifier falls
+# OUTSIDE its match and a re-export reads as a plain import. This variant takes
+# the optional `pub`/`pub(in ...)` prefix with it, which is what lets
+# `judgment_read_problems` see the difference.
+QUALIFIED_USE_ITEM_RE = re.compile(
+    r"(?:\bpub\b\s*(?:\([^)]*\)\s*)?)?\buse\b[^;]*;", re.DOTALL
+)
 # `check_reachability_row_independence.py` splits `use` items exactly this way,
 # and for the same reason: the launderings a lexical scan CAN see are a bare
 # trailing segment and an `as` rename, and both live inside a `use` item.
@@ -204,7 +256,21 @@ USE_ITEM_RE = re.compile(r"\buse\b[^;]*;", re.DOTALL)
 
 # 4987 §10 lists hardcoding a threshold at S1 as NO-GO: the bounds are the
 # OUTPUT of the 30-day observation this series starts.
-FORBIDDEN_BOUND_RE = re.compile(r"\b(warn_bound|fail_bound)\b")
+#
+# Case-insensitive and without word boundaries, so `OBLIGATION_WARN_BOUND_SECS`
+# and `warnBound` are the same finding as `warn_bound`. The original `\b(...)\b`
+# form let a rename walk straight past a gate whose whole point is the substance,
+# and #5071 T4-B6 landing real bounds is exactly when that would have happened
+# silently.
+FORBIDDEN_BOUND_RE = re.compile(r"warn_?bound|fail_?bound", re.IGNORECASE)
+# #5071 T4-B6 (4987 S3) is the slice §10 defers the bounds TO, and `composite` is
+# the module that owns them. The scan still runs over every other file in the
+# tree: an observation module growing its own threshold is the shape §10 rules
+# out, and moving a bound out of `composite` would be a second judgment site.
+BOUND_OWNER_RELS = {
+    "src/services/discord/health/reachability/composite.rs",
+    "src/services/discord/health/reachability/composite_tests.rs",
+}
 
 
 def _load_neutralizer():
@@ -661,6 +727,60 @@ def qualified_read_only_problems(rel: str, cleaned: str) -> list[str]:
     return problems
 
 
+def judgment_read_problems(rel: str, cleaned: str) -> list[str]:
+    """Hold a #5071 T4-B6 judgment consumer to unlaundered tree reads.
+
+    Two obligations, narrower than `qualified_read_only_problems` on the `use`
+    axis and wider on the path axis. First, a `use` item naming the tree may not
+    rename (`as`) or re-export (`pub use`) it: those are the two spellings that
+    put a tree item behind a name `names_tree` cannot see, which is what would
+    let a sibling read the tree while this gate reports no consumer. Second,
+    every MODULE REFERENCE outside a `use` item must begin one of the paths
+    T4-B6 unlocks; `ledger::` and `discovery::` stay refused here, so a consumer
+    cannot rebuild the classification outside `composite`.
+
+    Outside a `use` item this scans for module references (`reachability::`,
+    `mod reachability`), not for the bare word: 4987 §4.4 names the published
+    detail object `reachability`, so these files legitimately carry a field, a
+    binding, and a parameter with that name, and none of them reads anything.
+    Inside a `use` item the bare-name scan still applies, because that is where
+    a rename can hide.
+    """
+
+    problems: list[str] = []
+    use_spans = [
+        (item.start(), item.end(), item.group(0))
+        for item in QUALIFIED_USE_ITEM_RE.finditer(cleaned)
+        if TREE_NAME_RE.search(item.group(0)) is not None
+    ]
+    for start, _end, text in use_spans:
+        line = cleaned.count("\n", 0, start) + 1
+        if USE_RENAME_RE.search(text) is not None:
+            problems.append(
+                f"{rel}:{line}: a judgment consumer may import the tree but may "
+                "not rename it — an `as` alias republishes a tree item under a "
+                "name this gate cannot follow"
+            )
+        if PUB_USE_RE.search(text) is not None:
+            problems.append(
+                f"{rel}:{line}: a judgment consumer may import the tree but may "
+                "not re-export it — a `pub use` hands the tree to files that "
+                "hold no allowance here"
+            )
+    for match in TREE_REFERENCE_RE.finditer(cleaned):
+        if any(start <= match.start() < end for start, end, _ in use_spans):
+            continue
+        if JUDGMENT_REFERENCE_RE.match(cleaned, match.start()) is None:
+            line = cleaned.count("\n", 0, match.start()) + 1
+            problems.append(
+                f"{rel}:{line}: #5071 T4-B6 unlocks the `composite`, `verdict`, "
+                "`external_verdict` and `divergence` paths for this file. Any "
+                "other tree path — the ledger and the resolution ladder above "
+                "all — belongs to the composition module, not to its consumers"
+            )
+    return problems
+
+
 def check_no_judgment_authority(repo_root: Path) -> list[str]:
     problems: list[str] = []
 
@@ -674,13 +794,27 @@ def check_no_judgment_authority(repo_root: Path) -> list[str]:
         if ambiguous:
             problems.append(f"{rel}: unlexable source; failing closed")
             continue
-        for match in FORBIDDEN_BOUND_RE.finditer(cleaned):
-            line = cleaned.count("\n", 0, match.start()) + 1
-            problems.append(
-                f"{rel}:{line}: `{match.group(0)}` in code. 4987 §10 makes a "
-                "hardcoded bound at S1 a NO-GO; the bounds are what the 30-day "
-                "observation produces, and T4-B6 introduces them"
-            )
+        if rel not in BOUND_OWNER_RELS:
+            for match in FORBIDDEN_BOUND_RE.finditer(cleaned):
+                line = cleaned.count("\n", 0, match.start()) + 1
+                problems.append(
+                    f"{rel}:{line}: `{match.group(0)}` in code. 4987 §10 makes a "
+                    "hardcoded bound outside the composition a NO-GO; the bounds "
+                    "are what the 30-day observation produces, and T4-B6 gave "
+                    "them to `composite` alone"
+                )
+    missing_bound_owners = sorted(
+        BOUND_OWNER_RELS
+        - {path.relative_to(repo_root).as_posix() for path in owned}
+    )
+    if missing_bound_owners:
+        problems.append(
+            "the bound owner is gone: "
+            + ", ".join(missing_bound_owners)
+            + ". If the composition module moved or was removed, move its "
+            "`BOUND_OWNER_RELS` entry here in the same change instead of "
+            "leaving an allowance that covers nothing"
+        )
 
     owned_set = {path.resolve() for path in owned}
     consumers: set[str] = set()
@@ -699,26 +833,31 @@ def check_no_judgment_authority(repo_root: Path) -> list[str]:
             problems += declaration_only_problems(rel, cleaned)
         if rel in OBSERVATION_ONLY_TREE_REFERENCES:
             problems += observation_only_problems(rel, cleaned)
-        if rel in SANCTIONED_TREE_CONSUMERS:
+        if rel in JUDGMENT_TREE_CONSUMERS:
+            problems += judgment_read_problems(rel, cleaned)
+        elif rel in SANCTIONED_TREE_CONSUMERS:
             problems += qualified_read_only_problems(rel, cleaned)
 
-    unexpected = sorted(consumers - ALLOWED_TREE_REFERENCES - SANCTIONED_TREE_CONSUMERS)
+    every_allowance = (
+        ALLOWED_TREE_REFERENCES | SANCTIONED_TREE_CONSUMERS | JUDGMENT_TREE_CONSUMERS
+    )
+    unexpected = sorted(consumers - every_allowance)
     if unexpected:
         problems.append(
             "the reachability tree grew a consumer: "
             + ", ".join(unexpected)
             + ". Every reader joins its own allowance deliberately, in its own "
-            "reviewed slice: T4-B2c wired the observation task and T4-B4 "
-            "sanctioned the descriptive divergence record. A reader of the "
-            "verdicts is T4-B6, behind `G-T4`"
+            "reviewed slice: T4-B2c wired the observation task, T4-B4 "
+            "sanctioned the descriptive divergence record, and T4-B6 opened "
+            "the composed verdict to the four files named here"
         )
-    missing = sorted((ALLOWED_TREE_REFERENCES | SANCTIONED_TREE_CONSUMERS) - consumers)
+    missing = sorted(every_allowance - consumers)
     if missing:
         problems.append(
             "the expected wiring is gone: "
             + ", ".join(missing)
-            + ". If an expected declaration, observation consumer, or "
-            "sanctioned read was removed, "
+            + ". If an expected declaration, observation consumer, "
+            "sanctioned read, or judgment consumer was removed, "
             "remove its allowance here in the same change"
         )
     return problems
@@ -759,9 +898,11 @@ def main(argv: list[str] | None = None) -> int:
         f"reachability canonical equivalence OK: {len(cases)} corpus cases match "
         f"byte for byte, {len(PYTHON_MUTATIONS)} python mutations killed, "
         f"{rust_note}; the tree has exactly its declaration, its B2c "
-        f"observation consumer, and {len(SANCTIONED_TREE_CONSUMERS)} sanctioned "
-        "qualified-path reader(s), with aliases, re-exports, and verdict reads "
-        "rejected (source lint, not a type proof)"
+        f"observation consumer, {len(SANCTIONED_TREE_CONSUMERS)} sanctioned "
+        f"qualified-path reader(s) and {len(JUDGMENT_TREE_CONSUMERS)} T4-B6 "
+        "judgment consumer(s), with aliases and re-exports rejected everywhere "
+        "and ledger/discovery reads rejected outside the tree (source lint, "
+        "not a type proof)"
     )
     return 0
 
