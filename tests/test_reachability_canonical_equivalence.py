@@ -13,14 +13,14 @@ defect at a time:
     silently never applied. This is the failure mode a mutation runner is most
     likely to develop and least likely to notice;
   * a mutation the implementation no longer kills;
-  * a consumer added outside the tree, and the tree's module declaration
-    removed;
+  * a consumer added outside the tree, the tree's module declaration removed,
+    and a verdict read added to the observation-only B2c consumer;
   * the two ways a consumer can reach the tree WITHOUT writing `reachability::`
     — an `as` alias at the call site, and a re-export from the allowlisted file
     — each with the control that keeps the widened scan from reporting every
     local that happens to be called `reachability`. A gate whose central claim
-    is "zero consumers, machine-checked" is worth exactly what its weakest
-    spelling catches;
+    is "only the named observation consumer, machine-checked" is worth exactly
+    what its weakest spelling catches;
   * a `warn_bound` introduced inside the tree (4987 §10 NO-GO).
 
 The live-repo cases at the end pin that the gate is wired into
@@ -236,6 +236,29 @@ class SyntheticRootTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertProblem(_run(root), "allowlisted to DECLARE")
+
+    def test_the_b2c_consumer_cannot_read_a_verdict(self):
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            wiring = root / "src/services/discord/runtime_bootstrap/spawns.rs"
+            wiring.write_text(
+                wiring.read_text(encoding="utf-8")
+                + "\nfn forbidden() { let _ = health::reachability::verdict"
+                "::ReachabilityVerdict::Unknown; }\n",
+                encoding="utf-8",
+            )
+            self.assertProblem(_run(root), "may name only direct")
+
+    def test_the_b2c_consumer_cannot_alias_the_tree(self):
+        with TemporaryDirectory() as tmp:
+            root = _mirror_repo(tmp)
+            wiring = root / "src/services/discord/runtime_bootstrap/spawns.rs"
+            wiring.write_text(
+                wiring.read_text(encoding="utf-8")
+                + "\nuse crate::services::discord::health::reachability as rx;\n",
+                encoding="utf-8",
+            )
+            self.assertProblem(_run(root), "may name only direct")
 
     def test_an_identifier_that_merely_contains_the_name_is_not_a_consumer(self):
         """The control for the two cases above.

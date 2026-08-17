@@ -51,14 +51,16 @@ test-non-pg:
     cargo test --lib delivery_lease_key -- --skip _pg --skip pg_ --skip postgres
     # #5071 T0: keep the delivery-writer/terminal-fold contract seam in a curated lane.
     cargo test --lib services::discord::session_relay_sink::delivery_orchestration_tests -- --skip _pg --skip pg_ --skip postgres
-    # #5071 T4-B1 (4987 S1): the reachability library is inactive, so these are
-    # its ONLY execution. verdict pins the polarity (TransportUnknown is neither
-    # health nor a redelivery warrant); discovery pins fail-closed resolution and
-    # same-size/different-inode divergence; tail pins the 1 MiB per-tick cap and
-    # cursor identity revalidation.
+    # #5071 T4-B1/B2c (4987 S1): verdict pins the polarity (TransportUnknown is
+    # neither health nor a redelivery warrant); discovery pins fail-closed
+    # resolution and same-size/different-inode divergence; tail pins the 1 MiB
+    # per-tick cap and cursor identity revalidation. The ledger/observation
+    # lines pin atomic cursor+obligation commits and the production task seam.
     cargo test --lib services::discord::health::reachability::verdict::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::discord::health::reachability::discovery::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::discord::health::reachability::tail::tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib services::discord::health::reachability::ledger::tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib services::discord::health::reachability::observation::tests -- --skip _pg --skip pg_ --skip postgres
     # #5071 T4-B2a (4987 S1, second half + blocker B1'): canonical obligation
     # framing. This lane carries the RUST half of the Rust<->Python byte-equal
     # equivalence, so a Rust-only change to the obligation rule dies here in

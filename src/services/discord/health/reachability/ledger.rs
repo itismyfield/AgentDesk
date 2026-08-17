@@ -404,6 +404,79 @@ pub(in crate::services::discord) fn append_ledger_at(
     Ok(extinctions)
 }
 
+/// Result of one observation transaction. This is telemetry only: neither the
+/// appended count nor an extinction authorizes a relay or recovery decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::services::discord) struct ObservationCommit {
+    pub obligations_appended: usize,
+    pub extinctions: Vec<ObligationExtinction>,
+}
+
+/// Persist one framed transcript observation and its resume cursor together.
+///
+/// The lock revalidates both incarnation and cursor because a tick may have
+/// read while another process committed first. Every record must also carry
+/// the same transcript identity and generation as the ledger incarnation.
+///
+/// Ordering is deliberately indivisible: obligations are appended in memory,
+/// then the cursor is advanced in that same JSON snapshot, and one atomic
+/// rename publishes both. A crash before the rename publishes neither, so the
+/// bytes are read once again; a crash after it publishes both, so they are not
+/// counted twice. There is no interval where only one side is durable.
+pub(in crate::services::discord) fn record_observation_at(
+    path: &Path,
+    incarnation: &LedgerIncarnation,
+    expected_cursor: u64,
+    records: impl IntoIterator<Item = CanonicalRecord>,
+    next_offset: u64,
+    observed_len: u64,
+    observation_incomplete: bool,
+    observed_at_epoch_ms: u64,
+) -> Result<ObservationCommit, String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let _lock = delivery_record::lock_record_path(path)?;
+    let mut ledger = read_bootstrapped_ledger_at(path)?;
+    if !ledger.binds_to(incarnation) {
+        return Err("ledger incarnation changed during observation".to_string());
+    }
+    if ledger.cursor_offset != expected_cursor {
+        return Err("ledger cursor changed during observation".to_string());
+    }
+    if next_offset < expected_cursor || next_offset > observed_len {
+        return Err("observation cursor is outside the observed transcript".to_string());
+    }
+
+    let records: Vec<_> = records.into_iter().collect();
+    if records.iter().any(|record| {
+        record.generation_mtime_ns != incarnation.generation_mtime_ns
+            || record.identity != incarnation.identity()
+            || record.start < expected_cursor
+            || record.end < record.start
+            || record.end > observed_len
+    }) {
+        return Err("observation record does not bind to the ledger incarnation".to_string());
+    }
+
+    let before = ledger.counters.total_obligations;
+    let extinctions = ledger.append_obligations(records, observed_at_epoch_ms);
+    ledger.cursor_offset = next_offset;
+    ledger.last_observed_len = observed_len;
+    ledger.counters.ticks = ledger.counters.ticks.saturating_add(1);
+    if observation_incomplete {
+        ledger.counters.incomplete_observations =
+            ledger.counters.incomplete_observations.saturating_add(1);
+    }
+    let obligations_appended = ledger.counters.total_obligations.saturating_sub(before) as usize;
+    let data = serde_json::to_string_pretty(&ledger).map_err(|error| error.to_string())?;
+    runtime_store::atomic_write(path, &data)?;
+    Ok(ObservationCommit {
+        obligations_appended,
+        extinctions,
+    })
+}
+
 /// flock-guarded read-modify-write: retire the current incarnation and
 /// rebootstrap for a new one, atomically persisting.
 ///

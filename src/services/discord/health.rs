@@ -24,12 +24,12 @@ mod headless_turn;
 pub(in crate::services::discord) mod liveness_authority;
 pub(in crate::services::discord) mod mailbox;
 mod provider_probe;
-// #5071 T4-B1 (4987 S1, first half): the relay-reachability observation
-// library. Unix-gated because its transcript coordinate is the `(dev, ino)`
+// #5071 T4-B2c (4987 S1): the relay-reachability observation library and
+// task. Unix-gated because its transcript coordinate is the `(dev, ino)`
 // file identity of 4987 §-1.3, and no stable Windows equivalent exists through
 // `std::fs::Metadata`; the relay transport it observes (`session_relay_sink`)
-// is `#[cfg(unix)]` already. INACTIVE — nothing constructs or consumes it until
-// T4-B2 wires the observation task, so production verdicts are unchanged.
+// is `#[cfg(unix)]` already. It records facts only; B6 remains the first slice
+// allowed to compose those facts into a production verdict.
 #[cfg(unix)]
 pub(in crate::services::discord) mod reachability;
 #[path = "health/rebind_request.rs"]
@@ -90,7 +90,7 @@ pub use recovery::{
     stop_runtime_turn_preserving_watcher,
 };
 pub(crate) use recovery::{
-    channel_has_active_turn, clear_resume_runtime_owner_after_death,
+    STALL_WATCHDOG_INTERVAL_SECS, channel_has_active_turn, clear_resume_runtime_owner_after_death,
     rebind_channel_provider_session, release_zombie_foreground_turn_by_tmux_name,
     resume_runtime_for_channel, retain_resume_runtime_owner_before_teardown,
     stop_provider_channel_runtime_with_policy,

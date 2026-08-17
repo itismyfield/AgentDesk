@@ -268,6 +268,44 @@ fn sequential_append_ledger_at_calls_compose_without_lost_records() {
     assert_eq!(ledger.counters.total_obligations, 2);
 }
 
+#[test]
+fn observation_transaction_rejects_records_from_another_incarnation() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("provider/identity.json");
+    let bound = incarnation("adk-chan", 42, None, 900);
+    bootstrap_ledger_at(&path, bound.clone(), 0).expect("bootstrap");
+    let before = std::fs::read(&path).expect("read before rejected transaction");
+    let wrong_generation = CanonicalRecord {
+        generation_mtime_ns: 41,
+        start: 0,
+        end: 10,
+        identity: bound.identity(),
+        reason: ObligationReason::AssistantText,
+    };
+
+    let error = record_observation_at(
+        &path,
+        &bound,
+        0,
+        vec![wrong_generation],
+        10,
+        10,
+        false,
+        1_000,
+    )
+    .expect_err("foreign generation must be rejected");
+
+    assert_eq!(
+        error,
+        "observation record does not bind to the ledger incarnation"
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("read after rejected transaction"),
+        before,
+        "identity rejection must preserve both cursor and obligations"
+    );
+}
+
 /// Two sequential write transactions without an intermediate caller-side read
 /// both compose into the persisted ledger.
 #[test]

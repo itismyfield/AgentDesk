@@ -1,6 +1,6 @@
 //! Bounded incremental tail reader — 4987 S1 (#5071 T4-B1).
 //!
-//! The obligation prober T4-B2 adds needs to read what a transcript grew by
+//! The obligation prober T4-B2c wires needs to read what a transcript grew by
 //! since the last tick, cheaply, without ever concluding "nothing to see" from
 //! a file it is no longer looking at. This file is that read and nothing else:
 //! it returns raw bytes and the byte range they came from.
@@ -54,8 +54,7 @@ impl TailCursor {
 
     /// The cursor to use next tick after a read that ended at `end`.
     ///
-    /// No production caller as of #5071 T4-B2, and not by oversight: the
-    /// observation task advances to `ObligationScan::next_offset`, which is
+    /// The production observation task advances to `ObligationScan::next_offset`, which is
     /// deliberately BEHIND the read end whenever the chunk ended mid-line, so
     /// the partial line is re-read whole. This helper is the unconditional
     /// advance, correct only where framing cannot defer, and it stays because
@@ -78,6 +77,7 @@ pub(in crate::services::discord) enum TailOutcome {
         bytes: Vec<u8>,
         start: u64,
         end: u64,
+        observed_len: u64,
         cap_truncated: bool,
     },
     /// The path now names a different file than the cursor was established
@@ -182,6 +182,7 @@ pub(in crate::services::discord) fn read_incremental(
         bytes,
         start: cursor.next_offset,
         end: cursor.next_offset + to_read,
+        observed_len: len,
         cap_truncated,
     }
 }
@@ -225,6 +226,7 @@ mod tests {
             bytes,
             start,
             end,
+            observed_len,
             cap_truncated,
         } = read_incremental(&path, cursor)
         else {
@@ -232,6 +234,7 @@ mod tests {
         };
         assert_eq!(bytes, b"first\n");
         assert_eq!((start, end), (0, 6));
+        assert_eq!(observed_len, 6);
         assert!(!cap_truncated);
 
         append(&path, b"second\n");
@@ -239,6 +242,7 @@ mod tests {
             bytes,
             start,
             end,
+            observed_len,
             cap_truncated,
         } = read_incremental(&path, cursor.advanced_to(end))
         else {
@@ -246,6 +250,7 @@ mod tests {
         };
         assert_eq!(bytes, b"second\n");
         assert_eq!((start, end), (6, 13));
+        assert_eq!(observed_len, 13);
         assert!(!cap_truncated);
     }
 
@@ -262,6 +267,7 @@ mod tests {
                 bytes: Vec::new(),
                 start: 5,
                 end: 5,
+                observed_len: 5,
                 cap_truncated: false,
             }
         );
@@ -288,6 +294,7 @@ mod tests {
                 bytes,
                 start,
                 end,
+                observed_len,
                 cap_truncated,
             } = read_incremental(&path, cursor_at(&path, 0))
             else {
@@ -296,6 +303,7 @@ mod tests {
             let expected_read = available.min(TAIL_READ_CAP_BYTES);
             assert_eq!(bytes.len() as u64, expected_read);
             assert_eq!((start, end), (0, expected_read));
+            assert_eq!(observed_len, available);
             assert_eq!(
                 cap_truncated, expected_truncated,
                 "unexpected truncation at {available} available bytes"
@@ -309,6 +317,7 @@ mod tests {
             bytes: vec![b'x'; 8],
             start: 0,
             end: 8,
+            observed_len: 9,
             cap_truncated: true,
         };
         assert_eq!(
