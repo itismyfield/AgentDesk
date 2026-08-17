@@ -25,13 +25,13 @@
 //! re-derived from the durable row and retried until it succeeds, so they are
 //! at-least-once and converge — up to the attempt cap described below.
 //!
-//! Card rollback has a narrower guarantee. A rollback carrying a non-NULL
-//! dispatch generation is replay-safe because a successful rollback clears
-//! `latest_dispatch_id`, making that generation self-invalidating. A rollback
-//! carrying a NULL generation is applied only by the initial inline drain. It
-//! has no replay guarantee: a replay or lease-expiry reclaim dead-letters that
-//! card instead of applying it, because NULL cannot distinguish the original
-//! lifecycle from a later manual lifecycle that also leaves the field NULL.
+//! Card rollback has a narrower guarantee. Only rollbacks carrying a non-NULL
+//! dispatch generation enter this outbox: a successful rollback clears
+//! `latest_dispatch_id`, making that generation self-invalidating on replay.
+//! NULL cannot self-invalidate, so cancellation applies those rare rollbacks
+//! synchronously in the transaction that commits the cancel and never enrolls
+//! them for replay. A crash therefore commits neither the cancel nor the NULL
+//! rollback, removing the durability gap instead of trying to reject it later.
 //!
 //! The observability emit in step 1 is **not** covered by that guarantee and is
 //! deliberately at-most-once. `CancelTransitionMeta::emit` hands the event to an
@@ -74,6 +74,8 @@
 //!
 //! ## What happens when the cleanup cannot succeed at all
 //!
+//! Failure propagation is row-wide: one failed card or slot keeps the entire
+//! row, including already completed and still-owed siblings, retry-eligible.
 //! A row that fails `MAX_CLEANUP_ATTEMPTS` times is dead-lettered: it is parked
 //! on disk with its `last_error` and leaves both drain queries permanently. Its
 //! slot token and provider session id then stay in whatever state the last
@@ -83,10 +85,14 @@
 //! `RunCleanupReplayStats::dead_lettered` counts the transition when the parking
 //! UPDATE actually lands, and the standing `auto_queue_cleanup.dead_lettered`
 //! backlog is carried on the credential-free `/api/health` (count-only) as well
-//! as in full on `/api/health/detail`, until an operator clears it. The public
+//! as in full on `/api/health/detail`, until an operator clears it. Poison rows
+//! that cannot be decoded are parked directly, before the attempt cap. The
+//! active-dispatch card guard is a separate quiet permanent give-up: it returns
+//! success, so the row can be deleted without a warning or dead-letter and that
+//! card is never retried. The public
 //! half is the one that matters here: `/api/health/detail` is behind
 //! `protected_api_domain`, so without it a monitor with no token reads `ok: true`
-//! over a cleanup queue that stopped converging. No row is abandoned silently.
+//! over a cleanup queue that stopped converging.
 //!
 //! ## Bookkeeping writes can fail too
 //!
@@ -100,9 +106,9 @@
 //!    the row at the cap. If this UPDATE fails, `attempts` never rises and the
 //!    row can never reach the cap. It reports [`AttemptRecord::Unrecorded`]
 //!    instead of returning `false`, and the sweep counts it.
-//! 2. `dead_letter_task_pg` — parks an undecodable (poison) or policy-rejected
-//!    row. If this UPDATE fails the row is not parked, so it is re-claimed and
-//!    rejected again forever.
+//! 2. `dead_letter_task_pg` — parks an undecodable (poison) row. If this UPDATE
+//!    fails the row is not parked, so it is re-claimed and rejected again
+//!    forever.
 //!    It returns whether it landed; when it did not, the sweep falls back to the
 //!    ordinary attempt bookkeeping so the row still backs off and still reaches
 //!    the terminal cap.
@@ -114,7 +120,7 @@
 //! now on the same backoff and the same terminal cap.
 
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use super::AutoQueueLogContext;
 use super::cancel_run::{SlotCleanupResult, clear_sessions_for_dispatches_pg};
@@ -203,18 +209,6 @@ impl AttemptRecord {
 /// Columns every drain path selects. Kept in one place so the batch sweep and
 /// the single-row claim cannot drift apart.
 const TASK_COLUMNS: &str = "id, run_ids, dispatch_ids, released_slots, pending_emits, emitted, card_rollback_tasks, card_rollback_source";
-
-/// Why this process owns a cleanup row.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DrainOrigin {
-    /// The cancel flow's first post-commit attempt, addressed by task id.
-    InitialInline,
-    /// A background sweep, including a reclaim after the claim lease expires.
-    ReplayOrReclaim,
-}
-
-const NULL_CARD_ROLLBACK_REPLAY_DEAD_LETTER_REASON: &str =
-    "card rollback replay rejected NULL dispatch_id generation token";
 
 /// Rows drained per replay sweep.
 const REPLAY_BATCH_LIMIT: i64 = 50;
@@ -771,7 +765,6 @@ pub(crate) async fn drain_run_cleanup_task_pg(
     health_registry: Option<std::sync::Arc<crate::services::discord::health::HealthRegistry>>,
     pool: &PgPool,
     task: RunCleanupTask,
-    origin: DrainOrigin,
 ) -> RunCleanupDrainOutcome {
     let mut warnings = Vec::new();
 
@@ -918,35 +911,31 @@ pub(crate) async fn drain_run_cleanup_task_pg(
 
     // Step 3.5 — card rollback.
     //
-    // Retry safety: a Some generation is self-invalidating: a successful
-    // rollback clears `latest_dispatch_id` to NULL, so a replay sees Some !=
-    // NULL and skips. A NULL generation cannot self-invalidate (NULL -> rollback
-    // -> NULL), so replay/reclaim cannot tell the cancelled lifecycle from a
-    // later manual lifecycle and dead-letters the card instead of reapplying it.
-    //
-    // The initial inline drain still applies NULL generations. A manual
-    // transition racing inside that cancel attempt is a cancel/operator race,
-    // not a stale replay, and remains governed by the cancel flow itself.
+    // Retry safety: every enrolled generation is Some and self-invalidating: a
+    // successful rollback clears `latest_dispatch_id` to NULL, so a replay sees
+    // Some != NULL and skips. NULL is forbidden at enrollment because it cannot
+    // distinguish the cancelled lifecycle from a later manual NULL lifecycle.
+    // Seeing one here means manual corruption/tampering; skip only that card so
+    // a valid Some sibling in the same row is not lost with it.
     // The active-dispatch guard is a quiet permanent skip: it returns Ok, so the
     // outbox row can complete and be deleted, and that rollback is not retried.
     let mut all_cards_handled = true;
-    let mut replay_rejected_null_cards = Vec::new();
     if !task.card_rollback_tasks.is_empty() {
         let source = task.card_rollback_source.as_deref().unwrap_or("auto_queue");
         for (card_id, expected_dispatch_id) in &task.card_rollback_tasks {
-            if origin == DrainOrigin::ReplayOrReclaim && expected_dispatch_id.is_none() {
-                let reason =
-                    format!("{NULL_CARD_ROLLBACK_REPLAY_DEAD_LETTER_REASON}: card_id={card_id}");
+            if expected_dispatch_id.is_none() {
+                let reason = format!(
+                    "skipped forbidden NULL dispatch_id generation in card rollback outbox: card_id={card_id}"
+                );
                 crate::auto_queue_log!(
                     warn,
-                    "card_rollback_null_generation_replay_dead_lettered",
+                    "card_rollback_null_generation_outbox_invariant_violation",
                     crate::services::auto_queue::AutoQueueLogContext::new().card(card_id),
-                    "[auto-queue] dead-lettering postgres card rollback during cleanup task {}: {}",
+                    "[auto-queue] skipping corrupted postgres card rollback during cleanup task {}: {}",
                     task.id,
                     reason
                 );
-                warnings.push(reason.clone());
-                replay_rejected_null_cards.push(reason);
+                warnings.push(reason);
                 continue;
             }
             match perform_card_rollback_on_pg(
@@ -1030,25 +1019,6 @@ pub(crate) async fn drain_run_cleanup_task_pg(
         cleared_slot_sessions,
         warnings,
     };
-    if !replay_rejected_null_cards.is_empty() {
-        let reason = replay_rejected_null_cards.join("; ");
-        if dead_letter_task_pg(pool, task.id, &reason).await {
-            return RunCleanupDrainOutcome {
-                slot_cleanup,
-                completed: false,
-                dead_lettered: true,
-                attempt_unrecorded: false,
-            };
-        }
-
-        let record = record_task_failure_pg(pool, task.id, &reason).await;
-        return RunCleanupDrainOutcome {
-            slot_cleanup,
-            completed: false,
-            dead_lettered: record.dead_lettered(),
-            attempt_unrecorded: record.unrecorded(),
-        };
-    }
     if !all_slots_handled || !all_cards_handled {
         let summary = slot_cleanup.warnings.join("; ");
         let record = record_task_failure_pg(pool, task.id, &summary).await;
@@ -1120,9 +1090,7 @@ pub(crate) async fn drain_run_cleanup_task_by_id_pg(
     task_id: i64,
 ) -> RunCleanupDrainOutcome {
     match claim_run_cleanup_task_pg(pool, task_id).await {
-        Ok(Some(task)) => {
-            drain_run_cleanup_task_pg(health_registry, pool, task, DrainOrigin::InitialInline).await
-        }
+        Ok(Some(task)) => drain_run_cleanup_task_pg(health_registry, pool, task).await,
         Ok(None) => match run_cleanup_task_exists_pg(pool, task_id).await {
             // Row gone: a concurrent drain already carried it to completion.
             Ok(false) => RunCleanupDrainOutcome {
@@ -1179,8 +1147,8 @@ pub(crate) struct RunCleanupReplayStats {
     pub(crate) drained: usize,
     pub(crate) completed: usize,
     /// Rows this sweep parked and removed from the drain order for good — the
-    /// undecodable payloads (poison), policy-rejected NULL-generation card
-    /// replays, and rows that burned through `MAX_CLEANUP_ATTEMPTS`. Counted
+    /// undecodable payloads (poison) and rows that burned through
+    /// `MAX_CLEANUP_ATTEMPTS`. Counted
     /// rather than silently skipped because a
     /// dead-letter is the one outcome the retry loop can never repair on its
     /// own, so it has to reach a human; the standing backlog is on `/api/health`
@@ -1262,13 +1230,7 @@ pub(crate) async fn replay_pending_run_cleanup_tasks_pg(
             }
         };
         stats.drained += 1;
-        let outcome = drain_run_cleanup_task_pg(
-            health_registry.clone(),
-            pool,
-            task,
-            DrainOrigin::ReplayOrReclaim,
-        )
-        .await;
+        let outcome = drain_run_cleanup_task_pg(health_registry.clone(), pool, task).await;
         if outcome.completed {
             stats.completed += 1;
         }
@@ -1285,46 +1247,57 @@ pub(crate) async fn replay_pending_run_cleanup_tasks_pg(
     Ok(stats)
 }
 
-/// Perform card rollback for a single card. Used by the cleanup task drain to
-/// roll back cards that were in `requested|in_progress` when their runs were
-/// terminalized.
-///
-/// Retry safety: the operation is scoped to a specific card, status
-/// (requested|in_progress), and post-terminalization `latest_dispatch_id`
-/// snapshot. A successful Some-token rollback clears the field to NULL and
-/// therefore self-invalidates before any replay. The caller permits a NULL token
-/// only for the initial inline drain; replay/reclaim rejects it before reaching
-/// this function. The active-dispatch guard is a quiet permanent skip: it
-/// returns Ok, so the outbox row can complete and be deleted, and that rollback
-/// is not retried.
+/// Open and commit a transaction around the shared rollback body for an outbox
+/// card. Only Some generation tokens are permitted to reach this wrapper.
 async fn perform_card_rollback_on_pg(
     pool: &PgPool,
     card_id: &str,
     expected_dispatch_id: Option<&str>,
     source: &str,
 ) -> Result<(), String> {
-    let (status, current_dispatch_id): (Option<String>, Option<String>) =
-        sqlx::query_as("SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = $1")
-            .bind(card_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| format!("load card status and dispatch id for {card_id}: {error}"))?
-            .unwrap_or_default();
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin card rollback transaction for {card_id}: {error}"))?;
+    perform_card_rollback_on_tx(&mut tx, card_id, expected_dispatch_id, source).await?;
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit card rollback for {card_id}: {error}"))
+}
 
-    let Some(status) = status else {
+/// Apply the complete card rollback inside the caller's transaction.
+///
+/// The cancel path uses this directly for a NULL generation, while the outbox
+/// wrapper uses it for a replay-safe Some generation. Keeping the status and
+/// generation guards, active-dispatch check, state transition, review/clock/PM
+/// reset, audit, and worktree scrub in this single body prevents the two paths
+/// from drifting.
+pub(crate) async fn perform_card_rollback_on_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    card_id: &str,
+    expected_dispatch_id: Option<&str>,
+    source: &str,
+) -> Result<(), String> {
+    let (current_status, current_dispatch_id): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = $1 FOR UPDATE",
+    )
+    .bind(card_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| format!("load locked card status and dispatch id {card_id}: {error}"))?
+    .unwrap_or_default();
+
+    let Some(from_status) = current_status else {
         return Ok(());
     };
-
-    if !matches!(status.as_str(), "requested" | "in_progress") {
+    if !matches!(from_status.as_str(), "requested" | "in_progress") {
         return Ok(());
     }
 
-    // Generation equality proves only that the stored snapshot still matches;
-    // it does not by itself prove that this is the same lifecycle. NULL equality
-    // is accepted here solely for the caller's initial-inline path.
-    let current_dispatch_deref: Option<&str> = current_dispatch_id.as_deref();
-    if expected_dispatch_id != current_dispatch_deref {
-        return Ok(()); // Card generation mismatch: skip this card.
+    // A Some token that already rolled back now sees NULL and self-invalidates;
+    // any other mismatch skips without claiming what lifecycle produced it.
+    if expected_dispatch_id != current_dispatch_id.as_deref() {
+        return Ok(());
     }
 
     let has_active_dispatch = sqlx::query_scalar::<_, i64>(
@@ -1333,59 +1306,18 @@ async fn perform_card_rollback_on_pg(
          WHERE kanban_card_id = $1 AND status IN ('pending', 'dispatched')",
     )
     .bind(card_id)
-    .fetch_one(pool)
+    .fetch_one(&mut **tx)
     .await
-    .ok()
-    .unwrap_or(0)
+    .map_err(|error| format!("check active dispatches for card {card_id}: {error}"))?
         > 0;
-
     if has_active_dispatch {
-        // Quiet permanent give-up: Ok lets the outbox row complete and be
-        // deleted, so this card rollback receives no retry.
+        // Quiet permanent give-up: the outbox caller treats this as success and
+        // deletes the row, so this card rollback receives no retry.
         return Ok(());
     }
-
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|error| format!("begin card rollback transaction for {card_id}: {error}"))?;
-
-    let (current_status, current_dispatch_id_lock): (Option<String>, Option<String>) =
-        sqlx::query_as(
-            "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = $1 FOR UPDATE",
-        )
-        .bind(card_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|error| format!("reload card status and dispatch id {card_id}: {error}"))?
-        .map(|(s, d)| (s, d))
-        .unwrap_or_default();
-
-    match current_status.as_deref() {
-        Some("requested") | Some("in_progress") => {}
-        _ => {
-            tx.rollback()
-                .await
-                .map_err(|error| format!("rollback card status check for {card_id}: {error}"))?;
-            return Ok(());
-        }
-    }
-
-    // Final generation check under the lock. A Some token that already rolled
-    // back now sees NULL and self-invalidates here; any other mismatch also
-    // skips without claiming what lifecycle produced it.
-    let current_dispatch_deref_lock: Option<&str> = current_dispatch_id_lock.as_deref();
-    if expected_dispatch_id != current_dispatch_deref_lock {
-        tx.rollback()
-            .await
-            .map_err(|error| format!("rollback card generation check for {card_id}: {error}"))?;
-        return Ok(());
-    }
-
-    let from_status = current_status.unwrap_or_else(|| status.clone());
 
     crate::engine::transition_executor_pg::execute_pg_transition_intent(
-        &mut tx,
+        tx,
         &crate::engine::transition::TransitionIntent::UpdateStatus {
             card_id: card_id.to_string(),
             from: from_status.clone(),
@@ -1396,7 +1328,7 @@ async fn perform_card_rollback_on_pg(
     .map_err(|error| format!("update card status for {card_id}: {error}"))?;
 
     crate::engine::transition_executor_pg::execute_pg_transition_intent(
-        &mut tx,
+        tx,
         &crate::engine::transition::TransitionIntent::SetLatestDispatchId {
             card_id: card_id.to_string(),
             dispatch_id: None,
@@ -1406,7 +1338,7 @@ async fn perform_card_rollback_on_pg(
     .map_err(|error| format!("clear dispatch id for {card_id}: {error}"))?;
 
     crate::engine::transition_executor_pg::execute_pg_transition_intent(
-        &mut tx,
+        tx,
         &crate::engine::transition::TransitionIntent::SetReviewStatus {
             card_id: card_id.to_string(),
             review_status: None,
@@ -1427,7 +1359,7 @@ async fn perform_card_rollback_on_pg(
          WHERE id = $1",
     )
     .bind(card_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(|error| format!("reset card cleanup fields {card_id}: {error}"))?;
 
@@ -1453,14 +1385,14 @@ async fn perform_card_rollback_on_pg(
             updated_at = NOW()",
     )
     .bind(card_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(|error| format!("reset card review state {card_id}: {error}"))?;
 
     sqlx::query("DELETE FROM kv_meta WHERE key = $1 OR key = $2")
         .bind(format!("pm_pending:{card_id}"))
         .bind(format!("pm_decision_sent:{card_id}"))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|error| format!("clear card escalation state {card_id}: {error}"))?;
 
@@ -1469,9 +1401,9 @@ async fn perform_card_rollback_on_pg(
          VALUES ($1, $2, 'ready', $3, 'OK (run cleanup card rollback)')",
     )
     .bind(card_id)
-    .bind(&status)
+    .bind(&from_status)
     .bind(source)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(|error| format!("insert kanban audit log {card_id}: {error}"))?;
 
@@ -1518,13 +1450,11 @@ async fn perform_card_rollback_on_pg(
            )",
     )
     .bind(card_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(|error| format!("scrub dispatch worktree metadata {card_id}: {error}"))?;
 
-    tx.commit()
-        .await
-        .map_err(|error| format!("commit card rollback for {card_id}: {error}"))
+    Ok(())
 }
 
 #[cfg(test)]

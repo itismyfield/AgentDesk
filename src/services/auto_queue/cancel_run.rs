@@ -717,14 +717,15 @@ async fn terminalize_selected_runs_with_pg(
     // carries the slot keys directly; the steps that still have to run outside
     // the commit (emit, wake, session clear, slot-thread clear) become durable
     // here rather than living only on this stack.
-    // #5357: extend durable outbox to include card rollback so it is retried
-    // durably alongside the dispatch/run state changes. P1-A: only rollback cards
-    // when cancelling; end operations do not touch card state.
+    // #5357: P1-A rolls cards back only when cancelling; end operations do not
+    // touch card state. Card generations are partitioned at enrollment because
+    // a Some token is self-invalidating: rollback clears `latest_dispatch_id`,
+    // so a surviving replay no longer matches. NULL cannot self-invalidate and
+    // is therefore never a replay task. It is rolled back synchronously in this
+    // cancel transaction; if the process crashes, the cancel itself is also
+    // uncommitted, so there is no committed rollback obligation to recover.
     let card_rollback_tasks = if should_rollback_cards && !rollback_candidate_card_ids.is_empty() {
-        // Snapshot the card's actual post-cancellation generation, including NULL.
-        // The drain skips only when latest_dispatch_id changes after this task is
-        // enqueued; NULL-to-NULL is therefore a valid generation match.
-        sqlx::query_as::<_, (String, Option<String>)>(
+        let card_generations = sqlx::query_as::<_, (String, Option<String>)>(
             "SELECT id, latest_dispatch_id
              FROM kanban_cards
              WHERE id = ANY($1)
@@ -733,7 +734,29 @@ async fn terminalize_selected_runs_with_pg(
         .bind(&rollback_candidate_card_ids)
         .fetch_all(&mut *tx)
         .await
-        .map_err(|error| format!("load postgres cancellation card generations: {error}"))?
+        .map_err(|error| format!("load postgres cancellation card generations: {error}"))?;
+
+        let mut replay_safe_tasks = Vec::with_capacity(card_generations.len());
+        // `card_generations` is ordered by id, and the shared rollback body locks
+        // each NULL-generation card with FOR UPDATE in that order to retain the
+        // existing deadlock-avoidance contract. NULL generations are rare and
+        // arise on paths such as `clearLatestDispatch`. If any synchronous
+        // rollback fails, the entire cancel aborts under the advisory locks and
+        // can be retried; run, entry, dispatch, and card changes all roll back.
+        for (card_id, dispatch_id) in card_generations {
+            match dispatch_id {
+                Some(dispatch_id) => {
+                    replay_safe_tasks.push((card_id, Some(dispatch_id)));
+                }
+                None => {
+                    super::cleanup_tasks::perform_card_rollback_on_tx(
+                        &mut tx, &card_id, None, reason,
+                    )
+                    .await?;
+                }
+            }
+        }
+        replay_safe_tasks
     } else {
         Vec::new()
     };
@@ -807,12 +830,11 @@ pub(crate) async fn cancel_selected_runs_with_pg(
     let (response, _rollback_candidate_card_ids) =
         terminalize_selected_runs_with_pg(health_registry, pool, target_run_ids, reason, true)
             .await?;
-    // #5357: card rollback is now durable via the cleanup task outbox. Rollback
-    // candidate IDs are queued in the same transaction that commits entry state
-    // changes, making recovery durable. In the normal path, `drain_run_cleanup_task_by_id_pg`
-    // executes synchronously before this function returns, performing card rollback
-    // for candidates not hit by generation guards (P1-B). If drain fails, the cleanup
-    // task is retried by the replay sweep on the next policy tick.
+    // #5357: Some-generation card rollback candidates are queued in the same
+    // transaction as the entry changes and are retried by the replay sweep if
+    // the synchronous drain fails. NULL-generation candidates are instead
+    // rolled back inside that transaction, so failure aborts the entire cancel
+    // and leaves it retryable without creating an unsafe replay obligation.
     Ok(response)
 }
 
