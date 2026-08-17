@@ -344,13 +344,27 @@ RUST_MUTATIONS: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "harness-control-rung-removed",
-        "        return ObligationReason::HarnessControl;",
-        "        return ObligationReason::NoAssistantText;",
+        "        == Some(HARNESS_CONTROL_MODEL)\n"
+        "    {\n"
+        "        return ObligationReason::HarnessControl;\n"
+        "    }\n"
+        "    let timestamp = record",
+        "        == Some(HARNESS_CONTROL_MODEL)\n"
+        "    {\n"
+        "        return ObligationReason::NoAssistantText;\n"
+        "    }\n"
+        "    let timestamp = record",
     ),
     (
         "partial-line-advances-the-cursor",
-        "        next_offset: base_offset + line_start as u64,",
-        "        next_offset: base_offset + bytes.len() as u64,",
+        "        // Deliberately NOT past the partial line: the next read frames it whole.\n"
+        "        next_offset: base_offset + line_start as u64,\n"
+        "    }\n"
+        "}",
+        "        // Deliberately NOT past the partial line: the next read frames it whole.\n"
+        "        next_offset: base_offset + bytes.len() as u64,\n"
+        "    }\n"
+        "}",
     ),
     (
         "oversized-boundary-widened",
@@ -409,29 +423,47 @@ def run_python_mutations(repo_root: Path, cases: list[Case]) -> list[str]:
 def run_rust_mutations(repo_root: Path) -> list[str]:
     target = repo_root / OBLIGATION_REL
     original = target.read_text(encoding="utf-8")
-    survivors: list[str] = []
-    try:
-        baseline = subprocess.run(
-            ["cargo", "test", "--lib", RUST_CORPUS_TEST, "--", "--exact"],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            check=False,
+    orphaned = [
+        (name, original.count(after))
+        for name, before, after in RUST_MUTATIONS
+        if original.count(before) == 0 and original.count(after) > 0
+    ]
+    if orphaned:
+        signatures = ", ".join(
+            f"{name!r} (before anchor absent, after text appears {count} time(s))"
+            for name, count in orphaned
         )
-        if baseline.returncode != 0:
-            return [
-                "the unmutated Rust corpus test is already red; a mutation runner "
-                f"on a red baseline measures nothing.\n{baseline.stdout[-2000:]}"
-            ]
-        for name, before, after in RUST_MUTATIONS:
-            occurrences = original.count(before)
-            if occurrences != 1:
-                survivors.append(
-                    f"rust mutation {name!r} anchors on text appearing "
-                    f"{occurrences} time(s); a mutation that cannot be applied "
-                    "proves nothing"
-                )
-                continue
+        return [
+            f"target file {OBLIGATION_REL} contains residual declared rust "
+            f"mutation signature(s): {signatures}. Inspect it with "
+            f"`git diff -- {OBLIGATION_REL}`; restore only the mutated line for "
+            "each detected signature named above to its declared before-anchor text"
+        ]
+
+    survivors: list[str] = []
+    baseline = subprocess.run(
+        ["cargo", "test", "--lib", RUST_CORPUS_TEST, "--", "--exact"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if baseline.returncode != 0:
+        return [
+            "the unmutated Rust corpus test is already red; a mutation runner "
+            f"on a red baseline measures nothing.\n{baseline.stdout[-2000:]}"
+        ]
+    for name, before, after in RUST_MUTATIONS:
+        occurrences = original.count(before)
+        if occurrences != 1:
+            survivors.append(
+                f"rust mutation {name!r} anchors on text appearing "
+                f"{occurrences} time(s); a mutation that cannot be applied "
+                "proves nothing"
+            )
+            continue
+
+        try:
             target.write_text(original.replace(before, after), encoding="utf-8")
             result = subprocess.run(
                 ["cargo", "test", "--lib", RUST_CORPUS_TEST, "--", "--exact"],
@@ -455,8 +487,8 @@ def run_rust_mutations(repo_root: Path) -> list[str]:
                 f"  rust mutation {name}: "
                 + ("SURVIVED" if result.returncode == 0 else "killed")
             )
-    finally:
-        target.write_text(original, encoding="utf-8")
+        finally:
+            target.write_text(original, encoding="utf-8")
     return survivors
 
 
