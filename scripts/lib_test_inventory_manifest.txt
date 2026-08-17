@@ -3209,10 +3209,15 @@ services::discord::outbound::manual_delivery::manual_v3_delivery_tests::voice_an
 services::discord::outbound::message::tests::legacy_outbound_envelope_defaults_create_nonce_fields
 services::discord::outbound::reaction_control::tests::queue_reaction_delivery_uses_fallback_only_on_failure
 services::discord::outbound::reaction_control::tests::reaction_control_reply_ids_are_stable_for_queued_card_failure
+services::discord::outbound::receipt_index::tests::adjacent_receipts_union_covers_spanning_obligation
 services::discord::outbound::receipt_index::tests::empty_and_absent_stores_remain_distinct
+services::discord::outbound::receipt_index::tests::frontier_only_record_covers_prefix_but_not_beyond_high_water_mark
 services::discord::outbound::receipt_index::tests::malformed_present_store_is_unknown
+services::discord::outbound::receipt_index::tests::one_byte_gap_remains_uncovered
+services::discord::outbound::receipt_index::tests::overlapping_receipts_union_covers_spanning_obligation
 services::discord::outbound::receipt_index::tests::projection_covers_exact_and_contained_ranges
 services::discord::outbound::receipt_index::tests::projection_rejects_partial_overlap_and_adjacent_ranges
+services::discord::outbound::receipt_index::tests::receipts_from_different_projection_keys_do_not_union
 services::discord::outbound::receipt_index::tests::semantically_incomplete_receipt_is_unknown
 services::discord::outbound::receipt_index::tests::turn_nonce_is_not_part_of_the_projection
 services::discord::outbound::receipt_index::tests::wrong_generation_never_covers
