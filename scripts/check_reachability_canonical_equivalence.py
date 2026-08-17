@@ -100,6 +100,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -408,55 +409,90 @@ def run_python_mutations(repo_root: Path, cases: list[Case]) -> list[str]:
 
 def run_rust_mutations(repo_root: Path) -> list[str]:
     target = repo_root / OBLIGATION_REL
-    original = target.read_text(encoding="utf-8")
+
+    git_result = subprocess.run(
+        ["git", "show", f"HEAD:{OBLIGATION_REL}"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if git_result.returncode != 0:
+        return [
+            f"cannot read {OBLIGATION_REL} from git HEAD"
+        ]
+    original = git_result.stdout
+
+    current = target.read_text(encoding="utf-8")
+    if current != original:
+        return [
+            f"target file {OBLIGATION_REL} has been modified (not at HEAD state). "
+            f"A previous run may have failed to clean up. Restore it: "
+            f"`git checkout {OBLIGATION_REL}`"
+        ]
+
     survivors: list[str] = []
-    try:
-        baseline = subprocess.run(
-            ["cargo", "test", "--lib", RUST_CORPUS_TEST, "--", "--exact"],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if baseline.returncode != 0:
-            return [
-                "the unmutated Rust corpus test is already red; a mutation runner "
-                f"on a red baseline measures nothing.\n{baseline.stdout[-2000:]}"
-            ]
-        for name, before, after in RUST_MUTATIONS:
-            occurrences = original.count(before)
-            if occurrences != 1:
-                survivors.append(
-                    f"rust mutation {name!r} anchors on text appearing "
-                    f"{occurrences} time(s); a mutation that cannot be applied "
-                    "proves nothing"
-                )
-                continue
-            target.write_text(original.replace(before, after), encoding="utf-8")
-            result = subprocess.run(
-                ["cargo", "test", "--lib", RUST_CORPUS_TEST, "--", "--exact"],
-                cwd=repo_root,
-                capture_output=True,
-                text=True,
-                check=False,
+    baseline = subprocess.run(
+        ["cargo", "test", "--lib", RUST_CORPUS_TEST, "--", "--exact"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if baseline.returncode != 0:
+        return [
+            "the unmutated Rust corpus test is already red; a mutation runner "
+            f"on a red baseline measures nothing.\n{baseline.stdout[-2000:]}"
+        ]
+    for name, before, after in RUST_MUTATIONS:
+        occurrences = original.count(before)
+        if occurrences != 1:
+            survivors.append(
+                f"rust mutation {name!r} anchors on text appearing "
+                f"{occurrences} time(s); a mutation that cannot be applied "
+                "proves nothing"
             )
-            if result.returncode == 0:
-                survivors.append(
-                    f"rust mutation {name!r} SURVIVED: the corpus still matches "
-                    "with one implementation changed"
+            continue
+
+        with tempfile.TemporaryDirectory(prefix="rust_mut_") as tmpdir:
+            tmpwt = Path(tmpdir) / "wt"
+            try:
+                subprocess.run(
+                    ["git", "worktree", "add", "--detach", str(tmpwt), "HEAD"],
+                    cwd=repo_root,
+                    capture_output=True,
+                    check=True,
                 )
-            elif "error[E" in result.stderr or "error: could not compile" in result.stderr:
-                survivors.append(
-                    f"rust mutation {name!r} broke the BUILD rather than the "
-                    "assertion; #5071 §4.1 does not count a compile failure as "
-                    "behavioural evidence"
+                mut_target = tmpwt / OBLIGATION_REL
+                mut_target.write_text(original.replace(before, after), encoding="utf-8")
+                result = subprocess.run(
+                    ["cargo", "test", "--lib", RUST_CORPUS_TEST, "--", "--exact"],
+                    cwd=tmpwt,
+                    capture_output=True,
+                    text=True,
+                    check=False,
                 )
-            print(
-                f"  rust mutation {name}: "
-                + ("SURVIVED" if result.returncode == 0 else "killed")
-            )
-    finally:
-        target.write_text(original, encoding="utf-8")
+                if result.returncode == 0:
+                    survivors.append(
+                        f"rust mutation {name!r} SURVIVED: the corpus still matches "
+                        "with one implementation changed"
+                    )
+                elif "error[E" in result.stderr or "error: could not compile" in result.stderr:
+                    survivors.append(
+                        f"rust mutation {name!r} broke the BUILD rather than the "
+                        "assertion; #5071 §4.1 does not count a compile failure as "
+                        "behavioural evidence"
+                    )
+                print(
+                    f"  rust mutation {name}: "
+                    + ("SURVIVED" if result.returncode == 0 else "killed")
+                )
+            finally:
+                subprocess.run(
+                    ["git", "worktree", "remove", "--force", str(tmpwt)],
+                    cwd=repo_root,
+                    capture_output=True,
+                )
     return survivors
 
 
