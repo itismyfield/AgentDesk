@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
-import os
 import re
 import sys
 from collections import Counter
@@ -28,9 +27,6 @@ TEST_FILE_NAMES = {"integration_tests.rs", "tests.rs"}
 GIANT_FILE_REGISTRY = REPO_ROOT / "scripts" / "giant_file_registry.toml"
 GIANT_FILE_REGISTRY_DOC = GENERATED_DOCS_DIR / "giant-file-registry.md"
 GIANT_FILE_ISSUE_SNAPSHOT_MAX_AGE = timedelta(days=30)
-GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV = (
-    "GIANT_FILE_REGISTRY_ENFORCE_CLOSED_ISSUES"
-)
 GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST = (
     REPO_ROOT / "scripts" / "giant_file_closed_issue_transition_list.txt"
 )
@@ -1041,18 +1037,6 @@ def load_giant_file_issue_ratchets() -> dict[str, int]:
     return ratchets
 
 
-def closed_issue_enforcement_enabled() -> bool:
-    """Return whether closed-issue ratchets are enforced (enabled by default)."""
-    value = os.environ.get(GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV, "1")
-    if value in {"", "0"}:
-        return False
-    if value == "1":
-        return True
-    raise ParseError(
-        f"{GIANT_FILE_CLOSED_ISSUE_ENFORCEMENT_ENV} must be unset, 0, or 1"
-    )
-
-
 def load_giant_file_closed_issue_transition_list() -> set[str]:
     """Load registry paths temporarily allowed to retain closed deadlines."""
     if not GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST.is_file():
@@ -1289,11 +1273,7 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
     grandfathered, entries, baseline_paths = load_giant_file_registry()
     issue_metadata = load_giant_file_issue_metadata()
     transition_list = load_giant_file_closed_issue_transition_list()
-    issue_ratchets = (
-        load_giant_file_issue_ratchets()
-        if closed_issue_enforcement_enabled()
-        else None
-    )
+    issue_ratchets = load_giant_file_issue_ratchets()
     prod_giants = {
         entry.file_path: entry.prod_line_count
         for entry in modules
@@ -1463,14 +1443,13 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
                 "remove it from the transition list or add it to the registry"
             )
 
-    if issue_ratchets is not None:
-        problems.extend(
-            giant_file_issue_ratchet_problems(
-                closed_deadline_entries=closed_deadline_entries,
-                transition_list_entries=len(transition_list),
-                baselines=issue_ratchets,
-            )
+    problems.extend(
+        giant_file_issue_ratchet_problems(
+            closed_deadline_entries=closed_deadline_entries,
+            transition_list_entries=len(transition_list),
+            baselines=issue_ratchets,
         )
+    )
 
     if closed_issue_forbidden_problems:
         problems.extend(sorted(closed_issue_forbidden_problems))

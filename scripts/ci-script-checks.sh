@@ -392,8 +392,10 @@ echo "=== Generate inventory docs (refresh workspace; gate source-of-truth invar
 # count or transition-list count grows. A lower measured count must be recorded
 # by the writer, which automatically lowers (and never raises) both baselines:
 # `python3 scripts/refresh_giant_file_issue_metadata.py && git add scripts/giant_file_issue_metadata.json`
-# The same writer re-verifies GitHub issue state and snapshot freshness. Entries
-# already in the transition list warn but pass; a new dead pointer is fatal.
+# The same writer re-queries live GitHub for each issue's state and stamps a new
+# refreshed_at; it resets the freshness clock rather than checking it, and the
+# 30-day staleness gate lives in the generator above. Entries already in the
+# transition list warn but pass; a new dead pointer is fatal.
 "$PYTHON" scripts/generate_inventory_docs.py
 git diff --exit-code -- ARCHITECTURE.md docs/generated/route-inventory.md docs/generated/worker-inventory.md
 
