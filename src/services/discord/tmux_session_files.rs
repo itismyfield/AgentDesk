@@ -61,6 +61,141 @@ fn run_generation_stamp_before_create_hook_for_tests() {
     }
 }
 
+/// Hook fired on the freshly written temp inode BEFORE its mtime is read, so a
+/// test can give it any mtime the host filesystem would never produce on its own
+/// — notably one that exactly equals the previous incarnation's (#5437), which an
+/// APFS/ext4 host cannot reproduce because its timestamps advance every spawn.
+#[cfg(test)]
+type GenerationStampAfterCreateHook = std::sync::Arc<dyn Fn(&str) + Send + Sync + 'static>;
+#[cfg(test)]
+static GENERATION_STAMP_AFTER_CREATE_HOOK: std::sync::LazyLock<
+    std::sync::Mutex<Option<GenerationStampAfterCreateHook>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+#[cfg(test)]
+fn run_generation_stamp_after_create_hook_for_tests(tmp_path: &str) {
+    let hook = GENERATION_STAMP_AFTER_CREATE_HOOK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    if let Some(hook) = hook {
+        hook(tmp_path);
+    }
+}
+
+/// Escalating offsets (ns past the previous incarnation's mtime) tried when a
+/// freshly stamped `.generation` inode does not land strictly after it (#5437).
+/// The first steps cover nanosecond/microsecond-granularity filesystems; the
+/// later ones cover coarse ones (HFS+/ext3 at 1s, FAT at 2s), where a `+1ns`
+/// request truncates straight back onto the colliding value. The list length is
+/// the re-check loop's upper bound.
+const GENERATION_MTIME_BUMP_STEPS_NS: &[i64] = &[
+    1,
+    1_000,
+    1_000_000,
+    1_000_000_000,
+    2_000_000_000,
+    4_000_000_000,
+    8_000_000_000,
+];
+
+#[cfg(test)]
+static GENERATION_MTIME_BUMP_STEPS_OVERRIDE: std::sync::LazyLock<
+    std::sync::Mutex<Option<Vec<i64>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+fn generation_mtime_bump_steps_ns() -> Vec<i64> {
+    #[cfg(test)]
+    if let Some(steps) = GENERATION_MTIME_BUMP_STEPS_OVERRIDE
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone()
+    {
+        return steps;
+    }
+    GENERATION_MTIME_BUMP_STEPS_NS.to_vec()
+}
+
+/// Read an open marker inode's mtime as nanoseconds since the unix epoch, in the
+/// same units `read_generation_file_mtime_ns` reports to consumers.
+fn generation_marker_mtime_ns(file: &std::fs::File) -> std::io::Result<i64> {
+    let modified = file.metadata()?.modified()?;
+    modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
+        .ok_or_else(|| std::io::Error::other("generation marker mtime is out of range"))
+}
+
+/// Push a freshly created `.generation` inode's mtime strictly past the previous
+/// incarnation's, so two incarnations of one tmux session name cannot share the
+/// receipt-projection generation key when the filesystem's timestamp resolution
+/// is coarser than the respawn interval (#5437).
+///
+/// What this GUARANTEES when it returns a value greater than `previous_ns`: that
+/// value is what a later `stat` observes, because every step is verified by
+/// RE-READING the mtime rather than trusting the request (a coarse filesystem
+/// silently truncates it), and the escalation is bounded by
+/// `generation_mtime_bump_steps_ns()`.
+///
+/// What it deliberately does NOT guarantee: success. Uniqueness here is a
+/// best-effort hardening of the key, never a gate on the provider spawn. If
+/// `set_times` is unsupported or refused, if the mtime cannot be re-read, or if
+/// every escalation step is truncated back onto the collision, this warns once
+/// and returns the last OBSERVED mtime; the caller still publishes the marker
+/// and the spawn proceeds exactly as it did before this bump existed. A missing
+/// marker (mtime 0, "fresh wrapper") is strictly worse for every consumer than a
+/// marker whose uniqueness is merely unproven.
+fn bump_generation_mtime_past_previous(
+    file: &std::fs::File,
+    previous_ns: i64,
+    observed_ns: i64,
+    tmux_session_name: &str,
+) -> i64 {
+    let steps_ns = generation_mtime_bump_steps_ns();
+    let mut current_ns = observed_ns;
+    let mut failure = None;
+
+    for step_ns in steps_ns.iter().copied() {
+        let Some(target_ns) = previous_ns
+            .checked_add(step_ns)
+            .and_then(|target_ns| u64::try_from(target_ns).ok())
+        else {
+            failure = Some(format!("bump target for +{step_ns}ns is out of range"));
+            break;
+        };
+        let target = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(target_ns);
+        if let Err(error) = file.set_times(std::fs::FileTimes::new().set_modified(target)) {
+            failure = Some(format!("set_times(+{step_ns}ns) failed: {error}"));
+            break;
+        }
+        match generation_marker_mtime_ns(file) {
+            Ok(mtime_ns) => {
+                current_ns = mtime_ns;
+                if mtime_ns > previous_ns {
+                    return mtime_ns;
+                }
+            }
+            Err(error) => {
+                failure = Some(format!("re-reading the +{step_ns}ns bump failed: {error}"));
+                break;
+            }
+        }
+    }
+
+    let detail = failure.unwrap_or_else(|| {
+        format!(
+            "every bump step up to +{}ns was truncated back onto the previous mtime",
+            steps_ns.last().copied().unwrap_or(0)
+        )
+    });
+    tracing::warn!(
+        "generation marker mtime uniqueness unproven for {tmux_session_name} \
+         (previous={previous_ns}, publishing={current_ns}, {detail}); spawn continues"
+    );
+    current_ns
+}
+
 /// Stamp the `.generation` marker for one successful provider spawn.
 ///
 /// A successful call creates a new sibling inode with `create_new` and atomically
@@ -68,6 +203,13 @@ fn run_generation_stamp_before_create_hook_for_tests() {
 /// an fd for the prior inode without changing the marker visible at this path.
 /// Failures leave the destination untouched, emit one warning, and do not fail
 /// the provider spawn. The write is not fsynced.
+///
+/// Before the rename publishes the new inode, its mtime is bumped past the
+/// mtime the PREVIOUS incarnation published under this session name whenever the
+/// fresh inode did not already land after it (#5437) — so the published marker
+/// never carries a colliding generation key even transiently. That bump is
+/// best-effort: see `bump_generation_mtime_past_previous` for what it does and
+/// does not guarantee.
 pub(in crate::services::discord) fn stamp_session_generation_marker(
     tmux_session_name: &str,
 ) -> Option<i64> {
@@ -84,6 +226,12 @@ fn stamp_session_generation_marker_under_source_authority(tmux_session_name: &st
         std::process::id(),
         uuid::Uuid::new_v4().simple()
     );
+    // The generation key the previous incarnation of this session name published,
+    // read through the resolver consumers stat (canonical, then the legacy `/tmp`
+    // fallback). 0 = no readable prior marker, so this spawn has nothing to
+    // collide with and no comparison is needed. Read under source authority, which
+    // serializes this session's marker writers.
+    let previous_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
 
     #[cfg(test)]
     run_generation_stamp_before_create_hook_for_tests();
@@ -94,12 +242,17 @@ fn stamp_session_generation_marker_under_source_authority(tmux_session_name: &st
             .create_new(true)
             .open(&tmp_path)?;
         file.write_all(generation.to_string().as_bytes())?;
-        let modified = file.metadata()?.modified()?;
-        let modified_ns = modified
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
-            .ok_or_else(|| std::io::Error::other("generation marker mtime is out of range"))?;
+        #[cfg(test)]
+        run_generation_stamp_after_create_hook_for_tests(&tmp_path);
+        let mut modified_ns = generation_marker_mtime_ns(&file)?;
+        if previous_mtime_ns != 0 && modified_ns <= previous_mtime_ns {
+            modified_ns = bump_generation_mtime_past_previous(
+                &file,
+                previous_mtime_ns,
+                modified_ns,
+                tmux_session_name,
+            );
+        }
         drop(file);
         std::fs::rename(&tmp_path, &path)?;
         Ok(modified_ns)
@@ -797,6 +950,12 @@ mod tests {
             *GENERATION_STAMP_BEFORE_CREATE_HOOK
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner()) = None;
+            *GENERATION_STAMP_AFTER_CREATE_HOOK
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = None;
+            *GENERATION_MTIME_BUMP_STEPS_OVERRIDE
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = None;
         }
     }
 
@@ -826,6 +985,34 @@ mod tests {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = Some(hook);
         TestHookGuard
+    }
+
+    fn set_generation_after_create_hook(hook: GenerationStampAfterCreateHook) -> TestHookGuard {
+        *GENERATION_STAMP_AFTER_CREATE_HOOK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(hook);
+        TestHookGuard
+    }
+
+    fn set_generation_mtime_bump_steps(steps_ns: Vec<i64>) -> TestHookGuard {
+        *GENERATION_MTIME_BUMP_STEPS_OVERRIDE
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(steps_ns);
+        TestHookGuard
+    }
+
+    /// Force `path`'s mtime to an exact nanosecond value, so a test can stage the
+    /// same-tick collision a nanosecond-resolution host never produces.
+    fn set_mtime_ns(path: &str, mtime_ns: i64) {
+        let offset = std::time::Duration::from_nanos(
+            u64::try_from(mtime_ns).expect("mtime is not negative"),
+        );
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open marker to pin its mtime")
+            .set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH + offset))
+            .expect("pin marker mtime");
     }
 
     fn isolated_runtime_root() -> (tempfile::TempDir, crate::config::TestEnvVarGuard) {
@@ -1088,6 +1275,107 @@ mod tests {
         assert_ne!(
             new_inode, old_inode,
             "successful stamp must install a new inode"
+        );
+    }
+
+    /// #5437: the receipt-projection generation key is the `.generation` mtime, so
+    /// two incarnations of one tmux session name must never publish the same one.
+    /// A nanosecond-resolution host cannot produce the collision on its own, so
+    /// the fresh inode's mtime is pinned onto the previous incarnation's tick.
+    #[test]
+    fn respawn_inside_one_filesystem_tick_bumps_the_generation_key_5437() {
+        const PREVIOUS_NS: i64 = 1_700_000_000_000_000_000;
+
+        let (_root, _env) = isolated_runtime_root();
+        let session = unique_session("mtime-collision");
+        let path = generation_path(&session);
+
+        std::fs::write(&path, b"1").expect("previous incarnation marker");
+        set_mtime_ns(&path, PREVIOUS_NS);
+        assert_eq!(read_generation_file_mtime_ns(&session), PREVIOUS_NS);
+
+        let path_from_hook = path.clone();
+        let _collision = set_generation_after_create_hook(Arc::new(move |tmp_path| {
+            assert_ne!(
+                tmp_path, path_from_hook,
+                "the hook must see the temp sibling"
+            );
+            set_mtime_ns(tmp_path, PREVIOUS_NS);
+        }));
+
+        let mut stamped = Vec::new();
+        let logs = capture_warns(|| {
+            for attempt in 0..2 {
+                let mtime_ns = stamp_session_generation_marker(&session)
+                    .unwrap_or_else(|| panic!("respawn {attempt} must stamp"));
+                assert_eq!(
+                    read_generation_file_mtime_ns(&session),
+                    mtime_ns,
+                    "the published marker must carry exactly the returned key"
+                );
+                stamped.push(mtime_ns);
+            }
+        });
+
+        assert!(
+            stamped[0] > PREVIOUS_NS,
+            "a same-tick respawn must not reuse the previous incarnation key \
+             (stamped={}, previous={PREVIOUS_NS})",
+            stamped[0]
+        );
+        assert!(
+            stamped[1] > stamped[0],
+            "each further same-tick respawn must keep the key increasing \
+             (stamped={stamped:?})"
+        );
+        assert_eq!(logs, "", "a proven bump must stay silent: {logs}");
+    }
+
+    /// #5437 boundary: uniqueness is best-effort hardening, not a spawn gate.
+    /// Injects a filesystem that accepts the bump request and then truncates it
+    /// back onto the colliding tick (a single `+0ns` step re-reads unchanged).
+    #[test]
+    fn unbumpable_generation_mtime_still_publishes_the_marker_and_warns_5437() {
+        const PREVIOUS_NS: i64 = 1_700_000_000_000_000_000;
+
+        let (_root, _env) = isolated_runtime_root();
+        let session = unique_session("mtime-bump-refused");
+        let path = generation_path(&session);
+
+        std::fs::write(&path, b"1").expect("previous incarnation marker");
+        set_mtime_ns(&path, PREVIOUS_NS);
+
+        let _collision = set_generation_after_create_hook(Arc::new(|tmp_path| {
+            set_mtime_ns(tmp_path, PREVIOUS_NS);
+        }));
+        let _steps = set_generation_mtime_bump_steps(vec![0]);
+
+        let mut stamped = None;
+        let logs = capture_warns(|| {
+            stamped = Some(stamp_session_generation_marker(&session));
+        });
+
+        assert_eq!(
+            stamped.expect("stamp ran"),
+            Some(PREVIOUS_NS),
+            "an unprovable bump must still publish the marker at its observed mtime"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            crate::services::discord::runtime_store::process_generation().to_string(),
+            "the spawn's own generation content must land even when the bump fails"
+        );
+        assert_eq!(
+            read_generation_file_mtime_ns(&session),
+            PREVIOUS_NS,
+            "the marker stays readable; only its uniqueness is unproven"
+        );
+        assert_eq!(logs.lines().count(), 1, "captured WARN events: {logs}");
+        assert_eq!(
+            logs.matches("generation marker mtime uniqueness unproven")
+                .count(),
+            1,
+            "the bump boundary must be visible exactly once: {logs}"
         );
     }
 
