@@ -3211,7 +3211,9 @@ services::discord::outbound::reaction_control::tests::queue_reaction_delivery_us
 services::discord::outbound::reaction_control::tests::reaction_control_reply_ids_are_stable_for_queued_card_failure
 services::discord::outbound::receipt_index::tests::adjacent_receipts_union_covers_spanning_obligation
 services::discord::outbound::receipt_index::tests::empty_and_absent_stores_remain_distinct
-services::discord::outbound::receipt_index::tests::frontier_only_record_covers_prefix_but_not_beyond_high_water_mark
+services::discord::outbound::receipt_index::tests::frontier_beyond_current_transcript_eof_is_uncovered
+services::discord::outbound::receipt_index::tests::frontier_covers_only_its_committed_range_boundaries
+services::discord::outbound::receipt_index::tests::frontier_requires_and_uses_record_receipt_identity
 services::discord::outbound::receipt_index::tests::malformed_present_store_is_unknown
 services::discord::outbound::receipt_index::tests::one_byte_gap_remains_uncovered
 services::discord::outbound::receipt_index::tests::overlapping_receipts_union_covers_spanning_obligation

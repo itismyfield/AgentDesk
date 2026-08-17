@@ -2,20 +2,23 @@
 //!
 //! This is the 4987 S2 observation seam. It reads the existing delivery-record
 //! store and normalizes, per projection key, the union of confirmed receipt
-//! ranges plus the durable frontier's guaranteed `[0, end)` prefix. It neither
+//! ranges plus the exact `[range.0, range.1)` range of a canonically validated
+//! durable frontier. It neither
 //! mutates the store nor turns coverage into a health verdict. Later reachability
 //! composition may consume the returned fact; this module has no destructive-
 //! action authority and is intentionally not wired to production.
 //!
-//! One anomalous receipt or frontier currently makes the whole index `Unknown`;
-//! choosing a finer failure granularity remains a prerequisite for S3.
+//! One anomalous receipt currently makes the whole index `Unknown`. A frontier
+//! without canonical generation/EOF validation or a unique receipt-derived
+//! provider/session identity contributes no coverage.
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
 use super::delivery_record::{
-    ConfirmedDeliveryReceipt, DeliveredCommit, DeliveryRecord, read_record_at,
+    ConfirmedDeliveryReceipt, DeliveredCommit, DeliveryRecord,
+    current_generation_durable_frontier_at, read_record_at,
 };
 use crate::services::provider::ProviderKind;
 
@@ -81,20 +84,16 @@ impl ReceiptIndex {
     /// Pure adapter from the durable record shape into the projection index.
     fn from_record(
         record: DeliveryRecord,
-        record_provider: &ProviderKind,
-        record_tmux_session_name: &str,
+        projected_frontier: Option<(ReceiptProjectionKey, (u64, u64))>,
     ) -> Result<Self, ReceiptIndexUnknownReason> {
         let mut index = Self::default();
 
-        if let Some(frontier) = record.delivered_frontier {
-            let (key, range) =
-                project_frontier(frontier, record_provider, record_tmux_session_name)
-                    .ok_or(ReceiptIndexUnknownReason::ReceiptStoreUnreadable)?;
+        if let Some((key, range)) = projected_frontier {
             index.ranges.entry(key).or_default().push(range);
         }
 
         for receipt in record.confirmed_deliveries {
-            let (key, range) = project_receipt(receipt)
+            let (key, range) = project_receipt(&receipt)
                 .ok_or(ReceiptIndexUnknownReason::ReceiptStoreUnreadable)?;
             index.ranges.entry(key).or_default().push(range);
         }
@@ -126,16 +125,19 @@ impl ReceiptIndex {
 /// `read_record_at` intentionally merges missing and malformed into `None`, so
 /// `symlink_metadata` performs only the required second classification:
 /// missing is `Absent`; every present or unreadable path is `Unknown`.
-/// `record_provider` and `record_tmux_session_name` are the identity context of
-/// this delivery-record path. `DeliveredCommit` persists no provider/session,
-/// so callers must supply the same context used to select the record.
 pub(in crate::services::discord) fn read_receipt_index_at(
     path: &Path,
-    record_provider: &ProviderKind,
-    record_tmux_session_name: &str,
+    current_generation_mtime_ns: i64,
+    current_transcript_eof: Option<u64>,
 ) -> ReceiptIndexRead {
     if let Some(record) = read_record_at(path) {
-        return match ReceiptIndex::from_record(record, record_provider, record_tmux_session_name) {
+        let projected_frontier = current_generation_durable_frontier_at(
+            path,
+            current_generation_mtime_ns,
+            current_transcript_eof,
+        )
+        .and_then(|frontier| project_frontier(&record.confirmed_deliveries, frontier));
+        return match ReceiptIndex::from_record(record, projected_frontier) {
             Ok(index) => ReceiptIndexRead::Ready(index),
             Err(reason) => ReceiptIndexRead::Unknown(reason),
         };
@@ -148,33 +150,33 @@ pub(in crate::services::discord) fn read_receipt_index_at(
 }
 
 fn project_frontier(
+    receipts: &[ConfirmedDeliveryReceipt],
     frontier: DeliveredCommit,
-    provider: &ProviderKind,
-    tmux_session_name: &str,
 ) -> Option<(ReceiptProjectionKey, (u64, u64))> {
-    if tmux_session_name.is_empty()
-        || frontier.generation_mtime_ns == 0
-        || frontier.range.1 <= frontier.range.0
-    {
-        return None;
+    let mut identity = None;
+    for receipt in receipts {
+        if receipt.source.generation_mtime_ns != frontier.generation_mtime_ns {
+            continue;
+        }
+        let (candidate, _) = project_receipt(receipt)?;
+        if identity
+            .as_ref()
+            .is_some_and(|existing| existing != &candidate)
+        {
+            return None;
+        }
+        identity = Some(candidate);
     }
 
-    // `DeliveredCommit` is the durable mirror of `confirmed_end_offset`, and
-    // `range_already_committed` defines every range ending at or below that
-    // high-water mark as delivered. Therefore only `[0, range.1)` is projected;
-    // `range.0` describes the winning delivery, not the frontier's lower bound.
-    Some((
-        ReceiptProjectionKey {
-            provider: provider.clone(),
-            tmux_session_name: tmux_session_name.to_owned(),
-            generation_mtime_ns: frontier.generation_mtime_ns,
-        },
-        (0, frontier.range.1),
-    ))
+    // `current_generation_durable_frontier_at` has already proved the current
+    // generation and EOF bound. `DeliveredCommit` proves only its exact
+    // committed range, under the unique stored receipt identity for that
+    // generation; it does not prove a prefix before `range.0`.
+    Some((identity?, frontier.range))
 }
 
 fn project_receipt(
-    receipt: ConfirmedDeliveryReceipt,
+    receipt: &ConfirmedDeliveryReceipt,
 ) -> Option<(ReceiptProjectionKey, (u64, u64))> {
     if !receipt.source.is_authoritative()
         || receipt.delivery_channel_id != receipt.source.delivery_channel_id
@@ -187,7 +189,7 @@ fn project_receipt(
     Some((
         ReceiptProjectionKey {
             provider,
-            tmux_session_name: receipt.source.tmux_session_name,
+            tmux_session_name: receipt.source.tmux_session_name.clone(),
             generation_mtime_ns: receipt.source.generation_mtime_ns,
         },
         range,
@@ -227,14 +229,31 @@ mod tests {
                 confirmed_deliveries: receipts,
                 ..DeliveryRecord::default()
             },
-            &ProviderKind::Claude,
-            "AgentDesk-42",
+            None,
         )
         .expect("authoritative receipt index")
     }
 
     fn read_index(path: &Path) -> ReceiptIndexRead {
-        read_receipt_index_at(path, &ProviderKind::Claude, "AgentDesk-42")
+        read_receipt_index_at(path, 700, Some(200))
+    }
+
+    fn write_record(path: &Path, record: &DeliveryRecord) {
+        fs::write(
+            path,
+            serde_json::to_string(record).expect("serialize record"),
+        )
+        .expect("write record");
+    }
+
+    fn frontier(range: (u64, u64), generation_mtime_ns: i64) -> DeliveredCommit {
+        DeliveredCommit {
+            range,
+            generation_mtime_ns,
+            attempts: 1,
+            panel_msg_id: None,
+            panel_channel_id: None,
+        }
     }
 
     fn covered(index: &ReceiptIndex, generation: i64, range: (u64, u64)) -> bool {
@@ -317,27 +336,69 @@ mod tests {
     }
 
     #[test]
-    fn frontier_only_record_covers_prefix_but_not_beyond_high_water_mark() {
-        let index = ReceiptIndex::from_record(
-            DeliveryRecord {
-                delivered_frontier: Some(DeliveredCommit {
-                    range: (150, 200),
-                    generation_mtime_ns: 700,
-                    attempts: 1,
-                    panel_msg_id: None,
-                    panel_channel_id: None,
-                }),
-                confirmed_deliveries: Vec::new(),
+    fn frontier_covers_only_its_committed_range_boundaries() {
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join("record.json");
+        write_record(
+            &path,
+            &DeliveryRecord {
+                delivered_frontier: Some(frontier((150, 200), 700)),
+                confirmed_deliveries: vec![receipt((10, 20), 700, "identity")],
                 ..DeliveryRecord::default()
             },
-            &ProviderKind::Claude,
-            "AgentDesk-42",
-        )
-        .expect("authoritative frontier index");
+        );
 
-        assert!(covered(&index, 700, (0, 200)));
-        assert!(covered(&index, 700, (100, 200)));
+        let ReceiptIndexRead::Ready(index) = read_index(&path) else {
+            panic!("canonical frontier must produce an index");
+        };
+        assert!(!covered(&index, 700, (149, 200)));
+        assert!(covered(&index, 700, (150, 200)));
+        assert!(covered(&index, 700, (151, 199)));
         assert!(!covered(&index, 700, (199, 201)));
+    }
+
+    #[test]
+    fn frontier_beyond_current_transcript_eof_is_uncovered() {
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join("record.json");
+        write_record(
+            &path,
+            &DeliveryRecord {
+                delivered_frontier: Some(frontier((u64::MAX - 1, u64::MAX), 700)),
+                confirmed_deliveries: vec![receipt((10, 20), 700, "identity")],
+                ..DeliveryRecord::default()
+            },
+        );
+
+        let ReceiptIndexRead::Ready(index) = read_index(&path) else {
+            panic!("stale frontier must be omitted from an otherwise valid index");
+        };
+        assert!(!covered(&index, 700, (u64::MAX - 1, u64::MAX)));
+    }
+
+    #[test]
+    fn frontier_requires_and_uses_record_receipt_identity() {
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join("record.json");
+        let mut record = DeliveryRecord {
+            delivered_frontier: Some(frontier((150, 200), 700)),
+            ..DeliveryRecord::default()
+        };
+        write_record(&path, &record);
+
+        let ReceiptIndexRead::Ready(index) = read_index(&path) else {
+            panic!("identity-less frontier must yield an empty index");
+        };
+        assert!(!covered(&index, 700, (150, 200)));
+
+        record.confirmed_deliveries = vec![receipt((10, 20), 700, "identity")];
+        write_record(&path, &record);
+        let ReceiptIndexRead::Ready(index) = read_index(&path) else {
+            panic!("receipt identity must enable the canonical frontier");
+        };
+        assert!(!index.covers(&ProviderKind::Codex, "AgentDesk-42", 700, (150, 200)));
+        assert!(!index.covers(&ProviderKind::Claude, "AgentDesk-other", 700, (150, 200)));
+        assert!(covered(&index, 700, (150, 200)));
     }
 
     #[test]
@@ -363,11 +424,7 @@ mod tests {
             }],
             ..DeliveryRecord::default()
         };
-        fs::write(
-            &path,
-            serde_json::to_string(&record).expect("serialize record"),
-        )
-        .expect("write record");
+        write_record(&path, &record);
 
         assert_eq!(
             read_index(&path),
