@@ -52,6 +52,11 @@ EXPECTED_TEST_NON_PG_COMMANDS = (
     "cargo test --lib server::routes::e2e_control::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib formatting -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib delivery_record -- --skip _pg --skip pg_ --skip postgres",
+    # #5071 T4-B3 (4987 S2): the receipt projection index lane (union coverage
+    # and the frontier operand); the `delivery_record` filter above does not
+    # reach this module.
+    "cargo test --lib services::discord::outbound::receipt_index::tests"
+    " -- --skip _pg --skip pg_ --skip postgres",
     (
         "cargo test --lib services::discord::recovery_known_ids::recovery_known_message_ids_tests"
         " -- --skip _pg --skip pg_ --skip postgres"

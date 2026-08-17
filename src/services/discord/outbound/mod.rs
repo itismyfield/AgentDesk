@@ -16,6 +16,12 @@ pub(crate) mod manual_delivery;
 pub(crate) mod message;
 pub(crate) mod policy;
 pub(in crate::services::discord) mod reaction_control;
+// #5071 T4-B3: read-only projection over `delivery_record`'s durable evidence.
+// Unix-gated because its intended consumer, the reachability observation in
+// `crate::services::discord::health`, is itself `#[cfg(unix)]`; nothing
+// constructs the index yet, so it carries no verdict authority.
+#[cfg(unix)]
+pub(in crate::services::discord) mod receipt_index;
 pub(crate) mod result;
 pub(crate) mod send_api;
 pub(crate) mod send_gate;
