@@ -248,12 +248,16 @@ pub(crate) async fn cancel_live_dispatches_for_runs_pg(
     // this, the emit / wake / session clear / slot release that follow the
     // commit existed only on this stack, so a crash here left the cancel
     // durable and the cleanup lost.
+    // Note: cancel_live_dispatches_for_runs_pg does not involve card rollback,
+    // so we pass empty card_rollback_tasks.
     let cleanup_task_id = super::cleanup_tasks::enqueue_run_cleanup_task_on_tx(
         &mut tx,
         run_ids,
         &dispatch_ids,
         &[],
         &transitions,
+        &[],
+        None,
     )
     .await?;
 
@@ -523,265 +527,12 @@ async fn transition_entry_to_skipped_pg(
     Ok(true)
 }
 
-async fn rollback_cancelled_run_cards_pg(
-    pool: &PgPool,
-    card_ids: &[String],
-    source: &str,
-) -> usize {
-    let mut rolled_back = 0usize;
-
-    for card_id in card_ids {
-        let status = match sqlx::query_scalar::<_, Option<String>>(
-            "SELECT status FROM kanban_cards WHERE id = $1",
-        )
-        .bind(card_id)
-        .fetch_optional(pool)
-        .await
-        {
-            Ok(Some(status)) => status,
-            Ok(None) => continue,
-            Err(error) => {
-                crate::auto_queue_log!(
-                    warn,
-                    "run_cancel_card_status_pg_failed",
-                    AutoQueueLogContext::new().card(card_id),
-                    "[auto-queue] failed to load postgres card {} during run cancel rollback: {}",
-                    card_id,
-                    error
-                );
-                continue;
-            }
-        };
-        if !matches!(status.as_deref(), Some("requested") | Some("in_progress")) {
-            continue;
-        }
-
-        let has_active_dispatch = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT
-             FROM task_dispatches
-             WHERE kanban_card_id = $1 AND status IN ('pending', 'dispatched')",
-        )
-        .bind(card_id)
-        .fetch_one(pool)
-        .await
-        .ok()
-        .unwrap_or(0)
-            > 0;
-        if has_active_dispatch {
-            continue;
-        }
-
-        let mut tx = match pool.begin().await {
-            Ok(tx) => tx,
-            Err(error) => {
-                crate::auto_queue_log!(
-                    warn,
-                    "run_cancel_card_rollback_pg_begin_failed",
-                    AutoQueueLogContext::new().card(card_id),
-                    "[auto-queue] failed to open postgres rollback transaction for card {} during run cancel: {}",
-                    card_id,
-                    error
-                );
-                continue;
-            }
-        };
-
-        let rollback_result = async {
-            // #1081: route status + review/dispatch pointer clears through the
-            // canonical FSM executor (`execute_pg_transition_intent`) instead
-            // of a direct status write. The enclosing `tx` keeps the
-            // transition + ancillary field cleanup atomic.
-            let current_status: Option<String> = sqlx::query_scalar::<_, Option<String>>(
-                "SELECT status FROM kanban_cards WHERE id = $1 FOR UPDATE",
-            )
-            .bind(card_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|error| format!("reload postgres card status {card_id}: {error}"))?
-            .flatten();
-            match current_status.as_deref() {
-                Some("requested") | Some("in_progress") => {}
-                _ => return Ok(false),
-            }
-            let from_status = current_status
-                .or_else(|| status.clone())
-                .unwrap_or_default();
-
-            crate::engine::transition_executor_pg::execute_pg_transition_intent(
-                &mut tx,
-                &crate::engine::transition::TransitionIntent::UpdateStatus {
-                    card_id: card_id.to_string(),
-                    from: from_status.clone(),
-                    to: "ready".to_string(),
-                },
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-
-            crate::engine::transition_executor_pg::execute_pg_transition_intent(
-                &mut tx,
-                &crate::engine::transition::TransitionIntent::SetLatestDispatchId {
-                    card_id: card_id.to_string(),
-                    dispatch_id: None,
-                },
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-
-            crate::engine::transition_executor_pg::execute_pg_transition_intent(
-                &mut tx,
-                &crate::engine::transition::TransitionIntent::SetReviewStatus {
-                    card_id: card_id.to_string(),
-                    review_status: None,
-                },
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-
-            sqlx::query(
-                "UPDATE kanban_cards
-                 SET review_round = 0,
-                     review_notes = NULL,
-                     suggestion_pending_at = NULL,
-                     review_entered_at = NULL,
-                     awaiting_dod_at = NULL,
-                     blocked_reason = NULL,
-                     updated_at = NOW()
-                 WHERE id = $1",
-            )
-            .bind(card_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| format!("reset postgres card cleanup fields {card_id}: {error}"))?;
-
-            sqlx::query(
-                "INSERT INTO card_review_state (
-                    card_id, review_round, state, pending_dispatch_id, last_verdict, last_decision,
-                    decided_by, decided_at, approach_change_round, session_reset_round, review_entered_at, updated_at
-                 ) VALUES (
-                    $1, 0, 'idle', NULL, NULL, NULL,
-                    NULL, NULL, NULL, NULL, NULL, NOW()
-                 )
-                 ON CONFLICT (card_id) DO UPDATE SET
-                    review_round = 0,
-                    state = 'idle',
-                    pending_dispatch_id = NULL,
-                    last_verdict = NULL,
-                    last_decision = NULL,
-                    decided_by = NULL,
-                    decided_at = NULL,
-                    approach_change_round = NULL,
-                    session_reset_round = NULL,
-                    review_entered_at = NULL,
-                    updated_at = NOW()",
-            )
-            .bind(card_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| format!("reset postgres card review state {card_id}: {error}"))?;
-
-            sqlx::query("DELETE FROM kv_meta WHERE key = $1 OR key = $2")
-                .bind(format!("pm_pending:{card_id}"))
-                .bind(format!("pm_decision_sent:{card_id}"))
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| format!("clear postgres card escalation state {card_id}: {error}"))?;
-
-            sqlx::query(
-                "INSERT INTO kanban_audit_logs (card_id, from_status, to_status, source, result)
-                 VALUES ($1, $2, 'ready', $3, 'OK (run cancel rollback)')",
-            )
-            .bind(card_id)
-            .bind(&status)
-            .bind(source)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| format!("insert postgres kanban audit log {card_id}: {error}"))?;
-
-            sqlx::query(
-                "UPDATE task_dispatches
-                 SET context = CASE
-                         WHEN context IS NULL OR context = '' THEN context
-                         ELSE NULLIF(
-                             (context::jsonb
-                                 - 'worktree_path'
-                                 - 'worktree_branch'
-                                 - 'completed_worktree_path'
-                                 - 'completed_branch'
-                             )::text,
-                             '{}'
-                         )
-                     END,
-                     result = CASE
-                         WHEN result IS NULL OR result = '' THEN result
-                         ELSE NULLIF(
-                             (result::jsonb
-                                 - 'worktree_path'
-                                 - 'worktree_branch'
-                                 - 'completed_worktree_path'
-                                 - 'completed_branch'
-                             )::text,
-                             '{}'
-                         )
-                     END
-                 WHERE kanban_card_id = $1
-                   AND (
-                       (context IS NOT NULL AND context <> '' AND (
-                           (context::jsonb) ? 'worktree_path'
-                           OR (context::jsonb) ? 'worktree_branch'
-                           OR (context::jsonb) ? 'completed_worktree_path'
-                           OR (context::jsonb) ? 'completed_branch'
-                       ))
-                       OR (result IS NOT NULL AND result <> '' AND (
-                           (result::jsonb) ? 'worktree_path'
-                           OR (result::jsonb) ? 'worktree_branch'
-                           OR (result::jsonb) ? 'completed_worktree_path'
-                           OR (result::jsonb) ? 'completed_branch'
-                       ))
-                   )",
-            )
-            .bind(card_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| {
-                format!("scrub postgres dispatch worktree metadata {card_id}: {error}")
-            })?;
-
-            Ok::<bool, String>(true)
-        }
-        .await;
-
-        match rollback_result {
-            Ok(true) => {
-                if tx.commit().await.is_ok() {
-                    rolled_back += 1;
-                }
-            }
-            Ok(false) => {
-                let _ = tx.rollback().await;
-            }
-            Err(error) => {
-                let _ = tx.rollback().await;
-                crate::auto_queue_log!(
-                    warn,
-                    "run_cancel_card_rollback_pg_failed",
-                    AutoQueueLogContext::new().card(card_id),
-                    "[auto-queue] failed to roll back postgres card {} during run cancel: {}",
-                    card_id,
-                    error
-                );
-            }
-        }
-    }
-
-    rolled_back
-}
-
 async fn terminalize_selected_runs_with_pg(
     health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
     pool: &PgPool,
     target_run_ids: &[String],
     reason: &str,
+    should_rollback_cards: bool,
 ) -> Result<(Value, Vec<String>), String> {
     let completes_run = reason == "auto_queue_end";
     let run_status_filter = if completes_run {
@@ -802,7 +553,6 @@ async fn terminalize_selected_runs_with_pg(
                 "cancelled_runs": 0usize,
                 "cancelled_dispatches": 0usize,
                 "deleted_phase_gates": 0usize,
-                "rolled_back_cards": 0usize,
                 "remaining_live_dispatches": 0usize,
                 "released_slots": 0usize,
                 "cleared_slot_sessions": 0usize,
@@ -965,14 +715,30 @@ async fn terminalize_selected_runs_with_pg(
     // the commit (emit, wake, session clear, slot-thread clear) become durable
     // here rather than living only on this stack.
     // #5357: extend durable outbox to include card rollback so it is retried
-    // durably alongside the dispatch/run state changes.
+    // durably alongside the dispatch/run state changes. P1-A: only rollback cards
+    // when cancelling; end operations do not touch card state.
+    let card_rollback_tasks = if should_rollback_cards {
+        rollback_candidate_card_ids
+            .iter()
+            .map(|card_id| {
+                // Each card is paired with the dispatch_id at the time of
+                // terminalization, which serves as a generation marker. P1-B:
+                // if the card's dispatch_id changes before drain, the card has
+                // been reassigned and is skipped.
+                let dispatch_id = cancel_metas.first().map(|meta| meta.dispatch_id.clone());
+                (card_id.clone(), dispatch_id)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let cleanup_task_id = super::cleanup_tasks::enqueue_run_cleanup_task_on_tx(
         &mut tx,
         &locked_run_ids,
         &cancelled_dispatch_ids,
         &released_slot_keys,
         &cancel_metas,
-        &rollback_candidate_card_ids,
+        &card_rollback_tasks,
         Some(reason),
     )
     .await?;
@@ -1017,7 +783,6 @@ async fn terminalize_selected_runs_with_pg(
         "cancelled_runs": terminalized_runs,
         "cancelled_dispatches": cleanup.cancelled_dispatches,
         "deleted_phase_gates": deleted_phase_gates,
-        "rolled_back_cards": 0usize,
         "remaining_live_dispatches": remaining_live_dispatches,
         "released_slots": cleanup.slot_cleanup.released_slots,
         "cleared_slot_sessions": cleanup.slot_cleanup.cleared_slot_sessions,
@@ -1035,13 +800,14 @@ pub(crate) async fn cancel_selected_runs_with_pg(
     reason: &str,
 ) -> Result<Value, String> {
     let (response, _rollback_candidate_card_ids) =
-        terminalize_selected_runs_with_pg(health_registry, pool, target_run_ids, reason).await?;
-    // #5357: card rollback is now durable via the cleanup task outbox. The
-    // candidate card IDs are already queued for rollback in the same transaction
-    // that committed the entry state changes, so the post-commit drain step
-    // converges even if this process dies before returning. The rolled_back_cards
-    // counter stays 0 in the response because the real rollback happens
-    // asynchronously via the outbox and is retried durably.
+        terminalize_selected_runs_with_pg(health_registry, pool, target_run_ids, reason, true)
+            .await?;
+    // #5357: card rollback is now durable via the cleanup task outbox. Rollback
+    // candidate IDs are queued in the same transaction that commits entry state
+    // changes, making recovery durable. In the normal path, `drain_run_cleanup_task_by_id_pg`
+    // executes synchronously before this function returns, performing card rollback
+    // for candidates not hit by generation guards (P1-B). If drain fails, the cleanup
+    // task is retried by the replay sweep on the next policy tick.
     Ok(response)
 }
 
@@ -1055,6 +821,7 @@ pub(crate) async fn end_run_with_pg(
         pool,
         &[run_id.to_string()],
         "auto_queue_end",
+        false, // P1-A: end operations do not roll back cards
     )
     .await?;
     Ok(response

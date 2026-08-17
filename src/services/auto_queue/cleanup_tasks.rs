@@ -1,12 +1,12 @@
 //! Durable replay for the post-commit half of auto-queue run cancel/end (#5142).
 //!
 //! Both `cancel_live_dispatches_for_runs_pg` and `terminalize_selected_runs_with_pg`
-//! commit the dispatch/run state change first and then owe four more steps:
-//! observability emit, wait-queue wake, provider session clear, and slot release
-//! (plus slot-thread clearing). Those steps used to live only on the caller's
-//! stack, so a crash right after the commit left the cancel durable while the
-//! slot token and provider session id survived, and a failing session clear only
-//! appended a warning string.
+//! commit the dispatch/run state change first and then owe five more steps:
+//! observability emit, wait-queue wake, provider session clear, card rollback,
+//! and slot release (plus slot-thread clearing). Those steps used to live only
+//! on the caller's stack, so a crash right after the commit left the cancel
+//! durable while the slot token and provider session id survived, and a failing
+//! session clear only appended a warning string.
 //!
 //! The fix is a transactional outbox. `enqueue_run_cleanup_task_on_tx` inserts a
 //! row into `auto_queue_run_cleanup_tasks` inside the very transaction that
@@ -127,7 +127,7 @@ pub(crate) struct RunCleanupTask {
     pub(crate) released_slots: Vec<ReleasedSlot>,
     pub(crate) pending_emits: Vec<CancelTransitionMeta>,
     pub(crate) emitted: bool,
-    pub(crate) card_ids: Vec<String>,
+    pub(crate) card_rollback_tasks: Vec<(String, Option<String>)>, // (card_id, dispatch_id as generation marker)
     pub(crate) card_rollback_source: Option<String>,
 }
 
@@ -193,7 +193,7 @@ impl AttemptRecord {
 
 /// Columns every drain path selects. Kept in one place so the batch sweep and
 /// the single-row claim cannot drift apart.
-const TASK_COLUMNS: &str = "id, run_ids, dispatch_ids, released_slots, pending_emits, emitted, card_ids, card_rollback_source";
+const TASK_COLUMNS: &str = "id, run_ids, dispatch_ids, released_slots, pending_emits, emitted, card_rollback_tasks, card_rollback_source";
 
 /// Rows drained per replay sweep.
 const REPLAY_BATCH_LIMIT: i64 = 50;
@@ -251,16 +251,28 @@ pub(crate) async fn enqueue_run_cleanup_task_on_tx(
     dispatch_ids: &[String],
     released_slots: &[ReleasedSlot],
     pending_emits: &[CancelTransitionMeta],
-    card_ids: &[String],
+    card_rollback_tasks: &[(String, Option<String>)],
     card_rollback_source: Option<&str>,
 ) -> Result<i64, String> {
     let released_json = serde_json::to_value(released_slots)
         .map_err(|error| format!("serialize auto-queue cleanup released slots: {error}"))?;
     let emits_json = serde_json::to_value(pending_emits)
         .map_err(|error| format!("serialize auto-queue cleanup pending emits: {error}"))?;
+    let card_tasks_json = serde_json::to_value(
+        card_rollback_tasks
+            .iter()
+            .map(|(card_id, dispatch_id)| {
+                serde_json::json!({
+                    "card_id": card_id,
+                    "dispatch_id": dispatch_id,
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| format!("serialize auto-queue cleanup card rollback tasks: {error}"))?;
     sqlx::query_scalar::<_, i64>(
         "INSERT INTO auto_queue_run_cleanup_tasks
-            (run_ids, dispatch_ids, released_slots, pending_emits, card_ids, card_rollback_source)
+            (run_ids, dispatch_ids, released_slots, pending_emits, card_rollback_tasks, card_rollback_source)
          VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING id",
     )
@@ -268,7 +280,7 @@ pub(crate) async fn enqueue_run_cleanup_task_on_tx(
     .bind(dispatch_ids)
     .bind(released_json)
     .bind(emits_json)
-    .bind(card_ids)
+    .bind(card_tasks_json)
     .bind(card_rollback_source)
     .fetch_one(&mut **tx)
     .await
@@ -282,6 +294,27 @@ fn task_from_row(row: &sqlx::postgres::PgRow) -> Result<RunCleanupTask, String> 
     let pending_emits: serde_json::Value = row
         .try_get("pending_emits")
         .map_err(|error| format!("decode auto-queue cleanup pending emits: {error}"))?;
+    let card_rollback_tasks_json: serde_json::Value = row
+        .try_get("card_rollback_tasks")
+        .map_err(|error| format!("decode auto-queue cleanup card rollback tasks: {error}"))?;
+    let card_rollback_tasks: Vec<(String, Option<String>)> = card_rollback_tasks_json
+        .as_array()
+        .ok_or_else(|| "card_rollback_tasks is not an array".to_string())?
+        .iter()
+        .map(|item| {
+            let card_id = item
+                .get("card_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "missing or invalid card_id".to_string())?
+                .to_string();
+            let dispatch_id = item
+                .get("dispatch_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            Ok((card_id, dispatch_id))
+        })
+        .collect::<Result<Vec<_>, String>>()
+        .map_err(|error| format!("parse auto-queue cleanup card rollback tasks: {error}"))?;
     Ok(RunCleanupTask {
         id: row
             .try_get("id")
@@ -299,9 +332,7 @@ fn task_from_row(row: &sqlx::postgres::PgRow) -> Result<RunCleanupTask, String> 
         emitted: row
             .try_get("emitted")
             .map_err(|error| format!("decode auto-queue cleanup emitted flag: {error}"))?,
-        card_ids: row
-            .try_get("card_ids")
-            .map_err(|error| format!("decode auto-queue cleanup card ids: {error}"))?,
+        card_rollback_tasks,
         card_rollback_source: row
             .try_get("card_rollback_source")
             .map_err(|error| format!("decode auto-queue cleanup card rollback source: {error}"))?,
@@ -859,15 +890,23 @@ pub(crate) async fn drain_run_cleanup_task_pg(
 
     // Step 3.5 — card rollback.
     //
-    // Retry safety: each card rollback is scoped to a specific card id and status
-    // (requested|in_progress), so a replay that arrives after the card was already
-    // rolled back will find it in a different status and skip it. The operation is
-    // naturally idempotent.
+    // Retry safety: each card rollback is scoped to a specific card id, status
+    // (requested|in_progress), and generation marker (dispatch_id). If the card's
+    // current latest_dispatch_id differs from the stored dispatch_id, the card
+    // has been reassigned to a new lifecycle and is skipped. For cards that match,
+    // the operation is naturally idempotent.
     let mut all_cards_handled = true;
-    if !task.card_ids.is_empty() {
+    if !task.card_rollback_tasks.is_empty() {
         let source = task.card_rollback_source.as_deref().unwrap_or("auto_queue");
-        for card_id in &task.card_ids {
-            match perform_card_rollback_on_pg(pool, card_id, source).await {
+        for (card_id, expected_dispatch_id) in &task.card_rollback_tasks {
+            match perform_card_rollback_on_pg(
+                pool,
+                card_id,
+                expected_dispatch_id.as_deref(),
+                source,
+            )
+            .await
+            {
                 Ok(_) => {}
                 Err(error) => {
                     all_cards_handled = false;
@@ -1172,28 +1211,39 @@ pub(crate) async fn replay_pending_run_cleanup_tasks_pg(
 /// roll back cards that were in `requested|in_progress` when their runs were
 /// terminalized.
 ///
-/// Retry safety: the operation is scoped to a specific card and only succeeds
-/// if the card is in `requested|in_progress` status. A replay that arrives
-/// after the card was already rolled back will find it in a different status
-/// and return early without making changes.
+/// Retry safety: the operation is scoped to a specific card, status
+/// (requested|in_progress), and generation marker (expected_dispatch_id). If the
+/// card's current latest_dispatch_id differs from the expected dispatch_id, the
+/// card has been reassigned to a new lifecycle and is skipped (returned as Ok).
+/// For matching generations, the operation is naturally idempotent.
 async fn perform_card_rollback_on_pg(
     pool: &PgPool,
     card_id: &str,
+    expected_dispatch_id: Option<&str>,
     source: &str,
 ) -> Result<(), String> {
-    let status =
-        sqlx::query_scalar::<_, Option<String>>("SELECT status FROM kanban_cards WHERE id = $1")
+    let (status, current_dispatch_id): (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = $1")
             .bind(card_id)
             .fetch_optional(pool)
             .await
-            .map_err(|error| format!("load card status for {card_id}: {error}"))?;
+            .map_err(|error| format!("load card status and dispatch id for {card_id}: {error}"))?
+            .unwrap_or_default();
 
     let Some(status) = status else {
         return Ok(());
     };
 
-    if !matches!(status.as_deref(), Some("requested") | Some("in_progress")) {
+    if !matches!(status.as_str(), "requested" | "in_progress") {
         return Ok(());
+    }
+
+    // P1-B: generation guard. If the card's current dispatch_id differs from the
+    // one we recorded, the card has been reassigned to a new lifecycle and we
+    // must not roll it back.
+    let current_dispatch_deref: Option<&str> = current_dispatch_id.as_deref();
+    if expected_dispatch_id != current_dispatch_deref {
+        return Ok(()); // Card generation mismatch: skip this card.
     }
 
     let has_active_dispatch = sqlx::query_scalar::<_, i64>(
@@ -1217,14 +1267,16 @@ async fn perform_card_rollback_on_pg(
         .await
         .map_err(|error| format!("begin card rollback transaction for {card_id}: {error}"))?;
 
-    let current_status: Option<String> = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT status FROM kanban_cards WHERE id = $1 FOR UPDATE",
-    )
-    .bind(card_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|error| format!("reload card status {card_id}: {error}"))?
-    .flatten();
+    let (current_status, current_dispatch_id_lock): (Option<String>, Option<String>) =
+        sqlx::query_as(
+            "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = $1 FOR UPDATE",
+        )
+        .bind(card_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("reload card status and dispatch id {card_id}: {error}"))?
+        .map(|(s, d)| (s, d))
+        .unwrap_or_default();
 
     match current_status.as_deref() {
         Some("requested") | Some("in_progress") => {}
@@ -1234,6 +1286,15 @@ async fn perform_card_rollback_on_pg(
                 .map_err(|error| format!("rollback card status check for {card_id}: {error}"))?;
             return Ok(());
         }
+    }
+
+    // Final generation check under the lock. If it has changed, skip.
+    let current_dispatch_deref_lock: Option<&str> = current_dispatch_id_lock.as_deref();
+    if expected_dispatch_id != current_dispatch_deref_lock {
+        tx.rollback()
+            .await
+            .map_err(|error| format!("rollback card generation check for {card_id}: {error}"))?;
+        return Ok(());
     }
 
     let from_status = current_status.unwrap_or_else(|| status.clone());

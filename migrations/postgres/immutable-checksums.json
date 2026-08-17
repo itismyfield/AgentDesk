@@ -563,7 +563,7 @@
     },
     {
       "path": "migrations/postgres/0110_auto_queue_cleanup_tasks_card_rollback.sql",
-      "sha256": "611a2fdebd438d1e3bae5c345f932d39788f1a5082d7881ff7900326542ce7ae",
+      "sha256": "0a6bed5b779468b20df42784bc4c679143f15dec7206d3b4615a6aea0860925e",
       "version": 110
     }
   ],

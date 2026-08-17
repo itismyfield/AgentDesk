@@ -4,7 +4,9 @@
 mod pg_tests {
     use super::super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
-    use crate::services::auto_queue::cancel_run::cancel_live_dispatches_for_runs_pg;
+    use crate::services::auto_queue::cancel_run::{
+        cancel_live_dispatches_for_runs_pg, end_run_with_pg,
+    };
     use sqlx::PgPool;
 
     const SLOT_THREAD_ID: &str = "7142";
@@ -1806,13 +1808,14 @@ mod pg_tests {
             let mut tx = pool.begin().await.expect("begin cancel transaction");
 
             let cancelled_dispatch_ids = vec![dispatch_id.to_string()];
+            let card_rollback_tasks = vec![(card_id.to_string(), Some(dispatch_id.to_string()))];
             let task_id = super::super::enqueue_run_cleanup_task_on_tx(
                 &mut tx,
                 &[run_id.to_string()],
                 &cancelled_dispatch_ids,
                 &[],
                 &[],
-                &[card_id.to_string()],
+                &card_rollback_tasks,
                 Some("test_rollback"),
             )
             .await
@@ -1875,5 +1878,266 @@ mod pg_tests {
                 .await
                 .expect("count cleanup tasks after drain");
         assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn end_run_does_not_change_card_state_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        // Seed: create agent, card (in_progress), run, dispatch, entry
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
+             VALUES ('agent-end', 'End Agent', 'claude', '123')
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed end agent");
+
+        let card_id = "card-end-test";
+        let run_id = "run-end-test";
+        let dispatch_id = "dispatch-end-test";
+        let entry_id = "entry-end-test";
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, review_round, review_notes)
+             VALUES ($1, 'End Card', 'in_progress', 'agent-end', 1, 'some notes')",
+        )
+        .bind(card_id)
+        .execute(&pool)
+        .await
+        .expect("seed end card");
+
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, agent_id, status)
+             VALUES ($1, 'agent-end', 'active')",
+        )
+        .bind(run_id)
+        .execute(&pool)
+        .await
+        .expect("seed end run");
+
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, to_agent_id, dispatch_type, status, title)
+             VALUES ($1, $2, 'agent-end', 'implementation', 'dispatched', 'End Dispatch')",
+        )
+        .bind(dispatch_id)
+        .bind(card_id)
+        .execute(&pool)
+        .await
+        .expect("seed end dispatch");
+
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, dispatch_id)
+             VALUES ($1, $2, $3, 'agent-end', 'dispatched', $4)",
+        )
+        .bind(entry_id)
+        .bind(run_id)
+        .bind(card_id)
+        .bind(dispatch_id)
+        .execute(&pool)
+        .await
+        .expect("seed end entry");
+
+        // Before end: verify card state
+        let (initial_status, initial_review_round, initial_review_notes): (
+            String,
+            i32,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT status, review_round, review_notes FROM kanban_cards WHERE id = $1",
+        )
+        .bind(card_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load initial card state");
+
+        assert_eq!(initial_status, "in_progress");
+        assert_eq!(initial_review_round, 1);
+        assert_eq!(initial_review_notes, Some("some notes".to_string()));
+
+        // P1-A: end_run_with_pg should NOT roll back cards
+        end_run_with_pg(None, &pool, run_id).await.expect("end run");
+
+        // After end: verify card state is UNCHANGED
+        let (final_status, final_review_round, final_review_notes): (String, i32, Option<String>) =
+            sqlx::query_as(
+                "SELECT status, review_round, review_notes FROM kanban_cards WHERE id = $1",
+            )
+            .bind(card_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load final card state");
+
+        assert_eq!(
+            final_status, initial_status,
+            "P1-A: end_run must NOT change card status"
+        );
+        assert_eq!(
+            final_review_round, initial_review_round,
+            "P1-A: end_run must NOT change card review_round"
+        );
+        assert_eq!(
+            final_review_notes, initial_review_notes,
+            "P1-A: end_run must NOT change card review_notes"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn generation_mismatch_skips_card_rollback_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        // Seed: agent, card, run, dispatches, entries
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
+             VALUES ('agent-gen', 'Gen Agent', 'claude', '123')
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed gen agent");
+
+        let card_id = "card-gen-test";
+        let run_id = "run-gen-test";
+        let dispatch_id_old = "dispatch-gen-old";
+        let dispatch_id_new = "dispatch-gen-new";
+        let entry_id = "entry-gen-test";
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_round)
+             VALUES ($1, 'Gen Card', 'in_progress', 'agent-gen', $2, 1)",
+        )
+        .bind(card_id)
+        .bind(dispatch_id_old)
+        .execute(&pool)
+        .await
+        .expect("seed gen card");
+
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, agent_id, status)
+             VALUES ($1, 'agent-gen', 'active')",
+        )
+        .bind(run_id)
+        .execute(&pool)
+        .await
+        .expect("seed gen run");
+
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, to_agent_id, dispatch_type, status, title)
+             VALUES ($1, $2, 'agent-gen', 'implementation', 'dispatched', 'Gen Old Dispatch'),
+                    ($3, $2, 'agent-gen', 'implementation', 'dispatched', 'Gen New Dispatch')",
+        )
+        .bind(dispatch_id_old)
+        .bind(card_id)
+        .bind(dispatch_id_new)
+        .execute(&pool)
+        .await
+        .expect("seed gen dispatches");
+
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, dispatch_id)
+             VALUES ($1, $2, $3, 'agent-gen', 'dispatched', $4)",
+        )
+        .bind(entry_id)
+        .bind(run_id)
+        .bind(card_id)
+        .bind(dispatch_id_old)
+        .execute(&pool)
+        .await
+        .expect("seed gen entry");
+
+        // Enqueue cleanup task with OLD dispatch_id generation marker
+        let task_id = {
+            let mut tx = pool
+                .begin()
+                .await
+                .expect("begin cleanup enqueue transaction");
+
+            let card_rollback_tasks =
+                vec![(card_id.to_string(), Some(dispatch_id_old.to_string()))];
+            let task_id = super::super::enqueue_run_cleanup_task_on_tx(
+                &mut tx,
+                &[run_id.to_string()],
+                &[dispatch_id_old.to_string()],
+                &[],
+                &[],
+                &card_rollback_tasks,
+                Some("test_gen_mismatch"),
+            )
+            .await
+            .expect("enqueue gen cleanup task");
+
+            sqlx::query("UPDATE auto_queue_entries SET status = $1 WHERE id = $2")
+                .bind("skipped")
+                .bind(entry_id)
+                .execute(&mut *tx)
+                .await
+                .expect("update gen entry to skipped");
+
+            tx.commit().await.expect("commit gen cleanup enqueue");
+            task_id
+        };
+
+        // Now update the card's latest_dispatch_id to NEW (simulating reassignment)
+        sqlx::query("UPDATE kanban_cards SET latest_dispatch_id = $1 WHERE id = $2")
+            .bind(dispatch_id_new)
+            .bind(card_id)
+            .execute(&pool)
+            .await
+            .expect("update card to new dispatch_id");
+
+        // Before drain: card is still in_progress with review_round = 1
+        let (status_before, review_round_before): (String, i32) =
+            sqlx::query_as("SELECT status, review_round FROM kanban_cards WHERE id = $1")
+                .bind(card_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load card state before drain");
+        assert_eq!(status_before, "in_progress");
+        assert_eq!(review_round_before, 1);
+
+        // P1-B: Drain the cleanup task. Generation mismatch should cause skip.
+        super::super::drain_run_cleanup_task_by_id_pg(None, &pool, task_id).await;
+
+        // After drain: card should be UNCHANGED (skipped due to generation mismatch)
+        let (status_after, review_round_after): (String, i32) =
+            sqlx::query_as("SELECT status, review_round FROM kanban_cards WHERE id = $1")
+                .bind(card_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load card state after drain");
+
+        assert_eq!(
+            status_after, status_before,
+            "P1-B: generation mismatch must skip rollback; card status unchanged"
+        );
+        assert_eq!(
+            review_round_after, review_round_before,
+            "P1-B: generation mismatch must skip rollback; card review_round unchanged"
+        );
+
+        // After drain: cleanup task should be removed (drain completes despite skip)
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM auto_queue_run_cleanup_tasks WHERE id = $1")
+                .bind(task_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count cleanup tasks after gen mismatch drain");
+        assert_eq!(
+            count, 0,
+            "P1-B: cleanup task must be deleted after drain, generation mismatch is idempotent"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 }
