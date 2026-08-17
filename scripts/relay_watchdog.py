@@ -115,6 +115,38 @@ SELECTOR_PATH_RUNTIME_MIRROR = "runtime_session_mirror"
 SELECTOR_PATH_UNCOMPARABLE = "uncomparable"
 SELECTOR_DIVERGED_TRANSCRIPT_KEY = "selector_diverged_transcript"
 
+# ── External relay verdict sidecar (4987 S6 = #5071 T4-B5) ────────────────────
+#
+# One-way intake: this file WRITES the sidecar and dcserver only READS it
+# (`src/services/discord/health/reachability/external_verdict.rs`). 4987 §5.3
+# keeps the direction one-way on purpose — a watchdog that POSTed its verdict to
+# dcserver would have nowhere to put it exactly when dcserver is the thing that
+# died, and the whole point of running out-of-band is surviving that.
+#
+# The §5.2 payload keys are written unchanged. §-1.5 ADDED `generation_mtime_ns`,
+# `spawn_nonce`, `transcript_file_id`, `watchdog_epoch` and `read_complete` so
+# the reader can gate on incarnation identity instead of on timestamp freshness;
+# because they are additive, the state version does not move and a reader that
+# only knows the older keys still parses the file.
+EXTERNAL_VERDICT_DIR = "discord_external_relay_verdicts"
+EXTERNAL_VERDICT_SOURCE = "relay_watchdog"
+EXTERNAL_VERDICT_STATE_VERSION = 1
+EXTERNAL_VERDICT_EPOCH_KEY = "external_verdict_epoch"
+# Fail-closed spelling for a verdict state this table does not name. The reader
+# accepts it and derives no authority from it.
+EXTERNAL_VERDICT_UNKNOWN = "unknown"
+# Wire spellings. These ARE the format, so they live in one table on each side;
+# the Rust half is `external_verdict.rs::VERDICT_OK` and its siblings.
+EXTERNAL_VERDICT_BY_STATE = {
+    STATE_OK: "ok",
+    STATE_LAGGING: "degraded",
+    STATE_GAP: "unreachable",
+}
+
+# The bound on `agentdesk discord read`. Named because `read_complete` is a
+# statement about exactly this bound.
+DISCORD_READ_LIMIT = 100
+
 DELIVERED_WATERMARKS_KEY = "delivered_watermarks"
 SELECTED_TRANSCRIPT_KEY = "selected_transcript"
 TRANSCRIPT_SIZES_KEY = "transcript_sizes"
@@ -2871,6 +2903,166 @@ def evaluate(
     )
 
 
+def bounded_read_is_complete(
+    returned: int, limit: int, malformed_skipped: int
+) -> bool:
+    """Whether one bounded `discord read` saw the channel's whole history.
+
+    True only when the page came back with FEWER entries than it asked for and
+    every entry parsed. ``returned == limit`` is indistinguishable from "the page
+    filled up and older messages exist beyond it", and a dropped malformed entry
+    is a message the matcher never got to compare; both fail closed to False.
+    So does any nonsensical input, because the caller is reporting on a read it
+    already knows went wrong.
+
+    What a True here does NOT establish: that the messages read are the ones the
+    relay actually sent. An edit, a delete, or a normalization collision still
+    moves the text match either way, and nothing in the bounded read can see
+    that. This is a statement about the READ, not about the channel's truth --
+    which is why 4987 §-1.5 gates the reader on incarnation identity as well.
+    """
+    if returned < 0 or limit <= 0 or malformed_skipped < 0:
+        return False
+    return malformed_skipped == 0 and returned < limit
+
+
+def session_marker_candidates(session_name: str, suffix: str) -> list[Path]:
+    """Every `<prefix>-<session>.<suffix>` session marker, canonical dir first.
+
+    Mirrors the two locations `tmux_common::resolve_session_temp_path` accepts
+    without re-deriving its `agentdesk-<hash>-<host>-` prefix: that prefix is a
+    SHA-256 over the tmux owner marker and the host namespace, and reproducing it
+    here would be a second oracle for a value this file only needs to MATCH, not
+    to produce. Glob on the suffix instead and let the caller reject ambiguity.
+
+    The legacy fallback root follows Rust's `std::env::temp_dir()` on unix
+    (`$TMPDIR`, else `/tmp`), which is what `legacy_tmp_session_path` builds on.
+    """
+    for root in (
+        adk_root() / "runtime" / "sessions",
+        Path(os.environ.get("TMPDIR") or "/tmp"),
+    ):
+        try:
+            found = sorted(root.glob(f"*-{session_name}.{suffix}"))
+        except (OSError, ValueError):
+            continue
+        if found:
+            return found
+    return []
+
+
+def session_incarnation_identity(
+    session_name: str, transcript: Path
+) -> dict[str, Any] | None:
+    """The `(generation, nonce, transcript file id)` legs of one incarnation.
+
+    Returns None when a required leg is missing or AMBIGUOUS (more than one
+    marker for this session in the same location). A partial identity would let
+    the reader match on whichever legs arrived, and 4987 §-1.5 wants an
+    unmatched incarnation IGNORED rather than half-accepted.
+
+    `generation_mtime_ns` is usable as an incarnation key because
+    `tmux_session_files::stamp_session_generation_marker` pushes a freshly
+    stamped `.generation` inode strictly past the previous incarnation's mtime,
+    escalating through `GENERATION_MTIME_BUMP_STEPS_NS` until it lands there
+    (#5437, and #5439 for two respawns inside one filesystem tick). This side
+    only reads that stamp; it does not make it monotone.
+
+    An absent or unreadable `.spawn_nonce` yields None for that leg, matching
+    `tmux_session_files::read_spawn_nonce`. The reader does not treat a None
+    nonce as a wildcard, so this is a value and not a hole.
+    """
+    generation = session_marker_candidates(session_name, "generation")
+    if len(generation) != 1:
+        return None
+    generation_stat = _regular_file_stat_without_symlink(generation[0])
+    transcript_stat = _regular_file_stat_without_symlink(transcript)
+    if generation_stat is None or transcript_stat is None:
+        return None
+    if generation_stat.st_mtime_ns <= 0:
+        return None
+    nonce_files = session_marker_candidates(session_name, "spawn_nonce")
+    if len(nonce_files) > 1:
+        return None
+    nonce: str | None = None
+    if nonce_files:
+        try:
+            nonce = nonce_files[0].read_text(encoding="utf-8").strip() or None
+        except (OSError, UnicodeError):
+            nonce = None
+    return {
+        "generation_mtime_ns": generation_stat.st_mtime_ns,
+        "spawn_nonce": nonce,
+        "transcript_file_id": {
+            "dev": transcript_stat.st_dev,
+            "ino": transcript_stat.st_ino,
+        },
+    }
+
+
+def next_external_verdict_epoch(chs: dict[str, Any]) -> int:
+    """Advance and return this channel's monotone `watchdog_epoch`.
+
+    It counts published sidecars and lives in the watchdog's own state file. It
+    does NOT survive the loss of that file: `load_state` returns `{}` for a
+    missing or corrupt state, so a respawned watchdog restarts the count and the
+    reader sees a REGRESSION. That is the safe direction — the reader drops a
+    regressed epoch, so a lost state file costs the external tier its authority
+    instead of handing it a stale one.
+    """
+    previous = chs.get(EXTERNAL_VERDICT_EPOCH_KEY)
+    current = (
+        previous + 1
+        if isinstance(previous, int)
+        and not isinstance(previous, bool)
+        and previous >= 0
+        else 1
+    )
+    chs[EXTERNAL_VERDICT_EPOCH_KEY] = current
+    return current
+
+
+def build_external_verdict_record(
+    verdict: Verdict,
+    observed_at_epoch_ms: int,
+    watchdog_epoch: int,
+    read_complete: bool,
+    identity: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """The 4987 §5.2 sidecar payload plus §-1.5's identity/completeness fields.
+
+    `read_complete` and `identity` stay independent: the first describes the
+    Discord read, the second describes which incarnation the transcript side
+    framed. Folding them together would hide which half failed from a reader
+    that classifies them differently.
+
+    A state absent from `EXTERNAL_VERDICT_BY_STATE` is spelled
+    `EXTERNAL_VERDICT_UNKNOWN` rather than defaulting to the mildest verdict, so
+    a new state added to `evaluate` cannot silently publish as "ok".
+    """
+    record: dict[str, Any] = {
+        "verdict": EXTERNAL_VERDICT_BY_STATE.get(
+            verdict.state, EXTERNAL_VERDICT_UNKNOWN
+        ),
+        "observed_at_epoch_ms": observed_at_epoch_ms,
+        "source": EXTERNAL_VERDICT_SOURCE,
+        "watchdog_state_version": EXTERNAL_VERDICT_STATE_VERSION,
+        "reason": verdict.state,
+        "lost_blocks": verdict.lost,
+        "last_delivered_ts": (
+            int(verdict.delivered_ts * 1000) if verdict.delivered_ts > 0 else 0
+        ),
+        "watchdog_epoch": watchdog_epoch,
+        "read_complete": bool(read_complete),
+        "generation_mtime_ns": None,
+        "spawn_nonce": None,
+        "transcript_file_id": None,
+    }
+    if identity is not None:
+        record.update(identity)
+    return record
+
+
 # ── Persistent state (survives process restarts; launchd may respawn us) ──────
 
 
@@ -3117,6 +3309,12 @@ class Runtime:
         self.state_path = root / "logs/relay-watchdog.state.json"
         self.deploy_marker = root / "logs/relay-watchdog.deploy-marker"
         self.dcserver_pg_alert_state = root / "logs/dcserver-pg-alert.state"
+        self.external_verdict_root = root / "runtime" / EXTERNAL_VERDICT_DIR
+        # Per-read scratch, not persisted state: `discord_haystack` sets it and
+        # the same tick's sidecar publish reads it. It starts False and is reset
+        # to False on entry to every read, so a failed read can never leave the
+        # previous tick's True behind for the publish to pick up.
+        self.last_read_complete = False
 
     def log(self, msg: str) -> None:
         line = f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}\n"
@@ -3214,9 +3412,19 @@ class Runtime:
         return parse_watcher_state_probe(200, payload)
 
     def discord_haystack(self, channel_id: str) -> str | None:
+        # Every early return below leaves this False; only the final success path
+        # asks `bounded_read_is_complete` (4987 S6).
+        self.last_read_complete = False
         try:
             p = subprocess.run(
-                [self.agentdesk, "discord", "read", channel_id, "--limit", "100"],
+                [
+                    self.agentdesk,
+                    "discord",
+                    "read",
+                    channel_id,
+                    "--limit",
+                    str(DISCORD_READ_LIMIT),
+                ],
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -3270,8 +3478,53 @@ class Runtime:
                 f"discord read: skipped {skipped} malformed message "
                 f"entries (schema drift?)"
             )
+        self.last_read_complete = bounded_read_is_complete(
+            len(msgs), DISCORD_READ_LIMIT, skipped
+        )
         bot = [m for m in ok_msgs if (m.get("author") or {}).get("bot")]
         return norm(" ".join((m.get("content") or "") for m in bot))
+
+    def external_verdict_path(self, channel_id: str) -> Path:
+        """`runtime/discord_external_relay_verdicts/claude/<channel_id>.json`.
+
+        The provider segment mirrors `ProviderKind::as_str()` and is fixed to
+        `claude` because that is the only provider this watchdog's channel config
+        describes (`ChannelConfig.announce_channel_kind`, `worktree_prefix`).
+        Another provider's channels would need their own segment; a sidecar
+        written under the wrong one is simply never read.
+        """
+        return self.external_verdict_root / "claude" / f"{channel_id}.json"
+
+    def publish_external_verdict(
+        self, channel_id: str, record: dict[str, Any]
+    ) -> bool:
+        """Write one channel's sidecar, atomically, and never die trying.
+
+        Same invariant as `save_state_guarded`: under KeepAlive an OSError raised
+        here would crash-loop the watchdog and take the ALERT path down with it,
+        so a failed publish is logged and the tick continues. The reader treats a
+        missing sidecar as an absence with no authority, which is what a failed
+        publish should look like.
+
+        The temp-then-rename publish is what lets the reader take no lock: a
+        concurrent reader sees the old bytes or the new bytes, never a torn file.
+        """
+        path = self.external_verdict_path(channel_id)
+        tmp = path.with_suffix(f"{path.suffix}.tmp.{os.getpid()}")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(
+                json.dumps(record, indent=1, sort_keys=True), encoding="utf-8"
+            )
+            tmp.replace(path)
+            return True
+        except OSError as e:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            self.log(f"[{channel_id}] external verdict publish failed ({e})")
+            return False
 
     def pg_health(self) -> PgHealthVerdict:
         """Probe dcserver's end-to-end DB view, then classify with local TCP.
@@ -5574,6 +5827,23 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         else None
     )
     observe_coverage(coverage_transcript_probe)
+    # 4987 S6: publish the channel-ranked verdict to the one-way sidecar. The
+    # identity legs describe `verdict_candidate` — the transcript this verdict is
+    # ABOUT — not `selected`, so a reader that framed a different incarnation
+    # ignores the claim instead of attributing it to the wrong one. Publishing is
+    # observation: it changes no alert, no threshold, and no branch below it.
+    rt.publish_external_verdict(
+        cid,
+        build_external_verdict_record(
+            v,
+            int(now * 1000),
+            next_external_verdict_epoch(chs),
+            rt.last_read_complete,
+            session_incarnation_identity(
+                expected_tmux_session_name(ch), verdict_candidate.path
+            ),
+        ),
+    )
     raw_unannounced = chs.get(PERMANENT_LOSS_UNANNOUNCED_KEY, 0)
     unannounced = (
         raw_unannounced

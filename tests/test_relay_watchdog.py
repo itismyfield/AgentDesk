@@ -30,6 +30,8 @@ from scripts.relay_watchdog import (
     COVERAGE_UNCOVERED,
     COVERAGE_UNKNOWN,
     DELIVERED_WATERMARKS_KEY,
+    DISCORD_READ_LIMIT,
+    EXTERNAL_VERDICT_EPOCH_KEY,
     MAX_DELIVERED_WATERMARKS,
     PG_OK,
     PG_STATE_KEY,
@@ -52,9 +54,12 @@ from scripts.relay_watchdog import (
     CoverageTranscriptProbe,
     Runtime,
     TranscriptCandidate,
+    Verdict,
     WatcherStateProbe,
     advance_delivered_watermark,
     assistant_blocks_from_lines,
+    bounded_read_is_complete,
+    build_external_verdict_record,
     channel_project_dirs,
     delivered,
     delivered_flags,
@@ -70,6 +75,7 @@ from scripts.relay_watchdog import (
     load_state,
     main_channel_project_re,
     newest_transcript,
+    next_external_verdict_epoch,
     norm,
     parse_config,
     parse_watcher_state_probe,
@@ -82,6 +88,7 @@ from scripts.relay_watchdog import (
     select_watch_transcript,
     select_watch_transcript_with_reason,
     selector_divergence_confirmed,
+    session_incarnation_identity,
     tick_channel,
     tick_coverage,
     tick_pg_tunnel,
@@ -9461,6 +9468,425 @@ class AnnounceSkipLoggingTests(unittest.TestCase):
             any("announce bot skipped" in line for line in lines), lines
         )
 
+
+class BoundedReadCompletenessTests(unittest.TestCase):
+    """4987 S6: `read_complete` is a claim about the BOUNDED READ, and the
+    watchdog may only make it when the page it got back proves the read was not
+    truncated. Everything else fails closed, because the reader grants authority
+    on the strength of this one boolean."""
+
+    def test_a_short_page_with_no_drops_is_complete(self):
+        self.assertTrue(bounded_read_is_complete(99, 100, 0))
+        self.assertTrue(bounded_read_is_complete(0, 100, 0))
+
+    def test_a_full_page_is_not_complete(self):
+        # Indistinguishable from "the page filled and older messages exist".
+        self.assertFalse(bounded_read_is_complete(100, 100, 0))
+
+    def test_an_over_full_page_is_not_complete(self):
+        self.assertFalse(bounded_read_is_complete(101, 100, 0))
+
+    def test_any_dropped_entry_defeats_completeness(self):
+        # A skipped malformed entry is a message the matcher never compared.
+        self.assertFalse(bounded_read_is_complete(50, 100, 1))
+
+    def test_nonsensical_counts_fail_closed(self):
+        for args in ((-1, 100, 0), (50, 0, 0), (50, -1, 0), (50, 100, -1)):
+            with self.subTest(args=args):
+                self.assertFalse(bounded_read_is_complete(*args))
+
+
+class HaystackReadCompletenessTests(unittest.TestCase):
+    """`Runtime.discord_haystack` must publish an honest `read_complete` for the
+    read it just did, including on every failure path — a stale True from a
+    previous tick would hand the reader authority it did not earn."""
+
+    def _probe(self, stdout: str, returncode: int = 0):
+        """Returns (haystack result, rt.last_read_complete, argv)."""
+        seen: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            seen.append(list(argv))
+            return subprocess.CompletedProcess(argv, returncode, stdout=stdout)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rt = Runtime(Config(channels=(TICK_CHANNEL,)), Path(tmp))
+            # Arm the trap: a previous tick's success must not survive.
+            rt.last_read_complete = True
+            with mock.patch.object(
+                relay_watchdog.subprocess, "run", side_effect=fake_run
+            ):
+                out = rt.discord_haystack("999")
+            return out, rt.last_read_complete, seen[0] if seen else []
+
+    def _page(self, count: int) -> str:
+        return json.dumps(
+            [
+                {"author": {"bot": True}, "content": f"msg {index}"}
+                for index in range(count)
+            ]
+        )
+
+    def test_the_read_asks_for_exactly_the_named_bound(self):
+        # `bounded_read_is_complete` compares against DISCORD_READ_LIMIT, so a
+        # flag that drifted from the constant would silently mis-judge the page.
+        _, _, argv = self._probe(self._page(1))
+        self.assertIn("--limit", argv)
+        self.assertEqual(argv[argv.index("--limit") + 1], str(DISCORD_READ_LIMIT))
+
+    def test_a_short_page_marks_the_read_complete(self):
+        out, complete, _ = self._probe(self._page(DISCORD_READ_LIMIT - 1))
+        self.assertIsNotNone(out)
+        self.assertTrue(complete)
+
+    def test_a_full_page_leaves_the_read_incomplete(self):
+        out, complete, _ = self._probe(self._page(DISCORD_READ_LIMIT))
+        self.assertIsNotNone(out)
+        self.assertFalse(complete)
+
+    def test_a_mixed_payload_leaves_the_read_incomplete(self):
+        payload = json.dumps([{"author": {"bot": True}, "content": "kept"}, None])
+        out, complete, _ = self._probe(payload)
+        self.assertIsNotNone(out, "partial data still beats blindness")
+        self.assertFalse(complete)
+
+    def test_every_read_failure_path_resets_a_previous_true(self):
+        for stdout, returncode in (
+            ("", 1),
+            ("not json", 0),
+            ("null", 0),
+            ('{"messages": 5}', 0),
+            ("[null, 7]", 0),
+        ):
+            with self.subTest(stdout=stdout, returncode=returncode):
+                out, complete, _ = self._probe(stdout, returncode)
+                self.assertIsNone(out)
+                self.assertFalse(complete)
+
+
+class ExternalVerdictIdentityTests(unittest.TestCase):
+    """4987 §-1.5 gates the reader on incarnation identity, so a partial or
+    ambiguous identity has to become NO identity: the reader would otherwise
+    match on whichever legs happened to arrive."""
+
+    SESSION = "AgentDesk-claude-adk-cc"
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.sessions = self.root / "runtime" / "sessions"
+        self.sessions.mkdir(parents=True)
+        env = mock.patch.dict(
+            os.environ, {"AGENTDESK_ROOT_DIR": str(self.root), "TMPDIR": str(self.root)}
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        self.transcript = self.root / "s.jsonl"
+        self.transcript.write_text("{}\n", encoding="utf-8")
+
+    def marker(self, suffix: str, body: str = "", prefix: str = "agentdesk-abc-h") -> Path:
+        path = self.sessions / f"{prefix}-{self.SESSION}.{suffix}"
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def identity(self):
+        return session_incarnation_identity(self.SESSION, self.transcript)
+
+    def test_identity_carries_generation_nonce_and_file_id(self):
+        generation = self.marker("generation")
+        self.marker("spawn_nonce", "nonce-a\n")
+        transcript_stat = self.transcript.stat()
+        self.assertEqual(
+            self.identity(),
+            {
+                "generation_mtime_ns": generation.stat().st_mtime_ns,
+                "spawn_nonce": "nonce-a",
+                "transcript_file_id": {
+                    "dev": transcript_stat.st_dev,
+                    "ino": transcript_stat.st_ino,
+                },
+            },
+        )
+
+    def test_a_missing_generation_marker_yields_no_identity(self):
+        self.marker("spawn_nonce", "nonce-a")
+        self.assertIsNone(self.identity())
+
+    def test_an_ambiguous_generation_marker_yields_no_identity(self):
+        # Two owner-marker hashes for one session name: which incarnation the
+        # verdict belongs to is unknowable, so publish no identity at all.
+        self.marker("generation", prefix="agentdesk-aaa-h")
+        self.marker("generation", prefix="agentdesk-bbb-h")
+        self.assertIsNone(self.identity())
+
+    def test_an_absent_nonce_marker_is_a_none_leg_not_a_failure(self):
+        # `read_spawn_nonce` returns None for a missing/empty marker, and the
+        # reader compares that None for EQUALITY rather than as a wildcard.
+        self.marker("generation")
+        identity = self.identity()
+        self.assertIsNotNone(identity)
+        self.assertIsNone(identity["spawn_nonce"])
+
+    def test_an_empty_nonce_marker_is_the_same_none_leg(self):
+        self.marker("generation")
+        self.marker("spawn_nonce", "   \n")
+        identity = self.identity()
+        self.assertIsNotNone(identity)
+        self.assertIsNone(identity["spawn_nonce"])
+
+    def test_an_ambiguous_nonce_marker_yields_no_identity(self):
+        self.marker("generation")
+        self.marker("spawn_nonce", "nonce-a", prefix="agentdesk-aaa-h")
+        self.marker("spawn_nonce", "nonce-b", prefix="agentdesk-bbb-h")
+        self.assertIsNone(self.identity())
+
+    def test_a_missing_transcript_yields_no_identity(self):
+        self.marker("generation")
+        self.transcript.unlink()
+        self.assertIsNone(self.identity())
+
+
+class ExternalVerdictEpochTests(unittest.TestCase):
+    def test_the_epoch_advances_once_per_publish(self):
+        chs: dict = {}
+        self.assertEqual(next_external_verdict_epoch(chs), 1)
+        self.assertEqual(next_external_verdict_epoch(chs), 2)
+        self.assertEqual(chs[EXTERNAL_VERDICT_EPOCH_KEY], 2)
+
+    def test_a_lost_state_file_regresses_the_epoch_rather_than_inflating_it(self):
+        # `load_state` returns {} for a missing/corrupt state, so a respawned
+        # watchdog restarts at 1. The reader drops the regression, which costs
+        # the external tier its authority instead of handing it a stale one.
+        self.assertEqual(next_external_verdict_epoch({}), 1)
+
+    def test_a_non_integer_or_negative_epoch_restarts_at_one(self):
+        for stored in ("7", 7.5, True, -1, None, [7]):
+            with self.subTest(stored=stored):
+                self.assertEqual(
+                    next_external_verdict_epoch(
+                        {EXTERNAL_VERDICT_EPOCH_KEY: stored}
+                    ),
+                    1,
+                )
+
+
+class ExternalVerdictRecordTests(unittest.TestCase):
+    IDENTITY = {
+        "generation_mtime_ns": 1785321000000000000,
+        "spawn_nonce": "nonce-a",
+        "transcript_file_id": {"dev": 17, "ino": 4242},
+    }
+
+    def record(self, state: str, **overrides):
+        defaults = dict(
+            observed_at_epoch_ms=1785321543885,
+            watchdog_epoch=7,
+            read_complete=True,
+            identity=self.IDENTITY,
+        )
+        defaults.update(overrides)
+        return build_external_verdict_record(
+            Verdict(
+                state=state,
+                blocks=4,
+                stale=3,
+                lost=3,
+                delivered_ts=1785320700.0,
+                gap_secs=843.885,
+            ),
+            **defaults,
+        )
+
+    def test_every_verdict_state_has_a_wire_spelling(self):
+        for state, spelling in (
+            (STATE_OK, "ok"),
+            (STATE_LAGGING, "degraded"),
+            (STATE_GAP, "unreachable"),
+        ):
+            with self.subTest(state=state):
+                self.assertEqual(self.record(state)["verdict"], spelling)
+
+    def test_an_unnamed_state_publishes_as_unknown_not_ok(self):
+        # A state added to `evaluate` without a spelling here must not acquire
+        # the mildest verdict by default.
+        self.assertEqual(self.record("some_new_state")["verdict"], "unknown")
+
+    def test_the_added_identity_and_completeness_fields_are_always_present(self):
+        for identity in (self.IDENTITY, None):
+            with self.subTest(identity=identity):
+                record = self.record(STATE_GAP, identity=identity)
+                for key in (
+                    "generation_mtime_ns",
+                    "spawn_nonce",
+                    "transcript_file_id",
+                    "watchdog_epoch",
+                    "read_complete",
+                ):
+                    self.assertIn(key, record)
+
+    def test_the_older_payload_keys_are_kept_unchanged(self):
+        record = self.record(STATE_GAP)
+        self.assertEqual(record["source"], "relay_watchdog")
+        self.assertEqual(record["watchdog_state_version"], 1)
+        self.assertEqual(record["reason"], STATE_GAP)
+        self.assertEqual(record["lost_blocks"], 3)
+        self.assertEqual(record["observed_at_epoch_ms"], 1785321543885)
+        self.assertEqual(record["last_delivered_ts"], 1785320700000)
+
+    def test_an_unobserved_delivery_publishes_a_zero_watermark(self):
+        record = build_external_verdict_record(
+            Verdict(
+                state=STATE_GAP,
+                blocks=1,
+                stale=1,
+                lost=1,
+                delivered_ts=0.0,
+                gap_secs=relay_watchdog.GAP_SECS_UNOBSERVED,
+            ),
+            1785321543885,
+            1,
+            True,
+            None,
+        )
+        self.assertEqual(record["last_delivered_ts"], 0)
+
+    def test_read_complete_and_identity_stay_independent(self):
+        # The reader classifies an incomplete read and an unmatched incarnation
+        # differently, so folding them together here would hide which failed.
+        self.assertTrue(self.record(STATE_GAP, identity=None)["read_complete"])
+        without_read = self.record(STATE_GAP, read_complete=False)
+        self.assertFalse(without_read["read_complete"])
+        self.assertEqual(without_read["generation_mtime_ns"], 1785321000000000000)
+
+
+class ExternalVerdictSidecarTickTests(unittest.TestCase):
+    """The wiring test: `tick_channel` must actually publish the sidecar with
+    every field filled. The pure tests above cannot catch an unwired writer.
+
+    Deliberately not a subclass of `TickChannelTests`: inheriting it would rerun
+    that whole suite under this fixture for no coverage.
+    """
+
+    SESSION = "AgentDesk-claude-adk-cc"
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "logs").mkdir()
+        self.projects = self.root / "projects"
+        self.proj_dir = self.projects / (
+            "-Users-alice--adk-release-worktrees-claude-adk-cc-20260709-140500"
+        )
+        self.proj_dir.mkdir(parents=True)
+        self.sessions = self.root / "runtime" / "sessions"
+        self.sessions.mkdir(parents=True)
+        env = mock.patch.dict(
+            os.environ,
+            {
+                "CLAUDE_PROJECTS_ROOT": str(self.projects),
+                "AGENTDESK_ROOT_DIR": str(self.root),
+                "TMPDIR": str(self.root),
+            },
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        self.now = time.time()
+        self.generation = self.sessions / f"agentdesk-abc-h-{self.SESSION}.generation"
+        self.generation.write_text("1", encoding="utf-8")
+        (self.sessions / f"agentdesk-abc-h-{self.SESSION}.spawn_nonce").write_text(
+            "nonce-a\n", encoding="utf-8"
+        )
+        self.transcript = self.proj_dir / "s.jsonl"
+
+    def gap_rt(self) -> FakeRuntime:
+        """One stale block that was never delivered → the channel ranks GAP."""
+        self.transcript.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "uuid": "00000000-0000-4000-8000-000000000000",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.now - 2000)
+                    ),
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "never delivered block"}
+                        ]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        rt = FakeRuntime(Config(channels=(TICK_CHANNEL,)), self.root)
+        rt.haystack = ""
+        return rt
+
+    def sidecar(self, rt: FakeRuntime) -> dict:
+        path = rt.external_verdict_path(TICK_CHANNEL.channel_id)
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_a_gap_tick_publishes_the_full_schema(self):
+        rt = self.gap_rt()
+        rt.last_read_complete = True
+        tick_channel(rt, TICK_CHANNEL, {}, self.now)
+        record = self.sidecar(rt)
+        transcript_stat = self.transcript.stat()
+        self.assertEqual(record["verdict"], "unreachable")
+        self.assertEqual(record["reason"], STATE_GAP)
+        self.assertEqual(record["source"], "relay_watchdog")
+        self.assertEqual(record["watchdog_state_version"], 1)
+        self.assertTrue(record["read_complete"])
+        self.assertEqual(record["watchdog_epoch"], 1)
+        self.assertEqual(
+            record["generation_mtime_ns"], self.generation.stat().st_mtime_ns
+        )
+        self.assertEqual(record["spawn_nonce"], "nonce-a")
+        self.assertEqual(
+            record["transcript_file_id"],
+            {"dev": transcript_stat.st_dev, "ino": transcript_stat.st_ino},
+        )
+
+    def test_an_incomplete_read_publishes_read_complete_false(self):
+        rt = self.gap_rt()
+        rt.last_read_complete = False
+        tick_channel(rt, TICK_CHANNEL, {}, self.now)
+        self.assertFalse(self.sidecar(rt)["read_complete"])
+
+    def test_the_published_epoch_advances_across_ticks(self):
+        rt = self.gap_rt()
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(self.sidecar(rt)["watchdog_epoch"], 1)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        self.assertEqual(self.sidecar(rt)["watchdog_epoch"], 2)
+
+    def test_a_missing_generation_marker_publishes_null_identity_legs(self):
+        self.generation.unlink()
+        rt = self.gap_rt()
+        rt.last_read_complete = True
+        tick_channel(rt, TICK_CHANNEL, {}, self.now)
+        record = self.sidecar(rt)
+        self.assertIsNone(record["generation_mtime_ns"])
+        self.assertIsNone(record["transcript_file_id"])
+        self.assertTrue(
+            record["read_complete"],
+            "the read is still complete; only the identity is unknown",
+        )
+
+    def test_a_publish_failure_does_not_break_the_tick(self):
+        rt = self.gap_rt()
+        with mock.patch.object(
+            relay_watchdog.Path, "mkdir", side_effect=OSError("read-only")
+        ):
+            tick_channel(rt, TICK_CHANNEL, {}, self.now)
+        self.assertTrue(
+            any("external verdict publish failed" in line for line in rt.log_lines),
+            rt.log_lines,
+        )
+        self.assertTrue(rt.alerts, "the gap alert must still go out")
 
 
 if __name__ == "__main__":
