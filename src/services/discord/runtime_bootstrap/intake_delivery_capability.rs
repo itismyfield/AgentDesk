@@ -23,8 +23,11 @@ pub(in crate::services::discord) use cache::{SettlementCapabilityCache, bootstra
 pub(in crate::services::discord) struct SettlementCapabilities {
     /// Whether this snapshot authorizes a dispatched handoff stamp.
     pub(in crate::services::discord) stamp_dispatched: bool,
-    /// Whether this snapshot authorizes bridge-exit settlement and the capability-driven sweep.
-    /// Capability resolution sets it only for Settle/Enforce after a Ready schema probe.
+    /// Authorizes bridge-exit settlement: set only for Settle/Enforce after a Ready schema
+    /// probe, and `settle_intake_row_at_bridge_exit` returns early without it. The recovery
+    /// sweep is NOT stage-gated the same way: `intake_delivery_sweep::sweep_once` takes this
+    /// as one disjunct of two and proceeds whenever open stamp debt exists -- its own gate
+    /// decides, not this field alone.
     pub(in crate::services::discord) settle_and_sweep: bool,
 }
 

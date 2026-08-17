@@ -184,6 +184,20 @@ pub(super) async fn sweep_once(
     cutoffs: SweepCutoffs,
     limit: i64,
 ) -> Result<SweepStats, sqlx::Error> {
+    // This is a no-debt short-circuit, NOT a stage gate, and the difference is operationally
+    // visible. `open_stamp_debt_exists` asks whether any row sits in `spawned` or `dispatched`,
+    // and `spawned` is the normal initial status of every locally admitted row
+    // (`AdmissionKind::Local => Spawned`). So on a node carrying traffic the second disjunct is
+    // true and the sweep runs at every stage, `Off` included: rows older than the cutoff are
+    // settled `unknown` whether or not settlement has been "turned on".
+    //
+    // That is the intended design -- debt already in the table has to drain after a stage is
+    // lowered or a node restarts -- and two tests pin it with `settle_and_sweep: false`:
+    // `sweep_runs_when_stage_lowered_but_open_dispatched_exists_pg` and
+    // `sweep_runs_after_restart_with_only_spawned_stamp_debt_pg`. What the disjunct buys is
+    // skipping the per-tick queries on an idle table, not holding the sweep back until the stage
+    // authorizes it. The guards that do bound the damage are the staleness cutoffs, the
+    // `live_signal` deferral, and the in-transaction cutoff recheck before each terminal CAS.
     if !caps.settle_and_sweep && !open_stamp_debt_exists(pool).await? {
         return Ok(SweepStats::default());
     }
