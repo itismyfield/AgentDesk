@@ -560,6 +560,11 @@
       "path": "migrations/postgres/0109_delivery_journal_intake_binding_index.sql",
       "sha256": "30c0c161afa5c0ea8b42bdf6f839ee5482bcaf332bda3e7fffaf037eed6c24a6",
       "version": 109
+    },
+    {
+      "path": "migrations/postgres/0110_auto_queue_cleanup_tasks_card_rollback.sql",
+      "sha256": "c0162fce99a4d0d3d395ca46da42a0de809d877d827fb73fb689df2232be3308",
+      "version": 110
     }
   ],
   "version": 1

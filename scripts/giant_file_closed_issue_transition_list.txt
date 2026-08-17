@@ -70,7 +70,6 @@ src/receipt.rs
 src/reconcile.rs
 src/services/auto_queue.rs
 src/services/auto_queue/activate_command.rs
-src/services/auto_queue/cancel_run.rs
 src/services/dispatched_sessions.rs
 src/services/dispatches/discord_delivery/orchestration.rs
 src/services/dispatches/outbox_route.rs

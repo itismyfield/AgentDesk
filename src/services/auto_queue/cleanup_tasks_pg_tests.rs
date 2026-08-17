@@ -4,7 +4,9 @@
 mod pg_tests {
     use super::super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
-    use crate::services::auto_queue::cancel_run::cancel_live_dispatches_for_runs_pg;
+    use crate::services::auto_queue::cancel_run::{
+        cancel_live_dispatches_for_runs_pg, cancel_selected_runs_with_pg, end_run_with_pg,
+    };
     use sqlx::PgPool;
 
     const SLOT_THREAD_ID: &str = "7142";
@@ -1732,5 +1734,733 @@ mod pg_tests {
         assert_eq!(stats.unrecorded_failures, 0);
         assert_eq!(slot_assignment(&pool).await, None);
         assert_eq!(provider_session_ids(&pool).await, vec![None]);
+    }
+
+    /// #5357: NULL generations never enter replay. The card rollback and the
+    /// cancel commit together, while the outbox contains only replay-safe Some
+    /// generations. The delete failure keeps the drained row observable so the
+    /// JSONB enrollment boundary can be asserted after the inline drain.
+    #[tokio::test]
+    async fn cancel_rolls_back_null_generation_in_tx_without_enrolling_it_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let (run_id, dispatch_id) = seed_run_holding_slot(&pool, "null-in-tx").await;
+        let card_id = "card-cleanup-null-in-tx";
+
+        sqlx::query(
+            "CREATE FUNCTION keep_cleanup_row_for_null_enrollment_test()
+             RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 RAISE EXCEPTION 'keep cleanup row for enrollment assertion';
+             END
+             $$",
+        )
+        .execute(&pool)
+        .await
+        .expect("install cleanup-row retention function");
+        sqlx::query(
+            "CREATE TRIGGER keep_cleanup_row_for_null_enrollment_test
+             BEFORE DELETE ON auto_queue_run_cleanup_tasks
+             FOR EACH ROW EXECUTE FUNCTION keep_cleanup_row_for_null_enrollment_test()",
+        )
+        .execute(&pool)
+        .await
+        .expect("install cleanup-row retention trigger");
+
+        cancel_selected_runs_with_pg(None, &pool, std::slice::from_ref(&run_id), "test_cancel")
+            .await
+            .expect("cancel NULL-generation card run");
+
+        let card: (String, Option<String>) =
+            sqlx::query_as("SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = $1")
+                .bind(card_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load synchronously rolled-back card");
+        assert_eq!(card, ("ready".to_string(), None));
+
+        let enrolled: serde_json::Value = sqlx::query_scalar(
+            "SELECT card_rollback_tasks
+             FROM auto_queue_run_cleanup_tasks
+             WHERE run_ids @> ARRAY[$1]::TEXT[]",
+        )
+        .bind(&run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load retained cleanup enrollment");
+        assert_eq!(enrolled, serde_json::json!([]));
+
+        let states: (String, String, String) = sqlx::query_as(
+            "SELECT
+                 (SELECT status FROM auto_queue_runs WHERE id = $1),
+                 (SELECT status FROM auto_queue_entries WHERE run_id = $1),
+                 (SELECT status FROM task_dispatches WHERE id = $2)",
+        )
+        .bind(&run_id)
+        .bind(&dispatch_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load committed cancel states");
+        assert_eq!(
+            states,
+            (
+                "cancelled".to_string(),
+                "skipped".to_string(),
+                "cancelled".to_string()
+            )
+        );
+    }
+
+    /// #5357: generation enrollment and row locking must be one operation.
+    /// The sentinel lock pauses cancellation while it rolls back the first
+    /// candidate. At that point the ordered enrollment query must already hold
+    /// the second candidate, forcing an operator transition to serialize after
+    /// cancellation instead of letting cancellation erase that new lifecycle.
+    #[tokio::test]
+    async fn cancel_null_generation_snapshot_serializes_operator_transition_pg() {
+        use std::time::Duration;
+        use tokio::time::{Instant, sleep};
+
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate_with_max_connections(8).await;
+        let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "null-aba-a").await;
+        let first_card_id = "card-cleanup-null-aba-a";
+        let target_card_id = "card-cleanup-null-aba-b";
+        let target_dispatch_id = "dispatch-cleanup-null-aba-b";
+        let sentinel_card_id = "card-cleanup-null-aba-sentinel";
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id)
+             VALUES
+                 ($1, 'NULL ABA target', 'in_progress', NULL),
+                 ($2, 'NULL ABA sentinel', 'ready', 'agent-cleanup')",
+        )
+        .bind(target_card_id)
+        .bind(sentinel_card_id)
+        .execute(&pool)
+        .await
+        .expect("seed NULL ABA target and sentinel cards");
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, to_agent_id, dispatch_type, status, title)
+             VALUES ($1, $2, 'agent-cleanup', 'implementation', 'dispatched', 'NULL ABA target')",
+        )
+        .bind(target_dispatch_id)
+        .bind(target_card_id)
+        .execute(&pool)
+        .await
+        .expect("seed NULL ABA target dispatch");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, dispatch_id)
+             VALUES
+                ('entry-cleanup-null-aba-b', $1, $2, 'agent-cleanup', 'dispatched', $3)",
+        )
+        .bind(&run_id)
+        .bind(target_card_id)
+        .bind(target_dispatch_id)
+        .execute(&pool)
+        .await
+        .expect("seed NULL ABA target entry");
+
+        sqlx::query(
+            "CREATE FUNCTION block_first_null_aba_rollback_on_sentinel()
+             RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 IF OLD.id = 'card-cleanup-null-aba-a'
+                    AND OLD.status IN ('requested', 'in_progress')
+                    AND NEW.status = 'ready'
+                 THEN
+                     PERFORM id FROM kanban_cards
+                     WHERE id = 'card-cleanup-null-aba-sentinel'
+                     FOR UPDATE;
+                 END IF;
+                 RETURN NEW;
+             END
+             $$",
+        )
+        .execute(&pool)
+        .await
+        .expect("install NULL ABA blocking function");
+        sqlx::query(
+            "CREATE TRIGGER block_first_null_aba_rollback_on_sentinel
+             BEFORE UPDATE OF status ON kanban_cards
+             FOR EACH ROW EXECUTE FUNCTION block_first_null_aba_rollback_on_sentinel()",
+        )
+        .execute(&pool)
+        .await
+        .expect("install NULL ABA blocking trigger");
+
+        let mut blocker = pool.begin().await.expect("begin NULL ABA blocker");
+        sqlx::query("SELECT id FROM kanban_cards WHERE id = $1 FOR UPDATE")
+            .bind(sentinel_card_id)
+            .fetch_one(&mut *blocker)
+            .await
+            .expect("lock NULL ABA sentinel card");
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await
+            .expect("load NULL ABA blocker backend pid");
+
+        let cancel_pool = pool.clone();
+        let cancel_run_id = run_id.clone();
+        let cancel_task = tokio::spawn(async move {
+            cancel_selected_runs_with_pg(
+                None,
+                &cancel_pool,
+                &[cancel_run_id],
+                "test_cancel_null_aba",
+            )
+            .await
+        });
+
+        let wait_deadline = Instant::now() + Duration::from_secs(10);
+        let cancel_pid = loop {
+            let waiting_pid: Option<i32> = sqlx::query_scalar(
+                "SELECT pid
+                 FROM pg_stat_activity
+                 WHERE datname = current_database()
+                   AND wait_event_type = 'Lock'
+                   AND $1 = ANY(pg_blocking_pids(pid))
+                 ORDER BY pid
+                 LIMIT 1",
+            )
+            .bind(blocker_pid)
+            .fetch_optional(&pool)
+            .await
+            .expect("observe cancellation waiting on NULL ABA sentinel");
+            if let Some(pid) = waiting_pid {
+                break pid;
+            }
+            assert!(
+                Instant::now() < wait_deadline,
+                "cancellation never waited on the sentinel card lock"
+            );
+            sleep(Duration::from_millis(10)).await;
+        };
+
+        let transition_pool = pool.clone();
+        let engine = crate::engine::PolicyEngine::new_with_pg(
+            &crate::config::Config::default(),
+            Some(pool.clone()),
+        )
+        .expect("create NULL ABA transition engine");
+        let transition_engine = engine.clone();
+        let transition_task = tokio::spawn(async move {
+            crate::kanban::transition_status_with_opts_pg_only(
+                &transition_pool,
+                &transition_engine,
+                target_card_id,
+                "requested",
+                "test_force_transition_null_aba",
+                crate::engine::transition::ForceIntent::OperatorOverride,
+            )
+            .await
+        });
+
+        let transition_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let waiting_on_cancel: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                     SELECT 1
+                     FROM pg_stat_activity
+                     WHERE datname = current_database()
+                       AND wait_event_type = 'Lock'
+                       AND $1 = ANY(pg_blocking_pids(pid))
+                 )",
+            )
+            .bind(cancel_pid)
+            .fetch_one(&pool)
+            .await
+            .expect("observe operator transition serialization");
+            if waiting_on_cancel || transition_task.is_finished() {
+                break;
+            }
+            assert!(
+                Instant::now() < transition_deadline,
+                "operator transition neither committed nor waited on cancellation"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+
+        blocker
+            .commit()
+            .await
+            .expect("release NULL ABA sentinel card");
+        cancel_task
+            .await
+            .expect("join NULL ABA cancellation")
+            .expect("cancel NULL ABA run");
+        transition_task
+            .await
+            .expect("join NULL ABA operator transition")
+            .expect("force target card into a new requested lifecycle");
+
+        let target_card: (String, Option<String>) =
+            sqlx::query_as("SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = $1")
+                .bind(target_card_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load NULL ABA target after serialization");
+        assert_eq!(
+            target_card,
+            ("requested".to_string(), None),
+            "the authorized requested/NULL lifecycle must survive cancellation"
+        );
+
+        let first_card: (String, Option<String>) =
+            sqlx::query_as("SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = $1")
+                .bind(first_card_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load first NULL ABA cancellation card");
+        assert_eq!(first_card, ("ready".to_string(), None));
+    }
+
+    /// The trigger fails specifically when the shared in-transaction rollback
+    /// changes the NULL-generation card to ready. The resulting error must
+    /// abort the enclosing cancel transaction, not leave any terminal run,
+    /// entry, dispatch, or partial card state behind.
+    #[tokio::test]
+    async fn null_generation_rollback_failure_aborts_cancel_transaction_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let (run_id, dispatch_id) = seed_run_holding_slot(&pool, "null-atomic").await;
+        let card_id = "card-cleanup-null-atomic";
+
+        sqlx::query(
+            "CREATE FUNCTION fail_null_card_in_tx_rollback_test()
+             RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 IF OLD.status IN ('requested', 'in_progress') AND NEW.status = 'ready' THEN
+                     RAISE EXCEPTION 'forced in-tx card rollback failure';
+                 END IF;
+                 RETURN NEW;
+             END
+             $$",
+        )
+        .execute(&pool)
+        .await
+        .expect("install in-tx rollback failure function");
+        sqlx::query(
+            "CREATE TRIGGER fail_null_card_in_tx_rollback_test
+             BEFORE UPDATE OF status ON kanban_cards
+             FOR EACH ROW EXECUTE FUNCTION fail_null_card_in_tx_rollback_test()",
+        )
+        .execute(&pool)
+        .await
+        .expect("install in-tx rollback failure trigger");
+
+        let error = cancel_selected_runs_with_pg(
+            None,
+            &pool,
+            std::slice::from_ref(&run_id),
+            "test_cancel_atomicity",
+        )
+        .await
+        .expect_err("in-tx card rollback failure must abort cancel");
+        assert!(error.contains("forced in-tx card rollback failure"));
+
+        let states: (String, String, String, String, Option<String>) = sqlx::query_as(
+            "SELECT r.status, e.status, d.status, c.status, c.latest_dispatch_id
+             FROM auto_queue_runs r
+             JOIN auto_queue_entries e ON e.run_id = r.id
+             JOIN task_dispatches d ON d.id = e.dispatch_id
+             JOIN kanban_cards c ON c.id = e.kanban_card_id
+             WHERE r.id = $1 AND d.id = $2 AND c.id = $3",
+        )
+        .bind(&run_id)
+        .bind(&dispatch_id)
+        .bind(card_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load states after aborted cancel");
+        assert_eq!(
+            states,
+            (
+                "active".to_string(),
+                "dispatched".to_string(),
+                "dispatched".to_string(),
+                "in_progress".to_string(),
+                None
+            )
+        );
+        let task_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM auto_queue_run_cleanup_tasks")
+                .fetch_one(&pool)
+                .await
+                .expect("count outbox rows after aborted cancel");
+        assert_eq!(task_count, 0);
+    }
+
+    #[tokio::test]
+    async fn end_run_does_not_change_card_state_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        // Seed: create agent, card (in_progress), run, dispatch, entry
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
+             VALUES ('agent-end', 'End Agent', 'claude', '123')
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed end agent");
+
+        let card_id = "card-end-test";
+        let run_id = "run-end-test";
+        let dispatch_id = "dispatch-end-test";
+        let entry_id = "entry-end-test";
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, review_round, review_notes)
+             VALUES ($1, 'End Card', 'in_progress', 'agent-end', 1, 'some notes')",
+        )
+        .bind(card_id)
+        .execute(&pool)
+        .await
+        .expect("seed end card");
+
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, agent_id, status)
+             VALUES ($1, 'agent-end', 'active')",
+        )
+        .bind(run_id)
+        .execute(&pool)
+        .await
+        .expect("seed end run");
+
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, to_agent_id, dispatch_type, status, title)
+             VALUES ($1, $2, 'agent-end', 'implementation', 'dispatched', 'End Dispatch')",
+        )
+        .bind(dispatch_id)
+        .bind(card_id)
+        .execute(&pool)
+        .await
+        .expect("seed end dispatch");
+
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, dispatch_id)
+             VALUES ($1, $2, $3, 'agent-end', 'dispatched', $4)",
+        )
+        .bind(entry_id)
+        .bind(run_id)
+        .bind(card_id)
+        .bind(dispatch_id)
+        .execute(&pool)
+        .await
+        .expect("seed end entry");
+
+        // Before end: verify card state
+        let (initial_status, initial_review_round, initial_review_notes): (
+            String,
+            i64,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT status, review_round, review_notes FROM kanban_cards WHERE id = $1",
+        )
+        .bind(card_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load initial card state");
+
+        assert_eq!(initial_status, "in_progress");
+        assert_eq!(initial_review_round, 1);
+        assert_eq!(initial_review_notes, Some("some notes".to_string()));
+
+        // P1-A: end_run_with_pg should NOT roll back cards
+        end_run_with_pg(None, &pool, run_id).await.expect("end run");
+
+        // After end: verify card state is UNCHANGED
+        let (final_status, final_review_round, final_review_notes): (String, i64, Option<String>) =
+            sqlx::query_as(
+                "SELECT status, review_round, review_notes FROM kanban_cards WHERE id = $1",
+            )
+            .bind(card_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load final card state");
+
+        assert_eq!(
+            final_status, initial_status,
+            "P1-A: end_run must NOT change card status"
+        );
+        assert_eq!(
+            final_review_round, initial_review_round,
+            "P1-A: end_run must NOT change card review_round"
+        );
+        assert_eq!(
+            final_review_notes, initial_review_notes,
+            "P1-A: end_run must NOT change card review_notes"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #5357: NULL in an outbox row is corruption/tampering because enrollment
+    /// excludes it. The drain skips only that card and records a warning while
+    /// continuing a replay-safe Some sibling from the same row.
+    #[tokio::test]
+    async fn tampered_null_generation_skips_card_but_rolls_back_some_sibling_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let null_card_id = "card-tampered-null-generation";
+        let some_card_id = "card-valid-some-generation";
+        let some_dispatch_id = "dispatch-valid-some-generation";
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
+             VALUES ('agent-generation-partition', 'Generation Partition Agent', 'claude', '5357')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed generation-partition agent");
+        sqlx::query(
+            "INSERT INTO kanban_cards
+                (id, title, status, assigned_agent_id, latest_dispatch_id)
+             VALUES ($1, 'Tampered NULL Card', 'requested', 'agent-generation-partition', NULL),
+                    ($2, 'Valid Some Card', 'in_progress', 'agent-generation-partition', $3)",
+        )
+        .bind(null_card_id)
+        .bind(some_card_id)
+        .bind(some_dispatch_id)
+        .execute(&pool)
+        .await
+        .expect("seed mixed-generation cards");
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, to_agent_id, dispatch_type, status, title)
+             VALUES ($1, $2, 'agent-generation-partition', 'implementation',
+                     'cancelled', 'Valid Some Dispatch')",
+        )
+        .bind(some_dispatch_id)
+        .bind(some_card_id)
+        .execute(&pool)
+        .await
+        .expect("seed terminal Some-generation dispatch");
+
+        let task_id = {
+            let mut tx = pool.begin().await.expect("begin mixed-generation enqueue");
+            let task_id = super::super::enqueue_run_cleanup_task_on_tx(
+                &mut tx,
+                &[],
+                &[],
+                &[],
+                &[],
+                &[(some_card_id.to_string(), Some(some_dispatch_id.to_string()))],
+                Some("test_tampered_null_generation"),
+            )
+            .await
+            .expect("enqueue valid Some-generation rollback");
+            tx.commit().await.expect("commit mixed-generation enqueue");
+            task_id
+        };
+
+        let tampered = serde_json::json!([
+            {"card_id": null_card_id, "dispatch_id": null},
+            {"card_id": some_card_id, "dispatch_id": some_dispatch_id}
+        ]);
+        sqlx::query(
+            "UPDATE auto_queue_run_cleanup_tasks SET card_rollback_tasks = $1 WHERE id = $2",
+        )
+        .bind(tampered)
+        .bind(task_id)
+        .execute(&pool)
+        .await
+        .expect("inject forbidden NULL-generation rollback");
+
+        let outcome = drain_run_cleanup_task_by_id_pg(None, &pool, task_id).await;
+        assert!(outcome.completed, "mixed row must complete");
+        assert!(
+            outcome
+                .slot_cleanup
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("forbidden NULL dispatch_id generation")),
+            "tampered NULL card must use the existing warning surface"
+        );
+
+        let null_card: (String, Option<String>) =
+            sqlx::query_as("SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = $1")
+                .bind(null_card_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load skipped NULL-generation card");
+        assert_eq!(null_card, ("requested".to_string(), None));
+
+        let some_card: (String, Option<String>) =
+            sqlx::query_as("SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = $1")
+                .bind(some_card_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load rolled-back Some-generation card");
+        assert_eq!(some_card, ("ready".to_string(), None));
+
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM auto_queue_run_cleanup_tasks WHERE id = $1")
+                .bind(task_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count mixed-generation cleanup row after drain");
+        assert_eq!(remaining, 0, "completed mixed row must be deleted");
+    }
+
+    #[tokio::test]
+    async fn generation_mismatch_skips_card_rollback_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        // Seed: agent, card, run, dispatches, entries
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
+             VALUES ('agent-gen', 'Gen Agent', 'claude', '123')
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed gen agent");
+
+        let card_id = "card-gen-test";
+        let run_id = "run-gen-test";
+        let dispatch_id_old = "dispatch-gen-old";
+        let dispatch_id_new = "dispatch-gen-new";
+        let entry_id = "entry-gen-test";
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_round)
+             VALUES ($1, 'Gen Card', 'in_progress', 'agent-gen', $2, 1)",
+        )
+        .bind(card_id)
+        .bind(dispatch_id_old)
+        .execute(&pool)
+        .await
+        .expect("seed gen card");
+
+        // Both generations are terminal on purpose: that removes the
+        // active-dispatch safety net and isolates the generation guard.
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, agent_id, status)
+             VALUES ($1, 'agent-gen', 'active')",
+        )
+        .bind(run_id)
+        .execute(&pool)
+        .await
+        .expect("seed gen run");
+
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, to_agent_id, dispatch_type, status, title)
+             VALUES ($1, $2, 'agent-gen', 'implementation', 'cancelled', 'Gen Old Dispatch'),
+                    ($3, $2, 'agent-gen', 'implementation', 'cancelled', 'Gen New Dispatch')",
+        )
+        .bind(dispatch_id_old)
+        .bind(card_id)
+        .bind(dispatch_id_new)
+        .execute(&pool)
+        .await
+        .expect("seed gen dispatches");
+
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, dispatch_id)
+             VALUES ($1, $2, $3, 'agent-gen', 'dispatched', $4)",
+        )
+        .bind(entry_id)
+        .bind(run_id)
+        .bind(card_id)
+        .bind(dispatch_id_old)
+        .execute(&pool)
+        .await
+        .expect("seed gen entry");
+
+        // Enqueue cleanup task with OLD dispatch_id generation marker
+        let task_id = {
+            let mut tx = pool
+                .begin()
+                .await
+                .expect("begin cleanup enqueue transaction");
+
+            let card_rollback_tasks =
+                vec![(card_id.to_string(), Some(dispatch_id_old.to_string()))];
+            let task_id = super::super::enqueue_run_cleanup_task_on_tx(
+                &mut tx,
+                &[run_id.to_string()],
+                &[dispatch_id_old.to_string()],
+                &[],
+                &[],
+                &card_rollback_tasks,
+                Some("test_gen_mismatch"),
+            )
+            .await
+            .expect("enqueue gen cleanup task");
+
+            sqlx::query("UPDATE auto_queue_entries SET status = $1 WHERE id = $2")
+                .bind("skipped")
+                .bind(entry_id)
+                .execute(&mut *tx)
+                .await
+                .expect("update gen entry to skipped");
+
+            tx.commit().await.expect("commit gen cleanup enqueue");
+            task_id
+        };
+
+        // Now update the card's latest_dispatch_id to NEW (simulating reassignment)
+        sqlx::query("UPDATE kanban_cards SET latest_dispatch_id = $1 WHERE id = $2")
+            .bind(dispatch_id_new)
+            .bind(card_id)
+            .execute(&pool)
+            .await
+            .expect("update card to new dispatch_id");
+
+        // Before drain: card is still in_progress with review_round = 1
+        let (status_before, review_round_before): (String, i64) =
+            sqlx::query_as("SELECT status, review_round FROM kanban_cards WHERE id = $1")
+                .bind(card_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load card state before drain");
+        assert_eq!(status_before, "in_progress");
+        assert_eq!(review_round_before, 1);
+
+        // P1-A: Drain the cleanup task. Generation mismatch should cause skip.
+        super::super::drain_run_cleanup_task_by_id_pg(None, &pool, task_id).await;
+
+        // After drain: card should be UNCHANGED (skipped due to generation mismatch)
+        let (status_after, review_round_after): (String, i64) =
+            sqlx::query_as("SELECT status, review_round FROM kanban_cards WHERE id = $1")
+                .bind(card_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load card state after drain");
+
+        assert_eq!(
+            status_after, status_before,
+            "P1-A: generation mismatch must skip rollback; card status unchanged"
+        );
+        assert_eq!(
+            review_round_after, review_round_before,
+            "P1-A: generation mismatch must skip rollback; card review_round unchanged"
+        );
+
+        // After drain: cleanup task should be removed (drain completes despite skip)
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM auto_queue_run_cleanup_tasks WHERE id = $1")
+                .bind(task_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count cleanup tasks after gen mismatch drain");
+        assert_eq!(
+            count, 0,
+            "P1-A: cleanup task must be deleted after drain, generation mismatch is idempotent"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 }
