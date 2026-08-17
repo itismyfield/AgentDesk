@@ -1162,6 +1162,171 @@ if [ "$rc" -eq 0 ]; then
 else pass_test
 fi
 
+# --------------------------------------------------------------------------
+# 4g. THE BOUNDARY CASE CLOSED BY THIS ROUND (#5227).
+#     The lookahead `(?=ok|FAILED|ignored|\W|$)` keeps the two merged-write
+#     forms (`okok` and `OKok`) while refusing `okhttp:` and similar false
+#     greens where `ok` is followed by a word character (part of an identifier).
+#
+#     The first two cases (`okok` and `OKok`) are already tested above in §4c
+#     and §4f; they are listed here for completeness. New cases that were NOT
+#     tested before and that the lookahead closes are added below.
+# --------------------------------------------------------------------------
+
+# Test 4g-1: The lookahead must reject ok followed by word characters.
+#     `okhttp:` starts with ok but continues with word characters, so the
+#     ok at the start is not a verdict.
+write_manifest alpha::beta alpha::gamma >/dev/null
+EXTRA=$(grep -c '' "$PRELUDE")
+cat >"$LEDGER" <<'EOF'
+# no entries
+EOF
+
+OKHTTP_RUN="test alpha::beta ... ok
+test alpha::gamma ... okhttp://example.com
+$(summary_line 1 0 0)"
+run_gate "$OKHTTP_RUN" 0 --lane demo
+if [ "$rc" -eq 0 ]; then
+    fail_test "okhttp: prefix starting with ok must not be consumed as a verdict"
+else pass_test
+fi
+
+# Test 4g-2: The lookahead must also reject FAILED and ignored with word chars.
+write_manifest alpha::beta alpha::gamma >/dev/null
+EXTRA=$(grep -c '' "$PRELUDE")
+FAILEDBAR_RUN="test alpha::beta ... ok
+test alpha::gamma ... FAILED_upload_error
+$(summary_line 1 0 0)"
+run_gate "$FAILEDBAR_RUN" 0 --lane demo
+if [ "$rc" -eq 0 ]; then
+    fail_test "FAILED_something must not be consumed as a verdict"
+else pass_test
+fi
+
+# Test 4g-3: The lookahead ALLOWS ok/FAILED/ignored when followed by
+#     non-word characters or another verdict word (the whole point).
+write_manifest alpha::beta alpha::gamma >/dev/null
+EXTRA=$(grep -c '' "$PRELUDE")
+LOOKAHEAD_ALLOW_RUN="test alpha::beta ... test alpha::gamma ... okok
+$(summary_line 2 0 0)"
+run_gate "$LOOKAHEAD_ALLOW_RUN" 0 --lane demo
+if [ "$rc" -ne 0 ]; then
+    fail_test "lookahead must allow okok (two verdicts): $(grep -E '^(lane-missing|ERROR)' "$OUT" | head -1)"
+else pass_test
+fi
+
+# --------------------------------------------------------------------------
+# 4h. THE END ANCHOR MUST REMAIN FIXED (regression test for r1 review).
+#     VERDICT_AT_END uses `$` anchor to refuse mid-segment matches. The `$`
+#     is structural: without it, re.search() picks leftmost `ok` in the
+#     segment, not the last one, and foreign text at segment start shadows
+#     the real verdict at the end. All forms below must preserve this
+#     property: verdicts at the end are matched, verdicts in the middle or
+#     at the start of foreign text are not.
+# --------------------------------------------------------------------------
+
+# Test 4h-1: Foreign text with `ok` followed by FAILED must let FAILED win.
+#     Regression: r1 leftmost `ok` in `/Users/ok-dev/cache:` stole FAILED.
+write_manifest alpha::beta >/dev/null
+EXTRA=$(grep -c '' "$PRELUDE")
+cat >"$LEDGER" <<'EOF'
+always | alpha::beta | lane=demo | #5227 | regression test: mid-segment ok must not shadow end FAILED
+EOF
+
+FOREIGN_OK_THEN_FAILED_RUN="test alpha::beta ... /Users/ok-dev/cache: FAILED
+$(summary_line 0 1 0)
+
+$(failures_block alpha::beta)
+"
+run_gate "$FOREIGN_OK_THEN_FAILED_RUN" 101 --lane demo
+if [ "$rc" -ne 0 ]; then
+    fail_test "FAILED at end must override foreign ok in the middle (rc=$rc)"
+else pass_test
+fi
+
+# Test 4h-2: Foreign text with `ok` in middle, no real verdict, must stay missing.
+#     Regression: r1 END leftmost invented `ok` from `/tmp/ok-cache/x`.
+write_manifest alpha::beta >/dev/null
+EXTRA=$(grep -c '' "$PRELUDE")
+cat >"$LEDGER" <<'EOF'
+# no entries
+EOF
+
+FOREIGN_OK_NO_VERDICT_RUN="test alpha::beta ... /tmp/ok-cache/x
+$(summary_line 0 0 0)"
+run_gate "$FOREIGN_OK_NO_VERDICT_RUN" 0 --lane demo
+if [ "$rc" -eq 0 ]; then
+    fail_test "mid-segment ok in foreign text must not be invented as a verdict"
+else pass_test
+fi
+
+# Test 4h-3: Summary line with pending id must not supply the verdict.
+#     When a test name has no verdict on its line, pending remains until END
+#     can supply it. The summary line has no NAME_FRAGMENT so drain_verdicts
+#     sees it as a segment. Under the original broken r1 regex (without END
+#     anchor), `ok.` at end-of-line would match. With the fixed END anchor,
+#     it must not. Since alpha::beta has no verdict and summary is not one,
+#     beta must be reported as lane-missing.
+write_manifest alpha::beta >/dev/null
+EXTRA=$(grep -c '' "$PRELUDE")
+cat >"$LEDGER" <<'EOF'
+# no entries
+EOF
+
+SUMMARY_NO_VERDICT_RUN="test alpha::beta ... /tmp/error-ok-cache
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+run_gate "$SUMMARY_NO_VERDICT_RUN" 0 --lane demo
+if [ "$rc" -eq 0 ]; then
+    fail_test "pending id with no END match should fail lane-missing; summary line is not a verdict source"
+else pass_test
+fi
+if ! grep -q 'lane-missing' "$OUT"; then
+    fail_test "beta should be lane-missing since neither line supplies a verdict"
+else pass_test
+fi
+
+# Test 4h-4: Foreign text ending differently (message/warning), real verdict follows.
+#     Verify that `error: FAILED-to-open` is NOT parsed as FAILED verdict on
+#     the first line, but the second line `ok` is properly parsed.
+write_manifest alpha::beta >/dev/null
+EXTRA=$(grep -c '' "$PRELUDE")
+cat >"$LEDGER" <<'EOF'
+# no entries
+EOF
+
+FOREIGN_FAILED_THEN_OK_RUN="test alpha::beta ... error: FAILED-to-open /tmp/x, retrying
+ok
+$(summary_line 1 0 0)"
+run_gate "$FOREIGN_FAILED_THEN_OK_RUN" 0 --lane demo
+if [ "$rc" -ne 0 ]; then
+    fail_test "foreign FAILED-to-open must not be parsed; next line ok must complete (rc=$rc): $(grep -E '^(lane-missing|ERROR)' "$OUT" | head -1)"
+else pass_test
+fi
+
+# Test 4h-5: Foreign text ending with `ignored`, real verdict follows.
+write_manifest alpha::beta >/dev/null
+EXTRA=$(grep -c '' "$PRELUDE")
+FOREIGN_IGNORED_THEN_OK_RUN="test alpha::beta ... [warn] flag ignored, using default
+ok
+$(summary_line 1 0 0)"
+run_gate "$FOREIGN_IGNORED_THEN_OK_RUN" 0 --lane demo
+if [ "$rc" -ne 0 ]; then
+    fail_test "foreign ignored in message must not be parsed; next line ok must complete (rc=$rc): $(grep -E '^(lane-missing|ERROR)' "$OUT" | head -1)"
+else pass_test
+fi
+
+# Test 4h-6: OKok (END anchor must still match at segment end even with AT_START lookahead).
+#     This pins that the END anchor remains fixed and still matches final ok.
+write_manifest alpha::beta >/dev/null
+EXTRA=$(grep -c '' "$PRELUDE")
+OKOBJECT_END_OKOK_RUN="test alpha::beta ... /var/folders/tmp/agentdesk.plist: OKok
+$(summary_line 1 0 0)"
+run_gate "$OKOBJECT_END_OKOK_RUN" 0 --lane demo
+if [ "$rc" -ne 0 ]; then
+    fail_test "OKok at end must parse the final ok (rc=$rc): $(grep -E '^(lane-missing|ERROR)' "$OUT" | head -1)"
+else pass_test
+fi
+
 if [ "$failures" -ne 0 ]; then
     printf '%s\n' "test_run_test_lane_5185: $failures assertion(s) failed, $passed passed" >&2
     exit 1

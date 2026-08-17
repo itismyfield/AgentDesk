@@ -205,7 +205,7 @@ from check_test_target_integrity import (  # noqa: E402
 # 73-failure poison cascade -- the block set and the parsed set agree exactly,
 # so the measured false-red cost of this check is 0.
 NAME_FRAGMENT = re.compile(r"test (?P<id>[^\s:]+::\S*) \.\.\. ?")
-VERDICT_AT_START = re.compile(r"^(?P<outcome>ok|FAILED|ignored)")
+VERDICT_AT_START = re.compile(r"^(?P<outcome>ok|FAILED|ignored)(?=ok|FAILED|ignored|\W|$)")
 VERDICT_AT_END = re.compile(r"(?P<outcome>ok|FAILED|ignored)$")
 # libtest's own list of failing ids, printed as `failures:` followed by one
 # four-space-indented id per line. It is written by the console thread after
