@@ -24,7 +24,8 @@ a way through.
 
 **This proves equality over the corpus, not over all inputs.** The two runtimes
 do not share a JSON parser or a Unicode whitespace table. Known residual
-differences, none of which any corpus case can reach:
+differences, none of which any corpus case can reach (the deepest record in the
+corpus nests 5 levels, against the ≥ 128 the depth entries below turn on):
 
 * ``str.strip()`` treats U+001C..U+001F as whitespace and Rust's ``str::trim``
   does not, so a text block consisting ONLY of those code points would classify
@@ -38,7 +39,33 @@ differences, none of which any corpus case can reach:
   one of those alone classifies ``NON_ASSISTANT_RECORD`` in Python and
   ``MALFORMED_JSON`` in Rust. Measured, not assumed — see
   ``obligation::tests::the_json_parsers_disagree_about_the_non_rfc_literals``,
-  which pins the Rust side of that sentence so this list cannot quietly rot.
+  which pins the Rust side of that sentence so this list cannot quietly rot;
+* the two parsers stop at different NESTING DEPTHS. `serde_json`'s deserializer
+  starts at a depth budget of 128 and refuses any document that reaches it;
+  ``obligation.rs`` reads through ``from_slice``, which takes that default and
+  never calls ``disable_recursion_limit``, so the ceiling holds however the
+  crate's features unify (``unbounded_depth`` is enabled nowhere in this
+  workspace, and even enabling it would only make the opt-out reachable).
+  CPython's scanner has no comparable fixed limit. A line whose total depth is
+  ≥ 128 therefore diverges, and it diverges on the rung that decides whether an
+  obligation EXISTS at all: a well-formed assistant record whose ``content``
+  carries a deeply nested entry classifies ``ASSISTANT_TEXT`` in Python and
+  ``MALFORMED_JSON`` in Rust — not a disagreement about which reason, but about
+  whether there is text to be obliged to relay. Measured on both sides
+  (serde_json 1.0.149: depth 127 parses, 128 gives ``recursion limit
+  exceeded``; CPython 3.14.6: an assistant record nested 500 deep still returns
+  ``ASSISTANT_TEXT``). Unlike the literals above, NEITHER side is pinned by a
+  test, so of the entries here this is the one most able to rot;
+* past that, deep enough nesting stops being a disagreement and becomes an
+  abort. CPython raises ``RecursionError``, a ``RuntimeError``, which is outside
+  the ``(JSONDecodeError, UnicodeDecodeError, TypeError, ValueError)`` that
+  ``classify_canonical_line`` catches; it propagates through
+  ``canonical_obligation_records`` and this gate installs no handler for it. The
+  threshold is stack-dependent rather than ``sys.getrecursionlimit()``
+  (measured on 3.14.6: 100 000 levels parse, 1 000 000 raise). That direction is
+  fail-closed HERE — a traceback is a red run, not a quiet pass — and the
+  canonical framing has no other caller today: ``relay_watchdog.py`` defines it
+  and only this gate calls it, so there is no live watchdog path to abort.
 
 The schema-TYPE hazard used to belong on that list and no longer does. A JSONL
 transcript is not a schema-checked channel, and Rust reads a wrong-typed

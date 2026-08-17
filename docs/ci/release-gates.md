@@ -110,25 +110,34 @@ green으로 바뀌지 않는다"고 적었고, 그 전칭은 **실측으로 반�
    부모 것과 **union**된다. 자식이 부모가 선택하지도 않은 id로 실패하면 레인은
    매니페스트에 없는 id를 지목하며 red가 된다. `--max-summaries 2`를 선언하게 만든
    바로 그 재실행 경로이므로 가정이 아니라 **구성상 도달 가능**하다. fail-closed.
-5. 잔여는 `ok|FAILED|ignored`로 **끝나는** 외래 텍스트에 한정되지 않는다.
-   `VERDICT_AT_START`에 워드 경계가 없어 **그것으로 시작하는** 외래 텍스트
-   (`okhttp: connect`)도 판정을 훔친다. **`\b` 형태의 워드 경계는 넣을 수 없다**:
-   `ok` 뒤의 `\b`는 다음 문자가 non-word이기를 요구하는데, 이 파서가 존재하는
-   이유인 병합 write `okok`(개행이 유실된 연속 두 판정)은 다음 문자가 word라서
-   두 번째 판정이 유실되고 그 id가 `lane-missing`으로 레인을 red로 만든다.
-   required context에서 false red는 그것이 막는 false green보다 나쁘고,
-   false green 방향은 이미 `failures:` 집합 대조로 좁혀져 있다.
+5. 세그먼트 **시작**이 판정 단어이고 그 뒤가 **non-word 문자**인 외래 텍스트는
+   여전히 판정을 훔친다. lookahead가 `\W` 후속을 허용하므로 `ok: connect refused`는
+   `ok`로, `ignored, using default`는 `ignored`로 읽힌다 — 후자는 실제
+   `ignored, <#[ignore] 이유>`와 구분 불가하고, `drain_verdicts`의 `,` 분기가
+   바로 그 형상을 위해 있다. 즉 잔여는 `ok|FAILED|ignored`로 **끝나는** 외래
+   텍스트에 한정되지 않는다.
 
-   **기각된 것은 `\b`뿐이다 — "경계를 넣을 수 없다"로 읽지 말 것.** 다음 판정
-   단어 자체를 경계로 인정하는 lookahead `(?=ok|FAILED|ignored|\W|$)`는 위
-   논거의 대상이 아니다: `okok`을 유지하면서 `okhttp:`는 거부한다(리뷰 실측).
-   여기서 적용하지 않고 **후속 이슈로 남긴다** — 닫혔다고 주장하지 않는다.
+   그 잔여에서 **빠진 것은 판정 단어 뒤가 word 문자인 경우**다. 경계가 아예 없던
+   시절 `okhttp: connect`·`FAILED_upload_error`는 판정으로 읽혔으나,
+   `VERDICT_AT_START`의 lookahead `(?=ok|FAILED|ignored|\W|$)`가 둘을 거부한다.
+   `tests/test_run_test_lane_5185.sh` §4g가 세 방향을 핀한다 — 4g-1이 `okhttp:`
+   거부, 4g-2가 `FAILED_upload_error` 거부, 4g-3이 `okok`의 두 판정 파싱 유지.
 
-   `VERDICT_AT_END`의 `/var/….plist: OKok` 형상은 **경계를 어디에 두느냐에
-   따라 다르다**(이전 판은 이를 구분하지 않았다). 판정 단어 **앞**에 경계를 두면
-   잃는다: `OKok`의 `ok` 앞 문자가 word인 `K`다. 판정 단어 **뒤**에 두면 잃지
-   않는다: 매치가 이미 세그먼트 끝에서 끝나 `\b`가 충족된다. 선행 경계 해석
-   에서만 성립하는 논거다.
+   **`\b` 형태의 워드 경계는 여기서 유일하게 배제된 형태다**: `ok` 뒤의 `\b`는
+   다음 문자가 non-word이기를 요구하는데, 이 파서가 존재하는 이유인 병합 write
+   `okok`(개행이 유실된 연속 두 판정)은 다음 문자가 word라서 두 번째 판정이
+   유실되고 그 id가 `lane-missing`으로 레인을 red로 만든다. required context에서
+   false red는 그것이 막는 false green보다 나쁘다. 다음 판정 단어 자체를 경계로
+   인정하는 lookahead는 이 논거의 대상이 아니고, 그래서 그 형태가 적용돼 있다.
+
+   `VERDICT_AT_END`는 **의도적으로 경계를 두지 않는다**. 손실이 경계 위치에
+   달렸기 때문이다: 판정 단어 **앞**에 두면 실측된 `/var/….plist: OKok` 형상을
+   잃는다(`OKok`의 `ok` 앞 문자가 word인 `K`). **뒤**에 두면 잃지 않는다(매치가
+   이미 세그먼트 끝에서 끝난다). 선행 경계 해석에서만 손실이 성립하므로 end
+   앵커는 그대로 두고, §4h-6이 `OKok`의 판정 유지를 핀한다.
+
+   두 앵커 모두 false green 방향은 위 `failures:` 집합 대조로 좁혀져 있고,
+   그래서 이 잔여는 닫지 않고 안고 간다.
 
 2의 폐쇄 논증에는 명시되지 않은 전제가 있다: **블록 오염은 삽입 전용**이라는 것.
 블록 내용을 파싱 집합과 일치하도록 **치환**하면 rc=0이 나오지만, 인터리빙은 다른
