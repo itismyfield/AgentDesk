@@ -7,6 +7,20 @@ here against a synthetic repo root that reproduces exactly one defect at a time:
   * the three shapes an inflight dependency can take from inside the tree
     (`use` of a qualified path, a bare segment in a brace list, and an inline
     fully-qualified call with no `use` at all);
+  * the two shapes that reach the row from OUTSIDE the tree's own text — a
+    third file re-exporting it under a name that never says "inflight"
+    (directly, renamed, globbed, and one hop further on), and an `include!`
+    pulling a file the directory scan does not own into the tree — together
+    with the negative controls that keep the closure from cascading: a private
+    `use` publishes nothing, a re-export path that merely contains "inflight"
+    inside a longer identifier is not the module, and a tainted leaf does not
+    taint the siblings sharing its brace list;
+  * the same launder route split across two items of one file — a private
+    `use ...::inflight as alias;` that publishes nothing, plus a `pub use
+    self::alias::…` that publishes a name whose own path never says
+    "inflight" — in both binding forms, with the controls that keep the
+    file-local rewrite from following an alias the re-export does not name and
+    from chasing a binding cycle forever;
   * the shapes that must NOT trip it — the same text inside a comment or a
     string literal, because this tree's own module docs discuss "the inflight
     row" in prose and a lint that reds on its own documentation gets deleted;
@@ -18,7 +32,9 @@ here against a synthetic repo root that reproduces exactly one defect at a time:
     glob covers.
 
 The live-repo cases at the end pin that the gate is actually wired into
-`scripts/ci-script-checks.sh` and that the checked-in tree passes it.
+`scripts/ci-script-checks.sh`, that the checked-in tree passes it, and that its
+third-file half is not inert here — the real `src/` does contain re-exports of
+the inflight module, so the closure has something to close over.
 """
 
 from __future__ import annotations
@@ -190,6 +206,429 @@ class RowIndependenceDetectionTest(unittest.TestCase):
                 )
             )
         self.assertEqual(_kinds(violations), ["inflight-path"])
+
+
+class ThirdFileReExportTest(unittest.TestCase):
+    """The launder route: the row arrives under a name that never says "inflight".
+
+    Every case pairs the bypass with the control that the same tree text is
+    clean once the third file stops re-exporting the row — otherwise the test
+    would pass on a gate that simply forbids the name outright.
+    """
+
+    LAUNDERER = "src/services/discord/rows.rs"
+    SECOND_HOP = "src/services/discord/ledger_view.rs"
+
+    def test_a_renamed_third_file_re_export_is_flagged(self) -> None:
+        child = textwrap.dedent(
+            """\
+            use crate::services::discord::rows::Row;
+
+            fn probe(_row: Row) {}
+            """
+        )
+        launderer = (
+            "pub(crate) use crate::services::discord::inflight::"
+            "InflightTurnState as Row;\n"
+        )
+        with TemporaryDirectory() as tmp:
+            violations = GATE.run(
+                _build_root(tmp, child=child, extra_files={self.LAUNDERER: launderer})
+            )
+        self.assertEqual(set(_kinds(violations)), {"laundered-inflight-name"})
+        self.assertIn(self.LAUNDERER, violations[0].detail)
+
+    def test_the_same_tree_text_is_clean_without_the_re_export(self) -> None:
+        """The control: the gate forbids the laundered ROUTE, not the word `Row`."""
+
+        child = textwrap.dedent(
+            """\
+            use crate::services::discord::rows::Row;
+
+            fn probe(_row: Row) {}
+            """
+        )
+        launderer = "pub(crate) use crate::services::discord::registry::Row;\n"
+        with TemporaryDirectory() as tmp:
+            self.assertEqual(
+                GATE.run(
+                    _build_root(tmp, child=child, extra_files={self.LAUNDERER: launderer})
+                ),
+                [],
+            )
+
+    def test_a_second_hop_under_a_third_name_is_flagged(self) -> None:
+        """`inflight::X as Row` then `rows::Row as Ledger`: the closure follows."""
+
+        with TemporaryDirectory() as tmp:
+            violations = GATE.run(
+                _build_root(
+                    tmp,
+                    child="use crate::services::discord::ledger_view::Ledger;\n",
+                    extra_files={
+                        self.LAUNDERER: (
+                            "pub(crate) use crate::services::discord::inflight::"
+                            "InflightTurnState as Row;\n"
+                        ),
+                        self.SECOND_HOP: (
+                            "pub(crate) use crate::services::discord::rows::Row "
+                            "as Ledger;\n"
+                        ),
+                    },
+                )
+            )
+        self.assertEqual(_kinds(violations), ["laundered-inflight-name"])
+        self.assertIn(self.SECOND_HOP, violations[0].detail)
+
+    def test_a_glob_re_export_forbids_the_laundering_module_itself(self) -> None:
+        """`pub use inflight::*;` publishes a set this scan cannot enumerate, so
+        the module holding it becomes the forbidden segment instead."""
+
+        with TemporaryDirectory() as tmp:
+            violations = GATE.run(
+                _build_root(
+                    tmp,
+                    child="use crate::services::discord::rows::InflightTurnState;\n",
+                    extra_files={
+                        self.LAUNDERER: (
+                            "pub(crate) use crate::services::discord::inflight::*;\n"
+                        )
+                    },
+                )
+            )
+        self.assertEqual(_kinds(violations), ["laundered-inflight-module"])
+
+    def test_a_private_use_in_a_third_file_publishes_nothing(self) -> None:
+        """A non-`pub` import is not a route: no name leaves that file."""
+
+        launderer = (
+            "use crate::services::discord::inflight::InflightTurnState as Row;\n"
+            "fn hold(_row: Row) {}\n"
+        )
+        with TemporaryDirectory() as tmp:
+            self.assertEqual(
+                GATE.run(
+                    _build_root(
+                        tmp,
+                        child="use crate::services::discord::rows::Row;\n",
+                        extra_files={self.LAUNDERER: launderer},
+                    )
+                ),
+                [],
+            )
+
+    def test_inflight_inside_a_longer_identifier_is_not_the_module(self) -> None:
+        """`clear_inflight_state` re-exported from its own module is not a
+        launder of `inflight::`; seeding on the substring would taint the crate."""
+
+        launderer = "pub(crate) use self::store::clear_inflight_state;\n"
+        child = textwrap.dedent(
+            """\
+            use crate::services::discord::rows::clear_inflight_state;
+
+            fn probe() {
+                clear_inflight_state();
+            }
+            """
+        )
+        with TemporaryDirectory() as tmp:
+            self.assertEqual(
+                GATE.run(
+                    _build_root(tmp, child=child, extra_files={self.LAUNDERER: launderer})
+                ),
+                [],
+            )
+
+    def test_a_tainted_leaf_does_not_taint_its_brace_list_siblings(self) -> None:
+        """`use self::store::{Handle, clear_row};` re-exports one laundered name
+        and one unrelated one. Taking the item whole would cascade `Handle`."""
+
+        extra = {
+            self.LAUNDERER: (
+                "pub(crate) use crate::services::discord::inflight::clear_row;\n"
+            ),
+            self.SECOND_HOP: "pub(crate) use self::store::{Handle, clear_row};\n",
+        }
+        with TemporaryDirectory() as tmp:
+            self.assertEqual(
+                GATE.run(
+                    _build_root(
+                        tmp,
+                        child="use crate::services::discord::ledger_view::Handle;\n",
+                        extra_files=extra,
+                    )
+                ),
+                [],
+            )
+        with TemporaryDirectory() as tmp:
+            violations = GATE.run(
+                _build_root(
+                    tmp,
+                    child="use crate::services::discord::ledger_view::clear_row;\n",
+                    extra_files=extra,
+                )
+            )
+        self.assertEqual(_kinds(violations), ["laundered-inflight-name"])
+
+    def test_a_third_file_that_does_not_lex_fails_closed(self) -> None:
+        """The launder half has the same fail-closed floor as the tree scan: a
+        file whose re-exports cannot be read is reported, not assumed clean."""
+
+        launderer = (
+            "/* unterminated block comment\n"
+            "pub(crate) use crate::services::discord::inflight::Row;\n"
+        )
+        with TemporaryDirectory() as tmp:
+            violations = GATE.run(
+                _build_root(tmp, extra_files={self.LAUNDERER: launderer})
+            )
+        self.assertEqual(_kinds(violations), ["unlexable-reexport-source"])
+
+    def test_a_re_export_inside_the_tree_is_reported_once_as_an_import(self) -> None:
+        """The tree is excluded from the launder scan: its own `pub use` of the
+        row is an `inflight-import`, not that plus a laundered-name echo."""
+
+        with TemporaryDirectory() as tmp:
+            violations = GATE.run(
+                _build_root(
+                    tmp,
+                    child=(
+                        "pub(crate) use crate::services::discord::inflight::"
+                        "InflightTurnState as Row;\n"
+                    ),
+                )
+            )
+        self.assertEqual(_kinds(violations), ["inflight-path"])
+
+
+class FileLocalAliasLaunderTest(unittest.TestCase):
+    """A `pub use` laid over a PRIVATE alias bound in the same file.
+
+    Neither item spells the row's path in full: the private `use` names
+    `inflight` but publishes nothing, and the `pub use` publishes a name but
+    routes through `self::`, so a closure that only matches segments of `pub
+    use` paths sees no `inflight` and lets the name out. Both forms compile
+    (`pub(in crate::services::discord)` is a `pub` this gate counts), so both
+    are real routes, not hypotheticals.
+    """
+
+    LAUNDERER = "src/services/discord/rows.rs"
+    CHILD = "use crate::services::discord::rows::Row;\n\nfn probe(_row: Row) {}\n"
+
+    def test_a_re_export_over_a_renamed_private_alias_is_flagged(self) -> None:
+        """`use ...::inflight as private_rows;` + `pub use self::private_rows::…`."""
+
+        launderer = (
+            "use crate::services::discord::inflight as private_rows;\n"
+            "pub(in crate::services::discord) use self::private_rows::"
+            "InflightTurnState as Row;\n"
+        )
+        with TemporaryDirectory() as tmp:
+            violations = GATE.run(
+                _build_root(
+                    tmp, child=self.CHILD, extra_files={self.LAUNDERER: launderer}
+                )
+            )
+        self.assertEqual(set(_kinds(violations)), {"laundered-inflight-name"})
+        self.assertIn(self.LAUNDERER, violations[0].detail)
+
+    def test_a_re_export_over_a_bare_use_binding_is_flagged(self) -> None:
+        """The no-`as` form binds a name too: `use path::store;` binds `store`.
+
+        The binding has to name a MODULE inside inflight rather than the row
+        itself — re-exporting a private `use` binding of an ITEM is E0364, so
+        that shape is not a route; going THROUGH the binding to an item the
+        re-export's visibility already permits is, and it never spells
+        `inflight` in the `pub use` path.
+        """
+
+        launderer = (
+            "use crate::services::discord::inflight::store;\n"
+            "pub(in crate::services::discord) use self::store::"
+            "InflightTurnState as Row;\n"
+        )
+        with TemporaryDirectory() as tmp:
+            violations = GATE.run(
+                _build_root(
+                    tmp, child=self.CHILD, extra_files={self.LAUNDERER: launderer}
+                )
+            )
+        self.assertEqual(set(_kinds(violations)), {"laundered-inflight-name"})
+        self.assertIn(self.LAUNDERER, violations[0].detail)
+
+    def test_a_re_export_over_an_unrelated_alias_in_the_same_file_is_clean(self) -> None:
+        """The control: the rewrite follows the alias the `pub use` names, not
+        every alias in a file that happens to mention the row somewhere."""
+
+        launderer = textwrap.dedent(
+            """\
+            use crate::services::discord::inflight as private_rows;
+            use crate::services::discord::registry as safe_rows;
+
+            pub(in crate::services::discord) use self::safe_rows::Row;
+
+            fn hold(_row: private_rows::InflightTurnState) {}
+            """
+        )
+        with TemporaryDirectory() as tmp:
+            self.assertEqual(
+                GATE.run(
+                    _build_root(
+                        tmp, child=self.CHILD, extra_files={self.LAUNDERER: launderer}
+                    )
+                ),
+                [],
+            )
+
+    def test_an_alias_of_an_alias_resolves(self) -> None:
+        """Chained file-local bindings are followed to a fixpoint; stopping at
+        one hop would leave the same bypass one `use` line further out."""
+
+        launderer = (
+            "use crate::services::discord::inflight as first_hop;\n"
+            "use self::first_hop as second_hop;\n"
+            "pub(in crate::services::discord) use self::second_hop::"
+            "InflightTurnState as Row;\n"
+        )
+        with TemporaryDirectory() as tmp:
+            violations = GATE.run(
+                _build_root(
+                    tmp, child=self.CHILD, extra_files={self.LAUNDERER: launderer}
+                )
+            )
+        self.assertEqual(set(_kinds(violations)), {"laundered-inflight-name"})
+
+    def test_a_self_referential_binding_terminates(self) -> None:
+        """A cycle in the binding map must not hang the gate. This text does not
+        compile, but a lexical scan is pointed at whatever is on disk and has to
+        terminate on it — the chase is bounded by the paths it has visited."""
+
+        launderer = (
+            "use self::looped as looped;\n"
+            "pub(in crate::services::discord) use self::looped::Row;\n"
+        )
+        with TemporaryDirectory() as tmp:
+            self.assertEqual(
+                GATE.run(
+                    _build_root(
+                        tmp, child=self.CHILD, extra_files={self.LAUNDERER: launderer}
+                    )
+                ),
+                [],
+            )
+
+
+class IncludeExpansionTest(unittest.TestCase):
+    """`include!` makes another file's text part of the tree, so it is scanned."""
+
+    OFF_TREE = "src/services/discord/health/reachability_extra.rs"
+    OFF_TREE_SECOND = "src/services/discord/health/reachability_deeper.rs"
+    INCLUDE = 'include!("../reachability_extra.rs");\n'
+
+    def test_an_included_file_that_reaches_the_row_is_flagged(self) -> None:
+        with TemporaryDirectory() as tmp:
+            violations = GATE.run(
+                _build_root(
+                    tmp,
+                    child=self.INCLUDE,
+                    extra_files={
+                        self.OFF_TREE: (
+                            "use crate::services::discord::inflight::Row;\n"
+                        )
+                    },
+                )
+            )
+        self.assertEqual(_kinds(violations), ["inflight-path"])
+        self.assertTrue(violations[0].path.endswith("reachability_extra.rs"))
+
+    def test_the_same_off_tree_file_is_invisible_without_the_include(self) -> None:
+        """The control: `rglob` never sees it, so the include is what pulls it in."""
+
+        with TemporaryDirectory() as tmp:
+            self.assertEqual(
+                GATE.run(
+                    _build_root(
+                        tmp,
+                        extra_files={
+                            self.OFF_TREE: (
+                                "use crate::services::discord::inflight::Row;\n"
+                            )
+                        },
+                    )
+                ),
+                [],
+            )
+
+    def test_includes_are_followed_transitively(self) -> None:
+        with TemporaryDirectory() as tmp:
+            violations = GATE.run(
+                _build_root(
+                    tmp,
+                    child=self.INCLUDE,
+                    extra_files={
+                        self.OFF_TREE: 'include!("reachability_deeper.rs");\n',
+                        self.OFF_TREE_SECOND: (
+                            "fn probe() {\n"
+                            "    let _ = crate::services::discord::inflight"
+                            "::load_row();\n"
+                            "}\n"
+                        ),
+                    },
+                )
+            )
+        self.assertEqual(_kinds(violations), ["inflight-path"])
+        self.assertTrue(violations[0].path.endswith("reachability_deeper.rs"))
+
+    def test_a_clean_included_file_passes(self) -> None:
+        with TemporaryDirectory() as tmp:
+            self.assertEqual(
+                GATE.run(
+                    _build_root(
+                        tmp,
+                        child=self.INCLUDE,
+                        extra_files={self.OFF_TREE: "fn probe() {}\n"},
+                    )
+                ),
+                [],
+            )
+
+    def test_an_include_that_does_not_resolve_fails_closed(self) -> None:
+        with TemporaryDirectory() as tmp:
+            violations = GATE.run(
+                _build_root(tmp, child='include!("../nowhere.rs");\n')
+            )
+        self.assertEqual(_kinds(violations), ["unresolved-include"])
+
+    def test_an_include_argument_that_is_not_a_literal_fails_closed(self) -> None:
+        """A path a macro assembles cannot be resolved, so it is not waved past."""
+
+        with TemporaryDirectory() as tmp:
+            violations = GATE.run(
+                _build_root(tmp, child='include!(concat!("a", "b.rs"));\n')
+            )
+        self.assertEqual(_kinds(violations), ["unreadable-include"])
+
+    def test_a_commented_out_include_is_not_followed(self) -> None:
+        with TemporaryDirectory() as tmp:
+            self.assertEqual(
+                GATE.run(_build_root(tmp, child='// include!("../nowhere.rs");\n')), []
+            )
+
+
+class UseTreeExpansionTest(unittest.TestCase):
+    """The expander the launder closure reads re-exports through."""
+
+    def test_nested_braces_expand_to_one_leaf_each(self) -> None:
+        leaves = GATE.expand_use_tree(" crate::a::{b::{c, d as e}, f::*, self} ")
+        self.assertEqual(
+            [(path, name) for path, name in leaves],
+            [
+                (("crate", "a", "b", "c"), "c"),
+                (("crate", "a", "b", "d"), "e"),
+                (("crate", "a", "f", "*"), None),
+                (("crate", "a"), "a"),
+            ],
+        )
 
 
 class FalsePositiveTest(unittest.TestCase):
@@ -385,6 +824,20 @@ class LiveRepoTest(unittest.TestCase):
         )
         self.assertIn(
             '"$PYTHON" -m unittest tests.test_reachability_row_independence', text
+        )
+
+    def test_the_live_launder_closure_is_not_vacuous(self) -> None:
+        """The third-file half has to be doing work on THIS repo, not only on the
+        synthetic roots above. `src/services/discord/mod.rs` re-exports inflight
+        items today; if that ever stops being true this assertion has outlived
+        the fact it pins and should be deleted, not relaxed."""
+
+        laundered, violations = GATE.collect_launderers(REPO_ROOT)
+        self.assertEqual([violation.render() for violation in violations], [])
+        self.assertTrue(
+            laundered,
+            "no pub use under src/ re-exports the inflight module, so the "
+            "laundered-name half of this gate is inert against the real tree",
         )
 
     def test_module_root_and_directory_are_both_in_the_scan_set(self) -> None:
