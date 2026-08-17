@@ -964,12 +964,16 @@ async fn terminalize_selected_runs_with_pg(
     // carries the slot keys directly; the steps that still have to run outside
     // the commit (emit, wake, session clear, slot-thread clear) become durable
     // here rather than living only on this stack.
+    // #5357: extend durable outbox to include card rollback so it is retried
+    // durably alongside the dispatch/run state changes.
     let cleanup_task_id = super::cleanup_tasks::enqueue_run_cleanup_task_on_tx(
         &mut tx,
         &locked_run_ids,
         &cancelled_dispatch_ids,
         &released_slot_keys,
         &cancel_metas,
+        &rollback_candidate_card_ids,
+        Some(reason),
     )
     .await?;
 
@@ -1030,11 +1034,14 @@ pub(crate) async fn cancel_selected_runs_with_pg(
     target_run_ids: &[String],
     reason: &str,
 ) -> Result<Value, String> {
-    let (mut response, rollback_candidate_card_ids) =
+    let (response, _rollback_candidate_card_ids) =
         terminalize_selected_runs_with_pg(health_registry, pool, target_run_ids, reason).await?;
-    let rolled_back_cards =
-        rollback_cancelled_run_cards_pg(pool, &rollback_candidate_card_ids, reason).await;
-    response["rolled_back_cards"] = json!(rolled_back_cards);
+    // #5357: card rollback is now durable via the cleanup task outbox. The
+    // candidate card IDs are already queued for rollback in the same transaction
+    // that committed the entry state changes, so the post-commit drain step
+    // converges even if this process dies before returning. The rolled_back_cards
+    // counter stays 0 in the response because the real rollback happens
+    // asynchronously via the outbox and is retried durably.
     Ok(response)
 }
 

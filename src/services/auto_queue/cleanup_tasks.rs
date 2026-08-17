@@ -127,6 +127,8 @@ pub(crate) struct RunCleanupTask {
     pub(crate) released_slots: Vec<ReleasedSlot>,
     pub(crate) pending_emits: Vec<CancelTransitionMeta>,
     pub(crate) emitted: bool,
+    pub(crate) card_ids: Vec<String>,
+    pub(crate) card_rollback_source: Option<String>,
 }
 
 /// Outcome of draining one task.
@@ -191,7 +193,7 @@ impl AttemptRecord {
 
 /// Columns every drain path selects. Kept in one place so the batch sweep and
 /// the single-row claim cannot drift apart.
-const TASK_COLUMNS: &str = "id, run_ids, dispatch_ids, released_slots, pending_emits, emitted";
+const TASK_COLUMNS: &str = "id, run_ids, dispatch_ids, released_slots, pending_emits, emitted, card_ids, card_rollback_source";
 
 /// Rows drained per replay sweep.
 const REPLAY_BATCH_LIMIT: i64 = 50;
@@ -249,6 +251,8 @@ pub(crate) async fn enqueue_run_cleanup_task_on_tx(
     dispatch_ids: &[String],
     released_slots: &[ReleasedSlot],
     pending_emits: &[CancelTransitionMeta],
+    card_ids: &[String],
+    card_rollback_source: Option<&str>,
 ) -> Result<i64, String> {
     let released_json = serde_json::to_value(released_slots)
         .map_err(|error| format!("serialize auto-queue cleanup released slots: {error}"))?;
@@ -256,14 +260,16 @@ pub(crate) async fn enqueue_run_cleanup_task_on_tx(
         .map_err(|error| format!("serialize auto-queue cleanup pending emits: {error}"))?;
     sqlx::query_scalar::<_, i64>(
         "INSERT INTO auto_queue_run_cleanup_tasks
-            (run_ids, dispatch_ids, released_slots, pending_emits)
-         VALUES ($1, $2, $3, $4)
+            (run_ids, dispatch_ids, released_slots, pending_emits, card_ids, card_rollback_source)
+         VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING id",
     )
     .bind(run_ids)
     .bind(dispatch_ids)
     .bind(released_json)
     .bind(emits_json)
+    .bind(card_ids)
+    .bind(card_rollback_source)
     .fetch_one(&mut **tx)
     .await
     .map_err(|error| format!("enqueue auto-queue run cleanup task: {error}"))
@@ -293,6 +299,12 @@ fn task_from_row(row: &sqlx::postgres::PgRow) -> Result<RunCleanupTask, String> 
         emitted: row
             .try_get("emitted")
             .map_err(|error| format!("decode auto-queue cleanup emitted flag: {error}"))?,
+        card_ids: row
+            .try_get("card_ids")
+            .map_err(|error| format!("decode auto-queue cleanup card ids: {error}"))?,
+        card_rollback_source: row
+            .try_get("card_rollback_source")
+            .map_err(|error| format!("decode auto-queue cleanup card rollback source: {error}"))?,
     })
 }
 
@@ -845,6 +857,32 @@ pub(crate) async fn drain_run_cleanup_task_pg(
             }
         };
 
+    // Step 3.5 — card rollback.
+    //
+    // Retry safety: each card rollback is scoped to a specific card id and status
+    // (requested|in_progress), so a replay that arrives after the card was already
+    // rolled back will find it in a different status and skip it. The operation is
+    // naturally idempotent.
+    let mut all_cards_handled = true;
+    if !task.card_ids.is_empty() {
+        let source = task.card_rollback_source.as_deref().unwrap_or("auto_queue");
+        for card_id in &task.card_ids {
+            match perform_card_rollback_on_pg(pool, card_id, source).await {
+                Ok(_) => {}
+                Err(error) => {
+                    all_cards_handled = false;
+                    crate::auto_queue_log!(
+                        warn,
+                        "card_rollback_pg_failed",
+                        crate::services::auto_queue::AutoQueueLogContext::new().card(card_id),
+                        "[auto-queue] failed to roll back postgres card {card_id} during run cleanup: {error}"
+                    );
+                    warnings.push(format!("failed to roll back card {card_id}: {error}"));
+                }
+            }
+        }
+    }
+
     // Step 4 — slot-thread clear, guarded against the A-B-A hazard above.
     //
     // Retry safety: `clear_slot_threads_for_slot_pg` resets sessions bound to the
@@ -903,7 +941,7 @@ pub(crate) async fn drain_run_cleanup_task_pg(
         cleared_slot_sessions,
         warnings,
     };
-    if !all_slots_handled {
+    if !all_slots_handled || !all_cards_handled {
         let summary = slot_cleanup.warnings.join("; ");
         let record = record_task_failure_pg(pool, task.id, &summary).await;
         return RunCleanupDrainOutcome {
@@ -1128,6 +1166,219 @@ pub(crate) async fn replay_pending_run_cleanup_tasks_pg(
         }
     }
     Ok(stats)
+}
+
+/// Perform card rollback for a single card. Used by the cleanup task drain to
+/// roll back cards that were in `requested|in_progress` when their runs were
+/// terminalized.
+///
+/// Retry safety: the operation is scoped to a specific card and only succeeds
+/// if the card is in `requested|in_progress` status. A replay that arrives
+/// after the card was already rolled back will find it in a different status
+/// and return early without making changes.
+async fn perform_card_rollback_on_pg(
+    pool: &PgPool,
+    card_id: &str,
+    source: &str,
+) -> Result<(), String> {
+    let status =
+        sqlx::query_scalar::<_, Option<String>>("SELECT status FROM kanban_cards WHERE id = $1")
+            .bind(card_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| format!("load card status for {card_id}: {error}"))?;
+
+    let Some(status) = status else {
+        return Ok(());
+    };
+
+    if !matches!(status.as_deref(), Some("requested") | Some("in_progress")) {
+        return Ok(());
+    }
+
+    let has_active_dispatch = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT
+         FROM task_dispatches
+         WHERE kanban_card_id = $1 AND status IN ('pending', 'dispatched')",
+    )
+    .bind(card_id)
+    .fetch_one(pool)
+    .await
+    .ok()
+    .unwrap_or(0)
+        > 0;
+
+    if has_active_dispatch {
+        return Ok(());
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin card rollback transaction for {card_id}: {error}"))?;
+
+    let current_status: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT status FROM kanban_cards WHERE id = $1 FOR UPDATE",
+    )
+    .bind(card_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| format!("reload card status {card_id}: {error}"))?
+    .flatten();
+
+    match current_status.as_deref() {
+        Some("requested") | Some("in_progress") => {}
+        _ => {
+            tx.rollback()
+                .await
+                .map_err(|error| format!("rollback card status check for {card_id}: {error}"))?;
+            return Ok(());
+        }
+    }
+
+    let from_status = current_status.unwrap_or_else(|| status.clone());
+
+    crate::engine::transition_executor_pg::execute_pg_transition_intent(
+        &mut tx,
+        &crate::engine::transition::TransitionIntent::UpdateStatus {
+            card_id: card_id.to_string(),
+            from: from_status.clone(),
+            to: "ready".to_string(),
+        },
+    )
+    .await
+    .map_err(|error| format!("update card status for {card_id}: {error}"))?;
+
+    crate::engine::transition_executor_pg::execute_pg_transition_intent(
+        &mut tx,
+        &crate::engine::transition::TransitionIntent::SetLatestDispatchId {
+            card_id: card_id.to_string(),
+            dispatch_id: None,
+        },
+    )
+    .await
+    .map_err(|error| format!("clear dispatch id for {card_id}: {error}"))?;
+
+    crate::engine::transition_executor_pg::execute_pg_transition_intent(
+        &mut tx,
+        &crate::engine::transition::TransitionIntent::SetReviewStatus {
+            card_id: card_id.to_string(),
+            review_status: None,
+        },
+    )
+    .await
+    .map_err(|error| format!("clear review status for {card_id}: {error}"))?;
+
+    sqlx::query(
+        "UPDATE kanban_cards
+         SET review_round = 0,
+             review_notes = NULL,
+             suggestion_pending_at = NULL,
+             review_entered_at = NULL,
+             awaiting_dod_at = NULL,
+             blocked_reason = NULL,
+             updated_at = NOW()
+         WHERE id = $1",
+    )
+    .bind(card_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("reset card cleanup fields {card_id}: {error}"))?;
+
+    sqlx::query(
+        "INSERT INTO card_review_state (
+            card_id, review_round, state, pending_dispatch_id, last_verdict, last_decision,
+            decided_by, decided_at, approach_change_round, session_reset_round, review_entered_at, updated_at
+         ) VALUES (
+            $1, 0, 'idle', NULL, NULL, NULL,
+            NULL, NULL, NULL, NULL, NULL, NOW()
+         )
+         ON CONFLICT (card_id) DO UPDATE SET
+            review_round = 0,
+            state = 'idle',
+            pending_dispatch_id = NULL,
+            last_verdict = NULL,
+            last_decision = NULL,
+            decided_by = NULL,
+            decided_at = NULL,
+            approach_change_round = NULL,
+            session_reset_round = NULL,
+            review_entered_at = NULL,
+            updated_at = NOW()",
+    )
+    .bind(card_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("reset card review state {card_id}: {error}"))?;
+
+    sqlx::query("DELETE FROM kv_meta WHERE key = $1 OR key = $2")
+        .bind(format!("pm_pending:{card_id}"))
+        .bind(format!("pm_decision_sent:{card_id}"))
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("clear card escalation state {card_id}: {error}"))?;
+
+    sqlx::query(
+        "INSERT INTO kanban_audit_logs (card_id, from_status, to_status, source, result)
+         VALUES ($1, $2, 'ready', $3, 'OK (run cleanup card rollback)')",
+    )
+    .bind(card_id)
+    .bind(&status)
+    .bind(source)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("insert kanban audit log {card_id}: {error}"))?;
+
+    sqlx::query(
+        "UPDATE task_dispatches
+         SET context = CASE
+                 WHEN context IS NULL OR context = '' THEN context
+                 ELSE NULLIF(
+                     (context::jsonb
+                         - 'worktree_path'
+                         - 'worktree_branch'
+                         - 'completed_worktree_path'
+                         - 'completed_branch'
+                     )::text,
+                     '{}'
+                 )
+             END,
+             result = CASE
+                 WHEN result IS NULL OR result = '' THEN result
+                 ELSE NULLIF(
+                     (result::jsonb
+                         - 'worktree_path'
+                         - 'worktree_branch'
+                         - 'completed_worktree_path'
+                         - 'completed_branch'
+                     )::text,
+                     '{}'
+                 )
+             END
+         WHERE kanban_card_id = $1
+           AND (
+               (context IS NOT NULL AND context <> '' AND (
+                   (context::jsonb) ? 'worktree_path'
+                   OR (context::jsonb) ? 'worktree_branch'
+                   OR (context::jsonb) ? 'completed_worktree_path'
+                   OR (context::jsonb) ? 'completed_branch'
+               ))
+               OR (result IS NOT NULL AND result <> '' AND (
+                   (result::jsonb) ? 'worktree_path'
+                   OR (result::jsonb) ? 'worktree_branch'
+                   OR (result::jsonb) ? 'completed_worktree_path'
+                   OR (result::jsonb) ? 'completed_branch'
+               ))
+           )",
+    )
+    .bind(card_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("scrub dispatch worktree metadata {card_id}: {error}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit card rollback for {card_id}: {error}"))
 }
 
 #[cfg(test)]

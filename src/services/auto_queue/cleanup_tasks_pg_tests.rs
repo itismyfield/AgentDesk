@@ -1733,4 +1733,147 @@ mod pg_tests {
         assert_eq!(slot_assignment(&pool).await, None);
         assert_eq!(provider_session_ids(&pool).await, vec![None]);
     }
+
+    /// #5357: card rollback is durable. When a run is terminalized, its
+    /// card rollback candidates are queued in the same transaction that
+    /// commits the entry state changes. A crash between the commit and the
+    /// card rollback leaves the entry changed with the card stuck in
+    /// `requested|in_progress`. The durable outbox recovers it.
+    #[tokio::test]
+    async fn card_rollback_crash_window_retries_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        // Seed: entry in dispatched state, card in in_progress state.
+        let run_id = "run-card-rollback-test";
+        let dispatch_id = "dispatch-card-rollback-test";
+        let card_id = "card-card-rollback-test";
+        let entry_id = "entry-card-rollback-test";
+
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
+             VALUES ('agent-rollback', 'Rollback Agent', 'claude', '456')
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed rollback agent");
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id)
+             VALUES ($1, 'Rollback Card', 'in_progress', 'agent-rollback')",
+        )
+        .bind(card_id)
+        .execute(&pool)
+        .await
+        .expect("seed rollback card");
+
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, agent_id, status)
+             VALUES ($1, 'agent-rollback', 'active')",
+        )
+        .bind(run_id)
+        .execute(&pool)
+        .await
+        .expect("seed rollback run");
+
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, to_agent_id, dispatch_type, status, title)
+             VALUES ($1, $2, 'agent-rollback', 'implementation', 'dispatched', 'Rollback Dispatch')",
+        )
+        .bind(dispatch_id)
+        .bind(card_id)
+        .execute(&pool)
+        .await
+        .expect("seed rollback dispatch");
+
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, dispatch_id)
+             VALUES ($1, $2, $3, 'agent-rollback', 'dispatched', $4)",
+        )
+        .bind(entry_id)
+        .bind(run_id)
+        .bind(card_id)
+        .bind(dispatch_id)
+        .execute(&pool)
+        .await
+        .expect("seed rollback entry");
+
+        // Cancel the run. This enqueues the card rollback in the cleanup task.
+        let task_id = {
+            let mut tx = pool.begin().await.expect("begin cancel transaction");
+
+            let cancelled_dispatch_ids = vec![dispatch_id.to_string()];
+            let task_id = super::super::enqueue_run_cleanup_task_on_tx(
+                &mut tx,
+                &[run_id.to_string()],
+                &cancelled_dispatch_ids,
+                &[],
+                &[],
+                &[card_id.to_string()],
+                Some("test_rollback"),
+            )
+            .await
+            .expect("enqueue cleanup task");
+
+            sqlx::query("UPDATE auto_queue_entries SET status = $1 WHERE id = $2")
+                .bind("skipped")
+                .bind(entry_id)
+                .execute(&mut *tx)
+                .await
+                .expect("update entry to skipped");
+
+            tx.commit().await.expect("commit cancel transaction");
+            task_id
+        };
+
+        // Before drain: card is still in_progress.
+        let card_status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM kanban_cards WHERE id = $1")
+                .bind(card_id)
+                .fetch_optional(&pool)
+                .await
+                .expect("query card status")
+                .flatten();
+        assert_eq!(card_status, Some("in_progress".to_string()));
+
+        // Before drain: cleanup task is pending.
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM auto_queue_run_cleanup_tasks WHERE id = $1 AND dead_lettered_at IS NULL",
+        )
+        .bind(task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count pending cleanup tasks");
+        assert_eq!(count, 1);
+
+        // Drain the cleanup task (simulating the post-commit step).
+        let outcome = drain_run_cleanup_task_by_id_pg(None, &pool, task_id).await;
+        assert!(outcome.completed, "cleanup task must complete successfully");
+
+        // After drain: card is ready.
+        let card_status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM kanban_cards WHERE id = $1")
+                .bind(card_id)
+                .fetch_optional(&pool)
+                .await
+                .expect("query card status after drain")
+                .flatten();
+        assert_eq!(
+            card_status,
+            Some("ready".to_string()),
+            "card must be rolled back to ready state"
+        );
+
+        // After drain: cleanup task is removed.
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM auto_queue_run_cleanup_tasks WHERE id = $1")
+                .bind(task_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count cleanup tasks after drain");
+        assert_eq!(count, 0);
+    }
 }
