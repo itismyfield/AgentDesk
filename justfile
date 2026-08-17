@@ -207,3 +207,5 @@ test-postgres:
     cargo test --lib services::discord::runtime_bootstrap::intake_delivery_sweep::tests -- --nocapture --test-threads=1
 
 check: fmt-check lint cargo-check test
+    # #5071 T4-B3 (4987 S2): projection coverage and fail-closed receipt reads.
+    cargo test --lib services::discord::outbound::receipt_index::tests -- --skip _pg --skip pg_ --skip postgres

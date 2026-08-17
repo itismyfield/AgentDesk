@@ -16,6 +16,8 @@ pub(crate) mod manual_delivery;
 pub(crate) mod message;
 pub(crate) mod policy;
 pub(in crate::services::discord) mod reaction_control;
+#[cfg(unix)]
+pub(in crate::services::discord) mod receipt_index;
 pub(crate) mod result;
 pub(crate) mod send_api;
 pub(crate) mod send_gate;
