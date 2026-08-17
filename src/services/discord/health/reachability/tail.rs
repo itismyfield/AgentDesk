@@ -340,6 +340,7 @@ mod tests {
                 start,
                 end,
                 cap_truncated,
+                observed_len,
             } = read_incremental(&path, cursor_at(&path, CONSUMED))
             else {
                 panic!("expected a read with {remaining} bytes remaining");
@@ -347,6 +348,9 @@ mod tests {
             let expected_read = remaining.min(TAIL_READ_CAP_BYTES);
             assert_eq!(bytes.len() as u64, expected_read);
             assert_eq!((start, end), (CONSUMED, CONSUMED + expected_read));
+            // The two quantities this test separates: the full file length vs
+            // the capped read window.
+            assert_eq!(observed_len, CONSUMED + remaining);
             assert_eq!(
                 cap_truncated, expected_truncated,
                 "unexpected truncation with {remaining} bytes remaining"
