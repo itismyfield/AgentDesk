@@ -891,10 +891,10 @@ pub(crate) async fn drain_run_cleanup_task_pg(
     // Step 3.5 — card rollback.
     //
     // Retry safety: each card rollback is scoped to a specific card id, status
-    // (requested|in_progress), and generation marker (dispatch_id). If the card's
-    // current latest_dispatch_id differs from the stored dispatch_id, the card
-    // has been reassigned to a new lifecycle and is skipped. For cards that match,
-    // the operation is naturally idempotent.
+    // (requested|in_progress), and post-terminalization latest_dispatch_id
+    // snapshot. If that generation changes after enqueue, the card has been
+    // reassigned to a new lifecycle and is skipped. Equal NULL snapshots match.
+    // For cards that match, the operation is naturally idempotent.
     let mut all_cards_handled = true;
     if !task.card_rollback_tasks.is_empty() {
         let source = task.card_rollback_source.as_deref().unwrap_or("auto_queue");
@@ -1212,10 +1212,10 @@ pub(crate) async fn replay_pending_run_cleanup_tasks_pg(
 /// terminalized.
 ///
 /// Retry safety: the operation is scoped to a specific card, status
-/// (requested|in_progress), and generation marker (expected_dispatch_id). If the
-/// card's current latest_dispatch_id differs from the expected dispatch_id, the
-/// card has been reassigned to a new lifecycle and is skipped (returned as Ok).
-/// For matching generations, the operation is naturally idempotent.
+/// (requested|in_progress), and post-terminalization latest_dispatch_id snapshot.
+/// If the current generation differs, the card has been reassigned after enqueue
+/// and is skipped (returned as Ok). Equal NULL snapshots match. For matching
+/// generations, the operation is naturally idempotent.
 async fn perform_card_rollback_on_pg(
     pool: &PgPool,
     card_id: &str,
@@ -1238,9 +1238,8 @@ async fn perform_card_rollback_on_pg(
         return Ok(());
     }
 
-    // P1-B: generation guard. If the card's current dispatch_id differs from the
-    // one we recorded, the card has been reassigned to a new lifecycle and we
-    // must not roll it back.
+    // P1-B: generation guard. Option equality deliberately treats NULL-to-NULL
+    // as a match; only a changed latest_dispatch_id skips rollback.
     let current_dispatch_deref: Option<&str> = current_dispatch_id.as_deref();
     if expected_dispatch_id != current_dispatch_deref {
         return Ok(()); // Card generation mismatch: skip this card.

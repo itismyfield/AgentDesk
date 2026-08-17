@@ -1808,7 +1808,9 @@ mod pg_tests {
             let mut tx = pool.begin().await.expect("begin cancel transaction");
 
             let cancelled_dispatch_ids = vec![dispatch_id.to_string()];
-            let card_rollback_tasks = vec![(card_id.to_string(), Some(dispatch_id.to_string()))];
+            // The card's post-cancellation latest_dispatch_id is NULL. Persist that
+            // exact generation so NULL-to-NULL is treated as a valid match.
+            let card_rollback_tasks = vec![(card_id.to_string(), None)];
             let task_id = super::super::enqueue_run_cleanup_task_on_tx(
                 &mut tx,
                 &[run_id.to_string()],
@@ -1827,6 +1829,12 @@ mod pg_tests {
                 .execute(&mut *tx)
                 .await
                 .expect("update entry to skipped");
+
+            sqlx::query("UPDATE task_dispatches SET status = 'cancelled' WHERE id = $1")
+                .bind(dispatch_id)
+                .execute(&mut *tx)
+                .await
+                .expect("cancel dispatch");
 
             tx.commit().await.expect("commit cancel transaction");
             task_id
@@ -1945,7 +1953,7 @@ mod pg_tests {
         // Before end: verify card state
         let (initial_status, initial_review_round, initial_review_notes): (
             String,
-            i32,
+            i64,
             Option<String>,
         ) = sqlx::query_as(
             "SELECT status, review_round, review_notes FROM kanban_cards WHERE id = $1",
@@ -1963,7 +1971,7 @@ mod pg_tests {
         end_run_with_pg(None, &pool, run_id).await.expect("end run");
 
         // After end: verify card state is UNCHANGED
-        let (final_status, final_review_round, final_review_notes): (String, i32, Option<String>) =
+        let (final_status, final_review_round, final_review_notes): (String, i64, Option<String>) =
             sqlx::query_as(
                 "SELECT status, review_round, review_notes FROM kanban_cards WHERE id = $1",
             )
@@ -2096,7 +2104,7 @@ mod pg_tests {
             .expect("update card to new dispatch_id");
 
         // Before drain: card is still in_progress with review_round = 1
-        let (status_before, review_round_before): (String, i32) =
+        let (status_before, review_round_before): (String, i64) =
             sqlx::query_as("SELECT status, review_round FROM kanban_cards WHERE id = $1")
                 .bind(card_id)
                 .fetch_one(&pool)
@@ -2109,7 +2117,7 @@ mod pg_tests {
         super::super::drain_run_cleanup_task_by_id_pg(None, &pool, task_id).await;
 
         // After drain: card should be UNCHANGED (skipped due to generation mismatch)
-        let (status_after, review_round_after): (String, i32) =
+        let (status_after, review_round_after): (String, i64) =
             sqlx::query_as("SELECT status, review_round FROM kanban_cards WHERE id = $1")
                 .bind(card_id)
                 .fetch_one(&pool)

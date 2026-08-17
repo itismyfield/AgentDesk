@@ -586,6 +586,9 @@ async fn terminalize_selected_runs_with_pg(
         crate::db::auto_queue::acquire_run_advisory_xact_locks_on_pg_tx(&mut tx, &lock_candidates)
             .await?;
 
+    // P1-B: Capture the cards owned by the entries before terminalizing them. Their
+    // generation markers are loaded from kanban_cards after cancellation has applied
+    // all of its in-transaction state changes.
     let rollback_candidate_card_ids = sqlx::query_scalar::<_, String>(
         "SELECT DISTINCT kanban_card_id
          FROM auto_queue_entries
@@ -717,18 +720,20 @@ async fn terminalize_selected_runs_with_pg(
     // #5357: extend durable outbox to include card rollback so it is retried
     // durably alongside the dispatch/run state changes. P1-A: only rollback cards
     // when cancelling; end operations do not touch card state.
-    let card_rollback_tasks = if should_rollback_cards {
-        rollback_candidate_card_ids
-            .iter()
-            .map(|card_id| {
-                // Each card is paired with the dispatch_id at the time of
-                // terminalization, which serves as a generation marker. P1-B:
-                // if the card's dispatch_id changes before drain, the card has
-                // been reassigned and is skipped.
-                let dispatch_id = cancel_metas.first().map(|meta| meta.dispatch_id.clone());
-                (card_id.clone(), dispatch_id)
-            })
-            .collect::<Vec<_>>()
+    let card_rollback_tasks = if should_rollback_cards && !rollback_candidate_card_ids.is_empty() {
+        // Snapshot the card's actual post-cancellation generation, including NULL.
+        // The drain skips only when latest_dispatch_id changes after this task is
+        // enqueued; NULL-to-NULL is therefore a valid generation match.
+        sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT id, latest_dispatch_id
+             FROM kanban_cards
+             WHERE id = ANY($1)
+             ORDER BY id",
+        )
+        .bind(&rollback_candidate_card_ids)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|error| format!("load postgres cancellation card generations: {error}"))?
     } else {
         Vec::new()
     };

@@ -8,15 +8,16 @@
 -- durable with the entry state change and is retried by the same drain machinery.
 --
 -- P1-B: cards are identified by (card_id, dispatch_id) pairs. The dispatch_id
--- acts as a generation marker: during drain, if the card's current
--- latest_dispatch_id differs from the stored dispatch_id, the card has been
--- reassigned to a new lifecycle and the rollback is skipped.
+-- is the card's post-terminalization latest_dispatch_id snapshot (including
+-- NULL) and acts as a generation marker. During drain, a different current
+-- latest_dispatch_id means a new lifecycle attached after enqueue, so rollback
+-- is skipped. Equal NULL snapshots are a valid generation match.
 
 ALTER TABLE auto_queue_run_cleanup_tasks
 ADD COLUMN card_rollback_tasks JSONB NOT NULL DEFAULT '[]',
 ADD COLUMN card_rollback_source TEXT;
 
 COMMENT ON COLUMN auto_queue_run_cleanup_tasks.card_rollback_tasks IS
-    'Array of {card_id, dispatch_id} objects for cards that need status rollback from requested|in_progress to ready. dispatch_id is the generation marker.';
+    'Array of {card_id, dispatch_id} objects for cards that need status rollback from requested|in_progress to ready. dispatch_id is the post-terminalization latest_dispatch_id generation snapshot and may be null.';
 COMMENT ON COLUMN auto_queue_run_cleanup_tasks.card_rollback_source IS
     'Source identifier for the card rollback (e.g., "auto_queue_cancel").';
