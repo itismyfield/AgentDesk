@@ -8,7 +8,8 @@
 #     space, so a caller can field-split line 1),
 #   • rc semantics (0 = OK, 1 = NO, 2 = usage error),
 #   • the presence of every failure-reason string, one per gated metric, plus
-#     the fail-CLOSED `unreadable` reasons,
+#     the fail-CLOSED `unreadable` reasons — for a probe that printed nothing
+#     AND for one that printed a parseable reading but exited nonzero,
 #   • the canonical thresholds at their exact boundaries (idle 30 / free 25 /
 #     pressure 1 / swap-rate 10 / disk 50) — this file is where a silent
 #     threshold edit gets caught,
@@ -62,6 +63,13 @@ write_stub() {
   chmod +x "$STUB_DIR/$name"
 }
 
+# Two distinct failure knobs per probe, because they are different bugs:
+#   STUB_<X>_BROKEN=1 — exits 1 printing NOTHING (the probe is dead).
+#   STUB_<X>_RC=1     — prints its NORMAL, fully parseable output and THEN
+#                       exits 1 (the probe lied about succeeding). Section 13
+#                       pins that this second shape also fails closed; before
+#                       the #5438 rc fix, all five of these returned OK.
+
 # `CPU usage:` idle field is the only thing the script may read from top. The
 # PhysMem line is emitted verbatim in its real (misleading) shape so the
 # #5438 regression test below has something to trip on.
@@ -71,6 +79,7 @@ echo "Processes: 1175 total, 7 running, 1168 sleeping, 11506 threads"
 echo "Load Avg: 7.77, 10.06, 10.19"
 echo "CPU usage: 10.0% user, 5.0% sys, ${STUB_CPU_IDLE:-85.0}% idle"
 echo "PhysMem: 47G used (9314M wired, 4330M compressor), ${STUB_TOP_UNUSED:-451M} unused."
+exit "${STUB_TOP_RC:-0}"
 STUB
 
 write_stub memory_pressure <<'STUB'
@@ -83,6 +92,7 @@ echo "Swapins: 39350080 "
 echo "Swapouts: ${STUB_MP_SWAPOUTS:-1000} "
 echo ""
 echo "System-wide memory free percentage: ${STUB_MEM_FREE:-71}%"
+exit "${STUB_MEMORY_PRESSURE_RC:-0}"
 STUB
 
 write_stub sysctl <<'STUB'
@@ -91,6 +101,7 @@ case "$*" in
   *kern.memorystatus_vm_pressure_level*)
     [ "${STUB_SYSCTL_BROKEN:-0}" = "1" ] && exit 1
     echo "${STUB_MEM_PRESSURE_LEVEL:-1}"
+    exit "${STUB_SYSCTL_RC:-0}"
     ;;
   *) exit 1 ;;
 esac
@@ -108,6 +119,7 @@ echo "Mach Virtual Memory Statistics: (page size of 16384 bytes)"
 echo "Pages free:                                     9733."
 echo "Swapins:                                    39350080."
 echo "Swapouts:                                   $(( ${STUB_SWAPOUTS_BASE:-42620705} + n * ${STUB_SWAPOUTS_STEP:-0} ))."
+exit "${STUB_VM_STAT_RC:-0}"
 STUB
 
 write_stub df <<'STUB'
@@ -115,6 +127,7 @@ write_stub df <<'STUB'
 [ "${STUB_DF_BROKEN:-0}" = "1" ] && exit 1
 echo "Filesystem     1024-blocks      Used Available Capacity iused      ifree %iused  Mounted on"
 echo "/dev/stub        971350180  16240912 ${STUB_DISK_AVAIL_KB:-182742968}     9%  480435 1827429680    0%   /"
+exit "${STUB_DF_RC:-0}"
 STUB
 
 write_stub pgrep <<'STUB'
@@ -131,14 +144,34 @@ i=1
 while [ "$i" -le "$n" ]; do echo "$((1000 + i))"; i=$((i + 1)); done
 STUB
 
+# A "vm_stat is GONE" case needs the command genuinely off PATH: an exit-1
+# vm_stat is a FAILED probe (section 13 — fails closed), not a missing one. So
+# section 8 runs against a sanitized PATH — the stubs minus vm_stat, plus
+# symlinks to exactly the real utilities lane_headroom.sh itself calls. Without
+# the sanitizing, /usr/bin/vm_stat would answer and the case would assert
+# nothing about the fallback.
+SYSBIN="$TMP_ROOT/sysbin"
+STUB_DIR_NO_VM_STAT="$TMP_ROOT/bin-no-vm_stat"
+mkdir -p "$SYSBIN" "$STUB_DIR_NO_VM_STAT"
+for util in awk bash basename cat date dirname sleep; do
+  real="$(command -v "$util")" || { echo "FATAL: $util not on PATH"; exit 2; }
+  ln -sf "$real" "$SYSBIN/$util"
+done
+for stub in "$STUB_DIR"/*; do
+  [ "$(basename "$stub")" = "vm_stat" ] || ln -sf "$stub" "$STUB_DIR_NO_VM_STAT/"
+done
+NO_VM_STAT_PATH="$STUB_DIR_NO_VM_STAT:$SYSBIN"
+
 OUT=""
 RC=0
 LINE1=""
+HEADROOM_PATH=""
 run_headroom() {
   # run_headroom [VAR=VAL ...] — every override is a stub knob or a
-  # LANE_HEADROOM_* threshold. Captures OUT / RC / LINE1.
+  # LANE_HEADROOM_* threshold. Captures OUT / RC / LINE1. Set HEADROOM_PATH to
+  # run against a PATH other than the full stub set (see section 8).
   rm -f "$STATE_DIR/vm_stat_calls"
-  OUT="$(env "PATH=$STUB_DIR:$PATH" \
+  OUT="$(env "PATH=${HEADROOM_PATH:-$STUB_DIR:$PATH}" \
     "STUB_STATE_DIR=$STATE_DIR" \
     "LANE_HEADROOM_SWAP_SAMPLE_SECONDS=${SWAP_SAMPLE_SECONDS:-0}" \
     "$@" bash "$LANE_HEADROOM" 2>&1)"
@@ -221,9 +254,17 @@ assert_eq "builder-heavy rc" "0" "$RC"
 assert_contains "builder counts reported in detail" "cargo=8 rustc=7" "$OUT"
 
 echo "== 8. swapouts counter falls back to memory_pressure when vm_stat is gone =="
-run_headroom STUB_VM_STAT_BROKEN=1 STUB_MP_SWAPOUTS=1000
+if env "PATH=$NO_VM_STAT_PATH" bash -c 'command -v vm_stat >/dev/null 2>&1'; then
+  fail "sanitized PATH still resolves a vm_stat (case would test nothing)"
+else
+  pass "sanitized PATH has no vm_stat at all (absence, not failure)"
+fi
+HEADROOM_PATH="$NO_VM_STAT_PATH"
+run_headroom STUB_MP_SWAPOUTS=1000
 assert_eq "fallback swapouts counter yields a verdict" "HEADROOM: OK" "$LINE1"
 assert_contains "fallback rate reported" "swapout-rate" "$OUT"
+assert_eq "absent vm_stat is NOT an unreadable probe" "0" "$RC"
+HEADROOM_PATH=""
 
 echo "== 9. canonical thresholds hold at their boundaries =="
 run_headroom STUB_CPU_IDLE=30.0
@@ -262,11 +303,37 @@ help_out="$(env "PATH=$STUB_DIR:$PATH" bash "$LANE_HEADROOM" --help 2>&1)"
 help_rc=$?
 bad_out="$(env "PATH=$STUB_DIR:$PATH" bash "$LANE_HEADROOM" --nope 2>&1)"
 bad_rc=$?
-set -e
+set +e   # restore the suite's real mode: it runs without -e (line 23), and
+         # turning -e ON here would abort the next section on its first NO rc.
 assert_eq "--help rc 0" "0" "$help_rc"
 assert_contains "--help documents the verdict contract" "HEADROOM: OK" "$help_out"
 assert_eq "unknown argument rc 2 (distinct from a NO verdict)" "2" "$bad_rc"
 assert_contains "unknown argument names itself" "unknown argument" "$bad_out"
+
+echo "== 13. a probe that exits NONZERO is unreadable even when its stdout parses =="
+# The reviewed #5438 defect: every probe read its command through a bare
+# `$(cmd)`, so the rc was thrown away and well-formed stdout from a FAILING
+# command was accepted as a live reading — all five cases below returned
+# `HEADROOM: OK` rc 0 while the header promised fail-CLOSED. Each stub here
+# prints its normal, fully parseable output and then exits 1.
+assert_probe_rc_fails_closed() {
+  local label="$1" reason="$2"
+  shift 2
+  run_headroom "$@"
+  assert_contains "$label names its probe ($reason)" "$reason" "$LINE1"
+  assert_contains "$label verdict is NO" "HEADROOM: NO " "$LINE1"
+  assert_eq "$label rc is 1" "1" "$RC"
+}
+assert_probe_rc_fails_closed "top rc 1" "cpu-idle=unreadable" STUB_TOP_RC=1
+assert_probe_rc_fails_closed "memory_pressure rc 1" "mem-free=unreadable" STUB_MEMORY_PRESSURE_RC=1
+assert_probe_rc_fails_closed "sysctl rc 1" "mem-pressure=unreadable" STUB_SYSCTL_RC=1
+assert_probe_rc_fails_closed "vm_stat rc 1" "swapout-rate=unreadable" STUB_VM_STAT_RC=1
+assert_probe_rc_fails_closed "df rc 1" "disk-free=unreadable" STUB_DF_RC=1
+# An installed-but-failing vm_stat must NOT quietly borrow memory_pressure's
+# counter: the fallback is for an ABSENT vm_stat (section 8), and a failing probe
+# on a machine whose VM stats are broken is exactly what fail-closed is for.
+run_headroom STUB_VM_STAT_RC=1 STUB_MP_SWAPOUTS=1000
+assert_contains "failing vm_stat does not fall back to memory_pressure" "swapout-rate=unreadable" "$LINE1"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"
