@@ -581,13 +581,18 @@ pub(super) fn refresh_watcher_turn_identity(
         return;
     };
     let row_start_offset = state.turn_start_offset.unwrap_or(state.last_offset);
-    let fresh_bind_at_start = current_turn_nonce.is_none() && row_start_offset == current_offset;
-    if row_start_offset < current_offset || fresh_bind_at_start {
-        // `current_offset` is the watcher loop's already-consumed transcript byte
-        // offset. Keep the prior nonce for rows that start at/after that point:
-        // they are follow-ups whose output this watcher has not consumed yet.
-        // A fresh watcher binding at the exact start boundary has no prior nonce,
-        // so adopting that row is the initial observed-turn bind.
+    if row_start_offset < current_offset || current_turn_nonce.is_none() {
+        // #5421 F1: adopt the row's nonce if the watcher has no prior binding
+        // or if the row's output has been consumed. When `current_turn_nonce.is_none()`,
+        // the watcher will never satisfy the nonce conjunct in the pre-relay authority
+        // check `authorize_pre_relay_inflight`, guaranteeing TurnNonceMismatch refusal.
+        // This is structurally correct: a None-bound watcher CANNOT hold authority
+        // over any inflight (Incident 12 / #5175: frozen transcript, row_start >
+        // current_offset forever). Adoption breaks the latch by letting the row's
+        // nonce replace None. When Some(prior) is bound, ahead-rows that started
+        // at/after current_offset keep their prior nonce (follow-up protection).
+        // Forgery defense is the pre-relay judge (`soft_terminal_authority`'s
+        // conjuncts), not this binder; binding is not authority grant.
         *current_turn_nonce = state.turn_nonce.clone();
     }
 }

@@ -2071,3 +2071,109 @@ fn readopted_finish_mark_refuses_a_live_id0_newer_turn() {
     // An id!=0 newer turn trips both predicates and is likewise refused.
     assert!(!readopted_finish_mark_allowed(true, true));
 }
+
+// #5421 F1: nonce rebinding when watcher lacks prior binding OR row output consumed.
+// Incident 12 was frozen by exact-offset rule: row_start(16582809) > current(16580540),
+// watcher nonce=None, fresh_bind_at_start=false, adoption refused → latch.
+// F1 adopts when None to break latch; row_start < current for consumed range.
+
+/// Reproduce binding decision logic for testing (mirrors refresh_watcher_turn_identity).
+fn nonce_binding_decision(
+    current_turn_nonce: Option<String>,
+    row_start_offset: u64,
+    current_offset: u64,
+    row_nonce: Option<String>,
+) -> Option<String> {
+    let mut result = current_turn_nonce;
+    if row_start_offset < current_offset || result.is_none() {
+        result = row_nonce;
+    }
+    result
+}
+
+#[test]
+fn nonce_binding_adopts_row_when_watcher_none_and_row_ahead_5421_f1() {
+    // Incident 12: watcher None, row_start(16582809) > current(16580540),
+    // old rule required exact match (false), refused adoption → latch.
+    // New rule: None enables adoption regardless of offset.
+    let result = nonce_binding_decision(
+        None,     // watcher nonce
+        16582809, // row_start (ahead of current)
+        16580540, // current_offset
+        Some("incident-12-nonce".to_string()),
+    );
+    assert_eq!(
+        result.as_deref(),
+        Some("incident-12-nonce"),
+        "#5421 F1: None watcher must adopt any row's nonce to break latch"
+    );
+}
+
+#[test]
+fn nonce_binding_preserves_prior_for_followup_row_after_boundary() {
+    // Follow-up turn starts at/after current_offset: preserve prior nonce,
+    // refuse new row's nonce. This guards against mid-frame replacement.
+    let result = nonce_binding_decision(
+        Some("prior-nonce".to_string()), // watcher has prior binding
+        19640568,                        // row_start == current_offset (at boundary)
+        19640568,                        // current_offset
+        Some("newer-nonce".to_string()),
+    );
+    assert_eq!(
+        result.as_deref(),
+        Some("prior-nonce"),
+        "ahead-row (start >= current) must keep prior nonce"
+    );
+}
+
+#[test]
+fn nonce_binding_rebinds_when_row_consumed_and_prior_exists() {
+    // Row output already consumed (start < current): rebind to row's nonce
+    // even though watcher had prior binding.
+    let result = nonce_binding_decision(
+        Some("prior-nonce".to_string()),
+        19560001, // row_start < current_offset
+        19640568, // current_offset
+        Some("consumed-nonce".to_string()),
+    );
+    assert_eq!(
+        result.as_deref(),
+        Some("consumed-nonce"),
+        "consumed row (start < current) rebinds regardless of prior"
+    );
+}
+
+#[test]
+fn nonce_binding_adopts_at_exact_boundary_when_none() {
+    // Fresh watcher at exact boundary (old exact-match case): adoption still works
+    // because None branch triggers.
+    let result = nonce_binding_decision(
+        None,
+        19640568, // row_start == current_offset
+        19640568, // current_offset
+        Some("boundary-nonce".to_string()),
+    );
+    assert_eq!(
+        result.as_deref(),
+        Some("boundary-nonce"),
+        "exact boundary with None watcher must adopt (fresh-bind case)"
+    );
+}
+
+#[test]
+fn nonce_binding_refuses_row_nonce_when_prior_bound_and_row_ahead() {
+    // Existing prior nonce + row that started ahead: refusal. This case is NOT
+    // an adoption (would need Some() → Some() rebind, but row is ahead so
+    // range condition fails, and Some() ≠ None so None condition also fails).
+    let result = nonce_binding_decision(
+        Some("prior-nonce".to_string()),
+        19700000, // row_start > current_offset
+        19640568, // current_offset
+        Some("future-nonce".to_string()),
+    );
+    assert_eq!(
+        result.as_deref(),
+        Some("prior-nonce"),
+        "ahead-row with prior bound must preserve prior (no adoption)"
+    );
+}

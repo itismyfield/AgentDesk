@@ -5366,6 +5366,11 @@ services::discord::tmux::tmux_watcher::turn_identity::pane_dead_identity_tests::
 services::discord::tmux::tmux_watcher::turn_identity::pane_dead_identity_tests::live_long_chunk_delivery_fingerprint_uses_raw_body_4081
 services::discord::tmux::tmux_watcher::turn_identity::pane_dead_identity_tests::long_chunk_delivery_fingerprint_refuses_phantom_rerelay_4081
 services::discord::tmux::tmux_watcher::turn_identity::pane_dead_identity_tests::no_inflight_offset_key_still_refuses_append_edit_tail_duplicate_4277
+services::discord::tmux::tmux_watcher::turn_identity::pane_dead_identity_tests::nonce_binding_adopts_at_exact_boundary_when_none
+services::discord::tmux::tmux_watcher::turn_identity::pane_dead_identity_tests::nonce_binding_adopts_row_when_watcher_none_and_row_ahead_5421_f1
+services::discord::tmux::tmux_watcher::turn_identity::pane_dead_identity_tests::nonce_binding_preserves_prior_for_followup_row_after_boundary
+services::discord::tmux::tmux_watcher::turn_identity::pane_dead_identity_tests::nonce_binding_rebinds_when_row_consumed_and_prior_exists
+services::discord::tmux::tmux_watcher::turn_identity::pane_dead_identity_tests::nonce_binding_refuses_row_nonce_when_prior_bound_and_row_ahead
 services::discord::tmux::tmux_watcher::turn_identity::pane_dead_identity_tests::paused_first_branch_anchor_gate
 services::discord::tmux::tmux_watcher::turn_identity::pane_dead_identity_tests::pending_user_boundary_relays_fingerprint_collision_followup_4714
 services::discord::tmux::tmux_watcher::turn_identity::pane_dead_identity_tests::pinned_delivery_lease_key_id0_without_offset_acquires_and_commits_delivery
