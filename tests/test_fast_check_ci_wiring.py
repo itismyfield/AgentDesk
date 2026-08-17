@@ -44,6 +44,8 @@ EXPECTED_TEST_NON_PG_COMMANDS = (
     "cargo test --lib services::discord::health::reachability::tail::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib services::discord::health::reachability::ledger::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib services::discord::health::reachability::observation::tests -- --skip _pg --skip pg_ --skip postgres",
+    # #5071 T4-B5 (4987 S6): the watchdog sidecar intake lane.
+    "cargo test --lib services::discord::health::reachability::external_verdict::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib services::discord::health::reachability::obligation::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib services::discord::health::reachability::divergence::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib services::discord::e2e_control::tests -- --skip _pg --skip pg_ --skip postgres",

@@ -61,6 +61,11 @@ test-non-pg:
     cargo test --lib services::discord::health::reachability::tail::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::discord::health::reachability::ledger::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::discord::health::reachability::observation::tests -- --skip _pg --skip pg_ --skip postgres
+    # #5071 T4-B5 (4987 S6): the watchdog sidecar intake. Pins that an incomplete
+    # read, a wrong incarnation and a regressed watchdog epoch all carry no
+    # authority, and that an accepted claim can only worsen. The Python half that
+    # fills those fields is in `scripts/ci-script-checks.sh`.
+    cargo test --lib services::discord::health::reachability::external_verdict::tests -- --skip _pg --skip pg_ --skip postgres
     # #5071 T4-B2a (4987 S1, second half + blocker B1'): canonical obligation
     # framing. This lane carries the RUST half of the Rust<->Python byte-equal
     # equivalence, so a Rust-only change to the obligation rule dies here in

@@ -47,6 +47,7 @@
 
 pub(in crate::services::discord) mod discovery;
 pub(in crate::services::discord) mod divergence;
+pub(in crate::services::discord) mod external_verdict;
 pub(in crate::services::discord) mod ledger;
 pub(in crate::services::discord) mod obligation;
 pub(in crate::services::discord) mod observation;
