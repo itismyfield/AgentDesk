@@ -852,34 +852,34 @@ async fn build_health_snapshot_with_options(
                     // so a transcript that is not growing is idle rather than
                     // gone.
                     //
-                    // The third term is weaker than it reads. `unread_bytes`
-                    // is derived in `SessionEnrichment::load` from the capture
+                    // The third term is three-valued, and #5071 relay-tail S2
+                    // splits its `None` where T4-B6 folded it. `unread_bytes` is
+                    // derived in `SessionEnrichment::load` from the capture
                     // coordinate of the IN-FLIGHT ROW's `output_path`, so a
                     // channel with no in-flight row has no coordinate and the
-                    // field is `None` — and `unwrap_or(0)` reads `None` as
-                    // "nothing waiting". On an idle channel, which is the case
-                    // this witness exists for, the term is therefore satisfied
-                    // without measuring anything, and the effective gate is the
-                    // first two: the pane is up and the mailbox holds no turn.
-                    //
-                    // That fold runs the opposite way from
-                    // `RelayHealthSnapshot::relay_frontier_never_advanced_with_unread_tail`,
-                    // where the same field is read as `is_some_and(|b| b > 0)`.
-                    // There an unmeasured tail declines to assert a FAILURE;
-                    // here it helps assert liveness, so the residual risk is
-                    // GREEN-permitting: an unmeasurable tail cannot withhold
-                    // this witness. It is left this way deliberately. Requiring
-                    // `Some(0)` would deny the witness to every rowless idle
+                    // field is `None` with nothing that could be waiting. That
+                    // half of the old `unwrap_or(0)` fold is the population this
+                    // witness exists for and it is kept: requiring `Some(0)`
+                    // there would deny the witness to every rowless idle
                     // channel, and one with no held obligation and a transcript
                     // that is not growing would then classify
                     // `Unknown{TranscriptUnresolved}`
                     // (`composite_tests::nothing_observed_is_not_green` pins
                     // that verdict) — a degraded reason for each such channel
-                    // once `RelayVerdictSource` is `Composite`. Tightening this
-                    // needs evidence about that population first.
+                    // once `RelayVerdictSource` is `Composite`.
+                    //
+                    // The other half was a `None` beside a row present, where
+                    // the path exists and the measurement FAILED. That one did
+                    // let an unmeasurable tail help assert liveness, running
+                    // opposite to
+                    // `RelayHealthSnapshot::relay_frontier_never_advanced_with_unread_tail`,
+                    // which reads the same field as `is_some_and(|b| b > 0)` and
+                    // declines to assert a FAILURE from an unmeasured tail.
+                    // `idle_witness_tail_is_not_waiting` now requires `Some(0)`
+                    // for that case, which is not the rowless population above.
                     pane_idle_confirmed: tmux_present
                         && matches!(relay_health.active_turn, RelayActiveTurn::None)
-                        && relay_health.unread_bytes.unwrap_or(0) == 0,
+                        && relay_health.idle_witness_tail_is_not_waiting(),
                     // The RECONFIRMED unpaired token, not the raw one: a second
                     // mailbox snapshot and inflight read still saw the same
                     // active episode without a durable row, so an ordinary

@@ -1209,6 +1209,148 @@ async fn reattach_idle_tmux_clear_release_publishes_completion_event() {
     );
 }
 
+/// #5071 relay-tail S2: the destructive idle-clear gate's three-valued reading
+/// of `unread_bytes`, at the predicate both lanes share.
+#[test]
+fn unread_tail_is_proven_drained_only_for_a_measured_zero() {
+    assert!(
+        unread_tail_is_proven_drained(Some(0)),
+        "a measured empty tail is the only proof the gates accept"
+    );
+    assert!(
+        !unread_tail_is_proven_drained(None),
+        "an unmeasured tail is unknown, not drained"
+    );
+    assert!(
+        !unread_tail_is_proven_drained(Some(1)),
+        "a measured non-empty tail is live relay evidence"
+    );
+}
+
+/// #5071 relay-tail S2: the same table driven through the whole
+/// `ReattachWatcher` legacy manual lane, because the polarity that matters is
+/// whether the DESTRUCTIVE branch opens — not what the predicate returns.
+///
+/// `None` is the added row. It reaches this lane whenever the tail could not be
+/// measured against the row's frontier, and the companion
+/// `idle_tmux_repair_has_unrelayed_tail_answer` is blind in the same conditions,
+/// so an opened branch here would retire the mailbox token and the inflight row
+/// with neither witness having measured anything.
+#[tokio::test]
+async fn reattach_idle_tmux_clear_requires_a_measured_drained_tail() {
+    let cases: Vec<(&str, Option<u64>, bool)> = vec![
+        ("measured drained tail retires the idle turn", Some(0), true),
+        ("unmeasured tail must not retire the idle turn", None, false),
+        (
+            "measured waiting tail must not retire the idle turn",
+            Some(128),
+            false,
+        ),
+    ];
+    for (index, (label, unread_bytes, expect_cleared)) in cases.into_iter().enumerate() {
+        let _guard = auto_heal_test_lock().lock().await;
+        clear_auto_heal_attempts_for_tests();
+        let (_root_guard, root_dir) = isolated_agentdesk_root();
+        let provider = ProviderKind::Claude;
+        let (registry, shared) = registry_with_shared(provider.clone()).await;
+        let offset = index as u64;
+        let channel = ChannelId::new(4_099_100 + offset);
+        let user_msg = MessageId::new(4_099_200 + offset);
+        let tmux = format!("AgentDesk-claude-4099-s2-unread-{index}");
+        let output_path = root_dir.path().join(format!("s2-unread-{index}.jsonl"));
+        let body = "{\"type\":\"system\",\"subtype\":\"turn_duration\",\"session_id\":\"s\"}\n";
+        std::fs::write(&output_path, body).expect("write ready output fixture");
+        let output_len = std::fs::metadata(&output_path)
+            .expect("output fixture metadata")
+            .len();
+        let token = start_test_turn(&shared, channel, user_msg).await;
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+
+        let mut state = super::super::inflight::InflightTurnState::new(
+            provider.clone(),
+            channel.get(),
+            None,
+            1,
+            user_msg.get(),
+            4_099_300 + offset,
+            "idle tmux cleanup".to_string(),
+            None,
+            Some(tmux.clone()),
+            Some(output_path.to_string_lossy().to_string()),
+            None,
+            output_len,
+        );
+        state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::Watcher);
+        super::super::inflight::save_inflight_state(&state).expect("save idle-clear inflight");
+
+        let snapshot = RelayHealthSnapshot {
+            provider: provider.as_str().to_string(),
+            channel_id: channel.get(),
+            active_turn: RelayActiveTurn::Foreground,
+            tmux_session: Some(tmux.clone()),
+            tmux_alive: Some(true),
+            bridge_inflight_present: true,
+            mailbox_has_cancel_token: true,
+            mailbox_active_user_msg_id: Some(user_msg.get()),
+            mailbox_turn_started_at_ms: None,
+            last_capture_offset: Some(output_len),
+            last_relay_offset: output_len,
+            unread_bytes,
+            desynced: true,
+            ..snapshot()
+        };
+        let decision = plan_relay_recovery(&snapshot, RelayStallState::TmuxAliveRelayDead, 1_000);
+        assert_eq!(
+            decision.action,
+            RelayRecoveryActionKind::ReattachWatcher,
+            "{label}: the tail term must not move the planned action"
+        );
+        // The tail guard objects in none of the three rows, so `unread_bytes` is
+        // the only term that differs between them.
+        assert!(
+            !idle_tmux_repair_has_unrelayed_tail_answer(&state),
+            "{label}: fixture must keep the companion tail guard silent"
+        );
+
+        let result = apply_relay_recovery_decision(
+            &registry,
+            &shared,
+            &provider,
+            &decision,
+            None,
+            RelayRecoveryApplySource::ProbeAutoHeal,
+        )
+        .await;
+
+        if expect_cleared {
+            assert_eq!(result.status, "cleared_idle_tmux_stale_turn", "{label}");
+            assert!(result.removed_mailbox_token, "{label}");
+            assert!(token.cancelled.load(Ordering::Relaxed), "{label}");
+            assert!(
+                super::super::inflight::load_inflight_state(&provider, channel.get()).is_none(),
+                "{label}: the destructive lane clears the row it retired"
+            );
+        } else {
+            assert_ne!(
+                result.status, "cleared_idle_tmux_stale_turn",
+                "{label}: the destructive lane must stay closed"
+            );
+            assert!(
+                !result.removed_mailbox_token,
+                "{label}: no mailbox token may be retired"
+            );
+            assert!(
+                !token.cancelled.load(Ordering::Relaxed),
+                "{label}: the turn behind the unproven tail must survive"
+            );
+            assert!(
+                super::super::inflight::load_inflight_state(&provider, channel.get()).is_some(),
+                "{label}: the inflight row must survive for the non-destructive path"
+            );
+        }
+    }
+}
+
 #[test]
 fn reattach_idle_tmux_clear_generation_guard_preserves_concurrent_inflight_update() {
     let _guard = auto_heal_test_lock().blocking_lock();

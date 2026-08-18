@@ -83,14 +83,24 @@ pub(super) async fn apply_relay_recovery_decision(
             // manual lane keeps the idle-turn retirement behavior.
             if episode.is_none()
                 && let Some(tmux_session) = decision.affected.tmux_session.as_deref()
-                && decision.evidence.unread_bytes.unwrap_or(0) == 0
+                // #5071 relay-tail S2: `Some(0)`, never `None`. An unmeasured
+                // tail must not open the destructive branch — see
+                // `unread_tail_is_proven_drained`.
+                && unread_tail_is_proven_drained(decision.evidence.unread_bytes)
                 // This branch intentionally does not route through
                 // `destructive_cancel_gate`: the snapshot readiness check is
                 // the turn-scope proof that the provider prompt has returned
-                // (structured JSONL ready state, or tmux prompt fallback), and the
-                // following inflight/tail guards prove there is no deliverable
-                // assistant body left to preserve. The cleanup below only retires
-                // stale mailbox/inflight bookkeeping for an already-idle turn.
+                // (structured JSONL ready state, or tmux prompt fallback), and
+                // the following inflight/tail guards then rule out a
+                // deliverable assistant body. Their reach is bounded by what
+                // they can read: `idle_tmux_repair_has_unrelayed_tail_answer`
+                // proves an empty tail only for a row whose `output_path`
+                // resolves and extracts, and returns `false` — no objection —
+                // when it cannot read one. The measured `unread_bytes` above is
+                // what excludes that blind case, so the two guards prove
+                // "nothing left to preserve" only in conjunction. The cleanup
+                // below only retires stale mailbox/inflight bookkeeping for an
+                // already-idle turn.
                 && let Some(inflight_clear_state) =
                     load_idle_tmux_reattach_inflight_clear_candidate(provider, decision.channel_id)
                 && idle_tmux_repair_snapshot_ready_for_input(
