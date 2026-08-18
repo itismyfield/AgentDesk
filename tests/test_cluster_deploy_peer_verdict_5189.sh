@@ -35,6 +35,13 @@ extract_function() {
     ' "$DEPLOY_SH"
 }
 
+# The peer verdict's health axis is the shared readiness predicate, so the real
+# one has to be in scope here exactly as deploy-release.sh has it in scope.
+# Loading a copy would let this file go green against a predicate the deploy does
+# not use, which is the class of split this section exists to close.
+# shellcheck source=/dev/null
+. "$REPO_ROOT/scripts/_defaults.sh"
+
 # Exercise the production functions without executing the deploy script.
 eval "$(extract_function _emit_terminal_deploy_marker)"
 eval "$(extract_function _report_peer_verdict_failure)"
@@ -185,6 +192,117 @@ elif ! grep -q 'terminal marker: missing' <<<"$peer_verdict_out" \
     || ! grep -q 'repo head: expected=target-head observed=unavailable' <<<"$peer_verdict_out" \
     || ! grep -q 'health: ok=false' <<<"$peer_verdict_out"; then
     fail_test "a timeout must report marker, repo head, and health observations; got: $peer_verdict_out"
+fi
+
+# --- 3d. the health axis must be the deploy's own readiness verdict ---------
+# Measured on the mac-mini peer (2026-08-18) once the standby reconcile settled:
+# the node reached its INTENDED shape -- degraded:true, every degraded_reason a
+# `provider:<name>:gateway_standby`, cluster_standby:true, fully_recovered:true --
+# and the verdict tested `health.get("ok") is True`. A standby node's correct
+# answer to `ok` is false, so that test could not go green on one at any point in
+# the 1800s timeout; the peer leg spent the whole window and reported
+# "health: ok=false (status=degraded)" about a node that was exactly where the
+# deploy had put it. health_json_is_ready -- the predicate the local restart gate
+# already waits on, via its cluster_standby branch -- reads the same body as
+# ready. The defect was two consumers of one judgement, so the fix is the verdict
+# calling that predicate, and these cases pin it there.
+#
+# The body is the observed one, verbatim, rather than a modelled shape: what made
+# the split invisible is precisely that a body can be ready and NOT ok.
+STANDBY_READY_BODY='{"auto_queue_cleanup":{"dead_lettered":0,"pending":0},"cluster_standby":true,"dashboard":true,"db":true,"degraded":true,"degraded_reasons":["provider:codex:gateway_standby","provider:claude:gateway_standby"],"fully_recovered":true,"ok":false,"server_up":true,"startup_degraded":true,"startup_degraded_reasons":["startup_doctor_failed:1","startup_doctor_warned:4"],"startup_status":"doctor_failed","status":"degraded","version":"0.1.2"}'
+# Serving, but genuinely not deploy-ready: unhealthy with providers present and no
+# standby role to explain it. Raw `ok` is false here too, which is the point --
+# the two bodies are told apart by the predicate, not by `ok`.
+NOT_READY_BODY='{"ok":false,"status":"unhealthy","version":"0.1.2","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":false,"degraded":true,"degraded_reasons":["provider:codex:disconnected"],"startup_status":"doctor_passed"}'
+HEALTHY_READY_BODY='{"ok":true,"status":"healthy","version":"0.1.2","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":false,"degraded":false,"degraded_reasons":[],"startup_status":"doctor_passed"}'
+
+# A zero timeout leaves the success path as the only way to rc=0: the readiness
+# check is reached before the deadline check, so a green result here cannot come
+# from the loop simply not having given up yet.
+# shellcheck disable=SC2034  # Read by the production function loaded through eval.
+DEPLOY_PEER_VERDICT_TIMEOUT_SECS=0
+
+probe_stub_body=""
+probe_stub_ok="false"
+probe_stub_detail=""
+# shellcheck disable=SC2329  # Invoked indirectly by the production wait function.
+_probe_peer_deploy_state() {
+    # Emits the body as the trailing field, as the production probe does; the
+    # empty-body cases below leave it off entirely.
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        success '═══ Deploy Complete ═══' target-head read \
+        "$probe_stub_ok" "$probe_stub_detail" "$probe_stub_body"
+}
+
+run_peer_verdict() {
+    # (-> rc, output on stdout) same fixture on every call; only the stub varies.
+    local rc=0 out
+    out="$(_wait_for_peer_deploy_verdict \
+        peer-stub /stub/deploy.log /stub/release-source.json 8791 target-head 2>&1)" || rc=$?
+    printf '%s\n' "$rc" "$out"
+}
+
+probe_stub_ok="false"
+probe_stub_detail='ok=false, status=degraded'
+probe_stub_body="$STANDBY_READY_BODY"
+standby_verdict="$(run_peer_verdict)"
+standby_rc="${standby_verdict%%$'\n'*}"
+standby_out="${standby_verdict#*$'\n'}"
+if [ "$standby_rc" -ne 0 ]; then
+    fail_test "a peer settled in the intended gateway_standby shape is deploy-ready by health_json_is_ready, so its verdict must be green; got rc=$standby_rc: $standby_out"
+elif ! grep -q 'deploy verified' <<<"$standby_out"; then
+    fail_test "a green standby verdict must say so; got: $standby_out"
+fi
+# Observability: the verdict must keep BOTH axes, because on this body they
+# disagree and only the pair distinguishes a ready standby from a broken node.
+if ! grep -q 'ready=true' <<<"$standby_out" || ! grep -q 'ok=false' <<<"$standby_out"; then
+    fail_test "the standby verdict must report the raw ok AND the readiness judgement; got: $standby_out"
+fi
+
+probe_stub_body="$HEALTHY_READY_BODY"
+probe_stub_ok="true"
+probe_stub_detail='ok=true, status=healthy'
+healthy_verdict="$(run_peer_verdict)"
+healthy_rc="${healthy_verdict%%$'\n'*}"
+if [ "$healthy_rc" -ne 0 ]; then
+    fail_test "an ordinary healthy peer must still be verified green; got rc=$healthy_rc: ${healthy_verdict#*$'\n'}"
+fi
+
+probe_stub_body="$NOT_READY_BODY"
+probe_stub_ok="false"
+probe_stub_detail='ok=false, status=unhealthy'
+not_ready_verdict="$(run_peer_verdict)"
+not_ready_rc="${not_ready_verdict%%$'\n'*}"
+not_ready_out="${not_ready_verdict#*$'\n'}"
+if [ "$not_ready_rc" -eq 0 ]; then
+    fail_test "a peer the readiness predicate rejects must stay red -- the standby allowance must not widen into any not-ok body"
+elif ! grep -q 'ready=false' <<<"$not_ready_out"; then
+    fail_test "a red health axis must report ready=false; got: $not_ready_out"
+fi
+
+# Fail-closed on a body that never arrived: an unreachable or unparseable
+# /api/health leaves the field empty, and `ok` alone must not be able to rescue
+# it. `ok=true` here is what makes this discriminating -- it is the exact input a
+# reintroduced ok-based shortcut would turn green.
+probe_stub_body=""
+probe_stub_ok="true"
+probe_stub_detail='ok=true, status=healthy'
+no_body_verdict="$(run_peer_verdict)"
+no_body_rc="${no_body_verdict%%$'\n'*}"
+if [ "$no_body_rc" -eq 0 ]; then
+    fail_test "a verdict with no health body must fail closed even when the probe reported ok=true; got: ${no_body_verdict#*$'\n'}"
+fi
+
+# The allow flags must be the ones the local deploy readiness wait uses. A
+# verdict judged by the same predicate under DIFFERENT flags is the same split
+# again, one argument further down.
+verdict_body="$(extract_function _wait_for_peer_deploy_verdict)"
+case "$verdict_body" in
+    *'health_json_is_ready "$health_body" 1 1 1'*) : ;;
+    *) fail_test "the peer verdict must call health_json_is_ready with the same allow flags as the local readiness wait (require_dashboard, allow_reconcile_degraded, allow_no_provider_runtimes)" ;;
+esac
+if ! grep -q 'wait_for_http_service_health "$PLIST_REL" "$REL_PORT" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1 1' "$DEPLOY_SH"; then
+    fail_test "the local release readiness wait no longer uses flags 1 1 1 -- the peer verdict above is now judging by a different standard than the deploy it gates"
 fi
 
 # --- 3c. peer leg rc propagation: _deploy_to_one_peer must use verdict rc ----
