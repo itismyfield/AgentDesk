@@ -224,14 +224,20 @@ pub fn bot_token_reload_scopes() -> BotTokenReloadScopes {
 /// already old can register into a still-open rearm window and be reported as
 /// stalled while that window runs.
 ///
-/// What actually keeps a boot from pairing a `reconcile_stalled` reason with a
-/// stale no-provider skip is the pair of cases the rearm covers, not the shared
-/// constant:
-///   • a provider that registers is observed by the rearm poll within one
-///     `STARTUP_DOCTOR_REARM_POLL_INTERVAL` and the skip is replaced;
-///   • if none registers, `provider_probe` has no registered provider to
+/// The rearm does NOT keep every boot from pairing a `reconcile_stalled`
+/// reason with a stale no-provider skip (#5071 S0 r3 review):
+///   • a provider that registers while the rearm window is open is observed
+///     by the rearm poll within one `STARTUP_DOCTOR_REARM_POLL_INTERVAL` and
+///     the skip is replaced;
+///   • if none ever registers, `provider_probe` has no registered provider to
 ///     attribute a `provider:<name>:reconcile_stalled` reason to — an empty
-///     registry reports `no_providers_registered` instead.
+///     registry reports `no_providers_registered` instead;
+///   • a provider that registers after the window closed hits
+///     `startup_doctor_rearm_due`'s GiveUp arm — the stale skip then persists
+///     for the rest of the boot beside that provider's reasons, and the only
+///     deploy protection is `_defaults.sh`'s
+///     `_health_json_names_a_provider_runtime` cross-check, which refuses the
+///     no-provider rescue whenever the health body names a provider runtime.
 pub(in crate::services::discord) const RECONCILE_STALL_AFTER: std::time::Duration =
     std::time::Duration::from_secs(180);
 
