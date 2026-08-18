@@ -526,8 +526,10 @@ printf '0\n' >"$probe_round_file"
 # and SECONDS is an integer, so a 1s budget is really (0,1] — round 1's predicate
 # work (the full-body fixture through the jq-less lane costs ~0.3s) can cross an
 # integer-second boundary and end the loop after a single poll, turning the
-# "needs two polls" guard below into a wall-clock flake (measured ~75%
-# red without jq). Two polls still complete immediately with the 1s interval.
+# "needs two polls" guard below into a wall-clock flake (red in well over half
+# of jq-less measurement runs). With the 5s budget the second poll lands ~1.3s
+# in; the loop then keeps polling until the deadline (~5 polls, ~4.7s), which
+# the assertions tolerate.
 DEPLOY_PEER_VERDICT_TIMEOUT_SECS=5
 # shellcheck disable=SC2034  # Read by the production function loaded through eval.
 DEPLOY_PEER_VERDICT_POLL_INTERVAL_SECS=1
