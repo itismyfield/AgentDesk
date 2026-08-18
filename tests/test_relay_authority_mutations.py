@@ -25,10 +25,10 @@ MUTATION_FILES = (
     WATCHER_REGISTRY,
     DESTRUCTIVE_CANCEL_GATE,
 )
-# #5071 relay-tail S4 raised this from four; the declared condition-3 floor
-# stays four.
-MUTATION_COUNT = 6
-MUTATION_NAMES = ("M10", "M6", "M8", "anchor-drop", "S4-m5", "S4-m6")
+# #5071 relay-tail S4 raised this from four and its r2 repair added S4-m7; the
+# declared condition-3 floor stays four.
+MUTATION_COUNT = 7
+MUTATION_NAMES = ("M10", "M6", "M8", "anchor-drop", "S4-m5", "S4-m6", "S4-m7")
 
 
 def _cargo_log(body: str) -> str:

@@ -282,6 +282,23 @@ pub(in crate::services::discord) async fn evaluate(
     // were never consulted for exactly the turns most likely to have an
     // undelivered tail. It is now demoted to a fallback REASON at the bottom of
     // this function, reached only when no denial fired.
+    //
+    // The demotion has a LATENCY cost, and it is paid on the common case. An
+    // envelope-present turn used to return `Allowed` from this line without
+    // touching the disk; it now walks the whole no-progress ladder below, whose
+    // reprobe loop sleeps `DESTRUCTIVE_CANCEL_REPROBE_DELAY` between attempts —
+    // so the worst case for a turn that ends up Allowed anyway is
+    // `DESTRUCTIVE_CANCEL_REPROBE_ATTEMPTS * DESTRUCTIVE_CANCEL_REPROBE_DELAY`
+    // (3 x 1s = 3s in production; 2 x 10ms under `cfg(test)`) plus the metadata
+    // and frontier reads each attempt makes. Both callers pay it: the
+    // relay-recovery dead-frontier path and the TUI-direct claim path
+    // (`tui_direct_pending_start`), where it lands inside the interactive
+    // pending-start wait rather than a background sweep. That is the intended
+    // trade — the delay buys the reprobe a chance to SEE the relay frontier
+    // advance, which is the only evidence that distinguishes "the terminator was
+    // written" from "the bytes after it were delivered" — but it is a real
+    // regression in claim latency for every envelope-present turn, not a
+    // free-by-construction reordering.
     let Some(expected_output_path) = snapshot.output_path.as_deref() else {
         return DestructiveCancelGate::Denied("halt_evidence_incomplete");
     };

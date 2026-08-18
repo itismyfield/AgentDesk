@@ -5,23 +5,38 @@ This is a bounded lexical inventory, not a Rust/type/data-flow analysis and not
 proof that any listed destruction is safe.  It scans stripped source text for:
 tmux kill wrappers; watcher AtomicBool ``store(true, ...)`` calls; process kill
 calls; watcher-registry removal calls; and (#5071 relay-tail S4)
-``under_identity_fence`` bindings.  The first two categories include test call
-sites, matching the #5071 map.  Process, registry and fence categories reuse the
-repository's existing lexical ``cfg(test)`` classifier and exclude whole test
-modules.  Aliases, re-exports, macros that construct names, indirection, and
-semantically equivalent spellings can remain unseen.
+``under_identity_fence`` and ``with_terminal_delivery_fence`` bindings.  The
+first two categories include test call sites, matching the #5071 map.  Process,
+registry and fence categories reuse the repository's existing lexical
+``cfg(test)`` classifier and exclude whole test modules.  Aliases, re-exports,
+macros that construct names, indirection, and semantically equivalent spellings
+can remain unseen.
 
-The ``identity_fence_bind`` category is the inverse of the others: it counts the
-FENCED entry points, not unfenced destruction.  Pinning it does NOT make an
-unfenced destructive removal impossible — those spell the unfenced helper names
-and land in ``registry_remove`` instead.  What it does is force any change to
-the set of fence-bearing call sites (adding one, moving one, deleting one) to
-appear as a reviewed baseline diff in the same commit, so the S4 fence cannot be
-silently detached from a call site that keeps its ``registry_remove`` count.
+The ``identity_fence_bind`` and ``delivery_fence_bind`` categories are the
+inverse of the others: they count the FENCED entry points, not unfenced
+destruction.  Pinning them does NOT make an unfenced destructive removal
+impossible — those spell the unfenced helper names and land in
+``registry_remove`` instead.  What it does is force any change to the set of
+fence-bearing call sites (adding one, moving one, deleting one) to appear as a
+reviewed baseline diff in the same commit, so an S4 fence cannot be silently
+detached from a call site that keeps its ``registry_remove`` count.
 
-``--check`` rejects growth in an existing file and every UNLISTED file.  A
-decrease is allowed: this is a no-growth ratchet.  For an intentional change,
-run ``--write-baseline`` and review the JSON diff in the same commit.
+The two fence categories are additionally checked AGAINST EACH OTHER, per file,
+by :func:`pairing_errors` — a fenced site must carry both binders, so the counts
+must be equal in every file that has either.  This is deliberately two-sided and
+NOT a no-growth check: dropping ``.with_terminal_delivery_fence(..)`` from a
+site that keeps ``under_identity_fence(..)`` is a DECREASE, which the growth
+ratchet permits by design, and it is exactly the silent unfencing this guards.
+The compiler is the other half — ``TmuxWatcherRegistry::under_identity_fence``
+returns a view with no destructive method, so at this SHA that same deletion
+also fails to typecheck.  This check exists because that is a property of one
+type's shape, which a refactor can relax without anyone noticing, while a
+pairing diff is visible in review.
+
+``--check`` rejects growth in an existing file, every UNLISTED file, and any
+identity/delivery pairing mismatch.  A decrease is allowed for growth: this is a
+no-growth ratchet.  For an intentional change, run ``--write-baseline`` and
+review the JSON diff in the same commit.
 """
 
 from __future__ import annotations
@@ -44,6 +59,7 @@ CATEGORIES = (
     "process_kill",
     "registry_remove",
     "identity_fence_bind",
+    "delivery_fence_bind",
 )
 WARNING = "These counts are a growth-blocking baseline, not proof of safety."
 REPIN = (
@@ -75,10 +91,12 @@ REGISTRY_PATTERNS = {
     "remove_locked_helper": re.compile(r"\bremove_tmux_session_locked\s*\("),
 }
 REGISTRY_OWNER = "src/services/discord/tmux_watcher_registry.rs"
-# #5071 relay-tail S4: the binder for `WatcherIdentityFence` (+ the chained
-# `TerminalDeliveryFence`).  Counted with the registry categories, so the owner
-# file's own definition is excluded the same way.
+# #5071 relay-tail S4: the binder for `WatcherIdentityFence`, and (r2) the
+# chained binder for `TerminalDeliveryFence`.  Counted with the registry
+# categories, so the owner file's own definitions are excluded the same way.
 IDENTITY_FENCE_PATTERN = re.compile(r"\bunder_identity_fence\s*\(")
+DELIVERY_FENCE_PATTERN = re.compile(r"\bwith_terminal_delivery_fence\s*\(")
+FENCE_PAIR = ("identity_fence_bind", "delivery_fence_bind")
 
 
 class RatchetError(RuntimeError):
@@ -155,6 +173,9 @@ def scan(repo_root: Path) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
         fence_found = len(IDENTITY_FENCE_PATTERN.findall(production))
         if fence_found:
             counts["identity_fence_bind"][rel] = fence_found
+        delivery_found = len(DELIVERY_FENCE_PATTERN.findall(production))
+        if delivery_found:
+            counts["delivery_fence_bind"][rel] = delivery_found
     return counts, registry_subcounts
 
 
@@ -203,6 +224,30 @@ def growth_errors(
     return errors
 
 
+def pairing_errors(actual: Mapping[str, Mapping[str, int]]) -> list[str]:
+    """Every fenced site must bind BOTH S4 conjuncts.
+
+    Measured against the tree, not the baseline: this is an invariant of the
+    source, not a quantity that is allowed to ratchet down.  An unequal pair in
+    either direction is an error — a missing delivery fence is a destructive
+    removal that lost the lease conjunct, and a missing identity fence is a
+    delivery fence chained onto something that is not the fenced view.
+    """
+    identity, delivery = (dict(actual.get(category, {})) for category in FENCE_PAIR)
+    errors: list[str] = []
+    for path in sorted(set(identity) | set(delivery)):
+        identity_found = identity.get(path, 0)
+        delivery_found = delivery.get(path, 0)
+        if identity_found == delivery_found:
+            continue
+        errors.append(
+            f"fence_pairing: {path} binds under_identity_fence {identity_found}x but "
+            f"with_terminal_delivery_fence {delivery_found}x; every fenced destructive "
+            "removal must carry both S4 conjuncts"
+        )
+    return errors
+
+
 def _snapshot(
     counts: Mapping[str, Mapping[str, int]],
     registry_subcounts: Mapping[str, int],
@@ -241,6 +286,18 @@ def _snapshot(
                     "site a reviewed baseline diff."
                 ),
                 "files": dict(sorted(counts["identity_fence_bind"].items())),
+            },
+            "delivery_fence_bind": {
+                "comment": (
+                    "#5071 relay-tail S4 r2: production "
+                    "`with_terminal_delivery_fence` binders, same exclusions as "
+                    "identity_fence_bind. This must be the SAME per-file set: the "
+                    "checker's pairing pass rejects any file where the two counts "
+                    "differ, which is what catches a delivery fence being dropped "
+                    "from a site that keeps its identity fence — a DECREASE the "
+                    "no-growth ratchet would otherwise wave through."
+                ),
+                "files": dict(sorted(counts["delivery_fence_bind"].items())),
             },
         },
     }
@@ -284,12 +341,12 @@ def main(argv: Sequence[str] | None = None, repo_root: Path = REPO_ROOT) -> int:
             print(f"WROTE destructive call-site baseline at {sha}: {_totals(counts)}")
             return 0
         baseline, _payload = load_baseline(root / BASELINE_PATH)
-        errors = growth_errors(counts, baseline)
+        errors = growth_errors(counts, baseline) + pairing_errors(counts)
     except Exception as exc:
         print(f"FAIL: destructive call-site ratchet: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     if errors:
-        print("FAIL: destructive call-site growth detected", file=sys.stderr)
+        print("FAIL: destructive call-site growth or fence-pairing violation", file=sys.stderr)
         print("\n".join(f"  - {error}" for error in errors), file=sys.stderr)
         print(REPIN, file=sys.stderr)
         return 1

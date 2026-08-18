@@ -1915,9 +1915,9 @@ time for diagnostics; neither is a stored approval value.
   `scripts/destructive_call_site_baseline.json` stay unfenced in every mode.
 - second conjunct (#5071 relay-tail S4, I-1): `TerminalDeliveryFence` in the same
   `tmux_watcher_registry.rs`, chained onto the view by
-  `IdentityFencedRegistry::with_terminal_delivery_fence` at both converted call
-  sites and read by `delivery_fence_permits_destruction` inside the same registry
-  lock. It answers a DIFFERENT question from the identity conjuncts: not "is this
+  `IdentityFencePendingDelivery::with_terminal_delivery_fence` at both converted
+  call sites and consumed by `commit_under_delivery_fence` inside the same
+  registry lock (the r2 repair below replaced the original bool probe). It answers a DIFFERENT question from the identity conjuncts: not "is this
   the same watcher incarnation?" but "is a terminal delivery for the very turn
   being destroyed still in flight?". It refuses only while
   `LeaseSnapshot::identity_matched` finds the channel's `DeliveryLeaseCell`
@@ -1928,6 +1928,38 @@ time for diagnostics; neither is a stored approval value.
   this destruction's business) and it expires (a dead holder cannot latch it). It
   is NOT gated by `ExecutionIdentityMode` — a bounded, identity-matched refusal
   has no Observe-only stage to roll out through.
+- S4 r2 repairs to that conjunct, all three in the same two files:
+  - **judge/commit atomicity.** The r1 shape read the lease through
+    `DeliveryLeaseCell::read`, which drops the cell's payload mutex on return,
+    and answered `bool`; the registry lock the CAS core holds is a different
+    lock, so a `Sink`/`Bridge` `try_acquire` under the very key just judged
+    absent could win before the removal ran. `TerminalDeliveryFence::
+    commit_if_permitted` now judges AND performs the removal (and, on the
+    canceling helper, the `cancel` store) inside one
+    `DeliveryLeaseCell::with_state_locked` hold. The lock order that introduces
+    — registry lock → lease payload mutex → registry DashMap shards — and the
+    enumeration showing neither reverse edge exists are on the
+    `TerminalDeliveryFence` doc comment, which is the source of truth for it.
+    Mutation row `S4-m7` reopens the window; the atomicity target is
+    `tmux_watcher_registry_restore_tests::delivery_fence_judgment_and_destruction_are_atomic_against_a_racing_acquire`.
+  - **the conjunct is no longer optional.** `under_identity_fence` returns
+    `IdentityFencePendingDelivery`, which has NO destructive method;
+    `with_terminal_delivery_fence` consumes it and is the only way to reach
+    `IdentityFencedRegistry`. Deleting the chained call at a site used to
+    compile and still remove — silently unfenced — and now does not typecheck.
+  - **`delivery_fence_bind` pairing.** The destructive ratchet counts
+    `with_terminal_delivery_fence(` as its own category and requires the
+    per-file count to EQUAL `identity_fence_bind`. The growth ratchet could not
+    catch that omission on its own: dropping a binder is a decrease, which it
+    allows by design.
+- what the delivery conjunct still fails OPEN on, beyond the declared id-0
+  collapse: a turn whose relay owner leased under the fallback-offset key from
+  `tmux_watcher::turn_identity::pinned_delivery_lease_key`. That key is
+  `(user_msg_id 0, started_at None, turn_start_offset Some(relay_range_start))`
+  and the probe's key comes from `DeliveryLeaseKey::from_inflight_state_for_site`,
+  which passes no fallback offset and so never produces that shape — the two can
+  never compare equal, so the conjunct permits however live the delivery is. The
+  `TerminalDeliveryFence` doc comment carries the full residual enumeration.
 - S4 domain: the two converted call sites above and nothing else. Explicitly
   outside it, and still reaching an unfenced destructive path in every mode:
   `health/recovery.rs`, `health/relay_auto_heal.rs`,
@@ -1938,8 +1970,9 @@ time for diagnostics; neither is a stored approval value.
   `task_supervisor.rs`, `turn_finalizer.rs`,
   `relay_recovery_auto_heal_confirm.rs`, `inflight/destructive_commit.rs`, and
   the manual stale-mailbox path in `health_api.rs`. The `identity_fence_bind`
-  category of `scripts/destructive_call_site_baseline.json` pins the fenced set
-  at exactly two so that boundary can only move in a reviewed diff.
+  and `delivery_fence_bind` categories of
+  `scripts/destructive_call_site_baseline.json` pin the fenced set at exactly two
+  so that boundary can only move in a reviewed diff.
 - invariants, non_guarantees, rollout procedure and tests: NOT restated here.
   The runbooks are the source of truth and are anchored to the same symbols —
   [promotion criteria](../runbooks/execution-identity-promotion-criteria.md)
@@ -2471,6 +2504,7 @@ these contextual numbers to match ordinary LoC churn.
   from #3864 moving SIGTERM queue-restore merge inside the mailbox actor; +10
   from #4018 round-2 adding the distinct `MonitorAutoTurn` active-turn marker
   while keeping monitor turns background for queue-yield/cancel semantics).
+- `src/services/discord/tmux_watcher_registry.rs` (crossed the 1000-line production threshold at 1092 prod LoC via #5071 relay-tail S4 — the destructive-fence layer added there (`WatcherIdentityFence`/`TerminalDeliveryFence` and the `IdentityFencedRegistry` CAS cores) is the natural split seam; decompose scheduled per #5457, registry entry `shrink` with a 2026-10-31 deadline).
 - `src/services/discord/session_relay_sink.rs` (frozen giant surface; #5071 T0-S4
   moves the 100-physical-line sink-local terminal outcome fold and `RelaySink::deliver`
   implementation to `session_relay_sink/terminal_handoff.rs` with `continue 0`, one

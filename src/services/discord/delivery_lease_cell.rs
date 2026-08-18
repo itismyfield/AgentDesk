@@ -337,12 +337,49 @@ impl DeliveryLeaseCell {
     /// coherent. `state_tag` remains the single-winner CAS gate for acquire; it
     /// is NOT used as a lock-free read fast-path here because that reintroduced
     /// the publish/observe window the codex review flagged.
+    ///
+    /// NOTE the snapshot is stale the instant the mutex is dropped on return. A
+    /// caller that must ACT on what it read — rather than merely report it —
+    /// has a read/act window a concurrent `try_acquire` fits inside, and must
+    /// use [`DeliveryLeaseCell::with_state_locked`] instead.
     pub(in crate::services::discord) fn read(&self) -> LeaseSnapshot {
+        self.with_state_locked(|snapshot| snapshot)
+    }
+
+    /// #5071 relay-tail S4 r2 (P1-1): run `act` with the payload mutex HELD,
+    /// handing it the same snapshot [`DeliveryLeaseCell::read`] would return.
+    ///
+    /// This exists because `read()` alone cannot fence anything. `read()` takes
+    /// the mutex, materializes a snapshot, and DROPS the mutex on return, so a
+    /// caller that decides "no live holder → safe to destroy" and then performs
+    /// the destruction has a window between the two in which a `try_acquire`
+    /// can win. Every mutation of this cell runs under this one mutex, so a
+    /// decision taken and acted on inside `act` is atomic with respect to
+    /// acquire / commit / release / renew / reclaim on this cell.
+    ///
+    /// # Contract for `act`
+    ///
+    /// * It MUST NOT call back into ANY method of the SAME cell: `std::sync::
+    ///   Mutex` is not reentrant, so that self-deadlocks.
+    /// * It is called while a lock is held, so it should stay short and must not
+    ///   block on I/O or on a lock that some other thread could hold while
+    ///   waiting on this cell. The one production caller (the
+    ///   `TerminalDeliveryFence` conjunct in `tmux_watcher_registry`) runs only
+    ///   in-memory registry map mutations; the lock-order enumeration for that
+    ///   nesting lives on that fence's doc comment.
+    /// * A panic inside `act` poisons the mutex. That is survivable here: every
+    ///   lock site in this file recovers with `PoisonError::into_inner`, which
+    ///   is sound because a panicking `act` cannot have mutated the payload (it
+    ///   is handed a snapshot by value, not the guard).
+    pub(in crate::services::discord) fn with_state_locked<T>(
+        &self,
+        act: impl FnOnce(LeaseSnapshot) -> T,
+    ) -> T {
         let guard = self
             .payload
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match &*guard {
+        let snapshot = match &*guard {
             LeaseState::Unleased => LeaseSnapshot::Unleased,
             LeaseState::Leased {
                 holder,
@@ -370,7 +407,10 @@ impl DeliveryLeaseCell {
                 end: *end,
                 outcome: *outcome,
             },
-        }
+        };
+        let acted = act(snapshot);
+        drop(guard);
+        acted
     }
 
     /// CAS-acquire the lease for the full `(delivery_lease_key, [start,end))`
