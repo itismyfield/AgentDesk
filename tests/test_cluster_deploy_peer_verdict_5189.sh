@@ -522,7 +522,13 @@ fi
 probe_round_file="$TMP_ROOT/probe-round"
 printf '0\n' >"$probe_round_file"
 # shellcheck disable=SC2034  # Read by the production function loaded through eval.
-DEPLOY_PEER_VERDICT_TIMEOUT_SECS=1
+# Five seconds, not one: the production loop computes deadline=$((SECONDS+timeout)),
+# and SECONDS is an integer, so a 1s budget is really (0,1] — round 1's predicate
+# work (the full-body fixture through the jq-less lane costs ~0.3s) can cross an
+# integer-second boundary and end the loop after a single poll, turning the
+# "needs two polls" guard below into a wall-clock flake (measured ~75%
+# red without jq). Two polls still complete immediately with the 1s interval.
+DEPLOY_PEER_VERDICT_TIMEOUT_SECS=5
 # shellcheck disable=SC2034  # Read by the production function loaded through eval.
 DEPLOY_PEER_VERDICT_POLL_INTERVAL_SECS=1
 # shellcheck disable=SC2329  # Invoked indirectly by the production wait function.
