@@ -62,7 +62,10 @@ use super::external_verdict::{
 use super::ledger::{
     LedgerObligation, ReachabilityLedger, ledger_file_exists, ledger_path, read_ledger_at,
 };
-use super::verdict::{ReachabilityUnknownReason, ReachabilityVerdict, TransportUnknownEvidence};
+use super::verdict::{
+    NotAliveObligationState, ReachabilityUnknownReason, ReachabilityVerdict,
+    TransportUnknownEvidence,
+};
 
 /// Obligation age at which composition stops reporting `Reachable`.
 ///
@@ -317,9 +320,24 @@ impl RelayVerdictReport {
     }
 }
 
+/// #5071 relay-tail S1 (I-5): one string per branch.
+///
+/// Five producers used to spell `"transcript_unresolved"`, which made the
+/// published reason unable to say which of them answered — the exact question
+/// #adk-cc's `unknown{transcript_unresolved}` could not be asked. Every arm
+/// below is now reached by exactly one branch of [`classify_reachability`] or
+/// [`observe_relay_verdict`].
 fn unknown_reason_str(reason: ReachabilityUnknownReason) -> &'static str {
     match reason {
         ReachabilityUnknownReason::TranscriptUnresolved => "transcript_unresolved",
+        ReachabilityUnknownReason::NeverObserved => "never_observed",
+        ReachabilityUnknownReason::ProviderUnresolved => "provider_unresolved",
+        ReachabilityUnknownReason::IncarnationNotAliveWitnessed(
+            NotAliveObligationState::NoneOutstanding,
+        ) => "incarnation_not_alive_no_obligations",
+        ReachabilityUnknownReason::IncarnationNotAliveWitnessed(
+            NotAliveObligationState::WithinGrace,
+        ) => "incarnation_not_alive_within_grace",
         ReachabilityUnknownReason::TranscriptCoordinateDivergence => {
             "transcript_coordinate_divergence"
         }
@@ -466,6 +484,11 @@ fn sweep_coverage(
 ///
 /// This function reads no clock and opens no file: `now_epoch_ms` and every
 /// material arrive from the caller.
+///
+/// #5071 relay-tail S1 (I-5): the `Unknown` arms name what they observed rather
+/// than sharing one reason. The ORDER above is unchanged and so is every
+/// verdict variant — only the label a branch hands to `Unknown` moved, and
+/// `Unknown` permits no health whichever label it carries.
 pub(in crate::services::discord) fn classify_reachability(
     inputs: ReachabilityInputs<'_>,
 ) -> ReachabilityVerdict {
@@ -481,8 +504,10 @@ pub(in crate::services::discord) fn classify_reachability(
     }
     let Some(ledger) = inputs.ledger else {
         // No observation has ever recorded this channel. 4987 §-1.4: "not
-        // observed" is not `Reachable`.
-        return ReachabilityVerdict::unknown(ReachabilityUnknownReason::TranscriptUnresolved, 0);
+        // observed" is not `Reachable` — and #5071 relay-tail S1 (I-5): it is
+        // not an unresolved transcript either. Nothing here failed to resolve a
+        // coordinate; no coordinate was ever framed.
+        return ReachabilityVerdict::unknown(ReachabilityUnknownReason::NeverObserved, 0);
     };
     let TranscriptLiveness::Resolved { eof, alive } = inputs.transcript else {
         return ReachabilityVerdict::unknown(ReachabilityUnknownReason::TranscriptUnresolved, 0);
@@ -535,7 +560,15 @@ pub(in crate::services::discord) fn classify_reachability(
                 // `since_secs` is 0: this reader knows the incarnation is not
                 // visibly alive right now, and holds no record of when it
                 // stopped being so.
-                ReachabilityVerdict::unknown(ReachabilityUnknownReason::TranscriptUnresolved, 0)
+                //
+                // #5071 relay-tail S1 (I-5): the transcript resolved. What is
+                // unknown is the producer, with nothing owed to it.
+                ReachabilityVerdict::unknown(
+                    ReachabilityUnknownReason::IncarnationNotAliveWitnessed(
+                        NotAliveObligationState::NoneOutstanding,
+                    ),
+                    0,
+                )
             }
         }
         Some(oldest) if oldest < OBLIGATION_WARN_BOUND_SECS => {
@@ -545,8 +578,14 @@ pub(in crate::services::discord) fn classify_reachability(
             if alive {
                 ReachabilityVerdict::Reachable
             } else {
+                // #5071 relay-tail S1 (I-5): same not-alive producer as the
+                // zero-obligation arm above, with an obligation outstanding —
+                // `oldest` is how long it has been, and the grace it is inside
+                // is why that is not yet evidence.
                 ReachabilityVerdict::unknown(
-                    ReachabilityUnknownReason::TranscriptUnresolved,
+                    ReachabilityUnknownReason::IncarnationNotAliveWitnessed(
+                        NotAliveObligationState::WithinGrace,
+                    ),
                     oldest,
                 )
             }
@@ -652,8 +691,11 @@ pub(in crate::services::discord) fn observe_relay_verdict(
     );
 
     let Some(provider) = probe.provider else {
+        // #5071 relay-tail S1 (I-5): no provider owns this channel, so no
+        // ledger, receipt projection or sidecar can even be located. That is
+        // upstream of every rank of the resolution ladder, not a failure of it.
         return compose_relay_verdict(
-            ReachabilityVerdict::unknown(ReachabilityUnknownReason::TranscriptUnresolved, 0),
+            ReachabilityVerdict::unknown(ReachabilityUnknownReason::ProviderUnresolved, 0),
             ExternalRelayVerdict::Unknown,
         );
     };

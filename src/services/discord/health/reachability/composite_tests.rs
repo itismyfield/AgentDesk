@@ -19,6 +19,9 @@ use crate::services::discord::outbound::delivery_record::{
     ConfirmedDeliveryReceipt, DeliveredCommit, DeliveryRecord, ExactJsonlSourceIdentity,
 };
 use crate::services::discord::outbound::receipt_index::ReceiptIndexUnknownReason;
+use crate::services::discord::relay_health::{
+    CoordFrontierObservation, DurableFrontierObservation, FrontierProvenance,
+};
 
 const NOW_MS: u64 = 10_000_000;
 const PROCESS_STARTED_MS: u64 = 9_000_000;
@@ -368,7 +371,8 @@ fn counterexample_7_malformed_store_is_unknown_not_unreachable() {
     );
 
     // A genuinely absent ledger is a different fact and must not borrow the
-    // malformed reason.
+    // malformed reason — nor, since #5071 relay-tail S1 (I-5), the resolution
+    // ladder's.
     let never_written = Case {
         ledger: None,
         ledger_present: false,
@@ -376,7 +380,7 @@ fn counterexample_7_malformed_store_is_unknown_not_unreachable() {
     };
     assert_eq!(
         never_written.classify().unknown_reason(),
-        Some(ReachabilityUnknownReason::TranscriptUnresolved)
+        Some(ReachabilityUnknownReason::NeverObserved)
     );
 }
 
@@ -403,6 +407,20 @@ fn in_band_ladder() -> Vec<ReachabilityVerdict> {
         ReachabilityVerdict::unknown(ReachabilityUnknownReason::RowlessActiveTurn, 30),
         ReachabilityVerdict::unknown(ReachabilityUnknownReason::ReadTruncated, 30),
         ReachabilityVerdict::unknown(ReachabilityUnknownReason::ReceiptStoreUnreadable, 30),
+        ReachabilityVerdict::unknown(ReachabilityUnknownReason::NeverObserved, 30),
+        ReachabilityVerdict::unknown(ReachabilityUnknownReason::ProviderUnresolved, 30),
+        ReachabilityVerdict::unknown(
+            ReachabilityUnknownReason::IncarnationNotAliveWitnessed(
+                NotAliveObligationState::NoneOutstanding,
+            ),
+            30,
+        ),
+        ReachabilityVerdict::unknown(
+            ReachabilityUnknownReason::IncarnationNotAliveWitnessed(
+                NotAliveObligationState::WithinGrace,
+            ),
+            30,
+        ),
         ReachabilityVerdict::Unreachable {
             oldest_unsatisfied_age_secs: 900,
             uncovered_ranges: 3,
@@ -422,6 +440,17 @@ fn unknown_never_composes_to_a_health_permitting_verdict() {
         ReachabilityUnknownReason::RowlessActiveTurn,
         ReachabilityUnknownReason::ReadTruncated,
         ReachabilityUnknownReason::ReceiptStoreUnreadable,
+        // #5071 relay-tail S1 (I-5): the four reasons split out of
+        // `TranscriptUnresolved` inherit the same prohibition. Splitting a
+        // reason must not create one that composes to GREEN.
+        ReachabilityUnknownReason::NeverObserved,
+        ReachabilityUnknownReason::ProviderUnresolved,
+        ReachabilityUnknownReason::IncarnationNotAliveWitnessed(
+            NotAliveObligationState::NoneOutstanding,
+        ),
+        ReachabilityUnknownReason::IncarnationNotAliveWitnessed(
+            NotAliveObligationState::WithinGrace,
+        ),
     ];
     for reason in unknown_reasons {
         for external in [
@@ -646,6 +675,13 @@ fn section_6_2_enrichment(capture_lagged: bool) -> SessionEnrichment {
         unread_bytes: None,
         relay_stale: true,
         capture_lagged,
+        // #5071 relay-tail S1 (I-4): the §6.2 shape has a coordinate entry that
+        // never advanced and no durable row — `has_relay_coord` above already
+        // says the first half. `desynced` reads neither.
+        frontier_provenance: FrontierProvenance::observe(
+            CoordFrontierObservation::PresentZero,
+            DurableFrontierObservation::RowAbsent,
+        ),
     }
 }
 
@@ -755,7 +791,9 @@ fn nothing_observed_is_not_green() {
     };
     assert_eq!(
         not_alive.classify().unknown_reason(),
-        Some(ReachabilityUnknownReason::TranscriptUnresolved)
+        Some(ReachabilityUnknownReason::IncarnationNotAliveWitnessed(
+            NotAliveObligationState::NoneOutstanding
+        ))
     );
 
     let unresolved = Case {
@@ -765,5 +803,140 @@ fn nothing_observed_is_not_green() {
     assert_eq!(
         unresolved.classify().unknown_reason(),
         Some(ReachabilityUnknownReason::TranscriptUnresolved)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #5071 relay-tail S1 (I-5): the reason-splitting table
+// ---------------------------------------------------------------------------
+
+/// The string the health detail publishes for a branch, taken from the
+/// PRODUCTION formatter rather than restated here — a split that renames a
+/// reason without telling the surface would otherwise pass.
+fn published_reason(verdict: &ReachabilityVerdict) -> &'static str {
+    unknown_reason_str(
+        verdict
+            .unknown_reason()
+            .expect("every branch in this table produces an Unknown"),
+    )
+}
+
+/// The provider-absent branch lives in `observe_relay_verdict`, upstream of
+/// `classify_reachability`: with no provider there is no ledger, receipt
+/// projection or sidecar path to build. Every coordinate is `None`, so the
+/// probe returns before touching the filesystem.
+fn provider_absent_reason() -> &'static str {
+    let verdict = observe_relay_verdict(RelayVerdictProbe {
+        provider: None,
+        channel_id: 42,
+        row_output_path: None,
+        registry_output_path: None,
+        pane_idle_confirmed: false,
+        rowless_active_turn: false,
+        placeholder_present: false,
+        now_epoch_ms: NOW_MS,
+        process_started_at_epoch_ms: PROCESS_STARTED_MS,
+    });
+    RelayVerdictReport::of(&verdict, false)
+        .reason
+        .expect("a provider-absent probe is Unknown")
+}
+
+/// One fixture per branch that used to spell `transcript_unresolved`, each
+/// built from the shape that actually reaches it.
+fn split_branch_reasons() -> [(&'static str, &'static str); 5] {
+    let ladder_failed = Case {
+        transcript: TranscriptLiveness::Unresolved,
+        ..Case::default()
+    };
+    let never_written = Case {
+        ledger: None,
+        ledger_present: false,
+        ..Case::default()
+    };
+    let not_alive_nothing_owed = Case {
+        transcript: TranscriptLiveness::Resolved {
+            eof: 4_000,
+            alive: false,
+        },
+        ..Case::default()
+    };
+    let not_alive_within_grace = Case {
+        ledger: Some(ledger_with(
+            vec![obligation(0, 512, OBLIGATION_WARN_BOUND_SECS / 2)],
+            proven_incarnation(),
+        )),
+        transcript: TranscriptLiveness::Resolved {
+            eof: 4_000,
+            alive: false,
+        },
+        ..Case::default()
+    };
+
+    [
+        (
+            "resolution ladder failed",
+            published_reason(&ladder_failed.classify()),
+        ),
+        (
+            "no ledger was ever written",
+            published_reason(&never_written.classify()),
+        ),
+        (
+            "incarnation not alive, nothing owed",
+            published_reason(&not_alive_nothing_owed.classify()),
+        ),
+        (
+            "incarnation not alive, obligation inside the grace",
+            published_reason(&not_alive_within_grace.classify()),
+        ),
+        ("no provider owns the channel", provider_absent_reason()),
+    ]
+}
+
+/// I-5's acceptance: each of the five branches names itself.
+#[test]
+fn each_branch_that_shared_transcript_unresolved_now_names_itself() {
+    let expected = [
+        "transcript_unresolved",
+        "never_observed",
+        "incarnation_not_alive_no_obligations",
+        "incarnation_not_alive_within_grace",
+        "provider_unresolved",
+    ];
+    for ((branch, actual), expected) in split_branch_reasons().into_iter().zip(expected) {
+        assert_eq!(actual, expected, "branch: {branch}");
+    }
+}
+
+/// The other half of the same claim, and the one a future "simplification"
+/// would break silently: no two branches may share a string. Asserted over the
+/// produced values rather than the expected ones, so collapsing two arms of
+/// `unknown_reason_str` back together fails here even if the fixtures still
+/// look distinct.
+#[test]
+fn the_five_branches_are_pairwise_distinguishable() {
+    let produced = split_branch_reasons();
+    for (index, (branch, reason)) in produced.iter().enumerate() {
+        for (other_branch, other_reason) in produced.iter().skip(index + 1) {
+            assert_ne!(
+                reason, other_reason,
+                "'{branch}' and '{other_branch}' are indistinguishable on the detail surface"
+            );
+        }
+    }
+}
+
+/// And the overloaded string itself: `transcript_unresolved` answers for
+/// exactly one of the five now, so reading it off #adk-cc's detail entry
+/// identifies a branch instead of naming a set of five.
+#[test]
+fn transcript_unresolved_no_longer_answers_for_five_branches() {
+    assert_eq!(
+        split_branch_reasons()
+            .iter()
+            .filter(|(_, reason)| *reason == "transcript_unresolved")
+            .count(),
+        1
     );
 }

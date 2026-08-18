@@ -60,6 +60,204 @@ impl RelayStallState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// #5071 relay-tail S1 (I-4): frontier provenance
+// ---------------------------------------------------------------------------
+
+/// What the in-memory relay-coordinate map said about this channel's frontier.
+///
+/// `Absent` is NOT `Advanced { offset: 0 }`. The map holding no entry and an
+/// entry holding a zero are different observations, and
+/// `health::session_enrichment::load` flattens both into the same `0` through
+/// its `unwrap_or((0, 0, 0))` — which is why E2's frontier reads cannot be
+/// attributed to either. This records which of the two happened.
+///
+/// Recording only: every value derived from the coordinate keeps its current
+/// source and polarity. Making an unsourced frontier *unknown* is S2's change,
+/// not this one's.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(in crate::services::discord) enum CoordFrontierObservation {
+    /// The map holds an entry whose `confirmed_end_offset` is past zero.
+    Advanced { offset: u64 },
+    /// The map holds an entry that has never committed a byte.
+    PresentZero,
+    /// The map holds no entry for this channel at all.
+    Absent,
+}
+
+impl CoordFrontierObservation {
+    /// `None` means the lookup missed; `Some` carries that entry's
+    /// `confirmed_end_offset`.
+    pub(in crate::services::discord) fn observe(confirmed_end_offset: Option<u64>) -> Self {
+        match confirmed_end_offset {
+            None => Self::Absent,
+            Some(0) => Self::PresentZero,
+            Some(offset) => Self::Advanced { offset },
+        }
+    }
+
+    /// Whether two readings are the same KIND of observation, ignoring how far
+    /// each advanced. Two channels legitimately relay different byte counts, so
+    /// an offset difference is not an axis split; `Absent` opposite anything
+    /// present is.
+    fn same_kind(self, other: Self) -> bool {
+        std::mem::discriminant(&self) == std::mem::discriminant(&other)
+    }
+}
+
+/// What the durable in-flight row said about the same frontier.
+///
+/// Independent of [`CoordFrontierObservation`] on purpose (r1 review P1-4): the
+/// two witnesses fail separately, and one label for the pair would have to
+/// elect one of them to speak for the other — the exact confusion that made H1
+/// and H2 indistinguishable in the E2 traces.
+///
+/// `relayed_start` is the turn's START offset (what
+/// `tmux_watcher::commit_decisions` persists), not a delivered end, and it
+/// arrives with the `.generation` mtime it was snapshotted against because an
+/// offset is only attributable to the incarnation that produced it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(in crate::services::discord) enum DurableFrontierObservation {
+    /// No durable row records a relayed offset for this channel — either there
+    /// is no row, or the row carries no `last_watcher_relayed_offset`.
+    RowAbsent,
+    /// A row records one and nothing on hand contradicts its generation. That
+    /// includes "no live generation to compare against": an unwitnessed
+    /// generation is not a mismatch.
+    RowPresent {
+        relayed_start: u64,
+        generation_ns: Option<i64>,
+    },
+    /// A row records one, and the live coordinate's generation says it belongs
+    /// to an earlier incarnation.
+    GenerationMismatch {
+        relayed_start: u64,
+        row_generation_ns: i64,
+        live_generation_ns: i64,
+    },
+}
+
+impl DurableFrontierObservation {
+    /// `live_generation_ns` is the generation the LIVE coordinate snapshotted
+    /// when it last advanced (`TmuxRelayCoord::confirmed_end_generation_mtime_ns`).
+    /// Callers pass `None` for its "never observed" zero, so a coordinate that
+    /// never advanced cannot manufacture a mismatch against a row that did.
+    pub(in crate::services::discord) fn observe(
+        relayed_start: Option<u64>,
+        row_generation_ns: Option<i64>,
+        live_generation_ns: Option<i64>,
+    ) -> Self {
+        let Some(relayed_start) = relayed_start else {
+            return Self::RowAbsent;
+        };
+        match (row_generation_ns, live_generation_ns) {
+            (Some(row), Some(live)) if row != live => Self::GenerationMismatch {
+                relayed_start,
+                row_generation_ns: row,
+                live_generation_ns: live,
+            },
+            _ => Self::RowPresent {
+                relayed_start,
+                generation_ns: row_generation_ns,
+            },
+        }
+    }
+}
+
+/// The two witnesses, side by side and neither derived from the other.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub(in crate::services::discord) struct FrontierProvenance {
+    pub coord_observation: CoordFrontierObservation,
+    pub durable_observation: DurableFrontierObservation,
+}
+
+/// Which E2 hypothesis the pair of witnesses is consistent with (design §2.3).
+///
+/// A derived READ of the two fields, never a replacement for them: the mapping
+/// is lossy in one direction only, so the record stays the pair.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(in crate::services::discord) enum FrontierHypothesis {
+    /// H1 — `Absent × RowPresent`. The coordinate entry is gone while the
+    /// durable row still names a relayed offset: the frontier the poll reports
+    /// is the `unwrap_or` zero, not a measurement.
+    CoordEntryAbsentWithDurableRow,
+    /// H2 — `PresentZero × RowPresent`. The entry exists and never advanced,
+    /// while the row says a relay happened. `RowPresent` already excludes a
+    /// generation disagreement, so this is the design's "gen 일치" arm.
+    CoordNeverAdvancedWithDurableRow,
+    /// H3 — the parent and thread ends of one axis disagree about the
+    /// coordinate, i.e. the frontier is being read under the wrong `ChannelId`.
+    ChannelAxisSplit,
+    /// The witnesses name no row of the table.
+    Indeterminate,
+}
+
+impl FrontierProvenance {
+    pub(in crate::services::discord) fn observe(
+        coord_observation: CoordFrontierObservation,
+        durable_observation: DurableFrontierObservation,
+    ) -> Self {
+        Self {
+            coord_observation,
+            durable_observation,
+        }
+    }
+
+    /// The discrimination table.
+    ///
+    /// `counterpart_coord` is the other end of the parent/thread axis when the
+    /// caller resolved one. H3 is checked FIRST and is the only load-bearing
+    /// ordering: if the two ends of the axis disagree, this channel's own pair
+    /// is being read under a `ChannelId` that may not own the coordinate, so
+    /// the H1/H2 rows below cannot be attributed. A single row can never spell
+    /// H3, which is why the counterpart is a parameter rather than a field.
+    pub(in crate::services::discord) fn hypothesis(
+        self,
+        counterpart_coord: Option<CoordFrontierObservation>,
+    ) -> FrontierHypothesis {
+        if counterpart_coord
+            .is_some_and(|counterpart| !self.coord_observation.same_kind(counterpart))
+        {
+            return FrontierHypothesis::ChannelAxisSplit;
+        }
+        match (self.coord_observation, self.durable_observation) {
+            (CoordFrontierObservation::Absent, DurableFrontierObservation::RowPresent { .. }) => {
+                FrontierHypothesis::CoordEntryAbsentWithDurableRow
+            }
+            (
+                CoordFrontierObservation::PresentZero,
+                DurableFrontierObservation::RowPresent { .. },
+            ) => FrontierHypothesis::CoordNeverAdvancedWithDurableRow,
+            _ => FrontierHypothesis::Indeterminate,
+        }
+    }
+}
+
+/// The provenance as the health detail publishes it: the two independent
+/// fields, flattened so they stay two fields on the wire, plus the derived
+/// hypothesis. Serialization only — nothing reads this back.
+#[derive(Debug, Serialize)]
+pub(in crate::services::discord) struct FrontierProvenanceReport {
+    #[serde(flatten)]
+    provenance: FrontierProvenance,
+    hypothesis: FrontierHypothesis,
+}
+
+impl FrontierProvenanceReport {
+    pub(in crate::services::discord) fn of(
+        provenance: FrontierProvenance,
+        counterpart_coord: Option<CoordFrontierObservation>,
+    ) -> Self {
+        Self {
+            provenance,
+            hypothesis: provenance.hypothesis(counterpart_coord),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(in crate::services::discord) struct RelayHealthSnapshot {
     pub provider: String,
@@ -227,6 +425,8 @@ impl RelayStallClassifier {
 
 #[cfg(test)]
 mod tests {
+    use poise::serenity_prelude::ChannelId;
+
     use super::*;
 
     #[test]
@@ -422,5 +622,235 @@ mod tests {
         assert!(value.get("mailbox_turn_age_secs").is_some());
         assert!(value.get("last_relay_age_secs").is_some());
         assert!(value.get("unpaired_active_token_reconfirmed").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // #5071 relay-tail S1 (I-4): the frontier-provenance discrimination table
+    // -----------------------------------------------------------------------
+
+    const GENERATION_NS: i64 = 1_700_491_601_000_000_000;
+    const PARENT_CHANNEL: u64 = 41;
+    const THREAD_CHANNEL: u64 = 42;
+
+    /// A durable row that named a relayed offset, with nothing contradicting
+    /// its generation — the `RowPresent` both H1 and H2 are conditioned on.
+    fn row_present() -> DurableFrontierObservation {
+        DurableFrontierObservation::observe(Some(4_096), Some(GENERATION_NS), None)
+    }
+
+    /// A parent channel and the thread hung off it, each carrying its OWN
+    /// coordinate reading. H3 is a claim about a PAIR of `ChannelId`s, so the
+    /// fixture is two rows: one health poll observes one of them and can never
+    /// produce this shape by itself (r2 review).
+    fn parent_thread_rows(
+        parent: CoordFrontierObservation,
+        thread: CoordFrontierObservation,
+    ) -> [(ChannelId, FrontierProvenance); 2] {
+        [
+            (
+                ChannelId::new(PARENT_CHANNEL),
+                FrontierProvenance::observe(parent, row_present()),
+            ),
+            (
+                ChannelId::new(THREAD_CHANNEL),
+                FrontierProvenance::observe(thread, row_present()),
+            ),
+        ]
+    }
+
+    /// The E2 witnesses stay two fields, and `Absent` stays distinguishable
+    /// from a coordinate that is present at zero — the collapse
+    /// `unwrap_or((0, 0, 0))` performs today.
+    #[test]
+    fn an_absent_coordinate_entry_is_not_a_zero_frontier() {
+        assert_eq!(
+            CoordFrontierObservation::observe(None),
+            CoordFrontierObservation::Absent
+        );
+        assert_eq!(
+            CoordFrontierObservation::observe(Some(0)),
+            CoordFrontierObservation::PresentZero
+        );
+        assert_eq!(
+            CoordFrontierObservation::observe(Some(7)),
+            CoordFrontierObservation::Advanced { offset: 7 }
+        );
+        assert_ne!(
+            CoordFrontierObservation::observe(None),
+            CoordFrontierObservation::observe(Some(0)),
+            "H1 and H2 differ only here; equating them is what hid E2"
+        );
+    }
+
+    /// A mismatch is a disagreement between two WITNESSED generations. A
+    /// coordinate that never advanced witnesses none, and must not be able to
+    /// declare a durable row stale by saying nothing.
+    #[test]
+    fn a_durable_row_needs_two_witnessed_generations_to_be_a_mismatch() {
+        assert_eq!(
+            DurableFrontierObservation::observe(None, Some(GENERATION_NS), Some(GENERATION_NS + 1)),
+            DurableFrontierObservation::RowAbsent,
+            "no relayed offset is no row, whatever the generations say"
+        );
+        assert_eq!(
+            DurableFrontierObservation::observe(Some(9), None, Some(GENERATION_NS)),
+            DurableFrontierObservation::RowPresent {
+                relayed_start: 9,
+                generation_ns: None,
+            }
+        );
+        assert_eq!(
+            DurableFrontierObservation::observe(Some(9), Some(GENERATION_NS), None),
+            DurableFrontierObservation::RowPresent {
+                relayed_start: 9,
+                generation_ns: Some(GENERATION_NS),
+            }
+        );
+        assert_eq!(
+            DurableFrontierObservation::observe(
+                Some(9),
+                Some(GENERATION_NS),
+                Some(GENERATION_NS + 1)
+            ),
+            DurableFrontierObservation::GenerationMismatch {
+                relayed_start: 9,
+                row_generation_ns: GENERATION_NS,
+                live_generation_ns: GENERATION_NS + 1,
+            }
+        );
+    }
+
+    /// Design §2.3's table, single-row half: H1 is `Absent × RowPresent`, H2 is
+    /// `PresentZero × RowPresent`, and every neighbouring pair is neither.
+    ///
+    /// The coordinate side is built through [`CoordFrontierObservation::observe`]
+    /// rather than by naming variants, so folding the map's miss back into its
+    /// zero — the collapse this slice exists to undo — turns the H1 row into H2
+    /// and fails here, not only in the `observe` test above.
+    #[test]
+    fn frontier_provenance_discriminates_h1_from_h2() {
+        let table = [
+            (
+                CoordFrontierObservation::observe(None),
+                row_present(),
+                FrontierHypothesis::CoordEntryAbsentWithDurableRow,
+            ),
+            (
+                CoordFrontierObservation::observe(Some(0)),
+                row_present(),
+                FrontierHypothesis::CoordNeverAdvancedWithDurableRow,
+            ),
+            // No durable witness: "never relayed" is not "relayed and lost".
+            (
+                CoordFrontierObservation::observe(None),
+                DurableFrontierObservation::RowAbsent,
+                FrontierHypothesis::Indeterminate,
+            ),
+            (
+                CoordFrontierObservation::observe(Some(0)),
+                DurableFrontierObservation::RowAbsent,
+                FrontierHypothesis::Indeterminate,
+            ),
+            // An advancing coordinate is the healthy shape, not a hypothesis.
+            (
+                CoordFrontierObservation::observe(Some(8_192)),
+                row_present(),
+                FrontierHypothesis::Indeterminate,
+            ),
+            // §2.3 conditions H2 on the generations agreeing: an offset from an
+            // earlier incarnation explains nothing about this one.
+            (
+                CoordFrontierObservation::observe(Some(0)),
+                DurableFrontierObservation::observe(
+                    Some(4_096),
+                    Some(GENERATION_NS),
+                    Some(GENERATION_NS + 1),
+                ),
+                FrontierHypothesis::Indeterminate,
+            ),
+        ];
+
+        for (coord, durable, expected) in table {
+            assert_eq!(
+                FrontierProvenance::observe(coord, durable).hypothesis(None),
+                expected,
+                "{coord:?} x {durable:?}"
+            );
+        }
+    }
+
+    /// H3's half of the table. It takes the parent/thread pair: each end read
+    /// alone lands somewhere in the single-row table, and only the two together
+    /// name the split.
+    #[test]
+    fn the_parent_thread_pair_is_what_discriminates_h3() {
+        let [(parent_id, parent_row), (thread_id, thread_row)] = parent_thread_rows(
+            CoordFrontierObservation::Advanced { offset: 8_192 },
+            CoordFrontierObservation::Absent,
+        );
+        assert_ne!(parent_id, thread_id, "H3 is a claim about two ChannelIds");
+
+        assert_eq!(
+            parent_row.hypothesis(None),
+            FrontierHypothesis::Indeterminate,
+            "the parent's own row looks healthy"
+        );
+        assert_eq!(
+            thread_row.hypothesis(None),
+            FrontierHypothesis::CoordEntryAbsentWithDurableRow,
+            "the thread's own row is indistinguishable from H1 without its counterpart"
+        );
+
+        for (row, counterpart) in [
+            (parent_row, thread_row.coord_observation),
+            (thread_row, parent_row.coord_observation),
+        ] {
+            assert_eq!(
+                row.hypothesis(Some(counterpart)),
+                FrontierHypothesis::ChannelAxisSplit,
+                "the split is nameable from either end of the axis"
+            );
+        }
+    }
+
+    /// The counterpart must not turn every pair into a split: agreement is
+    /// about the KIND of observation, and two channels relaying different byte
+    /// counts agree.
+    #[test]
+    fn an_agreeing_parent_thread_pair_leaves_the_single_row_table_standing() {
+        let [(_, parent_row), (_, thread_row)] = parent_thread_rows(
+            CoordFrontierObservation::Advanced { offset: 8_192 },
+            CoordFrontierObservation::Advanced { offset: 12 },
+        );
+        assert_eq!(
+            parent_row.hypothesis(Some(thread_row.coord_observation)),
+            FrontierHypothesis::Indeterminate
+        );
+
+        let [(_, absent_parent), (_, absent_thread)] = parent_thread_rows(
+            CoordFrontierObservation::Absent,
+            CoordFrontierObservation::Absent,
+        );
+        assert_eq!(
+            absent_parent.hypothesis(Some(absent_thread.coord_observation)),
+            FrontierHypothesis::CoordEntryAbsentWithDurableRow,
+            "both ends losing the entry is H1 on both, not an axis split"
+        );
+    }
+
+    /// The detail surface publishes the two witnesses as two fields — the
+    /// hypothesis rides beside them, never in place of them.
+    #[test]
+    fn frontier_provenance_report_publishes_both_witnesses_and_the_hypothesis() {
+        let value = serde_json::to_value(FrontierProvenanceReport::of(
+            FrontierProvenance::observe(CoordFrontierObservation::Absent, row_present()),
+            None,
+        ))
+        .unwrap();
+
+        assert_eq!(value["coord_observation"]["kind"], "absent");
+        assert_eq!(value["durable_observation"]["kind"], "row_present");
+        assert_eq!(value["durable_observation"]["relayed_start"], 4_096);
+        assert_eq!(value["hypothesis"], "coord_entry_absent_with_durable_row");
     }
 }

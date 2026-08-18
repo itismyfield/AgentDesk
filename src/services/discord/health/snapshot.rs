@@ -16,7 +16,7 @@ use super::reachability::composite::{
     relay_verdict_source,
 };
 use super::redaction;
-use super::session_enrichment::SessionEnrichment;
+use super::session_enrichment::{self, SessionEnrichment};
 use super::stall_verdict;
 use super::transcript_binding_stall::{self, resolve_bound_selector};
 use super::unpaired_active_token;
@@ -25,7 +25,8 @@ use super::{BotTokenReloadScopes, HealthRegistry, bot_token_reload_scopes};
 use crate::services::discord;
 use crate::services::discord::SharedData;
 use crate::services::discord::relay_health::{
-    RelayActiveTurn, RelayHealthSnapshot, RelayStallClassifier, RelayStallState,
+    FrontierProvenanceReport, RelayActiveTurn, RelayHealthSnapshot, RelayStallClassifier,
+    RelayStallState,
 };
 use crate::services::provider::ProviderKind;
 
@@ -204,6 +205,23 @@ pub(super) struct RelayThreadProofSnapshot {
     pub(super) parent_channel_id: Option<u64>,
     pub(super) thread_channel_id: Option<u64>,
     pub(super) stale_thread_proof: bool,
+}
+
+impl RelayThreadProofSnapshot {
+    /// #5071 relay-tail S1 (I-4): the OTHER end of this channel's parent/thread
+    /// axis, if it has one.
+    ///
+    /// Either field can hold it — the map is keyed thread → parent, so a thread
+    /// resolves its parent through the lookup and a parent resolves its thread
+    /// through the reverse scan — and only one of the two is populated for any
+    /// given channel. The polled channel itself is filtered out so a self-edge
+    /// can never read as an axis.
+    fn counterpart_channel_id(&self, polled_channel_id: u64) -> Option<u64> {
+        [self.thread_channel_id, self.parent_channel_id]
+            .into_iter()
+            .flatten()
+            .find(|counterpart| *counterpart != polled_channel_id)
+    }
 }
 
 /// #3631: a rebind-origin inflight row (POST /api/inflight/rebind) is a
@@ -737,6 +755,24 @@ async fn build_health_snapshot_with_options(
                         || session.watcher_attached,
                 )
                 .await;
+                // #5071 relay-tail S1 (I-4): H3 is a claim about a PAIR of
+                // `ChannelId`s, so the counterpart's coordinate is read here,
+                // where the axis is already resolved, and handed to the table as
+                // a second independent witness. One more lock-free `.get()` on
+                // the same in-memory map; `None` when this channel is not part
+                // of a parent/thread pair, which leaves the single-row table.
+                let counterpart_coord_observation = relay_thread_proof
+                    .counterpart_channel_id(channel.get())
+                    .map(|counterpart| {
+                        session_enrichment::observe_coord_frontier(
+                            &entry.shared,
+                            ChannelId::new(counterpart),
+                        )
+                    });
+                let frontier_provenance = FrontierProvenanceReport::of(
+                    session.frontier_provenance,
+                    counterpart_coord_observation,
+                );
                 let active_turn = relay_active_turn_from_inflight(
                     mailbox_has_cancel_token,
                     session.inflight.as_ref(),
@@ -883,6 +919,7 @@ async fn build_health_snapshot_with_options(
                     stall_shadow_verdict,
                     #[cfg(unix)]
                     reachability,
+                    frontier_provenance,
                     relay_stall_state,
                     relay_health,
                 });

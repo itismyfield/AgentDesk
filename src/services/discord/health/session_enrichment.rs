@@ -1,5 +1,8 @@
 use poise::serenity_prelude::ChannelId;
 
+use crate::services::discord::relay_health::{
+    CoordFrontierObservation, DurableFrontierObservation, FrontierProvenance,
+};
 use crate::services::discord::{self as discord, SharedData};
 use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::ProviderKind;
@@ -7,6 +10,24 @@ use crate::services::provider::ProviderKind;
 use super::liveness_authority::{CaptureCoordinateObservation, CoordinateStatus};
 
 pub(super) const WATCHER_STATE_DESYNC_STALE_MS: i64 = 30_000;
+
+/// #5071 relay-tail S1 (I-4): read one channel's coordinate witness on its own.
+///
+/// [`SessionEnrichment::load`] reads the polled channel's inline, alongside the
+/// three values it already takes from the same entry. This exists for the OTHER
+/// end of a parent/thread axis, which `health::snapshot` resolves and no single
+/// channel's enrichment can see. One lock-free `.get()`; nothing is inserted,
+/// so a channel that has no entry keeps not having one.
+pub(super) fn observe_coord_frontier(
+    shared: &SharedData,
+    channel: ChannelId,
+) -> CoordFrontierObservation {
+    CoordFrontierObservation::observe(shared.tmux_relay_coords.get(&channel).map(|coord| {
+        coord
+            .confirmed_end_offset
+            .load(std::sync::atomic::Ordering::Acquire)
+    }))
+}
 
 #[derive(Debug)]
 pub(super) struct SessionEnrichment {
@@ -50,6 +71,10 @@ pub(super) struct SessionEnrichment {
     pub unread_bytes: Option<u64>,
     pub relay_stale: bool,
     pub capture_lagged: bool,
+    /// #5071 relay-tail S1 (I-4): which witnesses produced the frontier fields
+    /// above. Descriptive — no field on this struct changed source or polarity
+    /// because of it, and nothing but the health detail reads it.
+    pub frontier_provenance: FrontierProvenance,
 }
 
 impl SessionEnrichment {
@@ -102,23 +127,46 @@ impl SessionEnrichment {
             inflight_tmux_session.as_deref(),
             watcher_binding_tmux_session.as_deref(),
         );
-        let (last_relay_offset, last_relay_ts_ms, reconnect_count) = shared
-            .tmux_relay_coords
-            .get(&channel)
-            .map(|coord| {
-                (
-                    coord
-                        .confirmed_end_offset
-                        .load(std::sync::atomic::Ordering::Acquire),
-                    coord
-                        .last_relay_ts_ms
-                        .load(std::sync::atomic::Ordering::Acquire),
-                    coord
-                        .reconnect_count
-                        .load(std::sync::atomic::Ordering::Acquire),
-                )
-            })
+        // #5071 relay-tail S1 (I-4): one lookup, two independent readings. The
+        // tuple below keeps its `unwrap_or((0, 0, 0))` meaning byte for byte —
+        // S2 owns making an unsourced frontier unknown — while
+        // `coord_observation` records whether that zero came from an entry or
+        // from the miss.
+        let coord_entry = shared.tmux_relay_coords.get(&channel).map(|coord| {
+            (
+                coord
+                    .confirmed_end_offset
+                    .load(std::sync::atomic::Ordering::Acquire),
+                coord
+                    .last_relay_ts_ms
+                    .load(std::sync::atomic::Ordering::Acquire),
+                coord
+                    .reconnect_count
+                    .load(std::sync::atomic::Ordering::Acquire),
+                coord
+                    .confirmed_end_generation_mtime_ns
+                    .load(std::sync::atomic::Ordering::Acquire),
+            )
+        });
+        let coord_observation =
+            CoordFrontierObservation::observe(coord_entry.map(|(offset, ..)| offset));
+        // 0 is `TmuxRelayCoord`'s "never observed", not a generation.
+        let live_generation_mtime_ns = coord_entry
+            .map(|(_, _, _, generation)| generation)
+            .filter(|generation| *generation != 0);
+        let (last_relay_offset, last_relay_ts_ms, reconnect_count) = coord_entry
+            .map(|(offset, relay_ts_ms, reconnects, _)| (offset, relay_ts_ms, reconnects))
             .unwrap_or((0, 0, 0));
+        let durable_observation = DurableFrontierObservation::observe(
+            inflight
+                .as_ref()
+                .and_then(|state| state.last_watcher_relayed_offset),
+            inflight
+                .as_ref()
+                .and_then(|state| state.last_watcher_relayed_generation_mtime_ns)
+                .filter(|generation| *generation != 0),
+            live_generation_mtime_ns,
+        );
         let output_path_for_metadata = inflight
             .as_ref()
             .and_then(|state| state.output_path.as_deref())
@@ -173,6 +221,10 @@ impl SessionEnrichment {
             unread_bytes,
             relay_stale,
             capture_lagged,
+            frontier_provenance: FrontierProvenance::observe(
+                coord_observation,
+                durable_observation,
+            ),
         };
         enrichment.record_transcript_source_divergence(channel);
         enrichment
@@ -434,6 +486,41 @@ mod tests {
             watcher_output_path_from_binding(binding.as_ref()).as_deref(),
             Some(NATIVE_TRANSCRIPT),
             "the enrichment must carry the live handle's transcript, not None"
+        );
+    }
+
+    /// #5071 relay-tail S1 (I-4), design §9's S1 acceptance sentence, taken at
+    /// the coordinate read itself: a channel with no entry in the map polls as
+    /// `Absent`, an entry that never committed a byte polls as `PresentZero`,
+    /// and looking inserts nothing.
+    #[test]
+    fn a_channel_with_no_coordinate_entry_polls_as_absent() {
+        let shared = discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(5_071_000_000_000_042);
+
+        assert_eq!(
+            observe_coord_frontier(&shared, channel),
+            CoordFrontierObservation::Absent
+        );
+        assert!(
+            !shared.tmux_relay_coords.contains_key(&channel),
+            "observing must not create the entry it failed to find"
+        );
+
+        let coord = std::sync::Arc::new(discord::TmuxRelayCoord::new(channel));
+        shared.tmux_relay_coords.insert(channel, coord.clone());
+        assert_eq!(
+            observe_coord_frontier(&shared, channel),
+            CoordFrontierObservation::PresentZero,
+            "an entry that never advanced is a different fact from no entry"
+        );
+
+        coord
+            .confirmed_end_offset
+            .store(4_096, std::sync::atomic::Ordering::Release);
+        assert_eq!(
+            observe_coord_frontier(&shared, channel),
+            CoordFrontierObservation::Advanced { offset: 4_096 }
         );
     }
 

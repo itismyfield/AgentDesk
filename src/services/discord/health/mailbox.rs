@@ -3,7 +3,9 @@ use serde::Serialize;
 use poise::serenity_prelude::ChannelId;
 
 use crate::services::discord::SharedData;
-use crate::services::discord::relay_health::{RelayHealthSnapshot, RelayStallState};
+use crate::services::discord::relay_health::{
+    FrontierProvenanceReport, RelayHealthSnapshot, RelayStallState,
+};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::ChannelMailboxSnapshot;
 use crate::services::turn_orchestrator::registry_purge::MailboxPurgeOutcome;
@@ -38,6 +40,13 @@ pub(super) struct MailboxHealthSnapshot {
     /// `governs_health_polarity` field says whether it also decided anything.
     #[cfg(unix)]
     pub(super) reachability: RelayVerdictReport,
+    /// #5071 relay-tail S1 (I-4): which witnesses produced this channel's
+    /// frontier reading, and which E2 hypothesis the pair is consistent with.
+    /// Published beside the relay-health snapshot rather than inside it: this
+    /// entry is a serialization surface, while `RelayHealthSnapshot` is an
+    /// input to `RelayStallClassifier` and to the recovery decisions, and an
+    /// observation-only field has no business within their reach.
+    pub(super) frontier_provenance: FrontierProvenanceReport,
     pub(super) relay_stall_state: RelayStallState,
     pub(super) relay_health: RelayHealthSnapshot,
 }
