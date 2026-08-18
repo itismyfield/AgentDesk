@@ -254,11 +254,14 @@ impl FrontierProvenance {
     /// load between two stamp loads and withholds the witness when they
     /// disagree, which narrows the window to the reads that fall entirely
     /// inside it. It does not close the window: a poll whose loads all land
-    /// between the two writes — and, durably, a crash that lands there, leaving
-    /// `offset = 0` beside the old stamp for good, because the next reset takes
-    /// the `watermark == 0` early return and never restamps — reads a
-    /// stale-equal pair that both loads agree on. H2 off such a pair is not
-    /// guaranteed against, here or by the fence.
+    /// between the two writes reads a stale-equal pair (`offset = 0` beside
+    /// the old stamp) that both stamp loads agree on. The pair is
+    /// process-local (`TmuxRelayCoord` atomics die with the process, and no
+    /// await or failable operation separates the writer's two stores), so the
+    /// exposure lasts only until the second store lands — plus a concurrent
+    /// reset that observes `watermark == 0` in that instant and early-returns
+    /// without restamping. H2 off such a transient pair is not guaranteed
+    /// against, here or by the fence; nothing about it survives a crash.
     pub(in crate::services::discord) fn hypothesis(self) -> FrontierHypothesis {
         match (self.coord_observation, self.durable_observation) {
             // `RowPresent` is design §2.3's H1 row as written, and is kept

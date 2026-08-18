@@ -55,9 +55,12 @@ struct CoordFrontierReading {
 /// than to a hypothesis. `0` is the atomic's "never stamped", which is not a
 /// witness either.
 ///
-/// The fence sees only a transition it straddles. A crash BETWEEN the two
-/// writes leaves `offset = 0` beside the old stamp durably, both loads agree,
-/// and the pair is indistinguishable from a coordinate that never advanced —
+/// The fence sees only a transition it straddles. A poll whose loads all land
+/// between the writer's two adjacent stores reads a stale-equal pair
+/// (`offset = 0` beside the old stamp) that both stamp loads agree on. The
+/// pair lives in `TmuxRelayCoord`'s process-local atomics — no await or
+/// failable operation separates the two stores, and a crash destroys the pair
+/// with the process rather than persisting it — so the exposure is transient —
 /// see [`crate::services::discord::relay_health::FrontierProvenance::hypothesis`].
 fn observe_frontier_triple(
     triple: Option<(i64, u64, i64)>,
