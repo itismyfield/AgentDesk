@@ -392,18 +392,55 @@ pub(crate) fn latest_startup_doctor_response_json() -> Value {
     }
 }
 
+/// The one skip reason a later provider registration can falsify: the reconcile
+/// barrier released before any provider runtime had registered (#5449).
+pub(crate) const NO_PROVIDER_RUNTIMES_SKIP_REASON: &str = "no_provider_runtimes_registered";
+
 pub(crate) fn run_startup_diagnostic_once() -> Result<Option<PathBuf>, String> {
-    write_startup_doctor_artifact(None)
+    write_startup_doctor_artifact(None, false)
 }
 
-/// Record an intentional startup doctor skip as the final artifact for the
-/// current boot. This is terminal for the boot because the artifact path is
-/// keyed by pid+pidfile mtime and all writers are idempotent.
+/// Record an intentional startup doctor skip as the artifact for the current
+/// boot. The artifact path is keyed by pid+pidfile mtime and every writer here is
+/// idempotent, so this is terminal against all of them — the one exception is
+/// `rerun_startup_diagnostic_after_late_registration`, which replaces a
+/// `NO_PROVIDER_RUNTIMES_SKIP_REASON` skip whose premise a later provider
+/// registration falsified (#5449).
 pub(crate) fn record_startup_diagnostic_skipped(reason: &str) -> Result<Option<PathBuf>, String> {
-    write_startup_doctor_artifact(Some(reason))
+    write_startup_doctor_artifact(Some(reason), false)
 }
 
-fn write_startup_doctor_artifact(skipped_reason: Option<&str>) -> Result<Option<PathBuf>, String> {
+/// Run the real diagnostic for a boot whose artifact is the
+/// `no_provider_runtimes_registered` skip, replacing that skip in place (#5449).
+///
+/// The skip is recorded the moment the barrier observes an empty registry, so
+/// readers keyed on `skipped_reason` (the deploy-readiness rescue of #4348) still
+/// see it immediately. A provider runtime that registers after that decision
+/// falsifies the skip, so the doctor reruns and replaces it. ONLY that exact skip
+/// is replaced: a completed report, or a skip recorded for any other reason, is
+/// left alone — the artifact stays terminal for every other writer.
+pub(crate) fn rerun_startup_diagnostic_after_late_registration() -> Result<Option<PathBuf>, String>
+{
+    write_startup_doctor_artifact(None, true)
+}
+
+fn artifact_is_no_provider_skip(path: &std::path::Path) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+        .and_then(|value| {
+            value
+                .get("skipped_reason")
+                .and_then(Value::as_str)
+                .map(|reason| reason == NO_PROVIDER_RUNTIMES_SKIP_REASON)
+        })
+        .unwrap_or(false)
+}
+
+fn write_startup_doctor_artifact(
+    skipped_reason: Option<&str>,
+    replace_no_provider_skip: bool,
+) -> Result<Option<PathBuf>, String> {
     let artifact_root = startup_artifact_root()
         .ok_or_else(|| "AGENTDESK runtime root is not resolvable".to_string())?;
     fs::create_dir_all(&artifact_root).map_err(|error| {
@@ -414,7 +451,10 @@ fn write_startup_doctor_artifact(skipped_reason: Option<&str>) -> Result<Option<
     })?;
     let boot_id = current_boot_id()?;
     let artifact_path = artifact_root.join(format!("{boot_id}.json"));
-    if artifact_path.exists() {
+    let replacing_skip = artifact_path.exists()
+        && replace_no_provider_skip
+        && artifact_is_no_provider_skip(&artifact_path);
+    if artifact_path.exists() && !replacing_skip {
         return Ok(None);
     }
 
@@ -541,6 +581,13 @@ fn write_startup_doctor_artifact(skipped_reason: Option<&str>) -> Result<Option<
         .map_err(|error| format!("serialize startup doctor artifact: {error}"))?;
     fs::write(&tmp_path, json)
         .map_err(|error| format!("write startup doctor tmp {}: {error}", tmp_path.display()))?;
+    if replacing_skip {
+        // `fs::rename` onto an existing path is not portable, so the skip is
+        // unlinked first. The gap is covered by the lock this write still holds:
+        // `load_latest_startup_doctor_artifact` reports
+        // `startup_doctor_artifact_in_progress` rather than a missing artifact.
+        let _ = fs::remove_file(&artifact_path);
+    }
     fs::rename(&tmp_path, &artifact_path).map_err(|error| {
         format!(
             "commit startup doctor artifact {} -> {}: {error}",
@@ -619,5 +666,50 @@ mod tests {
                 .is_none(),
             "second skip for the same boot is idempotent"
         );
+    }
+
+    /// #5449: the late-registration rerun is the ONLY writer allowed to replace an
+    /// existing artifact, and only when that artifact is the no-provider skip a
+    /// late registration falsifies. Any other artifact — a completed report, or a
+    /// skip recorded for a different reason — stays terminal for the boot.
+    #[test]
+    fn only_the_no_provider_skip_is_replaceable() {
+        let _env_lock = env_lock();
+        let runtime_root = tempfile::tempdir().unwrap();
+        let _root_guard = EnvVarGuard::set_path(AGENTDESK_ROOT_DIR_ENV, runtime_root.path());
+        let runtime_dir = runtime_root.path().join("runtime");
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        std::fs::write(runtime_dir.join("dcserver.pid"), "12345\n").unwrap();
+
+        let artifact_path = record_startup_diagnostic_skipped(NO_PROVIDER_RUNTIMES_SKIP_REASON)
+            .unwrap()
+            .expect("skip should write artifact");
+        assert!(artifact_is_no_provider_skip(&artifact_path));
+
+        // A skip recorded for any other reason is not replaceable.
+        std::fs::write(
+            &artifact_path,
+            serde_json::to_string(&json!({"skipped": true, "skipped_reason": "other_reason"}))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(!artifact_is_no_provider_skip(&artifact_path));
+
+        // Neither is a completed report, which carries no `skipped_reason`.
+        std::fs::write(
+            &artifact_path,
+            serde_json::to_string(&json!({"ok": true, "summary": {"failed": 0}})).unwrap(),
+        )
+        .unwrap();
+        assert!(!artifact_is_no_provider_skip(&artifact_path));
+        assert!(
+            rerun_startup_diagnostic_after_late_registration()
+                .unwrap()
+                .is_none(),
+            "a completed report must not be replaced by the late-registration rerun"
+        );
+        let preserved: Value =
+            serde_json::from_str(&std::fs::read_to_string(&artifact_path).unwrap()).unwrap();
+        assert_eq!(preserved["summary"]["failed"], 0);
     }
 }

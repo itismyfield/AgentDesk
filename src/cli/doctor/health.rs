@@ -91,6 +91,32 @@ pub(crate) fn classify_degraded_reason(raw: &str) -> ClassifiedReason {
             summary: format!("provider {provider} reconcile is still in progress"),
             next_step: "wait for reconcile completion before dispatching new work".to_string(),
         },
+        // #5449: the same block as `reconcile_in_progress`, escalated — the
+        // reconcile outlived its boot-relative threshold, so waiting is no longer
+        // the next step. `fix_safety` stays read-only: the doctor diagnoses this
+        // state and does not act on it.
+        ["provider", provider, "reconcile_stalled"] => ClassifiedReason {
+            raw: raw.to_string(),
+            subsystem: "provider_runtime",
+            severity: Severity::Error,
+            fix_safety: FixSafety::ReadOnly,
+            security_exposure: SecurityExposure::OperationalMetadata,
+            summary: format!("provider {provider} reconcile has not completed within its threshold"),
+            next_step: format!(
+                "inspect {provider} recovery/reconcile progress in dcserver logs; deploys stay blocked until it completes"
+            ),
+        },
+        // Standby is an expected cluster state, so the severity matches what the
+        // unclassified fallback already reported for this reason (#5449).
+        ["provider", provider, "gateway_standby"] => ClassifiedReason {
+            raw: raw.to_string(),
+            subsystem: "provider_runtime",
+            severity: Severity::Warning,
+            fix_safety: FixSafety::ReadOnly,
+            security_exposure: SecurityExposure::OperationalMetadata,
+            summary: format!("provider {provider} runs as standby without a gateway session"),
+            next_step: format!("confirm which node holds the {provider} gateway singleton lease"),
+        },
         ["provider", provider, "deferred_hooks_backlog", count] => ClassifiedReason {
             raw: raw.to_string(),
             subsystem: "provider_runtime",
@@ -313,6 +339,37 @@ mod health_classification_tests {
         assert_eq!(warned.subsystem, "startup_doctor");
         assert_eq!(warned.summary, "startup doctor reported 3 warning(s)");
         assert_eq!(warned.next_step.as_str(), expected_next_step.as_str());
+    }
+
+    /// #5449: the promoted reconcile reason is classified rather than echoed by
+    /// the catch-all, and it escalates past `reconcile_in_progress` — the
+    /// orchestrator turns Error/Critical into a failing check, so the promotion
+    /// cannot read as progress.
+    #[test]
+    fn stalled_reconcile_classifies_above_in_progress() {
+        let in_progress = classify_degraded_reason("provider:codex:reconcile_in_progress");
+        let stalled = classify_degraded_reason("provider:codex:reconcile_stalled");
+
+        assert_eq!(in_progress.severity, Severity::Warning);
+        assert_eq!(stalled.subsystem, "provider_runtime");
+        assert_eq!(stalled.severity, Severity::Error);
+        assert_eq!(stalled.fix_safety, FixSafety::ReadOnly);
+        assert!(stalled.summary.contains("codex"));
+        // Not the generic catch-all (which echoes the raw string as summary).
+        assert_ne!(stalled.summary, stalled.raw);
+    }
+
+    /// #5449: standby stops landing in the catch-all, and keeps the severity the
+    /// catch-all already gave it so no deploy/doctor polarity moves.
+    #[test]
+    fn standby_provider_reason_is_named_without_changing_severity() {
+        let standby = classify_degraded_reason("provider:codex:gateway_standby");
+
+        assert_eq!(standby.subsystem, "provider_runtime");
+        assert_eq!(standby.severity, Severity::Warning);
+        assert_eq!(standby.fix_safety, FixSafety::ReadOnly);
+        assert!(standby.summary.contains("standby"));
+        assert_ne!(standby.summary, standby.raw);
     }
 
     #[test]

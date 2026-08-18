@@ -1,4 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Mutex;
+use std::time::Duration;
 
 use poise::serenity_prelude::ChannelId;
 use serde::Serialize;
@@ -34,6 +36,10 @@ struct ProviderProbeSignals {
     connected: bool,
     restart_pending: bool,
     reconcile_done: bool,
+    /// How long this runtime has been up, measured from the same anchor
+    /// `recovery_duration_secs` uses. Only consulted while `reconcile_done` is
+    /// false, to bound how long the block stays anonymous (#5449).
+    reconcile_age: Duration,
     deferred_hooks: usize,
     queue_depth: usize,
     recovering_channels: usize,
@@ -86,6 +92,10 @@ pub(super) async fn probe_provider(entry: &ProviderEntry) -> ProviderProbe {
         .values()
         .filter(|snapshot| snapshot.recovery_started_at.is_some())
         .count();
+    let reconcile_age = entry.shared.restart.recovery_started_at.elapsed();
+    if reconcile_stalled(reconcile_done, reconcile_age) {
+        warn_reconcile_stall_once(&entry.name, entry.role, reconcile_age);
+    }
     let recovery_duration = recovery_duration_secs(&entry.shared);
     let last_turn_at = entry
         .shared
@@ -101,6 +111,7 @@ pub(super) async fn probe_provider(entry: &ProviderEntry) -> ProviderProbe {
             connected,
             restart_pending,
             reconcile_done,
+            reconcile_age,
             deferred_hooks,
             queue_depth,
             recovering_channels,
@@ -150,8 +161,19 @@ fn classify_provider(
         degraded_reasons.push(format!("provider:{provider_name}:restart_pending"));
     }
     if !signals.reconcile_done {
+        // The promotion renames a finite obligation; the `status` and
+        // `fully_recovered` effects are identical to `reconcile_in_progress`, so
+        // no reader of those two axes changes polarity. The reason STRING is what
+        // discriminates the two: the deploy readiness gate tolerates
+        // `reconcile_in_progress` and denies `reconcile_stalled`
+        // (`_defaults.sh::_health_json_has_reconcile_stalled`, #5071 S0 r2 F3).
         status = status.worsen(HealthStatus::Degraded);
-        degraded_reasons.push(format!("provider:{provider_name}:reconcile_in_progress"));
+        let reason = if reconcile_stalled(signals.reconcile_done, signals.reconcile_age) {
+            "reconcile_stalled"
+        } else {
+            "reconcile_in_progress"
+        };
+        degraded_reasons.push(format!("provider:{provider_name}:{reason}"));
         fully_recovered = false;
     }
     if signals.deferred_hooks > 0 {
@@ -184,6 +206,37 @@ fn classify_provider(
     }
 }
 
+/// Whether an unfinished reconcile has outlived its boot-relative deadline and
+/// must be reported as stalled rather than in-progress (#5449). One predicate so
+/// the reason string and the WARN cannot disagree about the promotion.
+fn reconcile_stalled(reconcile_done: bool, reconcile_age: Duration) -> bool {
+    !reconcile_done && reconcile_age >= super::RECONCILE_STALL_AFTER
+}
+
+/// Providers already WARNed about a stalled reconcile in this process. The
+/// promotion is re-derived on every health poll, so the diagnostic is latched per
+/// provider name instead of repeating once per poll.
+static RECONCILE_STALL_WARNED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// Name a stalled reconcile once per provider per process. The registry is not
+/// reachable from a per-provider probe, so this reports the entry's own name and
+/// role plus the one process-wide fact that explains the common cause — whether
+/// this boot's startup doctor found an empty provider registry.
+fn warn_reconcile_stall_once(provider_name: &str, role: ProviderRuntimeRole, age: Duration) {
+    let Ok(mut warned) = RECONCILE_STALL_WARNED.lock() else {
+        return;
+    };
+    if !warned.insert(provider_name.to_string()) {
+        return;
+    }
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::warn!(
+        "  [{ts}] ⚠ provider {provider_name} reconcile unfinished after {}s (role={role:?}, startup_doctor_saw_empty_registry={}) — reported as reconcile_stalled; deploys stay blocked",
+        age.as_secs(),
+        super::startup_doctor_saw_empty_registry()
+    );
+}
+
 fn recovery_duration_secs(shared: &super::super::SharedData) -> f64 {
     let recorded_ms = shared
         .restart
@@ -207,9 +260,12 @@ mod tests {
 
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
+    use std::time::Duration;
+
     use super::{ProviderProbeSignals, classify_provider};
     use crate::services::discord::health::{
-        HealthRegistry, HealthStatus, ProviderRuntimeRole, build_health_snapshot,
+        HealthRegistry, HealthStatus, ProviderRuntimeRole, RECONCILE_STALL_AFTER,
+        build_health_snapshot,
     };
     use crate::services::provider::CancelToken;
 
@@ -224,6 +280,7 @@ mod tests {
                 connected: true,
                 restart_pending: false,
                 reconcile_done: true,
+                reconcile_age: Duration::ZERO,
                 deferred_hooks: 0,
                 queue_depth: 0,
                 recovering_channels: 0,
@@ -244,6 +301,7 @@ mod tests {
                 connected: false,
                 restart_pending: true,
                 reconcile_done: false,
+                reconcile_age: Duration::ZERO,
                 deferred_hooks: 2,
                 queue_depth: 3,
                 recovering_channels: 1,
@@ -345,6 +403,7 @@ mod tests {
                 connected: false,
                 restart_pending: true,
                 reconcile_done: false,
+                reconcile_age: Duration::ZERO,
                 deferred_hooks: 2,
                 queue_depth: 3,
                 recovering_channels: 1,
@@ -364,5 +423,61 @@ mod tests {
                 "provider:codex:recovering_channels:1",
             ]
         );
+    }
+
+    fn reconcile_pending_signals(reconcile_age: Duration) -> ProviderProbeSignals {
+        ProviderProbeSignals {
+            connected: true,
+            restart_pending: false,
+            reconcile_done: false,
+            reconcile_age,
+            deferred_hooks: 0,
+            queue_depth: 0,
+            recovering_channels: 0,
+        }
+    }
+
+    // T-S0-3: an unfinished reconcile is a finite obligation — once it outlives
+    // the threshold it must stop being reported as merely in progress.
+    #[test]
+    fn unfinished_reconcile_is_promoted_to_stalled_after_the_threshold() {
+        let stalled = classify_provider(
+            "codex",
+            ProviderRuntimeRole::Gateway,
+            reconcile_pending_signals(RECONCILE_STALL_AFTER),
+        );
+
+        assert_eq!(
+            stalled.degraded_reasons,
+            ["provider:codex:reconcile_stalled"]
+        );
+    }
+
+    // The promotion is a rename, not an admission: it keeps the exact status and
+    // `fully_recovered` effect the pre-threshold reason had. Scope note (#5071 S0
+    // r2 F3): this covers the two HEALTH axes only — the deploy gate deliberately
+    // does not treat the two reasons alike, and that difference lives in
+    // `_defaults.sh`, not here.
+    #[test]
+    fn stalled_reconcile_keeps_the_in_progress_health_axes() {
+        let in_progress = classify_provider(
+            "codex",
+            ProviderRuntimeRole::Gateway,
+            reconcile_pending_signals(RECONCILE_STALL_AFTER - Duration::from_secs(1)),
+        );
+        let stalled = classify_provider(
+            "codex",
+            ProviderRuntimeRole::Gateway,
+            reconcile_pending_signals(RECONCILE_STALL_AFTER),
+        );
+
+        assert_eq!(
+            in_progress.degraded_reasons,
+            ["provider:codex:reconcile_in_progress"]
+        );
+        assert_eq!(in_progress.status, HealthStatus::Degraded);
+        assert_eq!(stalled.status, in_progress.status);
+        assert_eq!(stalled.fully_recovered, in_progress.fully_recovered);
+        assert!(!stalled.fully_recovered);
     }
 }

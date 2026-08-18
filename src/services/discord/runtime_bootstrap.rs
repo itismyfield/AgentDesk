@@ -267,9 +267,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             // active state or an explicit idle provider entry. This also makes
             // a routing/config race fail closed instead of restoring the old
             // health-blind empty registry.
-            health_registry
-                .register_standby(provider.as_str().to_string(), shared.clone())
-                .await;
+            register_standby_and_settle_reconcile(&health_registry, &provider, &shared).await;
             // Standby intake can execute a full turn, so it gets the same
             // marker fence and acknowledgement path as a gateway runtime.
             spawns::run_bot_spawn_deferred_restart_poller(&shared, &provider);
@@ -324,6 +322,30 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 // each helper runs the exact statements it replaced, in the same order,
 // and run_bot calls them in the same order with the same threaded state.
 // INITIALIZATION/SPAWN ORDER IS LOAD-BEARING — do not reorder. ──
+
+/// Register a standby provider runtime and settle its reconcile obligation.
+///
+/// The standby branch returns before `recovery_flush` is spawned, so nothing on
+/// this path ever reached `mark_reconcile_complete`: the provider stayed
+/// `reconcile_in_progress` for the life of the process and kept blocking deploys
+/// to a standby-only node (#5449). A standby runtime still executes complete
+/// turns through the intake worker, which is the same shape as the utility-bot
+/// branch of `recovery_flush` — it marks the reconcile done precisely because it
+/// skipped recovery.
+///
+/// This does not leak an unreconciled runtime into a gateway: standby promotion
+/// runs through `attempt_clean_standby_promotion`, which issues a fenced
+/// restart, so the promoted process starts over with `reconcile_done == false`.
+async fn register_standby_and_settle_reconcile(
+    health_registry: &Arc<health::HealthRegistry>,
+    provider: &ProviderKind,
+    shared: &Arc<SharedData>,
+) {
+    health_registry
+        .register_standby(provider.as_str().to_string(), shared.clone())
+        .await;
+    mark_reconcile_complete(shared);
+}
 
 #[cfg(test)]
 mod bootstrap_tests {
@@ -732,6 +754,58 @@ agents:
             !tmp.path().join("runtime").join("discord_handoff").exists(),
             "legacy handoff JSON must be removed without being parsed or consumed"
         );
+    }
+
+    /// T-S0-2 (#5449): the standby registration path settles its own reconcile,
+    /// so the provider stops reporting `reconcile_in_progress` while it keeps
+    /// reporting `gateway_standby`. Before this, the standby branch returned
+    /// before `recovery_flush` was spawned and nothing ever called
+    /// `mark_reconcile_complete`, so the reason was permanent for the process.
+    #[tokio::test]
+    async fn standby_registration_settles_the_reconcile_obligation() {
+        let registry = Arc::new(health::HealthRegistry::new());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        // A real boot starts unreconciled; the test helper starts settled.
+        shared
+            .restart
+            .reconcile_done
+            .store(false, Ordering::Release);
+
+        register_standby_and_settle_reconcile(&registry, &ProviderKind::Codex, &shared).await;
+
+        assert!(
+            shared.restart.reconcile_done.load(Ordering::Acquire),
+            "standby must settle its reconcile: nothing downstream of this branch calls mark_reconcile_complete"
+        );
+        assert_eq!(registry.registered_provider_count().await, 1);
+        let reasons = serde_json::to_value(
+            crate::services::discord::health::build_health_snapshot(&registry).await,
+        )
+        .expect("serialize standby health")["degraded_reasons"]
+            .clone();
+        assert_eq!(
+            reasons,
+            serde_json::json!(["provider:codex:gateway_standby"])
+        );
+    }
+
+    /// The startup doctor observes the registration through the registry's
+    /// generation counter, which is what lets a boot that already released the
+    /// barrier notice this late registration (#5449).
+    #[tokio::test]
+    async fn standby_registration_advances_the_observable_generation() {
+        let registry = Arc::new(health::HealthRegistry::new());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let before = registry.registration_generation();
+
+        register_standby_and_settle_reconcile(&registry, &ProviderKind::Codex, &shared).await;
+        let after_first = registry.registration_generation();
+        // Duplicate registration of the same SharedData is ignored, so it must
+        // not advertise a registration the registry did not accept.
+        register_standby_and_settle_reconcile(&registry, &ProviderKind::Codex, &shared).await;
+
+        assert_eq!(after_first, before + 1);
+        assert_eq!(registry.registration_generation(), after_first);
     }
 }
 
