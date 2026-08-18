@@ -525,7 +525,7 @@ _health_json_has_reconcile_stalled() {
   # `ProviderKind::Unsupported(_)` id may itself contain `:` and /api/health/detail
   # re-emits it verbatim (the public body collapses it to `unsupported`).
   local health_json="$1"
-  local reasons_csv reason
+  local reasons_csv
   [ -n "$health_json" ] || return 1
 
   if _health_json_has_jq; then
@@ -536,16 +536,30 @@ _health_json_has_reconcile_stalled() {
     return
   fi
 
+  # #5071 S0 r3 F1: test the reasons ELEMENT-WISE across the whole CSV.
+  # `read` with a SINGLE target variable assigns the entire line whatever IFS
+  # says, so the previous `while IFS=, read -r reason` ran exactly ONCE with the
+  # WHOLE CSV in `$reason`; the `^`-anchored match then fired only when the
+  # stalled reason happened to be the array's LAST element AND the first element
+  # already began with `provider:`. A body shaped
+  # ["disk_low_free_bytes:123","provider:codex:reconcile_stalled"] therefore read
+  # as clean here while jq — an ANY test over the array — blocked it, so the
+  # deploy gate in `health_json_is_ready` fell OPEN on every node without jq.
+  # Nothing orders provider reasons first, either: `snapshot.rs` pushes the
+  # non-provider `relay_verdict_*` reason (via `apply_relay_verdict_polarity`)
+  # BEFORE it extends with the provider probe's reasons. Anchoring the element
+  # boundaries to `^` / `,` / `$` reproduces jq's per-element ANY test in one
+  # match.
+  #
+  # `.*` spans commas on purpose, so a `<name>` that itself contains one (the
+  # same operator-chosen `Unsupported(_)` id the `:` note above covers — the CSV
+  # join is lossy for it in either direction) still matches. The residual
+  # ambiguity that buys resolves toward MATCHING, i.e. deploy BLOCKED, which is
+  # the safe direction for a deny test.
   reasons_csv=$(_health_json_reasons "$health_json" || true)
   [ -n "$reasons_csv" ] || return 1
 
-  while IFS=, read -r reason; do
-    if [[ "$reason" =~ ^provider:.*:reconcile_stalled$ ]]; then
-      return 0
-    fi
-  done <<< "$reasons_csv"
-
-  return 1
+  [[ "$reasons_csv" =~ (^|,)provider:.*:reconcile_stalled(,|$) ]]
 }
 
 _health_json_names_a_provider_runtime() {
@@ -569,7 +583,7 @@ _health_json_names_a_provider_runtime() {
   # the reason-less `no_providers_registered` — so the #4348 rescue still applies
   # to exactly the topology it was written for.
   local health_json="$1"
-  local reasons_csv reason providers_raw
+  local reasons_csv providers_raw
   [ -n "$health_json" ] || return 1
 
   if _health_json_has_jq; then
@@ -581,13 +595,24 @@ _health_json_names_a_provider_runtime() {
   fi
 
   # jq-less fallback. Same two paths jq reads, both top-level only.
+  #
+  # #5071 S0 r3 F2: the reason scan carried the same defect
+  # `_health_json_has_reconcile_stalled` did — `while IFS=, read -r reason` ran
+  # ONCE with the whole CSV in `$reason`, so `case $reason in provider:*)` only
+  # ever inspected the FIRST element and a body shaped
+  # ["disk_low_free_bytes:123","provider:codex:disconnected"] read as
+  # provider-LESS. jq (a `startswith` ANY test) refuses the #4348 rescue on that
+  # body; the fallback granted it, keeping the exact stale-skip bug this
+  # predicate exists to close alive on every node without jq. Provider-first
+  # ordering is not an invariant that could have covered for it: `snapshot.rs`
+  # pushes the non-provider `relay_verdict_*` reason via
+  # `apply_relay_verdict_polarity` before extending with the provider probe's
+  # reasons. Anchoring the prefix to an element boundary (`^` / `,`) tests every
+  # element in one match, and resolves toward MATCHING — rescue REFUSED — which
+  # is the strict direction.
   reasons_csv=$(_health_json_reasons "$health_json" || true)
-  if [ -n "$reasons_csv" ]; then
-    while IFS=, read -r reason; do
-      case "$reason" in
-        provider:*) return 0 ;;
-      esac
-    done <<< "$reasons_csv"
+  if [[ "$reasons_csv" =~ (^|,)provider: ]]; then
+    return 0
   fi
 
   providers_raw=$(_health_json_top_level_field_raw "providers" "$(_health_json_compact "$health_json")")
