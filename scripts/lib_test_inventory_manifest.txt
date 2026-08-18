@@ -114,6 +114,8 @@ cli::doctor::health::health_classification_tests::disk_low_free_bytes_reason_for
 cli::doctor::health::health_classification_tests::global_active_counter_reason_is_actionable
 cli::doctor::health::health_classification_tests::opencode_warm_server_reason_codes_classify_without_serve_overlap
 cli::doctor::health::health_classification_tests::reasons_evidence_preserves_actionable_reason_contract
+cli::doctor::health::health_classification_tests::stalled_reconcile_classifies_above_in_progress
+cli::doctor::health::health_classification_tests::standby_provider_reason_is_named_without_changing_severity
 cli::doctor::health::health_classification_tests::startup_doctor_reasons_point_to_latest_report_endpoint
 cli::doctor::health::health_classification_tests::worker_recovery_reason_codes_classify
 cli::doctor::mailbox::tests::doctor_evidence_carries_both_frontier_witnesses_and_the_hypothesis
@@ -124,6 +126,7 @@ cli::doctor::orchestrator::profile_filter_tests::postgres_checksum_mismatch_deta
 cli::doctor::orchestrator::profile_filter_tests::quick_profile_keeps_dispatch_outbox_checks
 cli::doctor::orchestrator::profile_filter_tests::quick_profile_keeps_portable_optional_state_checks
 cli::doctor::orchestrator::profile_filter_tests::report_group_round_trip_keeps_portable_groups
+cli::doctor::startup::tests::only_the_no_provider_skip_is_replaceable
 cli::doctor::startup::tests::skipped_startup_doctor_writes_current_boot_artifact
 cli::init::launchd_plist_tests::clamp_launchd_nofile_soft_limit_never_exceeds_host_hard_limit
 cli::init::launchd_plist_tests::generate_launchd_plist_release_sets_clamped_soft_number_of_files_limit
@@ -964,6 +967,7 @@ server::routes::health_api::tests::public_health_json_keeps_degraded_and_startup
 server::routes::health_api::tests::public_health_json_omits_opencode_warm_server_array
 server::routes::health_api::tests::public_health_json_preserves_delivery_record_rollout_state
 server::routes::health_api::tests::public_health_json_preserves_intake_routing_state
+server::routes::health_api::tests::public_health_json_preserves_standby_and_stalled_reconcile_reasons
 server::routes::health_api::tests::public_health_json_redacts_provider_and_mailbox_details
 server::routes::health_api::tests::public_health_json_sanitizes_provider_ids_including_colons
 server::routes::health_api::tests::public_health_keeps_each_release_source_fact_independent
@@ -2446,8 +2450,10 @@ services::discord::health::provider_probe::tests::classifier_preserves_healthy_p
 services::discord::health::provider_probe::tests::classifier_reports_probe_degradation_reasons
 services::discord::health::provider_probe::tests::mixed_gateway_and_standby_is_not_classified_as_cluster_standby
 services::discord::health::provider_probe::tests::registered_idle_standby_is_degraded_but_http_ready
+services::discord::health::provider_probe::tests::stalled_reconcile_blocks_exactly_what_in_progress_blocked
 services::discord::health::provider_probe::tests::standby_live_and_finalizing_evidence_remains_visible_for_fail_closed_restart
 services::discord::health::provider_probe::tests::standby_role_only_ignores_gateway_disconnect_and_masks_no_other_axis
+services::discord::health::provider_probe::tests::unfinished_reconcile_is_promoted_to_stalled_after_the_threshold
 services::discord::health::reachability::composite::composite_tests::a_stale_high_frontier_does_not_retire_an_obligation_past_the_transcript_eof
 services::discord::health::reachability::composite::composite_tests::an_external_override_keeps_the_in_band_redelivery_ban
 services::discord::health::reachability::composite::composite_tests::counterexample_1_crash_window_is_transport_unknown_not_unreachable
@@ -4377,6 +4383,8 @@ services::discord::runtime_bootstrap::bootstrap_tests::filter_restored_queued_pl
 services::discord::runtime_bootstrap::bootstrap_tests::legacy_durable_handoff_cleanup_removes_retired_json_tree
 services::discord::runtime_bootstrap::bootstrap_tests::reaction_status_removal_cannot_cancel_gateway_contract
 services::discord::runtime_bootstrap::bootstrap_tests::restored_settings_filters_sort_parse_and_drop_disabled_entries
+services::discord::runtime_bootstrap::bootstrap_tests::standby_registration_advances_the_observable_generation
+services::discord::runtime_bootstrap::bootstrap_tests::standby_registration_settles_the_reconcile_obligation
 services::discord::runtime_bootstrap::bootstrap_tests::startup_doctor_barrier_arrive_decrements_once_until_release
 services::discord::runtime_bootstrap::bootstrap_tests::startup_doctor_barrier_arrive_handles_prestarted_release_once
 services::discord::runtime_bootstrap::bootstrap_tests::voice_auto_join_provider_map_includes_agent_voice_channel
@@ -4446,6 +4454,9 @@ services::discord::runtime_bootstrap::spawns::tests::cancellation_restores_admis
 services::discord::runtime_bootstrap::spawns::tests::stale_nonce_cannot_commit_persistence_or_remove_newer_marker
 services::discord::runtime_bootstrap::spawns::tests::standby_marker_fences_intake_exposes_ack_and_counts_shutdown_once
 services::discord::runtime_bootstrap::spawns::tests::superseded_owner_releases_slot_but_preserves_fence_for_next_nonce
+services::discord::runtime_bootstrap::startup_doctor::startup_doctor_rearm_tests::closed_window_gives_up_even_while_the_generation_moves
+services::discord::runtime_bootstrap::startup_doctor::startup_doctor_rearm_tests::late_registration_rearms_the_released_barrier
+services::discord::runtime_bootstrap::startup_doctor::startup_doctor_rearm_tests::unchanged_generation_inside_the_window_holds
 services::discord::runtime_bootstrap::voice::voice_bootstrap_tests::manual_join_only_config_starts_rejoin_supervisor_and_routes_rejoin
 services::discord::runtime_store::atomic_write_logging_tests::critical_atomic_write_returns_error_for_unwritable_parent_path
 services::discord::runtime_store::runtime_root_tests::concurrent_provider_allocations_share_one_epoch

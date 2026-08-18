@@ -623,8 +623,18 @@ fn delivery_record_rollout_health_json() -> serde_json::Value {
 
 /// Bare (argument-less) provider degraded-reason classifications emitted by
 /// `provider_probe::classify_provider`. Keep in sync with that producer.
-const PROVIDER_BARE_REASONS: &[&str] =
-    &["disconnected", "restart_pending", "reconcile_in_progress"];
+const PROVIDER_BARE_REASONS: &[&str] = &[
+    "disconnected",
+    "restart_pending",
+    "reconcile_in_progress",
+    // #5449: the finite-obligation promotion of `reconcile_in_progress`, and the
+    // standby role reason that predates it. A reason missing from this array is
+    // flattened to `provider:unsupported` by the fail-closed sanitizer, which
+    // makes exactly the states an operator needs to name unnameable in public
+    // health.
+    "reconcile_stalled",
+    "gateway_standby",
+];
 /// Counted (`<keyword>:<N>`) provider degraded-reason classifications emitted by
 /// `provider_probe::classify_provider`. Keep in sync with that producer.
 const PROVIDER_COUNTED_REASONS: &[&str] = &[
@@ -2599,6 +2609,39 @@ mod tests {
         let mixed_text = mixed.to_string();
         assert!(!mixed_text.contains("prod-mini-01"));
         assert!(!mixed_text.contains("customerA"));
+    }
+
+    /// T-S0-4 (#5449): the two provider reasons an operator needs in order to
+    /// tell a standby node from a wedged reconcile survive the public projection
+    /// with their keyword intact. Both are absent from the pre-#5449 bare-reason
+    /// vocabulary, so the fail-closed sanitizer flattened them to a shape that
+    /// names neither the provider nor the state.
+    #[test]
+    fn public_health_json_preserves_standby_and_stalled_reconcile_reasons() {
+        let public = public_health_json(json!({
+            "status": "degraded", "version": "0.1.2", "db": true,
+            "dashboard": true, "server_up": true,
+            "degraded_reasons": [
+                "provider:codex:gateway_standby",
+                "provider:codex:reconcile_stalled",
+                "provider:prod-mini-01:reconcile_stalled",
+                "gateway_standby",
+            ],
+        }));
+
+        assert_eq!(
+            public["degraded_reasons"],
+            json!([
+                "provider:codex:gateway_standby",
+                "provider:codex:reconcile_stalled",
+                // The unknown provider id is still replaced wholesale; only the
+                // reason keyword is allowed to survive.
+                "provider:unsupported:reconcile_stalled",
+                // Cluster-level reason: no `provider:` prefix, passed through.
+                "gateway_standby",
+            ])
+        );
+        assert!(!public.to_string().contains("prod-mini-01"));
     }
 
     /// Guards the whitelist source: the sanitizer trusts exactly the registry

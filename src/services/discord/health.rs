@@ -209,10 +209,40 @@ pub fn bot_token_reload_scopes() -> BotTokenReloadScopes {
     }
 }
 
+/// Boot-relative age at which a provider's unfinished reconcile stops being
+/// reported as in-progress and is promoted to a named stalled diagnosis (#5449).
+/// The promotion does not release the deploy block — it only bounds how long the
+/// block stays anonymous. Shared with the startup-doctor rearm window so one
+/// boot cannot be simultaneously "still waiting to diagnose" and "stalled".
+pub(in crate::services::discord) const RECONCILE_STALL_AFTER: std::time::Duration =
+    std::time::Duration::from_secs(180);
+
+/// Whether this boot's startup doctor found an empty provider registry when the
+/// reconcile barrier released. Single writer: the startup-doctor skip branch.
+/// Read by the reconcile-stall WARN, which cannot reach the registry from a
+/// per-provider probe, so that a stalled reconcile which also lost its startup
+/// diagnostic is distinguishable from one that did not (#5449).
+static STARTUP_DOCTOR_SAW_EMPTY_REGISTRY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub(in crate::services::discord) fn note_startup_doctor_saw_empty_registry() {
+    STARTUP_DOCTOR_SAW_EMPTY_REGISTRY.store(true, Ordering::Release);
+}
+
+pub(in crate::services::discord) fn startup_doctor_saw_empty_registry() -> bool {
+    STARTUP_DOCTOR_SAW_EMPTY_REGISTRY.load(Ordering::Acquire)
+}
+
 /// Registry that providers register with so the unified axum API can query all of them.
 /// Also holds Discord HTTP clients for agent-to-agent message routing.
 pub struct HealthRegistry {
     providers: tokio::sync::Mutex<Vec<ProviderEntry>>,
+    /// Monotonic count of accepted provider registrations. `providers` has no
+    /// notify/watch channel and every one of its observers is a pull-mode
+    /// reader, so the startup doctor polls this counter to notice a
+    /// registration that landed after it had already decided there was nothing
+    /// to diagnose (#5449). Duplicate-ignored registrations do not advance it.
+    registrations: AtomicU64,
     started_at: Instant,
     /// Wall-clock (Unix seconds) at which this dcserver process booted.
     /// `started_at` is a monotonic `Instant` and cannot be compared against
@@ -275,6 +305,7 @@ impl HealthRegistry {
     pub fn new() -> Self {
         Self {
             providers: tokio::sync::Mutex::new(Vec::new()),
+            registrations: AtomicU64::new(0),
             started_at: Instant::now(),
             started_at_unix: chrono::Utc::now().timestamp(),
             discord_http: tokio::sync::Mutex::new(Vec::new()),
@@ -364,6 +395,9 @@ impl HealthRegistry {
             );
         }
         providers.push(ProviderEntry { name, shared, role });
+        // Bumped under the `providers` lock and after the push, so a reader that
+        // observes a new generation and then takes the lock sees the entry.
+        self.registrations.fetch_add(1, Ordering::AcqRel);
     }
 
     pub(in crate::services::discord) async fn dm_default_agent_authorizes_private_channel(
@@ -405,6 +439,13 @@ impl HealthRegistry {
 
     pub(super) async fn registered_provider_count(&self) -> usize {
         self.providers.lock().await.len()
+    }
+
+    /// Snapshot of the accepted-registration counter. Lock-free on purpose: the
+    /// startup-doctor rearm poll must not contend with a provider that is trying
+    /// to register (#5449).
+    pub(super) fn registration_generation(&self) -> u64 {
+        self.registrations.load(Ordering::Acquire)
     }
 
     pub(in crate::services::discord) async fn shared_for_provider(
