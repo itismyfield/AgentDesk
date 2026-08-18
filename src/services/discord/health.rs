@@ -225,19 +225,21 @@ pub fn bot_token_reload_scopes() -> BotTokenReloadScopes {
 /// stalled while that window runs.
 ///
 /// The rearm does NOT keep every boot from pairing a `reconcile_stalled`
-/// reason with a stale no-provider skip (#5071 S0 r3 review):
-///   • a provider that registers while the rearm window is open is observed
-///     by the rearm poll within one `STARTUP_DOCTOR_REARM_POLL_INTERVAL` and
-///     the skip is replaced;
+/// reason with a stale no-provider skip (#5071 S0 r3/r4 review):
+///   • the rearm poll replaces the skip when a poll observes a registration
+///     while the window is still open — `startup_doctor_rearm_due` checks
+///     expiry before the generation, so a registration that no poll observes
+///     before expiry (including one landing inside the final poll interval)
+///     is given up;
 ///   • if none ever registers, `provider_probe` has no registered provider to
 ///     attribute a `provider:<name>:reconcile_stalled` reason to — an empty
 ///     registry reports `no_providers_registered` instead;
-///   • a provider that registers after the window closed hits
-///     `startup_doctor_rearm_due`'s GiveUp arm — the stale skip then persists
-///     for the rest of the boot beside that provider's reasons, and the only
-///     deploy protection is `_defaults.sh`'s
-///     `_health_json_names_a_provider_runtime` cross-check, which refuses the
-///     no-provider rescue whenever the health body names a provider runtime.
+///   • once the window is given up the stale skip persists for the rest of
+///     the boot beside that provider's reasons; deploys are then guarded in
+///     `_defaults.sh` by `_health_json_names_a_provider_runtime`, which
+///     refuses the no-provider rescue when the health body names a provider
+///     runtime, and by the `reconcile_stalled` deny, which rejects such a
+///     body independently of any skip.
 pub(in crate::services::discord) const RECONCILE_STALL_AFTER: std::time::Duration =
     std::time::Duration::from_secs(180);
 
