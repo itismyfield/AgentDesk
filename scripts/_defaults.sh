@@ -457,7 +457,7 @@ _health_json_reasons() {
 
 _health_json_gateway_standby_only() {
   local health_json="$1"
-  local reasons_csv reason
+  local reasons_csv reason_element
   [ -n "$health_json" ] || return 1
 
   if _health_json_has_jq; then
@@ -476,18 +476,45 @@ _health_json_gateway_standby_only() {
   _health_json_field_is_true "$health_json" "db" || return 1
   _health_json_field_is_true "$health_json" "server_up" || return 1
   _health_json_field_is_true "$health_json" "cluster_standby" || return 1
+  # #5071 S0b r2 F1: test the reasons ELEMENT-WISE across the whole CSV, the same
+  # correction S0 r3 made to `_health_json_has_reconcile_stalled` and
+  # `_health_json_names_a_provider_runtime`. `read` with a SINGLE target variable
+  # assigns the entire line whatever IFS says, so `while IFS=, read -r reason`
+  # ran exactly ONCE with the WHOLE CSV in `$reason`; the `$`-anchored alternation
+  # then could not match a body with more than one reason, because `[^:]+` cannot
+  # span the `,` joining them. The real settled-standby body carries one
+  # `provider:<name>:gateway_standby` PER REGISTERED PROVIDER, so every
+  # multi-provider node — the ordinary case — read as NOT standby-only here while
+  # jq (an `all` test over the array) read it as standby-only.
+  #
+  # S0 r3 left this predicate and `_health_json_reconcile_only` alone because
+  # their divergence pointed fail-CLOSED (deploy blocked) and neither was on the
+  # enumerated path. S0b dissolved that reservation: `health_json_is_ready` is now
+  # the peer deploy verdict's health axis (`_wait_for_peer_deploy_verdict`), so a
+  # controller without jq cannot go green on a correctly settled standby peer and
+  # burns the whole verdict timeout instead. Both ONLY-predicates are fixed here
+  # for that reason.
+  #
+  # The replacement keeps ONLY semantics exactly: the pattern spans the ENTIRE
+  # CSV as `<elem>(,<elem>)*`, so EVERY element must match — one non-standby
+  # reason anywhere fails the match, as it must. It is not an ANY test. An empty
+  # element (`a,,b`) fails too, preserving the old per-element `-n` guard.
+  #
+  # `[^:,]+` rather than jq's `[^:]+` for `<name>`: the CSV join is lossy for a
+  # name that itself contains a comma, and for an ALLOW test the safe way to
+  # resolve that ambiguity is NOT matching — deploy blocked — which excluding `,`
+  # from the name class gives. (The deny test in
+  # `_health_json_has_reconcile_stalled` resolves the same ambiguity the opposite
+  # way, toward matching, for the same fail-closed reason.)
   reasons_csv=$(_health_json_reasons "$health_json" || true)
   [ -n "$reasons_csv" ] || return 1
-  while IFS=, read -r reason; do
-    [ -n "$reason" ] || return 1
-    [[ "$reason" =~ ^gateway_standby$|^provider:[^:]+:gateway_standby$ ]] || return 1
-  done <<< "$reasons_csv"
-  return 0
+  reason_element='(gateway_standby|provider:[^:,]+:gateway_standby)'
+  [[ "$reasons_csv" =~ ^${reason_element}(,${reason_element})*$ ]]
 }
 
 _health_json_reconcile_only() {
   local health_json="$1"
-  local reasons_csv reason
+  local reasons_csv reason_element
   [ -n "$health_json" ] || return 1
 
   if _health_json_has_jq; then
@@ -503,15 +530,17 @@ _health_json_reconcile_only() {
   [ "$(_health_json_status "$health_json")" = "degraded" ] || return 1
   _health_json_field_is_true "$health_json" "db" || return 1
 
+  # #5071 S0b r2 F1: same element-wise correction as
+  # `_health_json_gateway_standby_only` above, for the same single-variable `read`
+  # defect — see the long note there. A node reconciling more than one provider
+  # emits one `provider:<name>:reconcile_in_progress` per provider, and the old
+  # loop could not match past the first. ONLY semantics are preserved: the pattern
+  # covers the whole CSV, so every element must be a reconcile reason.
   reasons_csv=$(_health_json_reasons "$health_json" || true)
   [ -n "$reasons_csv" ] || return 1
 
-  while IFS=, read -r reason; do
-    [ -n "$reason" ] || return 1
-    [[ "$reason" =~ ^provider:[^:]+:reconcile_in_progress$ ]] || return 1
-  done <<< "$reasons_csv"
-
-  return 0
+  reason_element='provider:[^:,]+:reconcile_in_progress'
+  [[ "$reasons_csv" =~ ^${reason_element}(,${reason_element})*$ ]]
 }
 
 _health_json_has_reconcile_stalled() {

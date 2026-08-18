@@ -1220,6 +1220,16 @@ def clean(value):
 
 marker_status = "missing"
 marker_detail = "no terminal marker"
+# #5071 S0b r2 F2: the port the health body is read from must come from the SAME
+# log the terminal marker comes from, because that log is one deploy runs whole
+# transcript (deploy-release.sh re-execs itself detached with stdout redirected to
+# AGENTDESK_DEPLOY_LOG, so the port line and the marker are written by one
+# process). Taking it from the config the deploy host pre-read over ssh instead
+# let the three verdict axes describe two different things: marker and repo head
+# from the target deploy, body from whatever else happened to be listening on
+# that port. Empty when the log has not reached its health stage yet, or names no
+# port at all, and that is fail-closed by construction below.
+health_port_from_log = ""
 try:
     with open(log_path, encoding="utf-8", errors="replace") as handle:
         for raw_line in handle:
@@ -1230,6 +1240,14 @@ try:
             elif re.fullmatch(r"═══ DEPLOY FAILED \\(exit=[0-9]+\\) ═══", line):
                 marker_status = "failure"
                 marker_detail = line
+            else:
+                port_match = re.fullmatch(
+                    r"▸ Waiting for release health on :([0-9]+)\\.\\.\\.", line
+                )
+                if port_match:
+                    # Last one wins, matching how the marker scan above keeps the
+                    # last marker it sees.
+                    health_port_from_log = port_match.group(1)
 except OSError as exc:
     marker_detail = f"log unavailable: {exc.strerror or type(exc).__name__}"
 
@@ -1249,31 +1267,64 @@ except (OSError, ValueError) as exc:
 
 health_status = "false"
 health_detail = "request not completed"
-try:
-    with urllib.request.urlopen(
-        f"http://127.0.0.1:{health_port}/api/health", timeout=5
-    ) as response:
-        health = json.load(response)
-    health_ok = isinstance(health, dict) and health.get("ok") is True
-    health_status = "true" if health_ok else "false"
-    status = health.get("status", "missing") if isinstance(health, dict) else "invalid body"
-    health_detail = f"ok={health_status}, status={status}"
-except Exception as exc:
-    health_detail = f"request failed: {type(exc).__name__}"
+health_body = ""
+# Fail-closed, deliberately WITHOUT falling back to the pre-read config port: a
+# fallback would restore the unbound composite this parse exists to remove, and
+# would do it on exactly the runs where the two ports disagree. A log that names
+# no port yet simply leaves the health axis red and the caller polls again; the
+# port line is printed before the success marker on every path that can produce
+# one, so a log carrying the marker carries the port too.
+if not health_port_from_log:
+    health_detail = "health port not named in the peer deploy log"
+else:
+    # The pre-read port stays in the report as a drift signal only. It is never
+    # what gets requested.
+    port_note = f"port={health_port_from_log}"
+    if health_port_from_log != health_port:
+        port_note = f"port={health_port_from_log} (config pre-read said {health_port})"
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{health_port_from_log}/api/health", timeout=5
+        ) as response:
+            health = json.load(response)
+        health_ok = isinstance(health, dict) and health.get("ok") is True
+        health_status = "true" if health_ok else "false"
+        status = health.get("status", "missing") if isinstance(health, dict) else "invalid body"
+        health_detail = f"ok={health_status}, status={status}, {port_note}"
+        if isinstance(health, dict):
+            # Reserialized, not byte-for-byte: the body is parsed and dumped
+            # again, so key order and whitespace are pythons and only the JSON
+            # value survives. That is all the DEPLOY HOST needs to put it through
+            # health_json_is_ready -- see the note at that call -- and the reparse
+            # is what guarantees the field below is one line. Anything that fails
+            # to parse as an object leaves this empty, which the caller reads as
+            # not-ready.
+            health_body = json.dumps(health, separators=(",", ":"))
+    except Exception as exc:
+        health_detail = f"request failed: {type(exc).__name__}, {port_note}"
 
-print(
-    "\\t".join(
-        clean(value)
-        for value in (
-            marker_status,
-            marker_detail,
-            repo_head,
-            repo_detail,
-            health_status,
-            health_detail,
-        )
+fields = [
+    clean(value)
+    for value in (
+        marker_status,
+        marker_detail,
+        repo_head,
+        repo_detail,
+        health_status,
+        health_detail,
     )
-)
+]
+# The body is the ONE field that must not go through clean(): it is an input to a
+# predicate, not a human-facing digest, and the 240-char cut clean() applies would
+# leave every real body unparseable. It stays inside a single tab-delimited field
+# because json.dumps of a parsed object is emitted on one line with every tab and
+# newline inside a string escaped, and it is placed LAST so an empty one is the
+# trailing field rather than a shift of the fields before it.
+# (No apostrophes above, deliberately: this block lives in a heredoc nested inside
+# a command substitution, where a lone one unbalances the quote scan bash runs
+# over the text and the whole script stops parsing.)
+fields.append(health_body)
+print("\\t".join(fields))
 PY
 EOF
 )"
@@ -1294,15 +1345,23 @@ _report_peer_verdict_failure() {
     local observed_repo_head="$6"
     local repo_detail="$7"
     local health_status="$8"
-    local health_detail="$9"
-    local peer_health_port="${10:-}"
+    local health_ready="$9"
+    local health_detail="${10}"
+    local peer_health_port="${11:-}"
 
     echo "✗ [peer:$peer] verdict failed: $reason"
     echo "  terminal marker: $marker_status ($marker_detail)"
     echo "  repo head: expected=$expected_repo_head observed=$observed_repo_head ($repo_detail)"
-    echo "  health: ok=$health_status ($health_detail)"
+    # Both axes: the raw `ok` the body reported AND the deploy-readiness verdict
+    # derived from it. They legitimately disagree on a standby node, so printing
+    # only one of them leaves the operator unable to tell "the peer is not ready"
+    # from "the peer is ready and simply not the gateway".
+    echo "  health: ok=$health_status ready=$health_ready ($health_detail)"
     if [ -n "$peer_health_port" ]; then
-        echo "  health check port: $peer_health_port"
+        # The config pre-read, shown for drift only. The port actually requested is
+        # the one the peer deploy log names, and it is reported inside
+        # health_detail above (#5071 S0b r2 F2).
+        echo "  health check port: $peer_health_port (config pre-read; the probe requests the port named in the peer deploy log)"
     fi
 }
 
@@ -1335,13 +1394,17 @@ _wait_for_peer_deploy_verdict() {
     local repo_detail="not probed"
     local health_status="false"
     local health_detail="not probed"
+    local health_body=""
+    local health_ready="false"
     local probe_output
 
     while :; do
+        health_body=""
         if probe_output="$(_probe_peer_deploy_state \
             "$peer" "$peer_log_path" "$peer_manifest_path" "$peer_health_port")"; then
             IFS=$'\t' read -r \
                 marker_status marker_detail observed_repo_head repo_detail health_status health_detail \
+                health_body \
                 <<<"$probe_output"
         else
             marker_status="unknown"
@@ -1352,17 +1415,53 @@ _wait_for_peer_deploy_verdict() {
             health_detail="peer probe failed"
         fi
 
+        # The peer's health axis is judged by the SAME predicate the local deploy
+        # readiness wait uses, with the same allow flags (see the
+        # wait_for_http_service_health call that gates the release restart), rather
+        # than by a second opinion built on `ok` alone. `ok` is the gateway-role
+        # answer: a correctly settled standby peer reports ok=false with
+        # degraded_reasons that are all `provider:<name>:gateway_standby`, so the
+        # old test could never go green on one and the peer leg burned the whole
+        # verdict timeout before failing. health_json_is_ready already accepts that
+        # shape (its cluster_standby branch), so calling it is what makes the two
+        # consumers of one judgement agree.
+        #
+        # It runs HERE, on the deploy host, over the body the probe carried back --
+        # the peer has the same _defaults.sh after the pre-sync, but the probe's
+        # stdout is the tab-delimited channel parsed just above, and the predicate
+        # writes operator diagnostics to stdout. Judging the transported body keeps
+        # that channel a pure data channel and keeps one implementation deciding.
+        # The transported body is a semantic reserialization of what /api/health
+        # returned (parsed, then re-dumped), not the response bytes; the predicate
+        # reads JSON values, so that is the same input to it.
+        #
+        # The body is bound to THIS deploy, not merely to this host: the probe
+        # requests the port its own log scan read out of the peer deploy log that
+        # produced the marker (#5071 S0b r2 F2), so a stale process listening on
+        # some other port cannot supply the ready body for a deploy it is not.
+        #
+        # Fail-closed is preserved on every path that is not a body proven ready: a
+        # failed probe, an unreachable or unparseable /api/health (empty
+        # health_body), and a body the predicate rejects all leave this false.
+        # health_body is cleared before each probe so a later iteration can never
+        # be judged on an earlier one's body.
+        health_ready="false"
+        if [ -n "$health_body" ] \
+            && health_json_is_ready "$health_body" 1 1 1 >/dev/null 2>&1; then
+            health_ready="true"
+        fi
+
         if [ "$marker_status" = "success" ] \
             && [ "$observed_repo_head" = "$expected_repo_head" ] \
-            && [ "$health_status" = "true" ]; then
-            echo "✓ [peer:$peer] deploy verified: terminal marker, repo head, and health ok=true"
+            && [ "$health_ready" = "true" ]; then
+            echo "✓ [peer:$peer] deploy verified: terminal marker, repo head, and health ready=true (ok=$health_status)"
             return 0
         fi
 
         if [ "$marker_status" = "failure" ]; then
             _report_peer_verdict_failure "$peer" "peer log ended in failure" \
                 "$marker_status" "$marker_detail" "$expected_repo_head" \
-                "$observed_repo_head" "$repo_detail" "$health_status" "$health_detail" "$peer_health_port"
+                "$observed_repo_head" "$repo_detail" "$health_status" "$health_ready" "$health_detail" "$peer_health_port"
             return 1
         fi
 
@@ -1371,14 +1470,14 @@ _wait_for_peer_deploy_verdict() {
             && [ "$observed_repo_head" != "$expected_repo_head" ]; then
             _report_peer_verdict_failure "$peer" "repo head does not match the deploy target" \
                 "$marker_status" "$marker_detail" "$expected_repo_head" \
-                "$observed_repo_head" "$repo_detail" "$health_status" "$health_detail" "$peer_health_port"
+                "$observed_repo_head" "$repo_detail" "$health_status" "$health_ready" "$health_detail" "$peer_health_port"
             return 1
         fi
 
         if [ "$SECONDS" -ge "$deadline" ]; then
             _report_peer_verdict_failure "$peer" "timed out after ${timeout_secs}s" \
                 "$marker_status" "$marker_detail" "$expected_repo_head" \
-                "$observed_repo_head" "$repo_detail" "$health_status" "$health_detail" "$peer_health_port"
+                "$observed_repo_head" "$repo_detail" "$health_status" "$health_ready" "$health_detail" "$peer_health_port"
             return 1
         fi
 
