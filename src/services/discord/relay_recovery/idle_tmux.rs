@@ -340,6 +340,17 @@ fn output_file_quiescent_for_duration_at(
 /// conditions — it returns `false` for an absent/empty `output_path` and for
 /// any extract failure. Two blind witnesses do not compose into a proof, so
 /// only `Some(0)` counts as one.
+///
+/// The name overstates what that one proves, and this is the whole of it.
+/// `Some(0)` says that `capture.saturating_sub(last_relay_offset)` was 0 in
+/// `SessionEnrichment::load`, which is also the answer whenever the relay
+/// frontier RUNS AHEAD of the capture offset — a rotated or truncated
+/// transcript reads drained by this measure without its tail having been
+/// relayed. And it is a snapshot-time fact: that poll's `std::fs::metadata`
+/// succeeded and its length did not exceed the frontier. A read or parse
+/// failure at apply time is outside it and belongs to the companion tail guard,
+/// which is the other reason the two prove "nothing left to preserve" only in
+/// conjunction.
 pub(crate) fn unread_tail_is_proven_drained(unread_bytes: Option<u64>) -> bool {
     unread_bytes == Some(0)
 }

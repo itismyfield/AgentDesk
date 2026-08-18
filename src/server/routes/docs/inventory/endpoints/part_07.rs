@@ -634,6 +634,10 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
              inflight_state_present, last_relay_ts_ms, last_capture_offset, unread_bytes, \
              desynced (orphan/cross-owner/stale capture divergence, 30s threshold), \
              reconnect_count, has_pending_queue. \
+             unread_bytes is nullable and null means UNMEASURED, never 0: the tail \
+             could not be counted against the row's relay frontier (no row \
+             output_path, a failed stat on it, or a row/watcher tmux mismatch), so \
+             folding null to 0 reads an unknown tail as a drained one. \
              #1133 enriched diagnostics (omitted when source is absent): \
              inflight_started_at, inflight_updated_at, inflight_user_msg_id, \
              inflight_current_msg_id, watcher_owner_channel_id, tmux_session_alive \

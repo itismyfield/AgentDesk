@@ -96,11 +96,15 @@ pub(super) async fn apply_relay_recovery_decision(
                 // they can read: `idle_tmux_repair_has_unrelayed_tail_answer`
                 // proves an empty tail only for a row whose `output_path`
                 // resolves and extracts, and returns `false` — no objection —
-                // when it cannot read one. The measured `unread_bytes` above is
-                // what excludes that blind case, so the two guards prove
-                // "nothing left to preserve" only in conjunction. The cleanup
-                // below only retires stale mailbox/inflight bookkeeping for an
-                // already-idle turn.
+                // when it cannot read one. The `Some(0)` above is what excludes
+                // that blind case, so the two guards prove "nothing left to
+                // preserve" only in conjunction — and only as far as `Some(0)`
+                // reaches, which is one snapshot's stat against the relay
+                // frontier and not a rotated/truncated transcript that reads
+                // drained by that measure (see
+                // `unread_tail_is_proven_drained`). The cleanup below only
+                // retires stale mailbox/inflight bookkeeping for an already-idle
+                // turn.
                 && let Some(inflight_clear_state) =
                     load_idle_tmux_reattach_inflight_clear_candidate(provider, decision.channel_id)
                 && idle_tmux_repair_snapshot_ready_for_input(

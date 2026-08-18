@@ -220,6 +220,12 @@ pub async fn cancel_turn(
 /// last_capture_offset, unread_bytes, desynced, reconnect_count,
 /// has_pending_queue }`.
 ///
+/// #5071 relay-tail S2: `unread_bytes` is nullable and `null` means UNMEASURED,
+/// not `0`. The tail could not be counted against this row's relay frontier (no
+/// row `output_path`, a failed stat on it, or a row/watcher tmux mismatch), so
+/// an out-of-band consumer that folds `null` to `0` reads an unknown tail as a
+/// drained one.
+///
 /// #1133 enriched read-only diagnostics (omitted when their source is
 /// absent): `inflight_started_at`, `inflight_updated_at`,
 /// `inflight_user_msg_id`, `inflight_current_msg_id`,

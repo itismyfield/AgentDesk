@@ -421,20 +421,38 @@ impl RelayHealthSnapshot {
     /// second alive witness needs — see the `pane_idle_confirmed` call site in
     /// `health::snapshot`.
     ///
-    /// That witness is for the IDLE channel, and an idle channel holds no
-    /// in-flight row. With no row there is no `output_path` to take a capture
-    /// coordinate from, so `SessionEnrichment::load` leaves `unread_bytes`
-    /// `None` and there is no tail that could be waiting — the first arm below.
-    /// This is the population the witness exists for and requiring `Some(0)`
-    /// would deny it to all of them.
+    /// The field is three-valued and its `None` is UNMEASURED, not
+    /// measured-empty. `SessionEnrichment::load` measures the in-flight ROW's
+    /// capture coordinate against the channel's relay frontier, so — the same
+    /// enumeration the sibling doc on
+    /// `relay_recovery::unread_tail_is_proven_drained` gives — `None` is produced
+    /// when the row carries no `output_path` (`seed_runtime` leaves it absent for
+    /// a remote profile, a provider with no managed-tmux backend, a Claude-TUI
+    /// prelaunch, and non-unix), when `std::fs::metadata` on that path failed, or
+    /// when the row's tmux session and the watcher binding's disagree so the
+    /// frontier is not attributable to the row.
     ///
-    /// `None` beside a row present is a different reading. The row supplies a
-    /// path, so the `None` is a FAILED measurement (path unreadable, or the
-    /// row's tmux session and the watcher binding's disagree so the frontier is
-    /// not attributable to it) — exactly the shape
-    /// `reachability::composite_tests::section_6_2_enrichment` fixtures. An
-    /// unmeasurable tail must not help assert liveness, so that case takes the
-    /// second arm and has to be measured empty.
+    /// The first arm is the channel with NO row, where none of those three can
+    /// even be asked: no row, no `output_path`, no capture coordinate, so the
+    /// field is `None` structurally and never carried a measurement. Requiring
+    /// `Some(0)` there would deny the witness to every rowless channel rather
+    /// than reject evidence, so the arm keeps them.
+    ///
+    /// The second arm is NOT "an active turn" and does not claim a row implies a
+    /// readable path. A row present with `active_turn == None` is a live shape —
+    /// `health::snapshot::relay_active_turn_from_inflight` reports `None` for a
+    /// #3631 rebind-origin row and for an ownerless TUI-direct `ExternalInput`
+    /// row — and such a row may itself have no `output_path` at all. All this
+    /// arm requires is that the measurement was attempted and read empty: with a
+    /// row present the `None` is unknown, and an unknown tail cannot witness
+    /// liveness whether the stat failed, the path was absent or the frontier was
+    /// unattributable. That is the fail-closed reading, the same one
+    /// [`Self::relay_frontier_never_advanced_with_unread_tail`] takes from the
+    /// other side when it declines to assert a FAILURE from an unmeasured tail.
+    /// The row-present `None` that
+    /// `reachability::composite_tests::section_6_2_enrichment` builds is the
+    /// failed-stat one. What `Some(0)` itself does and does not prove is in
+    /// `relay_recovery::unread_tail_is_proven_drained`.
     pub(in crate::services::discord) fn idle_witness_tail_is_not_waiting(&self) -> bool {
         if !self.bridge_inflight_present {
             return true;
@@ -519,10 +537,10 @@ mod tests {
     /// tail term, on both sides of the row-present split.
     ///
     /// The two rows that matter: `None` with no row keeps the witness (that is
-    /// the rowless idle population), and `None` WITH a row — a measurement that
-    /// failed, not a drained tail — no longer helps assert liveness.
+    /// the rowless idle population), and `None` WITH a row — an unknown tail,
+    /// not a drained one — no longer helps assert liveness.
     #[test]
-    fn idle_witness_tail_reads_unmeasured_as_waiting_only_when_a_row_could_measure_it() {
+    fn idle_witness_tail_reads_unmeasured_as_waiting_only_when_a_row_is_present() {
         let cases: Vec<(&str, bool, Option<u64>, bool)> = vec![
             (
                 "no row, unmeasured: nothing could be waiting",

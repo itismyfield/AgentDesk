@@ -868,15 +868,20 @@ async fn build_health_snapshot_with_options(
                     // that verdict) — a degraded reason for each such channel
                     // once `RelayVerdictSource` is `Composite`.
                     //
-                    // The other half was a `None` beside a row present, where
-                    // the path exists and the measurement FAILED. That one did
-                    // let an unmeasurable tail help assert liveness, running
-                    // opposite to
+                    // The other half was a `None` beside a row present, where the
+                    // tail is UNKNOWN — the row's `output_path` is absent, its
+                    // stat failed, or the frontier is not attributable to the
+                    // row. That one did let an unknown tail help assert liveness,
+                    // running opposite to
                     // `RelayHealthSnapshot::relay_frontier_never_advanced_with_unread_tail`,
                     // which reads the same field as `is_some_and(|b| b > 0)` and
                     // declines to assert a FAILURE from an unmeasured tail.
                     // `idle_witness_tail_is_not_waiting` now requires `Some(0)`
-                    // for that case, which is not the rowless population above.
+                    // for that case, which is not the rowless population above —
+                    // a row present with `active_turn == None` is its own live
+                    // shape (#3631 rebind-origin, ownerless TUI-direct rows), and
+                    // `call_site_withholds_the_pane_idle_witness_for_an_unmeasured_tail`
+                    // pins this conjunction on it.
                     pane_idle_confirmed: tmux_present
                         && matches!(relay_health.active_turn, RelayActiveTurn::None)
                         && relay_health.idle_witness_tail_is_not_waiting(),
@@ -1139,8 +1144,10 @@ mod tests {
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
     use super::{
-        HealthRegistry, authoritative_tmux_session, build_health_snapshot,
-        rebind_origin_inflight_is_idle, relay_active_turn_from_inflight, resolve_bound_selector,
+        HealthRegistry, RelayHealthBuildInput, RelayThreadProofSnapshot, SessionEnrichment,
+        authoritative_tmux_session, build_health_snapshot, build_relay_health_snapshot,
+        last_outbound_activity_ms, rebind_origin_inflight_is_idle, relay_active_turn_from_inflight,
+        resolve_bound_selector,
     };
     // #5071 T4-B6: the polarity tests below name the `#[cfg(unix)]` reachability
     // tree, so they are gated with the seam they exercise. `HealthStatus` rides
@@ -1157,7 +1164,7 @@ mod tests {
         ReachabilityUnknownReason, ReachabilityVerdict,
     };
     use crate::services::discord::inflight::InflightTurnState;
-    use crate::services::discord::relay_health::RelayActiveTurn;
+    use crate::services::discord::relay_health::{RelayActiveTurn, RelayHealthSnapshot};
     use crate::services::provider::{CancelToken, ProviderKind};
     use crate::services::tui_prompt_dedupe::TuiRuntimeBinding;
     use chrono::TimeZone;
@@ -1356,6 +1363,128 @@ mod tests {
             relay_active_turn_from_inflight(true, Some(&state)),
             RelayActiveTurn::None,
             "restart recovery can resurrect a cancel token for the stale row, but not the lost bridge tail"
+        );
+    }
+
+    /// #5071 relay-tail S2 (r2 review): the tail term's polarity where the alive
+    /// witness is actually assembled, not only in the predicate.
+    ///
+    /// The shape is the one the S2 split is about and that a rowless fixture
+    /// cannot build: a row IS present, so `bridge_inflight_present` is set, while
+    /// `active_turn` still reads `None` (#3631 rebind-origin without a cancel
+    /// token) — and that row's tail cannot be measured. Row, enrichment and
+    /// snapshot all come from production code, and the two cases differ only in
+    /// whether the row's transcript stats, so the withheld witness is this
+    /// input's answer rather than the fixture's.
+    #[tokio::test]
+    async fn call_site_withholds_the_pane_idle_witness_for_an_unmeasured_tail() {
+        /// The call site's own wiring of an enrichment into the snapshot it
+        /// reads, field for field. Only the mailbox and thread inputs are
+        /// stubbed: this shape has no cancel token, no queue and no thread axis.
+        fn relay_health_for(
+            provider: &ProviderKind,
+            channel: ChannelId,
+            session: &SessionEnrichment,
+            tmux_present: bool,
+        ) -> RelayHealthSnapshot {
+            build_relay_health_snapshot(RelayHealthBuildInput {
+                provider: provider.as_str().to_string(),
+                channel_id: channel.get(),
+                mailbox_has_cancel_token: false,
+                mailbox_active_user_msg_id: None,
+                mailbox_turn_started_at_ms: None,
+                unpaired_active_token_reconfirmed: false,
+                queue_depth: 0,
+                watcher_attached: session.watcher_attached,
+                watcher_attached_stale: session.watcher_attached_stale,
+                watcher_owner_channel_id: session.watcher_owner_channel_id,
+                tmux_session: session.tmux_session.clone(),
+                tmux_alive: session.tmux_session.as_ref().map(|_| tmux_present),
+                bridge_inflight_present: session.inflight_state_present,
+                bridge_current_msg_id: session.inflight_current_msg_id(),
+                watcher_owns_live_relay: session.watcher_owns_live_relay(),
+                last_relay_ts_ms: session.last_relay_ts_ms,
+                last_relay_offset: session.last_relay_offset,
+                last_capture_offset: session.last_capture_offset,
+                unread_bytes: session.unread_bytes,
+                desynced: session.desynced(tmux_present, session.watcher_attached),
+                thread_proof: RelayThreadProofSnapshot::default(),
+                active_turn: relay_active_turn_from_inflight(false, session.inflight.as_ref()),
+                last_outbound_activity_ms: last_outbound_activity_ms(
+                    session.last_relay_ts_ms,
+                    session.inflight.as_ref(),
+                ),
+            })
+        }
+
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path(AGENTDESK_ROOT_DIR_ENV, tmp.path());
+
+        let provider = ProviderKind::Codex;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+
+        // Two rows, one readable transcript and one that does not stat. The
+        // empty file measures a drained tail against a frontier of 0.
+        let drained = tmp.path().join("s2-call-site-drained.jsonl");
+        std::fs::write(&drained, b"").expect("write drained transcript fixture");
+        let unstattable = tmp.path().join("s2-call-site-missing.jsonl");
+
+        let mut witnessed = Vec::new();
+        for (label, output_path, expected_unread) in [
+            ("measured drained tail", drained, Some(0u64)),
+            ("unmeasured tail", unstattable, None),
+        ] {
+            let channel =
+                ChannelId::new(NEXT_ABSENT_MAILBOX_CHANNEL.fetch_add(1, Ordering::Relaxed));
+            let mut row = InflightTurnState::new(
+                provider.clone(),
+                channel.get(),
+                None,
+                5_071_000_000_002_000,
+                5_071_000_000_002_001,
+                5_071_000_000_002_002,
+                "s2 call-site fixture".to_string(),
+                None,
+                Some(format!("AgentDesk-codex-s2-{}", channel.get())),
+                Some(output_path.to_str().expect("utf8 path").to_string()),
+                None,
+                0,
+            );
+            // #3631: a rebind-origin row with no cancel token is idle. That is
+            // how `active_turn` is `None` while a row is present here.
+            row.rebind_origin = true;
+            crate::services::discord::inflight::save_inflight_state(&row)
+                .expect("persist row fixture");
+
+            let session = SessionEnrichment::load(&shared, Some(&provider), channel).await;
+            assert!(
+                session.inflight_state_present,
+                "{label}: the fixture row must be the one enrichment observed"
+            );
+            assert_eq!(
+                session.unread_bytes, expected_unread,
+                "{label}: enrichment must derive the tail reading this case is about"
+            );
+
+            // The `tmux_present` term is granted: the term under test is the
+            // third one, and a test process has no live pane to prove the first.
+            let relay_health = relay_health_for(&provider, channel, &session, true);
+            assert_eq!(
+                relay_health.active_turn,
+                RelayActiveTurn::None,
+                "{label}: a rebind-origin row without a cancel token must read idle"
+            );
+            witnessed.push((
+                label,
+                matches!(relay_health.active_turn, RelayActiveTurn::None)
+                    && relay_health.idle_witness_tail_is_not_waiting(),
+            ));
+        }
+
+        assert_eq!(
+            witnessed,
+            vec![("measured drained tail", true), ("unmeasured tail", false)],
+            "the call site's witness must survive a measured-empty tail and be withheld for an unmeasured one"
         );
     }
 
