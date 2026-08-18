@@ -341,8 +341,8 @@ fn output_file_quiescent_for_duration_at(
 /// any extract failure. Two blind witnesses do not compose into a proof, so
 /// only `Some(0)` counts as one.
 ///
-/// The name overstates what that one proves, and this is the whole of it.
-/// `Some(0)` says that `capture.saturating_sub(last_relay_offset)` was 0 in
+/// The name overstates the arithmetic. `Some(0)` says that
+/// `capture.saturating_sub(last_relay_offset)` was 0 in
 /// `SessionEnrichment::load`, which is also the answer whenever the relay
 /// frontier RUNS AHEAD of the capture offset — a rotated or truncated
 /// transcript reads drained by this measure without its tail having been
@@ -351,6 +351,14 @@ fn output_file_quiescent_for_duration_at(
 /// failure at apply time is outside it and belongs to the companion tail guard,
 /// which is the other reason the two prove "nothing left to preserve" only in
 /// conjunction.
+///
+/// What it does prove beyond the subtraction is ATTRIBUTION. The value is
+/// produced only inside `relay_state_matches_inflight.then(...)`
+/// (`health::session_enrichment::load`), so a `Some` at all means the row's tmux
+/// session and the live watcher binding's did not name different sessions: the
+/// frontier the capture offset was measured against belongs to this row's
+/// producer. Another session's watcher cannot reach this guard with a `Some` —
+/// that shape is `None`, which this returns `false` for.
 pub(crate) fn unread_tail_is_proven_drained(unread_bytes: Option<u64>) -> bool {
     unread_bytes == Some(0)
 }

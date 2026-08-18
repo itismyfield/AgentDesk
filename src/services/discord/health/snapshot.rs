@@ -879,9 +879,12 @@ async fn build_health_snapshot_with_options(
                     // `idle_witness_tail_is_not_waiting` now requires `Some(0)`
                     // for that case, which is not the rowless population above —
                     // a row present with `active_turn == None` is its own live
-                    // shape (#3631 rebind-origin, ownerless TUI-direct rows), and
+                    // shape (#3631 rebind-origin, ownerless TUI-direct rows).
                     // `call_site_withholds_the_pane_idle_witness_for_an_unmeasured_tail`
-                    // pins this conjunction on it.
+                    // builds that shape, runs it through `build_health_snapshot`,
+                    // and reads the verdict this term decides off the published
+                    // `reachability` of the mailbox entry — so folding EITHER this
+                    // line or the predicate back to `unwrap_or(0) == 0` fails it.
                     pane_idle_confirmed: tmux_present
                         && matches!(relay_health.active_turn, RelayActiveTurn::None)
                         && relay_health.idle_witness_tail_is_not_waiting(),
@@ -1144,10 +1147,8 @@ mod tests {
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
     use super::{
-        HealthRegistry, RelayHealthBuildInput, RelayThreadProofSnapshot, SessionEnrichment,
-        authoritative_tmux_session, build_health_snapshot, build_relay_health_snapshot,
-        last_outbound_activity_ms, rebind_origin_inflight_is_idle, relay_active_turn_from_inflight,
-        resolve_bound_selector,
+        HealthRegistry, authoritative_tmux_session, build_health_snapshot,
+        rebind_origin_inflight_is_idle, relay_active_turn_from_inflight, resolve_bound_selector,
     };
     // #5071 T4-B6: the polarity tests below name the `#[cfg(unix)]` reachability
     // tree, so they are gated with the seam they exercise. `HealthStatus` rides
@@ -1164,7 +1165,7 @@ mod tests {
         ReachabilityUnknownReason, ReachabilityVerdict,
     };
     use crate::services::discord::inflight::InflightTurnState;
-    use crate::services::discord::relay_health::{RelayActiveTurn, RelayHealthSnapshot};
+    use crate::services::discord::relay_health::RelayActiveTurn;
     use crate::services::provider::{CancelToken, ProviderKind};
     use crate::services::tui_prompt_dedupe::TuiRuntimeBinding;
     use chrono::TimeZone;
@@ -1366,76 +1367,110 @@ mod tests {
         );
     }
 
-    /// #5071 relay-tail S2 (r2 review): the tail term's polarity where the alive
-    /// witness is actually assembled, not only in the predicate.
+    /// #5071 relay-tail S2 (r4 review): the tail term's polarity as the LIVE
+    /// health path answers it, read off the surface that path publishes.
     ///
-    /// The shape is the one the S2 split is about and that a rowless fixture
-    /// cannot build: a row IS present, so `bridge_inflight_present` is set, while
-    /// `active_turn` still reads `None` (#3631 rebind-origin without a cancel
-    /// token) — and that row's tail cannot be measured. Row, enrichment and
-    /// snapshot all come from production code, and the two cases differ only in
-    /// whether the row's transcript stats, so the withheld witness is this
-    /// input's answer rather than the fixture's.
-    #[tokio::test]
+    /// The r3 review measured the r2 version of this test evaluating a COPY of
+    /// the call site's conjunction, so reverting the call site alone to the
+    /// pre-S2 `unread_bytes.unwrap_or(0) == 0` fold left it green. This one
+    /// calls `build_health_snapshot` and reads `reachability` off the mailbox
+    /// entry, which is where `pane_idle_confirmed` becomes observable from
+    /// outside the per-channel loop: it is `observe_relay_verdict`'s third alive
+    /// witness, and with a bootstrapped ledger holding no obligation and a
+    /// transcript no longer than that ledger's `last_observed_len`,
+    /// `transcript_liveness`'s `alive` IS that term — so `reachable` versus
+    /// `incarnation_not_alive_no_obligations` on the published surface reports
+    /// the conjunction rather than restating it.
+    ///
+    /// Both channels build the shape the S2 split is about and that a rowless
+    /// fixture cannot: a row IS present, so `bridge_inflight_present` is set,
+    /// while `active_turn` still reads `None` (#3631 rebind-origin without a
+    /// cancel token). They differ in whether that row carries an `output_path`
+    /// for the tail measurement to land on — the first entry of the
+    /// `seed_runtime` absence enumerated on `idle_witness_tail_is_not_waiting`.
+    /// That also moves the descriptive divergence operand (`SameFile` versus
+    /// `NoRowCoordinate`), and neither of those two produces an unknown reason,
+    /// so the verdict this reads apart is still the alive question alone.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn call_site_withholds_the_pane_idle_witness_for_an_unmeasured_tail() {
-        /// The call site's own wiring of an enrichment into the snapshot it
-        /// reads, field for field. Only the mailbox and thread inputs are
-        /// stubbed: this shape has no cancel token, no queue and no thread axis.
-        fn relay_health_for(
-            provider: &ProviderKind,
-            channel: ChannelId,
-            session: &SessionEnrichment,
-            tmux_present: bool,
-        ) -> RelayHealthSnapshot {
-            build_relay_health_snapshot(RelayHealthBuildInput {
-                provider: provider.as_str().to_string(),
-                channel_id: channel.get(),
-                mailbox_has_cancel_token: false,
-                mailbox_active_user_msg_id: None,
-                mailbox_turn_started_at_ms: None,
-                unpaired_active_token_reconfirmed: false,
-                queue_depth: 0,
-                watcher_attached: session.watcher_attached,
-                watcher_attached_stale: session.watcher_attached_stale,
-                watcher_owner_channel_id: session.watcher_owner_channel_id,
-                tmux_session: session.tmux_session.clone(),
-                tmux_alive: session.tmux_session.as_ref().map(|_| tmux_present),
-                bridge_inflight_present: session.inflight_state_present,
-                bridge_current_msg_id: session.inflight_current_msg_id(),
-                watcher_owns_live_relay: session.watcher_owns_live_relay(),
-                last_relay_ts_ms: session.last_relay_ts_ms,
-                last_relay_offset: session.last_relay_offset,
-                last_capture_offset: session.last_capture_offset,
-                unread_bytes: session.unread_bytes,
-                desynced: session.desynced(tmux_present, session.watcher_attached),
-                thread_proof: RelayThreadProofSnapshot::default(),
-                active_turn: relay_active_turn_from_inflight(false, session.inflight.as_ref()),
-                last_outbound_activity_ms: last_outbound_activity_ms(
-                    session.last_relay_ts_ms,
-                    session.inflight.as_ref(),
-                ),
-            })
+        use crate::services::discord::health::reachability::discovery::TranscriptFileId;
+        use crate::services::discord::health::reachability::ledger::{
+            LedgerIncarnation, bootstrap_ledger_at, ledger_path,
+        };
+
+        fn live_watcher_handle(
+            tmux_session_name: &str,
+            output_path: &str,
+        ) -> crate::services::discord::TmuxWatcherHandle {
+            crate::services::discord::TmuxWatcherHandle {
+                tmux_session_name: tmux_session_name.to_string(),
+                output_path: output_path.to_string(),
+                paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                resume_offset: Arc::new(std::sync::Mutex::new(None)),
+                cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                pause_epoch: Arc::new(AtomicU64::new(0)),
+                turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                    crate::services::discord::tmux_watcher_now_ms(),
+                )),
+            }
         }
 
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
         let tmp = tempfile::tempdir().expect("temp runtime root");
-        let _env = crate::config::TestEnvVarGuard::set_path(AGENTDESK_ROOT_DIR_ENV, tmp.path());
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+        if !crate::services::platform::tmux::is_available() {
+            eprintln!("skipping #5071 S2 call-site witness: tmux unavailable");
+            return;
+        }
 
         let provider = ProviderKind::Codex;
         let shared = crate::services::discord::make_shared_data_for_tests();
+        let registry = HealthRegistry::new();
+        registry
+            .register(provider.as_str().to_string(), shared.clone())
+            .await;
 
-        // Two rows, one readable transcript and one that does not stat. The
-        // empty file measures a drained tail against a frontier of 0.
-        let drained = tmp.path().join("s2-call-site-drained.jsonl");
-        std::fs::write(&drained, b"").expect("write drained transcript fixture");
-        let unstattable = tmp.path().join("s2-call-site-missing.jsonl");
-
-        let mut witnessed = Vec::new();
-        for (label, output_path, expected_unread) in [
-            ("measured drained tail", drained, Some(0u64)),
-            ("unmeasured tail", unstattable, None),
-        ] {
+        let mut fixtures = Vec::new();
+        for (label, row_carries_output_path) in
+            [("measured drained tail", true), ("unmeasured tail", false)]
+        {
             let channel =
                 ChannelId::new(NEXT_ABSENT_MAILBOX_CHANNEL.fetch_add(1, Ordering::Relaxed));
+            // The witness's FIRST conjunct is a real live pane, so this fixture
+            // owns one instead of granting the term.
+            let tmux_session = format!(
+                "AgentDesk-codex-s2r4-{}-{}",
+                std::process::id(),
+                channel.get()
+            );
+            let _ = crate::services::platform::tmux::kill_session(
+                &tmux_session,
+                "#5071 S2 call-site fixture reset",
+            );
+            assert!(
+                crate::services::platform::tmux::create_session(&tmux_session, None, "sleep 60")
+                    .expect("start tmux fixture")
+                    .status
+                    .success(),
+                "{label}: the pane-idle witness needs a live pane to be about"
+            );
+
+            // The transcript the live watcher tails, which is the one
+            // `transcript_liveness` stats. Empty, so its EOF cannot exceed the
+            // ledger's `last_observed_len` and the growth half of the alive
+            // question answers `false` — leaving `pane_idle_confirmed` as the
+            // only thing that can still make the incarnation read alive.
+            let transcript = tmp.path().join(format!("s2-r4-{}.jsonl", channel.get()));
+            std::fs::write(&transcript, b"").expect("write transcript fixture");
+            let transcript = transcript.to_str().expect("utf8 path").to_string();
+            shared
+                .tmux_watchers
+                .insert(channel, live_watcher_handle(&tmux_session, &transcript));
+
             let mut row = InflightTurnState::new(
                 provider.clone(),
                 channel.get(),
@@ -1445,8 +1480,8 @@ mod tests {
                 5_071_000_000_002_002,
                 "s2 call-site fixture".to_string(),
                 None,
-                Some(format!("AgentDesk-codex-s2-{}", channel.get())),
-                Some(output_path.to_str().expect("utf8 path").to_string()),
+                Some(tmux_session.clone()),
+                row_carries_output_path.then(|| transcript.clone()),
                 None,
                 0,
             );
@@ -1456,35 +1491,80 @@ mod tests {
             crate::services::discord::inflight::save_inflight_state(&row)
                 .expect("persist row fixture");
 
-            let session = SessionEnrichment::load(&shared, Some(&provider), channel).await;
-            assert!(
-                session.inflight_state_present,
-                "{label}: the fixture row must be the one enrichment observed"
-            );
-            assert_eq!(
-                session.unread_bytes, expected_unread,
-                "{label}: enrichment must derive the tail reading this case is about"
-            );
+            // A mailbox with no cancel token: what puts the channel into
+            // `provider_probe`'s snapshots, so the per-channel loop runs for it,
+            // without giving the row an active turn.
+            shared.mailboxes.handle(channel);
 
-            // The `tmux_present` term is granted: the term under test is the
-            // third one, and a test process has no live pane to prove the first.
-            let relay_health = relay_health_for(&provider, channel, &session, true);
+            // No obligation and `last_observed_len == 0`: the sweep holds
+            // nothing, so `classify_reachability` decides on `alive` alone.
+            bootstrap_ledger_at(
+                &ledger_path(&provider, channel.get()).expect("ledger path"),
+                LedgerIncarnation::new(
+                    tmux_session.clone(),
+                    0,
+                    None,
+                    TranscriptFileId { dev: 0, ino: 0 },
+                ),
+                0,
+            )
+            .expect("bootstrap ledger fixture");
+
+            fixtures.push((label, channel, tmux_session, row_carries_output_path));
+        }
+
+        let health = build_health_snapshot(&registry).await;
+
+        let mut published = Vec::new();
+        for (label, channel, _, row_carries_output_path) in &fixtures {
+            let entry = health
+                .mailboxes
+                .iter()
+                .find(|entry| entry.channel_id == channel.get())
+                .unwrap_or_else(|| panic!("{label}: the fixture channel must reach the snapshot"));
+            assert!(
+                entry.tmux_present && entry.relay_health.tmux_alive == Some(true),
+                "{label}: the fixture pane must be the one the snapshot probed"
+            );
+            assert!(
+                entry.relay_health.bridge_inflight_present,
+                "{label}: the fixture row must be the one the snapshot observed"
+            );
             assert_eq!(
-                relay_health.active_turn,
+                entry.relay_health.active_turn,
                 RelayActiveTurn::None,
                 "{label}: a rebind-origin row without a cancel token must read idle"
             );
-            witnessed.push((
-                label,
-                matches!(relay_health.active_turn, RelayActiveTurn::None)
-                    && relay_health.idle_witness_tail_is_not_waiting(),
+            assert_eq!(
+                entry.relay_health.unread_bytes,
+                row_carries_output_path.then_some(0),
+                "{label}: enrichment must derive the tail reading this case is about"
+            );
+            published.push((
+                *label,
+                entry.reachability.verdict,
+                entry.reachability.reason,
             ));
         }
 
+        for (_, _, tmux_session, _) in &fixtures {
+            let _ = crate::services::platform::tmux::kill_session(
+                tmux_session,
+                "#5071 S2 call-site fixture teardown",
+            );
+        }
+
         assert_eq!(
-            witnessed,
-            vec![("measured drained tail", true), ("unmeasured tail", false)],
-            "the call site's witness must survive a measured-empty tail and be withheld for an unmeasured one"
+            published,
+            vec![
+                ("measured drained tail", "reachable", None),
+                (
+                    "unmeasured tail",
+                    "unknown",
+                    Some("incarnation_not_alive_no_obligations")
+                ),
+            ],
+            "the live path's witness must survive a measured-empty tail and be withheld for an unmeasured one"
         );
     }
 
