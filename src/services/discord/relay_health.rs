@@ -242,11 +242,32 @@ impl FrontierProvenance {
     /// coordinate entry, so an ABSENT entry witnesses no generation by
     /// construction, and demanding one for H1 would make H1 unobservable on the
     /// production poll — the one shape this slice exists to see. H2's entry
-    /// does exist and does carry a generation (a watermark reset on wrapper
-    /// generation change stores one while parking the offset at zero), so there
-    /// the comparison is real and is required.
+    /// does exist and can carry a generation, so there the comparison is real
+    /// and is required.
+    ///
+    /// What that comparison is NOT, r2 review (legA P1):
+    /// `tmux_session_files::reset_relay_watermark_on_generation_change` parks
+    /// the offset at zero and stamps the new generation in two writes that are
+    /// not atomic together, so `PresentZero` beside a stamp is not by itself
+    /// evidence that the stamp belongs to the parked zero.
+    /// `health::session_enrichment::observe_frontier_triple` fences the offset
+    /// load between two stamp loads and withholds the witness when they
+    /// disagree, which narrows the window to the reads that fall entirely
+    /// inside it. It does not close the window: a poll whose loads all land
+    /// between the two writes — and, durably, a crash that lands there, leaving
+    /// `offset = 0` beside the old stamp for good, because the next reset takes
+    /// the `watermark == 0` early return and never restamps — reads a
+    /// stale-equal pair that both loads agree on. H2 off such a pair is not
+    /// guaranteed against, here or by the fence.
     pub(in crate::services::discord) fn hypothesis(self) -> FrontierHypothesis {
         match (self.coord_observation, self.durable_observation) {
+            // `RowPresent` is design §2.3's H1 row as written, and is kept
+            // spelled out for it. The production poll cannot reach it — r2
+            // review (legB P2): `Absent` IS the map miss, so the entry that
+            // would have witnessed a live generation is gone and
+            // `DurableFrontierObservation::observe` can only answer
+            // `GenerationUnresolved`. Dropping it would silently move a shape
+            // the design table calls H1 into `Indeterminate`.
             (
                 CoordFrontierObservation::Absent,
                 DurableFrontierObservation::RowPresent { .. }
@@ -263,7 +284,8 @@ impl FrontierProvenance {
 
 /// The provenance as the health detail publishes it: the two independent
 /// fields, flattened so they stay two fields on the wire, plus the derived
-/// hypothesis. Serialization only — nothing reads this back.
+/// hypothesis. No verdict, classifier or recovery consumes it; `cli::doctor`'s
+/// `frontier_provenance_evidence` reads it back as display-only evidence.
 #[derive(Debug, Serialize)]
 pub(in crate::services::discord) struct FrontierProvenanceReport {
     #[serde(flatten)]
@@ -685,6 +707,19 @@ mod tests {
         DurableFrontierObservation::observe(Some(4_096), Some(GENERATION_NS), None)
     }
 
+    /// The durable row an END with this coordinate reading actually polls
+    /// with. r2 review (legB P2): pairing every end with [`row_present`]
+    /// gave the `Absent` ends `Absent × RowPresent`, a shape the production
+    /// poll cannot produce — an absent entry witnesses no live generation — so
+    /// the H1 assertions below were being made against the one H1 row nothing
+    /// reaches.
+    fn row_for(coord: CoordFrontierObservation) -> DurableFrontierObservation {
+        match coord {
+            CoordFrontierObservation::Absent => row_with_unresolved_generation(),
+            _ => row_present(),
+        }
+    }
+
     /// A parent channel and the thread hung off it, each carrying its OWN
     /// coordinate reading — the two-row shape H3 would need. S1 does not
     /// discriminate H3 (design §1.4); the fixture stays so the deferral is
@@ -696,11 +731,11 @@ mod tests {
         [
             (
                 ChannelId::new(PARENT_CHANNEL),
-                FrontierProvenance::observe(parent, row_present()),
+                FrontierProvenance::observe(parent, row_for(parent)),
             ),
             (
                 ChannelId::new(THREAD_CHANNEL),
-                FrontierProvenance::observe(thread, row_present()),
+                FrontierProvenance::observe(thread, row_for(thread)),
             ),
         ]
     }

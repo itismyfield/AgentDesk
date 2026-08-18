@@ -325,8 +325,12 @@ impl RelayVerdictReport {
 /// Five producers used to spell `"transcript_unresolved"`, which made the
 /// published reason unable to say which of them answered — the exact question
 /// #adk-cc's `unknown{transcript_unresolved}` could not be asked. Every arm
-/// below is now reached by exactly one branch of [`classify_reachability`] or
-/// [`observe_relay_verdict`].
+/// below is now reached by exactly one REACHABLE branch of
+/// [`classify_reachability`] or [`observe_relay_verdict`]; r2 review (legB
+/// P2): `receipt_store_unreadable` is spelled by two branches of
+/// `classify_reachability`, the second of them unreachable behind the guard
+/// that already answered it and kept so a reordering of those guards costs a
+/// conservative verdict rather than the polling task.
 fn unknown_reason_str(reason: ReachabilityUnknownReason) -> &'static str {
     match reason {
         ReachabilityUnknownReason::TranscriptUnresolved => "transcript_unresolved",

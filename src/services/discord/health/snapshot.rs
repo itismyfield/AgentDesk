@@ -213,9 +213,13 @@ impl RelayThreadProofSnapshot {
     ///
     /// Either field can hold it — `dispatch.thread_parents` is keyed parent →
     /// thread, so a PARENT resolves its thread through the lookup and a THREAD
-    /// resolves its parent through the reverse scan over the values — and only
-    /// one of the two is populated for any given channel. The polled channel
-    /// itself is filtered out so a self-edge can never read as an axis.
+    /// resolves its parent through the reverse scan over the values. For a
+    /// channel that is one end of one axis exactly one field is populated —
+    /// the scope this reader was written for. r2 review (legB P2): nothing
+    /// here proves a channel cannot be a key AND a value, so when both are
+    /// populated the array order below decides it, taking the THREAD side.
+    /// The polled channel itself is filtered out so a self-edge can never
+    /// read as an axis.
     fn counterpart_channel_id(&self, polled_channel_id: u64) -> Option<u64> {
         [self.thread_channel_id, self.parent_channel_id]
             .into_iter()
@@ -605,10 +609,12 @@ async fn watcher_state_snapshot_for_shared(
     // #5071 T4-B4 (4987 S4): compare the row's transcript coordinate against
     // the registry's independently resolved one by FILE IDENTITY. This does
     // NOT replace T4-B0's path-string record in `SessionEnrichment`: that one
-    // is untouched and has already fired for this poll inside the `load` at
-    // line 461, so on a split the two records coexist until a follow-up slice
-    // retires B0's. Descriptive record only — the outcome feeds no verdict, no
-    // classifier, and no recovery here; T4-B6 owns composition. Unix-gated
+    // is untouched and has already fired for this poll inside
+    // `SessionEnrichment::load`, through its
+    // `record_transcript_source_divergence`, so on a split the two records
+    // coexist until a follow-up slice retires B0's. Descriptive record only —
+    // the outcome feeds no verdict, no classifier, and no recovery here;
+    // T4-B6 owns composition. Unix-gated
     // with the reachability tree because identity is the `(dev, ino)` pair.
     #[cfg(unix)]
     super::reachability::divergence::observe_row_coordinate_divergence(

@@ -2643,6 +2643,7 @@ services::discord::health::runtime_resolve::direct_meeting_candidate_tests::no_c
 services::discord::health::runtime_resolve::direct_meeting_candidate_tests::single_explicit_match_wins_over_live_matches
 services::discord::health::runtime_resolve::direct_meeting_candidate_tests::single_live_match_is_selected_without_explicit_match
 services::discord::health::session_enrichment::tests::a_channel_with_no_coordinate_entry_polls_as_absent
+services::discord::health::session_enrichment::tests::a_generation_stamp_moving_under_the_offset_read_witnesses_nothing
 services::discord::health::session_enrichment::tests::health_load_carries_the_live_watcher_transcript_into_the_enrichment
 services::discord::health::session_enrichment::tests::health_load_records_transcript_source_divergence_only_when_the_paths_split
 services::discord::health::session_enrichment::tests::health_reads_the_live_watcher_transcript_off_the_channel_binding

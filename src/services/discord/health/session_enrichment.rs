@@ -19,36 +19,85 @@ pub(super) const WATCHER_STATE_DESYNC_STALE_MS: i64 = 30_000;
 /// (legB P1-1) — there is exactly one place where a missing entry becomes a
 /// reading. Collapsing that miss into a zero is therefore one edit, and it is
 /// an edit the production poll path is tested through.
+///
+/// r2 review (legA P2): "the same lookup" scopes the fields below and
+/// nothing else. [`SessionEnrichment::has_relay_coord`] is a SEPARATE
+/// `contains_key` on the same map, so an insert landing between the two can
+/// still publish `has_relay_coord = false` beside a `PresentZero` observation
+/// inside one poll. That window predates this slice and stays; what is
+/// corrected here is the claim, not the read.
 struct CoordFrontierReading {
     observation: CoordFrontierObservation,
-    /// `confirmed_end_offset`, `last_relay_ts_ms`, `reconnect_count` and
-    /// `confirmed_end_generation_mtime_ns` as of that lookup. `None` when the
-    /// map held no entry.
-    entry: Option<(u64, i64, u64, i64)>,
+    /// `confirmed_end_offset`, `last_relay_ts_ms` and `reconnect_count` as of
+    /// that lookup. `None` when the map held no entry.
+    entry: Option<(u64, i64, u64)>,
+    /// The generation the offset above is attributable to. `None` when the
+    /// entry witnesses none — never stamped, or the stamp moved under the read
+    /// (see [`observe_frontier_triple`]).
+    live_generation_ns: Option<i64>,
+}
+
+/// #5071 relay-tail S1 r3 (legA P1): what one entry's raw
+/// `(generation, offset, generation)` triple observes — `None` for the map
+/// miss, which keeps a missing entry becoming a reading in exactly one place.
+///
+/// `tmux_session_files::reset_relay_watermark_on_generation_change` CASes
+/// `confirmed_end_offset` to 0 and only THEN stores the new wrapper's
+/// `.generation` stamp. A poll loading the offset between those two writes sees
+/// `0` paired with the OLD generation, and against a durable row from that same
+/// old incarnation the pair reads `PresentZero × RowPresent` — H2 — for a reset
+/// in flight rather than for a coordinate that never advanced.
+///
+/// Same fence as `tmux_session_files::committed_frontier_for_current_generation`
+/// (#3358 r2): the stamp has to agree on both sides of the offset load. When it
+/// does not, the live generation is no witness for THIS offset, and `None`
+/// sends the durable side to `GenerationUnresolved` — Indeterminate — rather
+/// than to a hypothesis. `0` is the atomic's "never stamped", which is not a
+/// witness either.
+///
+/// The fence sees only a transition it straddles. A crash BETWEEN the two
+/// writes leaves `offset = 0` beside the old stamp durably, both loads agree,
+/// and the pair is indistinguishable from a coordinate that never advanced —
+/// see [`crate::services::discord::relay_health::FrontierProvenance::hypothesis`].
+fn observe_frontier_triple(
+    triple: Option<(i64, u64, i64)>,
+) -> (CoordFrontierObservation, Option<i64>) {
+    let Some((generation_before, confirmed_end_offset, generation_after)) = triple else {
+        return (CoordFrontierObservation::observe(None), None);
+    };
+    let live_generation_ns = (generation_after != 0 && generation_before == generation_after)
+        .then_some(generation_after);
+    (
+        CoordFrontierObservation::observe(Some(confirmed_end_offset)),
+        live_generation_ns,
+    )
 }
 
 /// The single map read. Lock-free `.get()`; nothing is inserted, so a channel
 /// that has no entry keeps not having one.
 fn read_coord_frontier(shared: &SharedData, channel: ChannelId) -> CoordFrontierReading {
-    let entry = shared.tmux_relay_coords.get(&channel).map(|coord| {
+    use std::sync::atomic::Ordering::Acquire;
+    let read = shared.tmux_relay_coords.get(&channel).map(|coord| {
+        // Generation, offset, generation — the fence `observe_frontier_triple`
+        // documents. The two remaining fields load after it, so nothing widens
+        // the window between the stamp reads.
+        let generation_before = coord.confirmed_end_generation_mtime_ns.load(Acquire);
+        let confirmed_end_offset = coord.confirmed_end_offset.load(Acquire);
+        let generation_after = coord.confirmed_end_generation_mtime_ns.load(Acquire);
         (
-            coord
-                .confirmed_end_offset
-                .load(std::sync::atomic::Ordering::Acquire),
-            coord
-                .last_relay_ts_ms
-                .load(std::sync::atomic::Ordering::Acquire),
-            coord
-                .reconnect_count
-                .load(std::sync::atomic::Ordering::Acquire),
-            coord
-                .confirmed_end_generation_mtime_ns
-                .load(std::sync::atomic::Ordering::Acquire),
+            (generation_before, confirmed_end_offset, generation_after),
+            (
+                confirmed_end_offset,
+                coord.last_relay_ts_ms.load(Acquire),
+                coord.reconnect_count.load(Acquire),
+            ),
         )
     });
+    let (observation, live_generation_ns) = observe_frontier_triple(read.map(|(triple, _)| triple));
     CoordFrontierReading {
-        observation: CoordFrontierObservation::observe(entry.map(|(offset, ..)| offset)),
-        entry,
+        observation,
+        entry: read.map(|(_, entry)| entry),
+        live_generation_ns,
     }
 }
 
@@ -171,15 +220,9 @@ impl SessionEnrichment {
         // that zero came from an entry or from the miss.
         let coord = read_coord_frontier(shared, channel);
         let coord_observation = coord.observation;
-        // 0 is `TmuxRelayCoord`'s "never observed", not a generation.
-        let live_generation_mtime_ns = coord
-            .entry
-            .map(|(_, _, _, generation)| generation)
-            .filter(|generation| *generation != 0);
-        let (last_relay_offset, last_relay_ts_ms, reconnect_count) = coord
-            .entry
-            .map(|(offset, relay_ts_ms, reconnects, _)| (offset, relay_ts_ms, reconnects))
-            .unwrap_or((0, 0, 0));
+        let live_generation_mtime_ns = coord.live_generation_ns;
+        let (last_relay_offset, last_relay_ts_ms, reconnect_count) =
+            coord.entry.unwrap_or((0, 0, 0));
         let durable_observation = DurableFrontierObservation::observe(
             inflight
                 .as_ref()
@@ -509,6 +552,64 @@ mod tests {
             watcher_output_path_from_binding(binding.as_ref()).as_deref(),
             Some(NATIVE_TRANSCRIPT),
             "the enrichment must carry the live handle's transcript, not None"
+        );
+    }
+
+    /// #5071 relay-tail S1 r3 (legA P1): parking the offset at 0 and stamping
+    /// the new wrapper's generation are two writes, so a poll can load the 0
+    /// while the stamp is still the OLD one. Against a durable row from that
+    /// same old incarnation the pair reads as H2 — a coordinate that never
+    /// advanced while the row relayed in this incarnation — for a reset in
+    /// flight.
+    ///
+    /// Driven through the raw triple rather than through a race, because the
+    /// fence IS the second generation load: read the stamp once and the torn
+    /// triple below either witnesses `OLD` and names H2, or witnesses `NEW`
+    /// and stops being `None` — either way this fails.
+    #[test]
+    fn a_generation_stamp_moving_under_the_offset_read_witnesses_nothing() {
+        use crate::services::discord::relay_health::FrontierHypothesis;
+
+        const OLD_GENERATION_NS: i64 = 1_700_491_601_000_000_000;
+        const NEW_GENERATION_NS: i64 = 1_700_491_777_000_000_000;
+        // The row relayed under the wrapper the reset is retiring.
+        let hypothesis_of = |triple| {
+            let (coord_observation, live_generation_ns) = observe_frontier_triple(triple);
+            FrontierProvenance::observe(
+                coord_observation,
+                DurableFrontierObservation::observe(
+                    Some(4_096),
+                    Some(OLD_GENERATION_NS),
+                    live_generation_ns,
+                ),
+            )
+            .hypothesis()
+        };
+
+        assert_eq!(
+            observe_frontier_triple(Some((OLD_GENERATION_NS, 0, NEW_GENERATION_NS))),
+            (CoordFrontierObservation::PresentZero, None),
+            "a stamp that moved across the offset load witnesses nothing for that offset"
+        );
+        assert_eq!(
+            hypothesis_of(Some((OLD_GENERATION_NS, 0, NEW_GENERATION_NS))),
+            FrontierHypothesis::Indeterminate,
+            "a reset caught in flight is not a coordinate that never advanced"
+        );
+        assert_eq!(
+            hypothesis_of(Some((OLD_GENERATION_NS, 0, OLD_GENERATION_NS))),
+            FrontierHypothesis::CoordNeverAdvancedWithDurableRow,
+            "a stamp that held still across the load is the witness H2 is conditioned on"
+        );
+        assert_eq!(
+            observe_frontier_triple(Some((0, 4_096, 0))),
+            (CoordFrontierObservation::Advanced { offset: 4_096 }, None),
+            "the atomic's never-stamped zero is no generation, agreeing with itself or not"
+        );
+        assert_eq!(
+            observe_frontier_triple(None),
+            (CoordFrontierObservation::Absent, None),
+            "the map miss still becomes a reading in exactly one place"
         );
     }
 
