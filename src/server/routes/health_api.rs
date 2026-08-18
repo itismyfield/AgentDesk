@@ -1320,11 +1320,17 @@ pub async fn stale_mailbox_repair_handler(
                             &provider,
                             request.channel_id,
                         );
-                    let no_unread_bytes = snapshot.unread_bytes.unwrap_or(0) == 0;
                     // Keep the manual stale-mailbox repair's destructive idle
                     // clear gate aligned with ReattachWatcher: unread capture bytes
                     // are live relay evidence, so do not retire mailbox/inflight
                     // bookkeeping while the watcher still has bytes to consume.
+                    // #5071 relay-tail S2: the shared predicate is what keeps the
+                    // two gates aligned, including on `None` — an unmeasured tail
+                    // is not a drained one.
+                    let no_unread_bytes =
+                        crate::services::discord::relay_recovery::unread_tail_is_proven_drained(
+                            snapshot.unread_bytes,
+                        );
                     if inflight_safe && no_unread_bytes && !unrelayed_tail {
                         health::clear_idle_tmux_stale_turn(
                             registry,

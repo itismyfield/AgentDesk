@@ -416,6 +416,53 @@ impl RelayHealthSnapshot {
                 .is_some_and(|capture| capture > self.last_relay_offset)
             && self.unread_bytes.is_some_and(|bytes| bytes > 0)
     }
+
+    /// #5071 relay-tail S2: the reading of `unread_bytes` that 4987 §-1.4's
+    /// second alive witness needs — see the `pane_idle_confirmed` call site in
+    /// `health::snapshot`.
+    ///
+    /// The field is three-valued and its `None` is UNMEASURED, not
+    /// measured-empty. `SessionEnrichment::load` measures the in-flight ROW's
+    /// capture coordinate against the channel's relay frontier, so — the same
+    /// enumeration the sibling doc on
+    /// `relay_recovery::unread_tail_is_proven_drained` gives — `None` is produced
+    /// when the row carries no `output_path` (`seed_runtime` leaves it absent for
+    /// a remote profile, a provider with no managed-tmux backend, an unavailable
+    /// tmux binary, an absent tmux session name, a Claude-TUI prelaunch, and
+    /// non-unix: the four conjuncts of `provider_isolation::seed_runtime`'s
+    /// guard, then the Claude-TUI prelaunch seeding it delegates to
+    /// (`prelaunch_inflight_runtime_seed_from_paths`) and its non-unix arm), when
+    /// `std::fs::metadata` on that path failed, or when the row's tmux session
+    /// and the watcher binding's disagree so the frontier is not attributable to
+    /// the row.
+    ///
+    /// The first arm is the channel with NO row, where none of those three can
+    /// even be asked: no row, no `output_path`, no capture coordinate, so the
+    /// field is `None` structurally and never carried a measurement. Requiring
+    /// `Some(0)` there would deny the witness to every rowless channel rather
+    /// than reject evidence, so the arm keeps them.
+    ///
+    /// The second arm is NOT "an active turn" and does not claim a row implies a
+    /// readable path. A row present with `active_turn == None` is a live shape —
+    /// `health::snapshot::relay_active_turn_from_inflight` reports `None` for a
+    /// #3631 rebind-origin row and for an ownerless TUI-direct `ExternalInput`
+    /// row — and such a row may itself have no `output_path` at all. All this
+    /// arm requires is that the measurement was attempted and read empty: with a
+    /// row present the `None` is unknown, and an unknown tail cannot witness
+    /// liveness whether the stat failed, the path was absent or the frontier was
+    /// unattributable. That is the fail-closed reading, the same one
+    /// [`Self::relay_frontier_never_advanced_with_unread_tail`] takes from the
+    /// other side when it declines to assert a FAILURE from an unmeasured tail.
+    /// The row-present `None` that
+    /// `reachability::composite_tests::section_6_2_enrichment` builds is the
+    /// failed-stat one. What `Some(0)` itself does and does not prove is in
+    /// `relay_recovery::unread_tail_is_proven_drained`.
+    pub(in crate::services::discord) fn idle_witness_tail_is_not_waiting(&self) -> bool {
+        if !self.bridge_inflight_present {
+            return true;
+        }
+        self.unread_bytes == Some(0)
+    }
 }
 
 /// Time allowed for a newly minted mailbox token to acquire its durable
@@ -489,6 +536,50 @@ mod tests {
     use poise::serenity_prelude::ChannelId;
 
     use super::*;
+
+    /// #5071 relay-tail S2: the full three-valued table for the alive witness's
+    /// tail term, on both sides of the row-present split.
+    ///
+    /// The two rows that matter: `None` with no row keeps the witness (that is
+    /// the rowless idle population), and `None` WITH a row — an unknown tail,
+    /// not a drained one — no longer helps assert liveness.
+    #[test]
+    fn idle_witness_tail_reads_unmeasured_as_waiting_only_when_a_row_is_present() {
+        let cases: Vec<(&str, bool, Option<u64>, bool)> = vec![
+            (
+                "no row, unmeasured: nothing could be waiting",
+                false,
+                None,
+                true,
+            ),
+            ("row present, measured drained", true, Some(0), true),
+            (
+                "row present, unmeasured tail withholds the witness",
+                true,
+                None,
+                false,
+            ),
+            ("row present, measured tail waiting", true, Some(128), false),
+            // No row is the only producer of `None` for a rowless channel, so
+            // the two rows below are unreachable through
+            // `SessionEnrichment::load`; they pin the predicate's polarity
+            // rather than a live shape.
+            ("no row, measured drained", false, Some(0), true),
+            ("no row, measured tail waiting", false, Some(128), true),
+        ];
+        for (label, bridge_inflight_present, unread_bytes, expected) in cases {
+            let snapshot = RelayHealthSnapshot {
+                bridge_inflight_present,
+                unread_bytes,
+                ..RelayHealthSnapshot::test_snapshot()
+            };
+            assert_eq!(
+                snapshot.idle_witness_tail_is_not_waiting(),
+                expected,
+                "{label}"
+            );
+        }
+    }
 
     #[test]
     fn relay_stall_classifier_is_table_driven() {

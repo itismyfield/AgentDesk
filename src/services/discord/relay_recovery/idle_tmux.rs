@@ -322,6 +322,45 @@ fn output_file_quiescent_for_duration_at(
     now.duration_since(modified).is_ok_and(|age| age >= min_age)
 }
 
+/// #5071 relay-tail S2: how the destructive idle-tmux clear gates read
+/// `unread_bytes`, shared by the `ReattachWatcher` legacy manual lane
+/// (`apply.rs`) and the manual stale-mailbox repair route (`health_api.rs`) so
+/// the two cannot drift — the latter's gate exists to stay aligned with the
+/// former.
+///
+/// The field is three-valued and `None` means UNMEASURED, not measured-empty.
+/// `SessionEnrichment::load` produces `None` whenever the tail could not be
+/// counted against this row's relay frontier: the row carries no `output_path`,
+/// `std::fs::metadata` on that path failed, or the row's tmux session and the
+/// watcher binding's disagree so the frontier is not attributable to the row.
+///
+/// Folding `None` to `0` opened these destructive branches on no evidence at
+/// all, because the companion tail guard
+/// [`idle_tmux_repair_has_unrelayed_tail_answer`] is blind under the same
+/// conditions — it returns `false` for an absent/empty `output_path` and for
+/// any extract failure. Two blind witnesses do not compose into a proof, so
+/// only `Some(0)` counts as one.
+///
+/// The name overstates the arithmetic. `Some(0)` says that
+/// `capture.saturating_sub(last_relay_offset)` was 0 in
+/// `SessionEnrichment::load`, which is also the answer whenever the relay
+/// frontier RUNS AHEAD of the capture offset — a rotated or truncated
+/// transcript reads drained by this measure without its tail having been
+/// relayed. And it is a snapshot-time fact: that poll's `std::fs::metadata`
+/// succeeded and its length did not exceed the frontier. A read or parse
+/// failure at apply time is outside it and belongs to the companion tail guard,
+/// which is the other reason the two prove "nothing left to preserve" only in
+/// conjunction.
+///
+/// It does NOT prove attribution: `relay_state_matches_inflight`
+/// (`health::session_enrichment::load`) compares session names only when the
+/// row and the live watcher binding BOTH carry one (`_ => true` otherwise), so
+/// a frontier left behind by another session's watcher can still surface here
+/// as `Some(0)` when either side is unnamed.
+pub(crate) fn unread_tail_is_proven_drained(unread_bytes: Option<u64>) -> bool {
+    unread_bytes == Some(0)
+}
+
 /// Channel-scoped entry for callers outside the `discord` subtree (e.g. the
 /// manual stale-mailbox repair route) that cannot reach the `pub(super)`
 /// inflight loader: loads the current row and delegates to the state-based
