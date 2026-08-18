@@ -2664,6 +2664,7 @@ services::discord::health::snapshot::tests::a_non_green_relay_verdict_never_impr
 services::discord::health::snapshot::tests::bound_selector_absent_when_no_source_and_omitted_from_json
 services::discord::health::snapshot::tests::bound_selector_falls_back_to_runtime_binding
 services::discord::health::snapshot::tests::bound_selector_prefers_inflight_over_binding
+services::discord::health::snapshot::tests::call_site_withholds_the_pane_idle_witness_for_an_unmeasured_tail
 services::discord::health::snapshot::tests::enriched_tmux_identity_precedes_mailbox_fallback
 services::discord::health::snapshot::tests::health_detail_marks_same_episode_guarded_finish_occupancy_residual
 services::discord::health::snapshot::tests::mailbox_snapshot_absent_channel_is_peek_only_for_health
@@ -4036,6 +4037,7 @@ services::discord::relay_health::tests::an_absent_coordinate_entry_is_not_a_zero
 services::discord::relay_health::tests::an_agreeing_parent_thread_pair_leaves_the_single_row_table_standing
 services::discord::relay_health::tests::frontier_provenance_discriminates_h1_from_h2
 services::discord::relay_health::tests::frontier_provenance_report_publishes_both_witnesses_and_the_hypothesis
+services::discord::relay_health::tests::idle_witness_tail_reads_unmeasured_as_waiting_only_when_a_row_is_present
 services::discord::relay_health::tests::observation_age_rejects_future_and_overflowing_timestamps
 services::discord::relay_health::tests::relay_stall_classifier_is_table_driven
 services::discord::relay_health::tests::serialized_snapshot_exposes_ages_but_not_internal_recheck_proof
@@ -4125,6 +4127,7 @@ services::discord::relay_recovery::tests::reattach_eligibility_distinguishes_sta
 services::discord::relay_recovery::tests::reattach_idle_tmux_clear_generation_guard_preserves_concurrent_inflight_update
 services::discord::relay_recovery::tests::reattach_idle_tmux_clear_refuses_newer_idle_row_between_predicate_and_pin
 services::discord::relay_recovery::tests::reattach_idle_tmux_clear_release_publishes_completion_event
+services::discord::relay_recovery::tests::reattach_idle_tmux_clear_requires_a_measured_drained_tail
 services::discord::relay_recovery::tests::reattach_idle_tmux_clear_success_tears_down_after_guarded_clear
 services::discord::relay_recovery::tests::reattach_status_reports_live_incumbent_reuse_honestly
 services::discord::relay_recovery::tests::relay_recovery_identity_pin_preserves_t2_started_after_t1_snapshot
@@ -4135,6 +4138,7 @@ services::discord::relay_recovery::tests::stale_watcher_with_jsonl_progress_rebi
 services::discord::relay_recovery::tests::token_only_agentdesk_tmux_confirmed_dead_is_reclaimed_after_grace
 services::discord::relay_recovery::tests::token_only_agentdesk_tmux_with_unknown_liveness_stays_protected_after_grace
 services::discord::relay_recovery::tests::unpaired_active_token_is_observe_only
+services::discord::relay_recovery::tests::unread_tail_is_proven_drained_only_for_a_measured_zero
 services::discord::relay_recovery::tests::watchdog_auto_apply_is_rate_limited_after_first_token_reclaim
 services::discord::relay_recovery::tests::watcher_owned_live_relay_with_relay_progress_is_not_destructive_cancel_candidate
 services::discord::relay_recovery::tests::watcher_owned_live_relay_with_unread_bytes_and_zero_relay_offset_is_actionable
