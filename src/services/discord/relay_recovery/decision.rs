@@ -317,9 +317,7 @@ fn eligible_reattach_watcher(snapshot: &RelayHealthSnapshot) -> bool {
     snapshot.tmux_alive == Some(true)
         && snapshot.bridge_inflight_present
         && (snapshot.mailbox_has_cancel_token || snapshot.mailbox_active_user_msg_id.is_none())
-        && (!snapshot.watcher_attached
-            || snapshot.watcher_attached_stale
-            || !snapshot.watcher_owns_live_relay
+        && (snapshot.watcher_binding_is_not_a_live_relay_owner()
             || snapshot.relay_frontier_never_advanced_with_unread_tail())
         && snapshot.desynced
         && is_agentdesk_tmux_session(snapshot.tmux_session.as_deref())

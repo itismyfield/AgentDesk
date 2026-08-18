@@ -256,6 +256,69 @@ mod tests {
         )
     }
 
+    /// #5071 relay-tail S3 blast radius at the consumer that reads the
+    /// dead-frontier predicate with no guarding disjunction in front of it. A
+    /// frontier witnessed by a stale watcher heartbeat instead of by a measured
+    /// tail now earns the widened reattach budget; before S3 the unmeasured tail
+    /// silenced the predicate and this snapshot fell back to the default.
+    #[test]
+    fn dead_frontier_reattach_budget_follows_the_s3_witness() {
+        let dead_frontier = |unread_bytes, watcher_attached_stale| RelayHealthSnapshot {
+            tmux_session: Some("AgentDesk-codex-4423104".to_string()),
+            desynced: true,
+            tmux_alive: Some(true),
+            last_relay_ts_ms: None,
+            last_relay_offset: 0,
+            last_capture_offset: Some(128),
+            unread_bytes,
+            watcher_attached: true,
+            watcher_attached_stale,
+            watcher_owns_live_relay: true,
+            ..RelayHealthSnapshot::test_snapshot()
+        };
+
+        let cases: Vec<(&str, Option<u64>, bool, RelayRecoveryActionKind, u32)> = vec![
+            (
+                "a witness-fired dead frontier earns the widened reattach budget",
+                None,
+                true,
+                RelayRecoveryActionKind::ReattachWatcher,
+                AUTO_HEAL_DEAD_FRONTIER_REATTACH_MAX_ATTEMPTS_PER_WINDOW,
+            ),
+            (
+                "an unmeasured tail with no other dead witness keeps the default budget",
+                None,
+                false,
+                RelayRecoveryActionKind::ReattachWatcher,
+                AUTO_HEAL_DEFAULT_MAX_ATTEMPTS_PER_WINDOW,
+            ),
+            (
+                "the pre-S3 measured-tail path keeps its widened budget",
+                Some(128),
+                false,
+                RelayRecoveryActionKind::ReattachWatcher,
+                AUTO_HEAL_DEAD_FRONTIER_REATTACH_MAX_ATTEMPTS_PER_WINDOW,
+            ),
+            (
+                "the widened budget stays the ReattachWatcher lane's alone",
+                None,
+                true,
+                RelayRecoveryActionKind::DrainPendingQueue,
+                AUTO_HEAL_DEFAULT_MAX_ATTEMPTS_PER_WINDOW,
+            ),
+        ];
+        for (label, unread_bytes, watcher_attached_stale, action, expected) in cases {
+            assert_eq!(
+                max_attempts_per_window_for_snapshot(
+                    &dead_frontier(unread_bytes, watcher_attached_stale),
+                    action,
+                ),
+                expected,
+                "{label}"
+            );
+        }
+    }
+
     #[test]
     fn relay_recovery_internal_sources_share_budget_lane_manual_is_distinct() {
         let probe = auto_heal_key(

@@ -4035,11 +4035,14 @@ services::discord::relay_health::tests::a_disagreeing_parent_thread_pair_names_n
 services::discord::relay_health::tests::a_durable_row_needs_two_witnessed_generations_to_agree_or_to_mismatch
 services::discord::relay_health::tests::an_absent_coordinate_entry_is_not_a_zero_frontier
 services::discord::relay_health::tests::an_agreeing_parent_thread_pair_leaves_the_single_row_table_standing
+services::discord::relay_health::tests::dead_frontier_fires_on_an_unmeasured_tail_only_with_an_independent_witness
+services::discord::relay_health::tests::dead_frontier_shared_conjuncts_still_gate_the_witness_disjunct
 services::discord::relay_health::tests::frontier_provenance_discriminates_h1_from_h2
 services::discord::relay_health::tests::frontier_provenance_report_publishes_both_witnesses_and_the_hypothesis
 services::discord::relay_health::tests::idle_witness_tail_reads_unmeasured_as_waiting_only_when_a_row_is_present
 services::discord::relay_health::tests::observation_age_rejects_future_and_overflowing_timestamps
 services::discord::relay_health::tests::relay_stall_classifier_is_table_driven
+services::discord::relay_health::tests::s3_widening_moves_no_relay_stall_classification
 services::discord::relay_health::tests::serialized_snapshot_exposes_ages_but_not_internal_recheck_proof
 services::discord::relay_owner_observability::tests::finalizer_ledger_owner_extra_fields
 services::discord::relay_owner_observability::tests::inflight_clear_extra_carries_three_signals_and_flag
@@ -4058,6 +4061,7 @@ services::discord::relay_recovery::auto_heal_apply::tests::relay_recovery_reuse_
 services::discord::relay_recovery::auto_heal_apply::tests::relay_recovery_spawned_reattach_still_counts_applied_and_commits
 services::discord::relay_recovery::auto_heal_apply::tests::relay_recovery_startup_grace_consumes_budget_until_frontier_progress
 services::discord::relay_recovery::auto_heal_apply::tests::reserved_episode_replacement_at_apply_barrier_is_untouched
+services::discord::relay_recovery::auto_heal_attempts::tests::dead_frontier_reattach_budget_follows_the_s3_witness
 services::discord::relay_recovery::auto_heal_attempts::tests::relay_recovery_confirm_failure_counts_attempt_and_backs_off
 services::discord::relay_recovery::auto_heal_attempts::tests::relay_recovery_failed_spawn_refunds_reserved_budget
 services::discord::relay_recovery::auto_heal_attempts::tests::relay_recovery_internal_sources_share_budget_lane_manual_is_distinct

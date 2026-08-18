@@ -874,8 +874,13 @@ async fn build_health_snapshot_with_options(
                     // row. That one did let an unknown tail help assert liveness,
                     // running opposite to
                     // `RelayHealthSnapshot::relay_frontier_never_advanced_with_unread_tail`,
-                    // which reads the same field as `is_some_and(|b| b > 0)` and
-                    // declines to assert a FAILURE from an unmeasured tail.
+                    // whose tail term reads the same field (`is_some_and(|b| b > 0)`
+                    // in one disjunct, an unmeasured-`None` gate in the other) and
+                    // never lets an unmeasured tail carry a FAILURE on its own.
+                    // (#5071 relay-tail S3 gave that predicate a second disjunct
+                    // that fires while `unread_bytes` is `None`, but on an
+                    // independent watcher witness — the `None` permits it and
+                    // testifies to nothing, the same as here.)
                     // `idle_witness_tail_is_not_waiting` now requires `Some(0)`
                     // for that case, which is not the rowless population above —
                     // a row present with `active_turn == None` is its own live
