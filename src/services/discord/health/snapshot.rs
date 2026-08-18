@@ -211,11 +211,11 @@ impl RelayThreadProofSnapshot {
     /// #5071 relay-tail S1 (I-4): the OTHER end of this channel's parent/thread
     /// axis, if it has one.
     ///
-    /// Either field can hold it — the map is keyed thread → parent, so a thread
-    /// resolves its parent through the lookup and a parent resolves its thread
-    /// through the reverse scan — and only one of the two is populated for any
-    /// given channel. The polled channel itself is filtered out so a self-edge
-    /// can never read as an axis.
+    /// Either field can hold it — `dispatch.thread_parents` is keyed parent →
+    /// thread, so a PARENT resolves its thread through the lookup and a THREAD
+    /// resolves its parent through the reverse scan over the values — and only
+    /// one of the two is populated for any given channel. The polled channel
+    /// itself is filtered out so a self-edge can never read as an axis.
     fn counterpart_channel_id(&self, polled_channel_id: u64) -> Option<u64> {
         [self.thread_channel_id, self.parent_channel_id]
             .into_iter()
@@ -755,12 +755,13 @@ async fn build_health_snapshot_with_options(
                         || session.watcher_attached,
                 )
                 .await;
-                // #5071 relay-tail S1 (I-4): H3 is a claim about a PAIR of
-                // `ChannelId`s, so the counterpart's coordinate is read here,
-                // where the axis is already resolved, and handed to the table as
-                // a second independent witness. One more lock-free `.get()` on
-                // the same in-memory map; `None` when this channel is not part
-                // of a parent/thread pair, which leaves the single-row table.
+                // #5071 relay-tail S1 (I-4): the counterpart's coordinate is
+                // read here, where the axis is already resolved, and published
+                // beside this channel's own pair as raw evidence. It feeds NO
+                // hypothesis — H3 is deferred past S1 (design §1.4, §9's S1
+                // row) and the r1 review measured the cost of letting it decide
+                // early. One more lock-free `.get()` on the same in-memory map;
+                // `None` when this channel is not part of a parent/thread pair.
                 let counterpart_coord_observation = relay_thread_proof
                     .counterpart_channel_id(channel.get())
                     .map(|counterpart| {

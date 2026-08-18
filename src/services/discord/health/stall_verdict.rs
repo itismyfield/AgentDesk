@@ -1406,13 +1406,21 @@ mod tests {
             serialized["frontier_provenance"]["coord_observation"]["kind"],
             "absent"
         );
+        // r1 review (legA P1-1, legB P2-2): with no coordinate entry there is
+        // no live generation for the row's to be compared against, so the
+        // durable witness is `generation_unresolved` — H1's actual production
+        // shape — and it is NOT reported as an agreement it never made.
         assert_eq!(
             serialized["frontier_provenance"]["durable_observation"]["kind"],
-            "row_present"
+            "generation_unresolved"
         );
         assert_eq!(
             serialized["frontier_provenance"]["hypothesis"],
             "coord_entry_absent_with_durable_row"
+        );
+        assert!(
+            serialized["frontier_provenance"]["counterpart_coord_observation"].is_null(),
+            "a channel off any parent/thread axis reports no counterpart"
         );
         // #5071 T4-B6 (4987 §4.4): the composed verdict is published on the
         // same detail entry, and under `Structural` it announces that it

@@ -116,6 +116,9 @@ cli::doctor::health::health_classification_tests::opencode_warm_server_reason_co
 cli::doctor::health::health_classification_tests::reasons_evidence_preserves_actionable_reason_contract
 cli::doctor::health::health_classification_tests::startup_doctor_reasons_point_to_latest_report_endpoint
 cli::doctor::health::health_classification_tests::worker_recovery_reason_codes_classify
+cli::doctor::mailbox::tests::doctor_evidence_carries_both_frontier_witnesses_and_the_hypothesis
+cli::doctor::mailbox::tests::doctor_evidence_reports_missing_provenance_as_null
+cli::doctor::mailbox::tests::frontier_provenance_changes_no_doctor_verdict
 cli::doctor::orchestrator::profile_filter_tests::json_report_exposes_portable_readiness_sections
 cli::doctor::orchestrator::profile_filter_tests::postgres_checksum_mismatch_detail_includes_applied_and_resolved_hashes
 cli::doctor::orchestrator::profile_filter_tests::quick_profile_keeps_dispatch_outbox_checks
@@ -2646,6 +2649,7 @@ services::discord::health::session_enrichment::tests::health_reads_the_live_watc
 services::discord::health::session_enrichment::tests::health_reports_no_watcher_transcript_for_a_channel_without_a_binding
 services::discord::health::session_enrichment::tests::inflight_a_alive_watcher_b_dead_mismatch_probes_a
 services::discord::health::session_enrichment::tests::only_exact_dead_or_absent_maps_to_dead
+services::discord::health::session_enrichment::tests::the_health_poll_reports_an_absent_coordinate_as_absent
 services::discord::health::session_enrichment::tests::transcript_discovery_falls_back_to_the_inflight_row_and_then_to_nothing
 services::discord::health::session_enrichment::tests::transcript_discovery_prefers_the_live_watcher_over_the_inflight_row
 services::discord::health::snapshot::tests::a_green_relay_verdict_degrades_the_snapshot_in_neither_mode
@@ -4019,7 +4023,8 @@ services::discord::recovery_paths::shared::tests::transient_failure_counts_until
 services::discord::relay_coord_tests::relay_progress_heartbeat_stamps_each_confirmed_chunk
 services::discord::relay_health::frontier::tests::reset_frontier_publishes_a_new_incarnation_token
 services::discord::relay_health::frontier::tests::reset_yields_to_pending_mutation_on_same_thread_without_deadlock
-services::discord::relay_health::tests::a_durable_row_needs_two_witnessed_generations_to_be_a_mismatch
+services::discord::relay_health::tests::a_disagreeing_parent_thread_pair_names_no_hypothesis_in_s1
+services::discord::relay_health::tests::a_durable_row_needs_two_witnessed_generations_to_agree_or_to_mismatch
 services::discord::relay_health::tests::an_absent_coordinate_entry_is_not_a_zero_frontier
 services::discord::relay_health::tests::an_agreeing_parent_thread_pair_leaves_the_single_row_table_standing
 services::discord::relay_health::tests::frontier_provenance_discriminates_h1_from_h2
@@ -4027,7 +4032,6 @@ services::discord::relay_health::tests::frontier_provenance_report_publishes_bot
 services::discord::relay_health::tests::observation_age_rejects_future_and_overflowing_timestamps
 services::discord::relay_health::tests::relay_stall_classifier_is_table_driven
 services::discord::relay_health::tests::serialized_snapshot_exposes_ages_but_not_internal_recheck_proof
-services::discord::relay_health::tests::the_parent_thread_pair_is_what_discriminates_h3
 services::discord::relay_owner_observability::tests::finalizer_ledger_owner_extra_fields
 services::discord::relay_owner_observability::tests::inflight_clear_extra_carries_three_signals_and_flag
 services::discord::relay_owner_observability::tests::invariant_violated_only_on_committed_without_ui_or_obligation

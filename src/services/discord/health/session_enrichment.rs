@@ -11,22 +11,58 @@ use super::liveness_authority::{CaptureCoordinateObservation, CoordinateStatus};
 
 pub(super) const WATCHER_STATE_DESYNC_STALE_MS: i64 = 30_000;
 
-/// #5071 relay-tail S1 (I-4): read one channel's coordinate witness on its own.
+/// #5071 relay-tail S1 (I-4): one channel's relay coordinate, read once.
 ///
-/// [`SessionEnrichment::load`] reads the polled channel's inline, alongside the
-/// three values it already takes from the same entry. This exists for the OTHER
-/// end of a parent/thread axis, which `health::snapshot` resolves and no single
-/// channel's enrichment can see. One lock-free `.get()`; nothing is inserted,
-/// so a channel that has no entry keeps not having one.
+/// Both the offsets [`SessionEnrichment::load`] already took from this entry
+/// and the observation that says whether the entry existed at all come out of
+/// the SAME lookup, so the two cannot disagree and — the r1 review's point
+/// (legB P1-1) — there is exactly one place where a missing entry becomes a
+/// reading. Collapsing that miss into a zero is therefore one edit, and it is
+/// an edit the production poll path is tested through.
+struct CoordFrontierReading {
+    observation: CoordFrontierObservation,
+    /// `confirmed_end_offset`, `last_relay_ts_ms`, `reconnect_count` and
+    /// `confirmed_end_generation_mtime_ns` as of that lookup. `None` when the
+    /// map held no entry.
+    entry: Option<(u64, i64, u64, i64)>,
+}
+
+/// The single map read. Lock-free `.get()`; nothing is inserted, so a channel
+/// that has no entry keeps not having one.
+fn read_coord_frontier(shared: &SharedData, channel: ChannelId) -> CoordFrontierReading {
+    let entry = shared.tmux_relay_coords.get(&channel).map(|coord| {
+        (
+            coord
+                .confirmed_end_offset
+                .load(std::sync::atomic::Ordering::Acquire),
+            coord
+                .last_relay_ts_ms
+                .load(std::sync::atomic::Ordering::Acquire),
+            coord
+                .reconnect_count
+                .load(std::sync::atomic::Ordering::Acquire),
+            coord
+                .confirmed_end_generation_mtime_ns
+                .load(std::sync::atomic::Ordering::Acquire),
+        )
+    });
+    CoordFrontierReading {
+        observation: CoordFrontierObservation::observe(entry.map(|(offset, ..)| offset)),
+        entry,
+    }
+}
+
+/// The coordinate witness alone, for a channel this poll is not enriching —
+/// the OTHER end of a parent/thread axis, which `health::snapshot` resolves and
+/// no single channel's enrichment can see.
+///
+/// Same reader as the polled channel's own: [`SessionEnrichment::load`] calls
+/// [`read_coord_frontier`] too, rather than spelling the lookup a second time.
 pub(super) fn observe_coord_frontier(
     shared: &SharedData,
     channel: ChannelId,
 ) -> CoordFrontierObservation {
-    CoordFrontierObservation::observe(shared.tmux_relay_coords.get(&channel).map(|coord| {
-        coord
-            .confirmed_end_offset
-            .load(std::sync::atomic::Ordering::Acquire)
-    }))
+    read_coord_frontier(shared, channel).observation
 }
 
 #[derive(Debug)]
@@ -127,34 +163,21 @@ impl SessionEnrichment {
             inflight_tmux_session.as_deref(),
             watcher_binding_tmux_session.as_deref(),
         );
-        // #5071 relay-tail S1 (I-4): one lookup, two independent readings. The
-        // tuple below keeps its `unwrap_or((0, 0, 0))` meaning byte for byte —
-        // S2 owns making an unsourced frontier unknown — while
-        // `coord_observation` records whether that zero came from an entry or
-        // from the miss.
-        let coord_entry = shared.tmux_relay_coords.get(&channel).map(|coord| {
-            (
-                coord
-                    .confirmed_end_offset
-                    .load(std::sync::atomic::Ordering::Acquire),
-                coord
-                    .last_relay_ts_ms
-                    .load(std::sync::atomic::Ordering::Acquire),
-                coord
-                    .reconnect_count
-                    .load(std::sync::atomic::Ordering::Acquire),
-                coord
-                    .confirmed_end_generation_mtime_ns
-                    .load(std::sync::atomic::Ordering::Acquire),
-            )
-        });
-        let coord_observation =
-            CoordFrontierObservation::observe(coord_entry.map(|(offset, ..)| offset));
+        // #5071 relay-tail S1 (I-4): one lookup, two independent readings, and
+        // — since the r1 review — through the same reader the counterpart's
+        // observation goes through. The tuple below keeps its
+        // `unwrap_or((0, 0, 0))` meaning byte for byte, S2 owns making an
+        // unsourced frontier unknown, while `coord_observation` records whether
+        // that zero came from an entry or from the miss.
+        let coord = read_coord_frontier(shared, channel);
+        let coord_observation = coord.observation;
         // 0 is `TmuxRelayCoord`'s "never observed", not a generation.
-        let live_generation_mtime_ns = coord_entry
+        let live_generation_mtime_ns = coord
+            .entry
             .map(|(_, _, _, generation)| generation)
             .filter(|generation| *generation != 0);
-        let (last_relay_offset, last_relay_ts_ms, reconnect_count) = coord_entry
+        let (last_relay_offset, last_relay_ts_ms, reconnect_count) = coord
+            .entry
             .map(|(offset, relay_ts_ms, reconnects, _)| (offset, relay_ts_ms, reconnects))
             .unwrap_or((0, 0, 0));
         let durable_observation = DurableFrontierObservation::observe(
@@ -489,10 +512,53 @@ mod tests {
         );
     }
 
-    /// #5071 relay-tail S1 (I-4), design §9's S1 acceptance sentence, taken at
-    /// the coordinate read itself: a channel with no entry in the map polls as
-    /// `Absent`, an entry that never committed a byte polls as `PresentZero`,
-    /// and looking inserts nothing.
+    /// #5071 relay-tail S1 (I-4), design §9's S1 acceptance sentence taken on
+    /// the PRODUCTION POLL PATH: `SessionEnrichment::load` is what the health
+    /// poll calls, so that is where "coord 부재 폴이 `Absent`" has to hold.
+    ///
+    /// r1 review (legB P1-1): the lock used to live only on the pure
+    /// `CoordFrontierObservation::observe`, and `load` reached the same decision
+    /// down a line of its own — so collapsing the miss back into a zero THERE
+    /// left the whole repository green. This drives `load` itself. Passing no
+    /// provider keeps it off the inflight/transcript I/O and leaves the
+    /// coordinate as the only witness under test.
+    #[tokio::test]
+    async fn the_health_poll_reports_an_absent_coordinate_as_absent() {
+        let shared = discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(5_071_000_000_000_043);
+
+        let missed = SessionEnrichment::load(&shared, None, channel).await;
+        assert_eq!(
+            missed.frontier_provenance.coord_observation,
+            CoordFrontierObservation::Absent,
+            "a channel with no coordinate entry must poll as Absent, not as a zero frontier"
+        );
+        assert_eq!(
+            missed.last_relay_offset, 0,
+            "the tuple's unwrap_or zero is unchanged — S2 owns making it unknown"
+        );
+        assert!(
+            !shared.tmux_relay_coords.contains_key(&channel),
+            "the poll must not create the entry it failed to find"
+        );
+
+        let coord = std::sync::Arc::new(discord::TmuxRelayCoord::new(channel));
+        shared.tmux_relay_coords.insert(channel, coord);
+        let present = SessionEnrichment::load(&shared, None, channel).await;
+        assert_eq!(
+            present.frontier_provenance.coord_observation,
+            CoordFrontierObservation::PresentZero,
+            "an entry that never advanced is a different fact from no entry"
+        );
+        assert_eq!(
+            present.last_relay_offset, missed.last_relay_offset,
+            "both readings still produce the same frontier — only the provenance separates them"
+        );
+    }
+
+    /// The same acceptance at the counterpart reader, which observes a channel
+    /// no enrichment is loading. It shares [`read_coord_frontier`] with `load`,
+    /// so this and the poll test above fail together.
     #[test]
     fn a_channel_with_no_coordinate_entry_polls_as_absent() {
         let shared = discord::make_shared_data_for_tests();
