@@ -1,5 +1,8 @@
 use poise::serenity_prelude::ChannelId;
 
+use crate::services::discord::relay_health::{
+    CoordFrontierObservation, DurableFrontierObservation, FrontierProvenance,
+};
 use crate::services::discord::{self as discord, SharedData};
 use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::ProviderKind;
@@ -7,6 +10,112 @@ use crate::services::provider::ProviderKind;
 use super::liveness_authority::{CaptureCoordinateObservation, CoordinateStatus};
 
 pub(super) const WATCHER_STATE_DESYNC_STALE_MS: i64 = 30_000;
+
+/// #5071 relay-tail S1 (I-4): one channel's relay coordinate, read once.
+///
+/// Both the offsets [`SessionEnrichment::load`] already took from this entry
+/// and the observation that says whether the entry existed at all come out of
+/// the SAME lookup, so the two cannot disagree and — the r1 review's point
+/// (legB P1-1) — there is exactly one place where a missing entry becomes a
+/// reading. Collapsing that miss into a zero is therefore one edit, and it is
+/// an edit the production poll path is tested through.
+///
+/// r2 review (legA P2): "the same lookup" scopes the fields below and
+/// nothing else. [`SessionEnrichment::has_relay_coord`] is a SEPARATE
+/// `contains_key` on the same map, so an insert landing between the two can
+/// still publish `has_relay_coord = false` beside a `PresentZero` observation
+/// inside one poll. That window predates this slice and stays; what is
+/// corrected here is the claim, not the read.
+struct CoordFrontierReading {
+    observation: CoordFrontierObservation,
+    /// `confirmed_end_offset`, `last_relay_ts_ms` and `reconnect_count` as of
+    /// that lookup. `None` when the map held no entry.
+    entry: Option<(u64, i64, u64)>,
+    /// The generation the offset above is attributable to. `None` when the
+    /// entry witnesses none — never stamped, or the stamp moved under the read
+    /// (see [`observe_frontier_triple`]).
+    live_generation_ns: Option<i64>,
+}
+
+/// #5071 relay-tail S1 r3 (legA P1): what one entry's raw
+/// `(generation, offset, generation)` triple observes — `None` for the map
+/// miss, which keeps a missing entry becoming a reading in exactly one place.
+///
+/// `tmux_session_files::reset_relay_watermark_on_generation_change` CASes
+/// `confirmed_end_offset` to 0 and only THEN stores the new wrapper's
+/// `.generation` stamp. A poll loading the offset between those two writes sees
+/// `0` paired with the OLD generation, and against a durable row from that same
+/// old incarnation the pair reads `PresentZero × RowPresent` — H2 — for a reset
+/// in flight rather than for a coordinate that never advanced.
+///
+/// Same fence as `tmux_session_files::committed_frontier_for_current_generation`
+/// (#3358 r2): the stamp has to agree on both sides of the offset load. When it
+/// does not, the live generation is no witness for THIS offset, and `None`
+/// sends the durable side to `GenerationUnresolved` — Indeterminate — rather
+/// than to a hypothesis. `0` is the atomic's "never stamped", which is not a
+/// witness either.
+///
+/// The fence sees only a transition it straddles. A poll whose loads all land
+/// between the writer's two adjacent stores reads a stale-equal pair
+/// (`offset = 0` beside the old stamp) that both stamp loads agree on. The
+/// pair lives in `TmuxRelayCoord`'s process-local atomics — no await or
+/// failable operation separates the two stores, and a crash destroys the pair
+/// with the process rather than persisting it — so the exposure is transient —
+/// see [`crate::services::discord::relay_health::FrontierProvenance::hypothesis`].
+fn observe_frontier_triple(
+    triple: Option<(i64, u64, i64)>,
+) -> (CoordFrontierObservation, Option<i64>) {
+    let Some((generation_before, confirmed_end_offset, generation_after)) = triple else {
+        return (CoordFrontierObservation::observe(None), None);
+    };
+    let live_generation_ns = (generation_after != 0 && generation_before == generation_after)
+        .then_some(generation_after);
+    (
+        CoordFrontierObservation::observe(Some(confirmed_end_offset)),
+        live_generation_ns,
+    )
+}
+
+/// The single map read. Lock-free `.get()`; nothing is inserted, so a channel
+/// that has no entry keeps not having one.
+fn read_coord_frontier(shared: &SharedData, channel: ChannelId) -> CoordFrontierReading {
+    use std::sync::atomic::Ordering::Acquire;
+    let read = shared.tmux_relay_coords.get(&channel).map(|coord| {
+        // Generation, offset, generation — the fence `observe_frontier_triple`
+        // documents. The two remaining fields load after it, so nothing widens
+        // the window between the stamp reads.
+        let generation_before = coord.confirmed_end_generation_mtime_ns.load(Acquire);
+        let confirmed_end_offset = coord.confirmed_end_offset.load(Acquire);
+        let generation_after = coord.confirmed_end_generation_mtime_ns.load(Acquire);
+        (
+            (generation_before, confirmed_end_offset, generation_after),
+            (
+                confirmed_end_offset,
+                coord.last_relay_ts_ms.load(Acquire),
+                coord.reconnect_count.load(Acquire),
+            ),
+        )
+    });
+    let (observation, live_generation_ns) = observe_frontier_triple(read.map(|(triple, _)| triple));
+    CoordFrontierReading {
+        observation,
+        entry: read.map(|(_, entry)| entry),
+        live_generation_ns,
+    }
+}
+
+/// The coordinate witness alone, for a channel this poll is not enriching —
+/// the OTHER end of a parent/thread axis, which `health::snapshot` resolves and
+/// no single channel's enrichment can see.
+///
+/// Same reader as the polled channel's own: [`SessionEnrichment::load`] calls
+/// [`read_coord_frontier`] too, rather than spelling the lookup a second time.
+pub(super) fn observe_coord_frontier(
+    shared: &SharedData,
+    channel: ChannelId,
+) -> CoordFrontierObservation {
+    read_coord_frontier(shared, channel).observation
+}
 
 #[derive(Debug)]
 pub(super) struct SessionEnrichment {
@@ -50,6 +159,10 @@ pub(super) struct SessionEnrichment {
     pub unread_bytes: Option<u64>,
     pub relay_stale: bool,
     pub capture_lagged: bool,
+    /// #5071 relay-tail S1 (I-4): which witnesses produced the frontier fields
+    /// above. Descriptive — no field on this struct changed source or polarity
+    /// because of it, and nothing but the health detail reads it.
+    pub frontier_provenance: FrontierProvenance,
 }
 
 impl SessionEnrichment {
@@ -102,23 +215,27 @@ impl SessionEnrichment {
             inflight_tmux_session.as_deref(),
             watcher_binding_tmux_session.as_deref(),
         );
-        let (last_relay_offset, last_relay_ts_ms, reconnect_count) = shared
-            .tmux_relay_coords
-            .get(&channel)
-            .map(|coord| {
-                (
-                    coord
-                        .confirmed_end_offset
-                        .load(std::sync::atomic::Ordering::Acquire),
-                    coord
-                        .last_relay_ts_ms
-                        .load(std::sync::atomic::Ordering::Acquire),
-                    coord
-                        .reconnect_count
-                        .load(std::sync::atomic::Ordering::Acquire),
-                )
-            })
-            .unwrap_or((0, 0, 0));
+        // #5071 relay-tail S1 (I-4): one lookup, two independent readings, and
+        // — since the r1 review — through the same reader the counterpart's
+        // observation goes through. The tuple below keeps its
+        // `unwrap_or((0, 0, 0))` meaning byte for byte, S2 owns making an
+        // unsourced frontier unknown, while `coord_observation` records whether
+        // that zero came from an entry or from the miss.
+        let coord = read_coord_frontier(shared, channel);
+        let coord_observation = coord.observation;
+        let live_generation_mtime_ns = coord.live_generation_ns;
+        let (last_relay_offset, last_relay_ts_ms, reconnect_count) =
+            coord.entry.unwrap_or((0, 0, 0));
+        let durable_observation = DurableFrontierObservation::observe(
+            inflight
+                .as_ref()
+                .and_then(|state| state.last_watcher_relayed_offset),
+            inflight
+                .as_ref()
+                .and_then(|state| state.last_watcher_relayed_generation_mtime_ns)
+                .filter(|generation| *generation != 0),
+            live_generation_mtime_ns,
+        );
         let output_path_for_metadata = inflight
             .as_ref()
             .and_then(|state| state.output_path.as_deref())
@@ -173,6 +290,10 @@ impl SessionEnrichment {
             unread_bytes,
             relay_stale,
             capture_lagged,
+            frontier_provenance: FrontierProvenance::observe(
+                coord_observation,
+                durable_observation,
+            ),
         };
         enrichment.record_transcript_source_divergence(channel);
         enrichment
@@ -434,6 +555,142 @@ mod tests {
             watcher_output_path_from_binding(binding.as_ref()).as_deref(),
             Some(NATIVE_TRANSCRIPT),
             "the enrichment must carry the live handle's transcript, not None"
+        );
+    }
+
+    /// #5071 relay-tail S1 r3 (legA P1): parking the offset at 0 and stamping
+    /// the new wrapper's generation are two writes, so a poll can load the 0
+    /// while the stamp is still the OLD one. Against a durable row from that
+    /// same old incarnation the pair reads as H2 — a coordinate that never
+    /// advanced while the row relayed in this incarnation — for a reset in
+    /// flight.
+    ///
+    /// Driven through the raw triple rather than through a race, because the
+    /// fence IS the second generation load: read the stamp once and the torn
+    /// triple below either witnesses `OLD` and names H2, or witnesses `NEW`
+    /// and stops being `None` — either way this fails.
+    #[test]
+    fn a_generation_stamp_moving_under_the_offset_read_witnesses_nothing() {
+        use crate::services::discord::relay_health::FrontierHypothesis;
+
+        const OLD_GENERATION_NS: i64 = 1_700_491_601_000_000_000;
+        const NEW_GENERATION_NS: i64 = 1_700_491_777_000_000_000;
+        // The row relayed under the wrapper the reset is retiring.
+        let hypothesis_of = |triple| {
+            let (coord_observation, live_generation_ns) = observe_frontier_triple(triple);
+            FrontierProvenance::observe(
+                coord_observation,
+                DurableFrontierObservation::observe(
+                    Some(4_096),
+                    Some(OLD_GENERATION_NS),
+                    live_generation_ns,
+                ),
+            )
+            .hypothesis()
+        };
+
+        assert_eq!(
+            observe_frontier_triple(Some((OLD_GENERATION_NS, 0, NEW_GENERATION_NS))),
+            (CoordFrontierObservation::PresentZero, None),
+            "a stamp that moved across the offset load witnesses nothing for that offset"
+        );
+        assert_eq!(
+            hypothesis_of(Some((OLD_GENERATION_NS, 0, NEW_GENERATION_NS))),
+            FrontierHypothesis::Indeterminate,
+            "a reset caught in flight is not a coordinate that never advanced"
+        );
+        assert_eq!(
+            hypothesis_of(Some((OLD_GENERATION_NS, 0, OLD_GENERATION_NS))),
+            FrontierHypothesis::CoordNeverAdvancedWithDurableRow,
+            "a stamp that held still across the load is the witness H2 is conditioned on"
+        );
+        assert_eq!(
+            observe_frontier_triple(Some((0, 4_096, 0))),
+            (CoordFrontierObservation::Advanced { offset: 4_096 }, None),
+            "the atomic's never-stamped zero is no generation, agreeing with itself or not"
+        );
+        assert_eq!(
+            observe_frontier_triple(None),
+            (CoordFrontierObservation::Absent, None),
+            "the map miss still becomes a reading in exactly one place"
+        );
+    }
+
+    /// #5071 relay-tail S1 (I-4), design §9's S1 acceptance sentence taken on
+    /// the PRODUCTION POLL PATH: `SessionEnrichment::load` is what the health
+    /// poll calls, so that is where "coord 부재 폴이 `Absent`" has to hold.
+    ///
+    /// r1 review (legB P1-1): the lock used to live only on the pure
+    /// `CoordFrontierObservation::observe`, and `load` reached the same decision
+    /// down a line of its own — so collapsing the miss back into a zero THERE
+    /// left the whole repository green. This drives `load` itself. Passing no
+    /// provider keeps it off the inflight/transcript I/O and leaves the
+    /// coordinate as the only witness under test.
+    #[tokio::test]
+    async fn the_health_poll_reports_an_absent_coordinate_as_absent() {
+        let shared = discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(5_071_000_000_000_043);
+
+        let missed = SessionEnrichment::load(&shared, None, channel).await;
+        assert_eq!(
+            missed.frontier_provenance.coord_observation,
+            CoordFrontierObservation::Absent,
+            "a channel with no coordinate entry must poll as Absent, not as a zero frontier"
+        );
+        assert_eq!(
+            missed.last_relay_offset, 0,
+            "the tuple's unwrap_or zero is unchanged — S2 owns making it unknown"
+        );
+        assert!(
+            !shared.tmux_relay_coords.contains_key(&channel),
+            "the poll must not create the entry it failed to find"
+        );
+
+        let coord = std::sync::Arc::new(discord::TmuxRelayCoord::new(channel));
+        shared.tmux_relay_coords.insert(channel, coord);
+        let present = SessionEnrichment::load(&shared, None, channel).await;
+        assert_eq!(
+            present.frontier_provenance.coord_observation,
+            CoordFrontierObservation::PresentZero,
+            "an entry that never advanced is a different fact from no entry"
+        );
+        assert_eq!(
+            present.last_relay_offset, missed.last_relay_offset,
+            "both readings still produce the same frontier — only the provenance separates them"
+        );
+    }
+
+    /// The same acceptance at the counterpart reader, which observes a channel
+    /// no enrichment is loading. It shares [`read_coord_frontier`] with `load`,
+    /// so this and the poll test above fail together.
+    #[test]
+    fn a_channel_with_no_coordinate_entry_polls_as_absent() {
+        let shared = discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(5_071_000_000_000_042);
+
+        assert_eq!(
+            observe_coord_frontier(&shared, channel),
+            CoordFrontierObservation::Absent
+        );
+        assert!(
+            !shared.tmux_relay_coords.contains_key(&channel),
+            "observing must not create the entry it failed to find"
+        );
+
+        let coord = std::sync::Arc::new(discord::TmuxRelayCoord::new(channel));
+        shared.tmux_relay_coords.insert(channel, coord.clone());
+        assert_eq!(
+            observe_coord_frontier(&shared, channel),
+            CoordFrontierObservation::PresentZero,
+            "an entry that never advanced is a different fact from no entry"
+        );
+
+        coord
+            .confirmed_end_offset
+            .store(4_096, std::sync::atomic::Ordering::Release);
+        assert_eq!(
+            observe_coord_frontier(&shared, channel),
+            CoordFrontierObservation::Advanced { offset: 4_096 }
         );
     }
 
