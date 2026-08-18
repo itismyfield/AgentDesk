@@ -360,7 +360,7 @@ pub(in crate::services::discord) struct RelayHealthSnapshot {
 
 impl RelayHealthSnapshot {
     #[cfg(test)]
-    fn test_snapshot() -> Self {
+    pub(in crate::services::discord) fn test_snapshot() -> Self {
         Self {
             provider: "codex".to_string(),
             channel_id: 42,
@@ -401,9 +401,60 @@ impl RelayHealthSnapshot {
             || self.bridge_inflight_present
     }
 
+    /// The three watcher terms that each say this binding is NOT a live relay
+    /// owner: no handle attached, an attached handle whose heartbeat is stale
+    /// (`watcher_attached_stale`), or an in-flight row that does not record the
+    /// watcher as owning the live relay. `watcher_owns_live_relay` is read off
+    /// the row (`SessionEnrichment::watcher_owns_live_relay`) and not off the
+    /// handle, so the first and third terms are independent observations rather
+    /// than one restated twice.
+    ///
+    /// This is exactly the guard `RelayStallClassifier::classify` and
+    /// `relay_recovery::decision::eligible_reattach_watcher` already place to
+    /// the LEFT of their
+    /// [`Self::relay_frontier_never_advanced_with_unread_tail`] call — both now
+    /// spell it through this method. That shared spelling is what makes the
+    /// absorption keeping those two call sites invariant under #5071 relay-tail
+    /// S3 a property of one term instead of a coincidence between three
+    /// duplicated ones: with `A` this method and `U` a measured waiting tail,
+    /// `A || (rest && (U || (!measured && A)))` reduces to `A || (rest && U)`,
+    /// which is what each site decided before S3.
+    pub(in crate::services::discord) fn watcher_binding_is_not_a_live_relay_owner(&self) -> bool {
+        !self.watcher_attached || self.watcher_attached_stale || !self.watcher_owns_live_relay
+    }
+
     /// True for the restart/desync signature where a watcher handle still looks
     /// live and may even own the tmux session, but the relay frontier never
     /// advanced while the transcript/capture accumulated bytes.
+    ///
+    /// #5071 relay-tail S3: the tail term is a disjunction because on its own it
+    /// now UNDER-fires. `unread_bytes` became three-valued when S1 withdrew the
+    /// durable-frontier synthesis, and its `None` — the enumeration is on
+    /// [`Self::idle_witness_tail_is_not_waiting`] — makes `is_some_and(> 0)`
+    /// false without anything having been measured, silencing dead frontiers
+    /// that are otherwise fully witnessed. Of that three-arm enumeration, the
+    /// only arm this disjunct can actually reach in production is the third
+    /// (row/binding tmux mismatch → frontier unattributable): the other two
+    /// arms leave `last_capture_offset` at `None` as well, so they already fall
+    /// out of the `capture > relay` conjunct above and stay permanently silent
+    /// after S3. In that reachable arm `desynced` is implied (the mismatch is
+    /// one of its disjuncts in `session_enrichment`), so the effective gate is
+    /// mismatch + live pane + capture ahead of a never-moved frontier + an
+    /// independent witness. The second disjunct fires those from
+    /// evidence that never passes through the tail:
+    /// [`Self::watcher_binding_is_not_a_live_relay_owner`]. It is gated on the
+    /// tail being unmeasured, so a measured `Some(0)` keeps its S2 meaning — a
+    /// real drained-tail measurement, which this predicate does not overrule —
+    /// and an unmeasured tail still never fires this predicate by itself.
+    ///
+    /// `last_capture_offset > 0` is deliberately NOT restated in that disjunct:
+    /// the `capture > self.last_relay_offset` conjunct above already entails it
+    /// for every `u64` value of `last_relay_offset`, and the `last_relay_offset
+    /// == 0` conjunct entails it a second time.
+    ///
+    /// A dead tmux session is not available as one of those witnesses:
+    /// `tmux_alive == Some(true)` is a conjunct here, so every shape this
+    /// predicate describes is a live pane whose relay is dead.
     pub(in crate::services::discord) fn relay_frontier_never_advanced_with_unread_tail(
         &self,
     ) -> bool {
@@ -414,7 +465,9 @@ impl RelayHealthSnapshot {
             && self
                 .last_capture_offset
                 .is_some_and(|capture| capture > self.last_relay_offset)
-            && self.unread_bytes.is_some_and(|bytes| bytes > 0)
+            && (self.unread_bytes.is_some_and(|bytes| bytes > 0)
+                || (self.unread_bytes.is_none()
+                    && self.watcher_binding_is_not_a_live_relay_owner()))
     }
 
     /// #5071 relay-tail S2: the reading of `unread_bytes` that 4987 §-1.4's
@@ -450,10 +503,14 @@ impl RelayHealthSnapshot {
     /// arm requires is that the measurement was attempted and read empty: with a
     /// row present the `None` is unknown, and an unknown tail cannot witness
     /// liveness whether the stat failed, the path was absent or the frontier was
-    /// unattributable. That is the fail-closed reading, the same one
-    /// [`Self::relay_frontier_never_advanced_with_unread_tail`] takes from the
-    /// other side when it declines to assert a FAILURE from an unmeasured tail.
-    /// The row-present `None` that
+    /// unattributable. That is the fail-closed reading.
+    /// [`Self::relay_frontier_never_advanced_with_unread_tail`] takes the same
+    /// one from the other side, in the scope #5071 relay-tail S3 left it: an
+    /// unmeasured tail never carries that FAILURE by itself there either. S3
+    /// did give it a second disjunct that can fire while `unread_bytes` is
+    /// `None`, but what fires it is an independent watcher witness and the
+    /// `None` only permits it — the field still testifies to nothing on either
+    /// side. The row-present `None` that
     /// `reachability::composite_tests::section_6_2_enrichment` builds is the
     /// failed-stat one. What `Some(0)` itself does and does not prove is in
     /// `relay_recovery::unread_tail_is_proven_drained`.
@@ -485,12 +542,9 @@ impl RelayStallClassifier {
     pub(in crate::services::discord) fn classify(
         snapshot: &RelayHealthSnapshot,
     ) -> RelayStallState {
-        let live_watcher_owns_relay = snapshot.watcher_attached
-            && !snapshot.watcher_attached_stale
-            && snapshot.watcher_owns_live_relay;
         if snapshot.tmux_alive == Some(true)
             && snapshot.desynced
-            && (!live_watcher_owns_relay
+            && (snapshot.watcher_binding_is_not_a_live_relay_owner()
                 || snapshot.relay_frontier_never_advanced_with_unread_tail())
         {
             return RelayStallState::TmuxAliveRelayDead;
@@ -578,6 +632,224 @@ mod tests {
                 expected,
                 "{label}"
             );
+        }
+    }
+
+    /// The shape every #5071 relay-tail S3 row shares: a live pane, a desync,
+    /// and a capture coordinate ahead of a relay frontier that never moved. Only
+    /// the tail term and the three watcher terms vary across the rows.
+    fn dead_frontier_shape(
+        unread_bytes: Option<u64>,
+        watcher_attached: bool,
+        watcher_attached_stale: bool,
+        watcher_owns_live_relay: bool,
+    ) -> RelayHealthSnapshot {
+        RelayHealthSnapshot {
+            desynced: true,
+            tmux_alive: Some(true),
+            last_relay_ts_ms: None,
+            last_relay_offset: 0,
+            last_capture_offset: Some(128),
+            unread_bytes,
+            watcher_attached,
+            watcher_attached_stale,
+            watcher_owns_live_relay,
+            ..RelayHealthSnapshot::test_snapshot()
+        }
+    }
+
+    /// #5071 relay-tail S3: the tail term alone under-fires once S1 made
+    /// `unread_bytes` three-valued, so an independent watcher witness fires the
+    /// predicate on an unmeasured tail — and only on an unmeasured one.
+    ///
+    /// Deleting the `watcher_binding_is_not_a_live_relay_owner()` disjunct from
+    /// the predicate kills the three witness rows; deleting the
+    /// `unread_bytes.is_none()` gate beside it kills the drained-tail row.
+    #[test]
+    fn dead_frontier_fires_on_an_unmeasured_tail_only_with_an_independent_witness() {
+        let cases: Vec<(&str, Option<u64>, bool, bool, bool, bool)> = vec![
+            (
+                "measured waiting tail under a live owning watcher: the pre-S3 path, unchanged",
+                Some(128),
+                true,
+                false,
+                true,
+                true,
+            ),
+            (
+                "unmeasured tail with no other dead witness stays silent",
+                None,
+                true,
+                false,
+                true,
+                false,
+            ),
+            (
+                "unmeasured tail plus a stale watcher heartbeat fires",
+                None,
+                true,
+                true,
+                true,
+                true,
+            ),
+            (
+                "unmeasured tail plus a row that does not own the live relay fires",
+                None,
+                true,
+                false,
+                false,
+                true,
+            ),
+            (
+                "unmeasured tail plus no attached handle fires",
+                None,
+                false,
+                false,
+                true,
+                true,
+            ),
+            (
+                "a measured drained tail is a real measurement and the witness does not overrule it",
+                Some(0),
+                true,
+                true,
+                true,
+                false,
+            ),
+            (
+                "a measured waiting tail fires on the tail alone, witness or not",
+                Some(128),
+                true,
+                true,
+                true,
+                true,
+            ),
+        ];
+        for (label, unread_bytes, attached, stale, owns_live_relay, expected) in cases {
+            let snapshot = dead_frontier_shape(unread_bytes, attached, stale, owns_live_relay);
+            assert_eq!(
+                snapshot.relay_frontier_never_advanced_with_unread_tail(),
+                expected,
+                "{label}"
+            );
+        }
+    }
+
+    /// S3 widened the tail term and nothing else: the shared conjuncts still
+    /// gate every firing, the witness-driven one included.
+    #[test]
+    fn dead_frontier_shared_conjuncts_still_gate_the_witness_disjunct() {
+        let witnessed = || dead_frontier_shape(None, true, true, true);
+        assert!(
+            witnessed().relay_frontier_never_advanced_with_unread_tail(),
+            "the witness row this test negates must itself fire"
+        );
+
+        let cases: Vec<(&str, RelayHealthSnapshot)> = vec![
+            (
+                "no desync",
+                RelayHealthSnapshot {
+                    desynced: false,
+                    ..witnessed()
+                },
+            ),
+            (
+                "tmux is not alive, so this is not a live-pane dead relay",
+                RelayHealthSnapshot {
+                    tmux_alive: Some(false),
+                    ..witnessed()
+                },
+            ),
+            (
+                "tmux liveness unknown",
+                RelayHealthSnapshot {
+                    tmux_alive: None,
+                    ..witnessed()
+                },
+            ),
+            (
+                "the relay did emit once, so the frontier is not never-advanced",
+                RelayHealthSnapshot {
+                    last_relay_ts_ms: Some(1_777_001_234_000),
+                    ..witnessed()
+                },
+            ),
+            (
+                "the relay frontier already moved off zero",
+                RelayHealthSnapshot {
+                    last_relay_offset: 128,
+                    ..witnessed()
+                },
+            ),
+            (
+                "no capture coordinate to be ahead of the frontier",
+                RelayHealthSnapshot {
+                    last_capture_offset: None,
+                    ..witnessed()
+                },
+            ),
+            (
+                "the capture coordinate never passed the frontier",
+                RelayHealthSnapshot {
+                    last_capture_offset: Some(0),
+                    ..witnessed()
+                },
+            ),
+        ];
+        for (label, snapshot) in cases {
+            assert!(
+                !snapshot.relay_frontier_never_advanced_with_unread_tail(),
+                "{label}"
+            );
+        }
+    }
+
+    /// #5071 relay-tail S3 blast radius at the one consumer that CLASSIFIES
+    /// rather than repairs. `classify` guards its predicate read with
+    /// `watcher_binding_is_not_a_live_relay_owner()`, which is exactly what the
+    /// new disjunct requires, so `A || (rest && (U || (!measured && A)))`
+    /// absorbs back to the pre-S3 `A || (rest && U)`. This enumerates the whole
+    /// watcher x tail cross-product on the dead-frontier shape and finds no
+    /// input whose classification moved.
+    #[test]
+    fn s3_widening_moves_no_relay_stall_classification() {
+        for attached in [false, true] {
+            for stale in [false, true] {
+                for owns_live_relay in [false, true] {
+                    for unread_bytes in [None, Some(0_u64), Some(128_u64)] {
+                        let snapshot =
+                            dead_frontier_shape(unread_bytes, attached, stale, owns_live_relay);
+                        let label = format!(
+                            "attached={attached} stale={stale} owns_live_relay={owns_live_relay} unread_bytes={unread_bytes:?}"
+                        );
+
+                        // Every shared conjunct of the predicate holds on this
+                        // shape, so its pre-S3 value here was exactly the tail
+                        // term — which is what makes this a faithful stand-in
+                        // for the branch `classify` took before S3.
+                        let pre_s3_relay_dead = snapshot
+                            .watcher_binding_is_not_a_live_relay_owner()
+                            || snapshot.unread_bytes.is_some_and(|bytes| bytes > 0);
+                        let s3_relay_dead = snapshot.watcher_binding_is_not_a_live_relay_owner()
+                            || snapshot.relay_frontier_never_advanced_with_unread_tail();
+                        assert_eq!(
+                            s3_relay_dead, pre_s3_relay_dead,
+                            "S3 moved the relay-dead branch for {label}"
+                        );
+
+                        let expected = if pre_s3_relay_dead {
+                            RelayStallState::TmuxAliveRelayDead
+                        } else {
+                            RelayStallState::Healthy
+                        };
+                        assert_eq!(
+                            RelayStallClassifier::classify(&snapshot),
+                            expected,
+                            "{label}"
+                        );
+                    }
+                }
+            }
         }
     }
 
