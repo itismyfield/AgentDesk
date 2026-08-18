@@ -2450,7 +2450,7 @@ services::discord::health::provider_probe::tests::classifier_preserves_healthy_p
 services::discord::health::provider_probe::tests::classifier_reports_probe_degradation_reasons
 services::discord::health::provider_probe::tests::mixed_gateway_and_standby_is_not_classified_as_cluster_standby
 services::discord::health::provider_probe::tests::registered_idle_standby_is_degraded_but_http_ready
-services::discord::health::provider_probe::tests::stalled_reconcile_blocks_exactly_what_in_progress_blocked
+services::discord::health::provider_probe::tests::stalled_reconcile_keeps_the_in_progress_health_axes
 services::discord::health::provider_probe::tests::standby_live_and_finalizing_evidence_remains_visible_for_fail_closed_restart
 services::discord::health::provider_probe::tests::standby_role_only_ignores_gateway_disconnect_and_masks_no_other_axis
 services::discord::health::provider_probe::tests::unfinished_reconcile_is_promoted_to_stalled_after_the_threshold
@@ -4454,6 +4454,7 @@ services::discord::runtime_bootstrap::spawns::tests::cancellation_restores_admis
 services::discord::runtime_bootstrap::spawns::tests::stale_nonce_cannot_commit_persistence_or_remove_newer_marker
 services::discord::runtime_bootstrap::spawns::tests::standby_marker_fences_intake_exposes_ack_and_counts_shutdown_once
 services::discord::runtime_bootstrap::spawns::tests::superseded_owner_releases_slot_but_preserves_fence_for_next_nonce
+services::discord::runtime_bootstrap::startup_doctor::startup_doctor_rearm_tests::a_registration_during_the_skip_write_still_rearms_the_doctor
 services::discord::runtime_bootstrap::startup_doctor::startup_doctor_rearm_tests::closed_window_gives_up_even_while_the_generation_moves
 services::discord::runtime_bootstrap::startup_doctor::startup_doctor_rearm_tests::late_registration_rearms_the_released_barrier
 services::discord::runtime_bootstrap::startup_doctor::startup_doctor_rearm_tests::unchanged_generation_inside_the_window_holds

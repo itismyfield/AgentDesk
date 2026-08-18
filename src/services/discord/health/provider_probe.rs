@@ -161,9 +161,12 @@ fn classify_provider(
         degraded_reasons.push(format!("provider:{provider_name}:restart_pending"));
     }
     if !signals.reconcile_done {
-        // The promotion renames a finite obligation; it deliberately keeps the
-        // same `status` and `fully_recovered` effect as `reconcile_in_progress`,
-        // so a stalled reconcile still blocks exactly what it blocked before.
+        // The promotion renames a finite obligation; the `status` and
+        // `fully_recovered` effects are identical to `reconcile_in_progress`, so
+        // no reader of those two axes changes polarity. The reason STRING is what
+        // discriminates the two: the deploy readiness gate tolerates
+        // `reconcile_in_progress` and denies `reconcile_stalled`
+        // (`_defaults.sh::_health_json_has_reconcile_stalled`, #5071 S0 r2 F3).
         status = status.worsen(HealthStatus::Degraded);
         let reason = if reconcile_stalled(signals.reconcile_done, signals.reconcile_age) {
             "reconcile_stalled"
@@ -451,9 +454,12 @@ mod tests {
     }
 
     // The promotion is a rename, not an admission: it keeps the exact status and
-    // `fully_recovered` effect the pre-threshold reason had.
+    // `fully_recovered` effect the pre-threshold reason had. Scope note (#5071 S0
+    // r2 F3): this covers the two HEALTH axes only — the deploy gate deliberately
+    // does not treat the two reasons alike, and that difference lives in
+    // `_defaults.sh`, not here.
     #[test]
-    fn stalled_reconcile_blocks_exactly_what_in_progress_blocked() {
+    fn stalled_reconcile_keeps_the_in_progress_health_axes() {
         let in_progress = classify_provider(
             "codex",
             ProviderRuntimeRole::Gateway,

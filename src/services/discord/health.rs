@@ -212,8 +212,26 @@ pub fn bot_token_reload_scopes() -> BotTokenReloadScopes {
 /// Boot-relative age at which a provider's unfinished reconcile stops being
 /// reported as in-progress and is promoted to a named stalled diagnosis (#5449).
 /// The promotion does not release the deploy block — it only bounds how long the
-/// block stays anonymous. Shared with the startup-doctor rearm window so one
-/// boot cannot be simultaneously "still waiting to diagnose" and "stalled".
+/// block stays anonymous.
+///
+/// Also reused as the startup-doctor rearm window
+/// (`STARTUP_DOCTOR_REARM_WINDOW`). #5071 S0 r2 F4: that sharing is NOT an
+/// exclusivity proof, and an earlier version of this doc claimed one. The two
+/// clocks have different origins — this age runs from the provider's
+/// `RestartLifecycle::recovery_started_at`, stamped when its `SharedData` is
+/// built and therefore already ticking before it registers, while the rearm
+/// window runs from the barrier's release — so a provider whose reconcile is
+/// already old can register into a still-open rearm window and be reported as
+/// stalled while that window runs.
+///
+/// What actually keeps a boot from pairing a `reconcile_stalled` reason with a
+/// stale no-provider skip is the pair of cases the rearm covers, not the shared
+/// constant:
+///   • a provider that registers is observed by the rearm poll within one
+///     `STARTUP_DOCTOR_REARM_POLL_INTERVAL` and the skip is replaced;
+///   • if none registers, `provider_probe` has no registered provider to
+///     attribute a `provider:<name>:reconcile_stalled` reason to — an empty
+///     registry reports `no_providers_registered` instead.
 pub(in crate::services::discord) const RECONCILE_STALL_AFTER: std::time::Duration =
     std::time::Duration::from_secs(180);
 

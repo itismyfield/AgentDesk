@@ -514,6 +514,91 @@ _health_json_reconcile_only() {
   return 0
 }
 
+_health_json_has_reconcile_stalled() {
+  # #5071 S0 r2 F3: TRUE when the body names at least one provider whose
+  # reconcile outlived `health::RECONCILE_STALL_AFTER` and was therefore promoted
+  # from `reconcile_in_progress` to `reconcile_stalled`. Unlike
+  # `_health_json_reconcile_only` this is an ANY test, not an ONLY test: one
+  # stalled provider blocks the deploy however many other reasons ride along.
+  #
+  # `<name>` is matched with `.*` rather than `[^:]+` because an operator-chosen
+  # `ProviderKind::Unsupported(_)` id may itself contain `:` and /api/health/detail
+  # re-emits it verbatim (the public body collapses it to `unsupported`).
+  local health_json="$1"
+  local reasons_csv reason
+  [ -n "$health_json" ] || return 1
+
+  if _health_json_has_jq; then
+    printf '%s' "$health_json" | jq -e '
+      any((.degraded_reasons // [])[];
+          type == "string" and test("^provider:.*:reconcile_stalled$"))
+    ' >/dev/null 2>&1
+    return
+  fi
+
+  reasons_csv=$(_health_json_reasons "$health_json" || true)
+  [ -n "$reasons_csv" ] || return 1
+
+  while IFS=, read -r reason; do
+    if [[ "$reason" =~ ^provider:.*:reconcile_stalled$ ]]; then
+      return 0
+    fi
+  done <<< "$reasons_csv"
+
+  return 1
+}
+
+_health_json_names_a_provider_runtime() {
+  # #5071 S0 r2 F2: TRUE when the body ITSELF proves at least one provider
+  # runtime is registered — which makes the #4348 no-provider rescue's premise
+  # false. Two independent markers, because the fact surfaces differently on the
+  # two bodies a caller can be holding:
+  #   • a `degraded_reasons` entry shaped `provider:<name>:<reason>`. Those are
+  #     emitted per REGISTERED provider by `health::provider_probe`
+  #     (`classify_provider`); the unauthenticated /api/health body keeps the
+  #     `provider:` prefix and only rewrites an unrecognised `<name>` to
+  #     `unsupported` (`sanitize_public_degraded_reasons`), so the prefix survives
+  #     on the public body as well as on /api/health/detail. No other reason
+  #     producer uses the `provider:` prefix (the non-provider axes are
+  #     `db_unavailable`, `dispatch_outbox_oldest_pending_age:<n>`,
+  #     `disk_low_free_bytes:<n>`, `pipeline_override_warnings:<n>`, the opencode
+  #     warm-pool reasons and `no_providers_registered`).
+  #   • a non-empty top-level `providers` array, which /api/health/detail carries
+  #     and the public projection omits.
+  # A genuinely provider-less node matches NEITHER — its registry-empty axis is
+  # the reason-less `no_providers_registered` — so the #4348 rescue still applies
+  # to exactly the topology it was written for.
+  local health_json="$1"
+  local reasons_csv reason providers_raw
+  [ -n "$health_json" ] || return 1
+
+  if _health_json_has_jq; then
+    printf '%s' "$health_json" | jq -e '
+      (any((.degraded_reasons // [])[]; type == "string" and startswith("provider:")))
+      or (((.providers // []) | length) > 0)
+    ' >/dev/null 2>&1
+    return
+  fi
+
+  # jq-less fallback. Same two paths jq reads, both top-level only.
+  reasons_csv=$(_health_json_reasons "$health_json" || true)
+  if [ -n "$reasons_csv" ]; then
+    while IFS=, read -r reason; do
+      case "$reason" in
+        provider:*) return 0 ;;
+      esac
+    done <<< "$reasons_csv"
+  fi
+
+  providers_raw=$(_health_json_top_level_field_raw "providers" "$(_health_json_compact "$health_json")")
+  case "$providers_raw" in
+    '[]'|'') ;;
+    '['*']') return 0 ;;
+  esac
+
+  return 1
+}
+
 _health_json_unhealthy_only_no_provider_runtimes() {
   # #4348 DEPLOY/RESTART readiness rescue — NOT a runtime /health change.
   # Returns 0 when the node is provably SERVING the new binary (server_up + db +
@@ -536,10 +621,7 @@ _health_json_unhealthy_only_no_provider_runtimes() {
   #     provider-present node with the same axis reports status=degraded and
   #     PASSES the deploy gate today, so rescuing a no-provider node with a
   #     co-existing degraded axis is CONSISTENT with the existing gate, not a
-  #     new risk;
-  #   • the PUBLIC /api/health body STRIPS degraded_reasons, so proving
-  #     "solely no-providers" from this body is impossible without switching the
-  #     gate to the detailed body — a larger change we deliberately do NOT make.
+  #     new risk.
   # The runtime /health endpoint intentionally keeps reporting unhealthy for
   # monitoring; only the deploy/rollback readiness gate opts in to this rescue,
   # and only for this EXACT deploy-blocking cause (server_up=false /
@@ -547,6 +629,28 @@ _health_json_unhealthy_only_no_provider_runtimes() {
   # the gate).
   local health_json="$1"
   [ -n "$health_json" ] || return 1
+
+  # #5071 S0 r2 F2: the `startup_status` / `skipped_reason` evidence this rescue
+  # rests on is a STARTUP artifact — it records what the registry looked like when
+  # the reconcile barrier released, not what it looks like now. A provider runtime
+  # that registers after that decision leaves the skip behind as a stale claim, so
+  # `startup_status == doctor_skipped` alone let a node with a real but UNHEALTHY
+  # provider (e.g. `provider:codex:disconnected`) pass this gate. Cross-check the
+  # live body first: if it names a provider runtime, the skip's premise is false
+  # and no-provider is not the blocking cause, so the rescue must not apply.
+  #
+  # The runtime self-heals this inside the startup-doctor rearm window
+  # (`RECONCILE_STALL_AFTER`, 180s) by replacing the skip; a registration that
+  # lands after the window closes keeps the stale skip for the rest of the boot,
+  # and this cross-check is the only thing that stops it here.
+  #
+  # (An earlier revision of this comment claimed the public /api/health body
+  # STRIPS degraded_reasons. That stopped being true in #4382, which carries the
+  # live, name-sanitized reasons onto the public projection — which is what makes
+  # the cross-check below possible without moving the gate to the detailed body.)
+  if _health_json_names_a_provider_runtime "$health_json"; then
+    return 1
+  fi
 
   if _health_json_has_jq; then
     printf '%s' "$health_json" | jq -e '
@@ -646,6 +750,26 @@ health_json_is_ready() {
       return $?
     fi
     [ "$status" = "healthy" ] && return 0
+    # #5071 S0 r2 F3: an explicit DENY, placed ahead of the generic
+    # `fully_recovered == false` allowance below. The S0 contract is a FINITE
+    # reconcile obligation: an unfinished reconcile is tolerated while it is
+    # `reconcile_in_progress`, and once it outlives `RECONCILE_STALL_AFTER` it is
+    # promoted to `reconcile_stalled` and must BLOCK the deploy — which is what
+    # `agentdesk doctor`'s next_step and the promotion WARN both already tell the
+    # operator. The allowance below never looks at the reasons, so it was passing
+    # stalled providers through while every message about them said otherwise.
+    #
+    # A deny here rather than a narrower allowance: it changes the verdict ONLY
+    # for bodies that carry a `reconcile_stalled` reason, it covers the
+    # reason-blind allowance and any allowance added after it from one place, and
+    # it leaves both earlier branches untouched — the `status == unhealthy` rescue
+    # above and the `cluster_standby` / `gateway_standby` branch above it (a
+    # standby node whose only reasons are `gateway_standby` still passes).
+    # `reconcile_in_progress` is unaffected: it is a different reason string.
+    if _health_json_has_reconcile_stalled "$health_json"; then
+      echo "  ▸ provider reconcile is stalled (reconcile_stalled) — deploy stays blocked"
+      return 1
+    fi
     if [ "$allow_reconcile_degraded" = "1" ] \
       && _health_json_field_exists "$health_json" "fully_recovered" \
       && _health_json_field_is_false "$health_json" "fully_recovered"; then

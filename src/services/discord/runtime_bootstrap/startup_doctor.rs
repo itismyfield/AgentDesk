@@ -75,38 +75,103 @@ pub(super) async fn wait_for_local_http_bind(api_port: u16) {
     }
 }
 
+/// The three artifact-writing side effects the post-barrier decision can
+/// perform. Injected rather than called directly so a test can hold the skip
+/// write open at the exact instant the standby path registers, and observe which
+/// writer ran, without a real artifact write or a loopback HTTP server
+/// (#5071 S0 r2 F1).
+#[async_trait::async_trait]
+pub(super) trait StartupDoctorEffects: Send + Sync + 'static {
+    async fn record_skip(&self);
+    async fn run_now(&self);
+    async fn upgrade_skip(&self);
+}
+
+struct ProcessStartupDoctorEffects {
+    api_port: u16,
+}
+
+#[async_trait::async_trait]
+impl StartupDoctorEffects for ProcessStartupDoctorEffects {
+    async fn record_skip(&self) {
+        record_startup_diagnostic_skip().await;
+    }
+
+    async fn run_now(&self) {
+        run_startup_diagnostic_now(self.api_port).await;
+    }
+
+    async fn upgrade_skip(&self) {
+        upgrade_skipped_startup_diagnostic(self.api_port).await;
+    }
+}
+
 pub(super) async fn run_startup_diagnostic_after_reconcile_barrier(
     remaining: Arc<std::sync::atomic::AtomicUsize>,
     started: Arc<std::sync::atomic::AtomicBool>,
     health_registry: Arc<health::HealthRegistry>,
     api_port: u16,
 ) {
+    // The rearm handle is deliberately dropped: the watcher is detached (see
+    // `spawn_startup_doctor_rearm`). Only tests await it.
+    let _rearm = run_startup_diagnostic_after_reconcile_barrier_with(
+        remaining,
+        started,
+        health_registry,
+        Arc::new(ProcessStartupDoctorEffects { api_port }),
+    )
+    .await;
+}
+
+/// Returns the rearm watcher's handle when the skip branch armed one, so a test
+/// can await the watcher instead of racing it.
+async fn run_startup_diagnostic_after_reconcile_barrier_with(
+    remaining: Arc<std::sync::atomic::AtomicUsize>,
+    started: Arc<std::sync::atomic::AtomicBool>,
+    health_registry: Arc<health::HealthRegistry>,
+    effects: Arc<dyn StartupDoctorEffects>,
+) -> Option<tokio::task::JoinHandle<()>> {
     match startup_doctor_barrier_arrive(&remaining, &started) {
         StartupDoctorBarrier::Waiting(waiting) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] ⏳ startup_doctor waiting for {waiting} provider reconcile(s)"
             );
-            return;
+            return None;
         }
-        StartupDoctorBarrier::AlreadyReleased => return,
+        StartupDoctorBarrier::AlreadyReleased => return None,
         StartupDoctorBarrier::Released => {}
     }
 
+    // #5071 S0 r2 F1: read the rearm baseline BEFORE the count observation
+    // below, and never re-read it afterwards. Both the count observation and the
+    // skip write are await points, so a baseline captured after either of them
+    // can absorb the very registration the rearm exists to notice — the poll
+    // then sees `current == recorded` for the whole window, gives up, and this
+    // boot's stale no-provider skip becomes permanent even though a provider
+    // runtime is registered. Captured first, a registration landing in either
+    // gap is either already visible in the count (the diagnostic runs now) or
+    // strictly ahead of this baseline (the rearm fires).
+    let baseline_generation = health_registry.registration_generation();
+
     if health_registry.registered_provider_count().await == 0 {
         health::note_startup_doctor_saw_empty_registry();
-        record_startup_diagnostic_skip().await;
+        effects.record_skip().await;
         // #5449: on the standby path the registry is empty here by static
         // ordering, not by race — the lease branch awaits this call and only
         // then calls `register_standby`, so "no providers" is not yet final. The
         // skip above stays this boot's immediate artifact because deploy
         // readiness reads its `skipped_reason`; the rearm below replaces it with
         // a real report if a provider runtime does register.
-        spawn_startup_doctor_rearm(health_registry, api_port);
-        return;
+        return Some(spawn_startup_doctor_rearm(
+            health_registry,
+            effects,
+            baseline_generation,
+        ));
     }
 
-    run_startup_diagnostic_now(api_port).await;
+    effects.run_now().await;
+    None
 }
 
 async fn record_startup_diagnostic_skip() {
@@ -168,9 +233,14 @@ async fn run_startup_diagnostic_now(api_port: u16) {
 }
 
 /// How long a boot keeps watching for a provider registration after the barrier
-/// released with an empty registry. Same deadline as the reconcile-stall
-/// promotion, so the rearm window closes no later than the point at which health
-/// starts naming an unfinished reconcile as stalled (#5449).
+/// released with an empty registry. Deliberately the same constant as the
+/// reconcile-stall promotion so both bounds are tuned in one place (#5449).
+///
+/// #5071 S0 r2 F4: that is a shared bound, NOT a claim that this window closes
+/// before health can name an unfinished reconcile as stalled. The stall age is
+/// measured from the provider's `SharedData` construction and this window from
+/// the barrier's release, so the two can interleave; see
+/// `health::RECONCILE_STALL_AFTER` for what the pairing does guarantee.
 const STARTUP_DOCTOR_REARM_WINDOW: Duration = health::RECONCILE_STALL_AFTER;
 const STARTUP_DOCTOR_REARM_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -215,8 +285,15 @@ pub(super) fn startup_doctor_rearm_due(
 /// precondition. The `started` CAS is left alone: this reuses the barrier's
 /// single release rather than re-opening it, and because the barrier releases at
 /// most once per process, at most one rearm task exists per boot.
-fn spawn_startup_doctor_rearm(health_registry: Arc<health::HealthRegistry>, api_port: u16) {
-    let recorded_generation = health_registry.registration_generation();
+///
+/// `recorded_generation` is supplied by the caller instead of read here: it must
+/// pre-date the empty-registry observation that decided to skip, and this
+/// function runs after both that observation and the skip write (#5071 S0 r2 F1).
+fn spawn_startup_doctor_rearm(
+    health_registry: Arc<health::HealthRegistry>,
+    effects: Arc<dyn StartupDoctorEffects>,
+    recorded_generation: u64,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let start = tokio::time::Instant::now();
         loop {
@@ -232,7 +309,7 @@ fn spawn_startup_doctor_rearm(health_registry: Arc<health::HealthRegistry>, api_
                     tracing::info!(
                         "  [{ts}] 🔁 startup_doctor rearmed — a provider runtime registered after the reconcile barrier released"
                     );
-                    upgrade_skipped_startup_diagnostic(api_port).await;
+                    effects.upgrade_skip().await;
                     return;
                 }
                 StartupDoctorRearm::GiveUp => {
@@ -248,7 +325,7 @@ fn spawn_startup_doctor_rearm(health_registry: Arc<health::HealthRegistry>, api_
             }
             tokio::time::sleep(STARTUP_DOCTOR_REARM_POLL_INTERVAL).await;
         }
-    });
+    })
 }
 
 /// Replace this boot's no-provider skip with a real report once a provider
@@ -286,7 +363,10 @@ async fn upgrade_skipped_startup_diagnostic(api_port: u16) {
 
 #[cfg(test)]
 mod startup_doctor_rearm_tests {
-    use super::{STARTUP_DOCTOR_REARM_WINDOW, StartupDoctorRearm, startup_doctor_rearm_due};
+    use super::{
+        STARTUP_DOCTOR_REARM_WINDOW, StartupDoctorRearm, health, startup_doctor_rearm_due,
+    };
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -331,6 +411,93 @@ mod startup_doctor_rearm_tests {
         assert_eq!(
             startup_doctor_rearm_due(3, 9, STARTUP_DOCTOR_REARM_WINDOW),
             StartupDoctorRearm::GiveUp
+        );
+    }
+
+    /// Fake effects that park inside the skip write. `record_skip` announces that
+    /// the empty-registry count has already been observed and then blocks until
+    /// the test releases it, which reproduces the exact window the standby lease
+    /// branch registers in; `run_now` / `upgrade_skip` only record that they ran,
+    /// so no artifact is written and no loopback HTTP server is needed.
+    struct PausedSkipEffects {
+        entered_skip: Arc<tokio::sync::Notify>,
+        release_skip: Arc<tokio::sync::Notify>,
+        ran_now: Arc<AtomicUsize>,
+        upgraded: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl super::StartupDoctorEffects for PausedSkipEffects {
+        async fn record_skip(&self) {
+            self.entered_skip.notify_one();
+            self.release_skip.notified().await;
+        }
+
+        async fn run_now(&self) {
+            self.ran_now.fetch_add(1, Ordering::AcqRel);
+        }
+
+        async fn upgrade_skip(&self) {
+            self.upgraded.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    // T-S0-4 (#5071 S0 r2 F1): a registration that completes AFTER the
+    // empty-registry count was observed but BEFORE the skip write returns must
+    // still rearm the doctor. The generation baseline is captured ahead of the
+    // count observation precisely so this registration stays strictly ahead of
+    // it; a baseline captured at rearm-spawn time absorbs it, holds for the whole
+    // window, and leaves the stale no-provider skip in place forever.
+    #[tokio::test(start_paused = true)]
+    async fn a_registration_during_the_skip_write_still_rearms_the_doctor() {
+        let registry = Arc::new(health::HealthRegistry::new());
+        let entered_skip = Arc::new(tokio::sync::Notify::new());
+        let release_skip = Arc::new(tokio::sync::Notify::new());
+        let ran_now = Arc::new(AtomicUsize::new(0));
+        let upgraded = Arc::new(AtomicUsize::new(0));
+
+        let barrier = tokio::spawn(super::run_startup_diagnostic_after_reconcile_barrier_with(
+            Arc::new(AtomicUsize::new(1)),
+            Arc::new(AtomicBool::new(false)),
+            registry.clone(),
+            Arc::new(PausedSkipEffects {
+                entered_skip: entered_skip.clone(),
+                release_skip: release_skip.clone(),
+                ran_now: ran_now.clone(),
+                upgraded: upgraded.clone(),
+            }),
+        ));
+
+        // The barrier has released and read the registry as empty; the skip
+        // artifact is mid-write.
+        entered_skip.notified().await;
+        registry
+            .register_standby(
+                "codex".to_string(),
+                crate::services::discord::make_shared_data_for_tests(),
+            )
+            .await;
+        assert!(registry.registration_generation() > 0);
+        release_skip.notify_one();
+
+        let rearm = barrier
+            .await
+            .expect("barrier task")
+            .expect("the skip branch arms a rearm watcher");
+        // The clock is paused, so a watcher that decided to Hold burns its whole
+        // window in virtual time and returns here without upgrading — which the
+        // assertion below is what catches.
+        rearm.await.expect("rearm task");
+
+        assert_eq!(
+            upgraded.load(Ordering::Acquire),
+            1,
+            "a registration accepted while the skip was being written must replace the skip"
+        );
+        assert_eq!(
+            ran_now.load(Ordering::Acquire),
+            0,
+            "the count was observed as empty, so the immediate diagnostic must not have run"
         );
     }
 }
