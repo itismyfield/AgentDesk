@@ -4,11 +4,20 @@
 This is a bounded lexical inventory, not a Rust/type/data-flow analysis and not
 proof that any listed destruction is safe.  It scans stripped source text for:
 tmux kill wrappers; watcher AtomicBool ``store(true, ...)`` calls; process kill
-calls; and watcher-registry removal calls.  The first two categories include
-test call sites, matching the #5071 map.  Process and registry categories reuse
-the repository's existing lexical ``cfg(test)`` classifier and exclude whole
-test modules.  Aliases, re-exports, macros that construct names, indirection,
-and semantically equivalent spellings can remain unseen.
+calls; watcher-registry removal calls; and (#5071 relay-tail S4)
+``under_identity_fence`` bindings.  The first two categories include test call
+sites, matching the #5071 map.  Process, registry and fence categories reuse the
+repository's existing lexical ``cfg(test)`` classifier and exclude whole test
+modules.  Aliases, re-exports, macros that construct names, indirection, and
+semantically equivalent spellings can remain unseen.
+
+The ``identity_fence_bind`` category is the inverse of the others: it counts the
+FENCED entry points, not unfenced destruction.  Pinning it does NOT make an
+unfenced destructive removal impossible — those spell the unfenced helper names
+and land in ``registry_remove`` instead.  What it does is force any change to
+the set of fence-bearing call sites (adding one, moving one, deleting one) to
+appear as a reviewed baseline diff in the same commit, so the S4 fence cannot be
+silently detached from a call site that keeps its ``registry_remove`` count.
 
 ``--check`` rejects growth in an existing file and every UNLISTED file.  A
 decrease is allowed: this is a no-growth ratchet.  For an intentional change,
@@ -29,7 +38,13 @@ from typing import Mapping, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_PATH = Path("scripts/destructive_call_site_baseline.json")
-CATEGORIES = ("tmux_kill", "watcher_cancel", "process_kill", "registry_remove")
+CATEGORIES = (
+    "tmux_kill",
+    "watcher_cancel",
+    "process_kill",
+    "registry_remove",
+    "identity_fence_bind",
+)
 WARNING = "These counts are a growth-blocking baseline, not proof of safety."
 REPIN = (
     "Intentional change: run scripts/check_destructive_call_site_ratchet.py "
@@ -60,6 +75,10 @@ REGISTRY_PATTERNS = {
     "remove_locked_helper": re.compile(r"\bremove_tmux_session_locked\s*\("),
 }
 REGISTRY_OWNER = "src/services/discord/tmux_watcher_registry.rs"
+# #5071 relay-tail S4: the binder for `WatcherIdentityFence` (+ the chained
+# `TerminalDeliveryFence`).  Counted with the registry categories, so the owner
+# file's own definition is excluded the same way.
+IDENTITY_FENCE_PATTERN = re.compile(r"\bunder_identity_fence\s*\(")
 
 
 class RatchetError(RuntimeError):
@@ -133,6 +152,9 @@ def scan(repo_root: Path) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
             registry_found += found
         if registry_found:
             counts["registry_remove"][rel] = registry_found
+        fence_found = len(IDENTITY_FENCE_PATTERN.findall(production))
+        if fence_found:
+            counts["identity_fence_bind"][rel] = fence_found
     return counts, registry_subcounts
 
 
@@ -207,6 +229,18 @@ def _snapshot(
                     "is classified as direct channel remove, not remove_tmux_session_locked."
                 ),
                 "files": dict(sorted(counts["registry_remove"].items())),
+            },
+            "identity_fence_bind": {
+                "comment": (
+                    "#5071 relay-tail S4: production `under_identity_fence` binders, "
+                    "excluding the owner file that defines it. These are the ONLY "
+                    "destructive removals that carry the WatcherIdentityFence and "
+                    "TerminalDeliveryFence conjuncts; every other entry in "
+                    "registry_remove reaches an unfenced helper. Pinning this set does "
+                    "not fence those — it makes adding, moving or dropping a fenced "
+                    "site a reviewed baseline diff."
+                ),
+                "files": dict(sorted(counts["identity_fence_bind"].items())),
             },
         },
     }

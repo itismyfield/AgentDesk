@@ -56,6 +56,25 @@ class SourceContractTests(unittest.TestCase):
         production = ratchet.RUST_LEXER._production_text(watcher_backstop)
         self.assertNotRegex(production, ratchet.REGISTRY_PATTERNS["direct_channel_remove"])
 
+    def test_fenced_binders_are_exactly_the_two_production_call_sites(self) -> None:
+        # #5071 relay-tail S4: the fence rides on `under_identity_fence`, and the
+        # design claims exactly two production binders. Pin the set, not just a
+        # total, so moving one file to another still shows up as a diff.
+        self.assertEqual(
+            self.actual["identity_fence_bind"],
+            {
+                "src/services/discord/relay_recovery/apply.rs": 1,
+                "src/services/discord/tui_direct_pending_start.rs": 1,
+            },
+        )
+        # The owner file both defines and re-spells the binder; counting it would
+        # make the category track the implementation instead of its callers.
+        self.assertNotIn(ratchet.REGISTRY_OWNER, self.actual["identity_fence_bind"])
+        owner_production = ratchet.RUST_LEXER._production_text(ROOT / ratchet.REGISTRY_OWNER)
+        self.assertRegex(owner_production, ratchet.IDENTITY_FENCE_PATTERN)
+        comment = self.payload["categories"]["identity_fence_bind"]["comment"]
+        self.assertIn("does not fence those", comment)
+
     def test_baseline_states_that_counts_are_not_safety_proof(self) -> None:
         self.assertEqual(self.payload["comment"], ratchet.WARNING)
         self.assertIn("not proof of safety", ratchet.WARNING)
@@ -84,9 +103,13 @@ class RatchetDiscriminationTests(unittest.TestCase):
             "src/services/discord/t3a4_probe.rs",
             "shared.tmux_watchers.remove(&channel);\n",
         ),
+        "identity_fence_bind": (
+            "src/services/discord/t3a4_probe.rs",
+            "shared.tmux_watchers.under_identity_fence(fence);\n",
+        ),
     }
 
-    def test_four_fake_callsite_mutations_are_unlisted(self) -> None:
+    def test_fake_callsite_mutations_are_unlisted(self) -> None:
         for category, (rel, body) in self.MUTATIONS.items():
             with self.subTest(category=category), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
@@ -140,6 +163,7 @@ fn probe() {
     cancel.store(true, Ordering::Release);
     kill_pid_tree(1);
     shared.tmux_watchers.remove(&channel);
+    shared.tmux_watchers.under_identity_fence(fence);
 }
 """,
             )
@@ -148,6 +172,7 @@ fn probe() {
             self.assertEqual(sum(actual["watcher_cancel"].values()), 1)
             self.assertEqual(actual["process_kill"], {})
             self.assertEqual(actual["registry_remove"], {})
+            self.assertEqual(actual["identity_fence_bind"], {})
 
     def test_baseline_round_trip_preserves_per_file_counts_and_warning(self) -> None:
         counts = empty_counts()

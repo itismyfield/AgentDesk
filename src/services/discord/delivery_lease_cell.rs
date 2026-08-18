@@ -170,6 +170,57 @@ pub(in crate::services::discord) enum LeaseSnapshot {
     },
 }
 
+/// What a [`LeaseSnapshot`] holds for ONE expected [`DeliveryLeaseKey`], as
+/// returned by [`LeaseSnapshot::identity_matched`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) struct IdentityMatchedLease {
+    /// Exclusive end of the `[start, end)` delivery range the matched lease
+    /// covers.
+    pub(in crate::services::discord) end: u64,
+    /// `Some(deadline_ms)` while the lease is still `Leased`: the holder-liveness
+    /// deadline, on the [`lease_now_ms`] clock, that `reclaim_if_expired` will
+    /// return the cell to `Unleased` at. `None` once `Committed` — that state
+    /// carries no deadline field and is never deadline-reclaimed, so a caller
+    /// asking "is a holder still live?" must read `None` as "no live holder",
+    /// not as "expired".
+    pub(in crate::services::discord) deadline_ms: Option<u64>,
+}
+
+impl LeaseSnapshot {
+    /// The range and (uncommitted) deadline this snapshot holds FOR
+    /// `expected_key`, or `None` when the cell is `Unleased` or holds some other
+    /// turn's key.
+    ///
+    /// Key equality is the whole relevance test, and it is only as precise as
+    /// [`DeliveryLeaseKey`] itself: an id-0 turn that reached
+    /// `is_degenerate_legacy` collapses to `(channel, generation, 0)`, so two
+    /// such turns on one channel in one process generation compare EQUAL here.
+    /// A caller that refuses on a match therefore refuses slightly more often
+    /// than the turn identity alone would justify; one that acts on a match acts
+    /// on a range that may belong to a sibling id-0 turn.
+    pub(in crate::services::discord) fn identity_matched(
+        &self,
+        expected_key: &DeliveryLeaseKey,
+    ) -> Option<IdentityMatchedLease> {
+        match self {
+            Self::Leased {
+                key,
+                deadline_ms,
+                end,
+                ..
+            } if key == expected_key => Some(IdentityMatchedLease {
+                end: *end,
+                deadline_ms: Some(*deadline_ms),
+            }),
+            Self::Committed { key, end, .. } if key == expected_key => Some(IdentityMatchedLease {
+                end: *end,
+                deadline_ms: None,
+            }),
+            Self::Unleased | Self::Leased { .. } | Self::Committed { .. } => None,
+        }
+    }
+}
+
 /// #3041 P1-1/P1-2: delivery-lease acquire deadline shared by BOTH the watcher
 /// and the bridge terminal-delivery paths. The deadline is a HOLDER-LIVENESS
 /// signal, NOT a hard cap on delivery duration — while a send future is in

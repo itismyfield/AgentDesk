@@ -1913,6 +1913,33 @@ time for diagnostics; neither is a stored approval value.
   `tui_direct_pending_start.rs` (`STALE_FOREIGN_CANCEL_IDENTITY_SITE`). The other
   14 production entries in the `registry_remove` category of
   `scripts/destructive_call_site_baseline.json` stay unfenced in every mode.
+- second conjunct (#5071 relay-tail S4, I-1): `TerminalDeliveryFence` in the same
+  `tmux_watcher_registry.rs`, chained onto the view by
+  `IdentityFencedRegistry::with_terminal_delivery_fence` at both converted call
+  sites and read by `delivery_fence_permits_destruction` inside the same registry
+  lock. It answers a DIFFERENT question from the identity conjuncts: not "is this
+  the same watcher incarnation?" but "is a terminal delivery for the very turn
+  being destroyed still in flight?". It refuses only while
+  `LeaseSnapshot::identity_matched` finds the channel's `DeliveryLeaseCell`
+  `Leased` under the probe's own `DeliveryLeaseKey`
+  (`DestructiveCancelProbeSnapshot::delivery_lease_key`) with an unelapsed
+  deadline on the `lease_now_ms` clock. Two deliberate differences from the #5067
+  emission fence T3-A1 deleted: it is key-matched (a later turn's lease is not
+  this destruction's business) and it expires (a dead holder cannot latch it). It
+  is NOT gated by `ExecutionIdentityMode` — a bounded, identity-matched refusal
+  has no Observe-only stage to roll out through.
+- S4 domain: the two converted call sites above and nothing else. Explicitly
+  outside it, and still reaching an unfenced destructive path in every mode:
+  `health/recovery.rs`, `health/relay_auto_heal.rs`,
+  `recovery_engine/manual_rebind/`, `tmux_watcher/placeholder_reclaim.rs`,
+  `tmux_watcher/post_stream_exit.rs`, `turn_bridge/runtime_handoff_loop.rs` and
+  its `watcher_handoff.rs` sibling, `watchers/lifecycle/claims.rs`,
+  `inflight_heartbeat_sweeper.rs`, `runtime_bootstrap/gateway_lease.rs`,
+  `task_supervisor.rs`, `turn_finalizer.rs`,
+  `relay_recovery_auto_heal_confirm.rs`, `inflight/destructive_commit.rs`, and
+  the manual stale-mailbox path in `health_api.rs`. The `identity_fence_bind`
+  category of `scripts/destructive_call_site_baseline.json` pins the fenced set
+  at exactly two so that boundary can only move in a reviewed diff.
 - invariants, non_guarantees, rollout procedure and tests: NOT restated here.
   The runbooks are the source of truth and are anchored to the same symbols —
   [promotion criteria](../runbooks/execution-identity-promotion-criteria.md)
@@ -1923,7 +1950,8 @@ time for diagnostics; neither is a stored approval value.
   (why `RelayRecoveryApplySource::Manual` is fenced while process reset is not),
   and the counter-exposure decision proposal
   [5399-observe-exposure-options](../design/5399-observe-exposure-options.md).
-- related_issues: #5071 (T3-A0 #5394, T3-A1 #5398), #5396, #5399, #5411.
+- related_issues: #5071 (T3-A0 #5394, T3-A1 #5398, relay-tail S4), #5396, #5399,
+  #5411.
 
 ### `relay_reachability`
 

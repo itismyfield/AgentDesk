@@ -320,8 +320,105 @@ impl WatcherIdentityFence {
     }
 }
 
+/// #5071 relay-tail S4 (I-1): the delivery-lease conjunct the two fenced
+/// registry CAS sites add alongside [`WatcherIdentityFence`].
+///
+/// The identity fence answers "is this still the SAME watcher incarnation?".
+/// This one answers a different question the identity conjuncts explicitly do
+/// not — "is a terminal delivery for the very turn being destroyed still in
+/// flight?" — because a same-incarnation emission race is a declared
+/// non-guarantee of the value CAS (see [`WatcherIdentityFence`]).
+///
+/// # What it compares, and why the key comparison is the point
+///
+/// A channel-wide "is any lease held?" test is NOT usable here: the delivery
+/// lease is a per-channel cell reused across sequential turns, so a lease taken
+/// by a LATER sink/bridge owner would veto the cleanup of an OLDER stale watcher
+/// forever. The conjunct therefore refuses only on
+/// `LeaseSnapshot::identity_matched` against the key the destructive probe was
+/// built from, i.e. the same `(channel, generation, user_msg_id | started_at +
+/// turn_start_offset)` tuple the turn itself leases under, AND only while that
+/// lease is still `Leased` with an unelapsed deadline.
+///
+/// # What it does NOT establish
+///
+/// * `Committed` is not a veto. A committed lease has no deadline and awaits
+///   only a release; its holder is done sending.
+/// * The deadline is holder LIVENESS, not a delivery duration cap — a live
+///   holder heartbeat-renews it (`DeliveryLeaseHeartbeat`), so this refuses for
+///   as long as the holder keeps renewing and permits within roughly one
+///   `DELIVERY_LEASE_DEADLINE_MS` after a holder dies. That bound is the whole
+///   reason this veto is safe to add: unlike the #5067 emission fence #5071
+///   T3-A1 deleted, it cannot latch.
+/// * A degenerate legacy id-0 key collapses sibling turns (see
+///   [`LeaseSnapshot::identity_matched`]), so on that residual class the veto is
+///   channel-and-generation wide rather than turn-precise. It fails CLOSED —
+///   toward keeping the watcher — which is the direction this gate wants.
+/// * Nothing about leases on OTHER channels, and nothing at all about the
+///   destructive call sites listed as out of scope in the S4 commit body; those
+///   still reach the unfenced helpers.
+pub(in crate::services::discord) struct TerminalDeliveryFence {
+    lease: Arc<DeliveryLeaseCell>,
+    expected_key: DeliveryLeaseKey,
+    /// Static label the veto log attributes this to; mirrors
+    /// [`WatcherIdentityFence`]'s `site`.
+    site: &'static str,
+}
+
+impl TerminalDeliveryFence {
+    /// Pin the channel's lease cell and the turn identity to re-read it against.
+    /// Both are cheap value captures — the `Arc` is the live per-channel cell,
+    /// so the CAS below reads the CURRENT state through it, not a copy taken
+    /// here.
+    pub(in crate::services::discord) fn capture(
+        lease: Arc<DeliveryLeaseCell>,
+        expected_key: DeliveryLeaseKey,
+        site: &'static str,
+    ) -> Self {
+        Self {
+            lease,
+            expected_key,
+            site,
+        }
+    }
+
+    fn permits_destruction(&self) -> bool {
+        // `lease_now_ms` is the clock the deadline was written against
+        // (process-monotonic, anchored to a process-start `Instant`). Comparing
+        // it to a wall clock would make an NTP step decide this conjunct.
+        let now_ms = lease_now_ms();
+        let Some(deadline_ms) = self
+            .lease
+            .read()
+            .identity_matched(&self.expected_key)
+            .and_then(|matched| matched.deadline_ms)
+        else {
+            return true;
+        };
+        if deadline_ms <= now_ms {
+            return true;
+        }
+        tracing::info!(
+            counter = "terminal_delivery_fence_veto",
+            site = self.site,
+            channel_id = self.expected_key.channel_id().get(),
+            deadline_ms,
+            now_ms,
+            "identity-matched delivery lease is still live; refusing the destructive watcher removal"
+        );
+        false
+    }
+}
+
+/// The S4 (I-1) conjunct, spelled ONCE so both CAS cores read the same
+/// predicate and one mutation can neutralize it.
+fn delivery_fence_permits_destruction(delivery: Option<&TerminalDeliveryFence>) -> bool {
+    delivery.is_none_or(TerminalDeliveryFence::permits_destruction)
+}
+
 /// A registry view whose two CAS removals also require the [`WatcherIdentityFence`]
-/// conjunct.
+/// conjunct, and — once [`IdentityFencedRegistry::with_terminal_delivery_fence`]
+/// is applied — the [`TerminalDeliveryFence`] one.
 ///
 /// The fenced methods keep the SAME names as their unfenced originals on
 /// purpose: the #5071 T3-A4 destructive-call-site ratchet counts those names
@@ -330,9 +427,23 @@ impl WatcherIdentityFence {
 pub(in crate::services::discord) struct IdentityFencedRegistry<'a> {
     registry: &'a TmuxWatcherRegistry,
     fence: WatcherIdentityFence,
+    delivery: Option<TerminalDeliveryFence>,
 }
 
 impl IdentityFencedRegistry<'_> {
+    /// Add the S4 delivery-lease conjunct to this view's next CAS. Separate from
+    /// [`TmuxWatcherRegistry::under_identity_fence`] so the two production
+    /// callers stay the only `under_identity_fence` sites the destructive
+    /// ratchet counts, and so a caller that has no lease coordinate to pin is a
+    /// compile-time-visible omission rather than a silently `None` argument.
+    pub(in crate::services::discord) fn with_terminal_delivery_fence(
+        mut self,
+        delivery: TerminalDeliveryFence,
+    ) -> Self {
+        self.delivery = Some(delivery);
+        self
+    }
+
     /// Only REMOVES — like the unfenced original it never writes `cancel`, so
     /// the caller stores it after a `Some` return.
     pub(in crate::services::discord) fn remove_tmux_session_if_current(
@@ -346,6 +457,7 @@ impl IdentityFencedRegistry<'_> {
             tmux_session_name,
             expected_cancel,
             Some(&self.fence),
+            self.delivery.as_ref(),
         )
     }
 
@@ -366,6 +478,7 @@ impl IdentityFencedRegistry<'_> {
             expected_output_path,
             expected_cancel,
             Some(&self.fence),
+            self.delivery.as_ref(),
         )
     }
 }
@@ -545,26 +658,35 @@ impl TmuxWatcherRegistry {
         expected_cancel: &Arc<std::sync::atomic::AtomicBool>,
     ) -> Option<(ChannelId, TmuxWatcherHandle)> {
         let guard = lock_tmux_watcher_registry();
-        self.remove_tmux_session_if_current_locked(&guard, tmux_session_name, expected_cancel, None)
+        self.remove_tmux_session_if_current_locked(
+            &guard,
+            tmux_session_name,
+            expected_cancel,
+            None,
+            None,
+        )
     }
 
     /// Shared core for the fenced and unfenced spellings. `identity` is the
-    /// #5071 T3-A1 conjunct: it is evaluated INSIDE the registry lock and only
-    /// after the cancel-pointer CAS already matched, so a fence miss and a
-    /// pointer miss produce the same answer — nothing removed, nothing stored.
+    /// #5071 T3-A1 conjunct and `delivery` the #5071 relay-tail S4 (I-1) one:
+    /// both are evaluated INSIDE the registry lock and only after the
+    /// cancel-pointer CAS already matched, so a fence miss and a pointer miss
+    /// produce the same answer — nothing removed, nothing stored.
     ///
     /// The unfenced spelling compares the session key and the cancel pointer
     /// only. The live owner channel and output path read here complete T3-R2's
     /// tuple for a fence that pinned them; without a fence they are read and
-    /// discarded, leaving the unfenced answer unchanged. Every conjunct is a
-    /// value comparison — see [`WatcherIdentityFence`] for what that does and
-    /// does not establish.
+    /// discarded, leaving the unfenced answer unchanged. Every identity conjunct
+    /// is a value comparison — see [`WatcherIdentityFence`] for what that does
+    /// and does not establish, and [`TerminalDeliveryFence`] for the separate
+    /// in-flight-delivery question it answers.
     fn remove_tmux_session_if_current_locked(
         &self,
         guard: &TmuxWatcherRegistryGuard,
         tmux_session_name: &str,
         expected_cancel: &Arc<std::sync::atomic::AtomicBool>,
         identity: Option<&WatcherIdentityFence>,
+        delivery: Option<&TerminalDeliveryFence>,
     ) -> Option<(ChannelId, TmuxWatcherHandle)> {
         let live_output_path = self
             .by_tmux_session
@@ -577,6 +699,9 @@ impl TmuxWatcherRegistry {
                 &live_output_path,
             )
         {
+            return None;
+        }
+        if !delivery_fence_permits_destruction(delivery) {
             return None;
         }
         self.remove_tmux_session_locked(guard, tmux_session_name)
@@ -597,15 +722,18 @@ impl TmuxWatcherRegistry {
             expected_output_path,
             expected_cancel,
             None,
+            None,
         )
     }
 
     /// Shared core for the fenced and unfenced spellings. The `cancel` store
     /// happens only after every conjunct — channel binding, session name,
-    /// output path, cancel pointer, and the optional #5071 T3-A1 identity
-    /// re-read — has compared equal and the entry has been removed, so a `false`
-    /// return leaves the watcher both registered and uncancelled. Equality of
-    /// those values is the whole guarantee; see [`WatcherIdentityFence`].
+    /// output path, cancel pointer, the optional #5071 T3-A1 identity re-read,
+    /// and the optional #5071 relay-tail S4 delivery-lease re-read — has
+    /// compared equal and the entry has been removed, so a `false` return leaves
+    /// the watcher both registered and uncancelled. Equality of those values is
+    /// the whole identity guarantee; see [`WatcherIdentityFence`] and
+    /// [`TerminalDeliveryFence`].
     fn cancel_and_remove_channel_if_current_locked(
         &self,
         guard: &TmuxWatcherRegistryGuard,
@@ -614,6 +742,7 @@ impl TmuxWatcherRegistry {
         expected_output_path: &str,
         expected_cancel: &Arc<std::sync::atomic::AtomicBool>,
         identity: Option<&WatcherIdentityFence>,
+        delivery: Option<&TerminalDeliveryFence>,
     ) -> bool {
         let Some(tmux_session_name) = self
             .tmux_session_by_channel
@@ -643,6 +772,9 @@ impl TmuxWatcherRegistry {
         {
             return false;
         }
+        if !delivery_fence_permits_destruction(delivery) {
+            return false;
+        }
         let Some((_, handle)) = self.remove_locked(guard, channel_id) else {
             return false;
         };
@@ -654,12 +786,14 @@ impl TmuxWatcherRegistry {
 
     /// Bind an identity fence to the next CAS removal. The returned view spells
     /// the two removal helpers with their original names so the destructive
-    /// call-site ratchet keeps counting the caller.
+    /// call-site ratchet keeps counting the caller. Chain
+    /// [`IdentityFencedRegistry::with_terminal_delivery_fence`] to add the S4
+    /// delivery-lease conjunct.
     pub(in crate::services::discord) fn under_identity_fence(
         &self,
         fence: WatcherIdentityFence,
     ) -> IdentityFencedRegistry<'_> {
-        IdentityFencedRegistry { registry: self, fence }
+        IdentityFencedRegistry { registry: self, fence, delivery: None }
     }
 
     pub(in crate::services::discord) fn iter(&self) -> dashmap::iter::Iter<'_, String, TmuxWatcherHandle> {

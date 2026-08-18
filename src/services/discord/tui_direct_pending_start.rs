@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize};
 
 use super::SharedData;
 use crate::services::discord::tmux_watcher_registry::{
-    WatcherIdentityFence, execution_identity_mode,
+    TerminalDeliveryFence, WatcherIdentityFence, execution_identity_mode,
 };
 
 #[path = "tui_direct_pending_start/watcher_cancel.rs"]
@@ -904,6 +904,18 @@ async fn submit_stale_foreign_inflight_cancel(
             .with_pinned_binding(pinned.owner_channel_id, &pinned.output_path);
             (pinned, identity_fence)
         });
+    // #5071 relay-tail S4 (I-1): pinned alongside the execution identity above.
+    // The `Arc` is the channel's LIVE lease cell, so the registry CAS below
+    // re-reads the current lease through it; the key comes from the probe so the
+    // relevance test names the same turn the rest of this helper committed on.
+    // Scope: it is consumed by that CAS only. When `pinned` is `None` there is no
+    // watcher to remove, this helper takes the `CommittedNoWatcher` path, and the
+    // finalizer submit below is NOT lease-fenced.
+    let delivery_fence = TerminalDeliveryFence::capture(
+        shared.delivery_lease(channel_id),
+        probe.delivery_lease_key.clone(),
+        STALE_FOREIGN_CANCEL_IDENTITY_SITE,
+    );
     let pinned_watcher = pinned.is_some();
     let commit_outcome = super::inflight::commit_destructive_cancel_locked(
         provider,
@@ -950,6 +962,7 @@ async fn submit_stale_foreign_inflight_cancel(
         if shared
             .tmux_watchers
             .under_identity_fence(identity_fence)
+            .with_terminal_delivery_fence(delivery_fence)
             .remove_tmux_session_if_current(&pinned.tmux_session_name, &pinned.cancel)
             .is_none()
         {

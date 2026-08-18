@@ -1,7 +1,7 @@
 use super::*;
 
 use crate::services::discord::tmux_watcher_registry::{
-    WatcherIdentityFence, execution_identity_mode,
+    TerminalDeliveryFence, WatcherIdentityFence, execution_identity_mode,
 };
 
 /// #5071 T3-A1 observation label for the dead-frontier automatic watcher cancel.
@@ -234,6 +234,17 @@ pub(super) async fn apply_relay_recovery_decision(
                                 );
                                 (tmux_session_name, output_path, cancel, identity_fence)
                             });
+                        // #5071 relay-tail S4 (I-1): pin the delivery-lease
+                        // coordinate in the same breath as the execution
+                        // identity. Both re-read live state inside the registry
+                        // CAS below; what is pinned HERE is only which cell and
+                        // which turn key to re-read, taken from the probe so it
+                        // cannot name a different turn than the rest of the gate.
+                        let delivery_fence = TerminalDeliveryFence::capture(
+                            shared.delivery_lease(owner_channel_id),
+                            probe.delivery_lease_key.clone(),
+                            DEAD_FRONTIER_CANCEL_IDENTITY_SITE,
+                        );
                         let gate = super::destructive_cancel_gate::evaluate(
                             shared,
                             provider,
@@ -259,11 +270,19 @@ pub(super) async fn apply_relay_recovery_decision(
                             // row, so a replaced or respawned row is refused. It
                             // does NOT establish a row generation — see
                             // `WatcherIdentityFence` for the A -> B -> A
-                            // readmission it cannot see — and it says nothing
-                            // about a terminal POST the SAME incarnation may
-                            // have in flight. That same-incarnation emission
-                            // race is a declared non-guarantee, not a closed
-                            // hole.
+                            // readmission it cannot see — and it says nothing on
+                            // its own about a terminal POST the SAME incarnation
+                            // may have in flight.
+                            //
+                            // #5071 relay-tail S4 (I-1) narrowed that second
+                            // gap rather than closing it: the CAS below also
+                            // carries `TerminalDeliveryFence`, which refuses
+                            // while THIS turn's delivery lease is still `Leased`
+                            // with an unelapsed deadline. What stays a declared
+                            // non-guarantee is a same-incarnation terminal POST
+                            // that holds NO delivery lease, or one whose holder
+                            // stopped renewing — the fence is a lease read, not
+                            // an HTTP-in-flight observation.
                             if mailbox_active_user_msg_id != probe.pin.mailbox_active_user_msg_id {
                                 tracing::warn!(
                                     target: "agentdesk::discord::relay_recovery",
@@ -319,6 +338,7 @@ pub(super) async fn apply_relay_recovery_decision(
                                     let watcher_removed = shared
                                         .tmux_watchers
                                         .under_identity_fence(identity_fence)
+                                        .with_terminal_delivery_fence(delivery_fence)
                                         .cancel_and_remove_channel_if_current(
                                             &owner_channel_id,
                                             &tmux_session_name,

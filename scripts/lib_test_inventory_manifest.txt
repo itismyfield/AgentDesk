@@ -2310,6 +2310,8 @@ services::discord::destructive_cancel_gate::tests::generation_mismatched_relay_f
 services::discord::destructive_cancel_gate::tests::growing_capture_for_zero_origin_busy_turn_denies_destructive_cancel
 services::discord::destructive_cancel_gate::tests::ready_pane_reprobe_freeze_allows_destructive_cancel
 services::discord::destructive_cancel_gate::tests::relay_frontier_flap_to_none_then_same_value_is_not_progress
+services::discord::destructive_cancel_gate::tests::terminal_envelope_does_not_outrank_relay_frontier_progress_on_reprobe
+services::discord::destructive_cancel_gate::tests::terminal_envelope_is_the_demoted_fallback_allow_reason
 services::discord::dispatch_policy::allowed_turn_sender_tests::announce_authored_operational_alert_does_not_trigger
 services::discord::dispatch_policy::allowed_turn_sender_tests::announce_bot_legacy_issue_card_is_suppressed
 services::discord::dispatch_policy::allowed_turn_sender_tests::announce_bot_triggers_without_dispatch_marker
@@ -4122,6 +4124,7 @@ services::discord::relay_recovery::tests::live_agentdesk_tmux_relay_dead_can_rea
 services::discord::relay_recovery::tests::live_agentdesk_tmux_relay_dead_without_mailbox_token_can_adopt_ownerless_inflight
 services::discord::relay_recovery::tests::old_orphan_shape_remains_auto_heal_eligible
 services::discord::relay_recovery::tests::orphan_token_live_evidence_and_agentdesk_tmux_stay_protected
+services::discord::relay_recovery::tests::post_gate_identity_matched_live_delivery_lease_blocks_dead_frontier_watcher_cancel
 services::discord::relay_recovery::tests::post_gate_relay_emission_no_longer_blocks_dead_frontier_watcher_cancel
 services::discord::relay_recovery::tests::probe_auto_apply_is_rate_limited_per_channel_action
 services::discord::relay_recovery::tests::queue_blocked_allows_disk_backed_queue_to_reach_drain_helper
