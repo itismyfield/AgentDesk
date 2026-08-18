@@ -1220,6 +1220,16 @@ def clean(value):
 
 marker_status = "missing"
 marker_detail = "no terminal marker"
+# #5071 S0b r2 F2: the port the health body is read from must come from the SAME
+# log the terminal marker comes from, because that log is one deploy runs whole
+# transcript (deploy-release.sh re-execs itself detached with stdout redirected to
+# AGENTDESK_DEPLOY_LOG, so the port line and the marker are written by one
+# process). Taking it from the config the deploy host pre-read over ssh instead
+# let the three verdict axes describe two different things: marker and repo head
+# from the target deploy, body from whatever else happened to be listening on
+# that port. Empty when the log has not reached its health stage yet, or names no
+# port at all, and that is fail-closed by construction below.
+health_port_from_log = ""
 try:
     with open(log_path, encoding="utf-8", errors="replace") as handle:
         for raw_line in handle:
@@ -1230,6 +1240,14 @@ try:
             elif re.fullmatch(r"═══ DEPLOY FAILED \\(exit=[0-9]+\\) ═══", line):
                 marker_status = "failure"
                 marker_detail = line
+            else:
+                port_match = re.fullmatch(
+                    r"▸ Waiting for release health on :([0-9]+)\\.\\.\\.", line
+                )
+                if port_match:
+                    # Last one wins, matching how the marker scan above keeps the
+                    # last marker it sees.
+                    health_port_from_log = port_match.group(1)
 except OSError as exc:
     marker_detail = f"log unavailable: {exc.strerror or type(exc).__name__}"
 
@@ -1250,23 +1268,40 @@ except (OSError, ValueError) as exc:
 health_status = "false"
 health_detail = "request not completed"
 health_body = ""
-try:
-    with urllib.request.urlopen(
-        f"http://127.0.0.1:{health_port}/api/health", timeout=5
-    ) as response:
-        health = json.load(response)
-    health_ok = isinstance(health, dict) and health.get("ok") is True
-    health_status = "true" if health_ok else "false"
-    status = health.get("status", "missing") if isinstance(health, dict) else "invalid body"
-    health_detail = f"ok={health_status}, status={status}"
-    if isinstance(health, dict):
-        # Carried back verbatim so the DEPLOY HOST can put it through
-        # health_json_is_ready -- see the note at that call. Anything that fails
-        # to parse as an object leaves this empty, which the caller reads as
-        # not-ready.
-        health_body = json.dumps(health, separators=(",", ":"))
-except Exception as exc:
-    health_detail = f"request failed: {type(exc).__name__}"
+# Fail-closed, deliberately WITHOUT falling back to the pre-read config port: a
+# fallback would restore the unbound composite this parse exists to remove, and
+# would do it on exactly the runs where the two ports disagree. A log that names
+# no port yet simply leaves the health axis red and the caller polls again; the
+# port line is printed before the success marker on every path that can produce
+# one, so a log carrying the marker carries the port too.
+if not health_port_from_log:
+    health_detail = "health port not named in the peer deploy log"
+else:
+    # The pre-read port stays in the report as a drift signal only. It is never
+    # what gets requested.
+    port_note = f"port={health_port_from_log}"
+    if health_port_from_log != health_port:
+        port_note = f"port={health_port_from_log} (config pre-read said {health_port})"
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{health_port_from_log}/api/health", timeout=5
+        ) as response:
+            health = json.load(response)
+        health_ok = isinstance(health, dict) and health.get("ok") is True
+        health_status = "true" if health_ok else "false"
+        status = health.get("status", "missing") if isinstance(health, dict) else "invalid body"
+        health_detail = f"ok={health_status}, status={status}, {port_note}"
+        if isinstance(health, dict):
+            # Reserialized, not byte-for-byte: the body is parsed and dumped
+            # again, so key order and whitespace are pythons and only the JSON
+            # value survives. That is all the DEPLOY HOST needs to put it through
+            # health_json_is_ready -- see the note at that call -- and the reparse
+            # is what guarantees the field below is one line. Anything that fails
+            # to parse as an object leaves this empty, which the caller reads as
+            # not-ready.
+            health_body = json.dumps(health, separators=(",", ":"))
+    except Exception as exc:
+        health_detail = f"request failed: {type(exc).__name__}, {port_note}"
 
 fields = [
     clean(value)
@@ -1323,7 +1358,10 @@ _report_peer_verdict_failure() {
     # from "the peer is ready and simply not the gateway".
     echo "  health: ok=$health_status ready=$health_ready ($health_detail)"
     if [ -n "$peer_health_port" ]; then
-        echo "  health check port: $peer_health_port"
+        # The config pre-read, shown for drift only. The port actually requested is
+        # the one the peer deploy log names, and it is reported inside
+        # health_detail above (#5071 S0b r2 F2).
+        echo "  health check port: $peer_health_port (config pre-read; the probe requests the port named in the peer deploy log)"
     fi
 }
 
@@ -1393,6 +1431,14 @@ _wait_for_peer_deploy_verdict() {
         # stdout is the tab-delimited channel parsed just above, and the predicate
         # writes operator diagnostics to stdout. Judging the transported body keeps
         # that channel a pure data channel and keeps one implementation deciding.
+        # The transported body is a semantic reserialization of what /api/health
+        # returned (parsed, then re-dumped), not the response bytes; the predicate
+        # reads JSON values, so that is the same input to it.
+        #
+        # The body is bound to THIS deploy, not merely to this host: the probe
+        # requests the port its own log scan read out of the peer deploy log that
+        # produced the marker (#5071 S0b r2 F2), so a stale process listening on
+        # some other port cannot supply the ready body for a deploy it is not.
         #
         # Fail-closed is preserved on every path that is not a body proven ready: a
         # failed probe, an unreachable or unparseable /api/health (empty
