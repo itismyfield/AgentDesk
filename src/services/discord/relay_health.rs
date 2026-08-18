@@ -430,7 +430,8 @@ impl RelayHealthSnapshot {
     /// a remote profile, a provider with no managed-tmux backend, an unavailable
     /// tmux binary, an absent tmux session name, a Claude-TUI prelaunch, and
     /// non-unix: the four conjuncts of `provider_isolation::seed_runtime`'s
-    /// guard, then its Claude-TUI branch and its non-unix arm), when
+    /// guard, then the Claude-TUI prelaunch seeding it delegates to
+    /// (`prelaunch_inflight_runtime_seed_from_paths`) and its non-unix arm), when
     /// `std::fs::metadata` on that path failed, or when the row's tmux session
     /// and the watcher binding's disagree so the frontier is not attributable to
     /// the row.

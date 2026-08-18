@@ -352,13 +352,11 @@ fn output_file_quiescent_for_duration_at(
 /// which is the other reason the two prove "nothing left to preserve" only in
 /// conjunction.
 ///
-/// What it does prove beyond the subtraction is ATTRIBUTION. The value is
-/// produced only inside `relay_state_matches_inflight.then(...)`
-/// (`health::session_enrichment::load`), so a `Some` at all means the row's tmux
-/// session and the live watcher binding's did not name different sessions: the
-/// frontier the capture offset was measured against belongs to this row's
-/// producer. Another session's watcher cannot reach this guard with a `Some` —
-/// that shape is `None`, which this returns `false` for.
+/// It does NOT prove attribution: `relay_state_matches_inflight`
+/// (`health::session_enrichment::load`) compares session names only when the
+/// row and the live watcher binding BOTH carry one (`_ => true` otherwise), so
+/// a frontier left behind by another session's watcher can still surface here
+/// as `Some(0)` when either side is unnamed.
 pub(crate) fn unread_tail_is_proven_drained(unread_bytes: Option<u64>) -> bool {
     unread_bytes == Some(0)
 }
