@@ -56,6 +56,45 @@ class SourceContractTests(unittest.TestCase):
         production = ratchet.RUST_LEXER._production_text(watcher_backstop)
         self.assertNotRegex(production, ratchet.REGISTRY_PATTERNS["direct_channel_remove"])
 
+    def test_fenced_binders_are_exactly_the_two_production_call_sites(self) -> None:
+        # #5071 relay-tail S4: the fence rides on `under_identity_fence`, and the
+        # design claims exactly two production binders. Pin the set, not just a
+        # total, so moving one file to another still shows up as a diff.
+        self.assertEqual(
+            self.actual["identity_fence_bind"],
+            {
+                "src/services/discord/relay_recovery/apply.rs": 1,
+                "src/services/discord/tui_direct_pending_start.rs": 1,
+            },
+        )
+        # The owner file both defines and re-spells the binder; counting it would
+        # make the category track the implementation instead of its callers.
+        self.assertNotIn(ratchet.REGISTRY_OWNER, self.actual["identity_fence_bind"])
+        owner_production = ratchet.RUST_LEXER._production_text(ROOT / ratchet.REGISTRY_OWNER)
+        self.assertRegex(owner_production, ratchet.IDENTITY_FENCE_PATTERN)
+        comment = self.payload["categories"]["identity_fence_bind"]["comment"]
+        self.assertIn("does not fence those", comment)
+
+    def test_every_fenced_site_binds_both_s4_conjuncts(self) -> None:
+        # #5071 relay-tail S4 r2 (P1-2 ①): the delivery conjunct rides on a
+        # SECOND binder, and the growth ratchet cannot see it disappear — losing
+        # `.with_terminal_delivery_fence(..)` is a decrease, which this ratchet
+        # allows by design. The pairing pass is what makes the two move together.
+        self.assertEqual(
+            self.actual["delivery_fence_bind"],
+            {
+                "src/services/discord/relay_recovery/apply.rs": 1,
+                "src/services/discord/tui_direct_pending_start.rs": 1,
+            },
+        )
+        self.assertEqual(self.actual["delivery_fence_bind"], self.actual["identity_fence_bind"])
+        self.assertNotIn(ratchet.REGISTRY_OWNER, self.actual["delivery_fence_bind"])
+        owner_production = ratchet.RUST_LEXER._production_text(ROOT / ratchet.REGISTRY_OWNER)
+        self.assertRegex(owner_production, ratchet.DELIVERY_FENCE_PATTERN)
+        self.assertEqual(ratchet.pairing_errors(self.actual), [])
+        comment = self.payload["categories"]["delivery_fence_bind"]["comment"]
+        self.assertIn("the SAME per-file set", comment)
+
     def test_baseline_states_that_counts_are_not_safety_proof(self) -> None:
         self.assertEqual(self.payload["comment"], ratchet.WARNING)
         self.assertIn("not proof of safety", ratchet.WARNING)
@@ -84,9 +123,17 @@ class RatchetDiscriminationTests(unittest.TestCase):
             "src/services/discord/t3a4_probe.rs",
             "shared.tmux_watchers.remove(&channel);\n",
         ),
+        "identity_fence_bind": (
+            "src/services/discord/t3a4_probe.rs",
+            "shared.tmux_watchers.under_identity_fence(fence);\n",
+        ),
+        "delivery_fence_bind": (
+            "src/services/discord/t3a4_probe.rs",
+            "view.with_terminal_delivery_fence(delivery);\n",
+        ),
     }
 
-    def test_four_fake_callsite_mutations_are_unlisted(self) -> None:
+    def test_fake_callsite_mutations_are_unlisted(self) -> None:
         for category, (rel, body) in self.MUTATIONS.items():
             with self.subTest(category=category), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
@@ -95,6 +142,57 @@ class RatchetDiscriminationTests(unittest.TestCase):
                 errors = ratchet.growth_errors(actual, empty_counts())
                 self.assertEqual(len(errors), 1)
                 self.assertIn(f"{category}: UNLISTED call site", errors[0])
+
+    def test_dropping_a_delivery_fence_is_red_even_though_growth_allows_it(self) -> None:
+        """The whole point of the pairing pass, stated as a discrimination test.
+
+        A site that keeps `under_identity_fence(..)` and loses
+        `.with_terminal_delivery_fence(..)` is a silently unfenced destructive
+        removal. Its `registry_remove` and `identity_fence_bind` counts are
+        unchanged and its `delivery_fence_bind` count DECREASED, so the
+        no-growth ratchet is green on it. Only `pairing_errors` is red.
+        """
+        rel = "src/services/discord/t3a4_pairing_probe.rs"
+        both = (
+            "shared.tmux_watchers\n"
+            "    .under_identity_fence(fence)\n"
+            "    .with_terminal_delivery_fence(delivery)\n"
+            "    .remove_tmux_session_if_current(tmux, &cancel);\n"
+        )
+        unfenced = both.replace("    .with_terminal_delivery_fence(delivery)\n", "")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root, rel, both)
+            paired, _subcounts = ratchet.scan(root)
+            self.assertEqual(paired["identity_fence_bind"], {rel: 1})
+            self.assertEqual(paired["delivery_fence_bind"], {rel: 1})
+            self.assertEqual(ratchet.pairing_errors(paired), [])
+
+            write(root, rel, unfenced)
+            dropped, _subcounts = ratchet.scan(root)
+
+        self.assertEqual(dropped["identity_fence_bind"], {rel: 1})
+        self.assertEqual(dropped["delivery_fence_bind"], {})
+        # The removal is still counted, and nothing grew: the growth ratchet
+        # pinned at the PAIRED tree sees no problem at all.
+        self.assertEqual(dropped["registry_remove"], paired["registry_remove"])
+        self.assertEqual(ratchet.growth_errors(dropped, paired), [])
+        errors = ratchet.pairing_errors(dropped)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("fence_pairing", errors[0])
+        self.assertIn(rel, errors[0])
+        self.assertIn("must carry both S4 conjuncts", errors[0])
+
+    def test_pairing_is_two_sided(self) -> None:
+        actual = empty_counts()
+        actual["delivery_fence_bind"] = {"src/services/discord/a.rs": 1}
+        errors = ratchet.pairing_errors(actual)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("under_identity_fence 0x", errors[0])
+        actual["identity_fence_bind"] = {"src/services/discord/a.rs": 2}
+        self.assertEqual(len(ratchet.pairing_errors(actual)), 1)
+        actual["identity_fence_bind"]["src/services/discord/a.rs"] = 1
+        self.assertEqual(ratchet.pairing_errors(actual), [])
 
     def test_existing_file_growth_is_red_but_deletion_is_allowed(self) -> None:
         baseline = empty_counts()
@@ -140,6 +238,7 @@ fn probe() {
     cancel.store(true, Ordering::Release);
     kill_pid_tree(1);
     shared.tmux_watchers.remove(&channel);
+    shared.tmux_watchers.under_identity_fence(fence).with_terminal_delivery_fence(d);
 }
 """,
             )
@@ -148,6 +247,8 @@ fn probe() {
             self.assertEqual(sum(actual["watcher_cancel"].values()), 1)
             self.assertEqual(actual["process_kill"], {})
             self.assertEqual(actual["registry_remove"], {})
+            self.assertEqual(actual["identity_fence_bind"], {})
+            self.assertEqual(actual["delivery_fence_bind"], {})
 
     def test_baseline_round_trip_preserves_per_file_counts_and_warning(self) -> None:
         counts = empty_counts()

@@ -1405,7 +1405,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=9be327684586ffccd0ccd5ac99db81cf4af45e6425bd4deab402fb9eb8f27a56
+          expected=e32217629c135d5cbd16c8bb81eb58fe53e07cea0def203a5ce6380191f80263
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -1433,10 +1433,13 @@ jobs:
   # Its version-controlled manifest names every current T1-T5 contract target,
   # records explicit GAP rows, and owns the selection floors. Condition-3 fixed
   # mutations attach as a later step in this same job after target verification.
+  # relay-authority-contract timeouts: 7 mutations x ~4.5min compile+test + ~6min
+  # setup/base build (measured 2026-08-19, run 32194217057: 5 of 7 done at 30m16s
+  # timeout). 50/45 give headroom without hiding growth.
   relay-authority-contract:
     name: relay-authority-contract
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 50
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
@@ -1486,7 +1489,7 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
         shell: bash
-        timeout-minutes: 30
+        timeout-minutes: 45
         run: bash scripts/run_relay_authority_mutations.sh
 
       # Independent out-of-band backstop: conditional helper or gate mutations
@@ -1509,7 +1512,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=9be327684586ffccd0ccd5ac99db81cf4af45e6425bd4deab402fb9eb8f27a56
+          expected=e32217629c135d5cbd16c8bb81eb58fe53e07cea0def203a5ce6380191f80263
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

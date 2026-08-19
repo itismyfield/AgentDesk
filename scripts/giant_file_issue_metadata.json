@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "refreshed_at": "2026-08-17T19:01:15Z",
+  "refreshed_at": "2026-08-18T21:57:44Z",
   "ratchets": {
     "closed_deadline_entries": 79,
     "transition_list_entries": 79
@@ -136,6 +136,17 @@
       ],
       "files": [
         "src/services/discord/health/snapshot.rs"
+      ]
+    },
+    {
+      "number": 5457,
+      "state": "open",
+      "title": "decompose tmux_watcher_registry.rs below the 1000-line prod ceiling (post S4 fence)",
+      "owners": [
+        "discord-relay"
+      ],
+      "files": [
+        "src/services/discord/tmux_watcher_registry.rs"
       ]
     }
   ]

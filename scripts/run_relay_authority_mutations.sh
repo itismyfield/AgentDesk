@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# #5071 condition-3: four fixed, hand-written relay-authority mutations.
+# #5071 condition-3: seven fixed, hand-written relay-authority mutations.
+#
+# The declared floor stays four (the condition-3 minimum). #5071 relay-tail S4
+# added the two destructive-fence rows S4-m5 and S4-m6 on top of it, and its r2
+# repair added S4-m7 for the fence's judge/commit atomicity.
 #
 # Deferred workflow wiring (apply only after the relay-authority lane lands):
 # in jobs.relay-authority-contract.steps, immediately after
@@ -39,7 +43,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 readonly REPO_ROOT
 readonly TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target/relay-authority-mutations}"
 readonly LOCK_DIR="$REPO_ROOT/target/relay-authority-mutations.lock"
-readonly MUTATION_COUNT=4
+readonly MUTATION_COUNT=7
 readonly MODE="${RELAY_AUTHORITY_MUTATION_TEST_MODE:-cargo}"
 readonly FIXTURE_RUNNER="${RELAY_AUTHORITY_MUTATION_FIXTURE_RUNNER:-}"
 
@@ -54,7 +58,14 @@ fi
 
 readonly TERMINAL_HANDOFF="src/services/discord/session_relay_sink/terminal_handoff.rs"
 readonly SESSION_RELAY_SINK="src/services/discord/session_relay_sink.rs"
-readonly -a MUTATION_FILES=("$TERMINAL_HANDOFF" "$SESSION_RELAY_SINK")
+readonly WATCHER_REGISTRY="src/services/discord/tmux_watcher_registry.rs"
+readonly DESTRUCTIVE_CANCEL_GATE="src/services/discord/destructive_cancel_gate.rs"
+readonly -a MUTATION_FILES=(
+  "$TERMINAL_HANDOFF"
+  "$SESSION_RELAY_SINK"
+  "$WATCHER_REGISTRY"
+  "$DESTRUCTIVE_CANCEL_GATE"
+)
 declare -a ORIGINAL_COPIES=()
 declare -a ORIGINAL_HASHES=()
 RESTORE_FAILED=0
@@ -302,5 +313,38 @@ run_mutation \
   $'formatting::watcher_completion_footer_anchor(\n                        last_chunk_anchor.as_ref(),\n                        msg_id,\n                        &relay_text,\n                    )' \
   $'formatting::watcher_completion_footer_anchor(\n                        None,\n                        msg_id,\n                        &relay_text,\n                    )' \
   'services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_preserves_tail_anchor_and_observes_persisted_proof'
+
+# #5071 relay-tail S4 (I-1): neutralize the delivery-lease conjunct that both
+# fenced registry CAS cores gate their commit through. The bound fence is still
+# matched (just unused), and `commit` is still consumed exactly once, so the
+# mutant compiles and the only thing that changes is the verdict.
+run_mutation \
+  S4-m5 "$WATCHER_REGISTRY" \
+  '        Some(fence) => fence.commit_if_permitted(commit),' \
+  '        Some(_fence) => Some(commit()),' \
+  'services::discord::relay_recovery::tests::post_gate_identity_matched_live_delivery_lease_blocks_dead_frontier_watcher_cancel'
+
+# #5071 relay-tail S4 (I-2a): restore the terminal-envelope early return ahead of
+# the no-progress ladder, i.e. undo the demotion. The envelope is still present
+# in the target's fixture, so the mutant short-circuits to Allowed before the
+# reprobe ever observes the advancing relay frontier.
+run_mutation \
+  S4-m6 "$DESTRUCTIVE_CANCEL_GATE" \
+  $'    let Some(expected_output_path) = snapshot.output_path.as_deref() else {' \
+  $'    if terminal_envelope_present(provider, snapshot) {\n        return DestructiveCancelGate::Allowed("terminal_envelope_present");\n    }\n    let Some(expected_output_path) = snapshot.output_path.as_deref() else {' \
+  'services::discord::destructive_cancel_gate::tests::terminal_envelope_does_not_outrank_relay_frontier_progress_on_reprobe'
+
+# #5071 relay-tail S4 r2 (P1-1): reopen the r1 read/act split. The judgment
+# still happens under the cell's payload mutex, but the mutex is now DROPPED on
+# the way out of `with_state_locked` and the destruction runs after it, exactly
+# as the r1 `permits_destruction` -> bool shape did. Every sequential verdict is
+# unchanged, so only the atomicity target can see this: a racing acquirer wins
+# the judged key inside the reopened window and still observes the registry row
+# the judgment authorized destroying.
+run_mutation \
+  S4-m7 "$WATCHER_REGISTRY" \
+  $'            #[cfg(test)]\n            run_delivery_fence_permitted_hook_for_tests(self.site);\n            Some(commit())\n        })\n    }' \
+  $'            Some(())\n        })?;\n        #[cfg(test)]\n        run_delivery_fence_permitted_hook_for_tests(self.site);\n        Some(commit())\n    }' \
+  'services::discord::tmux_watcher_registry_restore_tests::delivery_fence_judgment_and_destruction_are_atomic_against_a_racing_acquire'
 
 printf 'MUTATION_SUMMARY killed=%d survived=0 minimum=4 status=PASS\n' "$MUTATION_COUNT"

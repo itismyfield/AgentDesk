@@ -888,8 +888,8 @@ targets = {
     # hardening registry so order-independent job keys cannot disable it silently.
     # #5321 re-pins after making the independent backstop verify both the
     # result helper and the gate before executing that verified gate.
-    "job_sha256" => "4038e039649d5f7736e9bdeb03f047072db1f0db92243d42f0e8581f0703bb42",
-    "job_timeout_minutes" => 30,
+    "job_sha256" => "5d3c101473dff0bea9df5b12979081a91f082bf955e28009ea6afe85cea9ae7f",
+    "job_timeout_minutes" => 50,
     "cargo_steps" => {
       "Verify named relay-authority targets and selection floors" => {
         "commands" => ["python3 scripts/check_relay_authority_contract.py"],
@@ -905,7 +905,7 @@ targets = {
       },
       "Require relay-authority mutations to be killed" => {
         "commands" => ["bash scripts/run_relay_authority_mutations.sh"],
-        "timeout_minutes" => 30,
+        "timeout_minutes" => 45,
       },
       "Pin required-check mirror content (#5321)" => {
         "commands" => [

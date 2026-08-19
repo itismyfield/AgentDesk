@@ -5,7 +5,7 @@ use std::time::Duration;
 // the ratcheted discord/mod.rs; this gate is its only consumer.
 #[path = "destructive_cancel_capture.rs"]
 mod destructive_cancel_capture;
-use super::{SharedData, inflight, mailbox_snapshot};
+use super::{DeliveryLeaseKey, SharedData, inflight, mailbox_snapshot};
 use destructive_cancel_capture::{CaptureProgressEvidence, fresh_watcher_heartbeat_blocks_rebind};
 use poise::serenity_prelude::{ChannelId, MessageId};
 
@@ -48,6 +48,10 @@ impl DestructiveCancelIdentityPin {
     }
 }
 
+/// #5071 relay-tail S4 (I-1) attribution for the lease key derived here; only
+/// the `delivery lease id-0 turn missing disambiguators` warn log reads it.
+const DESTRUCTIVE_FENCE_LEASE_SITE: &str = "destructive_fence";
+
 #[derive(Clone, Debug)]
 pub(in crate::services::discord) struct DestructiveCancelProbeSnapshot {
     pub pin: DestructiveCancelIdentityPin,
@@ -57,6 +61,12 @@ pub(in crate::services::discord) struct DestructiveCancelProbeSnapshot {
     pub output_path: Option<String>,
     pub output_len: Option<u64>,
     pub relay_frontier: Option<u64>,
+    /// #5071 relay-tail S4 (I-1): the delivery-lease identity of the turn this
+    /// probe pinned, derived from the SAME inflight read the identity pin came
+    /// from. Carried on the snapshot rather than recomputed at the call sites so
+    /// the key a `TerminalDeliveryFence` re-reads the lease against cannot drift
+    /// from the row the rest of the gate is pinned to.
+    pub delivery_lease_key: DeliveryLeaseKey,
 }
 
 impl DestructiveCancelProbeSnapshot {
@@ -91,6 +101,12 @@ impl DestructiveCancelProbeSnapshot {
             watcher_owner_channel,
             pin.tmux_session_name.as_deref(),
         );
+        let delivery_lease_key = DeliveryLeaseKey::from_inflight_state_for_site(
+            watcher_owner_channel,
+            shared.restart.current_generation,
+            state,
+            DESTRUCTIVE_FENCE_LEASE_SITE,
+        );
         Self {
             pin,
             inflight_identity: inflight::InflightTurnIdentity::from_state(state),
@@ -99,6 +115,7 @@ impl DestructiveCancelProbeSnapshot {
             output_path,
             output_len,
             relay_frontier,
+            delivery_lease_key,
         }
     }
 }
@@ -257,10 +274,31 @@ pub(in crate::services::discord) async fn evaluate(
         false
     };
 
-    if terminal_envelope_present(provider, snapshot) {
-        return DestructiveCancelGate::Allowed("terminal_envelope_present");
-    }
-
+    // #5071 relay-tail S4 (I-2a): the terminal envelope USED to short-circuit
+    // here, ahead of every no-progress check below. It is evidence that the
+    // provider WROTE its turn terminator — the terminal POST began — and not
+    // that the relay finished delivering the bytes after it. Short-circuiting on
+    // it meant a growing capture, an advancing relay frontier and a busy pane
+    // were never consulted for exactly the turns most likely to have an
+    // undelivered tail. It is now demoted to a fallback REASON at the bottom of
+    // this function, reached only when no denial fired.
+    //
+    // The demotion has a LATENCY cost, and it is paid on the common case. An
+    // envelope-present turn used to return `Allowed` from this line without
+    // touching the disk; it now walks the whole no-progress ladder below, whose
+    // reprobe loop sleeps `DESTRUCTIVE_CANCEL_REPROBE_DELAY` between attempts —
+    // so the worst case for a turn that ends up Allowed anyway is
+    // `DESTRUCTIVE_CANCEL_REPROBE_ATTEMPTS * DESTRUCTIVE_CANCEL_REPROBE_DELAY`
+    // (3 x 1s = 3s in production; 2 x 10ms under `cfg(test)`) plus the metadata
+    // and frontier reads each attempt makes. Both callers pay it: the
+    // relay-recovery dead-frontier path and the TUI-direct claim path
+    // (`tui_direct_pending_start`), where it lands inside the interactive
+    // pending-start wait rather than a background sweep. That is the intended
+    // trade — the delay buys the reprobe a chance to SEE the relay frontier
+    // advance, which is the only evidence that distinguishes "the terminator was
+    // written" from "the bytes after it were delivered" — but it is a real
+    // regression in claim latency for every envelope-present turn, not a
+    // free-by-construction reordering.
     let Some(expected_output_path) = snapshot.output_path.as_deref() else {
         return DestructiveCancelGate::Denied("halt_evidence_incomplete");
     };
@@ -329,6 +367,14 @@ pub(in crate::services::discord) async fn evaluate(
 
     if watcher_heartbeat_stale {
         return DestructiveCancelGate::Allowed("capture_and_jsonl_halted_with_stale_watcher");
+    }
+    // #5071 relay-tail S4 (I-2a): the demoted envelope. Every denial gate above
+    // has already passed, so this only chooses which allow REASON is logged as
+    // `death_evidence`; it can no longer skip a gate. Kept as a distinct label
+    // because "halted AND the provider wrote its terminator" is a materially
+    // different triage picture from "halted with no terminator at all".
+    if terminal_envelope_present(provider, snapshot) {
+        return DestructiveCancelGate::Allowed("terminal_envelope_present");
     }
     DestructiveCancelGate::Allowed("capture_and_jsonl_halted")
 }
@@ -711,6 +757,122 @@ mod tests {
                 "a current-generation frontier appearing after a None snapshot is progress"
             );
             let _ = std::fs::remove_file(generation_path);
+        });
+    }
+
+    /// #5071 relay-tail S4 (I-2a). The transcript carries Claude's authoritative
+    /// turn terminator, so before this slice the gate short-circuited to
+    /// `Allowed("terminal_envelope_present")` without ever entering the reprobe
+    /// loop. A relay frontier that ADVANCES during the reprobe is the relay
+    /// actively delivering the tail that follows that terminator, which is
+    /// exactly what the envelope cannot speak to. Restoring the early return
+    /// ahead of the reprobe loop fails here.
+    ///
+    /// #4353: reads tmux generation files via `super::super::tmux` (cfg(unix)).
+    #[cfg(unix)]
+    #[test]
+    fn terminal_envelope_does_not_outrank_relay_frontier_progress_on_reprobe() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::TempDir::new().expect("runtime root");
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
+        current_thread_rt().block_on(async {
+            let shared = super::super::make_shared_data_for_tests();
+            let provider = ProviderKind::Claude;
+            let channel = ChannelId::new(5_071_401);
+            let tmux = "tmux-5071-envelope-vs-frontier";
+            let output_path = root.path().join("envelope-vs-frontier.jsonl");
+            let len = write_jsonl(
+                &output_path,
+                &[r#"{"type":"result","result":"done","session_id":"s"}"#],
+            );
+            let state = save_gate_state(
+                provider.clone(),
+                channel.get(),
+                5_071_501,
+                tmux,
+                &output_path,
+                len,
+            );
+            let snapshot =
+                DestructiveCancelProbeSnapshot::from_state(&shared, &state, None, channel);
+            assert!(
+                terminal_envelope_present(&provider, &snapshot),
+                "fixture must actually carry a terminal envelope, or this test proves nothing"
+            );
+            assert_eq!(snapshot.relay_frontier, None);
+
+            let generation_path = write_generation_marker(tmux);
+            let current_generation = super::super::tmux::read_generation_file_mtime_ns(tmux);
+            assert!(
+                current_generation > 0,
+                "generation marker mtime is observable"
+            );
+            let coord = shared.tmux_relay_coord(channel);
+            coord
+                .confirmed_end_offset
+                .store(4096, std::sync::atomic::Ordering::Release);
+            coord
+                .confirmed_end_generation_mtime_ns
+                .store(current_generation, std::sync::atomic::Ordering::Release);
+
+            let gate = evaluate(&shared, &provider, channel, channel, &snapshot).await;
+
+            assert_eq!(
+                gate.denied_reason(),
+                Some("relay_frontier_progress_on_reprobe"),
+                "a terminal envelope is evidence the terminal POST began, not that the relay finished delivering after it"
+            );
+            let _ = std::fs::remove_file(generation_path);
+        });
+    }
+
+    /// #5071 relay-tail S4 (I-2a), the other half: demoting the envelope must not
+    /// DELETE it. Same fixture as `ready_pane_reprobe_freeze_allows_destructive_cancel`
+    /// except that the transcript ends in Claude's turn terminator, so the ladder
+    /// reaches the bottom with no denial and the envelope is what distinguishes
+    /// the reported `death_evidence`.
+    #[test]
+    fn terminal_envelope_is_the_demoted_fallback_allow_reason() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::TempDir::new().expect("runtime root");
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
+        current_thread_rt().block_on(async {
+            let shared = super::super::make_shared_data_for_tests();
+            let provider = ProviderKind::Claude;
+            let channel = ChannelId::new(5_071_402);
+            let output_path = root.path().join("envelope-fallback.jsonl");
+            let len = write_jsonl(
+                &output_path,
+                &[r#"{"type":"result","result":"done","session_id":"s"}"#],
+            );
+            let state = save_gate_state(
+                provider.clone(),
+                channel.get(),
+                5_071_502,
+                "tmux-5071-envelope-fallback",
+                &output_path,
+                len,
+            );
+            let snapshot =
+                DestructiveCancelProbeSnapshot::from_state(&shared, &state, None, channel);
+            assert!(
+                terminal_envelope_present(&provider, &snapshot),
+                "fixture must actually carry a terminal envelope, or this test proves nothing"
+            );
+
+            let gate = evaluate(&shared, &provider, channel, channel, &snapshot).await;
+
+            assert_eq!(
+                gate.allowed_reason(),
+                Some("terminal_envelope_present"),
+                "with every denial gate passed, the envelope is still the reported death evidence"
+            );
         });
     }
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
@@ -11,8 +12,23 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MUTATION_SCRIPT = Path("scripts/run_relay_authority_mutations.sh")
+CONTRACT_MANIFEST = Path("scripts/relay_authority_contract_targets.json")
 TERMINAL_HANDOFF = Path("src/services/discord/session_relay_sink/terminal_handoff.rs")
 SESSION_RELAY_SINK = Path("src/services/discord/session_relay_sink.rs")
+WATCHER_REGISTRY = Path("src/services/discord/tmux_watcher_registry.rs")
+DESTRUCTIVE_CANCEL_GATE = Path("src/services/discord/destructive_cancel_gate.rs")
+# Every file the script mutates; it backs up and hash-verifies all of them on
+# every row, so the fixture tree has to carry the whole set.
+MUTATION_FILES = (
+    TERMINAL_HANDOFF,
+    SESSION_RELAY_SINK,
+    WATCHER_REGISTRY,
+    DESTRUCTIVE_CANCEL_GATE,
+)
+# #5071 relay-tail S4 raised this from four and its r2 repair added S4-m7; the
+# declared condition-3 floor stays four.
+MUTATION_COUNT = 7
+MUTATION_NAMES = ("M10", "M6", "M8", "anchor-drop", "S4-m5", "S4-m6", "S4-m7")
 
 
 def _cargo_log(body: str) -> str:
@@ -82,7 +98,7 @@ class RelayAuthorityMutationScriptTests(unittest.TestCase):
     def copy_fixture(self) -> Path:
         temp = Path(tempfile.mkdtemp(prefix="relay-authority-mutations-"))
         self.addCleanup(shutil.rmtree, temp, True)
-        for relative in (MUTATION_SCRIPT, TERMINAL_HANDOFF, SESSION_RELAY_SINK):
+        for relative in (MUTATION_SCRIPT, *MUTATION_FILES):
             destination = temp / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(REPO_ROOT / relative, destination, follow_symlinks=False)
@@ -154,7 +170,7 @@ exit 101
 
     @staticmethod
     def assert_sources_restored(test: unittest.TestCase, root: Path) -> None:
-        for relative in (TERMINAL_HANDOFF, SESSION_RELAY_SINK):
+        for relative in MUTATION_FILES:
             test.assertEqual((root / relative).read_bytes(), (REPO_ROOT / relative).read_bytes())
 
     def test_color_neutralization_keeps_cache_proof_color_proof(self) -> None:
@@ -164,14 +180,18 @@ exit 101
         result = self.run_script_with_fake_cargo(root, cargo)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(result.stdout.count("compiling_agentdesk=1"), 4, result.stdout)
+        self.assertEqual(
+            result.stdout.count("compiling_agentdesk=1"), MUTATION_COUNT, result.stdout
+        )
         self.assertNotIn("cache-proof=invalid", result.stderr)
         # #5243 case E control: a freshly built, genuinely killed mutant must not
         # be misgraded by the new build/test gates.
         self.assertNotIn("status=BUILD-BROKEN", result.stderr)
         self.assertNotIn("status=NO-TEST-RAN", result.stderr)
         self.assertEqual(
-            result.stdout.count("compile_ok=yes tests_passed=0 tests_failed=1"), 4, result.stdout
+            result.stdout.count("compile_ok=yes tests_passed=0 tests_failed=1"),
+            MUTATION_COUNT,
+            result.stdout,
         )
 
     def test_cache_proof_still_trips_on_a_cached_tree(self) -> None:
@@ -193,7 +213,7 @@ exit 101
         result = self.run_script(root, runner)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        for mutation in ("M10", "M6", "M8", "anchor-drop"):
+        for mutation in MUTATION_NAMES:
             self.assertIn(
                 f"MUTATION_ORACLE mutation={mutation} compile_ok=yes "
                 "tests_passed=0 tests_failed=1",
@@ -235,7 +255,7 @@ exit 101
         self.assertNotIn("MUTATION_SUMMARY", result.stdout)
         self.assert_sources_restored(self, root)
 
-    def test_four_fixed_mutations_are_killed_and_sources_restore(self) -> None:
+    def test_every_fixed_mutation_is_killed_and_sources_restore(self) -> None:
         root = self.copy_fixture()
         runner = self.write_runner(root, KILLED_RUNNER)
 
@@ -246,7 +266,7 @@ exit 101
             line for line in result.stdout.splitlines() if line.startswith("MUTATION_COUNT ")
         )
         fields = dict(item.split("=", 1) for item in count_line.split()[1:])
-        self.assertEqual(int(fields["count"]), 4)
+        self.assertEqual(int(fields["count"]), MUTATION_COUNT)
         self.assertEqual(int(fields["minimum"]), 4)
         self.assertEqual(
             result.stdout.count("status=KILLED rc=101"), int(fields["count"]), result.stdout
@@ -256,6 +276,36 @@ exit 101
             result.stdout,
         )
         self.assert_sources_restored(self, root)
+
+    def test_manifest_declares_the_same_mutation_rows_the_script_runs(self) -> None:
+        """The manifest's `condition3_mutations` list is documentation until
+        something compares it to the script. Compare it to a real run: the names
+        come from the run's own `MUTATION_RESULT` markers, and the files and
+        named targets must literally appear in the script that produced them."""
+        manifest = json.loads((REPO_ROOT / CONTRACT_MANIFEST).read_text(encoding="utf-8"))
+        declared = manifest["condition3_mutations"]
+        root = self.copy_fixture()
+        runner = self.write_runner(root, KILLED_RUNNER)
+
+        result = self.run_script(root, runner)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        executed = [
+            line.split("mutation=", 1)[1].split(maxsplit=1)[0]
+            for line in result.stdout.splitlines()
+            if line.startswith("MUTATION_RESULT mutation=")
+        ]
+        self.assertEqual([row["name"] for row in declared], executed)
+        self.assertEqual(executed, list(MUTATION_NAMES))
+        script = (REPO_ROOT / MUTATION_SCRIPT).read_text(encoding="utf-8")
+        for row in declared:
+            with self.subTest(mutation=row["name"]):
+                self.assertIn(row["file"], script)
+                self.assertIn(row["target"], script)
+        self.assertEqual(
+            {row["file"] for row in declared},
+            {relative.as_posix() for relative in MUTATION_FILES},
+        )
 
     def test_concurrent_run_fails_closed_without_modifying_sources(self) -> None:
         root = self.copy_fixture()
@@ -351,8 +401,11 @@ exit 101
             line for line in result.stdout.splitlines() if line.startswith("MUTATION_COUNT ")
         )
         fields = dict(item.split("=", 1) for item in count_line.split()[1:])
-        self.assertEqual(int(fields["count"]), 4)
+        # The floor is what this test names; the exact row count is pinned by
+        # `test_every_fixed_mutation_is_killed_and_sources_restore`, so adding a
+        # mutation does not have to be edited in twice.
         self.assertEqual(int(fields["minimum"]), 4)
+        self.assertGreaterEqual(int(fields["count"]), int(fields["minimum"]))
         self.assertEqual(result.stdout.count("MUTATION_RESULT mutation="), int(fields["count"]))
 
     @staticmethod

@@ -170,6 +170,57 @@ pub(in crate::services::discord) enum LeaseSnapshot {
     },
 }
 
+/// What a [`LeaseSnapshot`] holds for ONE expected [`DeliveryLeaseKey`], as
+/// returned by [`LeaseSnapshot::identity_matched`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) struct IdentityMatchedLease {
+    /// Exclusive end of the `[start, end)` delivery range the matched lease
+    /// covers.
+    pub(in crate::services::discord) end: u64,
+    /// `Some(deadline_ms)` while the lease is still `Leased`: the holder-liveness
+    /// deadline, on the [`lease_now_ms`] clock, that `reclaim_if_expired` will
+    /// return the cell to `Unleased` at. `None` once `Committed` — that state
+    /// carries no deadline field and is never deadline-reclaimed, so a caller
+    /// asking "is a holder still live?" must read `None` as "no live holder",
+    /// not as "expired".
+    pub(in crate::services::discord) deadline_ms: Option<u64>,
+}
+
+impl LeaseSnapshot {
+    /// The range and (uncommitted) deadline this snapshot holds FOR
+    /// `expected_key`, or `None` when the cell is `Unleased` or holds some other
+    /// turn's key.
+    ///
+    /// Key equality is the whole relevance test, and it is only as precise as
+    /// [`DeliveryLeaseKey`] itself: an id-0 turn that reached
+    /// `is_degenerate_legacy` collapses to `(channel, generation, 0)`, so two
+    /// such turns on one channel in one process generation compare EQUAL here.
+    /// A caller that refuses on a match therefore refuses slightly more often
+    /// than the turn identity alone would justify; one that acts on a match acts
+    /// on a range that may belong to a sibling id-0 turn.
+    pub(in crate::services::discord) fn identity_matched(
+        &self,
+        expected_key: &DeliveryLeaseKey,
+    ) -> Option<IdentityMatchedLease> {
+        match self {
+            Self::Leased {
+                key,
+                deadline_ms,
+                end,
+                ..
+            } if key == expected_key => Some(IdentityMatchedLease {
+                end: *end,
+                deadline_ms: Some(*deadline_ms),
+            }),
+            Self::Committed { key, end, .. } if key == expected_key => Some(IdentityMatchedLease {
+                end: *end,
+                deadline_ms: None,
+            }),
+            Self::Unleased | Self::Leased { .. } | Self::Committed { .. } => None,
+        }
+    }
+}
+
 /// #3041 P1-1/P1-2: delivery-lease acquire deadline shared by BOTH the watcher
 /// and the bridge terminal-delivery paths. The deadline is a HOLDER-LIVENESS
 /// signal, NOT a hard cap on delivery duration — while a send future is in
@@ -286,12 +337,49 @@ impl DeliveryLeaseCell {
     /// coherent. `state_tag` remains the single-winner CAS gate for acquire; it
     /// is NOT used as a lock-free read fast-path here because that reintroduced
     /// the publish/observe window the codex review flagged.
+    ///
+    /// NOTE the snapshot is stale the instant the mutex is dropped on return. A
+    /// caller that must ACT on what it read — rather than merely report it —
+    /// has a read/act window a concurrent `try_acquire` fits inside, and must
+    /// use [`DeliveryLeaseCell::with_state_locked`] instead.
     pub(in crate::services::discord) fn read(&self) -> LeaseSnapshot {
+        self.with_state_locked(|snapshot| snapshot)
+    }
+
+    /// #5071 relay-tail S4 r2 (P1-1): run `act` with the payload mutex HELD,
+    /// handing it the same snapshot [`DeliveryLeaseCell::read`] would return.
+    ///
+    /// This exists because `read()` alone cannot fence anything. `read()` takes
+    /// the mutex, materializes a snapshot, and DROPS the mutex on return, so a
+    /// caller that decides "no live holder → safe to destroy" and then performs
+    /// the destruction has a window between the two in which a `try_acquire`
+    /// can win. Every mutation of this cell runs under this one mutex, so a
+    /// decision taken and acted on inside `act` is atomic with respect to
+    /// acquire / commit / release / renew / reclaim on this cell.
+    ///
+    /// # Contract for `act`
+    ///
+    /// * It MUST NOT call back into ANY method of the SAME cell: `std::sync::
+    ///   Mutex` is not reentrant, so that self-deadlocks.
+    /// * It is called while a lock is held, so it should stay short and must not
+    ///   block on I/O or on a lock that some other thread could hold while
+    ///   waiting on this cell. The one production caller (the
+    ///   `TerminalDeliveryFence` conjunct in `tmux_watcher_registry`) runs only
+    ///   in-memory registry map mutations; the lock-order enumeration for that
+    ///   nesting lives on that fence's doc comment.
+    /// * A panic inside `act` poisons the mutex. That is survivable here: every
+    ///   lock site in this file recovers with `PoisonError::into_inner`, which
+    ///   is sound because a panicking `act` cannot have mutated the payload (it
+    ///   is handed a snapshot by value, not the guard).
+    pub(in crate::services::discord) fn with_state_locked<T>(
+        &self,
+        act: impl FnOnce(LeaseSnapshot) -> T,
+    ) -> T {
         let guard = self
             .payload
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match &*guard {
+        let snapshot = match &*guard {
             LeaseState::Unleased => LeaseSnapshot::Unleased,
             LeaseState::Leased {
                 holder,
@@ -319,7 +407,10 @@ impl DeliveryLeaseCell {
                 end: *end,
                 outcome: *outcome,
             },
-        }
+        };
+        let acted = act(snapshot);
+        drop(guard);
+        acted
     }
 
     /// CAS-acquire the lease for the full `(delivery_lease_key, [start,end))`

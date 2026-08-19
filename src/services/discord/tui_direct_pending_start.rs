@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize};
 
 use super::SharedData;
 use crate::services::discord::tmux_watcher_registry::{
-    WatcherIdentityFence, execution_identity_mode,
+    TerminalDeliveryFence, WatcherIdentityFence, execution_identity_mode,
 };
 
 #[path = "tui_direct_pending_start/watcher_cancel.rs"]
@@ -904,6 +904,18 @@ async fn submit_stale_foreign_inflight_cancel(
             .with_pinned_binding(pinned.owner_channel_id, &pinned.output_path);
             (pinned, identity_fence)
         });
+    // #5071 relay-tail S4 (I-1): pinned alongside the execution identity above.
+    // The `Arc` is the channel's LIVE lease cell, so the registry CAS below
+    // re-reads the current lease through it; the key comes from the probe so the
+    // relevance test names the same turn the rest of this helper committed on.
+    // Scope: it is consumed by that CAS only. When `pinned` is `None` there is no
+    // watcher to remove, this helper takes the `CommittedNoWatcher` path, and the
+    // finalizer submit below is NOT lease-fenced.
+    let delivery_fence = TerminalDeliveryFence::capture(
+        shared.delivery_lease(channel_id),
+        probe.delivery_lease_key.clone(),
+        STALE_FOREIGN_CANCEL_IDENTITY_SITE,
+    );
     let pinned_watcher = pinned.is_some();
     let commit_outcome = super::inflight::commit_destructive_cancel_locked(
         provider,
@@ -950,6 +962,7 @@ async fn submit_stale_foreign_inflight_cancel(
         if shared
             .tmux_watchers
             .under_identity_fence(identity_fence)
+            .with_terminal_delivery_fence(delivery_fence)
             .remove_tmux_session_if_current(&pinned.tmux_session_name, &pinned.cancel)
             .is_none()
         {
@@ -3070,6 +3083,237 @@ mod tests {
             );
             assert!(shared.tmux_watchers.has_live_watcher_handle(tmux));
             assert!(!token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+        });
+    }
+
+    /// Which delivery lease the pre-CAS window takes in one run of
+    /// [`stale_foreign_demote_under_delivery_lease`].
+    #[derive(Clone, Copy)]
+    enum DeliveryLeaseArm {
+        /// This turn's own key, deadline in the future: a terminal delivery for
+        /// the very turn being destroyed is in flight.
+        LiveMatchedKey,
+        /// This turn's own key, deadline already elapsed: a DEAD holder.
+        ExpiredMatchedKey,
+        /// A live lease under some OTHER turn's key.
+        LiveForeignKey,
+    }
+
+    /// What one run of [`stale_foreign_demote_under_delivery_lease`] left behind.
+    struct DeliveryFenceOutcome {
+        demoted: bool,
+        cancelled: bool,
+        session_still_registered: bool,
+        turn_cancelled: bool,
+        inflight_present: bool,
+    }
+
+    /// Drive one stale-FOREIGN demote in which the post-gate / pre-CAS window
+    /// takes the channel's delivery lease under `arm`.
+    ///
+    /// The identity conjuncts cannot be what decides any of these runs: the
+    /// session is never respawned and the registry row never moves, so the
+    /// session key, the cancel pointer, the owner channel and the output path
+    /// all still match at the CAS. Only the S4 delivery conjunct differs
+    /// between the arms.
+    async fn stale_foreign_demote_under_delivery_lease(
+        root: &std::path::Path,
+        channel_id: u64,
+        label: &str,
+        arm: DeliveryLeaseArm,
+    ) -> DeliveryFenceOutcome {
+        let shared = super::super::make_shared_data_for_tests();
+        let provider = crate::services::provider::ProviderKind::Claude;
+        let channel = poise::serenity_prelude::ChannelId::new(channel_id);
+        let stale_msg = channel_id + 100;
+        let tmux = format!("tmux-5071-s4r2-{label}");
+        let output_path = root.join(format!("ready-s4r2-{label}.jsonl"));
+        std::fs::write(
+            &output_path,
+            r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+        )
+        .expect("write ready output");
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+        assert!(
+            super::super::mailbox_try_start_turn(
+                &shared,
+                channel,
+                token.clone(),
+                poise::serenity_prelude::UserId::new(1),
+                poise::serenity_prelude::MessageId::new(stale_msg),
+            )
+            .await
+        );
+        shared
+            .restart
+            .global_active
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+        let mut state =
+            stale_foreign_state(provider.clone(), channel_id, stale_msg, &tmux, &output_path);
+        stamp_claude_ready_for_input_evidence(&mut state, &output_path);
+        write_inflight_fixture(root, &provider, &state);
+        let (watcher, watcher_cancel) = test_watcher_handle(&tmux, &output_path);
+        watcher
+            .last_heartbeat_ts_ms
+            .store(1, std::sync::atomic::Ordering::Release);
+        shared.tmux_watchers.insert(channel, watcher);
+        let mut rec = record("claude", channel_id, channel_id + 200);
+        rec.tmux_session_name = tmux.clone();
+
+        // The key the production fence re-reads against, derived exactly the way
+        // `DestructiveCancelProbeSnapshot::from_pinned_state` derives it — from
+        // the same inflight row this fixture just wrote.
+        let matched_key = super::super::DeliveryLeaseKey::from_inflight_state_for_site(
+            channel,
+            shared.restart.current_generation,
+            &state,
+            "s4_r2_tui_delivery_fence_test",
+        );
+        let (lease_key, deadline_ms) = match arm {
+            DeliveryLeaseArm::LiveMatchedKey => (
+                matched_key,
+                super::super::lease_now_ms()
+                    .saturating_add(super::super::DELIVERY_LEASE_DEADLINE_MS),
+            ),
+            // Strictly in the past on the same monotonic clock the fence reads,
+            // which only moves forward from here.
+            DeliveryLeaseArm::ExpiredMatchedKey => {
+                (matched_key, super::super::lease_now_ms().saturating_sub(1))
+            }
+            DeliveryLeaseArm::LiveForeignKey => {
+                let foreign = super::super::DeliveryLeaseKey::new_for_site(
+                    channel,
+                    shared.restart.current_generation,
+                    stale_msg + 5_000,
+                    None,
+                    None,
+                    "s4_r2_tui_delivery_fence_test.foreign",
+                );
+                assert_ne!(
+                    matched_key, foreign,
+                    "the foreign arm needs a genuinely different turn key"
+                );
+                (
+                    foreign,
+                    super::super::lease_now_ms()
+                        .saturating_add(super::super::DELIVERY_LEASE_DEADLINE_MS),
+                )
+            }
+        };
+
+        let hook_shared = Arc::clone(&shared);
+        let lease_slot = Mutex::new(Some((lease_key, deadline_ms)));
+        let _hook = set_destructive_cancel_post_gate_hook_for_tests(Arc::new(move |point| {
+            if point != DestructiveCancelHookPoint::PreRegistryCas {
+                return;
+            }
+            if let Some((key, deadline_ms)) = lease_slot
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .take()
+            {
+                assert!(
+                    hook_shared.delivery_lease(channel).try_acquire(
+                        key,
+                        super::super::LeaseHolder::Sink,
+                        0,
+                        128,
+                        deadline_ms,
+                    ),
+                    "the pre-CAS window must be able to take this channel's delivery lease"
+                );
+            }
+        }));
+
+        let demoted = demote_stale_foreign_inflight_if_current(&shared, &rec).await;
+        DeliveryFenceOutcome {
+            demoted,
+            cancelled: watcher_cancel.load(std::sync::atomic::Ordering::Acquire),
+            session_still_registered: shared.tmux_watchers.has_live_watcher_handle(&tmux),
+            turn_cancelled: token.cancelled.load(std::sync::atomic::Ordering::Relaxed),
+            inflight_present: super::super::inflight::load_inflight_state(&provider, channel_id)
+                .is_some(),
+        }
+    }
+
+    /// #5071 relay-tail S4 r2 (P1-2 ③): the TUI-direct half of the delivery
+    /// fence, symmetric with the relay-recovery sibling
+    /// `relay_recovery::tests::post_gate_identity_matched_live_delivery_lease_blocks_dead_frontier_watcher_cancel`.
+    ///
+    /// Both production call sites bind `TerminalDeliveryFence`, but until this
+    /// slice only the relay one had a behavioural test — the TUI site's conjunct
+    /// was asserted by nothing at all, so detaching it there was invisible. The
+    /// three arms are the relay test's three, driven through
+    /// `demote_stale_foreign_inflight_if_current`:
+    ///
+    ///   * arm A — this turn's lease is live: the registry CAS must refuse, and
+    ///     because this helper stores `cancel` only AFTER a successful CAS, the
+    ///     watcher must be left registered, uncancelled and still relaying.
+    ///   * arm B — the same key, deadline elapsed. A dead holder must not strand
+    ///     the watcher; this is what bounds the veto.
+    ///   * arm C — a live lease under a DIFFERENT turn key, which is not this
+    ///     destruction's business. Without the key comparison the veto would be
+    ///     channel-wide and a later turn's lease would block stale-watcher
+    ///     cleanup forever.
+    ///
+    /// Dropping `.with_terminal_delivery_fence(..)` from the TUI call site fails
+    /// arm A; widening the conjunct to "any lease held" fails arm C; dropping the
+    /// deadline comparison fails arm B.
+    #[test]
+    fn stale_foreign_demote_refuses_only_a_live_identity_matched_delivery_lease() {
+        let _guard = worker_test_lock();
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::TempDir::new().expect("runtime root");
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
+        current_thread_rt().block_on(async {
+            let live = stale_foreign_demote_under_delivery_lease(
+                root.path(),
+                4_030_140,
+                "lease-live",
+                DeliveryLeaseArm::LiveMatchedKey,
+            )
+            .await;
+            assert!(!live.demoted);
+            assert!(
+                !live.cancelled,
+                "a live identity-matched delivery lease must veto the committed watcher cancel"
+            );
+            assert!(live.session_still_registered);
+            assert!(!live.turn_cancelled);
+            assert!(live.inflight_present);
+
+            let expired = stale_foreign_demote_under_delivery_lease(
+                root.path(),
+                4_030_141,
+                "lease-expired",
+                DeliveryLeaseArm::ExpiredMatchedKey,
+            )
+            .await;
+            assert!(expired.demoted);
+            assert!(
+                expired.cancelled,
+                "an expired lease is a dead holder and must not strand the watcher"
+            );
+            assert!(!expired.session_still_registered);
+            assert!(expired.turn_cancelled);
+
+            let foreign = stale_foreign_demote_under_delivery_lease(
+                root.path(),
+                4_030_142,
+                "lease-foreign",
+                DeliveryLeaseArm::LiveForeignKey,
+            )
+            .await;
+            assert!(foreign.demoted);
+            assert!(
+                foreign.cancelled,
+                "another turn's delivery lease is not this destruction's business"
+            );
+            assert!(!foreign.session_still_registered);
+            assert!(foreign.turn_cancelled);
         });
     }
 

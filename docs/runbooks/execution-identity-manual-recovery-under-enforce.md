@@ -35,7 +35,8 @@ next spawn to mint a fresh `.spawn_nonce`.
 `relay_recovery::apply::apply_relay_recovery_decision` captures a
 `WatcherIdentityFence` (`DEAD_FRONTIER_CANCEL_IDENTITY_SITE`) and routes the
 dead-frontier destructive cancel through
-`under_identity_fence(...).cancel_and_remove_channel_if_current(...)`. Under
+`under_identity_fence(...).with_terminal_delivery_fence(...).cancel_and_remove_channel_if_current(...)`
+(the delivery binder is required since #5071 relay-tail S4 r2). Under
 `Enforce`, an absent or changed `.spawn_nonce` denies that removal.
 
 That branch is guarded by `episode.is_none()`, and **only Manual can satisfy it**

@@ -179,15 +179,17 @@ fn watcher_backstop_produced_terminal_end(
             state,
             "watcher_backstop_produced_terminal_end",
         );
-        let lease_end = match shared.delivery_lease(channel_id).read() {
-            crate::services::discord::LeaseSnapshot::Leased { key, end, .. }
-            | crate::services::discord::LeaseSnapshot::Committed { key, end, .. }
-                if key == expected_key =>
-            {
-                Some(end)
-            }
-            _ => None,
-        };
+        // #5071 relay-tail S4: the `Leased | Committed` + `key == expected_key`
+        // discrimination this used to spell inline is now
+        // `LeaseSnapshot::identity_matched`, shared verbatim with the
+        // `TerminalDeliveryFence` conjunct in `tmux_watcher_registry`. This
+        // caller wants the produced END from EITHER state and ignores the
+        // deadline; the fence wants the deadline and only from `Leased`.
+        let lease_end = shared
+            .delivery_lease(channel_id)
+            .read()
+            .identity_matched(&expected_key)
+            .map(|matched| matched.end);
         if let Some(lease_end) = lease_end {
             end = Some(end.unwrap_or(0).max(lease_end));
         }

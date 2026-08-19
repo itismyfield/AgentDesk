@@ -1,6 +1,44 @@
 {
   "schema_version": 1,
   "condition3_mutations_present": true,
+  "condition3_mutations_comment": "The fixed mutation rows scripts/run_relay_authority_mutations.sh runs, in order. Not read by check_relay_authority_contract.py; kept honest by tests/test_relay_authority_mutations.py, which runs the script and compares the MUTATION_RESULT names, mutated files and named targets against this list. The declared floor stays four; S4-m5/S4-m6 are the #5071 relay-tail S4 destructive-fence rows and S4-m7 is its r2 repair row, which reopens the fence's judge/commit window instead of neutering the verdict.",
+  "condition3_mutations": [
+    {
+      "name": "M10",
+      "file": "src/services/discord/session_relay_sink/terminal_handoff.rs",
+      "target": "services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_preserves_tail_anchor_and_observes_persisted_proof"
+    },
+    {
+      "name": "M6",
+      "file": "src/services/discord/session_relay_sink/terminal_handoff.rs",
+      "target": "services::discord::session_relay_sink::delivery_orchestration_tests::fenced_terminal_without_parser_delivery_is_terminal_not_delivered"
+    },
+    {
+      "name": "M8",
+      "file": "src/services/discord/session_relay_sink/terminal_handoff.rs",
+      "target": "services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_propagates_injected_transport_error"
+    },
+    {
+      "name": "anchor-drop",
+      "file": "src/services/discord/session_relay_sink.rs",
+      "target": "services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_preserves_tail_anchor_and_observes_persisted_proof"
+    },
+    {
+      "name": "S4-m5",
+      "file": "src/services/discord/tmux_watcher_registry.rs",
+      "target": "services::discord::relay_recovery::tests::post_gate_identity_matched_live_delivery_lease_blocks_dead_frontier_watcher_cancel"
+    },
+    {
+      "name": "S4-m6",
+      "file": "src/services/discord/destructive_cancel_gate.rs",
+      "target": "services::discord::destructive_cancel_gate::tests::terminal_envelope_does_not_outrank_relay_frontier_progress_on_reprobe"
+    },
+    {
+      "name": "S4-m7",
+      "file": "src/services/discord/tmux_watcher_registry.rs",
+      "target": "services::discord::tmux_watcher_registry_restore_tests::delivery_fence_judgment_and_destruction_are_atomic_against_a_racing_acquire"
+    }
+  ],
   "lanes": [
     {
       "name": "t1-sink-terminal-handoff",
@@ -41,8 +79,8 @@
         "--lib",
         "services::discord::relay_recovery::tests"
       ],
-      "minimum": 43,
-      "derivation": "Measured on origin/main 0ae1c5b77 with the declared command plus -- --list. This is the existing recovery planner/apply contract module around plan_relay_recovery."
+      "minimum": 50,
+      "derivation": "Re-measured with the declared command plus -- --list on the #5071 relay-tail S4 branch over origin/main 0d6e810f9: 50 named tests were selected, up from the 43 pinned on 0ae1c5b77. This is the existing recovery planner/apply contract module around plan_relay_recovery, and it is also where the S4-m5 mutation target post_gate_identity_matched_live_delivery_lease_blocks_dead_frontier_watcher_cancel lives, so this floor is what keeps that target selectable."
     },
     {
       "name": "t5-structural-signal-authority-teardown",

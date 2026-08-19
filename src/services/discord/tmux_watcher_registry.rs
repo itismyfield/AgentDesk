@@ -320,8 +320,265 @@ impl WatcherIdentityFence {
     }
 }
 
-/// A registry view whose two CAS removals also require the [`WatcherIdentityFence`]
-/// conjunct.
+/// #5071 relay-tail S4 (I-1): the delivery-lease conjunct the two fenced
+/// registry CAS sites add alongside [`WatcherIdentityFence`].
+///
+/// The identity fence answers "is this still the SAME watcher incarnation?".
+/// This one answers a different question the identity conjuncts explicitly do
+/// not — "is a terminal delivery for the very turn being destroyed still in
+/// flight?" — because a same-incarnation emission race is a declared
+/// non-guarantee of the value CAS (see [`WatcherIdentityFence`]).
+///
+/// # What it compares, and why the key comparison is the point
+///
+/// A channel-wide "is any lease held?" test is NOT usable here: the delivery
+/// lease is a per-channel cell reused across sequential turns, so a lease taken
+/// by a LATER sink/bridge owner would veto the cleanup of an OLDER stale watcher
+/// forever. The conjunct therefore refuses only on
+/// `LeaseSnapshot::identity_matched` against the key the destructive probe was
+/// built from, i.e. the same `(channel, generation, user_msg_id | started_at +
+/// turn_start_offset)` tuple the turn itself leases under, AND only while that
+/// lease is still `Leased` with an unelapsed deadline.
+///
+/// # What it does NOT establish
+///
+/// * `Committed` is not a veto. A committed lease has no deadline and awaits
+///   only a release; its holder is done sending.
+/// * The deadline is holder LIVENESS, not a delivery duration cap — a live
+///   holder heartbeat-renews it (`DeliveryLeaseHeartbeat`), so this refuses for
+///   as long as the holder keeps renewing and permits within roughly one
+///   `DELIVERY_LEASE_DEADLINE_MS` after a holder dies. That bound is the whole
+///   reason this veto is safe to add: unlike the #5067 emission fence #5071
+///   T3-A1 deleted, it cannot latch.
+/// * A degenerate legacy id-0 key collapses sibling turns (see
+///   [`LeaseSnapshot::identity_matched`]), so on that residual class the veto is
+///   channel-and-generation wide rather than turn-precise. It fails CLOSED —
+///   toward keeping the watcher — which is the direction this gate wants.
+/// * A turn whose relay owner leased under the FALLBACK-OFFSET key can never be
+///   matched here, so it fails OPEN. `tmux_watcher::turn_identity::
+///   pinned_delivery_lease_key` falls back to
+///   `DeliveryLeaseKey::new_for_site_with_fallback_offset(.., 0, None, None,
+///   Some(relay_range_start))` whenever no inflight row matched the session, and
+///   that key is `(user_msg_id 0, started_at None, turn_start_offset Some)`.
+///   `expected_key` here always comes from
+///   `DestructiveCancelProbeSnapshot::delivery_lease_key`, i.e. from
+///   `DeliveryLeaseKey::from_inflight_state_for_site`, which passes NO fallback
+///   offset and therefore only ever produces `(id, None, None)`, `(0,
+///   Some(started_at), Some(offset))` or the degenerate `(0, None, None)`. None
+///   of those three shapes can equal the fallback shape, so whenever the relay
+///   owner took that branch this conjunct permits regardless of how live the
+///   delivery is. This is a fail-OPEN residual, unlike the degenerate id-0 class
+///   above.
+/// * Nothing about leases on OTHER channels, and nothing at all about the
+///   destructive call sites listed as out of scope in the S4 commit body; those
+///   still reach the unfenced helpers.
+///
+/// # Lock order (#5071 relay-tail S4 r2, P1-1)
+///
+/// [`TerminalDeliveryFence::commit_if_permitted`] holds the lease cell's payload
+/// mutex across BOTH the judgment and the registry mutation it authorizes, which
+/// is the only way the two can be atomic against a concurrent `try_acquire` (see
+/// [`DeliveryLeaseCell::with_state_locked`]). That establishes the nesting
+///
+/// ```text
+/// TMUX_WATCHER_REGISTRY_LOCK  ->  DeliveryLeaseCell::payload  ->  registry DashMap shards
+/// ```
+///
+/// and both reverse directions were enumerated to be absent at this commit:
+///
+/// * `payload -> TMUX_WATCHER_REGISTRY_LOCK` cannot exist. The payload mutex is
+///   private to `DeliveryLeaseCell` and is only ever taken inside its own
+///   methods; exactly one of them (`with_state_locked`) runs caller code under
+///   it, and its only callers are `read()` (which runs nothing) and this fence,
+///   which is already under the registry lock when it gets there.
+/// * `DashMap shard -> payload` was checked against every site that holds a
+///   registry shard guard — a `Ref` from `tmux_watchers.get`/`.iter()` or from
+///   the `by_tmux_session` field. None of them touches a delivery lease while
+///   the guard is live: `turn_finalizer/watcher_backstop.rs` explicitly drops
+///   its `Ref` before the lease read further down, and every other site either
+///   clones values out of the `Ref` immediately or only performs atomic loads
+///   and stores on the handle. The transitive callees that DO run under a live
+///   `Ref` — `destructive_cancel_gate::fresh_watcher_heartbeat_should_block`,
+///   `health/relay_auto_heal::nudge_watcher_handle_for_backlog` and its
+///   `redrive_should_yield_to_live_relay` — reach no lease cell.
+///
+/// That is an enumeration of today's callers, not an invariant the types hold. A
+/// future reader that keeps a registry `Ref` alive across a `DeliveryLeaseCell`
+/// call would close the cycle and falsify this paragraph.
+pub(in crate::services::discord) struct TerminalDeliveryFence {
+    lease: Arc<DeliveryLeaseCell>,
+    expected_key: DeliveryLeaseKey,
+    /// Static label the veto log attributes this to; mirrors
+    /// [`WatcherIdentityFence`]'s `site`.
+    site: &'static str,
+}
+
+impl TerminalDeliveryFence {
+    /// Pin the channel's lease cell and the turn identity to re-read it against.
+    /// Both are cheap value captures — the `Arc` is the live per-channel cell,
+    /// so the CAS below reads the CURRENT state through it, not a copy taken
+    /// here.
+    pub(in crate::services::discord) fn capture(
+        lease: Arc<DeliveryLeaseCell>,
+        expected_key: DeliveryLeaseKey,
+        site: &'static str,
+    ) -> Self {
+        Self {
+            lease,
+            expected_key,
+            site,
+        }
+    }
+
+    /// Judge the lease and, if it permits, run `commit` — BOTH under one hold of
+    /// the lease cell's payload mutex. Returns `None` when the conjunct refuses,
+    /// in which case `commit` never ran.
+    ///
+    /// #5071 relay-tail S4 r2 (P1-1) is exactly this atomicity. The r1 shape read
+    /// a `LeaseSnapshot`, dropped the payload mutex on the way out of `read()`,
+    /// returned a `bool`, and only then let the caller remove the row. The
+    /// registry lock the caller holds is a DIFFERENT lock from the lease cell's,
+    /// so it fences nothing here: a `Sink`/`Bridge` `try_acquire` under the very
+    /// key just judged absent could win inside that gap, and the removal would
+    /// proceed on a judgment that was already false. Deciding and acting under
+    /// the one mutex every lease mutation also runs under closes it — a racing
+    /// acquirer now either wins BEFORE the judgment (and is seen, and vetoes) or
+    /// blocks until the removal is already committed.
+    fn commit_if_permitted<T>(&self, commit: impl FnOnce() -> T) -> Option<T> {
+        self.lease.with_state_locked(|snapshot| {
+            // `lease_now_ms` is the clock the deadline was written against
+            // (process-monotonic, anchored to a process-start `Instant`).
+            // Comparing it to a wall clock would make an NTP step decide this
+            // conjunct.
+            let now_ms = lease_now_ms();
+            if let Some(deadline_ms) = snapshot
+                .identity_matched(&self.expected_key)
+                .and_then(|matched| matched.deadline_ms)
+                && deadline_ms > now_ms
+            {
+                tracing::info!(
+                    counter = "terminal_delivery_fence_veto",
+                    site = self.site,
+                    channel_id = self.expected_key.channel_id().get(),
+                    deadline_ms,
+                    now_ms,
+                    "identity-matched delivery lease is still live; refusing the destructive watcher removal"
+                );
+                return None;
+            }
+            #[cfg(test)]
+            run_delivery_fence_permitted_hook_for_tests(self.site);
+            Some(commit())
+        })
+    }
+}
+
+/// The S4 (I-1) conjunct, spelled ONCE so both CAS cores gate their commit
+/// through the same predicate and one mutation can neutralize it. `None` means
+/// the conjunct refused and `commit` did not run; a caller with no fence bound
+/// commits unconditionally.
+fn commit_under_delivery_fence<T>(
+    delivery: Option<&TerminalDeliveryFence>,
+    commit: impl FnOnce() -> T,
+) -> Option<T> {
+    match delivery {
+        None => Some(commit()),
+        Some(fence) => fence.commit_if_permitted(commit),
+    }
+}
+
+/// #5071 relay-tail S4 r2 (P1-1): fires inside `commit_if_permitted`, AFTER the
+/// conjunct permitted and BEFORE the registry mutation runs — i.e. in the exact
+/// window the r1 shape left open, and while the payload mutex is held. Only the
+/// atomicity test installs it, and it is filtered by fence `site` so a fence
+/// running concurrently in another test is unaffected.
+#[cfg(test)]
+type DeliveryFencePermittedHook = Arc<dyn Fn(&'static str) + Send + Sync + 'static>;
+
+#[cfg(test)]
+static DELIVERY_FENCE_PERMITTED_HOOK: std::sync::LazyLock<
+    std::sync::Mutex<Option<DeliveryFencePermittedHook>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+#[cfg(test)]
+fn run_delivery_fence_permitted_hook_for_tests(site: &'static str) {
+    let hook = DELIVERY_FENCE_PERMITTED_HOOK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    if let Some(hook) = hook {
+        hook(site);
+    }
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) struct DeliveryFencePermittedHookGuard;
+
+#[cfg(test)]
+impl Drop for DeliveryFencePermittedHookGuard {
+    fn drop(&mut self) {
+        *DELIVERY_FENCE_PERMITTED_HOOK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = None;
+    }
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn set_delivery_fence_permitted_hook_for_tests(
+    hook: DeliveryFencePermittedHook,
+) -> DeliveryFencePermittedHookGuard {
+    *DELIVERY_FENCE_PERMITTED_HOOK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = Some(hook);
+    DeliveryFencePermittedHookGuard
+}
+
+/// #5071 relay-tail S4 r2 (P1-2 ②): the HALF-BUILT view
+/// [`TmuxWatcherRegistry::under_identity_fence`] returns. It carries the
+/// [`WatcherIdentityFence`] and deliberately exposes NO destructive method — the
+/// only thing that can be done with it is
+/// [`IdentityFencePendingDelivery::with_terminal_delivery_fence`], which
+/// consumes it and yields the [`IdentityFencedRegistry`] that can actually
+/// remove.
+///
+/// This is the type-level half of keeping the S4 conjunct attached. In r1 both
+/// fences rode on one view with `delivery: Option<_>`, so deleting the single
+/// `.with_terminal_delivery_fence(..)` line at a call site still compiled and
+/// still removed — silently unfenced. Now that deletion does not typecheck. The
+/// [`identity_fence_bind`/`delivery_fence_bind` pairing check][ratchet] in
+/// `scripts/check_destructive_call_site_ratchet.py` is the lexical half, and
+/// catches the same omission for anything the type system stops covering (a new
+/// binder added in a file the compiler is happy with but reviewers should see).
+///
+/// [ratchet]: ../../../scripts/check_destructive_call_site_ratchet.py
+pub(in crate::services::discord) struct IdentityFencePendingDelivery<'a> {
+    registry: &'a TmuxWatcherRegistry,
+    fence: WatcherIdentityFence,
+}
+
+impl<'a> IdentityFencePendingDelivery<'a> {
+    /// Add the S4 delivery-lease conjunct and complete the view. Separate from
+    /// [`TmuxWatcherRegistry::under_identity_fence`] so the two production
+    /// callers stay the only `under_identity_fence` sites the destructive
+    /// ratchet counts, and REQUIRED because a caller that has no lease
+    /// coordinate to pin must be a compile error rather than a silently `None`
+    /// argument.
+    pub(in crate::services::discord) fn with_terminal_delivery_fence(
+        self,
+        delivery: TerminalDeliveryFence,
+    ) -> IdentityFencedRegistry<'a> {
+        IdentityFencedRegistry {
+            registry: self.registry,
+            fence: self.fence,
+            delivery,
+        }
+    }
+}
+
+/// A registry view whose two CAS removals also require the
+/// [`WatcherIdentityFence`] conjunct AND the [`TerminalDeliveryFence`] one. It
+/// is unconstructible without both: the only way to reach it is
+/// [`IdentityFencePendingDelivery::with_terminal_delivery_fence`].
 ///
 /// The fenced methods keep the SAME names as their unfenced originals on
 /// purpose: the #5071 T3-A4 destructive-call-site ratchet counts those names
@@ -330,6 +587,7 @@ impl WatcherIdentityFence {
 pub(in crate::services::discord) struct IdentityFencedRegistry<'a> {
     registry: &'a TmuxWatcherRegistry,
     fence: WatcherIdentityFence,
+    delivery: TerminalDeliveryFence,
 }
 
 impl IdentityFencedRegistry<'_> {
@@ -346,6 +604,7 @@ impl IdentityFencedRegistry<'_> {
             tmux_session_name,
             expected_cancel,
             Some(&self.fence),
+            Some(&self.delivery),
         )
     }
 
@@ -366,6 +625,7 @@ impl IdentityFencedRegistry<'_> {
             expected_output_path,
             expected_cancel,
             Some(&self.fence),
+            Some(&self.delivery),
         )
     }
 }
@@ -545,26 +805,35 @@ impl TmuxWatcherRegistry {
         expected_cancel: &Arc<std::sync::atomic::AtomicBool>,
     ) -> Option<(ChannelId, TmuxWatcherHandle)> {
         let guard = lock_tmux_watcher_registry();
-        self.remove_tmux_session_if_current_locked(&guard, tmux_session_name, expected_cancel, None)
+        self.remove_tmux_session_if_current_locked(
+            &guard,
+            tmux_session_name,
+            expected_cancel,
+            None,
+            None,
+        )
     }
 
     /// Shared core for the fenced and unfenced spellings. `identity` is the
-    /// #5071 T3-A1 conjunct: it is evaluated INSIDE the registry lock and only
-    /// after the cancel-pointer CAS already matched, so a fence miss and a
-    /// pointer miss produce the same answer — nothing removed, nothing stored.
+    /// #5071 T3-A1 conjunct and `delivery` the #5071 relay-tail S4 (I-1) one:
+    /// both are evaluated INSIDE the registry lock and only after the
+    /// cancel-pointer CAS already matched, so a fence miss and a pointer miss
+    /// produce the same answer — nothing removed, nothing stored.
     ///
     /// The unfenced spelling compares the session key and the cancel pointer
     /// only. The live owner channel and output path read here complete T3-R2's
     /// tuple for a fence that pinned them; without a fence they are read and
-    /// discarded, leaving the unfenced answer unchanged. Every conjunct is a
-    /// value comparison — see [`WatcherIdentityFence`] for what that does and
-    /// does not establish.
+    /// discarded, leaving the unfenced answer unchanged. Every identity conjunct
+    /// is a value comparison — see [`WatcherIdentityFence`] for what that does
+    /// and does not establish, and [`TerminalDeliveryFence`] for the separate
+    /// in-flight-delivery question it answers.
     fn remove_tmux_session_if_current_locked(
         &self,
         guard: &TmuxWatcherRegistryGuard,
         tmux_session_name: &str,
         expected_cancel: &Arc<std::sync::atomic::AtomicBool>,
         identity: Option<&WatcherIdentityFence>,
+        delivery: Option<&TerminalDeliveryFence>,
     ) -> Option<(ChannelId, TmuxWatcherHandle)> {
         let live_output_path = self
             .by_tmux_session
@@ -579,7 +848,12 @@ impl TmuxWatcherRegistry {
         {
             return None;
         }
-        self.remove_tmux_session_locked(guard, tmux_session_name)
+        // #5071 relay-tail S4 r2 (P1-1): the removal runs INSIDE the delivery
+        // conjunct's critical section, not after a bool it returned.
+        commit_under_delivery_fence(delivery, || {
+            self.remove_tmux_session_locked(guard, tmux_session_name)
+        })
+        .flatten()
     }
 
     pub(in crate::services::discord) fn cancel_and_remove_channel_if_current(
@@ -597,15 +871,18 @@ impl TmuxWatcherRegistry {
             expected_output_path,
             expected_cancel,
             None,
+            None,
         )
     }
 
     /// Shared core for the fenced and unfenced spellings. The `cancel` store
     /// happens only after every conjunct — channel binding, session name,
-    /// output path, cancel pointer, and the optional #5071 T3-A1 identity
-    /// re-read — has compared equal and the entry has been removed, so a `false`
-    /// return leaves the watcher both registered and uncancelled. Equality of
-    /// those values is the whole guarantee; see [`WatcherIdentityFence`].
+    /// output path, cancel pointer, the optional #5071 T3-A1 identity re-read,
+    /// and the optional #5071 relay-tail S4 delivery-lease re-read — has
+    /// compared equal and the entry has been removed, so a `false` return leaves
+    /// the watcher both registered and uncancelled. Equality of those values is
+    /// the whole identity guarantee; see [`WatcherIdentityFence`] and
+    /// [`TerminalDeliveryFence`].
     fn cancel_and_remove_channel_if_current_locked(
         &self,
         guard: &TmuxWatcherRegistryGuard,
@@ -614,6 +891,7 @@ impl TmuxWatcherRegistry {
         expected_output_path: &str,
         expected_cancel: &Arc<std::sync::atomic::AtomicBool>,
         identity: Option<&WatcherIdentityFence>,
+        delivery: Option<&TerminalDeliveryFence>,
     ) -> bool {
         let Some(tmux_session_name) = self
             .tmux_session_by_channel
@@ -643,23 +921,33 @@ impl TmuxWatcherRegistry {
         {
             return false;
         }
-        let Some((_, handle)) = self.remove_locked(guard, channel_id) else {
-            return false;
-        };
-        handle
-            .cancel
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        true
+        // #5071 relay-tail S4 r2 (P1-1): the removal AND the `cancel` store run
+        // INSIDE the delivery conjunct's critical section, not after a bool it
+        // returned — the whole destruction is what has to be atomic against a
+        // racing acquire, not just the map mutation.
+        commit_under_delivery_fence(delivery, || {
+            let Some((_, handle)) = self.remove_locked(guard, channel_id) else {
+                return false;
+            };
+            handle
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            true
+        })
+        .unwrap_or(false)
     }
 
-    /// Bind an identity fence to the next CAS removal. The returned view spells
-    /// the two removal helpers with their original names so the destructive
-    /// call-site ratchet keeps counting the caller.
+    /// Bind an identity fence to the next CAS removal. The returned view is
+    /// HALF-BUILT and has no destructive method: the caller must chain
+    /// [`IdentityFencePendingDelivery::with_terminal_delivery_fence`] to add the
+    /// S4 delivery-lease conjunct before it can remove anything. The completed
+    /// view spells the two removal helpers with their original names so the
+    /// destructive call-site ratchet keeps counting the caller.
     pub(in crate::services::discord) fn under_identity_fence(
         &self,
         fence: WatcherIdentityFence,
-    ) -> IdentityFencedRegistry<'_> {
-        IdentityFencedRegistry { registry: self, fence }
+    ) -> IdentityFencePendingDelivery<'_> {
+        IdentityFencePendingDelivery { registry: self, fence }
     }
 
     pub(in crate::services::discord) fn iter(&self) -> dashmap::iter::Iter<'_, String, TmuxWatcherHandle> {
