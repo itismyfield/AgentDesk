@@ -225,6 +225,57 @@ async fn a_frontier_realigned_by_another_resetter_is_not_rewound() {
     );
 }
 
+/// The same release predicate owed to the rotation's own retry loop, whose resets sit
+/// on the far side of a 25 ms sleep. Another resetter that realigns inside that window
+/// leaves a frontier measured after the rewrite, and the reset waiting on the other
+/// side of the sleep would put this rotation's `new_size` back over it.
+#[tokio::test]
+async fn a_frontier_realigned_during_a_retry_sleep_is_not_rewound() {
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let channel_id = ChannelId::new(1_479_662_682_909_970_006);
+    let session = "AgentDesk-claude-rot-realigned-mid-retry";
+    clear_sticky_frontier_realign(channel_id);
+    park_frontier(&shared, channel_id, 21_000_000);
+
+    // Declines the rotation's own attempts, so the loop is still spending its budget
+    // when the other resetter gets there.
+    let admission = shared
+        .acquire_relay_frontier_mutation(channel_id, shared.relay_frontier_token(channel_id))
+        .expect("admission");
+    let other = Arc::clone(&shared);
+    let realigning = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        // No await between these three, so on this single-threaded runtime the retry
+        // loop cannot land a reset between the admission clearing and delivery
+        // advancing — what the loop observes on its next wake is the finished state.
+        drop(admission);
+        assert!(
+            reset_stale_relay_watermark_if_output_regressed(
+                &other,
+                channel_id,
+                session,
+                16_000_000,
+                "test_other_resetter",
+            ),
+            "the regression is still observable, so the other resetter's reset lands"
+        );
+        park_frontier(&other, channel_id, 16_000_000);
+    });
+
+    realign_frontier_after_rotation(&shared, channel_id, session, 15_000_000).await;
+    realigning.await.expect("join");
+
+    assert_eq!(
+        shared.committed_relay_offset(channel_id),
+        16_000_000,
+        "a frontier realigned during a retry sleep must not be pulled back to new_size"
+    );
+    assert!(
+        !sticky_is_armed(channel_id),
+        "the loop stops on the same evidence that would release the sticky flag"
+    );
+}
+
 fn sticky_is_armed(channel_id: ChannelId) -> bool {
     STICKY_FRONTIER_REALIGN
         .lock()

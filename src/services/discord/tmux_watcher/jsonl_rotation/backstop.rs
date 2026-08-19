@@ -77,7 +77,8 @@ pub(super) async fn realign_frontier_after_rotation(
     new_size: u64,
 ) {
     // Read before the first reset, so any reset that lands from here on — this
-    // function's own included — shows up as movement to the per-tick retry.
+    // function's own included — shows up as movement to the retry loop below and to
+    // the per-tick retry.
     let reset_incarnation = shared.relay_frontier_token(channel_id).reset_incarnation;
     reset_stale_relay_watermark_if_output_regressed(
         shared,
@@ -92,6 +93,17 @@ pub(super) async fn realign_frontier_after_rotation(
             return;
         }
         tokio::time::sleep(FRONTIER_REALIGN_RETRY_DELAY).await;
+        // The per-tick retry's release predicate, applied to this loop's own resets and
+        // read after the sleep rather than at the loop top because the reset it has to
+        // hold back is the one on the far side of that sleep: a reset landing inside
+        // the 25 ms window leaves a frontier measured after the rewrite, with delivery
+        // advancing from there, and `new_size` applied to that is a rewind onto ranges
+        // already sent — so movement here ends the loop without arming the sticky flag,
+        // whose own predicate the same movement has already released.
+        if shared.relay_frontier_token(channel_id).reset_incarnation != reset_incarnation {
+            clear_sticky_frontier_realign(channel_id);
+            return;
+        }
         reset_stale_relay_watermark_if_output_regressed(
             shared,
             channel_id,
@@ -127,9 +139,9 @@ pub(super) async fn realign_frontier_after_rotation(
 /// arm the flag after every ordinary rotation and then never release it, since the
 /// retries would keep reporting `false` for the second reason.
 ///
-/// Being regressed against `new_size` is necessary for the per-tick retry to act and
-/// not sufficient: that retry also requires the reset incarnation to be the one this
-/// rotation armed against, which is what tells this state apart from a frontier
+/// Being regressed against `new_size` is necessary for either retry to act and not
+/// sufficient: both also require the reset incarnation to be the one this rotation read
+/// before its first attempt, which is what tells this state apart from a frontier
 /// somebody else has already realigned. See [`StickyFrontierRealign`].
 fn frontier_is_still_regressed(
     shared: &Arc<SharedData>,
