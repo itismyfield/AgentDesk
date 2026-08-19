@@ -246,11 +246,18 @@ mod foreign_rotation_ban_tests {
     /// classification judged is relinked at another file before the truncate opens it.
     /// Both halves of `rotate_owned_jsonl` are driven by hand because the swap has to
     /// land between them and the production function offers no seam. Asserted is what
-    /// the check buys: the rewrite refuses, and the entry is still the link somebody
-    /// put there — revert the guard and the truncate reports a rewrite whose rename
-    /// replaces that link with a regular file. Deliberately *not* asserted: the
-    /// victim's own bytes, which survive either way because the rename lands on the
-    /// link's entry and never on the victim's.
+    /// the checks buy: the rewrite refuses, and the entry is still the link somebody
+    /// put there.
+    ///
+    /// What this pins is the pair of fd-identity checks, not either one of them. The
+    /// refusal here is reached by the one after the open; revert only that and the
+    /// swap is still caught immediately before the rename, so the verdict is
+    /// unchanged and all that differs is a staging file written and then dropped.
+    /// Reverting both is the mutation this fails on — the rename then resolves the
+    /// link's own entry and publishes over it, replacing the link with a regular file
+    /// and reporting a rewrite. Deliberately *not* asserted: the victim's own bytes,
+    /// which survive either way because the rename lands on the link's entry and
+    /// never on the victim's.
     #[cfg(unix)]
     #[test]
     fn a_target_relinked_after_the_verdict_is_refused() {
