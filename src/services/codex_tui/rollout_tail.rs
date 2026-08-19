@@ -159,12 +159,20 @@ impl Default for RolloutTailOptions {
     }
 }
 
-pub fn default_codex_sessions_dir() -> Option<PathBuf> {
+/// The Codex home this host reads rollouts under, honouring the `CODEX_HOME`
+/// override. Split out of `default_codex_sessions_dir` for #5452 PR-A so
+/// `tmux_common::classify_watcher_jsonl_owner` recognises a provider-owned file
+/// anywhere under the home rather than only under `sessions/` — Codex keeps
+/// other state there too, and none of it is AgentDesk's to rewrite.
+pub(crate) fn default_codex_home() -> Option<PathBuf> {
     std::env::var_os("CODEX_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
-        .map(|home| home.join("sessions"))
+}
+
+pub fn default_codex_sessions_dir() -> Option<PathBuf> {
+    default_codex_home().map(|home| home.join("sessions"))
 }
 
 pub(crate) fn observe_rollout_turn_state(

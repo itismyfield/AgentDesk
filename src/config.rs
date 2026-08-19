@@ -3722,6 +3722,44 @@ pub(crate) fn set_agentdesk_root_for_test(path: &std::path::Path) -> TestEnvVarG
     TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", path)
 }
 
+/// Runtime root plus both provider homes, each pinned to a fresh empty tempdir.
+///
+/// Added for #5452 PR-A, where a path's verdict depends on all three: a test that
+/// inherited the host's `CLAUDE_CONFIG_DIR` / `CODEX_HOME` would flip an
+/// owned-or-unknown case to foreign if that home happened to contain the fixture,
+/// and would let a foreign case pass for the wrong reason if it did not. Fields
+/// drop before `_guards`, so every override is restored afterwards.
+#[cfg(test)]
+pub(crate) struct PinnedRuntimeHost {
+    pub(crate) root: tempfile::TempDir,
+    pub(crate) claude_home: tempfile::TempDir,
+    pub(crate) codex_home: tempfile::TempDir,
+    _guards: [TestEnvVarGuard; 3],
+}
+
+/// The root guard takes the shared env lock, so the two home pins must use the
+/// after-lock constructor: re-acquiring that lock on one thread panics by design.
+#[cfg(test)]
+pub(crate) fn pin_runtime_host_for_test() -> PinnedRuntimeHost {
+    let root = tempfile::tempdir().expect("tempdir");
+    let claude_home = tempfile::tempdir().expect("tempdir");
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let guards = [
+        set_agentdesk_root_for_test(root.path()),
+        TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "CLAUDE_CONFIG_DIR",
+            claude_home.path(),
+        ),
+        TestEnvVarGuard::set_path_after_shared_test_env_lock("CODEX_HOME", codex_home.path()),
+    ];
+    PinnedRuntimeHost {
+        root,
+        claude_home,
+        codex_home,
+        _guards: guards,
+    }
+}
+
 /// Compatibility shim for legacy provider signatures that still mention
 /// `remote_profiles`.
 ///
