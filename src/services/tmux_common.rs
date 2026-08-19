@@ -1449,6 +1449,12 @@ pub const JSONL_TARGET_KEEP_BYTES: u64 = 15 * 1024 * 1024;
 /// file is under cap, missing, or no longer the file the caller judged (see
 /// `rotation_target_was_swapped`).
 ///
+/// Every byte coordinate is measured on the opened fd and never on the path. A
+/// second rotation of the same relay jsonl — #3277 leaves two watcher instances on
+/// one — can land between any two lookups of that name, so a size read before the
+/// open answers for whichever inode the name held then, and an offset derived from
+/// it cuts into a tail the replacement file has already shortened.
+///
 /// `path` must already be resolved: the swap check reads it back with
 /// `symlink_metadata`, so a spelling whose last component is a legitimate link
 /// is refused on every call. [`classify_watcher_jsonl_owner`] hands its verdict
@@ -1460,12 +1466,25 @@ pub fn truncate_jsonl_head_safe(
 ) -> std::io::Result<Option<u64>> {
     use std::io::{Read, Seek, SeekFrom, Write};
 
-    let meta = match std::fs::metadata(path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
     };
-    let size = meta.len();
+    if rotation_target_was_swapped(&file, path)? {
+        return Ok(None);
+    }
+
+    // fstat, on the fd the check above just identified, so the size is this file's
+    // and not the previous occupant of the name. Concretely: A replaces a 21 MiB
+    // relay jsonl with the 15 MiB rewrite while B is between its stat and its open.
+    // B's open and identity check both land on the new file and agree, but B's
+    // `21 MiB - 15 MiB` offset seeks 6 MiB into a file that is now entirely tail, so
+    // B keeps 9 MiB of the 15 A just published and drops the rest — and once the
+    // stale size exceeds the live one by more than `target_keep_bytes`, the seek is
+    // past EOF and B publishes an empty file. The under-cap answer moves here for
+    // the same reason: it must be given about the file that is there.
+    let size = file.metadata()?.len();
     if size <= size_cap_bytes {
         return Ok(None);
     }
@@ -1473,14 +1492,12 @@ pub fn truncate_jsonl_head_safe(
     // Figure out the byte offset we *want* to start keeping from.
     let start_offset = size.saturating_sub(target_keep_bytes);
 
-    let mut file = std::fs::File::open(path)?;
-    if rotation_target_was_swapped(&file, path)? {
-        return Ok(None);
-    }
     file.seek(SeekFrom::Start(start_offset))?;
     let mut buf = Vec::with_capacity((size - start_offset) as usize);
     file.read_to_end(&mut buf)?;
-    drop(file);
+    // `file` is deliberately still open: its (dev, ino) is the identity everything
+    // below is authorised against, and the pre-rename re-check compares the entry
+    // back to it.
 
     // Drop any partial leading line: advance past the first newline so the
     // kept buffer begins at a line boundary. If no newline exists in buf
@@ -1499,6 +1516,11 @@ pub fn truncate_jsonl_head_safe(
     let kept = &buf[keep_start..];
     let new_size = kept.len() as u64;
 
+    // Staging siblings are per-attempt names, so a process that dies mid-rotation
+    // leaves one behind that nothing will ever reuse or clean. Swept here, on the
+    // way to creating the next one.
+    sweep_stale_rotation_staging(path);
+
     // Atomic-ish rewrite: write to a sibling temp, then rename it over the target.
     // `create_new`, so the sibling is created and never opened onto — a link left
     // at that name would take a `create(true)` rewrite through to whatever it
@@ -1515,13 +1537,69 @@ pub fn truncate_jsonl_head_safe(
     let mut staged = out.write_all(kept).and_then(|()| out.sync_all());
     drop(out);
     if staged.is_ok() {
-        staged = std::fs::rename(&tmp_path, path);
+        // The entry is checked once more here, against the same fd, because the
+        // window the post-open check closed reopens while the staging file is being
+        // written: `rename` removes whatever directory entry `path` names at the
+        // moment it runs, so an entry replaced during the write — a foreign file
+        // moved in, a link put there — would be the entry this rename unlinks, and
+        // for a file whose only name that is, publishing our bytes over it destroys
+        // it. Refuse instead, dropping the staging file, having touched nothing.
+        match rotation_target_was_swapped(&file, path) {
+            Ok(false) => staged = std::fs::rename(&tmp_path, path),
+            Ok(true) => {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Ok(None);
+            }
+            Err(error) => staged = Err(error),
+        }
     }
     if let Err(error) = staged {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(error);
     }
     Ok(Some(new_size))
+}
+
+/// Best-effort removal of staging siblings an attempt that died mid-rotation left
+/// behind, so they cannot accumulate for the life of the directory.
+///
+/// Bounded deliberately to residue no live attempt could own: a staging file is
+/// created, written and renamed away inside one call, so anything still bearing
+/// this target's staging prefix an hour later belongs to a process that is gone.
+/// That age floor is the whole safety argument — an overlapping instance's staging
+/// is minutes old at most and is never a candidate — and a file whose mtime does
+/// not read, or reads in the future, is left alone for the same reason. Nothing is
+/// logged and every failure is ignored: this is incidental to the rotation, and a
+/// directory that will not enumerate is not a reason to fail one.
+fn sweep_stale_rotation_staging(path: &Path) {
+    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return;
+    };
+    let mut prefix = name.to_os_string();
+    prefix.push(ROTATION_STAGING_INFIX);
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let entry_name = entry.file_name();
+        let entry_bytes = entry_name.as_encoded_bytes();
+        if !entry_bytes.starts_with(prefix.as_encoded_bytes())
+            || !entry_bytes.ends_with(ROTATION_STAGING_SUFFIX.as_bytes())
+        {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
+            .is_some_and(|age| age >= STALE_AFTER);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// A staging name for one rotation attempt that no other attempt will pick.
@@ -1543,14 +1621,23 @@ fn rotation_staging_sibling(path: &Path) -> PathBuf {
     let attempt = ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut name = path.as_os_str().to_owned();
     name.push(format!(
-        ".truncate.{}.{nanos}.{attempt}.tmp",
+        "{ROTATION_STAGING_INFIX}{}.{nanos}.{attempt}{ROTATION_STAGING_SUFFIX}",
         std::process::id()
     ));
     PathBuf::from(name)
 }
 
-/// Whether the file just opened is no longer the one `path` names — the window
-/// between an ownership verdict and the rewrite it authorises (#5452 PR-A).
+/// The fixed head and tail of a staging sibling's name, spelled once so
+/// `sweep_stale_rotation_staging` recognises exactly what the generator above
+/// produces. A sweep pattern written out separately would drift from it and then
+/// either miss the residue it exists to remove or match a file that is not ours.
+const ROTATION_STAGING_INFIX: &str = ".truncate.";
+const ROTATION_STAGING_SUFFIX: &str = ".tmp";
+
+/// Whether the file `path` names is no longer the one the open fd holds. Called at
+/// both ends of a rotation (#5452 PR-A): after the open, closing the window between
+/// an ownership verdict and the rewrite it authorises, and again immediately before
+/// the rename, closing the window that reopens while the staging file is written.
 /// `path` is the resolved path that verdict was reached on, so its last component
 /// was a real file and not a link; `symlink_metadata` now disagreeing with the
 /// open fd means the entry was replaced since. Refuse, having written nothing; an
@@ -1558,13 +1645,18 @@ fn rotation_staging_sibling(path: &Path) -> PathBuf {
 /// `metadata`, because following the link would land on the same inode the open did
 /// and the two would agree — also why `path_points_to_different_file` is not reused.
 ///
-/// This narrows the window without closing it. Redirecting a *parent* directory
-/// before the open moves the open and the stat onto the same foreign file, so they
-/// agree and the swap goes unseen; sealing that needs the open and the rename to
-/// share an `O_DIRECTORY` fd (`openat`/`renameat`), which std does not expose. Left
-/// open deliberately: the threat model is a same-user local process, and one able
-/// to redirect that directory can truncate the victim itself without going through
-/// AgentDesk, so the check would buy nothing against them.
+/// Two windows are left, and both are the same missing primitive. The check before
+/// the rename is a separate syscall from the rename, which resolves `path` again
+/// and removes whatever entry it finds; an entry replaced in between is still the
+/// one it unlinks. And redirecting a *parent* directory is invisible to either
+/// call — it moves the open and the stat onto the same foreign file, so they agree.
+/// Sealing either needs the open, the stat and the rename to share an `O_DIRECTORY`
+/// fd (`openat`/`renameat`), which std does not expose. Left open deliberately: the
+/// threat model is a same-user local process, and one that can win a sub-syscall
+/// race or redirect that directory can truncate the victim itself without going
+/// through AgentDesk, so the checks would buy nothing against them. What they do
+/// buy is everything an unsynchronised neighbour does by accident, which is the
+/// case that actually happens.
 #[cfg(unix)]
 fn rotation_target_was_swapped(file: &File, path: &Path) -> std::io::Result<bool> {
     use std::os::unix::fs::MetadataExt;
@@ -1645,7 +1737,9 @@ pub fn classify_watcher_jsonl_owner(output_path: &str, session_name: &str) -> Wa
     // Provider homes come from each provider module's own resolver, so the
     // `CLAUDE_CONFIG_DIR` / `CODEX_HOME` overrides those readers honour are honoured
     // here too. The roots are canonicalized as well; one that does not resolve holds
-    // no real file, so dropping it cannot hide a match.
+    // no real file, so dropping it cannot hide a match. What counts as *under* one of
+    // them is `path_is_under_provider_home`, whose doc carries the one case-folding
+    // gap that comparison has on a case-insensitive volume.
     let provider_homes = [
         crate::services::claude_tui::transcript_tail::default_claude_home(),
         crate::services::codex_tui::rollout_tail::default_codex_home(),
@@ -1654,7 +1748,7 @@ pub fn classify_watcher_jsonl_owner(output_path: &str, session_name: &str) -> Wa
         .into_iter()
         .flatten()
         .filter_map(|home| std::fs::canonicalize(home).ok())
-        .any(|home| canonical.starts_with(&home))
+        .any(|home| path_is_under_provider_home(&canonical, &home))
     {
         return WatcherJsonlOwner::Foreign;
     }
@@ -1675,6 +1769,52 @@ pub fn classify_watcher_jsonl_owner(output_path: &str, session_name: &str) -> Wa
     } else {
         WatcherJsonlOwner::Unknown
     }
+}
+
+/// Whether `candidate` lies under a provider home, component by component so that
+/// `.claude-backup` is not "under" `.claude`.
+///
+/// A plain prefix test is not the whole answer on macOS, whose default APFS volume
+/// is case-insensitive: `.Claude` and `.claude` are one directory there, and
+/// `canonicalize` hands back the caller's spelling rather than the on-disk one, so a
+/// path spelled in the other case reads as outside a home it is in fact inside.
+/// `Foreign` is decided before `Owned` precisely so that a file inside a provider
+/// home can never collect a rewrite permit, and a spelling that slips this test is a
+/// spelling that skips that ordering.
+///
+/// The fold is ASCII-only, which is narrower than the volume's — HFS+/APFS fold
+/// Unicode too. A component differing from the home's by a non-ASCII case alias
+/// still passes as "not under", and what catches it after that is only the `Owned`
+/// rule's exact equality against a path this runtime constructed. That covers the
+/// ordinary shape and leaves one uncovered: a runtime root placed *inside* a
+/// provider home reached through such an alias, whose relay jsonl then classifies
+/// `Owned`. Stated rather than sealed, because folding Unicode the way a particular
+/// volume does is not a promise a path comparison here can keep.
+///
+/// The widening errs safely: a false positive costs a file its size cap and nothing
+/// else, since `Foreign` only ever refuses a rewrite.
+fn path_is_under_provider_home(candidate: &Path, home: &Path) -> bool {
+    candidate.starts_with(home) || path_is_under_case_insensitively(candidate, home)
+}
+
+#[cfg(target_os = "macos")]
+fn path_is_under_case_insensitively(candidate: &Path, home: &Path) -> bool {
+    let mut components = candidate.components();
+    home.components().all(|expected| {
+        components.next().is_some_and(|actual| {
+            actual
+                .as_os_str()
+                .as_encoded_bytes()
+                .eq_ignore_ascii_case(expected.as_os_str().as_encoded_bytes())
+        })
+    })
+}
+
+/// Elsewhere the volume is case-sensitive in practice, so the plain prefix test is
+/// the whole answer and this reports no additional match.
+#[cfg(not(target_os = "macos"))]
+fn path_is_under_case_insensitively(_candidate: &Path, _home: &Path) -> bool {
+    false
 }
 
 /// Whether an AgentDesk-constructed path *holds* the file `resolved` names, as
@@ -1740,9 +1880,12 @@ mod watcher_jsonl_owner_tests {
     }
 
     /// Both provider homes, reached through the same env overrides the providers'
-    /// own readers honour rather than a hardcoded `~/.claude`.
+    /// own readers honour rather than a hardcoded `~/.claude`. The last case is the
+    /// reason `default_codex_home` was split out of `default_codex_sessions_dir`:
+    /// Codex keeps state outside `sessions/` too, and a home-wide ban is what covers
+    /// it — a `sessions/`-scoped one would classify `config.toml` as Unknown.
     #[test]
-    fn transcripts_under_a_provider_home_are_foreign() {
+    fn files_under_a_provider_home_are_foreign() {
         let host = crate::config::pin_runtime_host_for_test();
 
         for transcript in [
@@ -1752,6 +1895,7 @@ mod watcher_jsonl_owner_tests {
             host.codex_home
                 .path()
                 .join("sessions/2026/08/rollout-2026-08-19T01-49-00-abc.jsonl"),
+            host.codex_home.path().join("config.toml"),
         ] {
             touch(&transcript);
             let owner =
@@ -1763,6 +1907,26 @@ mod watcher_jsonl_owner_tests {
                 transcript.display()
             );
         }
+    }
+
+    /// On the case-insensitive volume macOS ships by default the two spellings name
+    /// one directory, and `canonicalize` does not fold them, so under a plain prefix
+    /// test a transcript reached as `.Claude` would read as outside the `.claude`
+    /// home it is in — and skip the `Foreign`-before-`Owned` ordering. The second
+    /// assertion is the other half of the contract: the comparison stays
+    /// component-wise, so a sibling whose name merely begins with the home's is
+    /// still not under it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_provider_home_spelled_in_another_case_is_still_that_home() {
+        assert!(path_is_under_provider_home(
+            Path::new("/Users/me/.Claude/projects/-Users-me-repo/a.jsonl"),
+            Path::new("/Users/me/.claude"),
+        ));
+        assert!(!path_is_under_provider_home(
+            Path::new("/Users/me/.claude-backup/projects/a.jsonl"),
+            Path::new("/Users/me/.claude"),
+        ));
     }
 
     /// The link, not its name, decides: a symlink wearing this session's own

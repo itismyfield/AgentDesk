@@ -6,10 +6,15 @@ use std::sync::{LazyLock, Mutex};
 const ROTATION_CHECK_EVERY: u32 = 120; // ~30s at 250ms base cadence
 
 /// Paths already refused this process lifetime, so the skip WARN is one line per
-/// path instead of one every `ROTATION_CHECK_EVERY` tick for as long as the
-/// watcher runs. Keyed on `PathBuf`, not a `display()` string: lossy replacement
-/// would collapse two distinct non-UTF-8 paths onto one key and silence the
-/// second file's only warning.
+/// file instead of one every `ROTATION_CHECK_EVERY` tick for as long as the watcher
+/// runs. The key is the resolved path, and what that buys is exactly one thing:
+/// several spellings of one file collapse onto one entry and therefore one line.
+///
+/// It does not make the key non-UTF-8 safe, which an earlier version of this comment
+/// claimed. `output_path` reaches this module as a `&str`, so a path that was not
+/// UTF-8 was already put through a lossy conversion upstream and two distinct such
+/// paths can arrive here as the same string. A `PathBuf` faithfully keeps whatever it
+/// is handed; it cannot recover bytes the function boundary has dropped.
 static REFUSED_ROTATION_PATHS: LazyLock<Mutex<HashSet<PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
@@ -118,7 +123,22 @@ fn rotate_owned_jsonl(
     let owner =
         crate::services::tmux_common::classify_watcher_jsonl_owner(output_path, tmux_session_name);
     let Some(target) = owner.rotatable_path() else {
-        if first_rotation_refusal(output_path) {
+        // Resolving here serves two purposes: it is the WARN's dedupe key, and it is
+        // the evidence for whether a line is owed at all. `NotFound` means the entry
+        // is not on disk at this instant, which is what a wrapper recreating its own
+        // relay jsonl looks like to a tick landing in that gap — the classifier
+        // refuses any path it cannot resolve, so the verdict there says nothing about
+        // whose file it is, and announcing this session's own jsonl as one AgentDesk
+        // may not rewrite would be wrong. Ordering matters as much as the test: the
+        // check precedes `first_rotation_refusal`, whose insert is the single warning
+        // that path will ever get, so a suppressed line must not spend it. Every other
+        // resolution failure still warns, keyed on the caller's spelling.
+        let resolved = std::fs::canonicalize(output_path);
+        let missing = resolved
+            .as_ref()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        let key = resolved.unwrap_or_else(|_| PathBuf::from(output_path));
+        if !missing && first_rotation_refusal(key) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 channel_id = channel_id.get(),
@@ -137,14 +157,11 @@ fn rotate_owned_jsonl(
     .map_err(|e| e.to_string())
 }
 
-/// Whether this is the first refusal recorded for `output_path`, keyed on the
-/// resolved path so every spelling of one file collapses to a single WARN and
-/// falling back to the raw spelling for a path that does not resolve. Best-effort
-/// by nature: the set only suppresses logs, so a drifted key costs one duplicate
-/// WARN, and a poisoned lock — unreachable, nothing panics holding it — drops the
-/// line instead of repeating it every tick.
-fn first_rotation_refusal(output_path: &str) -> bool {
-    let key = std::fs::canonicalize(output_path).unwrap_or_else(|_| PathBuf::from(output_path));
+/// Whether this is the first refusal recorded under `key`, which the caller has
+/// already resolved. Best-effort by nature: the set only suppresses logs, so a
+/// drifted key costs one duplicate WARN, and a poisoned lock — unreachable, nothing
+/// panics holding it — drops the line instead of repeating it every tick.
+fn first_rotation_refusal(key: PathBuf) -> bool {
     REFUSED_ROTATION_PATHS
         .lock()
         .map(|mut seen| seen.len() < REFUSED_ROTATION_PATHS_CAP && seen.insert(key))
@@ -277,8 +294,8 @@ mod foreign_rotation_ban_tests {
     /// staging: the rotation must still succeed — residue cannot block a retry, since
     /// every attempt names its own sibling — and must leave that file byte-for-byte,
     /// where the fixed name would unlink it and reuse the name for this attempt's
-    /// output.
-    #[cfg(unix)]
+    /// output. Its freshly written mtime is also what keeps it clear of the stale-
+    /// staging sweep, whose whole safety argument is that age floor.
     #[test]
     fn a_concurrent_instances_staging_file_is_neither_reused_nor_removed() {
         let _host = crate::config::pin_runtime_host_for_test();
