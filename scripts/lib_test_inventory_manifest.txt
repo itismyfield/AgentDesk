@@ -5074,6 +5074,7 @@ services::discord::tmux::tmux_watcher::completion_gate::matched_session_jsonl_ga
 services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests::background_marker_includes_summary_and_preserves_event_identity
 services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests::background_marker_omits_missing_summary
 services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests::subagent_marker_remains_suppressed
+services::discord::tmux::tmux_watcher::jsonl_rotation::backstop::rotation_backstop_tests::a_frontier_realigned_by_another_resetter_is_not_rewound
 services::discord::tmux::tmux_watcher::jsonl_rotation::backstop::rotation_backstop_tests::a_realignment_declined_by_an_admitted_mutation_is_retried
 services::discord::tmux::tmux_watcher::jsonl_rotation::backstop::rotation_backstop_tests::a_rotation_realigns_a_stale_high_frontier_immediately
 services::discord::tmux::tmux_watcher::jsonl_rotation::backstop::rotation_backstop_tests::a_sticky_realignment_retries_on_a_tick_that_is_not_a_rotation_tick

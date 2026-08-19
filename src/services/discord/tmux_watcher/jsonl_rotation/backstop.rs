@@ -23,13 +23,31 @@ const FRONTIER_REALIGN_RETRY_DELAY: std::time::Duration = std::time::Duration::f
 const FRONTIER_REALIGN_RETRIES: u32 = 10;
 
 /// Channels whose post-rotation frontier realignment has not succeeded yet, each
-/// holding the `new_size` the rotation that armed it published.
+/// holding what the release predicate needs: the `new_size` the rotation that armed
+/// it published, and the frontier reset incarnation as it read before that rotation's
+/// first realignment attempt.
 ///
 /// `new_size` and not a bare flag, because the release predicate is stated against
 /// it: outside the rotation cadence there is no fresh rotation to ask, and deriving
 /// a length from `metadata(path)` here would put a rotation coordinate back on a
 /// path stat, which is what PR-A forbids.
-static STICKY_FRONTIER_REALIGN: LazyLock<Mutex<HashMap<ChannelId, u64>>> =
+///
+/// The incarnation is what makes `committed > new_size` mean the stale-high *this*
+/// rotation left. Seven other call sites reset the same watermark, each against a
+/// length it measured itself, and delivery advances from wherever one of them landed
+/// — a frontier above `new_size` for that reason is the correct one, and re-applying
+/// `new_size` to it walks the frontier back over ranges that have already been sent.
+/// Keyed on the incarnation rather than on "this function's own reset succeeded
+/// once", because the realignment that has to be respected is usually somebody
+/// else's, and this function never sees a return value from those: what every one of
+/// them does share is `reset_confirmed_frontier` bumping the incarnation on success.
+#[derive(Clone, Copy)]
+struct StickyFrontierRealign {
+    new_size: u64,
+    reset_incarnation: u64,
+}
+
+static STICKY_FRONTIER_REALIGN: LazyLock<Mutex<HashMap<ChannelId, StickyFrontierRealign>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Bring the in-memory relay frontier back under the rotated file's EOF (#5452 R2).
@@ -58,6 +76,9 @@ pub(super) async fn realign_frontier_after_rotation(
     tmux_session_name: &str,
     new_size: u64,
 ) {
+    // Read before the first reset, so any reset that lands from here on — this
+    // function's own included — shows up as movement to the per-tick retry.
+    let reset_incarnation = shared.relay_frontier_token(channel_id).reset_incarnation;
     reset_stale_relay_watermark_if_output_regressed(
         shared,
         channel_id,
@@ -82,7 +103,15 @@ pub(super) async fn realign_frontier_after_rotation(
     if frontier_is_still_regressed(shared, channel_id, new_size) {
         STICKY_FRONTIER_REALIGN
             .lock()
-            .map(|mut sticky| sticky.insert(channel_id, new_size))
+            .map(|mut sticky| {
+                sticky.insert(
+                    channel_id,
+                    StickyFrontierRealign {
+                        new_size,
+                        reset_incarnation,
+                    },
+                )
+            })
             .ok();
     } else {
         clear_sticky_frontier_realign(channel_id);
@@ -97,6 +126,11 @@ pub(super) async fn realign_frontier_after_rotation(
 /// mutation, and one with no regression to observe at all — so keying on it would
 /// arm the flag after every ordinary rotation and then never release it, since the
 /// retries would keep reporting `false` for the second reason.
+///
+/// Being regressed against `new_size` is necessary for the per-tick retry to act and
+/// not sufficient: that retry also requires the reset incarnation to be the one this
+/// rotation armed against, which is what tells this state apart from a frontier
+/// somebody else has already realigned. See [`StickyFrontierRealign`].
 fn frontier_is_still_regressed(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
@@ -115,7 +149,7 @@ fn clear_sticky_frontier_realign(channel_id: ChannelId) {
 /// The per-tick tail of the realignment, run outside the rotation cadence so it
 /// retries every 250 ms rather than every 30 seconds.
 ///
-/// Costs nothing while nothing is armed, and one comparison plus at most one reset
+/// Costs nothing while nothing is armed, and two comparisons plus at most one reset
 /// while something is: the point of running it this often is to keep that window
 /// short, not to keep it open.
 pub(super) fn retry_sticky_frontier_realign(
@@ -123,22 +157,30 @@ pub(super) fn retry_sticky_frontier_realign(
     channel_id: ChannelId,
     tmux_session_name: &str,
 ) {
-    let Some(new_size) = STICKY_FRONTIER_REALIGN
+    let Some(armed) = STICKY_FRONTIER_REALIGN
         .lock()
         .ok()
         .and_then(|sticky| sticky.get(&channel_id).copied())
     else {
         return;
     };
-    if frontier_is_still_regressed(shared, channel_id, new_size) {
+    // A reset has landed since this rotation published `new_size`, so whatever the
+    // frontier reads now was put there against a length measured after the rewrite.
+    // There is no stale-high of this rotation's left to walk back, and `new_size`
+    // applied to an already-realigned frontier is a rewind onto delivered ranges.
+    if shared.relay_frontier_token(channel_id).reset_incarnation != armed.reset_incarnation {
+        clear_sticky_frontier_realign(channel_id);
+        return;
+    }
+    if frontier_is_still_regressed(shared, channel_id, armed.new_size) {
         reset_stale_relay_watermark_if_output_regressed(
             shared,
             channel_id,
             tmux_session_name,
-            new_size,
+            armed.new_size,
             "jsonl_rotation_sticky",
         );
-        if frontier_is_still_regressed(shared, channel_id, new_size) {
+        if frontier_is_still_regressed(shared, channel_id, armed.new_size) {
             return;
         }
     }
@@ -153,6 +195,15 @@ pub(super) fn retry_sticky_frontier_realign(
 // which term is producing them, and how far past the cap the file has grown — so the
 // question of whether such channels exist at all is answered by data rather than by
 // a threshold guessed now. The ladder speaks at multiples of the cap, not per tick.
+//
+// The consequence is worth stating plainly, because it is the likeliest operational
+// outcome of this design: on a channel that never presents an idle moment the 20 MB
+// cap is not enforced at all, and the file grows until an operator acts on one of
+// these lines. Nothing here bounds that growth. How often it happens is unmeasured —
+// these are the first lines that would measure it — and the channels most exposed to
+// it are the busy ones, which is where a cap earns its keep. That the ladder speaks
+// instead of the rotation acting is the choice, not an oversight; what it costs is
+// this.
 
 const ROTATION_LADDER_WARN_MULTIPLE: u64 = 2;
 const ROTATION_LADDER_ERROR_MULTIPLE: u64 = 5;
@@ -246,6 +297,15 @@ pub(super) fn record_rotation_refusal(output_path: &str, term: RotationBusyTerm)
     if size_bytes < size_cap_bytes.saturating_mul(ROTATION_LADDER_WARN_MULTIPLE) {
         // Below every rung: still counted, so a run that reaches one reports its
         // true length rather than starting from wherever the file crossed it.
+        //
+        // What lands here includes the ticks with nothing to rotate at all — an
+        // under-cap file is a `FdRefusal` like any other, since the truncate answers
+        // the same `None` for "no work" as for "a witness disagreed". So
+        // `consecutive_refusals` is the count since the last successful rotation and
+        // not the count since the cap was crossed, and the term histogram carries
+        // those ticks too. Both are read only by an alarm that fires above the cap;
+        // separating them means the truncate distinguishing the two answers, which
+        // is a change to its signature and not to this file.
         let _ = ROTATION_REFUSAL_LADDERS.lock().map(|mut ladders| {
             let ladder = ladders.entry(output_path.to_string()).or_default();
             advance_rotation_refusal_ladder(ladder, term, size_bytes, size_cap_bytes)

@@ -174,6 +174,57 @@ async fn a_sticky_realignment_retries_on_a_tick_that_is_not_a_rotation_tick() {
     assert!(!sticky_is_armed(channel_id));
 }
 
+/// A frontier above `new_size` is not always the stale-high this rotation left. One
+/// of the other resetters can get there first, against the file as it reads after the
+/// rewrite, and delivery then advances from where that left it. Re-applying this
+/// rotation's `new_size` there would walk the frontier back over ranges already sent,
+/// which the second relay path would send again.
+#[tokio::test]
+async fn a_frontier_realigned_by_another_resetter_is_not_rewound() {
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let channel_id = ChannelId::new(1_479_662_682_909_970_005);
+    let session = "AgentDesk-claude-rot-realigned-elsewhere";
+    clear_sticky_frontier_realign(channel_id);
+    park_frontier(&shared, channel_id, 21_000_000);
+
+    // Armed the only way production can arm it: an admission held past the whole
+    // retry budget.
+    let admission = shared
+        .acquire_relay_frontier_mutation(channel_id, shared.relay_frontier_token(channel_id))
+        .expect("admission");
+    realign_frontier_after_rotation(&shared, channel_id, session, 15_000_000).await;
+    assert!(
+        sticky_is_armed(channel_id),
+        "the budget ran out with the frontier still high"
+    );
+    drop(admission);
+
+    // Somebody else realigns, and delivery advances from where they landed.
+    assert!(
+        reset_stale_relay_watermark_if_output_regressed(
+            &shared,
+            channel_id,
+            session,
+            16_000_000,
+            "test_other_resetter",
+        ),
+        "the regression is still observable, so the other resetter's reset lands"
+    );
+    park_frontier(&shared, channel_id, 16_000_000);
+
+    retry_sticky_frontier_realign(&shared, channel_id, session);
+
+    assert_eq!(
+        shared.committed_relay_offset(channel_id),
+        16_000_000,
+        "a frontier realigned after the rotation must not be pulled back to its new_size"
+    );
+    assert!(
+        !sticky_is_armed(channel_id),
+        "the stale-high this rotation published is gone, so the retry is finished"
+    );
+}
+
 fn sticky_is_armed(channel_id: ChannelId) -> bool {
     STICKY_FRONTIER_REALIGN
         .lock()

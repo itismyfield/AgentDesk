@@ -54,12 +54,18 @@ pub(super) async fn rotate_watcher_jsonl_if_due(
     all_data_is_empty: bool,
 ) -> (u64, Option<u64>, Option<i64>, bool) {
     // Sibling of the cadence branch below, never inside it, and the placement is the
-    // whole point: the caller runs this function every tick, so a retry here lands on
-    // the watcher's 250 ms base cadence. Moved into the branch it would fire on the
-    // rotation cadence instead — ~30s — and the idle-jsonl relay loop polls every
-    // 500 ms, consuming up to 1 MiB per poll without sending while the frontier is
-    // stale-high. That is roughly sixty polls of silently skipped output for a window
-    // that is meant to close in under one.
+    // whole point: the caller reaches this line on every tick it polls, so a retry
+    // here lands on the watcher's 250 ms base cadence. Moved into the branch it would
+    // fire on the rotation cadence instead — ~30s — and the idle-jsonl relay loop
+    // polls every 500 ms, consuming up to 1 MiB per poll without sending while the
+    // frontier is stale-high. That is roughly sixty polls of silently skipped output
+    // for a window that is meant to close in under one.
+    //
+    // "Every tick it polls" is the whole of it: the caller's paused branch returns
+    // before this call, so while a Discord-origin turn holds the pause the retry does
+    // not run — the gap there is the turn's length, not 250 ms. What keeps that
+    // survivable is the emit paths resetting the same watermark themselves, which is
+    // best-effort like everything else in this backstop.
     retry_sticky_frontier_realign(shared, channel_id, tmux_session_name);
 
     // Periodic size-cap rotation for the session jsonl. Running this off
@@ -221,7 +227,10 @@ fn rotate_owned_jsonl(
         Some(new_size) => RotationOutcome::Rotated(new_size),
         // The gate said idle and the fd disagreed: a witness was not at the length
         // measured there, the length moved before the rename, or the entry was
-        // swapped. Under cap cannot reach the ladder — it only speaks above it.
+        // swapped — or there was nothing to rotate, because an under-cap file answers
+        // the same `None`. This term therefore reaches the ladder's counters on an
+        // ordinary under-cap tick as well; what it cannot reach there is a rung,
+        // since those are gated on the file being a multiple of the cap.
         None => RotationOutcome::Refused(RotationBusyTerm::FdRefusal),
     })
     .map_err(|e| e.to_string())

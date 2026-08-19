@@ -85,8 +85,10 @@ pub(super) enum RotationBusyTerm {
     RelayOwner(RelayOwnerKind),
     /// The gate said idle and `truncate_jsonl_head_safe` still declined: a witness
     /// disagreed with the fd's length, the length moved before the rename, or the
-    /// entry was swapped. Under-cap cannot reach here — the ladder only speaks when
-    /// the file is a multiple of the cap.
+    /// entry was swapped. An under-cap file lands here too — the truncate answers the
+    /// same "nothing was rewritten" for having no work as for a disagreement — so this
+    /// term is counted on ordinary ticks and only the ladder's rungs, which need the
+    /// file to be a multiple of the cap, are out of its reach.
     FdRefusal,
     /// Refused before the gate: this jsonl is not AgentDesk's to rewrite (PR-A).
     NotOwned,
