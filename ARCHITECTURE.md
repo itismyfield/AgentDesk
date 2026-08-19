@@ -882,6 +882,10 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   └── ops.rs
 │   │   ├── tmux_watcher/
+│   │   │   ├── jsonl_rotation/
+│   │   │   │   ├── backstop.rs
+│   │   │   │   ├── backstop_tests.rs
+│   │   │   │   └── idle_gate.rs
 │   │   │   ├── streaming_status_tick/
 │   │   │   │   └── types.rs
 │   │   │   ├── turn_identity/

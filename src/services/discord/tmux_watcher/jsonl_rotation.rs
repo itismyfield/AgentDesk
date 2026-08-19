@@ -3,6 +3,24 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 
+// Nested under this module's own directory rather than declared beside it in the
+// hot `tmux_watcher.rs` root, which stays untouched. `#[path]` because every module
+// in this tree is spelled that way, and because the sibling default would put these
+// files next to `jsonl_rotation.rs` instead of under it.
+#[path = "jsonl_rotation/backstop.rs"]
+mod backstop;
+#[path = "jsonl_rotation/idle_gate.rs"]
+mod idle_gate;
+
+use self::backstop::{
+    clear_rotation_refusal_ladder, realign_frontier_after_rotation, record_rotation_refusal,
+    retry_sticky_frontier_realign,
+};
+use self::idle_gate::{
+    RotationBusyTerm, RotationIdleContext, RotationIdleVerdict, collect_rotation_idle_evidence,
+    rotation_idle_verdict,
+};
+
 const ROTATION_CHECK_EVERY: u32 = 120; // ~30s at 250ms base cadence
 
 /// Paths already refused this process lifetime, so the skip WARN is one line per
@@ -32,7 +50,24 @@ pub(super) async fn rotate_watcher_jsonl_if_due(
     mut last_observed_generation_mtime_ns: Option<i64>,
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
+    watcher_provider: &ProviderKind,
+    all_data_is_empty: bool,
 ) -> (u64, Option<u64>, Option<i64>, bool) {
+    // Sibling of the cadence branch below, never inside it, and the placement is the
+    // whole point: the caller reaches this line on every tick it polls, so a retry
+    // here lands on the watcher's 250 ms base cadence. Moved into the branch it would
+    // fire on the rotation cadence instead — ~30s — and the idle-jsonl relay loop
+    // polls every 500 ms, consuming up to 1 MiB per poll without sending while the
+    // frontier is stale-high. That is roughly sixty polls of silently skipped output
+    // for a window that is meant to close in under one.
+    //
+    // "Every tick it polls" is the whole of it: the caller's paused branch returns
+    // before this call, so while a Discord-origin turn holds the pause the retry does
+    // not run — the gap there is the turn's length, not 250 ms. What keeps that
+    // survivable is the emit paths resetting the same watermark themselves, which is
+    // best-effort like everything else in this backstop.
+    retry_sticky_frontier_realign(shared, channel_id, tmux_session_name);
+
     // Periodic size-cap rotation for the session jsonl. Running this off
     // the watcher loop keeps the wrapper child process simple while
     // still enforcing a 20 MB soft cap (see issue #892).
@@ -42,6 +77,13 @@ pub(super) async fn rotate_watcher_jsonl_if_due(
         let session = tmux_session_name.to_string();
         let prev_offset = current_offset;
         let owned_session = session.clone();
+        let context = RotationIdleContext {
+            shared: Arc::clone(shared),
+            provider: watcher_provider.clone(),
+            channel_id,
+            current_offset,
+            all_data_is_empty,
+        };
         let rotation = tokio::task::spawn_blocking(move || {
             rotate_owned_jsonl(
                 &path,
@@ -49,12 +91,14 @@ pub(super) async fn rotate_watcher_jsonl_if_due(
                 channel_id,
                 crate::services::tmux_common::JSONL_SIZE_CAP_BYTES,
                 crate::services::tmux_common::JSONL_TARGET_KEEP_BYTES,
+                &context,
             )
         })
         .await
         .unwrap_or_else(|e| Err(format!("join error: {e}")));
         match rotation {
-            Ok(Some(new_size)) => {
+            Ok(RotationOutcome::Rotated(new_size)) => {
+                clear_rotation_refusal_ladder(output_path);
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
                     "  [{ts}] ✂ rotated jsonl for {} — new size {} bytes (was beyond cap)",
@@ -77,16 +121,18 @@ pub(super) async fn rotate_watcher_jsonl_if_due(
                     // local offset to None — re-relaying surviving content.
                     last_observed_generation_mtime_ns =
                         Some(read_generation_file_mtime_ns(tmux_session_name));
-                    reset_stale_relay_watermark_if_output_regressed(
+                    realign_frontier_after_rotation(
                         shared,
                         channel_id,
                         tmux_session_name,
                         new_size,
-                        "jsonl_rotation",
-                    );
+                    )
+                    .await;
                 }
             }
-            Ok(None) => {}
+            Ok(RotationOutcome::Refused(term)) => {
+                record_rotation_refusal(output_path, term);
+            }
             Err(e) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!("  [{ts}] ⚠ jsonl rotation failed for {}: {}", session, e);
@@ -102,24 +148,39 @@ pub(super) async fn rotate_watcher_jsonl_if_due(
     )
 }
 
+/// What a rotation attempt did, carrying the refusal's reason rather than folding
+/// every "nothing happened" onto one value. The caller's byte bookkeeping still
+/// treats both refusal shapes identically — only the backstop ladder reads the term.
+enum RotationOutcome {
+    Rotated(u64),
+    Refused(RotationBusyTerm),
+}
+
 /// The blocking half of the rotation: refuse any jsonl AgentDesk does not own,
 /// then apply the size cap to the ones it does — #5452 PR-A. Ownership, and why
 /// only `Owned` may be rewritten, is
 /// [`crate::services::tmux_common::classify_watcher_jsonl_owner`]'s contract.
 ///
-/// A refused file reports `Ok(None)`, the same "nothing was rewritten" answer an
+/// A refused file reports no rewrite, the same "nothing was rewritten" answer an
 /// under-cap file gives, so the caller's offset bookkeeping is untouched: a refusal
 /// must not look like a rotation that moved the reader's coordinates. The truncate
 /// then runs on the resolved path the verdict came back carrying, never on
 /// `output_path` resolved again — re-resolving the caller's spelling would let a
 /// link swapped in after the verdict aim the rewrite at another file.
+///
+/// Ownership is judged before idleness even though idleness is the cheaper test
+/// (#5452 R2). The ownership refusal spends this path's single lifetime WARN, and a
+/// busy channel is an ordinary state that must not consume that budget — deciding
+/// idleness first would leave a permanently busy channel never announcing that its
+/// `output_path` names a file AgentDesk may not rewrite at all.
 fn rotate_owned_jsonl(
     output_path: &str,
     tmux_session_name: &str,
     channel_id: ChannelId,
     size_cap_bytes: u64,
     target_keep_bytes: u64,
-) -> Result<Option<u64>, String> {
+    context: &RotationIdleContext,
+) -> Result<RotationOutcome, String> {
     let owner =
         crate::services::tmux_common::classify_watcher_jsonl_owner(output_path, tmux_session_name);
     let Some(target) = owner.rotatable_path() else {
@@ -147,13 +208,31 @@ fn rotate_owned_jsonl(
                 "  [{ts}] ⏭ jsonl rotation skipped for {tmux_session_name} — this file is not AgentDesk's relay jsonl to rewrite"
             );
         }
-        return Ok(None);
+        return Ok(RotationOutcome::Refused(RotationBusyTerm::NotOwned));
     };
+
+    let evidence = collect_rotation_idle_evidence(context, tmux_session_name, target);
+    let eof_witnesses = match rotation_idle_verdict(&evidence) {
+        RotationIdleVerdict::Idle { eof_witnesses } => eof_witnesses,
+        RotationIdleVerdict::Busy(term) => return Ok(RotationOutcome::Refused(term)),
+    };
+
     crate::services::tmux_common::truncate_jsonl_head_safe(
         target,
         size_cap_bytes,
         target_keep_bytes,
+        &eof_witnesses,
     )
+    .map(|rotated| match rotated {
+        Some(new_size) => RotationOutcome::Rotated(new_size),
+        // The gate said idle and the fd disagreed: a witness was not at the length
+        // measured there, the length moved before the rename, or the entry was
+        // swapped — or there was nothing to rotate, because an under-cap file answers
+        // the same `None`. This term therefore reaches the ladder's counters on an
+        // ordinary under-cap tick as well; what it cannot reach there is a rung,
+        // since those are gated on the file being a multiple of the cap.
+        None => RotationOutcome::Refused(RotationBusyTerm::FdRefusal),
+    })
     .map_err(|e| e.to_string())
 }
 
@@ -188,14 +267,35 @@ mod foreign_rotation_ban_tests {
         body.into_bytes()
     }
 
-    fn rotate(path: &str, session: &str) -> Result<Option<u64>, String> {
+    const TEST_CHANNEL: ChannelId = ChannelId::new(1_479_662_682_909_966_490);
+
+    /// An idle context: no accumulated buffer, no row, no binding, a fresh
+    /// coordinator, and the reader parked at `current_offset`. Every test below that
+    /// wants the rotation to proceed passes the fixture's own length there, which is
+    /// what term (a) requires.
+    fn idle_context(current_offset: u64) -> RotationIdleContext {
+        RotationIdleContext {
+            shared: crate::services::discord::make_shared_data_for_tests(),
+            provider: ProviderKind::Claude,
+            channel_id: TEST_CHANNEL,
+            current_offset,
+            all_data_is_empty: true,
+        }
+    }
+
+    fn rotate(path: &str, session: &str, current_offset: u64) -> Result<Option<u64>, String> {
         rotate_owned_jsonl(
             path,
             session,
-            ChannelId::new(1_479_662_682_909_966_490),
+            TEST_CHANNEL,
             CAP,
             KEEP,
+            &idle_context(current_offset),
         )
+        .map(|outcome| match outcome {
+            RotationOutcome::Rotated(new_size) => Some(new_size),
+            RotationOutcome::Refused(_) => None,
+        })
     }
 
     /// Both directions in one call path, so the gate and the truncate are proven
@@ -204,6 +304,11 @@ mod foreign_rotation_ban_tests {
     /// `tmux_common::watcher_jsonl_owner_tests` carries which paths land in which
     /// verdict, both provider homes included; this adds that a refusal really does
     /// leave the bytes alone.
+    ///
+    /// It is also the negative control for the idle gate (#5452 R2): with the reader
+    /// at EOF and nothing else holding a coordinate, the cap is still enforced. A gate
+    /// that refused here would be indistinguishable from one that had quietly removed
+    /// the cap altogether.
     #[test]
     fn only_this_runtimes_own_relay_jsonl_is_rewritten() {
         let host = crate::config::pin_runtime_host_for_test();
@@ -212,7 +317,8 @@ mod foreign_rotation_ban_tests {
         let relay = crate::services::tmux_common::session_temp_path(session, "jsonl");
         let relay_before = oversized_jsonl(Path::new(&relay));
 
-        let rotated = rotate(&relay, session).expect("rotation must not error");
+        let rotated =
+            rotate(&relay, session, relay_before.len() as u64).expect("rotation must not error");
         let relay_after = std::fs::read(&relay).expect("read rotated");
         assert_eq!(rotated, Some(relay_after.len() as u64));
         assert!(
@@ -229,8 +335,12 @@ mod foreign_rotation_ban_tests {
             .path()
             .join("projects/-Users-me-repo/0f2b9d1e-0000-4000-8000-000000000000.jsonl");
         let transcript_before = oversized_jsonl(&transcript);
-        let refused = rotate(&transcript.display().to_string(), session)
-            .expect("a refused rotation is not an error");
+        let refused = rotate(
+            &transcript.display().to_string(),
+            session,
+            transcript_before.len() as u64,
+        )
+        .expect("a refused rotation is not an error");
         assert_eq!(
             refused, None,
             "a provider transcript must report no rewrite"
@@ -281,8 +391,9 @@ mod foreign_rotation_ban_tests {
         std::os::unix::fs::symlink(&victim, &target).expect("symlink");
 
         // The rewrite the verdict authorised, now aimed elsewhere.
-        let refused = crate::services::tmux_common::truncate_jsonl_head_safe(&target, CAP, KEEP)
-            .expect("a refused rotation is not an error");
+        let refused =
+            crate::services::tmux_common::truncate_jsonl_head_safe(&target, CAP, KEEP, &[])
+                .expect("a refused rotation is not an error");
         assert_eq!(refused, None, "a swapped entry must report no rewrite");
         assert!(
             std::fs::symlink_metadata(&target)
@@ -319,7 +430,8 @@ mod foreign_rotation_ban_tests {
         let half_written = b"{\"type\":\"assistant\",\"i\":0".as_slice();
         std::fs::write(&other_staging, half_written).expect("park the other instance's staging");
 
-        let rotated = rotate(&relay, session).expect("rotation must not error");
+        let rotated =
+            rotate(&relay, session, relay_before.len() as u64).expect("rotation must not error");
         assert!(
             rotated.is_some_and(|new_size| new_size < relay_before.len() as u64),
             "the owned relay jsonl must still rotate past parked residue"
