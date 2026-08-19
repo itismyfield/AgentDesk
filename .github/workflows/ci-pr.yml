@@ -1436,7 +1436,9 @@ jobs:
   relay-authority-contract:
     name: relay-authority-contract
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 7 mutations x ~4.5min compile+test + ~6min setup/base build (measured 2026-08-19,
+    # run 32194217057: 5 of 7 done at 30m16s timeout). 50 gives headroom without hiding growth.
+    timeout-minutes: 50
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
