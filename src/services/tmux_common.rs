@@ -1446,8 +1446,8 @@ pub const JSONL_TARGET_KEEP_BYTES: u64 = 15 * 1024 * 1024;
 /// complete line.
 ///
 /// Returns `Ok(Some(new_size))` if the file was rewritten, `Ok(None)` if the
-/// file is under cap, missing, or no longer the file the caller judged (see
-/// `rotation_target_was_swapped`).
+/// file is under cap, missing, not a regular file, or no longer the file the
+/// caller judged (see `rotation_target_was_swapped`).
 ///
 /// Every byte coordinate is measured on the opened fd and never on the path. A
 /// second rotation of the same relay jsonl — #3277 leaves two watcher instances on
@@ -1469,7 +1469,7 @@ pub fn truncate_jsonl_head_safe(
 ) -> std::io::Result<Option<u64>> {
     use std::io::{Read, Seek, SeekFrom, Write};
 
-    let mut file = match std::fs::File::open(path) {
+    let mut file = match open_rotation_target_without_waiting(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
@@ -1487,7 +1487,20 @@ pub fn truncate_jsonl_head_safe(
     // stale size exceeds the live one by more than `target_keep_bytes`, the seek is
     // past EOF and B publishes an empty file. The under-cap answer moves here for
     // the same reason: it must be given about the file that is there.
-    let size = file.metadata()?.len();
+    let opened = file.metadata()?;
+
+    // Type, from that same fstat, and this is where the regular-file rule is actually
+    // enforced. The ownership verdict reached it on an `lstat` of the name, and the
+    // name can be replaced between that `lstat` and the open above — so the entry the
+    // open landed on is the only one whose type this can know. The identity check
+    // above does not cover it: a FIFO moved onto the name is what both the open and
+    // that check see, so they agree, and agreeing is not the same as being a file we
+    // may rewrite. A device or a socket at the name is no more ours than a FIFO is.
+    if !opened.file_type().is_file() {
+        return Ok(None);
+    }
+
+    let size = opened.len();
     if size <= size_cap_bytes {
         return Ok(None);
     }
@@ -1561,6 +1574,35 @@ pub fn truncate_jsonl_head_safe(
         return Err(error);
     }
     Ok(Some(new_size))
+}
+
+/// Open a rotation target for reading in a way that cannot wait on it.
+///
+/// The ownership verdict's regular-file rule is decided on an `lstat` of the name in
+/// [`adk_path_holds_resolved_file`], and the name can be replaced between that `lstat`
+/// and this open. A plain `O_RDONLY` open of a FIFO blocks until a writer arrives, and
+/// this open runs inside the rotation's `spawn_blocking`, whose result the watcher's
+/// poll loop awaits — so a FIFO moved onto the name inside that window would stop that
+/// session's relaying outright, not for a tick but until someone opened the other end.
+/// `O_NONBLOCK` returns immediately instead, which leaves the caller's `fstat` free to
+/// refuse the thing on its type. Regular files are unaffected: POSIX gives `O_NONBLOCK`
+/// no meaning for reads on them.
+#[cfg(unix)]
+fn open_rotation_target_without_waiting(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+}
+
+/// Off unix there is no `O_NONBLOCK` to set through `OpenOptions`. The caller's `fstat`
+/// still refuses whatever is not a regular file, so what is missing here is not the
+/// refusal but the guarantee that reaching it costs no wait.
+#[cfg(not(unix))]
+fn open_rotation_target_without_waiting(path: &Path) -> std::io::Result<File> {
+    File::open(path)
 }
 
 /// Best-effort removal of staging siblings an attempt that died mid-rotation left
@@ -1868,14 +1910,14 @@ fn path_is_under_provider_home(candidate: &Path, home: &Path) -> bool {
 ///   passes — including files under no provider home, which the `Foreign` guard
 ///   therefore cannot catch. Ownership means the ADK path is the file's own directory
 ///   entry, and `canonicalize` cannot be made to say that.
-/// - It is a regular file. `Owned` is a permit to `File::open` the path, and an
-///   `O_RDONLY` open of a FIFO blocks until a writer arrives. That open runs inside
-///   the rotation's `spawn_blocking`, which the watcher's poll loop awaits, so a FIFO
-///   parked at this session's relay jsonl name stops that session's relaying outright
-///   — not for a tick, but until someone opens the other end. A device or a socket at
-///   that name is no more ours than a FIFO is. Answering from the lstat is what keeps
-///   the refusal non-blocking; deciding it after the open would be deciding it too
-///   late.
+/// - It is a regular file. `Owned` is a permit to open and rewrite the path, and a FIFO,
+///   a device or a socket parked at this session's relay jsonl name is no more ours than
+///   any other process's file is. What makes the refusal non-blocking is not this lstat,
+///   which the name can be replaced out from under between here and the open: it is
+///   [`open_rotation_target_without_waiting`] opening `O_NONBLOCK` and
+///   `truncate_jsonl_head_safe` refusing on the type it reads back from that fd. This
+///   rule is the earlier and coarser of the two — it settles the verdict itself, so a
+///   FIFO sitting at the name is never called ours and no open is attempted at all.
 ///
 /// `is_file()` is false for a symlink read this way, so it carries the first rule as
 /// well as the second; both are written out because they fail closed for different
@@ -2028,14 +2070,12 @@ mod watcher_jsonl_owner_tests {
         }
     }
 
-    /// `Owned` is a permit to `File::open` the path, and an `O_RDONLY` open of a FIFO
-    /// blocks until a writer arrives — inside the rotation's `spawn_blocking`, whose
-    /// result the watcher's poll loop awaits, so that session stops relaying until
-    /// someone opens the other end. The entry's type is therefore settled from the
-    /// same lstat the link rule uses, before any open: a FIFO at this session's own
-    /// relay jsonl name is `Unknown`. Revert that and this test fails on the verdict,
-    /// which is the point — the hang it prevents is one call further on, in
-    /// `truncate_jsonl_head_safe`, where a test could only hang rather than fail.
+    /// `Owned` is a permit to open and rewrite the path, and a FIFO at this session's
+    /// own relay jsonl name is not a file of ours to rewrite. The entry's type is
+    /// settled from the same lstat the link rule uses, so the verdict comes back
+    /// `Unknown` and no open is attempted. Liveness does not rest on this test:
+    /// `a_fifo_swapped_in_after_the_verdict_is_refused_without_waiting` covers the
+    /// window this lstat cannot, where the name turns into a FIFO after the verdict.
     #[cfg(unix)]
     #[test]
     fn a_fifo_at_the_relay_jsonl_name_is_not_owned() {
@@ -2052,6 +2092,75 @@ mod watcher_jsonl_owner_tests {
         assert_eq!(owner, WatcherJsonlOwner::Unknown, "{}", relay.display());
         assert_eq!(owner.rotatable_path(), None);
         let _ = std::fs::remove_file(relay);
+    }
+
+    /// The window the classification's lstat cannot close: the name held a real,
+    /// over-cap file when the verdict was reached, and is a FIFO by the time the
+    /// rotation opens it. A plain `O_RDONLY` open there waits for a writer that never
+    /// comes, inside the `spawn_blocking` the watcher's poll loop awaits — so the
+    /// assertion that matters is the one about *time*, and the call is driven from a
+    /// worker thread precisely so that a regression fails this test on the timeout
+    /// instead of hanging the whole run at the open.
+    ///
+    /// Both halves of the fix are needed to pass: `O_NONBLOCK` for the open to return
+    /// at all, and the fstat's type check for what it returns to be a refusal. Without
+    /// the second, this particular FIFO is still refused — `fstat` reports size 0 for
+    /// it, which reads as under-cap — so what the type check buys over that accident is
+    /// that the refusal is on the grounds that hold for every non-file, whatever a
+    /// platform chooses to put in `st_size`.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_swapped_in_after_the_verdict_is_refused_without_waiting() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let _host = crate::config::pin_runtime_host_for_test();
+
+        let session = "AgentDesk-claude-rot-5452-fifo-swap";
+        let relay = session_temp_path(session, "jsonl");
+        let relay = Path::new(&relay);
+        std::fs::create_dir_all(relay.parent().expect("parent")).expect("create dir");
+        let _ = std::fs::remove_file(relay);
+        let body: String = (0..40)
+            .map(|index| format!("{{\"type\":\"assistant\",\"i\":{index:03}}}\n"))
+            .collect();
+        std::fs::write(relay, &body).expect("write fixture");
+
+        // The verdict, reached while the name still holds that regular file.
+        let target = classify_watcher_jsonl_owner(&relay.display().to_string(), session)
+            .rotatable_path()
+            .expect("a regular over-cap relay jsonl is rotatable")
+            .to_path_buf();
+
+        // The swap, inside the window that verdict opened.
+        std::fs::remove_file(&target).expect("unlink the judged entry");
+        mkfifo(&target);
+
+        let (done, finished) = std::sync::mpsc::channel();
+        let rotating = target.clone();
+        std::thread::spawn(move || {
+            let _ = done.send(truncate_jsonl_head_safe(
+                &rotating,
+                body.len() as u64 / 2,
+                body.len() as u64 / 4,
+            ));
+        });
+        let rotated = finished
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the open must not wait on a FIFO nobody will ever write to");
+
+        assert_eq!(
+            rotated.expect("a refused rotation is not an error"),
+            None,
+            "a FIFO at the judged name must report no rewrite"
+        );
+        assert!(
+            std::fs::symlink_metadata(&target)
+                .expect("the swapped-in entry is still there")
+                .file_type()
+                .is_fifo(),
+            "refusing means writing nothing, so the rename must not have replaced the FIFO"
+        );
+        let _ = std::fs::remove_file(&target);
     }
 
     #[cfg(unix)]
