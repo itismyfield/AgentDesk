@@ -320,7 +320,12 @@ pub(crate) fn encode_project_path(path: &Path) -> String {
         .collect()
 }
 
-fn default_claude_home() -> Option<PathBuf> {
+/// The Claude home this host reads rollout transcripts under, honouring the
+/// `CLAUDE_CONFIG_DIR` override. `pub(crate)` since #5452 PR-A so
+/// `tmux_common::classify_watcher_jsonl_owner` recognises a provider-owned
+/// transcript through the same resolver the readers here use, instead of
+/// matching a hardcoded `~/.claude` the override would walk away from.
+pub(crate) fn default_claude_home() -> Option<PathBuf> {
     std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)

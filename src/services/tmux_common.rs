@@ -1446,20 +1446,61 @@ pub const JSONL_TARGET_KEEP_BYTES: u64 = 15 * 1024 * 1024;
 /// complete line.
 ///
 /// Returns `Ok(Some(new_size))` if the file was rewritten, `Ok(None)` if the
-/// file is under cap or missing.
+/// file is under cap, missing, not a regular file, or no longer the file the
+/// caller judged (see `rotation_target_was_swapped`).
+///
+/// Every byte coordinate is measured on the opened fd and never on the path. A
+/// second rotation of the same relay jsonl — #3277 leaves two watcher instances on
+/// one — can land between any two lookups of that name, so a size read before the
+/// open answers for whichever inode the name held then, and an offset derived from
+/// it cuts into a tail the replacement file has already shortened.
+///
+/// `path` must already be resolved. On unix the swap check reads it back with
+/// `symlink_metadata`, so a spelling whose last component is a legitimate link never
+/// matches the fd the open landed on and is refused on every call. Off unix that
+/// check is a no-op — std exposes no (dev, ino) there — so such a spelling is not so
+/// much refused as unchecked, which is the other half of why the resolved path is
+/// what belongs here. [`classify_watcher_jsonl_owner`] hands its verdict back
+/// carrying the path it judged, which is that path.
 pub fn truncate_jsonl_head_safe(
-    path: &str,
+    path: &Path,
     size_cap_bytes: u64,
     target_keep_bytes: u64,
 ) -> std::io::Result<Option<u64>> {
     use std::io::{Read, Seek, SeekFrom, Write};
 
-    let meta = match std::fs::metadata(path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
+    let mut file = match open_rotation_target_without_waiting(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
     };
-    let size = meta.len();
+    if rotation_target_was_swapped(&file, path)? {
+        return Ok(None);
+    }
+
+    // fstat, on the fd the check above just identified, so the size is this file's
+    // and not the previous occupant of the name. Concretely: A replaces a 21 MiB
+    // relay jsonl with the 15 MiB rewrite while B is between its stat and its open.
+    // B's open and identity check both land on the new file and agree, but B's
+    // `21 MiB - 15 MiB` offset seeks 6 MiB into a file that is now entirely tail, so
+    // B keeps 9 MiB of the 15 A just published and drops the rest — and once the
+    // stale size exceeds the live one by more than `target_keep_bytes`, the seek is
+    // past EOF and B publishes an empty file. The under-cap answer moves here for
+    // the same reason: it must be given about the file that is there.
+    let opened = file.metadata()?;
+
+    // Type, from that same fstat, and this is where the regular-file rule is actually
+    // enforced. The ownership verdict reached it on an `lstat` of the name, and the
+    // name can be replaced between that `lstat` and the open above — so the entry the
+    // open landed on is the only one whose type this can know. The identity check
+    // above does not cover it: a FIFO moved onto the name is what both the open and
+    // that check see, so they agree, and agreeing is not the same as being a file we
+    // may rewrite. A device or a socket at the name is no more ours than a FIFO is.
+    if !opened.file_type().is_file() {
+        return Ok(None);
+    }
+
+    let size = opened.len();
     if size <= size_cap_bytes {
         return Ok(None);
     }
@@ -1467,11 +1508,12 @@ pub fn truncate_jsonl_head_safe(
     // Figure out the byte offset we *want* to start keeping from.
     let start_offset = size.saturating_sub(target_keep_bytes);
 
-    let mut file = std::fs::File::open(path)?;
     file.seek(SeekFrom::Start(start_offset))?;
     let mut buf = Vec::with_capacity((size - start_offset) as usize);
     file.read_to_end(&mut buf)?;
-    drop(file);
+    // `file` is deliberately still open: its (dev, ino) is the identity everything
+    // below is authorised against, and the pre-rename re-check compares the entry
+    // back to it.
 
     // Drop any partial leading line: advance past the first newline so the
     // kept buffer begins at a line boundary. If no newline exists in buf
@@ -1490,19 +1532,714 @@ pub fn truncate_jsonl_head_safe(
     let kept = &buf[keep_start..];
     let new_size = kept.len() as u64;
 
-    // Atomic-ish rewrite: write to sibling temp then rename.
-    let tmp_path = format!("{}.truncate.tmp", path);
-    {
-        let mut out = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&tmp_path)?;
-        out.write_all(kept)?;
-        out.sync_all()?;
+    // Staging siblings are per-attempt names, so a process that dies mid-rotation
+    // leaves one behind that nothing will ever reuse or clean. Swept here, on the
+    // way to creating the next one.
+    sweep_stale_rotation_staging(path);
+
+    // Atomic-ish rewrite: write to a sibling temp, then rename it over the target.
+    // `create_new`, so the sibling is created and never opened onto — a link left
+    // at that name would take a `create(true)` rewrite through to whatever it
+    // points at, the damage the ownership gate exists to prevent, without needing
+    // to win a race for it.
+    let tmp_path = rotation_staging_sibling(path);
+    let mut out = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&tmp_path)?;
+
+    // Past the open, the sibling is this attempt's own file, so failing back
+    // over it cannot remove staging another instance is still filling.
+    let mut staged = out.write_all(kept).and_then(|()| out.sync_all());
+    drop(out);
+    if staged.is_ok() {
+        // The entry is checked once more here, against the same fd, because the
+        // window the post-open check closed reopens while the staging file is being
+        // written: `rename` removes whatever directory entry `path` names at the
+        // moment it runs, so an entry replaced during the write — a foreign file
+        // moved in, a link put there — would be the entry this rename unlinks, and
+        // for a file whose only name that is, publishing our bytes over it destroys
+        // it. Refuse instead, dropping the staging file, having touched nothing.
+        match rotation_target_was_swapped(&file, path) {
+            Ok(false) => staged = std::fs::rename(&tmp_path, path),
+            Ok(true) => {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Ok(None);
+            }
+            Err(error) => staged = Err(error),
+        }
     }
-    std::fs::rename(&tmp_path, path)?;
+    if let Err(error) = staged {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(error);
+    }
     Ok(Some(new_size))
+}
+
+/// Open a rotation target for reading in a way that cannot wait on it.
+///
+/// The ownership verdict's regular-file rule is decided on an `lstat` of the name in
+/// [`adk_path_holds_resolved_file`], and the name can be replaced between that `lstat`
+/// and this open. A plain `O_RDONLY` open of a FIFO blocks until a writer arrives, and
+/// this open runs inside the rotation's `spawn_blocking`, whose result the watcher's
+/// poll loop awaits — so a FIFO moved onto the name inside that window would stop that
+/// session's relaying outright, not for a tick but until someone opened the other end.
+/// `O_NONBLOCK` returns immediately instead, which leaves the caller's `fstat` free to
+/// refuse the thing on its type. Regular files are unaffected: POSIX gives `O_NONBLOCK`
+/// no meaning for reads on them.
+#[cfg(unix)]
+fn open_rotation_target_without_waiting(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+}
+
+/// Off unix there is no `O_NONBLOCK` to set through `OpenOptions`. The caller's `fstat`
+/// still refuses whatever is not a regular file, so what is missing here is not the
+/// refusal but the guarantee that reaching it costs no wait.
+#[cfg(not(unix))]
+fn open_rotation_target_without_waiting(path: &Path) -> std::io::Result<File> {
+    File::open(path)
+}
+
+/// Best-effort removal of staging siblings an attempt that died mid-rotation left
+/// behind, so they cannot accumulate for the life of the directory.
+///
+/// Bounded by an age floor: a staging file is created, written and renamed away
+/// inside one call, so anything still bearing this target's staging prefix an hour
+/// later is residue of an attempt that almost certainly died. Almost, not certainly —
+/// an hour of wall-clock is evidence of death, not proof of it. An attempt whose
+/// process was suspended that long (SIGSTOP, a stopped job, a host paused or
+/// suspended-to-disk) still owns its staging file, and this sweep will delete it.
+/// What that costs is bounded and is not the target file: that attempt's `rename`
+/// then fails `ENOENT`, the rotation reports the error, the caller logs one WARN and
+/// leaves its offsets alone, and the next cadence retries under a fresh sibling name.
+/// The jsonl being rotated is never touched on that path — nothing was published —
+/// so the loss is one skipped rotation.
+///
+/// What the floor does buy outright is the case it exists for: an overlapping
+/// instance rotating normally has staging seconds to minutes old, and is never a
+/// candidate. A file whose mtime does not read, or reads in the future, is left alone
+/// for the same reason. Nothing is logged and every failure is ignored: this is
+/// incidental to the rotation, and a directory that will not enumerate is not a
+/// reason to fail one.
+fn sweep_stale_rotation_staging(path: &Path) {
+    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return;
+    };
+    let mut prefix = name.to_os_string();
+    prefix.push(ROTATION_STAGING_INFIX);
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let entry_name = entry.file_name();
+        let entry_bytes = entry_name.as_encoded_bytes();
+        if !entry_bytes.starts_with(prefix.as_encoded_bytes())
+            || !entry_bytes.ends_with(ROTATION_STAGING_SUFFIX.as_bytes())
+        {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
+            .is_some_and(|age| age >= STALE_AFTER);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// A staging name for one rotation attempt that no other attempt will pick.
+///
+/// #3277 leaves two watcher instances overlapping on one relay jsonl, so their
+/// rotations overlap too. Under a single fixed sibling name they share the
+/// staging file and A's rename can publish the half-filled inode B is still
+/// writing, losing whatever tail B had not flushed. `pid` separates processes; the
+/// counter separates concurrent attempts inside one, which pid cannot, since those
+/// two watchers are blocking tasks of the same dcserver; the nanosecond stamp
+/// keeps residue from a dead process whose pid the OS recycled from colliding with
+/// a fresh attempt. Pushed onto the `OsString` so a non-UTF-8 path keeps its bytes.
+fn rotation_staging_sibling(path: &Path) -> PathBuf {
+    static ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since_epoch| since_epoch.as_nanos());
+    let attempt = ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut name = path.as_os_str().to_owned();
+    name.push(format!(
+        "{ROTATION_STAGING_INFIX}{}.{nanos}.{attempt}{ROTATION_STAGING_SUFFIX}",
+        std::process::id()
+    ));
+    PathBuf::from(name)
+}
+
+/// The fixed head and tail of a staging sibling's name, spelled once so
+/// `sweep_stale_rotation_staging` recognises exactly what the generator above
+/// produces. A sweep pattern written out separately would drift from it and then
+/// either miss the residue it exists to remove or match a file that is not ours.
+const ROTATION_STAGING_INFIX: &str = ".truncate.";
+const ROTATION_STAGING_SUFFIX: &str = ".tmp";
+
+/// Whether the file `path` names is no longer the one the open fd holds. Called at
+/// both ends of a rotation (#5452 PR-A): after the open, closing the window between
+/// an ownership verdict and the rewrite it authorises, and again immediately before
+/// the rename, closing the window that reopens while the staging file is written.
+/// `path` is the resolved path that verdict was reached on, so its last component
+/// was a real file and not a link; `symlink_metadata` now disagreeing with the
+/// open fd means the entry was replaced since. Refuse, having written nothing; an
+/// entry that is simply gone is not the judged file either. `symlink_metadata`, not
+/// `metadata`, because following the link would land on the same inode the open did
+/// and the two would agree — also why `path_points_to_different_file` is not reused.
+///
+/// Two windows are left, and both are the same missing primitive. The check before
+/// the rename is a separate syscall from the rename, which resolves `path` again
+/// and removes whatever entry it finds; an entry replaced in between is still the
+/// one it unlinks. And redirecting a *parent* directory is invisible to either
+/// call — it moves the open and the stat onto the same foreign file, so they agree.
+/// Sealing either needs the open, the stat and the rename to share an `O_DIRECTORY`
+/// fd (`openat`/`renameat`), which std does not expose. Left open deliberately: the
+/// threat model is a same-user local process, and one that can win a sub-syscall
+/// race or redirect that directory can truncate the victim itself without going
+/// through AgentDesk, so the checks would buy nothing against them. What they do
+/// buy is everything an unsynchronised neighbour does by accident, which is the
+/// case that actually happens.
+#[cfg(unix)]
+fn rotation_target_was_swapped(file: &File, path: &Path) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+
+    let opened = file.metadata()?;
+    match std::fs::symlink_metadata(path) {
+        Ok(entry) => Ok(entry.dev() != opened.dev() || entry.ino() != opened.ino()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(unix))]
+fn rotation_target_was_swapped(_file: &File, _path: &Path) -> std::io::Result<bool> {
+    Ok(false)
+}
+
+// ── Whose jsonl is a watcher pointed at (#5452 PR-A) ────────────────────
+//
+// `truncate_jsonl_head_safe` rewrites a file from its head, invalidating every
+// byte coordinate anyone else holds into it. That is legitimate for the relay
+// jsonl this runtime's own wrapper writes, and for nothing else: a TUI-direct
+// watcher is pointed at the provider's rollout transcript instead, a file under
+// the Claude or Codex home that the provider owns and holds its own coordinates
+// into. Provider transcripts are the measured victim, not the protected set — the
+// gate is an allow-list of this session's own relay jsonl, so every other file an
+// `output_path` can name is refused under the same rule and for the same reason:
+// an operator-supplied override path, another session's relay jsonl, a stray file
+// left behind by a restore.
+
+/// Whose file the jsonl behind a watcher's `output_path` is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WatcherJsonlOwner {
+    /// The relay jsonl this runtime builds for this session via
+    /// [`session_temp_path`] / [`legacy_tmp_session_path`], carrying the resolved
+    /// path judged — an `Owned` verdict cannot be held apart from its file.
+    Owned(PathBuf),
+    /// A file under a provider home. AgentDesk only ever reads these.
+    Foreign,
+    /// Neither. No proof it is ours, so it is not treated as ours.
+    Unknown,
+}
+
+impl WatcherJsonlOwner {
+    /// The file AgentDesk may rewrite in place, or `None`. An allow-list: `Foreign`
+    /// is another process's file and `Unknown` carries no proof either way, so both
+    /// refuse. Permission and target are one value, so a caller cannot take the yes
+    /// and then supply its own path.
+    pub fn rotatable_path(&self) -> Option<&Path> {
+        match self {
+            Self::Owned(path) => Some(path),
+            Self::Foreign | Self::Unknown => None,
+        }
+    }
+}
+
+/// Classify `output_path` by re-running the constructors an AgentDesk relay jsonl
+/// path comes from, rather than by matching path substrings, so the answer cannot
+/// drift from where wrappers actually write. Every comparison happens on the
+/// *resolved* path, never on the caller's spelling, and an `Owned` verdict carries
+/// that resolved path back so the rewrite runs on the file that was judged.
+///
+/// Fail-closed twice, and the order matters: `Foreign` is decided **before**
+/// `Owned`, and the two guards overlap without either subsuming the other. A link
+/// at the relay jsonl's own name pointing into a provider home is refused here and
+/// again by `adk_path_holds_resolved_file` — but a runtime root whose sessions
+/// *directory* is a link into a provider home leaves a genuine non-link file at the
+/// candidate name, and only this ordering refuses that one. Owned-first would hand
+/// the provider's transcript a rewrite permit.
+pub fn classify_watcher_jsonl_owner(output_path: &str, session_name: &str) -> WatcherJsonlOwner {
+    // An unresolvable path proves nothing about ownership, so it is refused; that
+    // costs no capping, since `truncate_jsonl_head_safe` already answers `Ok(None)`
+    // for a file that is not there.
+    let Ok(canonical) = std::fs::canonicalize(output_path) else {
+        return WatcherJsonlOwner::Unknown;
+    };
+
+    // Provider homes come from each provider module's own resolver, so the
+    // `CLAUDE_CONFIG_DIR` / `CODEX_HOME` overrides those readers honour are honoured
+    // here too. What counts as *under* one of them is `path_is_under_provider_home`,
+    // which decides on inode identity and drops a home it cannot stat — the same
+    // reasoning as the canonicalize above, since nothing real is under a directory
+    // that is not there, so dropping it cannot hide a match.
+    let provider_homes = [
+        crate::services::claude_tui::transcript_tail::default_claude_home(),
+        crate::services::codex_tui::rollout_tail::default_codex_home(),
+    ];
+    if provider_homes
+        .into_iter()
+        .flatten()
+        .any(|home| path_is_under_provider_home(&canonical, &home))
+    {
+        return WatcherJsonlOwner::Foreign;
+    }
+
+    // Both locations a wrapper may have written this session's relay jsonl to: the
+    // canonical runtime path, and the legacy `/tmp` one pre-migration wrappers still
+    // hold fds to. Anything under a provider home was claimed above, so a runtime
+    // root placed inside one loses its cap rather than gaining permission to rewrite
+    // a provider's file.
+    //
+    // Losing the cap has a running cost, so it is worth being exact about it rather
+    // than filing it as "refused, no harm done". This rotation is the only thing that
+    // ever shortens a relay jsonl — the wrappers write through `RotatingJsonlWriter`,
+    // which only appends — so a file refused here grows without bound for as long as
+    // the session lives, until `cleanup_session_temp_files` deletes it at teardown or
+    // recreate. Nothing polls it, nothing alarms on it, and the single WARN
+    // `rotate_owned_jsonl` emits per path per process is the only signal it will ever
+    // produce. Still the right way to be wrong: the alternative is rewriting the head
+    // of a file another process is holding coordinates into.
+    let owned = [
+        session_temp_path(session_name, "jsonl"),
+        legacy_tmp_session_path(session_name, "jsonl"),
+    ]
+    .iter()
+    .any(|candidate| adk_path_holds_resolved_file(Path::new(candidate), &canonical));
+    if owned {
+        WatcherJsonlOwner::Owned(canonical)
+    } else {
+        WatcherJsonlOwner::Unknown
+    }
+}
+
+/// Whether `candidate` — already canonical — physically lies inside `home`.
+///
+/// Decided on inode identity rather than on how either path is spelled, because a
+/// comparison of spellings rests on something no platform promises: that the two
+/// sides reach here already agreed on how to write one directory. They come from
+/// different places. `candidate` has been through `canonicalize`, and what that does
+/// to a case alias is the host resolver's business — macOS corrects it to the on-disk
+/// spelling (measured here: `canonicalize` of a `.CLAUDE/…` path on a
+/// case-insensitive volume comes back spelled `.claude/…`), while `realpath` on Linux
+/// performs no such correction for a casefolded ext4 directory. `home` is not
+/// canonicalized at all: it is whatever the provider module's resolver produced, and
+/// `CLAUDE_CONFIG_DIR` / `CODEX_HOME` may spell it any way the volume will accept.
+/// Where those two disagree, a prefix test reads a file inside a provider home as
+/// outside it, and that skips the `Foreign`-before-`Owned` ordering that exists to
+/// keep such a file from ever collecting a rewrite permit.
+///
+/// Folding case to bridge that was the previous attempt, and it fails the other way
+/// round. On a volume that really is case-sensitive — APFS and HFS+ both offer that
+/// format, and macOS is where the fold lived — `.CLAUDE` is a *different* directory;
+/// a runtime root legitimately placed in one would be called `Foreign` on every tick,
+/// and its relay jsonl would lose the size cap permanently and silently. Neither
+/// volume announces which kind it is, and a path comparison cannot ask.
+///
+/// So every ancestor of `candidate` is compared with `home` by (dev, ino), which is
+/// what "inside" physically means. Casing, Unicode normalisation, and any other alias
+/// a filesystem accepts for one directory all collapse onto one pair, so none of them
+/// is a case this has to know about. A home that does not stat is not compared
+/// against at all — nothing real is under a directory that is not there — which is
+/// the same rule the caller applies to an `output_path` that will not canonicalize.
+///
+/// The walk is bounded by path depth and runs once per rotation cadence (120 loop
+/// ticks, ~30s), so its handful of stats is not worth optimising away. An ancestor
+/// that will not stat simply does not match; failing to prove `Foreign` is not proof
+/// of `Owned`, which still demands exact identity with a path this runtime built.
+#[cfg(unix)]
+fn path_is_under_provider_home(candidate: &Path, home: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(home) = std::fs::metadata(home) else {
+        return false;
+    };
+    // `metadata`, not `symlink_metadata`: `candidate` is canonical, so its ancestors
+    // hold no links for the follow to change the answer on.
+    candidate.ancestors().any(|ancestor| {
+        std::fs::metadata(ancestor)
+            .is_ok_and(|entry| entry.dev() == home.dev() && entry.ino() == home.ino())
+    })
+}
+
+/// Best-effort where std exposes no inode: the home is resolved and matched as a path
+/// prefix, component by component so that `.claude-backup` is not "under" `.claude`.
+/// This is weaker than the unix arm and not equivalent to it — an alias the volume
+/// accepts for one of those components is invisible to it, and NTFS is
+/// case-insensitive by default, so a transcript reached through such a spelling reads
+/// as outside the home it is in and reaches the `Owned` rule instead. Stated rather
+/// than sealed: which spellings a volume folds together is the volume's business, and
+/// reproducing that in a path comparison is not a promise this can keep. (Linux and
+/// the BSDs take the arm above, which has no such gap — ext4's casefolded directories
+/// included.)
+#[cfg(not(unix))]
+fn path_is_under_provider_home(candidate: &Path, home: &Path) -> bool {
+    std::fs::canonicalize(home).is_ok_and(|home| candidate.starts_with(home))
+}
+
+/// Whether an AgentDesk-constructed path *holds* the file `resolved` names, as
+/// opposed to merely being able to reach it. Two things are demanded of the entry
+/// itself, both read from the one `symlink_metadata` — which describes the entry
+/// rather than what it leads to — and both before anything is opened:
+///
+/// - It is not a symlink. `canonicalize(candidate) == resolved` alone is satisfied by
+///   a candidate that is itself a link, both sides resolving to the link's target, so
+///   the comparison is that target against itself and any file the link points at
+///   passes — including files under no provider home, which the `Foreign` guard
+///   therefore cannot catch. Ownership means the ADK path is the file's own directory
+///   entry, and `canonicalize` cannot be made to say that.
+/// - It is a regular file. `Owned` is a permit to open and rewrite the path, and a FIFO,
+///   a device or a socket parked at this session's relay jsonl name is no more ours than
+///   any other process's file is. What makes the refusal non-blocking is not this lstat,
+///   which the name can be replaced out from under between here and the open: it is
+///   [`open_rotation_target_without_waiting`] opening `O_NONBLOCK` and
+///   `truncate_jsonl_head_safe` refusing on the type it reads back from that fd. This
+///   rule is the earlier and coarser of the two — it settles the verdict itself, so a
+///   FIFO sitting at the name is never called ours and no open is attempted at all.
+///
+/// `is_file()` is false for a symlink read this way, so it carries the first rule as
+/// well as the second; both are written out because they fail closed for different
+/// reasons and a later reader should not have to rediscover the FIFO one.
+fn adk_path_holds_resolved_file(candidate: &Path, resolved: &Path) -> bool {
+    // Missing, unreadable, a link, or not a regular file: nothing of ours sits here.
+    if !std::fs::symlink_metadata(candidate).is_ok_and(|entry| entry.is_file()) {
+        return false;
+    }
+    // Parent components may still be links, so both sides are resolved; that is what
+    // makes the equality hold across the `/var` -> `/private/var` shapes a host can
+    // hand back.
+    std::fs::canonicalize(candidate).is_ok_and(|candidate| candidate == resolved)
+}
+
+#[cfg(test)]
+mod watcher_jsonl_owner_tests {
+    use super::*;
+
+    fn touch(path: &Path) {
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
+        std::fs::write(path, b"{\"type\":\"assistant\"}\n").expect("write fixture");
+    }
+
+    /// Replace whatever sits at `link` with a symlink to `target`.
+    fn symlink_at(link: &Path, target: &Path) {
+        std::fs::create_dir_all(link.parent().expect("parent")).expect("create dir");
+        let _ = std::fs::remove_file(link);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).expect("symlink");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(target, link).expect("symlink");
+    }
+
+    /// Both locations a wrapper may have written this session's relay jsonl to are
+    /// ours — the ban must not cost the cap on AgentDesk's own files — and the
+    /// verdict hands back the resolved path the rewrite may run on, not only a yes.
+    #[test]
+    fn this_sessions_own_relay_jsonl_is_owned() {
+        let _host = crate::config::pin_runtime_host_for_test();
+
+        let session = "AgentDesk-claude-rot-5452-owned";
+        for relay in [
+            session_temp_path(session, "jsonl"),
+            legacy_tmp_session_path(session, "jsonl"),
+        ] {
+            touch(Path::new(&relay));
+            let owner = classify_watcher_jsonl_owner(&relay, session);
+            let resolved = std::fs::canonicalize(&relay).expect("fixture resolves");
+            assert_eq!(owner, WatcherJsonlOwner::Owned(resolved.clone()), "{relay}");
+            assert_eq!(owner.rotatable_path(), Some(resolved.as_path()));
+            let _ = std::fs::remove_file(&relay);
+        }
+    }
+
+    /// Both provider homes, reached through the same env overrides the providers'
+    /// own readers honour rather than a hardcoded `~/.claude`. The last case is the
+    /// reason `default_codex_home` was split out of `default_codex_sessions_dir`:
+    /// Codex keeps state outside `sessions/` too, and a home-wide ban is what covers
+    /// it — a `sessions/`-scoped one would classify `config.toml` as Unknown.
+    #[test]
+    fn files_under_a_provider_home_are_foreign() {
+        let host = crate::config::pin_runtime_host_for_test();
+
+        for transcript in [
+            host.claude_home
+                .path()
+                .join("projects/-Users-me-repo/0f2b9d1e-0000-4000-8000-000000000000.jsonl"),
+            host.codex_home
+                .path()
+                .join("sessions/2026/08/rollout-2026-08-19T01-49-00-abc.jsonl"),
+            host.codex_home.path().join("config.toml"),
+        ] {
+            touch(&transcript);
+            let owner =
+                classify_watcher_jsonl_owner(&transcript.display().to_string(), "AgentDesk-rot");
+            assert_eq!(
+                owner,
+                WatcherJsonlOwner::Foreign,
+                "{}",
+                transcript.display()
+            );
+        }
+    }
+
+    /// The contract that replaced the string comparison: "inside a provider home" is
+    /// (dev, ino) identity between one of a canonical path's ancestors and the home,
+    /// so it holds for whatever spelling the filesystem accepts for that directory and
+    /// for no directory that is merely spelled like it.
+    ///
+    /// The case alias is the shape this was changed for, and the side it is asserted
+    /// on is the side production actually varies: the *home*. The classifier passes it
+    /// exactly as the provider module resolved it — `CLAUDE_CONFIG_DIR` may spell it
+    /// any way the volume accepts — while the candidate has been canonicalized, and on
+    /// this host that correction runs the other way (`canonicalize` of a `.CLAUDE/…`
+    /// path returns it spelled `.claude/…`). A prefix test compares those two
+    /// spellings and answers no; stat compares the directories and answers yes.
+    ///
+    /// Asserted only where the volume provides the alias at all. On a case-sensitive
+    /// volume `.CLAUDE` is not another name for this home, nothing is there to stat,
+    /// and the case does not exist to be tested — which is what the probe below asks
+    /// of the volume the test is really running on, rather than assuming it from the
+    /// target triple.
+    #[cfg(unix)]
+    #[test]
+    fn provider_home_containment_is_decided_on_inode_identity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join(".claude");
+        let transcript = home.join("projects/-Users-me-repo/a.jsonl");
+        touch(&transcript);
+        let home = std::fs::canonicalize(&home).expect("home resolves");
+        let inside = std::fs::canonicalize(&transcript).expect("transcript resolves");
+        assert!(
+            path_is_under_provider_home(&inside, &home),
+            "a file under the home is inside it"
+        );
+
+        // A sibling whose name merely begins with the home's is a different directory
+        // and therefore a different inode.
+        let sibling = dir.path().join(".claude-backup/projects/a.jsonl");
+        touch(&sibling);
+        let sibling = std::fs::canonicalize(&sibling).expect("sibling resolves");
+        assert!(
+            !path_is_under_provider_home(&sibling, &home),
+            ".claude-backup is not under .claude"
+        );
+
+        // A home that is not on disk holds nothing and is not compared against.
+        assert!(
+            !path_is_under_provider_home(&inside, &dir.path().join(".claude-absent")),
+            "a home that does not stat cannot contain anything"
+        );
+
+        // Built off the canonical home so casing is the *only* way this spelling
+        // differs from it — otherwise a prefix test would also fail on `/var` vs
+        // `/private/var` and the assertion would not be about the fold at all.
+        let alias_home = home
+            .parent()
+            .expect("the home has a parent")
+            .join(".CLAUDE");
+        if std::fs::metadata(&alias_home).is_ok() {
+            assert_ne!(
+                alias_home, home,
+                "the alias must be the other spelling, or this proves nothing"
+            );
+            assert!(
+                path_is_under_provider_home(&inside, &alias_home),
+                "a home spelled the way the volume aliases it is still that home"
+            );
+        }
+    }
+
+    /// `Owned` is a permit to open and rewrite the path, and a FIFO at this session's
+    /// own relay jsonl name is not a file of ours to rewrite. The entry's type is
+    /// settled from the same lstat the link rule uses, so the verdict comes back
+    /// `Unknown` and no open is attempted. Liveness does not rest on this test:
+    /// `a_fifo_swapped_in_after_the_verdict_is_refused_without_waiting` covers the
+    /// window this lstat cannot, where the name turns into a FIFO after the verdict.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_the_relay_jsonl_name_is_not_owned() {
+        let _host = crate::config::pin_runtime_host_for_test();
+
+        let session = "AgentDesk-claude-rot-5452-fifo";
+        let relay = session_temp_path(session, "jsonl");
+        let relay = Path::new(&relay);
+        std::fs::create_dir_all(relay.parent().expect("parent")).expect("create dir");
+        let _ = std::fs::remove_file(relay);
+        mkfifo(relay);
+
+        let owner = classify_watcher_jsonl_owner(&relay.display().to_string(), session);
+        assert_eq!(owner, WatcherJsonlOwner::Unknown, "{}", relay.display());
+        assert_eq!(owner.rotatable_path(), None);
+        let _ = std::fs::remove_file(relay);
+    }
+
+    /// The window the classification's lstat cannot close: the name held a real,
+    /// over-cap file when the verdict was reached, and is a FIFO by the time the
+    /// rotation opens it. A plain `O_RDONLY` open there waits for a writer that never
+    /// comes, inside the `spawn_blocking` the watcher's poll loop awaits — so the
+    /// assertion that matters is the one about *time*, and the call is driven from a
+    /// worker thread precisely so that a regression fails this test on the timeout
+    /// instead of hanging the whole run at the open.
+    ///
+    /// Both halves of the fix are needed to pass: `O_NONBLOCK` for the open to return
+    /// at all, and the fstat's type check for what it returns to be a refusal. Without
+    /// the second, this particular FIFO is still refused — `fstat` reports size 0 for
+    /// it, which reads as under-cap — so what the type check buys over that accident is
+    /// that the refusal is on the grounds that hold for every non-file, whatever a
+    /// platform chooses to put in `st_size`.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_swapped_in_after_the_verdict_is_refused_without_waiting() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let _host = crate::config::pin_runtime_host_for_test();
+
+        let session = "AgentDesk-claude-rot-5452-fifo-swap";
+        let relay = session_temp_path(session, "jsonl");
+        let relay = Path::new(&relay);
+        std::fs::create_dir_all(relay.parent().expect("parent")).expect("create dir");
+        let _ = std::fs::remove_file(relay);
+        let body: String = (0..40)
+            .map(|index| format!("{{\"type\":\"assistant\",\"i\":{index:03}}}\n"))
+            .collect();
+        std::fs::write(relay, &body).expect("write fixture");
+
+        // The verdict, reached while the name still holds that regular file.
+        let target = classify_watcher_jsonl_owner(&relay.display().to_string(), session)
+            .rotatable_path()
+            .expect("a regular over-cap relay jsonl is rotatable")
+            .to_path_buf();
+
+        // The swap, inside the window that verdict opened.
+        std::fs::remove_file(&target).expect("unlink the judged entry");
+        mkfifo(&target);
+
+        let (done, finished) = std::sync::mpsc::channel();
+        let rotating = target.clone();
+        std::thread::spawn(move || {
+            let _ = done.send(truncate_jsonl_head_safe(
+                &rotating,
+                body.len() as u64 / 2,
+                body.len() as u64 / 4,
+            ));
+        });
+        let rotated = finished
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the open must not wait on a FIFO nobody will ever write to");
+
+        assert_eq!(
+            rotated.expect("a refused rotation is not an error"),
+            None,
+            "a FIFO at the judged name must report no rewrite"
+        );
+        assert!(
+            std::fs::symlink_metadata(&target)
+                .expect("the swapped-in entry is still there")
+                .file_type()
+                .is_fifo(),
+            "refusing means writing nothing, so the rename must not have replaced the FIFO"
+        );
+        let _ = std::fs::remove_file(&target);
+    }
+
+    #[cfg(unix)]
+    fn mkfifo(path: &Path) {
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("path holds no NUL");
+        // SAFETY: `path` is a NUL-terminated C string that outlives the call, and
+        // `mkfifo` reads it without retaining it.
+        let created = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+        assert_eq!(created, 0, "mkfifo: {}", std::io::Error::last_os_error());
+    }
+
+    /// The link, not its name, decides: a symlink wearing this session's own
+    /// relay jsonl name still resolves into the provider home and is refused.
+    #[test]
+    fn a_symlink_from_the_relay_name_into_a_provider_home_is_foreign() {
+        let host = crate::config::pin_runtime_host_for_test();
+
+        let session = "AgentDesk-claude-rot-5452-link";
+        let transcript = host
+            .claude_home
+            .path()
+            .join("projects/-Users-me-repo/0f2b9d1e-0000-4000-8000-000000000001.jsonl");
+        touch(&transcript);
+
+        let relay = session_temp_path(session, "jsonl");
+        symlink_at(Path::new(&relay), &transcript);
+
+        let owner = classify_watcher_jsonl_owner(&relay, session);
+        assert_eq!(
+            owner,
+            WatcherJsonlOwner::Foreign,
+            "a link into a provider home is that provider's file, whatever it is named"
+        );
+        let _ = std::fs::remove_file(&relay);
+    }
+
+    /// The victim here is an ordinary tempdir file under neither provider home, so
+    /// the `Foreign` guard cannot cover for this case: without the non-link
+    /// requirement on the candidate, `canonicalize(candidate)` and the resolved
+    /// `output_path` are both the link's target, the comparison is that target
+    /// against itself, and the verdict comes back `Owned` for another's file.
+    #[test]
+    fn a_relay_path_that_is_itself_a_symlink_is_not_owned() {
+        let host = crate::config::pin_runtime_host_for_test();
+
+        let outsider = host.root.path().join("not-ours.jsonl");
+        touch(&outsider);
+
+        let session = "AgentDesk-claude-rot-5452-relay-link";
+        for relay in [
+            session_temp_path(session, "jsonl"),
+            legacy_tmp_session_path(session, "jsonl"),
+        ] {
+            symlink_at(Path::new(&relay), &outsider);
+            let owner = classify_watcher_jsonl_owner(&relay, session);
+            assert_eq!(owner, WatcherJsonlOwner::Unknown, "{relay}");
+            assert_eq!(owner.rotatable_path(), None);
+            let _ = std::fs::remove_file(&relay);
+        }
+    }
+
+    /// Fail-closed: an unrecognized path and another session's relay jsonl are
+    /// both Unknown, neither being this watcher's to rewrite.
+    #[test]
+    fn anything_else_is_unknown_and_refused() {
+        let host = crate::config::pin_runtime_host_for_test();
+
+        let stray = host.root.path().join("somebody-elses.jsonl");
+        touch(&stray);
+        let other = session_temp_path("AgentDesk-claude-other", "jsonl");
+        touch(Path::new(&other));
+        for path in [stray.display().to_string(), other] {
+            let owner = classify_watcher_jsonl_owner(&path, "AgentDesk-claude-mine");
+            assert_eq!(owner, WatcherJsonlOwner::Unknown, "{path}");
+            assert_eq!(owner.rotatable_path(), None);
+        }
+    }
 }
 
 #[cfg(test)]

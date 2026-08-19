@@ -3722,6 +3722,58 @@ pub(crate) fn set_agentdesk_root_for_test(path: &std::path::Path) -> TestEnvVarG
     TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", path)
 }
 
+/// Runtime root plus both provider homes, each pinned to a fresh empty tempdir.
+///
+/// Added for #5452 PR-A, where a path's verdict depends on all three: a test that
+/// inherited the host's `CLAUDE_CONFIG_DIR` / `CODEX_HOME` would flip an
+/// owned-or-unknown case to foreign if that home happened to contain the fixture,
+/// and would let a foreign case pass for the wrong reason if it did not.
+///
+/// Field order is drop order, and here it is what keeps the three overrides a
+/// single atom. The shared env mutex lives in its own field declared last, so it
+/// is released last: the tempdirs are removed and all three vars are restored
+/// while this thread still holds it. Parking the mutex inside one of the
+/// `TestEnvVarGuard`s instead — which is what `set_path` does — releases it when
+/// that one guard drops, and the remaining restores then run unlocked; a sibling
+/// test that takes the mutex in that gap sees a half-restored environment, and
+/// the vars still to be restored name tempdirs this value has already deleted.
+#[cfg(test)]
+pub(crate) struct PinnedRuntimeHost {
+    pub(crate) root: tempfile::TempDir,
+    pub(crate) claude_home: tempfile::TempDir,
+    pub(crate) codex_home: tempfile::TempDir,
+    _guards: [TestEnvVarGuard; 3],
+    _env_lock: test_env_lock::SharedTestEnvLockGuard,
+}
+
+/// The mutex is taken once, up front, and every var is then set through the
+/// after-lock constructor. `set_agentdesk_root_for_test` cannot be used for the
+/// runtime root here because it takes that mutex itself, and re-acquiring it on
+/// one thread panics by design — which is why the root's env key is spelled out
+/// below rather than reached through that helper.
+#[cfg(test)]
+pub(crate) fn pin_runtime_host_for_test() -> PinnedRuntimeHost {
+    let env_lock = test_env_lock::acquire_shared_test_env_lock();
+    let root = tempfile::tempdir().expect("tempdir");
+    let claude_home = tempfile::tempdir().expect("tempdir");
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let guards = [
+        TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path()),
+        TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "CLAUDE_CONFIG_DIR",
+            claude_home.path(),
+        ),
+        TestEnvVarGuard::set_path_after_shared_test_env_lock("CODEX_HOME", codex_home.path()),
+    ];
+    PinnedRuntimeHost {
+        root,
+        claude_home,
+        codex_home,
+        _guards: guards,
+        _env_lock: env_lock,
+    }
+}
+
 /// Compatibility shim for legacy provider signatures that still mention
 /// `remote_profiles`.
 ///
