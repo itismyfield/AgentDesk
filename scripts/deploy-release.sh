@@ -86,6 +86,12 @@ fi
 #   AGENTDESK_POST_DEPLOY_SMOKE_RELAY_CELL  configured TUI E2E cell for the
 #                                          single E-1 relay round-trip
 #                                          (default: claude-tui).
+#   AGENTDESK_POST_DEPLOY_SMOKE_RECOVERY_GATE_S
+#                                          bounded wait for startup recovery to
+#                                          report fully_recovered before E-1
+#                                          injects (default: 120 seconds; a
+#                                          timeout records a not-evaluated
+#                                          coverage note, never a FAIL).
 #   AGENTDESK_POST_DEPLOY_SMOKE_LOG_LINES   recent dcserver log sample size
 #                                          (default: 500 lines).
 #   AGENTDESK_POST_DEPLOY_SMOKE_WARN_LIMIT  fail-closed WARN count considered
@@ -2978,6 +2984,7 @@ POST_DEPLOY_SMOKE_CORE_API_ENDPOINTS=(
 POST_DEPLOY_SMOKE_LOG_LINES="${AGENTDESK_POST_DEPLOY_SMOKE_LOG_LINES:-500}"
 POST_DEPLOY_SMOKE_WARN_LIMIT="${AGENTDESK_POST_DEPLOY_SMOKE_WARN_LIMIT:-5}"
 POST_DEPLOY_SMOKE_RELAY_CELL="${AGENTDESK_POST_DEPLOY_SMOKE_RELAY_CELL:-claude-tui}"
+POST_DEPLOY_SMOKE_RECOVERY_GATE_S="${AGENTDESK_POST_DEPLOY_SMOKE_RECOVERY_GATE_S:-120}"
 # The E-35 phase from lease acquisition through scenario execution is capped,
 # including its live safety gate, setup/send/fetch HTTP, response wait, record
 # poll, refetch, idle check, and teardown. The component timeouts total 1,422
@@ -3302,8 +3309,74 @@ _post_deploy_smoke_resolve_cluster_standby() {
     esac
 }
 
+# #5462: E-1 must not inject while startup recovery is still restoring inflight
+# state for the target channel.
+#
+# The wedge check already declines to judge anything while
+# `fully_recovered` is false, but E-1 injected regardless — an asymmetry that
+# made the round-trip race the recovery engine. Observed on the 20260819T123143Z
+# and 20260819T212553Z deploys: `turn/start` was accepted, the TUI printed the
+# marker, then `recovery_engine::restore_inflight` spawned its own watcher for
+# the same channel ~1s later and cleared the turn's inflight identity
+# (`clear_inflight_state_if_matches_identity`), so the completed frame reached
+# the #5175 guard with no delivery owner and the body was dropped. Nothing at
+# all was posted (relay_count=0, raw_count=0) while live channels relayed fine.
+#
+# Recovery is in progress at the API-sweep moment on EVERY deploy, so a
+# point-in-time read cannot gate this; only a bounded wait can. Non-arrival is a
+# smoke coverage gap, never a relay finding, so every exit here is fail-open.
+#
+# Echoes nothing and returns 0 once `fully_recovered` is true. On timeout or an
+# unreadable state it echoes the not-evaluated reason and returns non-zero. It
+# never writes evidence notes itself: the caller owns that, and stdout here is
+# consumed by command substitution.
+_post_deploy_smoke_wait_for_startup_recovery() {
+    local budget="$POST_DEPLOY_SMOKE_RECOVERY_GATE_S"
+    local body="$POST_DEPLOY_SMOKE_TMP_DIR/recovery-health-detail.json"
+    local interval=5 attempts attempt=0 started="$SECONDS" observation recovered
+    case "$budget" in
+        ''|*[!0-9]*|0)
+            printf 'startup recovery wait budget is invalid: %s\n' "${budget:-<empty>}"
+            return 1
+            ;;
+    esac
+    if ! command -v jq >/dev/null 2>&1; then
+        printf 'startup recovery state unreadable: jq unavailable\n'
+        return 1
+    fi
+    # Two independent bounds: the elapsed-time deadline is the contract, and the
+    # attempt cap keeps the loop finite if the clock behind $SECONDS jumps.
+    attempts=$((budget / interval + 1))
+    observation="no /api/health/detail read"
+    while [ "$attempt" -lt "$attempts" ]; do
+        attempt=$((attempt + 1))
+        if curl -sS --connect-timeout 2 --max-time 15 \
+            -H "Origin: http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}" \
+            -o "$body" \
+            "http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}/api/health/detail" \
+            2>> "$POST_DEPLOY_SMOKE_EVIDENCE"; then
+            recovered=$(jq -r '
+                if (.fully_recovered | type) == "boolean" then .fully_recovered
+                else "unreadable" end
+            ' "$body" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE")
+            case "$recovered" in
+                true) return 0 ;;
+                false) observation="recovery still in progress" ;;
+                *) observation="fully_recovered missing or non-boolean" ;;
+            esac
+        else
+            observation="/api/health/detail request failed"
+        fi
+        [ "$((SECONDS - started))" -lt "$budget" ] || break
+        sleep "$interval"
+    done
+    printf 'startup recovery did not finish within %ss (%s)\n' "$budget" "$observation"
+    return 1
+}
+
 _post_deploy_smoke_check_relay_round_trip() {
-    local cluster_standby channel_id relay_output relay_log resolve_rc cell_busy cell_guard_rc
+    local recovery_gap cluster_standby channel_id relay_output relay_log
+    local resolve_rc cell_busy cell_guard_rc
     local config_path="$ADK_REL/config/agentdesk.yaml"
     if [ -z "$POST_DEPLOY_SMOKE_HEALTH_BODY" ] || [ ! -s "$POST_DEPLOY_SMOKE_HEALTH_BODY" ]; then
         _post_deploy_smoke_fail "relay E-1 NOT VERIFIED: /api/health body unavailable for standby gate; round-trip did not run (smoke coverage gap, not a relay failure)" || true
@@ -3322,6 +3395,15 @@ _post_deploy_smoke_check_relay_round_trip() {
     # actually executing. Absence of this line in a deploy log means the relay
     # check did not run, which is what silently held for every prior deploy.
     _post_deploy_smoke_note "relay E-1=round-trip proceeding cluster_standby=false" || return 1
+
+    # #5462: bounded recovery gate, mirroring the wedge check's refusal to judge
+    # a still-recovering runtime. Skipping before the channel resolves also
+    # leaves E-35 on its own "channel unavailable" not-evaluated path, so a
+    # still-recovering node reports coverage gaps instead of relay findings.
+    if ! recovery_gap=$(_post_deploy_smoke_wait_for_startup_recovery); then
+        _post_deploy_smoke_note "relay E-1=not evaluated: ${recovery_gap}" || return 1
+        return 0
+    fi
 
     # Reuse the #3729 wrapper's config resolver: channel ids remain
     # machine-local agentdesk.yaml data and are never hard-coded here.
