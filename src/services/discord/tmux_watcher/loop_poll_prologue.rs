@@ -268,6 +268,8 @@ pub(super) async fn poll_watcher_output_or_continue(
         last_observed_generation_mtime_ns,
         shared,
         channel_id,
+        watcher_provider,
+        all_data.is_empty(),
     )
     .await;
     if rotated_from_head {

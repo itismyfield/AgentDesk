@@ -1,5 +1,5 @@
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -1462,10 +1462,25 @@ pub const JSONL_TARGET_KEEP_BYTES: u64 = 15 * 1024 * 1024;
 /// much refused as unchecked, which is the other half of why the resolved path is
 /// what belongs here. [`classify_watcher_jsonl_owner`] hands its verdict back
 /// carrying the path it judged, which is that path.
+///
+/// `eof_witnesses` are byte offsets into this file that callers hold and that this
+/// rewrite would invalidate: the rotation proceeds only if every one of them equals
+/// the length measured on the fd (#5452 R2). Each element means "the holder of this
+/// coordinate has consumed the file to here", so equality with the length is the
+/// statement that nobody is mid-file. One element differing is a refusal, and the
+/// element count is what varies as callers grow — the rule below does not.
+///
+/// The measurement is the fd's `fstat`, never a `metadata(path)` at the call site:
+/// the caller's own stat would answer for whichever inode the name held then, which
+/// is precisely the stat/open race the fd-identity checks above exist to close. An
+/// empty slice therefore does not mean "no coordinates exist", it means "this caller
+/// holds none" — the production call site always passes at least the watcher's own
+/// read offset.
 pub fn truncate_jsonl_head_safe(
     path: &Path,
     size_cap_bytes: u64,
     target_keep_bytes: u64,
+    eof_witnesses: &[u64],
 ) -> std::io::Result<Option<u64>> {
     use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -1502,6 +1517,16 @@ pub fn truncate_jsonl_head_safe(
 
     let size = opened.len();
     if size <= size_cap_bytes {
+        return Ok(None);
+    }
+
+    // The idle gate, decided against this fd's length. Refusing here rather than at
+    // the caller is what keeps the comparison honest: the caller holds offsets but
+    // not this file's length, and any length it read for itself would be a stat of
+    // the name. Order behind the cap check is deliberate — an under-cap file and a
+    // busy one must give the same `Ok(None)`, so neither can be told from the other
+    // by the return value.
+    if eof_witnesses.iter().any(|witness| *witness != size) {
         return Ok(None);
     }
 
@@ -1550,9 +1575,16 @@ pub fn truncate_jsonl_head_safe(
 
     // Past the open, the sibling is this attempt's own file, so failing back
     // over it cannot remove staging another instance is still filling.
-    let mut staged = out.write_all(kept).and_then(|()| out.sync_all());
+    let mut staged = out.write_all(kept);
+    if staged.is_ok() {
+        preserve_rotation_target_mtime(&out, &opened, path);
+        staged = out.sync_all();
+    }
     drop(out);
     if staged.is_ok() {
+        #[cfg(test)]
+        run_rotation_before_rename_hook_for_tests();
+
         // The entry is checked once more here, against the same fd, because the
         // window the post-open check closed reopens while the staging file is being
         // written: `rename` removes whatever directory entry `path` names at the
@@ -1560,7 +1592,19 @@ pub fn truncate_jsonl_head_safe(
         // moved in, a link put there — would be the entry this rename unlinks, and
         // for a file whose only name that is, publishing our bytes over it destroys
         // it. Refuse instead, dropping the staging file, having touched nothing.
-        match rotation_target_was_swapped(&file, path) {
+        //
+        // `rotation_target_size_changed` answers the other half of the same
+        // question. The swap check asks whether the name still holds this inode;
+        // this asks whether the inode still holds the bytes that were snapshotted.
+        // A wrapper appending during the write leaves both agreeing on identity
+        // while the rename would publish a rewrite that never saw those bytes and
+        // unlink the only inode carrying them. Refuse for the same reason and at
+        // the same cost, dropping the staging file.
+        let refuse_rename = match rotation_target_was_swapped(&file, path) {
+            Ok(false) => rotation_target_size_changed(&file, size),
+            swapped_or_error => swapped_or_error,
+        };
+        match refuse_rename {
             Ok(false) => staged = std::fs::rename(&tmp_path, path),
             Ok(true) => {
                 let _ = std::fs::remove_file(&tmp_path);
@@ -1727,6 +1771,110 @@ fn rotation_target_was_swapped(file: &File, path: &Path) -> std::io::Result<bool
 #[cfg(not(unix))]
 fn rotation_target_was_swapped(_file: &File, _path: &Path) -> std::io::Result<bool> {
     Ok(false)
+}
+
+/// Whether the rotation target's length has moved since `snapshot_size` was read
+/// off this same fd (#5452 R2). Called immediately before the rename, where it is
+/// an exact detector rather than a heuristic: this rewrite is the only thing that
+/// ever shortens a relay jsonl and the wrappers write through `RotatingJsonlWriter`,
+/// which only appends — so an unchanged length means no write completed inside the
+/// window, and a changed one means at least one did and its bytes exist nowhere but
+/// the inode the rename is about to unlink.
+///
+/// Compared with `!=` and not `>`. Growth is the only reachable direction today,
+/// which is exactly why equality costs nothing: it drops the dependency on that
+/// argument staying true. A record whose body and newline left as separate
+/// `write_all` calls needs no special case either — "not the snapshotted length"
+/// already covers a half-written record.
+///
+/// It answers about bytes only. An entry replaced by a different file of the same
+/// length is `rotation_target_was_swapped`'s question, and both are asked.
+fn rotation_target_size_changed(file: &File, snapshot_size: u64) -> std::io::Result<bool> {
+    Ok(file.metadata()?.len() != snapshot_size)
+}
+
+#[cfg(test)]
+type RotationBeforeRenameHook = std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
+#[cfg(test)]
+static ROTATION_BEFORE_RENAME_HOOK: LazyLock<Mutex<Option<RotationBeforeRenameHook>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+/// Seam for driving the window between the staging write and the rename, which
+/// production offers no way to enter. Only the tests that must land a write inside
+/// it install anything here.
+#[cfg(test)]
+pub(crate) fn set_rotation_before_rename_hook_for_tests(
+    hook: Option<RotationBeforeRenameHook>,
+) -> Option<RotationBeforeRenameHook> {
+    std::mem::replace(
+        &mut *ROTATION_BEFORE_RENAME_HOOK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()),
+        hook,
+    )
+}
+
+#[cfg(test)]
+fn run_rotation_before_rename_hook_for_tests() {
+    let hook = ROTATION_BEFORE_RENAME_HOOK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+/// Paths whose mtime restoration has already been reported, so the WARN below is
+/// one line per file rather than one every rotation. Same reasoning and same
+/// ceiling as the rotation-refusal set in `jsonl_rotation`.
+static ROTATION_MTIME_WARNED_PATHS: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+const ROTATION_MTIME_WARNED_PATHS_CAP: usize = 1024;
+
+/// Carry the target's modification time onto the staging file, so the rename
+/// publishes the rotation without moving this jsonl's quiescence clock (#5452 R2).
+///
+/// Two consumers read that clock and would be misled by a rename's "now":
+/// `relay_recovery::idle_tmux::output_file_quiescent_for_duration_at`, which decides
+/// a ten-minute stillness before allowing an idle-tmux pane-ready fallback, and
+/// `recovery_engine::manual_rebind_output_path::saved_output_path_activity`, which
+/// ranks rebind candidates by mtime age. Preserving is the semantically right answer
+/// regardless of direction: rotation clips the head and leaves the newest records
+/// exactly where they were, so the file's last write really has not moved.
+///
+/// Applied to the staging fd before the rename, never to the path afterwards. A
+/// post-rename `set_times(path, ..)` resolves the name a second time, and the window
+/// `rotation_target_was_swapped` documents as still open is precisely where that
+/// name may belong to somebody else by then — writing metadata to a file the
+/// ownership gate forbids touching, with the failure swallowed so nobody sees it.
+/// The fd has no such window. `rename` does not disturb an mtime, so this is enough.
+///
+/// Failure never fails the rotation: the clock is incidental to it, and the fallback
+/// costs at most one delayed recovery in the fail-safe direction (a file that reads
+/// fresher is not eligible for destructive recovery sooner). Reporting it once per
+/// path is what keeps the layer verifiable rather than silently absent.
+fn preserve_rotation_target_mtime(staging: &File, opened: &std::fs::Metadata, path: &Path) {
+    let restored = opened
+        .modified()
+        .and_then(|prior| staging.set_times(std::fs::FileTimes::new().set_modified(prior)));
+    let Err(error) = restored else {
+        return;
+    };
+    let first = ROTATION_MTIME_WARNED_PATHS
+        .lock()
+        .map(|mut seen| {
+            seen.len() < ROTATION_MTIME_WARNED_PATHS_CAP && seen.insert(path.to_path_buf())
+        })
+        .unwrap_or(false);
+    if first {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ jsonl rotation could not preserve the mtime of {} — the file's quiescence clock reads as reset (error={})",
+            path.display(),
+            error
+        );
+    }
 }
 
 // ── Whose jsonl is a watcher pointed at (#5452 PR-A) ────────────────────
@@ -1931,6 +2079,261 @@ fn adk_path_holds_resolved_file(candidate: &Path, resolved: &Path) -> bool {
     // makes the equality hold across the `/var` -> `/private/var` shapes a host can
     // hand back.
     std::fs::canonicalize(candidate).is_ok_and(|candidate| candidate == resolved)
+}
+
+/// The rotation's own mechanics: which coordinates authorise it, what makes it
+/// abandon a rewrite it has already staged, and what it must leave untouched
+/// (#5452 R2). Whose file it is stays with `watcher_jsonl_owner_tests`.
+#[cfg(test)]
+mod rotation_gate_tests {
+    use super::*;
+
+    const CAP: u64 = 200;
+    const KEEP: u64 = 100;
+
+    /// An over-cap fixture at a unique name, returned with its length so witnesses
+    /// can be spelled relative to it.
+    fn oversized_at(session: &str) -> (PathBuf, u64) {
+        let _ = std::fs::create_dir_all(
+            Path::new(&session_temp_path(session, "jsonl"))
+                .parent()
+                .expect("parent"),
+        );
+        let path = PathBuf::from(session_temp_path(session, "jsonl"));
+        let _ = std::fs::remove_file(&path);
+        let body: String = (0..40)
+            .map(|index| format!("{{\"type\":\"assistant\",\"i\":{index:03}}}\n"))
+            .collect();
+        assert!(body.len() as u64 > CAP, "fixture must exceed the cap");
+        std::fs::write(&path, &body).expect("write fixture");
+        let resolved = std::fs::canonicalize(&path).expect("fixture resolves");
+        (resolved, body.len() as u64)
+    }
+
+    /// Every witness must equal the length measured on the fd, and one that does not
+    /// refuses the whole rotation. The element count is deliberately varied: the rule
+    /// is over the slice, so a caller growing from one coordinate to three changes
+    /// nothing about how they are checked.
+    ///
+    /// The refusals assert the file is byte-identical, which is the contract that
+    /// makes a refusal safe to treat as "no rotation happened" — the reader's
+    /// coordinates are still valid because nothing moved.
+    #[test]
+    fn a_witness_that_is_not_at_the_measured_length_refuses_the_rotation() {
+        let _host = crate::config::pin_runtime_host_for_test();
+
+        for (case, witnesses, expect_rotation) in [
+            ("reader at EOF", vec![0u64], true),
+            ("reader behind the tail", vec![1], false),
+            ("reader and row both at EOF", vec![0, 0], true),
+            ("row coordinate stale", vec![0, 1], false),
+            ("reader, row and binding all at EOF", vec![0, 0, 0], true),
+            ("binding coordinate stale", vec![0, 0, 1], false),
+        ] {
+            let session = format!(
+                "AgentDesk-claude-rot-5452-witness-{}",
+                case.replace(' ', "-")
+            );
+            let (target, len) = oversized_at(&session);
+            let before = std::fs::read(&target).expect("read fixture");
+            // Spelled as offsets from the length so each case reads as "this holder
+            // is `n` bytes short of the tail".
+            let witnesses: Vec<u64> = witnesses.iter().map(|behind| len - behind).collect();
+
+            let rotated = truncate_jsonl_head_safe(&target, CAP, KEEP, &witnesses)
+                .expect("a refused rotation is not an error");
+            let after = std::fs::read(&target).expect("read after");
+            if expect_rotation {
+                assert_eq!(rotated, Some(after.len() as u64), "{case}");
+                assert!(after.len() < before.len(), "{case}: the file must shrink");
+            } else {
+                assert_eq!(rotated, None, "{case}");
+                assert_eq!(after, before, "{case}: a refusal moves not one byte");
+            }
+        }
+
+        // A coordinate past the tail is as wrong as one behind it, and reaches the
+        // same refusal — this is the shape a persisted row left in the pre-rotation
+        // coordinate space arrives in.
+        let session = "AgentDesk-claude-rot-5452-witness-past-eof";
+        let (target, len) = oversized_at(session);
+        let before = std::fs::read(&target).expect("read fixture");
+        assert_eq!(
+            truncate_jsonl_head_safe(&target, CAP, KEEP, &[len + 1]).expect("not an error"),
+            None
+        );
+        assert_eq!(std::fs::read(&target).expect("read after"), before);
+    }
+
+    /// An under-cap file and a busy one give the same answer, so neither can be told
+    /// from the other by the return value (I-7). The witnesses here are wrong on
+    /// purpose: under cap, they are never even consulted.
+    #[test]
+    fn an_under_cap_file_refuses_the_same_way_a_busy_one_does() {
+        let _host = crate::config::pin_runtime_host_for_test();
+
+        let session = "AgentDesk-claude-rot-5452-under-cap";
+        let (target, len) = oversized_at(session);
+        let before = std::fs::read(&target).expect("read fixture");
+        assert_eq!(
+            truncate_jsonl_head_safe(&target, len * 2, KEEP, &[len - 1]).expect("not an error"),
+            None,
+            "under cap is not a rotation"
+        );
+        assert_eq!(std::fs::read(&target).expect("read after"), before);
+    }
+
+    /// A rotation authorised by a reader at EOF always rewrites from the head, which
+    /// is what the caller's offset reset and pending-buffer discard assume (I-10).
+    /// It follows from the arithmetic rather than from luck: the witness equals the
+    /// length, the length is over cap, and what is kept is bounded by the keep
+    /// window — so the new size is below both.
+    #[test]
+    fn a_rotation_the_gate_authorised_always_shrinks_past_the_readers_offset() {
+        let _host = crate::config::pin_runtime_host_for_test();
+
+        let session = "AgentDesk-claude-rot-5452-head-rewrite";
+        let (target, len) = oversized_at(session);
+        let new_size = truncate_jsonl_head_safe(&target, CAP, KEEP, &[len])
+            .expect("not an error")
+            .expect("an over-cap file with the reader at EOF rotates");
+        assert!(new_size <= KEEP, "the kept window bounds the new size");
+        assert!(
+            len > new_size,
+            "the reader's offset is past the new EOF, so the caller resets it"
+        );
+    }
+
+    /// The detector the zero-loss claim actually rests on. Equality and not `>`:
+    /// growth is the only reachable direction today, and the point of comparing for
+    /// difference is to stop depending on that staying true.
+    #[test]
+    fn the_size_check_reports_any_change_to_the_snapshotted_length() {
+        let _host = crate::config::pin_runtime_host_for_test();
+
+        let session = "AgentDesk-claude-rot-5452-size-changed";
+        let (target, len) = oversized_at(session);
+        let file = File::open(&target).expect("open");
+        assert!(
+            !rotation_target_size_changed(&file, len).expect("stat"),
+            "an untouched file is unchanged"
+        );
+
+        let mut appending = OpenOptions::new()
+            .append(true)
+            .open(&target)
+            .expect("open for append");
+        appending
+            .write_all(b"{\"type\":\"result\"}\n")
+            .expect("append");
+        assert!(
+            rotation_target_size_changed(&file, len).expect("stat"),
+            "an append inside the window is a change"
+        );
+
+        // Shrinking is unreachable in production — this rewrite is the only thing
+        // that shortens a relay jsonl — and is asserted anyway, because that is
+        // precisely the assumption `!=` exists not to depend on.
+        File::options()
+            .write(true)
+            .open(&target)
+            .expect("open for truncate")
+            .set_len(len - 1)
+            .expect("shrink");
+        assert!(
+            rotation_target_size_changed(&file, len).expect("stat"),
+            "a shrink is a change too"
+        );
+    }
+
+    /// The window between the staging write and the rename, entered through the test
+    /// seam because production offers no other way in: a wrapper's append lands there
+    /// and the rotation abandons the rewrite rather than publishing bytes that never
+    /// saw it. Without this the appended record survives only on the inode the rename
+    /// unlinks, which is what "the rotation ate a `result` line" looks like.
+    #[test]
+    fn an_append_inside_the_rename_window_abandons_the_rotation() {
+        let _host = crate::config::pin_runtime_host_for_test();
+
+        let session = "AgentDesk-claude-rot-5452-append-abort";
+        let (target, len) = oversized_at(session);
+        let before = std::fs::read(&target).expect("read fixture");
+        let appended = b"{\"type\":\"result\",\"subtype\":\"success\"}\n".as_slice();
+
+        let appending_target = target.clone();
+        let previous = set_rotation_before_rename_hook_for_tests(Some(Arc::new(move || {
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&appending_target)
+                .expect("the wrapper's fd is still open on this inode");
+            file.write_all(b"{\"type\":\"result\",\"subtype\":\"success\"}\n")
+                .expect("append");
+        })));
+        let rotated = truncate_jsonl_head_safe(&target, CAP, KEEP, &[len]).expect("not an error");
+        set_rotation_before_rename_hook_for_tests(previous);
+
+        assert_eq!(rotated, None, "the rotation must abandon the rename");
+        let mut expected = before;
+        expected.extend_from_slice(appended);
+        assert_eq!(
+            std::fs::read(&target).expect("read after"),
+            expected,
+            "every byte survives, the appended record included"
+        );
+        let staging_residue: Vec<_> = std::fs::read_dir(target.parent().expect("parent"))
+            .expect("read dir")
+            .flatten()
+            .map(|entry| entry.file_name())
+            .filter(|name| {
+                name.as_encoded_bytes()
+                    .windows(ROTATION_STAGING_INFIX.len())
+                    .any(|window| window == ROTATION_STAGING_INFIX.as_bytes())
+            })
+            .collect();
+        assert!(
+            staging_residue.is_empty(),
+            "an abandoned attempt cleans up its own staging: {staging_residue:?}"
+        );
+    }
+
+    /// The file's quiescence clock survives the rotation. Two recovery paths read it
+    /// — the idle-tmux pane-ready fallback's ten-minute stillness and the rebind
+    /// candidate ranking — and a rename publishes the staging file's "now" unless the
+    /// mtime is carried across, which would restart both clocks every rotation.
+    ///
+    /// The shrink is asserted alongside, so a rotation that silently did nothing
+    /// cannot pass this by leaving the original mtime in place for the obvious reason.
+    #[test]
+    fn a_rotation_does_not_disturb_the_files_quiescence_clock() {
+        let _host = crate::config::pin_runtime_host_for_test();
+
+        let session = "AgentDesk-claude-rot-5452-mtime";
+        let (target, len) = oversized_at(session);
+        let aged =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        File::options()
+            .write(true)
+            .open(&target)
+            .expect("open")
+            .set_times(std::fs::FileTimes::new().set_modified(aged))
+            .expect("age the fixture");
+        let before = std::fs::metadata(&target)
+            .and_then(|metadata| metadata.modified())
+            .expect("read mtime");
+
+        let new_size = truncate_jsonl_head_safe(&target, CAP, KEEP, &[len])
+            .expect("not an error")
+            .expect("an idle over-cap file rotates");
+        assert!(new_size < len, "the rotation really happened");
+        assert_eq!(
+            std::fs::metadata(&target)
+                .and_then(|metadata| metadata.modified())
+                .expect("read mtime"),
+            before,
+            "rotation clips the head and leaves the newest record where it was, so \
+             the last-write time has not moved either"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2142,6 +2545,9 @@ mod watcher_jsonl_owner_tests {
                 &rotating,
                 body.len() as u64 / 2,
                 body.len() as u64 / 4,
+                // No coordinate of this caller's own is at stake: what is under
+                // test is the refusal reached before any witness is consulted.
+                &[],
             ));
         });
         let rotated = finished
