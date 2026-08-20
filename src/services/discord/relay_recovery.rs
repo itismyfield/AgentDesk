@@ -54,6 +54,8 @@ mod auto_heal_attempts;
 mod auto_heal_confirm;
 #[path = "relay_recovery_circuit_breaker.rs"]
 mod circuit_breaker;
+#[path = "relay_recovery/cohort.rs"]
+pub(crate) mod cohort;
 #[path = "relay_recovery_completion_footer.rs"]
 mod completion_footer;
 #[path = "relay_recovery/decision.rs"]

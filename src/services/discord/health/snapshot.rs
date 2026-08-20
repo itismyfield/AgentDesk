@@ -28,6 +28,7 @@ use crate::services::discord::relay_health::{
     FrontierProvenanceReport, RelayActiveTurn, RelayHealthSnapshot, RelayStallClassifier,
     RelayStallState,
 };
+use crate::services::discord::relay_recovery::cohort::{self, RelayAuthorityRolloutReport};
 use crate::services::provider::ProviderKind;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -192,6 +193,15 @@ pub struct DiscordHealthSnapshot {
     degraded_reasons: Vec<String>,
     providers: Vec<ProviderHealthSnapshot>,
     mailboxes: Vec<MailboxHealthSnapshot>,
+    /// #5464 T5 S1: live position of the AC2-R relay-authority dial (mode,
+    /// cohort width, fingerprint).
+    ///
+    /// Detail-only, by the same rule the mailbox probes follow: the public
+    /// `/api/health` payload is an allowlist an operator dashboard depends on,
+    /// and a rollout dial is triage data, not a liveness signal. `None` on the
+    /// public build keeps the key absent rather than publishing a null.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relay_authority_rollout: Option<RelayAuthorityRolloutReport>,
 }
 
 impl DiscordHealthSnapshot {
@@ -1003,6 +1013,7 @@ async fn build_health_snapshot_with_options(
         degraded_reasons,
         providers: provider_entries,
         mailboxes: mailbox_entries,
+        relay_authority_rollout: include_mailbox_details.then(cohort::rollout_report),
     }
 }
 
@@ -1153,7 +1164,8 @@ mod tests {
 
     use super::{
         HealthRegistry, authoritative_tmux_session, build_health_snapshot,
-        rebind_origin_inflight_is_idle, relay_active_turn_from_inflight, resolve_bound_selector,
+        build_public_health_snapshot, rebind_origin_inflight_is_idle,
+        relay_active_turn_from_inflight, resolve_bound_selector,
     };
     // #5071 T4-B6: the polarity tests below name the `#[cfg(unix)]` reachability
     // tree, so they are gated with the seam they exercise. `HealthStatus` rides
@@ -1184,6 +1196,46 @@ mod tests {
         fn drop(&mut self) {
             unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
         }
+    }
+
+    /// #5464 T5 S1: the rollout dial rides the detail axis only, and it reports
+    /// the dormant position with no operator config loaded.
+    ///
+    /// Both halves matter. Publishing on the public build would put a rollout
+    /// knob into the allowlisted payload an unauthenticated dashboard reads;
+    /// omitting it from the detail build would leave the S2 observation slice
+    /// with no live way to confirm which dial a node is answering under.
+    #[tokio::test]
+    async fn relay_authority_rollout_is_published_on_the_detail_build_only() {
+        let registry = HealthRegistry::new();
+
+        let public = serde_json::to_value(build_public_health_snapshot(&registry).await)
+            .expect("serialize public snapshot");
+        assert!(
+            public.get("relay_authority_rollout").is_none(),
+            "the rollout dial must not reach the public health allowlist"
+        );
+
+        let detail = serde_json::to_value(build_health_snapshot(&registry).await)
+            .expect("serialize detail snapshot");
+        let rollout = detail
+            .get("relay_authority_rollout")
+            .expect("detail health publishes the rollout dial");
+        assert_eq!(rollout.get("mode").and_then(|v| v.as_str()), Some("legacy"));
+        assert_eq!(
+            rollout.get("cohort_percent").and_then(|v| v.as_u64()),
+            Some(0)
+        );
+        assert_eq!(
+            rollout.get("cohort_fingerprint").and_then(|v| v.as_str()),
+            Some(
+                crate::services::discord::relay_recovery::cohort::cohort_fingerprint(
+                    crate::config::RelayAuthorityMode::Legacy,
+                    0,
+                )
+                .as_str()
+            )
+        );
     }
 
     #[cfg(unix)]
