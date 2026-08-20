@@ -976,7 +976,7 @@ server::routes::health_api::tests::public_health_keeps_each_release_source_fact_
 server::routes::health_api::tests::public_health_reads_release_source_manifest_from_runtime_root
 server::routes::health_api::tests::registry_purge_decision_gates_on_request_and_fully_applied_repair
 server::routes::health_api::tests::stale_mailbox_repair_applied_includes_session_only_disconnect
-server::routes::health_api::tests::standalone_relay_authority_rollout_matches_the_snapshot_block_shape
+server::routes::health_api::tests::standalone_relay_authority_rollout_publishes_the_whole_dormant_block
 server::routes::health_api::tests::supported_provider_ids_contain_no_colon
 server::routes::kanban::update_card_validation_tests::update_card_validation_accepts_valid_metadata_json_object
 server::routes::kanban::update_card_validation_tests::update_card_validation_accepts_valid_metadata_json_scalar
@@ -4101,7 +4101,9 @@ services::discord::relay_recovery::circuit_breaker::tests::zero_originating_mess
 services::discord::relay_recovery::circuit_breaker::tests::zero_originating_message_still_rejects_episode_identity_mismatches
 services::discord::relay_recovery::cohort::tests::admission_is_monotone_in_the_cohort_width
 services::discord::relay_recovery::cohort::tests::cohort_bucket_is_pinned_to_a_fixed_vector
+services::discord::relay_recovery::cohort::tests::cohort_bucket_spreads_ids_that_move_only_in_the_low_bits
 services::discord::relay_recovery::cohort::tests::cohort_bucket_spreads_snowflake_ids_across_all_buckets
+services::discord::relay_recovery::cohort::tests::cohort_fingerprint_is_pinned_to_a_fixed_vector
 services::discord::relay_recovery::cohort::tests::either_dial_left_at_its_default_admits_nobody
 services::discord::relay_recovery::cohort::tests::fingerprint_separates_dial_positions_and_repeats_for_equal_ones
 services::discord::relay_recovery::cohort::tests::full_width_admits_every_channel_in_a_consuming_mode

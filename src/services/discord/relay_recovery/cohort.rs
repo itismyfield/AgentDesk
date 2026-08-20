@@ -22,8 +22,20 @@
 //!
 //! Uniformity is *measured* here, not asserted — r1 L-4 / r2 L-10 / r3 §8 L-12
 //! carried "the bucket spread is a design claim and not a measurement" as an
-//! open limit for three rounds. `cohort_bucket_spreads_snowflake_ids_across_all_buckets`
-//! closes it for the Discord snowflake shape that actually reaches this function.
+//! open limit for three rounds. Two fixtures close it, each named for the
+//! snowflake field it actually moves — and each asserting that shape instead of
+//! only describing it:
+//! `cohort_bucket_spreads_snowflake_ids_across_all_buckets` strides the
+//! TIMESTAMP field (one `2^22` step per sample, so the worker/process/sequence
+//! low 22 bits are identical across the whole population), and
+//! `cohort_bucket_spreads_ids_that_move_only_in_the_low_bits` holds the
+//! timestamp still and varies those low bits instead. The timestamp-strided
+//! population is the harder input of the two — its worst bucket sits 7.7% off
+//! expected against the 25% bound, where the low-bit population's worst bucket
+//! sits 0.5% off — so stating the closure on the timestamp-adjacent shape is the
+//! conservative reading. What is closed is those two measured shapes; neither is
+//! an observed census of live channel ids, so a real guild's mix is bounded by
+//! them rather than measured directly.
 
 use serde::Serialize;
 
@@ -104,8 +116,19 @@ pub(crate) struct RelayAuthorityRolloutReport {
 
 /// Build the rollout block from the live config.
 ///
-/// A config that cannot be read at all reports the shipped defaults, which is
-/// also the safe answer: an unreadable config is one that admits nobody.
+/// The fallback covers one narrow state: `config_live_reload::current()` answers
+/// `None` only before `config_live_reload::install` has published the boot
+/// config — a unit test, or startup before the install point — and that window
+/// reports the shipped `Legacy/0` dial, which is also the dormant answer.
+///
+/// A config that fails to parse is a *different* state and does not reach that
+/// fallback. `config_live_reload::reload_from_path` answers
+/// `ReloadOutcome::Rejected` and leaves the last-known-good snapshot installed,
+/// so an invalid or half-written `agentdesk.yaml` keeps the dial that was in
+/// force before the bad edit: if the operator had moved to `Observe`/`Enforce`,
+/// this block keeps reporting that and a later slice's consumer keeps admitting
+/// under it. The policy is fail-stale, not fail-closed — a broken edit is not a
+/// way to take the cohort back to nobody.
 pub(crate) fn rollout_report() -> RelayAuthorityRolloutReport {
     let (mode, percent) = crate::config_live_reload::current()
         .map(|config| {
@@ -132,11 +155,31 @@ mod tests {
         RelayAuthorityMode::Enforce,
     ];
 
-    /// Discord snowflakes for a plausible guild: one epoch base, incremented
-    /// the way consecutively created channels actually are (the worker/process
-    /// /sequence low bits move, the timestamp high bits barely do).
+    /// One plausible guild's epoch base for both id fixtures below.
+    const SNOWFLAKE_BASE: u64 = 1_234_567_890_123_456_789;
+    /// Width of a snowflake's worker + process + sequence fields; everything
+    /// above it is the timestamp.
+    const LOW_22_MASK: u64 = (1 << 22) - 1;
+
+    /// Discord snowflakes strided by `2^22` — exactly the width of the
+    /// worker/process/sequence field — so each sample advances the TIMESTAMP
+    /// field by one tick while those low 22 bits hold the base's values for the
+    /// whole population. That is a burst of channels minted one per tick by the
+    /// same worker and process, and it is the harder of the two shapes for the
+    /// hash: every bit the modulo could key on sits in the high half.
+    ///
+    /// `low_bit_ids` is the complementary fixture. Both callers assert the split
+    /// they rely on rather than trusting this comment.
     fn snowflake_ids(count: u64) -> impl Iterator<Item = u64> {
-        (0..count).map(|index| 1_234_567_890_123_456_789u64 + index * 4_194_304)
+        (0..count).map(|index| SNOWFLAKE_BASE + index * (LOW_22_MASK + 1))
+    }
+
+    /// The complement of `snowflake_ids`: consecutive ids from the same base, so
+    /// the worker/process/sequence low bits carry every bit of the variation and
+    /// the timestamp field never advances (the base's low-22 value plus `count`
+    /// stays inside the 22-bit field for the counts used here).
+    fn low_bit_ids(count: u64) -> impl Iterator<Item = u64> {
+        (0..count).map(|index| SNOWFLAKE_BASE + index)
     }
 
     /// The S1 deployment no-op proof, stated as the property that makes it one:
@@ -211,18 +254,35 @@ mod tests {
     }
 
     /// Closes design §8 L-12 ("the bucket spread is a claim, not a
-    /// measurement") for the snowflake shape that reaches this function.
+    /// measurement") for the timestamp-strided shape `snowflake_ids` builds —
+    /// and pins that shape here, so the measurement and its description cannot
+    /// drift apart.
     ///
     /// The bound is deliberately loose — this asserts the hash avalanches, not
     /// that it is cryptographic. A `% 100` of the raw snowflake fails it
-    /// outright: consecutive ids stride the low bits, so raw modulo lands on a
-    /// handful of buckets.
+    /// outright, and this fixture is why: the stride is `2^22`, and
+    /// `2^22 % 100 == 4`, so a raw modulo walks the buckets four at a time and
+    /// reaches only 25 of the 100 (deviation 3.0 against the 0.25 bound).
+    /// Avalanching all eight bytes first is what earns the modulo.
     #[test]
     fn cohort_bucket_spreads_snowflake_ids_across_all_buckets() {
         const SAMPLES: u64 = 100_000;
         let expected = SAMPLES as f64 / 100.0;
         let mut counts = [0u32; 100];
-        for channel_id in snowflake_ids(SAMPLES) {
+        for (index, channel_id) in snowflake_ids(SAMPLES).enumerate() {
+            // The fixture's own shape, asserted rather than described: the
+            // worker/process/sequence low bits hold still and only the timestamp
+            // field advances, one tick per sample.
+            assert_eq!(
+                channel_id & LOW_22_MASK,
+                SNOWFLAKE_BASE & LOW_22_MASK,
+                "sample {index} moved the low 22 bits; this fixture must vary the timestamp only"
+            );
+            assert_eq!(
+                channel_id >> 22,
+                (SNOWFLAKE_BASE >> 22) + index as u64,
+                "sample {index} did not advance the timestamp field by exactly one tick"
+            );
             let bucket = cohort_bucket(channel_id);
             assert!(bucket < 100, "bucket {bucket} is out of range");
             counts[bucket as usize] += 1;
@@ -248,6 +308,51 @@ mod tests {
         );
     }
 
+    /// The other half of the snowflake, measured under the same bound: ids that
+    /// share one timestamp tick and differ only in the
+    /// worker/process/sequence low bits. Together with
+    /// `cohort_bucket_spreads_snowflake_ids_across_all_buckets` this covers both
+    /// fields instead of measuring one and describing the other.
+    ///
+    /// This case widens coverage; it does not discriminate. A raw `% 100` also
+    /// spreads consecutive ids evenly, so the counterfactual that fails belongs
+    /// to the timestamp-strided fixture, not to this one.
+    #[test]
+    fn cohort_bucket_spreads_ids_that_move_only_in_the_low_bits() {
+        const SAMPLES: u64 = 100_000;
+        let expected = SAMPLES as f64 / 100.0;
+        let mut counts = [0u32; 100];
+        for (index, channel_id) in low_bit_ids(SAMPLES).enumerate() {
+            assert_eq!(
+                channel_id >> 22,
+                SNOWFLAKE_BASE >> 22,
+                "sample {index} left the fixture's single timestamp tick"
+            );
+            assert_eq!(
+                channel_id & LOW_22_MASK,
+                (SNOWFLAKE_BASE & LOW_22_MASK) + index as u64,
+                "sample {index} did not advance the low 22 bits by exactly one"
+            );
+            counts[cohort_bucket(channel_id) as usize] += 1;
+        }
+        for (bucket, count) in counts.iter().enumerate() {
+            let deviation = (f64::from(*count) - expected).abs() / expected;
+            assert!(
+                deviation < 0.25,
+                "bucket {bucket} holds {count} of {SAMPLES} low-bit samples \
+                 (expected ~{expected}); deviation {deviation:.3} exceeds the 0.25 bound"
+            );
+        }
+        let admitted = low_bit_ids(SAMPLES)
+            .filter(|id| admits(RelayAuthorityMode::Observe, 10, *id))
+            .count();
+        let share = admitted as f64 / SAMPLES as f64;
+        assert!(
+            (0.085..=0.115).contains(&share),
+            "a 10% cohort admitted {share:.4} of the low-bit population"
+        );
+    }
+
     /// Cohort membership must survive a restart and a release. A changed hash
     /// silently re-rolls every channel mid-rollout, so it has to break a test
     /// instead.
@@ -263,6 +368,33 @@ mod tests {
                 cohort_bucket(channel_id),
                 expected,
                 "cohort bucket for {channel_id} moved; every channel's membership changed"
+            );
+        }
+    }
+
+    /// The fingerprint's half of the AC3 correlation key, pinned the same way
+    /// `cohort_bucket_is_pinned_to_a_fixed_vector` pins the bucket. Design §5.2
+    /// makes this string the JSONL window key, so a moved fingerprint does not
+    /// just re-roll a channel — it orphans every window already emitted under
+    /// the old spelling.
+    ///
+    /// The canonical string interpolates the DERIVED `Debug` (`mode=Legacy`),
+    /// which is not the serde wire spelling the health block publishes
+    /// (`"legacy"`). Nothing but these vectors stops a cosmetic cleanup — a
+    /// hand-written `Debug`, a switch to `Display`, or lowercasing the canonical
+    /// form — from silently re-keying the whole fleet.
+    #[test]
+    fn cohort_fingerprint_is_pinned_to_a_fixed_vector() {
+        for (mode, percent, expected) in [
+            (RelayAuthorityMode::Legacy, 0u8, "18a16fbe4259fa89"),
+            (RelayAuthorityMode::Observe, 25, "5ec9884a77557ba9"),
+            (RelayAuthorityMode::Enforce, 100, "d1d48477e7e326bd"),
+        ] {
+            assert_eq!(
+                cohort_fingerprint(mode, percent),
+                expected,
+                "the {mode:?}/{percent} fingerprint moved; every rollout window \
+                 emitted under the old canonical form loses its correlation key"
             );
         }
     }

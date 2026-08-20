@@ -1943,18 +1943,35 @@ mod tests {
         headers
     }
 
-    /// #5464 T5 S1: the standalone branch's rollout block must be the same
-    /// shape the registry branch's `DiscordHealthSnapshot` serializes, or an
-    /// operator reading `/api/health/detail` gets a different answer depending
-    /// on whether the node happens to host Discord providers.
+    /// #5464 T5 S1: the standalone branch publishes the whole rollout block,
+    /// with the dormant dial, on a node that hosts no Discord registry.
+    ///
+    /// The cross-branch shape guarantee is structural and not observable from
+    /// here: `relay_authority_rollout_health_json` and the registry branch's
+    /// `DiscordHealthSnapshot::relay_authority_rollout` field serialize the same
+    /// `cohort::rollout_report` producer, so there is no second shape to drift
+    /// into — comparing this helper against that producer would only restate
+    /// this helper's own body. What is checkable here is that the standalone
+    /// branch forwards the producer's whole object rather than a subset (which
+    /// also catches its `{}` serialization fallback firing) and that the shipped
+    /// dial is dormant. The registry branch's own serialization is pinned by
+    /// `services::discord::health::snapshot`'s
+    /// `relay_authority_rollout_is_published_on_the_detail_build_only`.
     #[test]
-    fn standalone_relay_authority_rollout_matches_the_snapshot_block_shape() {
+    fn standalone_relay_authority_rollout_publishes_the_whole_dormant_block() {
         let standalone = relay_authority_rollout_health_json();
-        let direct = serde_json::to_value(
-            crate::services::discord::relay_recovery::cohort::rollout_report(),
-        )
-        .expect("serialize rollout report");
-        assert_eq!(standalone, direct);
+        let mut keys: Vec<&str> = standalone
+            .as_object()
+            .expect("the rollout block is a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["cohort_fingerprint", "cohort_percent", "mode"],
+            "the standalone branch must forward the whole rollout report"
+        );
         assert_eq!(
             standalone.get("mode").and_then(|v| v.as_str()),
             Some("legacy"),

@@ -50,6 +50,10 @@
 - [`opencode-usability-spec.md`](opencode-usability-spec.md) — implementation
   contract for raising OpenCode's Discord-facing usability toward Claude/Codex
   parity, including prompt/output safety, SSE text handling, and MCP sync.
+- [`t5-t6-removal-inventory.md`](t5-t6-removal-inventory.md) — #5464 (#5071 T5)
+  §12-2 teardown inventory: what each T5 slice replaced (or explicitly did not),
+  so the T6 removal pass is a marker grep rather than a new census. The repo copy
+  is canonical; every slice appends its own section in its own PR.
 - [`post-stabilization-backlog.md`](post-stabilization-backlog.md) — Phase 3
   maintainability checklist deferred until relay recovery and CookingHeart
   two-node readiness are stable. Use this page to decide when P2 cleanup may be
