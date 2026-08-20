@@ -1,20 +1,20 @@
 use super::*;
 
-// #5457: the S4 fence layer moved into `fences`. Every name it took with it is
-// re-exported below, so each existing `tmux_watcher_registry::<name>` path
-// resolves unchanged.
+// #5457: the S4 fence layer moved into `fences`. Every name a caller actually
+// spells as `tmux_watcher_registry::<name>` is re-exported below, so those
+// paths resolve unchanged. The two RAII guard types the `set_*_for_tests` pair
+// returns are deliberately NOT re-exported: every caller binds them as
+// `let _guard = set_...(..)` and never names the type, so re-exporting them
+// would only add an import nothing uses.
 mod fences;
 
 use fences::commit_under_delivery_fence;
-#[allow(unused_imports)]
-#[cfg(test)]
-pub(in crate::services::discord) use fences::{
-    DeliveryFencePermittedHookGuard, ExecutionIdentityModeGuard,
-    set_delivery_fence_permitted_hook_for_tests, set_execution_identity_mode_for_tests,
-};
-#[allow(unused_imports)]
 pub(in crate::services::discord) use fences::{
     TerminalDeliveryFence, WatcherIdentityFence, execution_identity_mode,
+};
+#[cfg(test)]
+pub(in crate::services::discord) use fences::{
+    set_delivery_fence_permitted_hook_for_tests, set_execution_identity_mode_for_tests,
 };
 
 /// Shared state for the Discord bot (multi-channel: each channel has its own session)

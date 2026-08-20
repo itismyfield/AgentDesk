@@ -1929,7 +1929,10 @@ time for diagnostics; neither is a stored approval value.
   this destruction's business) and it expires (a dead holder cannot latch it). It
   is NOT gated by `ExecutionIdentityMode` — a bounded, identity-matched refusal
   has no Observe-only stage to roll out through.
-- S4 r2 repairs to that conjunct, all three in the same two files:
+- S4 r2 repairs to that conjunct. They landed in two files at the time; since
+  #5457 split the fence layer out they span three — the fence implementation in
+  `tmux_watcher_registry/fences.rs`, the fenced view in the registry root, and
+  `scripts/check_destructive_call_site_ratchet.py`:
   - **judge/commit atomicity.** The r1 shape read the lease through
     `DeliveryLeaseCell::read`, which drops the cell's payload mutex on return,
     and answered `bool`; the registry lock the CAS core holds is a different

@@ -133,13 +133,13 @@ struct PinnedWatcherBinding {
 ///
 /// # What the completed tuple establishes
 ///
-/// A VALUE match, and only that. Under `Enforce` the two CAS cores below refuse
-/// whenever any captured value stops equalling the live one, which covers every
-/// shape the conjuncts were added for: a row whose owner channel moved, a row
-/// whose output path moved, a replacement watcher carrying a fresh cancel `Arc`
-/// (`Arc::ptr_eq` fails), a respawn that minted a new `.spawn_nonce`, and a
-/// marker that is unreadable on either side. `Legacy` keeps each call site's
-/// pre-A1 comparison verbatim and `Observe` only counts.
+/// A VALUE match, and only that. Under `Enforce` the two CAS cores that consume
+/// this tuple refuse whenever any captured value stops equalling the live one,
+/// which covers every shape the conjuncts were added for: a row whose owner
+/// channel moved, a row whose output path moved, a replacement watcher carrying
+/// a fresh cancel `Arc` (`Arc::ptr_eq` fails), a respawn that minted a new
+/// `.spawn_nonce`, and a marker that is unreadable on either side. `Legacy`
+/// keeps each call site's pre-A1 comparison verbatim and `Observe` only counts.
 ///
 /// # Declared limit: A -> B -> A readmission is indistinguishable
 ///
@@ -188,7 +188,8 @@ pub(in crate::services::discord) struct WatcherIdentityFence {
 impl WatcherIdentityFence {
     /// #5399: the marker is read only for a mode that will use the comparison.
     /// `Legacy` captures `None` without touching the disk, which is the same
-    /// pin it would have discarded — the answer at the CAS below is unchanged.
+    /// pin it would have discarded — the answer the CAS core reaches through
+    /// `permits_destruction` is unchanged.
     pub(in crate::services::discord) fn capture(
         mode: ExecutionIdentityMode,
         site: &'static str,
@@ -370,8 +371,8 @@ pub(in crate::services::discord) struct TerminalDeliveryFence {
 impl TerminalDeliveryFence {
     /// Pin the channel's lease cell and the turn identity to re-read it against.
     /// Both are cheap value captures — the `Arc` is the live per-channel cell,
-    /// so the CAS below reads the CURRENT state through it, not a copy taken
-    /// here.
+    /// so `commit_if_permitted` reads the CURRENT state through it at CAS time,
+    /// not a copy taken here.
     pub(in crate::services::discord) fn capture(
         lease: Arc<DeliveryLeaseCell>,
         expected_key: DeliveryLeaseKey,
