@@ -2509,7 +2509,7 @@ if [ "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-0}" != "1" ]; then
         exit 1
     fi
 else
-    echo "⚠ [gate] release restart durability gate=not evaluated: ${AGENTDESK_RESTART_DRAIN_VERDICT}"
+    echo "⚠ [gate] release restart durability gate=${AGENTDESK_RESTART_DRAIN_VERDICT}"
 fi
 # <<< END restart-durability gate (#5254)
 

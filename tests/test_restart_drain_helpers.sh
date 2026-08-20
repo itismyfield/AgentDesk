@@ -917,7 +917,7 @@ rc=$?
 set -e
 assert_eq "fence-observed path returns 0" "0" "$rc"
 assert_eq "attribution is claimed only when a nonce artifact exists" \
-  "armed:fence-observed" "${AGENTDESK_RESTART_DRAIN_VERDICT:-missing}"
+  "fence-observed:nonce-unattributed" "${AGENTDESK_RESTART_DRAIN_VERDICT:-missing}"
 if grep -Fq 'acknowledged by runtime' "$S1_TMP/health.out"; then
   fail "the fence-observed exit does not claim acknowledgement"
 else
@@ -963,6 +963,31 @@ assert_eq "matching nonce artifact path returns 0" "0" "$rc"
 assert_eq "matching nonce artifact is named as acknowledged" \
   "acknowledged:nonce" "${AGENTDESK_RESTART_DRAIN_VERDICT:-missing}"
 
+# Marker consumption without our durable nonce is a distinct observation. S1
+# still preserves the existing success return; S2 will decide this state.
+# shellcheck source=/dev/null
+. "$DEFAULTS_SH"
+guard_no_foreign_active_turns_or_warn() { return 0; }
+mkdir -p "$S1_TMP/consumed-root"
+( for _ in $(seq 1 50); do
+    [ -f "$S1_TMP/consumed-root/restart_pending" ] && break
+    sleep 0.1
+  done
+  rm -f "$S1_TMP/consumed-root/restart_pending" ) &
+S1_BG=$!
+set +e
+PATH="$TMP_FIXTURE_DIR/bin_fail:$PATH" \
+  AGENTDESK_RESTART_DRAIN_ACK_WAIT=10 \
+  request_restart_drain_mode_or_fail \
+    "test" "test.label" 0 "$S1_TMP/consumed-root" "smoke-test" \
+    >"$S1_TMP/consumed.out" 2>&1
+rc=$?
+set -e
+wait "$S1_BG" 2>/dev/null || true
+assert_eq "consumed path without our nonce keeps its existing success return" "0" "$rc"
+assert_eq "consumed path without our nonce has its own verdict" \
+  "consumed:our-nonce-unobserved" "${AGENTDESK_RESTART_DRAIN_VERDICT:-missing}"
+
 # The two NOT_REQUIRED outcomes remain behaviorally identical, but now carry
 # distinguishable reasons for the deploy consumer.
 # shellcheck source=/dev/null
@@ -999,7 +1024,8 @@ rc=$?
 set -e
 assert_eq "timeout path retains its existing success return" "0" "$rc"
 timeout_verdict="${AGENTDESK_RESTART_DRAIN_VERDICT:-missing}"
-assert_eq "timeout retains the unobserved verdict" "armed:unobserved" "$timeout_verdict"
+assert_eq "timeout names why durability was not evaluated" \
+  "not evaluated: restart drain acknowledgement timed out" "$timeout_verdict"
 if [ "$stopped_verdict" != "$timeout_verdict" ]; then
   pass "the two skip reasons are distinguishable"
 else
@@ -1035,7 +1061,7 @@ skip_out=$(REGION="$S1_TMP/durability-region.sh" bash -c '
   eval "$(<"$REGION")"
 ')
 case "$skip_out" in
-  *'restart durability gate=not evaluated:'*)
+  *'restart durability gate=not evaluated: launchd job is not running'*)
     pass "phase-2 skip is named on stdout" ;;
   *)
     fail "phase-2 skip is named on stdout (got: $skip_out)" ;;
@@ -1046,6 +1072,11 @@ case "$skip_out" in
   *)
     fail "the skip names its reason (got: $skip_out)" ;;
 esac
+if [ "$(grep -o 'not evaluated:' <<<"$skip_out" | wc -l | tr -d ' ')" = "1" ]; then
+  pass "the skip renders the not-evaluated prefix once"
+else
+  fail "the skip renders the not-evaluated prefix once (got: $skip_out)"
+fi
 case "$skip_out" in
   *'phase-2-ran'*)
     fail "the skip line appears iff phase 2 did not run" ;;
@@ -1058,7 +1089,7 @@ run_out=$(REGION="$S1_TMP/durability-region.sh" bash -c '
   ADK_REL="/unused"
   RESTART_REQUEST_NONCE="test-nonce"
   AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=0
-  AGENTDESK_RESTART_DRAIN_VERDICT="armed:fence-observed"
+  AGENTDESK_RESTART_DRAIN_VERDICT="fence-observed:nonce-unattributed"
   clear_restart_drain_mode() { :; }
   wait_for_restart_persistence_or_fail() { echo phase-2-ran; }
   eval "$(<"$REGION")"
@@ -1070,7 +1101,7 @@ case "$run_out" in
     fail "phase 2 still runs when persistence is required (got: $run_out)" ;;
 esac
 case "$run_out" in
-  *'restart durability gate=not evaluated:'*)
+  *'restart durability gate='*)
     fail "the skip line appears iff phase 2 did not run" ;;
   *)
     pass "the run path does not print a skip line" ;;
