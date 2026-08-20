@@ -410,8 +410,9 @@ fn nonce_reuse_is_refused_without_publishing_an_index_only_marker() {
 }
 
 /// #5254 §2-3 / [r3]-4 / M-N3: the charset gate is not line-anchored. Both
-/// `x\n../escape` and the charset-clean-per-line `x\nescape` must be refused;
-/// a `grep -Eqx`-shaped gate passes the second one.
+/// `x\n../escape` and the charset-clean-per-line `x\nescape` must be refused; a
+/// `grep -Eqx`-shaped gate passes both of them, because it succeeds on any one
+/// matching line and the leading `x` line matches on its own.
 #[test]
 fn nonce_charset_gate_refuses_smuggled_newlines_and_builds_no_path() {
     let root = tempfile::tempdir().expect("runtime root");
@@ -472,13 +473,28 @@ fn unsafe_nonce_terminal_read_is_absent_and_never_promotes_the_index() {
         terminal_proof(root.path(), "../escape"),
         TerminalProof::Absent
     );
+
+    // §E5.4's second sentence: this arm also leaves the label. §E5.8 4-R makes
+    // diagnostic confidence the only residual risk, so the label is load-bearing.
+    let arm = include_str!("gateway_lease_recovery.rs")
+        .split_once("let Some(identity) = restart_request_artifact_path(root, name, nonce)")
+        .expect("unsafe-nonce read arm")
+        .1
+        .split_once("};")
+        .expect("arm body")
+        .0;
+    assert!(
+        arm.contains("tracing::warn!") && arm.contains("restart-nonce-unsafe"),
+        "the read path must name its unsafe-nonce refusal with the fixed label"
+    );
 }
 
 /// ERRATUM §E5.2: the terminal read is three-valued and only the identity name
-/// is a durability authority. R2's own disposition for a demoted index
-/// observation is unchanged — R2 only decides whether the shared fence stays
-/// closed; the durability claim belongs to the deploy gate (D2) and the CLI
-/// (D9), and neither promotes an index observation.
+/// is a durability authority. R2's disposition for a demoted index observation
+/// is unchanged from main — it commits the handoff, which keeps the shared fence
+/// closed and stops the standby lease retry loop — and R2 asserts no durability
+/// of its own. The shell deploy gate does still promote a fixed-name index
+/// observation to a green verdict in this tree; S4/S5 close that, not this arm.
 #[tokio::test]
 async fn terminal_proof_is_three_valued_and_only_identity_is_green() {
     let root = tempfile::tempdir().expect("runtime root");

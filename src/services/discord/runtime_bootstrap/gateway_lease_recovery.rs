@@ -232,7 +232,8 @@ fn restart_file_matches(root: &std::path::Path, name: &str, nonce: &str) -> bool
 
 /// #5254 §2-3: a nonce is a pathname component under D11, so it is validated
 /// rather than trusted. Whole-string, never line-anchored — a `grep -Eqx`-shaped
-/// gate anchors per line and lets an embedded newline smuggle `../` through.
+/// gate succeeds on any one matching line, so it admits both `x\n../escape` and
+/// `x\nescape`: the clean `x` line alone satisfies it and the rest smuggles.
 fn nonce_is_path_safe(nonce: &str) -> bool {
     !nonce.is_empty()
         && nonce != "."
@@ -263,7 +264,10 @@ pub(super) enum TerminalProof {
     /// Only the fixed-name index carries this nonce. NOT a durability proof: a
     /// pre-I2c publisher both retracts such a proof after its post-rename
     /// re-check [E1] and survives publishing it under supersession [E2]. It
-    /// still beats `Absent`, which would wait the state out to a timeout.
+    /// still beats `Absent`, which resolves nothing by itself: this module has
+    /// no timer, so an `Absent` read keeps polling until the marker disappears
+    /// (`Cancelled`), is replaced by another nonce (`Superseded`), or a terminal
+    /// artifact for this nonce appears. The timeout belongs to the shell gate.
     LegacyIndexOnly,
     Absent,
 }
@@ -277,7 +281,15 @@ pub(super) fn restart_artifact_proof(
     let Some(identity) = restart_request_artifact_path(root, name, nonce) else {
         // ERRATUM §E5.4: an unsafe nonce yields `Absent`, not a fallback read.
         // The index is not a promotion path, so there is nothing to fall back
-        // to and no route by which an unvalidated nonce becomes evidence.
+        // to and no route by which an unvalidated nonce becomes evidence. The
+        // label is §E5.4's other half: §E5.8 4-R leaves diagnostics as the only
+        // residual risk of a non-authoritative index, and a silent `Absent` here
+        // leaves an operator watching a fence with nothing naming why.
+        tracing::warn!(
+            root = %root.display(),
+            name = name,
+            "restart-nonce-unsafe: refusing to read a terminal artifact for an unvalidated nonce"
+        );
         return TerminalProof::Absent;
     };
     if restart_path_nonce(&identity).as_deref() == Some(nonce) {
@@ -386,12 +398,19 @@ pub(super) async fn wait_for_promotion_handoff(
             TerminalProof::Proven => return PromotionHandoffOutcome::Committed,
             TerminalProof::LegacyIndexOnly => {
                 // R3-E5: the index is not a durability authority, and this arm
-                // claims none — only the deploy gate (D2) and the CLI (D9) make
-                // that claim and neither promotes an index observation. R2 only
-                // decides whether the shared fence stays closed, and for a
-                // pre-I2c publisher that already renamed our nonce into place
-                // the honest answer is today's: the handoff owner resolved, so
-                // stop retrying the lease. The label keeps the demotion visible.
+                // asserts no durability of its own. It decides more than the
+                // shared fence, though: `Committed` keeps every runtime fenced,
+                // returns `true` out of `attempt_clean_standby_promotion`, and
+                // so ends `spawn_standby_gateway_retry`'s loop for good behind a
+                // success log that does not restate this demotion. That is
+                // deliberately main's disposition, which #5254 S1 must preserve
+                // for a nonce-bearing marker: a pre-I2c publisher that already
+                // renamed our nonce into place has resolved the handoff, so stop
+                // retrying the lease. What this arm cannot claim is that nothing
+                // promotes an index observation — the deploy gate in
+                // `scripts/_defaults.sh` still matches this fixed-name body by
+                // nonce and calls that green (`acknowledged:nonce`) until S4/S5
+                // remove it. The label below is this arm's honesty, not its fix.
                 tracing::warn!(
                     root = %root.display(),
                     "GATEWAY-LEASE: restart handoff resolved by a legacy fixed-name publisher; durability is not proven for this nonce"
