@@ -4,12 +4,20 @@ use sqlx::Connection;
 
 use super::gateway_lease_recovery::{
     GATEWAY_LEASE_APPLICATION_PREFIX, GatewayLeaseHolder, PromotionHandoffOutcome,
-    STANDBY_PROMOTION_IN_PROGRESS, follow_promotion_handoff_chain, gateway_holder_is_reapable,
-    gateway_lease_application_name_for, reap_orphaned_gateway_lease_for_instance_with_min_age,
-    recover_cancelled_promotion, restart_artifact_is_newer_than, restart_file_nonce,
+    STANDBY_PROMOTION_IN_PROGRESS, TerminalProof, follow_promotion_handoff_chain,
+    gateway_holder_is_reapable, gateway_lease_application_name_for,
+    reap_orphaned_gateway_lease_for_instance_with_min_age, recover_cancelled_promotion,
+    restart_artifact_proof, restart_file_nonce, restart_request_artifact_path, terminal_proof,
     try_create_restart_marker, wait_for_promotion_handoff,
 };
 use crate::services::discord::ProviderKind;
+
+/// #5254 S1 fixture: age a restart artifact well past any plausible process
+/// start so a reintroduced mtime "current lifetime" conjunction would reject it.
+fn age_artifact(path: &std::path::Path) {
+    filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(1_700_000_000, 0))
+        .expect("age restart artifact");
+}
 
 /// #5185: `STANDBY_PROMOTION_IN_PROGRESS` is one process-global `AtomicBool`,
 /// and the tests below both publish to it and assert on it. libtest runs them
@@ -198,7 +206,14 @@ async fn existing_marker_cancel_restores_promotion_fence_for_retry() {
     let root = tempfile::tempdir().expect("runtime root");
     let marker = root.path().join("restart_pending");
     std::fs::write(&marker, "nonce=deploy-b\nsource=deploy\n").expect("existing marker");
-    assert!(!try_create_restart_marker(&marker, "nonce=promotion-a\n").expect("exclusive create"));
+    assert!(
+        !try_create_restart_marker(root.path(), "promotion-a", "nonce=promotion-a\n")
+            .expect("exclusive create")
+    );
+    assert!(
+        !root.path().join("restart_pending.promotion-a").exists(),
+        "a refused lease must not leave our identity marker behind"
+    );
     let existing_nonce =
         restart_file_nonce(root.path(), "restart_pending").expect("existing nonce");
     let root_for_owner = root.path().to_path_buf();
@@ -232,129 +247,329 @@ async fn existing_marker_cancel_restores_promotion_fence_for_retry() {
     assert!(!STANDBY_PROMOTION_IN_PROGRESS.load(std::sync::atomic::Ordering::Acquire));
 }
 
+/// #5254 [r2]-4 / M12: a terminal artifact carrying somebody else's nonce is
+/// not evidence about our request, however fresh its mtime is — and the retired
+/// lifetime gate answered "current" for exactly these files.
 #[tokio::test]
-async fn stale_prior_lifetime_persisted_does_not_mask_current_cancel() {
-    let _flag = PROMOTION_FLAG_LOCK.lock().await;
-    STANDBY_PROMOTION_IN_PROGRESS.store(true, std::sync::atomic::Ordering::SeqCst);
-    let runtime_a = crate::services::discord::make_shared_data_for_tests();
-    let runtime_b = crate::services::discord::make_shared_data_for_tests();
-    let runtimes = vec![runtime_a.clone(), runtime_b.clone()];
-    for runtime in &runtimes {
-        runtime.restart.intake_worker_lifecycle.fence_admission();
-        runtime
-            .restart
-            .restart_pending
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
+async fn foreign_nonce_terminal_artifact_does_not_mask_our_cancellation() {
     let root = tempfile::tempdir().expect("runtime root");
-    let stale_path = root.path().join("restart_persisted");
-    std::fs::write(&stale_path, "nonce=current\n").expect("stale persisted");
-    let old = filetime::FileTime::from_unix_time(1_700_000_000, 0);
-    filetime::set_file_mtime(&stale_path, old).expect("set stale mtime");
-    let boot = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_100);
-    assert!(!restart_artifact_is_newer_than(
-        root.path(),
-        "restart_persisted",
-        boot
-    ));
-    assert!(
-        stale_path.exists(),
-        "boot must not delete barrier-owned persisted ack"
+    for name in ["restart_persisted", "restart_persisted.someone-else"] {
+        std::fs::write(root.path().join(name), "nonce=someone-else\n").expect("foreign commit");
+    }
+    assert_eq!(
+        terminal_proof(root.path(), "current"),
+        TerminalProof::Absent
     );
 
-    std::fs::write(root.path().join("restart_pending"), "nonce=current\n").expect("current marker");
-    let cancel = root.path().join("restart_cancelled");
-    std::fs::write(&cancel, "nonce=current\n").expect("current cancellation");
-    let fresh = filetime::FileTime::from_unix_time(1_700_000_200, 0);
-    filetime::set_file_mtime(&cancel, fresh).expect("set fresh cancel mtime");
-    assert!(restart_artifact_is_newer_than(
-        root.path(),
-        "restart_cancelled",
-        boot
-    ));
-    std::fs::remove_file(root.path().join("restart_pending")).expect("remove current marker");
-
-    // Model the lifetime-guarded production decision directly: stale persisted
-    // is ignored, while the current-lifetime cancellation wins.
-    let outcome = if restart_artifact_is_newer_than(root.path(), "restart_persisted", boot) {
-        PromotionHandoffOutcome::Committed
-    } else {
+    std::fs::write(root.path().join("restart_cancelled"), "nonce=current\n")
+        .expect("our cancellation");
+    assert_eq!(
+        wait_for_promotion_handoff(root.path(), "current").await,
         PromotionHandoffOutcome::Cancelled
-    };
-    assert_eq!(outcome, PromotionHandoffOutcome::Cancelled);
-    recover_cancelled_promotion(&runtimes);
-    for runtime in runtimes {
-        assert!(
-            !runtime
-                .restart
-                .intake_worker_lifecycle
-                .admission_is_fenced()
-        );
-        assert!(
-            !runtime
-                .restart
-                .restart_pending
-                .load(std::sync::atomic::Ordering::Acquire)
-        );
-    }
-    assert!(!STANDBY_PROMOTION_IN_PROGRESS.load(std::sync::atomic::Ordering::Acquire));
+    );
 }
 
-#[test]
-fn fresh_current_lifetime_persisted_is_commit_evidence_and_survives_boot() {
+/// #5254 D8 / M14: nonce equality does not consult the wall clock, so an
+/// identity proof whose mtime predates this process is still the point of no
+/// return. Restoring the lifetime conjunction turns this commit into a cancel.
+#[tokio::test]
+async fn identity_terminal_proof_commits_handoff_despite_clock_regression() {
     let root = tempfile::tempdir().expect("runtime root");
-    let persisted = root.path().join("restart_persisted");
-    std::fs::write(&persisted, "nonce=current\n").expect("fresh persisted");
-    let fresh = filetime::FileTime::from_unix_time(1_700_000_200, 0);
-    filetime::set_file_mtime(&persisted, fresh).expect("set fresh mtime");
-    let boot = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_100);
-    assert!(restart_artifact_is_newer_than(
-        root.path(),
-        "restart_persisted",
-        boot
-    ));
+    let identity = root.path().join("restart_persisted.current");
+    std::fs::write(&identity, "nonce=current\nprovider=claude\n").expect("identity proof");
+    age_artifact(&identity);
+
+    assert_eq!(
+        terminal_proof(root.path(), "current"),
+        TerminalProof::Proven
+    );
+    assert_eq!(
+        wait_for_promotion_handoff(root.path(), "current").await,
+        PromotionHandoffOutcome::Committed
+    );
     assert!(
-        persisted.exists(),
+        identity.exists(),
         "respawned binary must preserve external barrier ack"
     );
 }
 
+/// #5254 D8 / M12: the `existing_nonce == None` arm fails closed. A marker we
+/// lost the race to that carries no nonce cannot attribute any terminal
+/// artifact to itself, so the promotion restores its preflight fence (already
+/// covered by the recovery tests above) rather than claiming success.
 #[test]
-fn committed_existing_marker_gap_preserves_promotion_fence() {
-    let _flag = PROMOTION_FLAG_LOCK.blocking_lock();
-    STANDBY_PROMOTION_IN_PROGRESS.store(true, std::sync::atomic::Ordering::SeqCst);
-    let runtime_a = crate::services::discord::make_shared_data_for_tests();
-    let runtime_b = crate::services::discord::make_shared_data_for_tests();
-    let runtimes = vec![runtime_a.clone(), runtime_b.clone()];
-    for runtime in &runtimes {
-        runtime.restart.intake_worker_lifecycle.fence_admission();
-        runtime
-            .restart
-            .restart_pending
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
+fn nonce_free_existing_marker_fails_closed_instead_of_claiming_promotion() {
     let root = tempfile::tempdir().expect("runtime root");
+    std::fs::write(root.path().join("restart_pending"), "source=deploy\n")
+        .expect("nonce-free marker");
     std::fs::write(root.path().join("restart_persisted"), "nonce=deploy-b\n")
-        .expect("durable commit");
+        .expect("unrelated durable commit");
+    assert!(
+        !try_create_restart_marker(root.path(), "promotion-a", "nonce=promotion-a\n")
+            .expect("exclusive create")
+    );
     assert!(restart_file_nonce(root.path(), "restart_pending").is_none());
+    assert_eq!(
+        terminal_proof(root.path(), "promotion-a"),
+        TerminalProof::Absent,
+        "a nonce-free marker plus somebody else's commit proves nothing about us"
+    );
 
-    // AlreadyExists was observed just before the committer removed pending. The
-    // persisted acknowledgement must win over the subsequent missing marker.
-    let committed = root.path().join("restart_persisted").exists();
-    assert!(committed);
-    STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
-    for runtime in runtimes {
+    // The arm production takes on that `None` is the fail-closed one.
+    let arm = include_str!("gateway_lease_recovery.rs")
+        .split_once("let Some(existing_nonce) = restart_file_nonce(&root, \"restart_pending\")")
+        .expect("fail-closed arm")
+        .1
+        .split_once("};")
+        .expect("arm body")
+        .0;
+    assert!(arm.contains("recover_cancelled_promotion(&runtimes);"));
+    assert!(
+        !arm.contains("return true"),
+        "the nonce-free arm must not claim promotion succeeded"
+    );
+}
+
+/// #5254 D8 / M12: the supersession arm has no nonce-free shortcut left. A
+/// marker without a `nonce=` line supersedes us and yields no next nonce, and a
+/// fresh foreign terminal artifact must not turn that into a commit.
+#[tokio::test]
+async fn nonce_free_supersession_folds_to_cancelled_despite_fresh_terminal_artifact() {
+    let root = tempfile::tempdir().expect("runtime root");
+    std::fs::write(
+        root.path().join("restart_persisted"),
+        "nonce=someone-else\n",
+    )
+    .expect("fresh foreign commit");
+    std::fs::write(root.path().join("restart_pending"), "source=deploy\n")
+        .expect("nonce-free superseding marker");
+
+    assert_eq!(
+        follow_promotion_handoff_chain(root.path(), "promotion-a".to_string()).await,
+        PromotionHandoffOutcome::Cancelled
+    );
+}
+
+/// #5254 D1 + D11-1 / M13: both reachable names are hard links to a body that
+/// was complete before either existed, and the dot-prefixed stage is gone.
+#[test]
+fn marker_creation_links_a_complete_body_under_both_names() {
+    let root = tempfile::tempdir().expect("runtime root");
+    let body = "nonce=promotion-a\nreason=gateway_standby_promotion\n";
+    assert!(try_create_restart_marker(root.path(), "promotion-a", body).expect("acquire lease"));
+
+    let identity = root.path().join("restart_pending.promotion-a");
+    let canonical = root.path().join("restart_pending");
+    for path in [&identity, &canonical] {
+        assert_eq!(
+            std::fs::read_to_string(path).expect("marker body"),
+            body,
+            "both names must resolve to the complete staged body"
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            std::fs::metadata(&identity).expect("identity meta").ino(),
+            std::fs::metadata(&canonical).expect("canonical meta").ino(),
+            "the canonical lease is a hard link of the identity name"
+        );
+    }
+    assert!(
+        !std::fs::read_dir(root.path())
+            .expect("scan root")
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().starts_with(".restart_")),
+        "no staging residue may survive a successful claim"
+    );
+}
+
+/// #5254 D1 / M-N9: EEXIST on the identity name is nonce reuse, which is
+/// refused. Crucially the canonical lease is never published without its
+/// identity name — an index-only marker is a shape this runtime cannot make.
+#[test]
+fn nonce_reuse_is_refused_without_publishing_an_index_only_marker() {
+    let root = tempfile::tempdir().expect("runtime root");
+    let orphan = root.path().join("restart_pending.promotion-a");
+    std::fs::write(&orphan, "nonce=promotion-a\n").expect("identity orphan");
+
+    let error = try_create_restart_marker(root.path(), "promotion-a", "nonce=promotion-a\n")
+        .expect_err("nonce reuse is fail-closed");
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert!(
+        !root.path().join("restart_pending").exists(),
+        "a refused claim must not publish the canonical lease"
+    );
+    assert!(
+        !std::fs::read_dir(root.path())
+            .expect("scan root")
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().starts_with(".restart_"))
+    );
+}
+
+/// #5254 §2-3 / [r3]-4 / M-N3: the charset gate is not line-anchored. Both
+/// `x\n../escape` and the charset-clean-per-line `x\nescape` must be refused;
+/// a `grep -Eqx`-shaped gate passes the second one.
+#[test]
+fn nonce_charset_gate_refuses_smuggled_newlines_and_builds_no_path() {
+    let root = tempfile::tempdir().expect("runtime root");
+    for unsafe_nonce in [
+        "",
+        ".",
+        "..",
+        "../escape",
+        "x\n../escape",
+        "x\nescape",
+        "x\0y",
+        "a b",
+        "n".repeat(129).as_str(),
+    ] {
         assert!(
-            runtime
-                .restart
-                .intake_worker_lifecycle
-                .admission_is_fenced()
+            restart_request_artifact_path(root.path(), "restart_pending", unsafe_nonce).is_none(),
+            "gate must refuse {unsafe_nonce:?}"
+        );
+        let error = try_create_restart_marker(root.path(), unsafe_nonce, "nonce=x\n")
+            .expect_err("unsafe nonce is refused");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+    assert_eq!(
+        std::fs::read_dir(root.path())
+            .expect("scan root")
+            .flatten()
+            .count(),
+        0,
+        "a refused nonce must not create anything at all"
+    );
+    for safe_nonce in [
+        uuid::Uuid::new_v4().to_string().as_str(),
+        "a.b_c-d",
+        "n".repeat(128).as_str(),
+    ] {
+        assert_eq!(
+            restart_request_artifact_path(root.path(), "restart_pending", safe_nonce),
+            Some(root.path().join(format!("restart_pending.{safe_nonce}"))),
+        );
+    }
+}
+
+/// ERRATUM §E5.4 / M-N9: an unsafe nonce yields `Absent`. There is no fallback
+/// read to promote, so a nonce that cannot name an identity file cannot be
+/// proven by the index either.
+#[test]
+fn unsafe_nonce_terminal_read_is_absent_and_never_promotes_the_index() {
+    let root = tempfile::tempdir().expect("runtime root");
+    std::fs::write(root.path().join("restart_persisted"), "nonce=../escape\n")
+        .expect("index body matching an unsafe nonce");
+
+    assert_eq!(
+        restart_file_nonce(root.path(), "restart_persisted").as_deref(),
+        Some("../escape"),
+        "the index body really does carry the unsafe nonce"
+    );
+    assert_eq!(
+        terminal_proof(root.path(), "../escape"),
+        TerminalProof::Absent
+    );
+}
+
+/// ERRATUM §E5.2: the terminal read is three-valued and only the identity name
+/// is a durability authority. R2's own disposition for a demoted index
+/// observation is unchanged — R2 only decides whether the shared fence stays
+/// closed; the durability claim belongs to the deploy gate (D2) and the CLI
+/// (D9), and neither promotes an index observation.
+#[tokio::test]
+async fn terminal_proof_is_three_valued_and_only_identity_is_green() {
+    let root = tempfile::tempdir().expect("runtime root");
+    assert_eq!(terminal_proof(root.path(), "n1"), TerminalProof::Absent);
+
+    let index = root.path().join("restart_persisted");
+    std::fs::write(&index, "nonce=n1\n").expect("legacy fixed-name publish");
+    assert_eq!(
+        terminal_proof(root.path(), "n1"),
+        TerminalProof::LegacyIndexOnly,
+        "a fixed-name-only publisher is identified, never proven"
+    );
+    assert_eq!(
+        wait_for_promotion_handoff(root.path(), "n1").await,
+        PromotionHandoffOutcome::Committed
+    );
+
+    let identity = root.path().join("restart_persisted.n2");
+    std::fs::write(&identity, "nonce=n2\n").expect("identity publish");
+    assert_eq!(terminal_proof(root.path(), "n2"), TerminalProof::Proven);
+
+    // Name/body disagreement is ignored rather than trusted (D11-1).
+    std::fs::write(root.path().join("restart_persisted.n3"), "nonce=n2\n")
+        .expect("hand-made identity file");
+    assert_eq!(terminal_proof(root.path(), "n3"), TerminalProof::Absent);
+}
+
+/// ERRATUM §E5.2 priority order: a legacy index observation suppresses a
+/// `cancelled` verdict, because the rename that carried our nonce necessarily
+/// happened after the cancellation record.
+#[tokio::test]
+async fn legacy_index_persisted_suppresses_a_matching_cancellation() {
+    let root = tempfile::tempdir().expect("runtime root");
+    std::fs::write(root.path().join("restart_cancelled.n1"), "nonce=n1\n")
+        .expect("identity cancellation");
+    assert_eq!(
+        restart_artifact_proof(root.path(), "restart_cancelled", "n1"),
+        TerminalProof::Proven
+    );
+    assert_eq!(
+        wait_for_promotion_handoff(root.path(), "n1").await,
+        PromotionHandoffOutcome::Cancelled
+    );
+
+    std::fs::write(root.path().join("restart_persisted"), "nonce=n1\n").expect("legacy publish");
+    assert_eq!(
+        wait_for_promotion_handoff(root.path(), "n1").await,
+        PromotionHandoffOutcome::Committed
+    );
+}
+
+/// #5254 PC-5 for the pending family: per-request identities accumulate, and an
+/// earlier request's leftover identity marker does not block the next claim.
+#[test]
+fn sequential_requests_keep_independent_identities() {
+    let root = tempfile::tempdir().expect("runtime root");
+    assert!(try_create_restart_marker(root.path(), "a", "nonce=a\n").expect("A claims"));
+    // The committer drops the lease; the identity name is swept later (D5).
+    std::fs::remove_file(root.path().join("restart_pending")).expect("release lease");
+    assert!(try_create_restart_marker(root.path(), "b", "nonce=b\n").expect("B claims"));
+
+    assert!(root.path().join("restart_pending.a").exists());
+    assert!(root.path().join("restart_pending.b").exists());
+    assert_eq!(
+        restart_file_nonce(root.path(), "restart_pending").as_deref(),
+        Some("b")
+    );
+}
+
+/// #5254 §9-0 auxiliary source assertion: the mtime lifetime gate retired with
+/// five symbols and one call site. This is a regression hint, not the authority
+/// — the behavioural authority is the clock-regression and fail-closed tests
+/// above — but it fails loudly if a refactor resurrects the deleted branch.
+#[test]
+fn retired_mtime_lifetime_gate_has_no_remaining_source_references() {
+    let recovery = include_str!("gateway_lease_recovery.rs");
+    let bootstrap = include_str!("../runtime_bootstrap.rs");
+    for symbol in [
+        "RESTART_ARTIFACT_BOOT_INSTANT",
+        "restart_artifact_boot_instant",
+        "record_restart_artifact_boot_instant",
+        "restart_artifact_is_current_lifetime",
+        "restart_artifact_is_newer_than",
+    ] {
+        assert!(
+            !recovery.contains(symbol),
+            "{symbol} must stay retired in gateway_lease_recovery.rs"
         );
         assert!(
-            runtime
-                .restart
-                .restart_pending
-                .load(std::sync::atomic::Ordering::Acquire)
+            !bootstrap.contains(symbol),
+            "{symbol} must stay retired in runtime_bootstrap.rs"
         );
     }
 }

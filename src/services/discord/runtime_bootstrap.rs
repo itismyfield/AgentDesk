@@ -26,9 +26,7 @@ use self::framework_setup::{run_bot_build_slash_commands, run_bot_framework_setu
 use self::gateway_lease::{
     GatewayLeaseOutcome, run_bot_acquire_gateway_lease, run_bot_spawn_gateway_lease_keepalive,
 };
-use self::gateway_lease_recovery::{
-    record_restart_artifact_boot_instant, spawn_standby_gateway_retry,
-};
+use self::gateway_lease_recovery::spawn_standby_gateway_retry;
 use self::gateway_runtime::run_bot_start_gateway_runtime;
 use self::intake::run_bot_maybe_spawn_intake_worker;
 #[allow(unused_imports)]
@@ -253,11 +251,11 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         return;
     }
 
-    // Record the process lifetime boundary before any deferred-restart poller
-    // or standby lease-retry task can inspect persisted/cancelled evidence. The
-    // files remain owned by the external persistence barrier and are never
-    // deleted by the respawned binary.
-    record_restart_artifact_boot_instant();
+    // #5254 D8: no process lifetime boundary is recorded here any more. The
+    // restart poller and the standby lease-retry task attribute persisted and
+    // cancelled evidence by nonce equality alone, which does not depend on the
+    // wall clock. The files remain owned by the external persistence barrier
+    // and are never deleted by the respawned binary.
 
     let gateway_lease = match gateway_outcome {
         GatewayLeaseOutcome::Proceed(lease) => lease,
