@@ -379,6 +379,8 @@ mod tests {
             .response["release_source"];
         assert!(observed["generated_at"].is_string());
         assert!(observed["deployed_repo_head"].is_string());
+        // #5071 T1 S8-1r2: #5262's "clean" condition is now a documented field.
+        assert_eq!(observed["deployed_repo_dirty"], "false");
 
         let unobserved = &endpoint
             .error_example
@@ -389,7 +391,11 @@ mod tests {
         assert_eq!(unobserved["generated_at"], "2026-08-12T00:00:00Z");
         assert_eq!(
             unobserved["observation_failures"],
-            json!(["repo_head_missing", "latest_postgres_migration_missing"])
+            json!([
+                "repo_head_missing",
+                "latest_postgres_migration_missing",
+                "repo_dirty_missing"
+            ])
         );
         assert!(unobserved.get("deployed_repo_head").is_none());
         assert!(
@@ -397,6 +403,7 @@ mod tests {
                 .get("deployed_latest_postgres_migration")
                 .is_none()
         );
+        assert!(unobserved.get("deployed_repo_dirty").is_none());
 
         let detail = endpoints
             .iter()
@@ -410,6 +417,7 @@ mod tests {
             json!(["latest_postgres_migration_missing"])
         );
         assert!(partial.get("deployed_latest_postgres_migration").is_none());
+        assert_eq!(partial["deployed_repo_dirty"], "false");
     }
 
     #[test]

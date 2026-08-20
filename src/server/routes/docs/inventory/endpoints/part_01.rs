@@ -21,7 +21,8 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                     "observation_status": "observed",
                     "generated_at": "2026-08-12T00:00:00Z",
                     "deployed_repo_head": "0123456789abcdef0123456789abcdef01234567",
-                    "deployed_latest_postgres_migration": "0104_example.sql"
+                    "deployed_latest_postgres_migration": "0104_example.sql",
+                    "deployed_repo_dirty": "false"
                 },
                 "delivery_record_rollout": {
                     "shadow_enabled": false,
@@ -29,6 +30,10 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                     "mode": "off",
                     "dedup_authority": "in_memory_committed_offset",
                     "same_turn_backward_write_enforcement": "observe_only",
+                    "flag_source": {
+                        "shadow": "compiled_default",
+                        "authority": "compiled_default"
+                    },
                     "warning_count": 1
                 },
                 "intake_routing": {
@@ -79,7 +84,8 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                     "generated_at": "2026-08-12T00:00:00Z",
                     "observation_failures": [
                         "repo_head_missing",
-                        "latest_postgres_migration_missing"
+                        "latest_postgres_migration_missing",
+                        "repo_dirty_missing"
                     ]
                 },
                 "db": false,
@@ -106,6 +112,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                     "node_hostname": "mac-mini",
                     "generated_at": "2026-08-12T00:00:00Z",
                     "deployed_repo_head": "0123456789abcdef0123456789abcdef01234567",
+                    "deployed_repo_dirty": "false",
                     "observation_failures": ["latest_postgres_migration_missing"]
                 },
                 "delivery_record_rollout": {
@@ -114,6 +121,10 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                     "mode": "shadow_and_authority",
                     "dedup_authority": "durable_delivery_record_frontier",
                     "same_turn_backward_write_enforcement": "enforcing",
+                    "flag_source": {
+                        "shadow": "env_override",
+                        "authority": "env_override"
+                    },
                     "warning_count": 0,
                     "configuration_warnings": []
                 },

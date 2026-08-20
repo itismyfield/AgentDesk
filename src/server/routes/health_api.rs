@@ -2731,6 +2731,10 @@ mod tests {
                 "mode": "off",
                 "dedup_authority": "in_memory_committed_offset",
                 "same_turn_backward_write_enforcement": "observe_only",
+                "flag_source": {
+                    "shadow": "compiled_default",
+                    "authority": "env_override"
+                },
                 "warning_count": 1,
                 "configuration_warnings": [
                     "delivery_record_authority_disabled: durable frontiers are not the default committed-offset authority"
@@ -2739,6 +2743,10 @@ mod tests {
         }));
         assert_eq!(public["delivery_record_rollout"]["mode"], json!("off"));
         assert_eq!(public["delivery_record_rollout"]["warning_count"], json!(1));
+        assert_eq!(
+            public["delivery_record_rollout"]["flag_source"],
+            json!({"shadow": "compiled_default", "authority": "env_override"})
+        );
         assert_eq!(public["ok"], json!(true));
     }
 
@@ -2820,7 +2828,7 @@ mod tests {
         std::fs::create_dir_all(&runtime_dir).expect("create runtime directory");
         std::fs::write(
             runtime_dir.join("release-source.json"),
-            r#"{"generated_at":"2026-08-12T00:00:00Z","repo_head":"0123456789abcdef0123456789abcdef01234567","latest_postgres_migration":"0104_example.sql"}"#,
+            r#"{"generated_at":"2026-08-12T00:00:00Z","repo_head":"0123456789abcdef0123456789abcdef01234567","latest_postgres_migration":"0104_example.sql","repo_dirty":"false"}"#,
         )
         .expect("write release source manifest");
 
@@ -2848,11 +2856,44 @@ mod tests {
                 body["release_source"]["deployed_latest_postgres_migration"],
                 "0104_example.sql"
             );
+            // #5071 T1 S8-1r2: the checkout-cleanliness verdict rides the same
+            // public whitelist entry as the head it qualifies.
+            assert_eq!(body["release_source"]["deployed_repo_dirty"], "false");
             assert!(body["release_source"].get("node_hostname").is_none());
         }
 
         let detail = runtime.block_on(health_body("/health/detail", None));
         assert!(detail["release_source"]["node_hostname"].is_string());
+    }
+
+    #[test]
+    fn public_health_exposes_rollout_flag_source_on_both_assembly_points() {
+        // #5071 T1 S8-1r2 gate (d): the peer-rollout comparison is run against the
+        // PUBLIC endpoint across two nodes, so provenance has to survive the public
+        // whitelist rather than live in the protected detail response — unlike
+        // `release_source.node_hostname`, which stays detail-only.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let expected = crate::services::discord::outbound::delivery_record_rollout_health_json()
+            ["flag_source"]
+            .clone();
+        assert!(
+            expected["shadow"].is_string() && expected["authority"].is_string(),
+            "both rollout axes must report a provenance"
+        );
+
+        for path in ["/health", "/health/detail"] {
+            let body = runtime.block_on(health_body(path, None));
+            assert_eq!(
+                body["delivery_record_rollout"]["flag_source"], expected,
+                "{path} must carry the rollout provenance"
+            );
+        }
+
+        let public = runtime.block_on(health_body("/health", None));
+        assert!(public["release_source"].get("node_hostname").is_none());
     }
 
     #[test]
@@ -2869,7 +2910,7 @@ mod tests {
 
         std::fs::write(
             &manifest,
-            r#"{"generated_at":"2026-08-12T00:00:00Z","repo_head":"unknown","latest_postgres_migration":"0104_example.sql"}"#,
+            r#"{"generated_at":"2026-08-12T00:00:00Z","repo_head":"unknown","latest_postgres_migration":"0104_example.sql","repo_dirty":"true"}"#,
         )
         .expect("write release source manifest");
         let body = runtime.block_on(health_body("/health", None));
@@ -2878,6 +2919,8 @@ mod tests {
             body["release_source"]["observation_failures"],
             serde_json::json!(["repo_head_invalid"])
         );
+        // A dirty checkout is still an OBSERVED fact; only the head failed here.
+        assert_eq!(body["release_source"]["deployed_repo_dirty"], "true");
         assert_eq!(
             body["release_source"]["generated_at"],
             "2026-08-12T00:00:00Z"
@@ -2897,7 +2940,10 @@ mod tests {
         assert_eq!(body["release_source"]["observation_status"], "partial");
         assert_eq!(
             body["release_source"]["observation_failures"],
-            serde_json::json!(["latest_postgres_migration_missing"])
+            serde_json::json!([
+                "latest_postgres_migration_missing",
+                "repo_dirty_missing"
+            ])
         );
         assert_eq!(
             body["release_source"]["deployed_repo_head"],
@@ -2914,7 +2960,11 @@ mod tests {
         assert_eq!(body["release_source"]["observation_status"], "unobserved");
         assert_eq!(
             body["release_source"]["observation_failures"],
-            serde_json::json!(["repo_head_missing", "latest_postgres_migration_missing"])
+            serde_json::json!([
+                "repo_head_missing",
+                "latest_postgres_migration_missing",
+                "repo_dirty_missing"
+            ])
         );
     }
 

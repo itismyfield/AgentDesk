@@ -728,3 +728,18 @@ changing runtime behavior.
 > Last refreshed: 2026-08-07 (#5185 — `outbound/send_gate.rs` changes only inside `#[cfg(test)] mod send_source_tests`: two acquisitions of `config::shared_test_env_lock()` recover a poisoned guard with `unwrap_or_else(|poison| poison.into_inner())` instead of propagating the `PoisonError`. The widened PR library sweep measured one real failure reporting itself as eleven because every later acquirer of that mutex died on the poison; recovering at the acquisition site removes the cascade. No production code, delivery verb, transport, dedup identity, target grammar, or callsite coverage change — the callsite coverage map is unchanged. Recorded here because the `src/services/discord/outbound/**` touch rule is path-based and cannot see that the change is test-only.)
 
 > Last refreshed: 2026-08-11 (#5264 PR-B — `outbound/delivery_record.rs` gains `record_pinned_delivery_metadata`, a third caller of the previously module-local `record_delivered_content_fingerprint_for_generation`, and `confirmed_delivery_receipt_exists` gains a `historical_pinned_delivery_exists` fast path. The metadata call is the pinned terminal path's post-commit epilogue: it writes a delivered-content fingerprint plus a completed-turn ledger entry, both addressed purely by the pinned source's CAPTURED identity, never by live source state, and both under their own per-path flock. The two writes are keyed by DIFFERENT captured channels, matching `shadow_mirror_delivered_frontier_inner`: the fingerprint by `offset_authority_channel_id` (plus the captured `generation_mtime_ns`), which is where both production readers — `tmux_watcher/turn_identity.rs` and `tmux_watcher/terminal_preflight.rs` — look it up; the completed-turn ledger entry by `delivery_channel_id` (plus the captured `user_msg_id`). It runs after the source-authority fence releases but before the delivery lease releases. No new delivery verb, transport, target grammar, or dedup identity, so the production callsite coverage map is unchanged. One known gap is recorded rather than closed: the receipt fast path skips `resolved_receipt_owner_channel`'s live-generation equality and split-receipt context check, which its own doc comment still describes as fail-closed. The earlier gap in this entry — the fingerprint written under `delivery_channel_id`, leaving it inert whenever owner and destination differ — was closed in `98c1e1b06`; both key choices are now pinned by assertions in `terminal_controller_cutover`'s two `pinned_codex_*_generation_flip_5264` barriers.)
+
+> Last refreshed: 2026-08-20 (#5071 T1 S8-1r2 — `outbound/delivery_record.rs` splits each
+> rollout flag's env read into a pure resolver (`resolve_shadow_flag` /
+> `resolve_authority_flag`) returning `FlagResolution { enabled, source }`, widens the two
+> `OnceLock<bool>` caches to `OnceLock<FlagResolution>`, and emits the new `flag_source`
+> object in `delivery_record_rollout`'s health block. Enablement parsing is unchanged —
+> absent is still OFF for both flags and a present value is still ON only for `1`/`true`
+> (trimmed, case-insensitive) — so this is observation-only and a deploy no-op. `source` is
+> decided by the variable's PRESENCE alone, so an explicit `=0` reports `env_override`; that
+> is the point, since #5262 asks for repo-owned flags and once a compiled default agrees
+> with a node-local `launchd.env` pin the two become indistinguishable by value. The
+> `#[cfg(test)]` shadow/authority seams keep their `Option<bool>` shape and report
+> `env_override`, so provenance assertions test the pure resolvers rather than the seams. No
+> new delivery verb, transport, target grammar, dedup identity, or direct-send callsite: the
+> production callsite coverage map is unchanged.)
