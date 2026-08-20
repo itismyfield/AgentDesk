@@ -1267,11 +1267,11 @@ guard_no_foreign_active_turns_or_warn() {
   return 1
 }
 
-# AGENTDESK_RESTART_REQUEST_NONCE and AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED
-# are intentional out-parameters: the sourcing deploy script (deploy-release.sh
-# lines ~2069-2070) reads them after this function returns. shellcheck analyses
-# this library in isolation and cannot see that cross-file consumption, so it
-# reports SC2034 (appears unused). Silence it for this function.
+# AGENTDESK_RESTART_REQUEST_NONCE, AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED,
+# and AGENTDESK_RESTART_DRAIN_VERDICT are intentional out-parameters: the
+# sourcing deploy script reads them after this function returns. shellcheck
+# analyses this library in isolation and cannot see that cross-file consumption,
+# so it reports SC2034 (appears unused). Silence it for this function.
 # shellcheck disable=SC2034
 request_restart_drain_mode_or_fail() {
   local scope="$1"
@@ -1292,6 +1292,8 @@ request_restart_drain_mode_or_fail() {
 
   AGENTDESK_RESTART_REQUEST_NONCE=""
   AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=0
+  AGENTDESK_RESTART_DRAIN_VERDICT="armed:unobserved"
+  export AGENTDESK_RESTART_DRAIN_VERDICT
 
   if [ -z "$runtime_root" ]; then
     echo "✗ [gate] ${scope} runtime root is required for restart drain mode" >&2
@@ -1345,8 +1347,9 @@ request_restart_drain_mode_or_fail() {
 
   while [ "$waited" -lt "$ack_wait" ]; do
     if _restart_pending_acknowledged "$port"; then
-      echo "✓ [gate] ${scope} restart drain mode acknowledged by runtime"
+      echo "▸ [gate] ${scope} restart admission fence observed on :${port} (not attributable to this request's nonce)"
       AGENTDESK_RESTART_REQUEST_NONCE="$nonce"
+      AGENTDESK_RESTART_DRAIN_VERDICT="armed:fence-observed"
       return 0
     fi
     # #1447 review P2: idle runtime may consume the marker (restart_ctrl
@@ -1356,6 +1359,13 @@ request_restart_drain_mode_or_fail() {
     if consumed_root="$(_restart_marker_consumed_root "${roots[@]}")"; then
       echo "▸ [gate] ${scope} restart drain marker consumed by runtime at ${consumed_root} — treating as acknowledged"
       AGENTDESK_RESTART_REQUEST_NONCE="$nonce"
+      for root in "${roots[@]}"; do
+        if [ -f "$root/restart_persisted" ] \
+          && grep -Fqx "nonce=${nonce}" "$root/restart_persisted" 2>/dev/null; then
+          AGENTDESK_RESTART_DRAIN_VERDICT="acknowledged:nonce"
+          break
+        fi
+      done
       return 0
     fi
     sleep 1
@@ -1374,6 +1384,7 @@ request_restart_drain_mode_or_fail() {
         "$root/restart_cancelled" 2>/dev/null || true
     done
     AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=1
+    AGENTDESK_RESTART_DRAIN_VERDICT="not evaluated: launchd job is not running"
     echo "▸ [gate] ${scope} launchd job is not running; cleared restart drain marker (no in-flight turns to drain)"
     return 0
   fi
@@ -1382,6 +1393,13 @@ request_restart_drain_mode_or_fail() {
   if consumed_root="$(_restart_marker_consumed_root "${roots[@]}")"; then
     echo "▸ [gate] ${scope} restart drain marker consumed by runtime at ${consumed_root} during timeout window — treating as acknowledged"
     AGENTDESK_RESTART_REQUEST_NONCE="$nonce"
+    for root in "${roots[@]}"; do
+      if [ -f "$root/restart_persisted" ] \
+        && grep -Fqx "nonce=${nonce}" "$root/restart_persisted" 2>/dev/null; then
+        AGENTDESK_RESTART_DRAIN_VERDICT="acknowledged:nonce"
+        break
+      fi
+    done
     return 0
   fi
 

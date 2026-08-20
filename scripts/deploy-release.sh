@@ -2497,6 +2497,7 @@ if ! request_restart_drain_mode_or_fail \
     exit 1
 fi
 RESTART_REQUEST_NONCE="${AGENTDESK_RESTART_REQUEST_NONCE:-}"
+# >>> BEGIN restart-durability gate (#5254)
 if [ "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-0}" != "1" ]; then
     if [ -z "$RESTART_REQUEST_NONCE" ]; then
         echo "✗ [gate] release restart request nonce missing" >&2
@@ -2507,7 +2508,10 @@ if [ "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-0}" != "1" ]; then
         "release" "$ADK_REL/runtime" "$RESTART_REQUEST_NONCE" 30; then
         exit 1
     fi
+else
+    echo "⚠ [gate] release restart durability gate=not evaluated: ${AGENTDESK_RESTART_DRAIN_VERDICT}"
 fi
+# <<< END restart-durability gate (#5254)
 
 # A planned restart no longer suppresses transcript gaps: the watchdog's durable
 # pre-restart authority must remain observable until Discord delivery catches up.
