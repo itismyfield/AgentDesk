@@ -7,7 +7,7 @@
 //! module's re-exported types and helpers (`SharedData`, `ProviderKind`,
 //! `ChannelId` / `MessageId` / `UserId`, `CancelToken`, the `inflight` /
 //! `turn_finalizer` modules, `mailbox_snapshot` / `mailbox_try_start_turn` /
-//! `ensure_cancel_token_bound_from_inflight_state` / `clear_inflight_state`,
+//! `ensure_cancel_token_bound_from_inflight_state`,
 //! `finish_recovered_turn_mailbox`, and `recovery_terminal_delivery_already_committed`),
 //! pulled in via `use super::*`, so this cluster lives in a leaf module.
 //! `reregister_active_turn_from_inflight` is re-exported by the root so
@@ -225,7 +225,16 @@ async fn reregister_active_turn_from_inflight_inner(
         )
         .await;
         if persist_durable_marker {
-            clear_inflight_state(&provider, state.channel_id);
+            // #5462 S1b: `state` is a snapshot the reconcile scan read earlier
+            // (~91ms in the observed accident), so a NEW turn intake accepted in
+            // that window already owns the row on disk while this snapshot still
+            // says the terminal delivery was committed. The blind unlink that
+            // used to stand here deleted that live row, leaving
+            // `durable_relay_owner_kind="none"` (#5175). The reconcile wrapper
+            // re-reads the row inside the sidecar flock and refuses when the
+            // running process authored it or a newer turn owns its identity;
+            // either way this arm still reports no restored turn.
+            inflight::clear_inflight_state_for_reconcile(&provider, state);
         } else {
             tracing::warn!(
                 provider = %provider.as_str(),
@@ -654,6 +663,195 @@ mod reregister_ledger_reseed_tests {
                 "Emitted proceeds"
             );
         }
+    }
+}
+
+/// #5462 S1b — the eleventh reconcile destruction site. The
+/// `recovery_terminal_delivery_already_committed` fast path above used to unlink
+/// the channel's row unconditionally on a T0 snapshot's verdict, so a turn that
+/// intake accepted during the scan's DB round-trips lost its row and finished
+/// with `durable_relay_owner_kind="none"` (#5175). The S2 reconcile wrapper
+/// re-reads the row under the sidecar flock, so the fence (a row this process
+/// authored) and the identity+nonce guard (a row a newer turn owns) both apply.
+///
+/// The async entry is driven through a local current-thread runtime so the
+/// shared env guard is held across a synchronous `block_on` instead of an
+/// `.await` — the #3034 idiom that keeps `AGENTDESK_ROOT_DIR` and the pinned
+/// generation stable without an `await_holding_lock` allow.
+#[cfg(test)]
+mod terminal_committed_reconcile_clear_tests {
+    use super::inflight::{self, InflightTurnState};
+    use crate::services::provider::ProviderKind;
+
+    const CURRENT_GENERATION: u64 = 546_200;
+
+    fn run_async<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime")
+            .block_on(fut)
+    }
+
+    /// Pin the runtime root AND the process generation: `InflightTurnState::new`
+    /// stamps `born_generation` from the latter, so an unpinned fixture is born
+    /// at generation 0 and diverts into §9-8's legacy fail-open rather than
+    /// exercising the fence at all.
+    fn pinned_root() -> (
+        std::sync::MutexGuard<'static, ()>,
+        tempfile::TempDir,
+        crate::config::TestEnvVarGuard,
+    ) {
+        let lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::TempDir::new().expect("runtime root");
+        let env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        crate::services::discord::runtime_store::set_process_generation_for_tests(Some(
+            CURRENT_GENERATION,
+        ));
+        (lock, root, env)
+    }
+
+    fn unpin_generation() {
+        crate::services::discord::runtime_store::set_process_generation_for_tests(None);
+    }
+
+    fn row(channel_id: u64, user_msg_id: u64) -> InflightTurnState {
+        InflightTurnState::new(
+            ProviderKind::Claude,
+            channel_id,
+            Some("adk-cc".to_string()),
+            343_742_347_365_974_026,
+            user_msg_id,
+            user_msg_id + 1,
+            "live prompt".to_string(),
+            Some("session-5462".to_string()),
+            Some(format!("AgentDesk-claude-5462-{channel_id}")),
+            Some("/tmp/claude-transcript.jsonl".to_string()),
+            None,
+            0,
+        )
+    }
+
+    /// The T0 read the scan carries into the committed fast path: identical to
+    /// the row it was taken from except for the bool the verdict reads.
+    fn committed_snapshot(source: &InflightTurnState) -> InflightTurnState {
+        let mut snapshot = source.clone();
+        snapshot.terminal_delivery_committed = true;
+        snapshot
+    }
+
+    #[test]
+    fn a_row_the_running_process_authored_survives_the_committed_clear() {
+        let (_lock, _root, _env) = pinned_root();
+        let live = row(546_201, 546_201_002);
+        assert_eq!(
+            live.born_generation, CURRENT_GENERATION,
+            "InflightTurnState::new must stamp the pinned generation at birth"
+        );
+        inflight::save_inflight_state(&live).expect("seed current-generation row");
+
+        let snapshot = committed_snapshot(&live);
+        let restored = run_async(async {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None);
+            super::reregister_active_turn_from_inflight(&shared, &snapshot).await
+        });
+        let preserved = inflight::load_inflight_state(&ProviderKind::Claude, live.channel_id);
+        unpin_generation();
+
+        assert!(!restored, "the committed fast path never reports a restore");
+        assert_eq!(
+            preserved
+                .expect("a row the running process authored must survive reconcile")
+                .born_generation,
+            CURRENT_GENERATION
+        );
+    }
+
+    /// §9-8: a legacy row carries generation 0, so the fence fails open there
+    /// and the identity+nonce guard is the only thing standing between the stale
+    /// verdict and the newer turn's row.
+    #[test]
+    fn a_newer_turns_legacy_row_survives_the_committed_clear() {
+        let (_lock, _root, _env) = pinned_root();
+        let channel_id = 546_202;
+        let mut newer = row(channel_id, 546_202_002);
+        newer.born_generation = 0;
+        inflight::save_inflight_state(&newer).expect("seed the newer turn's row");
+        let mut stale = committed_snapshot(&row(channel_id, 546_202_001));
+        stale.born_generation = 0;
+
+        let restored = run_async(async {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None);
+            super::reregister_active_turn_from_inflight(&shared, &stale).await
+        });
+        let preserved = inflight::load_inflight_state(&ProviderKind::Claude, channel_id);
+        unpin_generation();
+
+        assert!(!restored);
+        assert_eq!(
+            preserved
+                .expect("the newer turn's row must survive a superseded verdict")
+                .user_msg_id,
+            newer.user_msg_id
+        );
+    }
+
+    /// The gate must not neuter the site: a prior-generation row whose identity
+    /// still matches the committed snapshot is the population this fast path
+    /// exists to reclaim, and it is still reclaimed.
+    #[test]
+    fn a_prior_generations_matching_row_is_still_reclaimed() {
+        let (_lock, _root, _env) = pinned_root();
+        let mut stale = row(546_203, 546_203_002);
+        stale.born_generation = CURRENT_GENERATION - 1;
+        inflight::save_inflight_state(&stale).expect("seed prior-generation row");
+
+        let snapshot = committed_snapshot(&stale);
+        let restored = run_async(async {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None);
+            super::reregister_active_turn_from_inflight(&shared, &snapshot).await
+        });
+        let survivor = inflight::load_inflight_state(&ProviderKind::Claude, stale.channel_id);
+        unpin_generation();
+
+        assert!(!restored);
+        assert!(
+            survivor.is_none(),
+            "a row no live turn owns must still be reclaimed"
+        );
+    }
+
+    /// §4.1: the `persist_durable_marker == false` arm stays untouched — the
+    /// exact-episode guard already owns the sidecar flock there, so a wrapper
+    /// that takes the same flock would deadlock on itself. That arm clears
+    /// nothing, and this pins it so a later "consistency" edit cannot add the
+    /// wrapper call to it.
+    #[test]
+    fn the_episode_guard_arm_still_clears_nothing() {
+        let (_lock, _root, _env) = pinned_root();
+        let mut stale = row(546_204, 546_204_002);
+        stale.born_generation = CURRENT_GENERATION - 1;
+        inflight::save_inflight_state(&stale).expect("seed prior-generation row");
+
+        let snapshot = committed_snapshot(&stale);
+        let restored = run_async(async {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None);
+            super::reregister_active_turn_from_inflight_under_episode_guard(&shared, &snapshot)
+                .await
+        });
+        let survivor = inflight::load_inflight_state(&ProviderKind::Claude, stale.channel_id);
+        unpin_generation();
+
+        assert!(!restored);
+        assert!(
+            survivor.is_some(),
+            "the episode guard's caller owns this row's lifetime, not this arm"
+        );
     }
 }
 
