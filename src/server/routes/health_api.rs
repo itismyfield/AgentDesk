@@ -2871,7 +2871,9 @@ mod tests {
         // #5071 T1 S8-1r2 gate (d): the peer-rollout comparison is run against the
         // PUBLIC endpoint across two nodes, so provenance has to survive the public
         // whitelist rather than live in the protected detail response — unlike
-        // `release_source.node_hostname`, which stays detail-only.
+        // `release_source.node_hostname`, which stays detail-only. `health_response`
+        // has mutually exclusive registry and standalone assembly branches; the URL
+        // selects the projection, not the assembly branch, so both axes are explicit.
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -2884,16 +2886,31 @@ mod tests {
             "both rollout axes must report a provenance"
         );
 
-        for path in ["/health", "/health/detail"] {
-            let body = runtime.block_on(health_body(path, None));
-            assert_eq!(
-                body["delivery_record_rollout"]["flag_source"], expected,
-                "{path} must carry the rollout provenance"
-            );
+        for registry in [
+            None,
+            Some(Arc::new(
+                crate::services::discord::health::HealthRegistry::new(),
+            )),
+        ] {
+            let assembly = if registry.is_some() {
+                "registry"
+            } else {
+                "standalone"
+            };
+            for path in ["/health", "/health/detail"] {
+                let body = runtime.block_on(health_body(path, registry.clone()));
+                assert_eq!(
+                    body["delivery_record_rollout"]["flag_source"], expected,
+                    "{path} must carry rollout provenance on the {assembly} assembly branch"
+                );
+                if path == "/health" {
+                    assert!(
+                        body["release_source"].get("node_hostname").is_none(),
+                        "{assembly} public health must keep node_hostname detail-only"
+                    );
+                }
+            }
         }
-
-        let public = runtime.block_on(health_body("/health", None));
-        assert!(public["release_source"].get("node_hostname").is_none());
     }
 
     #[test]
@@ -2940,10 +2957,7 @@ mod tests {
         assert_eq!(body["release_source"]["observation_status"], "partial");
         assert_eq!(
             body["release_source"]["observation_failures"],
-            serde_json::json!([
-                "latest_postgres_migration_missing",
-                "repo_dirty_missing"
-            ])
+            serde_json::json!(["latest_postgres_migration_missing", "repo_dirty_missing"])
         );
         assert_eq!(
             body["release_source"]["deployed_repo_head"],

@@ -612,26 +612,32 @@ delivery-record rollout across mac-book and mac-mini. Two blocks matter:
 `delivery_record_rollout` and `release_source`.
 
 **Reading `flag_source`.** `shadow_enabled` / `authority_enabled` say what a flag's
-value is; `flag_source` says who decided it. `compiled_default` means the process
-never saw the environment variable, so the value came from this repository.
-`env_override` means the variable was present — whatever it said — so the node's
-untracked `~/.adk/release/config/launchd.env` owns it. Presence alone decides
-provenance, so an explicit `=0` still reports `env_override`.
+value is; `flag_source` says which resolver branch supplied it. `compiled_default`
+means `std::env::var` did not yield a Unicode value (the variable was absent or its
+value was non-Unicode), so the compiled value was used. `env_override` means a
+Unicode value was present — whatever it said — so the node's untracked
+`~/.adk/release/config/launchd.env` normally owns it. A present Unicode value alone
+decides that provenance, so an explicit `=0` still reports `env_override`.
 
 | observed | reading |
 | --- | --- |
 | `authority_enabled: false`, `compiled_default` | rollout has not landed on this node |
 | `authority_enabled: true`, `env_override` | on by node-local pin only — the #5262 pathology |
-| `authority_enabled: true`, `compiled_default` | repo-owned, the target state |
+| `authority_enabled: true`, `compiled_default` | compiled branch, the target state (verify no non-Unicode env ambiguity) |
 | `authority_enabled: false`, `env_override` | someone pinned an explicit rollback |
 
 **Reading `release_source`.** `deployed_repo_head` is the 40-hex the deploy script
 recorded; `deployed_repo_dirty` is its checkout-cleanliness verdict, passed through
 verbatim as `"true"`, `"false"`, or `"unknown"` (the writer could not tell).
-`"unknown"` is not a clean checkout. An absent field is a reader-side failure and
-appears in `observation_failures` as `repo_dirty_missing` with
-`observation_status: "partial"`; `unobserved` means every recognized fact failed,
-so a published `deployed_repo_head` is never accompanied by `unobserved`.
+`"unknown"` is not a clean checkout. Recognizing `repo_dirty` changes two
+observable shapes. A current-writer manifest with a confirmed `repo_dirty` but no
+confirmed head or migration moves from `unobserved` to `partial`; an older manifest
+with both older facts confirmed but no `repo_dirty` moves from `observed` to
+`partial` and reports `repo_dirty_missing`. A non-string `repo_dirty` is now a
+recognized-field type error that rejects the whole manifest as
+`manifest_invalid_json`. These observation fields do not feed deployment readiness:
+the deploy gate reads its existing top-level readiness predicates, including
+`fully_recovered`, and never reads `release_source.observation_status`.
 
 **Acceptance.** T1 S8 closes when both nodes return this object from public
 `/api/health`, and both report the same 40-hex `deployed_repo_head` with

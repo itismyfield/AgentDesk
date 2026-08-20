@@ -207,6 +207,12 @@ fn health_json_for(
                 }
             }
             if !failures.is_empty() {
+                // Recognizing `repo_dirty` intentionally moves legacy two-fact
+                // manifests from `observed` to `partial`, and a confirmed dirty
+                // verdict can move the old no-head/no-migration shape from
+                // `unobserved` to `partial`. This changes health observation output,
+                // not deployment readiness: the deploy gate consumes existing
+                // top-level readiness fields, not this release-source status.
                 health["observation_status"] =
                     serde_json::json!(if failures.len() == RECOGNIZED_FACT_COUNT {
                         "unobserved"
@@ -391,6 +397,23 @@ mod tests {
         )
         .expect("write manifest");
 
+        assert_unobserved(&path, ReleaseSourceUnobservedReason::ManifestInvalidJson);
+    }
+
+    #[test]
+    fn release_source_rejects_wrong_repo_dirty_type_with_other_facts_intact() {
+        // Once `repo_dirty` became a recognized field, its schema mismatch stopped
+        // being ignored and began rejecting the whole manifest. Keep that expanded
+        // rejection surface explicit rather than mistaking this slice for shape-only.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("wrong-repo-dirty-type.json");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"repo_head":"{REPO_HEAD}","latest_postgres_migration":"0104_example.sql","repo_dirty":true}}"#
+            ),
+        )
+        .expect("write manifest");
         assert_unobserved(&path, ReleaseSourceUnobservedReason::ManifestInvalidJson);
     }
 

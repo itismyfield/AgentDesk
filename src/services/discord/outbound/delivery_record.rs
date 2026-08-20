@@ -1145,9 +1145,10 @@ pub(in crate::services::discord) fn delete_record(
 // ---------------------------------------------------------------------------
 
 /// #5071 T1 S8-1r2: where a rollout flag's value came from, which is a different
-/// question from what the value is. `CompiledDefault` means the process never saw
-/// the environment variable, so the value is the one this repository compiled in.
-/// `EnvOverride` means the variable was present — whatever it said — so a
+/// question from what the value is. `CompiledDefault` means `std::env::var` did not
+/// yield a Unicode value (absent and non-Unicode values both take this path), so the
+/// compiled value was used. `EnvOverride` means a Unicode value was present —
+/// whatever it said — so a
 /// node-local untracked `launchd.env`, not the repository, decided it. #5262's
 /// completion contract asks for repo-owned flags, which is a claim about
 /// provenance that `shadow_enabled`/`authority_enabled` alone cannot answer: once
@@ -1404,8 +1405,9 @@ fn delivery_record_rollout_health_json_for_flags(
         "dedup_authority": dedup_authority,
         "same_turn_backward_write_enforcement": same_turn_backward_write_enforcement,
         // Provenance, not value: `compiled_default` on both axes is the operational
-        // definition of #5262's "repo-owned" requirement, and an `env_override`
-        // here names the node whose untracked `launchd.env` still owns the flag.
+        // rollout signal for #5262's "repo-owned" requirement. A non-Unicode env
+        // value is the documented ambiguity because `std::env::var` maps it to this
+        // branch; `env_override` means a Unicode value was read from the environment.
         "flag_source": {
             "shadow": shadow.source.as_str(),
             "authority": authority.source.as_str(),
@@ -3460,7 +3462,7 @@ mod tests {
             assert_eq!(
                 compiled["flag_source"],
                 serde_json::json!({"shadow": "compiled_default", "authority": "compiled_default"}),
-                "repo-owned row ({shadow_enabled}, {authority_enabled})"
+                "compiled-branch row ({shadow_enabled}, {authority_enabled})"
             );
 
             let pinned = delivery_record_rollout_health_json_for_flags(

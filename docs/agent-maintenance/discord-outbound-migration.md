@@ -736,8 +736,9 @@ changing runtime behavior.
 > object in `delivery_record_rollout`'s health block. Enablement parsing is unchanged —
 > absent is still OFF for both flags and a present value is still ON only for `1`/`true`
 > (trimmed, case-insensitive) — so this is observation-only and a deploy no-op. `source` is
-> decided by the variable's PRESENCE alone, so an explicit `=0` reports `env_override`; that
-> is the point, since #5262 asks for repo-owned flags and once a compiled default agrees
+> decided by whether `std::env::var` yields a Unicode value; absent and non-Unicode values
+> use `compiled_default`, while a present Unicode `=0` reports `env_override`. That is the
+> point, since #5262 asks for repo-owned flags and once a compiled default agrees
 > with a node-local `launchd.env` pin the two become indistinguishable by value. The
 > `#[cfg(test)]` shadow/authority seams keep their `Option<bool>` shape and report
 > `env_override`, so provenance assertions test the pure resolvers rather than the seams. No
