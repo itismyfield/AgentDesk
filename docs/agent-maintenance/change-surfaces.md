@@ -2198,8 +2198,9 @@ time for diagnostics; neither is a stored approval value.
 
 - canonical_modules: `src/config.rs`, `src/runtime_layout/mod.rs`,
   `src/server/mod.rs`, `src/kanban/state_machine.rs`, `src/receipt.rs`,
-  `src/github/sync.rs`, `src/reconcile.rs` (periodic stale-inflight + orphan
-  sweep), `src/high_risk_recovery.rs` (PG recovery harness for delivery
+  `src/github/sync.rs`, `src/reconcile.rs` (dispatch-delivery, auto-queue, and
+  queue-review reconciliation), `src/high_risk_recovery.rs` (PG recovery
+  harness for delivery
   outbox/notify), `src/server/task_dispatch_claims.rs` (cluster-aware
   task-dispatch claim coordination), `src/server/cluster.rs`
   (cluster role/leader-failover coordination), `src/server/worker_registry.rs`
@@ -2211,11 +2212,9 @@ time for diagnostics; neither is a stored approval value.
   - `src/server/mod.rs` (frozen giant surface; +42 from #4615 S3b worker delivery fence — the lease-guarded `fence_claimed_delivery` call site in `drain_message_outbox_batch_once` (re-validates circuit authority between claim and the Discord send; fence logic lives in `services::message_outbox_circuit_authority`); -22 from #4449 extracting actionable-alert announce→notify delivery into `src/server/outbox_actionable_delivery.rs`; -21 from #4465 moving stale outbox/expired-held GC ownership into `services::message_outbox`; #1122 extends that shared GC owner to preserve scheduled-message permanent dedupe sentinels; +140 from #4089 claude-accounts cswap surface — leader/forced rate-limit refresh serialization (shared async Mutex critical section), fire-and-forget switch refresh with 8s bound, and the sync_claude_rate_limit_cache_once extraction; follow-up decomposition candidate: move the claude rate-limit sync block into a sibling module; +42 from #3573 auto-resume tick + backoff-race fix; #3628 wires failure→pause producer behind the same knob, net -1 line from comment condensation; #3651 net ~0 — the message_outbox_loop is the foreground headless-delivery drain and must NOT be backpressured, so its earlier backpressure gate was removed during codex review; #3740 adds the boot hook for token-analytics cache prewarm; #3722 removes duplicate startup reseed when callers already completed guarded startup initialization; +20 from #3870 fail-closed bind-security guard at the listener bind site — force-loopback when non-loopback host + no auth_token; +15 from #4260 the terminal outbox-failure alert call site in the message-outbox Fail arm (silent-loss vector 3) — the helper bodies (`note_terminal_outbox_delivery_failure` + snippet/target resolvers) live in the new sibling `src/server/outbox_delivery_alert.rs`, only the Fail-arm call + module wiring remain in root).
   - `src/receipt.rs` (frozen giant surface).
   - `src/github/sync.rs` (frozen giant surface).
-  - `src/reconcile.rs` (frozen giant surface; +39 from #4104 standardized inflight-row
-    removal logging at the `sweep_stale_inflight_files` site; #3685 rebind-origin
-    stale-inflight preservation review hardening; periodic reconcile loop
-    covering stale inflights, orphan uploads, dispatched-session drift, and
-    queue-review drift — split before adding non-bugfix behavior).
+  - `src/reconcile.rs` (frozen giant surface; dispatch-delivery, auto-queue,
+    dispatched-session, and queue-review reconciliation — split before adding
+    non-bugfix behavior).
   - `src/server/maintenance.rs` decomposed in #4710 into
     `src/server/maintenance/mod.rs` (registry + scheduler loop, now below the
     1000-line giant threshold) and `src/server/maintenance/storage_jobs.rs`

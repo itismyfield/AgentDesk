@@ -139,11 +139,9 @@ impl MaintenanceJobRegistry {
             Arc::new(ProgressTtsCacheSweepJob {
                 config: voice_cache_sweep,
             }),
-            // #3231 — disk-GC / memory maintenance jobs. Implemented in
-            // `services::maintenance::jobs::*` but historically never wired
-            // (zero callers of `spawn_storage_maintenance_jobs`), so the
-            // disk-full prevention from #3231 never ran. Registered here so
-            // the live leader-only scheduler executes them.
+            // #3231 — disk-GC / memory maintenance jobs. Their implementations
+            // live in `services::maintenance::jobs::*`; these wrappers register
+            // them on the live leader-only scheduler.
             Arc::new(StorageTargetSweepJob),
             Arc::new(StorageWorktreeOrphanSweepJob),
             Arc::new(StorageTmpPipelineSweepJob),
@@ -943,12 +941,9 @@ mod registry_membership_tests {
         );
     }
 
-    /// #3231 — the disk-GC / memory maintenance jobs were implemented in
-    /// `services::maintenance::jobs::*` but never wired into the live
-    /// scheduler (zero callers of `spawn_storage_maintenance_jobs`; absent
-    /// from this static registry), so the disk-full prevention never ran.
-    /// These assertions fail on origin/main and pass once the wrapper
-    /// structs are registered.
+    /// #3231 — the disk-GC / memory maintenance implementations live in
+    /// `services::maintenance::jobs::*`; the wrapper structs below keep them
+    /// registered on the live leader-only scheduler.
     #[test]
     fn static_registry_includes_disk_gc_jobs() {
         let registry = MaintenanceJobRegistry::static_registry();
