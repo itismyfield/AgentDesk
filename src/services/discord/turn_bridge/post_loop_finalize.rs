@@ -672,6 +672,15 @@ pub(super) async fn run_post_loop_finalize(
         has_pending_after_voice
     };
 
+    // #5464 T5 S2: loop exit is this turn's single flush point — the stream
+    // gate's per-tick tally and the entry gate's verdict pair are written here,
+    // with the terminal range shape design §4.3 measures `no_range_share` from.
+    // Records only; every value below is already decided.
+    crate::services::discord::relay_recovery::authority_observation::record_loop_exit(
+        &inflight_state,
+        tmux_last_offset,
+    );
+
     PostLoopFinalizeOutput {
         full_response,
         active_background_child_session_ids,
