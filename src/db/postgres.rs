@@ -1238,12 +1238,13 @@ pub(crate) fn assert_test_lifecycle_lock_not_held_before_env_lock() {
         .name()
         .unwrap_or("<unnamed test thread>")
         .to_string();
-    panic!(
+    let message = format!(
         "test lock order inversion in `{offender}`: POSTGRES_TEST_LIFECYCLE_LOCK is already \
          held while acquiring config::shared_test_env_lock. The canonical hierarchy is \
          E -> P: take the shared test-env lock (or the fixture that owns it) *before* \
          creating the PostgreSQL test database, not after."
     );
+    panic!("{message}"); // agentdesk-audit: allow-unwrap — #[cfg(test)]-gated tripwire, never compiled into production; the panic converts a silent ABBA hang into a red test naming the offender
 }
 
 #[cfg(test)]
