@@ -58,12 +58,15 @@ fi
 
 readonly TERMINAL_HANDOFF="src/services/discord/session_relay_sink/terminal_handoff.rs"
 readonly SESSION_RELAY_SINK="src/services/discord/session_relay_sink.rs"
-readonly WATCHER_REGISTRY="src/services/discord/tmux_watcher_registry.rs"
+# #5457 moved the S4 fence layer out of `tmux_watcher_registry.rs` into this
+# child module. Both S4 fence rows below anchor on text that went with it, so
+# they mutate the child; the registry root no longer carries a mutated anchor.
+readonly WATCHER_FENCES="src/services/discord/tmux_watcher_registry/fences.rs"
 readonly DESTRUCTIVE_CANCEL_GATE="src/services/discord/destructive_cancel_gate.rs"
 readonly -a MUTATION_FILES=(
   "$TERMINAL_HANDOFF"
   "$SESSION_RELAY_SINK"
-  "$WATCHER_REGISTRY"
+  "$WATCHER_FENCES"
   "$DESTRUCTIVE_CANCEL_GATE"
 )
 declare -a ORIGINAL_COPIES=()
@@ -319,7 +322,7 @@ run_mutation \
 # matched (just unused), and `commit` is still consumed exactly once, so the
 # mutant compiles and the only thing that changes is the verdict.
 run_mutation \
-  S4-m5 "$WATCHER_REGISTRY" \
+  S4-m5 "$WATCHER_FENCES" \
   '        Some(fence) => fence.commit_if_permitted(commit),' \
   '        Some(_fence) => Some(commit()),' \
   'services::discord::relay_recovery::tests::post_gate_identity_matched_live_delivery_lease_blocks_dead_frontier_watcher_cancel'
@@ -342,7 +345,7 @@ run_mutation \
 # the judged key inside the reopened window and still observes the registry row
 # the judgment authorized destroying.
 run_mutation \
-  S4-m7 "$WATCHER_REGISTRY" \
+  S4-m7 "$WATCHER_FENCES" \
   $'            #[cfg(test)]\n            run_delivery_fence_permitted_hook_for_tests(self.site);\n            Some(commit())\n        })\n    }' \
   $'            Some(())\n        })?;\n        #[cfg(test)]\n        run_delivery_fence_permitted_hook_for_tests(self.site);\n        Some(commit())\n    }' \
   'services::discord::tmux_watcher_registry_restore_tests::delivery_fence_judgment_and_destruction_are_atomic_against_a_racing_acquire'

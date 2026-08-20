@@ -1902,9 +1902,10 @@ time for diagnostics; neither is a stored approval value.
   `.spawn_nonce` read model, mounted at
   `services::discord::tmux::execution_identity` by a `#[path]` declaration in
   `tmux.rs`, so it inherits that file's unix gate) and the
-  `WatcherIdentityFence` / `IdentityFencedRegistry` pair in
-  `tmux_watcher_registry.rs`, which is NOT unix-gated and carries its own
-  `#[cfg(not(unix))]` shim pair. Switch: `config::ExecutionIdentityMode` +
+  `WatcherIdentityFence` / `IdentityFencedRegistry` pair — since #5457 the fence
+  itself lives in the `tmux_watcher_registry/fences.rs` child module and the
+  fenced view stays in the registry root. Neither is unix-gated, and `fences.rs`
+  carries the `#[cfg(not(unix))]` shim pair. Switch: `config::ExecutionIdentityMode` +
   `RuntimeSettingsConfig.execution_identity_mode`, read live per decision by
   `tmux_watcher_registry::execution_identity_mode`.
 - converted call sites: exactly two, both keeping their unfenced helper NAMES so
@@ -1913,8 +1914,8 @@ time for diagnostics; neither is a stored approval value.
   `tui_direct_pending_start.rs` (`STALE_FOREIGN_CANCEL_IDENTITY_SITE`). The other
   14 production entries in the `registry_remove` category of
   `scripts/destructive_call_site_baseline.json` stay unfenced in every mode.
-- second conjunct (#5071 relay-tail S4, I-1): `TerminalDeliveryFence` in the same
-  `tmux_watcher_registry.rs`, chained onto the view by
+- second conjunct (#5071 relay-tail S4, I-1): `TerminalDeliveryFence`, beside
+  `WatcherIdentityFence` in `tmux_watcher_registry/fences.rs`, chained onto the view by
   `IdentityFencePendingDelivery::with_terminal_delivery_fence` at both converted
   call sites and consumed by `commit_under_delivery_fence` inside the same
   registry lock (the r2 repair below replaced the original bool probe). It answers a DIFFERENT question from the identity conjuncts: not "is this
@@ -1928,7 +1929,10 @@ time for diagnostics; neither is a stored approval value.
   this destruction's business) and it expires (a dead holder cannot latch it). It
   is NOT gated by `ExecutionIdentityMode` — a bounded, identity-matched refusal
   has no Observe-only stage to roll out through.
-- S4 r2 repairs to that conjunct, all three in the same two files:
+- S4 r2 repairs to that conjunct. They landed in two files at the time; since
+  #5457 split the fence layer out they span three — the fence implementation in
+  `tmux_watcher_registry/fences.rs`, the fenced view in the registry root, and
+  `scripts/check_destructive_call_site_ratchet.py`:
   - **judge/commit atomicity.** The r1 shape read the lease through
     `DeliveryLeaseCell::read`, which drops the cell's payload mutex on return,
     and answered `bool`; the registry lock the CAS core holds is a different
@@ -2504,7 +2508,21 @@ these contextual numbers to match ordinary LoC churn.
   from #3864 moving SIGTERM queue-restore merge inside the mailbox actor; +10
   from #4018 round-2 adding the distinct `MonitorAutoTurn` active-turn marker
   while keeping monitor turns background for queue-yield/cancel semantics).
-- `src/services/discord/tmux_watcher_registry.rs` (crossed the 1000-line production threshold at 1092 prod LoC via #5071 relay-tail S4 — the destructive-fence layer added there (`WatcherIdentityFence`/`TerminalDeliveryFence` and the `IdentityFencedRegistry` CAS cores) is the natural split seam; decompose scheduled per #5457, registry entry `shrink` with a 2026-10-31 deadline).
+- `src/services/discord/tmux_watcher_registry.rs` (below the giant threshold; crossed
+  the 1000-line production threshold at 1092 prod LoC via #5071 relay-tail S4 and came
+  back to 637 prod LoC in #5457, which moved the S4 conjunct layer verbatim into the
+  child module `tmux_watcher_registry/fences.rs` (489 prod LoC): `WatcherIdentityFence`
+  with its `PinnedWatcherBinding` and `#[cfg(not(unix))]` shims, `TerminalDeliveryFence`,
+  `commit_under_delivery_fence`, the live `execution_identity_mode` read, and the two
+  test hooks. The registry root deliberately KEEPS the four maps, both
+  `*_if_current_locked` CAS cores, `under_identity_fence` and the
+  `IdentityFencePendingDelivery`/`IdentityFencedRegistry` views: the destructive
+  call-site ratchet excludes exactly one owner FILE (`REGISTRY_OWNER` in
+  `scripts/check_destructive_call_site_ratchet.py`), so leaving every fenced spelling
+  and both `*_if_current` names in that file is what kept the ratchet counts and the
+  `identity_fence_bind`/`delivery_fence_bind` pairing pass unchanged with no baseline
+  repin. Moving the fenced view too would require teaching that script the owner is now
+  a module, not a file. The registry `[[entry]]` was removed as a ghost registration).
 - `src/services/discord/session_relay_sink.rs` (frozen giant surface; #5071 T0-S4
   moves the 100-physical-line sink-local terminal outcome fold and `RelaySink::deliver`
   implementation to `session_relay_sink/terminal_handoff.rs` with `continue 0`, one

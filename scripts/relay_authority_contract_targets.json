@@ -25,7 +25,7 @@
     },
     {
       "name": "S4-m5",
-      "file": "src/services/discord/tmux_watcher_registry.rs",
+      "file": "src/services/discord/tmux_watcher_registry/fences.rs",
       "target": "services::discord::relay_recovery::tests::post_gate_identity_matched_live_delivery_lease_blocks_dead_frontier_watcher_cancel"
     },
     {
@@ -35,7 +35,7 @@
     },
     {
       "name": "S4-m7",
-      "file": "src/services/discord/tmux_watcher_registry.rs",
+      "file": "src/services/discord/tmux_watcher_registry/fences.rs",
       "target": "services::discord::tmux_watcher_registry_restore_tests::delivery_fence_judgment_and_destruction_are_atomic_against_a_racing_acquire"
     }
   ],
