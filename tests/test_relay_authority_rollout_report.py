@@ -12,6 +12,23 @@ segment gap still merged two rollout windows (legA/legB r2c P1-1), the
 history diluted the target window's own losses (legB r2c P1-2), and a turn lost
 while stranded was invisible in the canon, which `publish_reason` now records
 (legA r2c P1-3).
+
+rc adds four more. Two are the half of that dilution the per-file scope still
+let through — daily files are named by PUBLISH day and the dial moves mid-day, so
+the previous segment's records cohabit the target's own first file (legA/legB r3c
+P1-1): one pins the verdict on r3's own F -> G -> F counterexample, the other pins
+that the verdict does not MOVE with the cohabiting volume, across r3's 1,350-line
+flip threshold. The third is a self-inflicted defect standing since r1: a JSON
+line that parses to a bare scalar raised `AttributeError` and aborted the run
+before any criterion was evaluated, on exactly the interleaved input
+`MALFORMED_LINE_CEILING` documents as expected (legA r3c P2-2). The fourth
+asserts the criteria key set is exactly the six axis-A gates, because r3 claimed
+that was pinned when only one negative membership check existed (legA r3c P2-7).
+
+rc r2 adds no test, but `out_of_scope_unusable_lines` — the display field for the
+one residual of the scope that is FAIL-OPEN rather than false-red (legA rc P1-1)
+— is asserted inside the corrupt-history regression, which is that residual's own
+shape.
 """
 
 from __future__ import annotations
@@ -364,6 +381,11 @@ class RolloutReportTest(unittest.TestCase):
         self.assertTrue(summary["criteria"]["line_integrity"]["met"])
         self.assertTrue(summary["promotion_ready"], summary["criteria"])
         self.assertEqual(summary["line_integrity_all_files"]["unusable"], 500)
+        # The same exclusion read the other way (legA rc P1-1): this direction is
+        # fail-open, not false-red, and no criterion sees it — so the count that
+        # left both sides of the ratio is displayed, symmetric with
+        # `cohabiting_usable_lines`.
+        self.assertEqual(summary["line_integrity"]["out_of_scope_unusable_lines"], 500)
 
     def test_a_cohabiting_segment_in_the_targets_own_file_does_not_dilute_it(self):
         """legA/legB r3c P1-1: the half the per-file scope still let through.

@@ -62,14 +62,24 @@ in the target's own first file — daily files are named by publish day, the dia
 moves mid-day — read the same 3.08% as 0.92% and flip promotion (legA/legB r3c
 P1-1). Only counting the target's own records closes both.
 
-Both residuals of that choice are stated rather than hidden, and unlike the
-dilution above they both point toward false-red, which is the direction a
-promotion gate may err in: unusable lines belonging to a cohabiting segment are
-charged to this target, and a file containing NO usable target record is
-outside the scope entirely, so a day's file that is unusable end-to-end shows up
-only in ``line_integrity_all_files``. That whole-input tally is still reported;
-nothing is judged on it. ``cohabiting_usable_lines`` reports how many usable
-lines the scope excluded, so the exclusion can be audited from the output.
+Both residuals of that choice are stated rather than hidden, and they do NOT
+point the same way. Unusable lines belonging to a cohabiting segment are charged
+to this target: that one is false-red, the direction a promotion gate may err in.
+But a file containing NO usable target record is outside the scope entirely,
+which drops its unusable lines from the numerator AND the denominator and so
+*lowers* the measured share — that residual is FAIL-OPEN. A day of the target's
+own window that is unusable end to end shows up only in
+``line_integrity_all_files``, and no criterion can see it: a mixed-version schema
+bump that left one day of a nine-day window unparseable read ``0/810 = 0.0%``
+scoped while the whole input was 55.25% unusable, with ``promotion_ready`` True
+(legA rc P1-1).
+
+Neither exclusion is silent and neither is judged: ``cohabiting_usable_lines``
+reports the usable lines the scope excluded, ``out_of_scope_unusable_lines`` the
+unusable ones. Because the fail-open residual is invisible to all six criteria,
+a runbook reading this output has to watch that second field and the
+``line_integrity_all_files`` ratio itself before promoting on a green
+``line_integrity``.
 
 Known self-blocking limit of the coverage floors: see ``SITE_COVERAGE_FLOOR``.
 
@@ -470,20 +480,34 @@ def scoped_integrity(target: dict | None, by_file: dict[str, dict]) -> dict:
     segment's records for that day; counting them diluted the target's own
     losses below the ceiling exactly as the whole-input tally used to (legA/legB
     r3c P1-1: a target losing 20 of its own 650 lines, 3.08%, read as 0.92%
-    against 1,550 cohabiting lines and flipped ``promotion_ready`` to True).
+    against 1,530 cohabiting lines and flipped ``promotion_ready`` to True).
     Cohabitation is the default at segment birth, not a corner case, and it is
     worst when the target's sample is thinnest.
 
     An unusable line has no observation time — that is what makes it unusable —
     so it cannot be split between the segments sharing its file, and it is
     charged to the target whole. Both residuals of that choice are declared
-    rather than hidden, and both point the same way, toward false-red:
+    rather than hidden, and they point OPPOSITE ways:
 
     * a cohabiting segment's unusable lines are charged to this target, so a
-      neighbour's corruption can fail a clean target;
-    * a file holding NO usable target record is outside the scope entirely, so a
-      day's file that is unusable end to end shows up only in
-      ``line_integrity_all_files``.
+      neighbour's corruption can fail a clean target — false-red;
+    * a file holding NO usable target record is outside the scope entirely,
+      which takes its unusable lines out of the numerator AND the denominator
+      and so *lowers* the measured share — FAIL-OPEN, not false-red. A day's
+      file that is unusable end to end shows up only in
+      ``line_integrity_all_files``. Both ends of that are reachable: history
+      files accumulate exactly the interleaved junk ``MALFORMED_LINE_CEILING``
+      documents as expected, so 36 such lines beside a clean target read
+      ``0/630 = 0.0%`` here while the whole input is 4.26%; and a mixed-version
+      schema bump can lose one whole day of the target's own window, which read
+      ``0/810 = 0.0%`` scoped against 55.25% unusable whole-input and left
+      ``promotion_ready`` True (legA rc P1-1).
+
+    ``out_of_scope_unusable_lines`` is what bounds the second residual: it is the
+    only way to audit that exclusion from this output, and like
+    ``cohabiting_usable_lines`` it is displayed, never judged. No criterion can
+    see the fail-open residual, so the runbook — not this script — is what has to
+    read that field and the whole-input ratio next to a green ``line_integrity``.
 
     Dating an unparseable line by its position between the datable lines around
     it would close both, and is a machine for S4 rather than this slice (§12-2).
@@ -499,6 +523,12 @@ def scoped_integrity(target: dict | None, by_file: dict[str, dict]) -> dict:
     # Usable lines in those files belonging to some other segment. Excluded from
     # the denominator; reported so the exclusion is auditable rather than silent.
     scoped["cohabiting_usable_lines"] = scoped["lines"] - scoped["unusable"] - records
+    # The symmetric display for the fail-open residual: unusable lines in files
+    # this target has no usable record in, which leave BOTH sides of the ratio.
+    # Displayed only — no criterion reads it, and none is added here.
+    scoped["out_of_scope_unusable_lines"] = (
+        merge_integrity(by_file.values())["unusable"] - scoped["unusable"]
+    )
     scoped["lines"] = records + scoped["unusable"]
     scoped["files"] = files
     return scoped
@@ -580,7 +610,11 @@ def render(summary: dict, warnings: list[str]) -> str:
             f"  integrity scope    : {len(summary['line_integrity']['files'])} file(s) of"
             f" the target segment, excluding"
             f" {summary['line_integrity']['cohabiting_usable_lines']} usable line(s)"
-            f" cohabiting there; whole input {summary['line_integrity_all_files']}",
+            f" cohabiting there and"
+            f" {summary['line_integrity']['out_of_scope_unusable_lines']} unusable line(s)"
+            " in files with no target record (that second exclusion is FAIL-OPEN and no"
+            " criterion sees it — read it against the whole input);"
+            f" whole input {summary['line_integrity_all_files']}",
         ]
     )
     if target["unmeasured_fields"]:

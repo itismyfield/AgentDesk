@@ -88,7 +88,12 @@ pub(crate) fn admits(mode: RelayAuthorityMode, percent: u8, channel_id: u64) -> 
 /// between two samples of one fingerprint. File order and a bare timestamp gap
 /// were both tried as the discriminator and both retired, because neither can
 /// tell a detour from an idle night; the gap survives only as a fallback for the
-/// detour that left the observing set and so wrote nothing at all.
+/// two cases that leave no interleaved sample to find — the detour left the
+/// observing set and so wrote nothing at all, or samples did exist during it and
+/// were all lost while stranded. `segment_events` in
+/// `scripts/relay_authority_rollout_report.py` carries both branches and why the
+/// second is low-reachability (eviction bounds unpublished turns at one per
+/// channel — legA r3c P2-4).
 ///
 /// The fingerprint is deliberately host-independent, which means it witnesses
 /// "the observed population disagreed about the dial", not "the dial moved":
