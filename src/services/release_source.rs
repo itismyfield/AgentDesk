@@ -15,6 +15,7 @@ pub(crate) enum ReleaseSourceObservation {
         generated_at: Option<String>,
         repo_head: Result<String, ReleaseSourceUnobservedReason>,
         latest_postgres_migration: Result<String, ReleaseSourceUnobservedReason>,
+        repo_dirty: Result<String, ReleaseSourceUnobservedReason>,
     },
     Unobserved {
         reason: ReleaseSourceUnobservedReason,
@@ -31,7 +32,14 @@ pub(crate) enum ReleaseSourceUnobservedReason {
     RepoHeadMissing,
     RepoHeadInvalid,
     LatestPostgresMigrationMissing,
+    RepoDirtyMissing,
 }
+
+/// The recognized release-source facts: repository head, latest PostgreSQL
+/// migration, and checkout cleanliness. `unobserved` means every one of them
+/// failed; anything short of that is `partial`, so a confirmed fact is never
+/// published under a status that denies it exists.
+const RECOGNIZED_FACT_COUNT: usize = 3;
 
 impl ReleaseSourceUnobservedReason {
     fn as_str(self) -> &'static str {
@@ -44,6 +52,7 @@ impl ReleaseSourceUnobservedReason {
             Self::RepoHeadMissing => "repo_head_missing",
             Self::RepoHeadInvalid => "repo_head_invalid",
             Self::LatestPostgresMigrationMissing => "latest_postgres_migration_missing",
+            Self::RepoDirtyMissing => "repo_dirty_missing",
         }
     }
 }
@@ -53,6 +62,7 @@ struct ReleaseSourceManifest {
     generated_at: Option<String>,
     repo_head: Option<String>,
     latest_postgres_migration: Option<String>,
+    repo_dirty: Option<String>,
 }
 
 pub(crate) fn observe() -> ReleaseSourceObservation {
@@ -107,6 +117,16 @@ fn read(path: impl AsRef<Path>) -> ReleaseSourceObservation {
         Some(value) => Ok(value),
         None => Err(ReleaseSourceUnobservedReason::LatestPostgresMigrationMissing),
     };
+    // #5262 asks for a "clean" deployment, so the writer's checkout-cleanliness
+    // verdict is passed through verbatim rather than reduced to a boolean. The
+    // writer emits `true`, `false`, or its own `unknown` when it could not tell,
+    // and collapsing `unknown` into either answer would manufacture the very
+    // confirmed-fact-from-missing-evidence this module refuses to produce. An
+    // absent field is a reader-side failure and stays typed as one.
+    let repo_dirty = match nonempty(manifest.repo_dirty) {
+        Some(value) => Ok(value),
+        None => Err(ReleaseSourceUnobservedReason::RepoDirtyMissing),
+    };
 
     ReleaseSourceObservation::Manifest {
         // This is the manifest writer's timestamp, not proof that the manifest
@@ -120,6 +140,7 @@ fn read(path: impl AsRef<Path>) -> ReleaseSourceObservation {
         generated_at,
         repo_head,
         latest_postgres_migration,
+        repo_dirty,
     }
 }
 
@@ -140,11 +161,19 @@ fn is_git_object_id(value: &str) -> bool {
 }
 
 pub(crate) fn health_json(include_node_hostname: bool) -> serde_json::Value {
-    let mut health = match observe() {
+    health_json_for(observe(), include_node_hostname)
+}
+
+fn health_json_for(
+    observation: ReleaseSourceObservation,
+    include_node_hostname: bool,
+) -> serde_json::Value {
+    let mut health = match observation {
         ReleaseSourceObservation::Manifest {
             generated_at,
             repo_head,
             latest_postgres_migration,
+            repo_dirty,
         } => {
             // `observed` means only that the parsed manifest supplied values accepted
             // by this reader, not that they are proven to match repository state.
@@ -169,12 +198,27 @@ pub(crate) fn health_json(include_node_hostname: bool) -> serde_json::Value {
                     failures.push(reason.as_str());
                 }
             }
+            match repo_dirty {
+                Ok(value) => {
+                    health["deployed_repo_dirty"] = serde_json::json!(value);
+                }
+                Err(reason) => {
+                    failures.push(reason.as_str());
+                }
+            }
             if !failures.is_empty() {
-                health["observation_status"] = serde_json::json!(if failures.len() == 1 {
-                    "partial"
-                } else {
-                    "unobserved"
-                });
+                // Recognizing `repo_dirty` intentionally moves legacy two-fact
+                // manifests from `observed` to `partial`, and a confirmed dirty
+                // verdict can move the old no-head/no-migration shape from
+                // `unobserved` to `partial`. This changes health observation output,
+                // not deployment readiness: the deploy gate consumes existing
+                // top-level readiness fields, not this release-source status.
+                health["observation_status"] =
+                    serde_json::json!(if failures.len() == RECOGNIZED_FACT_COUNT {
+                        "unobserved"
+                    } else {
+                        "partial"
+                    });
                 health["observation_failures"] = serde_json::json!(failures);
             }
             health
@@ -210,7 +254,7 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                r#"{{"generated_at":"2026-08-12T00:00:00Z","repo_head":"{REPO_HEAD}","latest_postgres_migration":"0104_example.sql"}}"#
+                r#"{{"generated_at":"2026-08-12T00:00:00Z","repo_head":"{REPO_HEAD}","latest_postgres_migration":"0104_example.sql","repo_dirty":"false"}}"#
             ),
         )
         .expect("write manifest");
@@ -221,7 +265,98 @@ mod tests {
                 generated_at: Some("2026-08-12T00:00:00Z".to_string()),
                 repo_head: Ok(REPO_HEAD.to_string()),
                 latest_postgres_migration: Ok("0104_example.sql".to_string()),
+                repo_dirty: Ok("false".to_string()),
             }
+        );
+    }
+
+    #[test]
+    fn release_source_passes_through_every_written_repo_dirty_verdict() {
+        // #5071 T1 S8-1r2: #5262 asks for a *clean* 40-hex deployment on both
+        // nodes, so the writer's three verdicts must survive the read intact.
+        // `unknown` in particular is the writer admitting it could not tell, and
+        // it must not arrive as either a clean or a dirty claim.
+        let temp = tempfile::tempdir().expect("tempdir");
+        for verdict in ["true", "false", "unknown"] {
+            let path = temp.path().join(format!("dirty-{verdict}.json"));
+            std::fs::write(
+                &path,
+                format!(
+                    r#"{{"repo_head":"{REPO_HEAD}","latest_postgres_migration":"0104_example.sql","repo_dirty":"{verdict}"}}"#
+                ),
+            )
+            .expect("write manifest");
+            let ReleaseSourceObservation::Manifest { repo_dirty, .. } = read(&path) else {
+                panic!("valid manifest must retain field-level observations");
+            };
+            assert_eq!(repo_dirty.as_deref(), Ok(verdict));
+        }
+    }
+
+    #[test]
+    fn release_source_reports_absent_repo_dirty_as_a_partial_observation() {
+        // An old manifest written before the reader recognized this field keeps
+        // its other two facts and is downgraded to `partial`, never silently
+        // reported as a clean checkout.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("no-dirty.json");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"repo_head":"{REPO_HEAD}","latest_postgres_migration":"0104_example.sql"}}"#
+            ),
+        )
+        .expect("write manifest");
+        let ReleaseSourceObservation::Manifest { repo_dirty, .. } = read(&path) else {
+            panic!("valid manifest must retain field-level observations");
+        };
+        assert_eq!(
+            repo_dirty,
+            Err(ReleaseSourceUnobservedReason::RepoDirtyMissing)
+        );
+
+        // An empty or whitespace-only value is absence, matching the other facts.
+        let blank = temp.path().join("blank-dirty.json");
+        std::fs::write(
+            &blank,
+            format!(r#"{{"repo_head":"{REPO_HEAD}","repo_dirty":"  "}}"#),
+        )
+        .expect("write manifest");
+        let ReleaseSourceObservation::Manifest { repo_dirty, .. } = read(&blank) else {
+            panic!("valid manifest must retain field-level observations");
+        };
+        assert_eq!(
+            repo_dirty,
+            Err(ReleaseSourceUnobservedReason::RepoDirtyMissing)
+        );
+    }
+
+    #[test]
+    fn release_source_reserves_unobserved_for_a_manifest_with_no_confirmed_fact() {
+        // Adding a third fact must not let a manifest that still carries a
+        // confirmed 40-hex head be published as `unobserved`.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("head-only.json");
+        std::fs::write(&path, format!(r#"{{"repo_head":"{REPO_HEAD}"}}"#)).expect("write manifest");
+        let health = health_json_for(read(&path), false);
+        assert_eq!(health["observation_status"], "partial");
+        assert_eq!(health["deployed_repo_head"], REPO_HEAD);
+        assert_eq!(
+            health["observation_failures"],
+            serde_json::json!(["latest_postgres_migration_missing", "repo_dirty_missing"])
+        );
+
+        let empty = temp.path().join("empty-object.json");
+        std::fs::write(&empty, "{}").expect("write manifest");
+        let health = health_json_for(read(&empty), false);
+        assert_eq!(health["observation_status"], "unobserved");
+        assert_eq!(
+            health["observation_failures"],
+            serde_json::json!([
+                "repo_head_missing",
+                "latest_postgres_migration_missing",
+                "repo_dirty_missing"
+            ])
         );
     }
 
@@ -262,6 +397,23 @@ mod tests {
         )
         .expect("write manifest");
 
+        assert_unobserved(&path, ReleaseSourceUnobservedReason::ManifestInvalidJson);
+    }
+
+    #[test]
+    fn release_source_rejects_wrong_repo_dirty_type_with_other_facts_intact() {
+        // Once `repo_dirty` became a recognized field, its schema mismatch stopped
+        // being ignored and began rejecting the whole manifest. Keep that expanded
+        // rejection surface explicit rather than mistaking this slice for shape-only.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("wrong-repo-dirty-type.json");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"repo_head":"{REPO_HEAD}","latest_postgres_migration":"0104_example.sql","repo_dirty":true}}"#
+            ),
+        )
+        .expect("write manifest");
         assert_unobserved(&path, ReleaseSourceUnobservedReason::ManifestInvalidJson);
     }
 

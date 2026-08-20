@@ -605,6 +605,68 @@
   head SHA, advance the PR head, and assert direct merge/auto-merge is blocked
   until evidence exists for the new head SHA.
 
+## Delivery-Record Rollout: Two-Node Comparison
+
+`/api/health` (public, no auth) is the comparison surface for the #5071 T1 S8
+delivery-record rollout across mac-book and mac-mini. Two blocks matter:
+`delivery_record_rollout` and `release_source`.
+
+**Reading `flag_source`.** `shadow_enabled` / `authority_enabled` say what a flag's
+value is; `flag_source` says which resolver branch supplied it. `compiled_default`
+means `std::env::var` did not yield a Unicode value (the variable was absent or its
+value was non-Unicode), so the compiled value was used. `env_override` means a
+Unicode value was present — whatever it said — so the node's untracked
+`~/.adk/release/config/launchd.env` normally owns it. A present Unicode value alone
+decides that provenance, so an explicit `=0` still reports `env_override`.
+
+| observed | reading |
+| --- | --- |
+| `authority_enabled: false`, `compiled_default` | rollout has not landed on this node |
+| `authority_enabled: true`, `env_override` | on by node-local pin only — the #5262 pathology |
+| `authority_enabled: true`, `compiled_default` | compiled branch, the target state (verify no non-Unicode env ambiguity) |
+| `authority_enabled: false`, `env_override` | someone pinned an explicit rollback |
+
+**Reading `release_source`.** `deployed_repo_head` is the 40-hex the deploy script
+recorded; `deployed_repo_dirty` is its checkout-cleanliness verdict, passed through
+verbatim as `"true"`, `"false"`, or `"unknown"` (the writer could not tell).
+`"unknown"` is not a clean checkout. Recognizing `repo_dirty` changes two
+observable shapes. A current-writer manifest with a confirmed `repo_dirty` but no
+confirmed head or migration moves from `unobserved` to `partial`; an older manifest
+with both older facts confirmed but no `repo_dirty` moves from `observed` to
+`partial` and reports `repo_dirty_missing`. A non-string `repo_dirty` is now a
+recognized-field type error that rejects the whole manifest as
+`manifest_invalid_json`. These observation fields do not feed deployment readiness:
+the deploy gate reads its existing top-level readiness predicates, including
+`fully_recovered`, and never reads `release_source.observation_status`.
+
+**Acceptance.** T1 S8 closes when both nodes return this object from public
+`/api/health`, and both report the same 40-hex `deployed_repo_head` with
+`deployed_repo_dirty` of `"false"`:
+
+```jsonc
+"delivery_record_rollout": {
+  "shadow_enabled": false,
+  "authority_enabled": true,
+  "mode": "authority_only",
+  "dedup_authority": "durable_delivery_record_frontier",
+  "same_turn_backward_write_enforcement": "enforcing",
+  "flag_source": { "shadow": "compiled_default", "authority": "compiled_default" },
+  "warning_count": 0,
+  "configuration_warnings": []
+}
+```
+
+This is the target, not the current state. The observation fields land first as a
+deploy no-op; the compiled default is still OFF and `warning_count` is still 1
+until the promotion slice ships. Reaching `compiled_default` on both axes also
+requires deleting the two `AGENTDESK_DELIVERY_RECORD_*` lines from mac-book's
+`launchd.env` — and that deletion is only safe after both nodes report the
+promoted commit as `deployed_repo_head`. Removing the pins while the old binary
+is running regresses mac-book to in-memory authority, the opposite of the
+rollout. Deleting the lines is also not enough on its own: `deploy-release.sh`
+regenerates the plist and merges `launchd.env` into it, so a `launchctl kickstart`
+without a redeploy leaves the old values live in the plist.
+
 ## Updating This Page
 
 - Update this page in the same PR that changes any owning module listed above.

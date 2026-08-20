@@ -961,6 +961,7 @@ server::routes::health_api::tests::public_auto_queue_cleanup_backlog_does_not_mo
 server::routes::health_api::tests::public_auto_queue_cleanup_backlog_is_served_on_the_unauthenticated_endpoint
 server::routes::health_api::tests::public_auto_queue_cleanup_projection_is_count_only
 server::routes::health_api::tests::public_health_exposes_release_source_read_failure
+server::routes::health_api::tests::public_health_exposes_rollout_flag_source_on_both_assembly_points
 server::routes::health_api::tests::public_health_json_degraded_iff_reasons_nonempty
 server::routes::health_api::tests::public_health_json_degraded_status_reports_not_ok
 server::routes::health_api::tests::public_health_json_keeps_degraded_and_startup_reasons_distinct
@@ -3210,6 +3211,7 @@ services::discord::outbound::delivery_record::tests::degenerate_content_guard_ma
 services::discord::outbound::delivery_record::tests::delete_record_removes_file
 services::discord::outbound::delivery_record::tests::delivered_frontier_end_divergence_predicate
 services::discord::outbound::delivery_record::tests::delivery_record_rollout_health_reports_enforcing_modes
+services::discord::outbound::delivery_record::tests::delivery_record_rollout_health_reports_flag_source_across_truth_table
 services::discord::outbound::delivery_record::tests::delivery_record_rollout_health_reports_off_as_observable_warning
 services::discord::outbound::delivery_record::tests::delivery_record_serde_roundtrip
 services::discord::outbound::delivery_record::tests::edit_failure_recheck_detects_rotate_between_eof_and_frontier_4508
@@ -3254,6 +3256,7 @@ services::discord::outbound::delivery_record::tests::recent_delivered_content_ri
 services::discord::outbound::delivery_record::tests::recent_delivered_content_window_expires_4081
 services::discord::outbound::delivery_record::tests::record_long_chunk_terminal_delivery_off_is_noop_3610c
 services::discord::outbound::delivery_record::tests::replace_mirror_gate_records_only_delivered_committed_3630
+services::discord::outbound::delivery_record::tests::rollout_flag_resolvers_separate_provenance_from_value
 services::discord::outbound::delivery_record::tests::rotate_after_receipt_validation_preserves_current_incarnation_4911
 services::discord::outbound::delivery_record::tests::same_generation_frontier_reanchor_converges_once_4841
 services::discord::outbound::delivery_record::tests::shadow_off_confirmed_delivery_writes_exact_split_channel_authority_4911
@@ -7083,12 +7086,16 @@ services::queue::tests::force_purge_channel_mailbox_drains_queue_without_session
 services::queue::tests::force_purge_reaches_queue_hydrated_by_dedup_replay
 services::qwen::qwen_provider_lifecycle_tests::live_reused_provider_session_is_preserved_when_wrapper_io_is_missing
 services::release_source::tests::release_source_module_docs_define_release_fact_scope
+services::release_source::tests::release_source_passes_through_every_written_repo_dirty_verdict
 services::release_source::tests::release_source_reads_confirmed_identity
 services::release_source::tests::release_source_rejects_non_sha_repo_heads_without_discarding_migration
 services::release_source::tests::release_source_rejects_wrong_generated_at_type_with_other_facts_intact
+services::release_source::tests::release_source_rejects_wrong_repo_dirty_type_with_other_facts_intact
+services::release_source::tests::release_source_reports_absent_repo_dirty_as_a_partial_observation
 services::release_source::tests::release_source_reports_empty_file_as_unobserved
 services::release_source::tests::release_source_reports_invalid_json_as_unobserved
 services::release_source::tests::release_source_reports_missing_file_as_unobserved
+services::release_source::tests::release_source_reserves_unobserved_for_a_manifest_with_no_confirmed_fact
 services::remote_stub::tests::password_and_keyfile_auth_parse_for_compatibility_only
 services::remote_stub::tests::ssh_connect_stub_refuses_before_auth_for_all_legacy_variants
 services::review_decision::repo_card::tests::commit_sha_differs_distinct_is_true

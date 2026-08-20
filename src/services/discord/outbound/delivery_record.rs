@@ -1144,25 +1144,107 @@ pub(in crate::services::discord) fn delete_record(
 // read-authority rollout remains separately gated below.
 // ---------------------------------------------------------------------------
 
+/// #5071 T1 S8-1r2: where a rollout flag's value came from, which is a different
+/// question from what the value is. `CompiledDefault` means `std::env::var` did not
+/// yield a Unicode value (absent and non-Unicode values both take this path), so the
+/// compiled value was used. `EnvOverride` means a Unicode value was present —
+/// whatever it said — so a
+/// node-local untracked `launchd.env`, not the repository, decided it. #5262's
+/// completion contract asks for repo-owned flags, which is a claim about
+/// provenance that `shadow_enabled`/`authority_enabled` alone cannot answer: once
+/// the compiled default matches the pin, the two are indistinguishable by value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum FlagSource {
+    CompiledDefault,
+    EnvOverride,
+}
+
+impl FlagSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CompiledDefault => "compiled_default",
+            Self::EnvOverride => "env_override",
+        }
+    }
+}
+
+/// A rollout flag's resolved value paired with its provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) struct FlagResolution {
+    pub(in crate::services::discord) enabled: bool,
+    pub(in crate::services::discord) source: FlagSource,
+}
+
+impl FlagResolution {
+    const fn compiled_default(enabled: bool) -> Self {
+        Self {
+            enabled,
+            source: FlagSource::CompiledDefault,
+        }
+    }
+
+    const fn env_override(enabled: bool) -> Self {
+        Self {
+            enabled,
+            source: FlagSource::EnvOverride,
+        }
+    }
+}
+
+/// The opt-in reading shared by both rollout flags today: absent → compiled
+/// default OFF, present → `EnvOverride` whose value is ON only for `1`/`true`
+/// (trimmed, case-insensitive). Provenance is decided by presence ALONE, so an
+/// explicit `=0` still reports `EnvOverride` — that is the whole point of the
+/// distinction, since a pin that agrees with the compiled default is otherwise
+/// invisible. The two named wrappers below exist so a later slice can move one
+/// flag's default without touching the other.
+fn resolve_opt_in_flag(raw: Option<&str>) -> FlagResolution {
+    match raw {
+        Some(value) => {
+            let normalized = value.trim().to_ascii_lowercase();
+            FlagResolution::env_override(normalized == "1" || normalized == "true")
+        }
+        None => FlagResolution::compiled_default(false),
+    }
+}
+
+/// Pure resolver for `AGENTDESK_DELIVERY_RECORD_SHADOW` (compiled default OFF).
+fn resolve_shadow_flag(raw: Option<&str>) -> FlagResolution {
+    resolve_opt_in_flag(raw)
+}
+
+/// Pure resolver for `AGENTDESK_DELIVERY_RECORD_AUTHORITY` (compiled default OFF).
+fn resolve_authority_flag(raw: Option<&str>) -> FlagResolution {
+    resolve_opt_in_flag(raw)
+}
+
 /// #3089 B1 shadow-write flag (`AGENTDESK_DELIVERY_RECORD_SHADOW`, OnceLock,
-/// default OFF). Divergence telemetry only; confirmed persistence never consults
-/// this flag.
-pub(in crate::services::discord) fn delivery_record_shadow_enabled() -> bool {
+/// default OFF), with its provenance. Divergence telemetry only; confirmed
+/// persistence never consults this flag.
+fn delivery_record_shadow_resolution() -> FlagResolution {
     #[cfg(test)]
     if let Some(forced) = shadow_test_seam::current_override() {
-        return forced;
+        // The seam forces a value the environment did not supply, so it reports
+        // `EnvOverride` rather than claiming the repository compiled it in.
+        // Provenance assertions therefore test `resolve_shadow_flag` directly.
+        return FlagResolution::env_override(forced);
     }
-    static CACHED: OnceLock<bool> = OnceLock::new();
+    static CACHED: OnceLock<FlagResolution> = OnceLock::new();
     *CACHED.get_or_init(|| {
-        let on = std::env::var("AGENTDESK_DELIVERY_RECORD_SHADOW")
-            .ok()
-            .map(|v| v.trim().to_ascii_lowercase())
-            .is_some_and(|v| v == "1" || v == "true");
-        if on {
+        let resolution = resolve_shadow_flag(
+            std::env::var("AGENTDESK_DELIVERY_RECORD_SHADOW")
+                .ok()
+                .as_deref(),
+        );
+        if resolution.enabled {
             tracing::info!("  ✓ delivery_record_shadow: enabled");
         }
-        on
+        resolution
     })
+}
+
+pub(in crate::services::discord) fn delivery_record_shadow_enabled() -> bool {
+    delivery_record_shadow_resolution().enabled
 }
 
 /// #4130 test seam: a per-thread override of
@@ -1203,7 +1285,7 @@ pub(in crate::services::discord) mod shadow_test_seam {
 /// `committed_relay_offset` verbatim → byte-identical, deploy no-op. When ON the
 /// gates consult the durable `delivered_frontier` (fused with in-memory) so the
 /// "already-relayed → skip" decision survives a restart / cross-actor boundary.
-pub(in crate::services::discord) fn delivery_record_authority_enabled() -> bool {
+fn delivery_record_authority_resolution() -> FlagResolution {
     // #3933: a per-thread test override (see `authority_test_seam`) lets a unit
     // test drive the authority-ON enforce path (the release config) through the
     // real save path WITHOUT poisoning the env-global `OnceLock` cache for
@@ -1211,19 +1293,26 @@ pub(in crate::services::discord) fn delivery_record_authority_enabled() -> bool 
     // branch entirely (`cfg(test)`), so the flag stays byte-identical at runtime.
     #[cfg(test)]
     if let Some(forced) = authority_test_seam::current_override() {
-        return forced;
+        // Reported as `EnvOverride` for the same reason as the shadow seam: the
+        // value did not come from what this repository compiled in.
+        return FlagResolution::env_override(forced);
     }
-    static CACHED: OnceLock<bool> = OnceLock::new();
+    static CACHED: OnceLock<FlagResolution> = OnceLock::new();
     *CACHED.get_or_init(|| {
-        let on = std::env::var("AGENTDESK_DELIVERY_RECORD_AUTHORITY")
-            .ok()
-            .map(|v| v.trim().to_ascii_lowercase())
-            .is_some_and(|v| v == "1" || v == "true");
-        if on {
+        let resolution = resolve_authority_flag(
+            std::env::var("AGENTDESK_DELIVERY_RECORD_AUTHORITY")
+                .ok()
+                .as_deref(),
+        );
+        if resolution.enabled {
             tracing::info!("  ✓ delivery_record_authority: enabled");
         }
-        on
+        resolution
     })
+}
+
+pub(in crate::services::discord) fn delivery_record_authority_enabled() -> bool {
+    delivery_record_authority_resolution().enabled
 }
 
 /// #3933 test seam: a per-thread override of `delivery_record_authority_enabled()`
@@ -1270,15 +1359,17 @@ pub(in crate::services::discord) mod authority_test_seam {
 
 pub(super) fn delivery_record_rollout_health_json() -> serde_json::Value {
     delivery_record_rollout_health_json_for_flags(
-        delivery_record_shadow_enabled(),
-        delivery_record_authority_enabled(),
+        delivery_record_shadow_resolution(),
+        delivery_record_authority_resolution(),
     )
 }
 
 fn delivery_record_rollout_health_json_for_flags(
-    shadow_enabled: bool,
-    authority_enabled: bool,
+    shadow: FlagResolution,
+    authority: FlagResolution,
 ) -> serde_json::Value {
+    let shadow_enabled = shadow.enabled;
+    let authority_enabled = authority.enabled;
     let mode = match (shadow_enabled, authority_enabled) {
         (false, false) => "off",
         (true, false) => "shadow_only",
@@ -1313,6 +1404,14 @@ fn delivery_record_rollout_health_json_for_flags(
         "mode": mode,
         "dedup_authority": dedup_authority,
         "same_turn_backward_write_enforcement": same_turn_backward_write_enforcement,
+        // Provenance, not value: `compiled_default` on both axes is the operational
+        // rollout signal for #5262's "repo-owned" requirement. A non-Unicode env
+        // value is the documented ambiguity because `std::env::var` maps it to this
+        // branch; `env_override` means a Unicode value was read from the environment.
+        "flag_source": {
+            "shadow": shadow.source.as_str(),
+            "authority": authority.source.as_str(),
+        },
         "warning_count": warning_count,
         "configuration_warnings": configuration_warnings,
     })
@@ -3237,7 +3336,10 @@ mod tests {
 
     #[test]
     fn delivery_record_rollout_health_reports_off_as_observable_warning() {
-        let json = delivery_record_rollout_health_json_for_flags(false, false);
+        let json = delivery_record_rollout_health_json_for_flags(
+            FlagResolution::compiled_default(false),
+            FlagResolution::compiled_default(false),
+        );
         assert_eq!(json["mode"], "off");
         assert_eq!(json["shadow_enabled"], false);
         assert_eq!(json["authority_enabled"], false);
@@ -3258,11 +3360,17 @@ mod tests {
 
     #[test]
     fn delivery_record_rollout_health_reports_enforcing_modes() {
-        let shadow_only = delivery_record_rollout_health_json_for_flags(true, false);
+        let shadow_only = delivery_record_rollout_health_json_for_flags(
+            FlagResolution::compiled_default(true),
+            FlagResolution::compiled_default(false),
+        );
         assert_eq!(shadow_only["mode"], "shadow_only");
         assert_eq!(shadow_only["warning_count"], 1);
 
-        let authority_only = delivery_record_rollout_health_json_for_flags(false, true);
+        let authority_only = delivery_record_rollout_health_json_for_flags(
+            FlagResolution::compiled_default(false),
+            FlagResolution::compiled_default(true),
+        );
         assert_eq!(authority_only["mode"], "authority_only");
         assert_eq!(
             authority_only["same_turn_backward_write_enforcement"],
@@ -3270,7 +3378,10 @@ mod tests {
         );
         assert_eq!(authority_only["warning_count"], 1);
 
-        let enforcing = delivery_record_rollout_health_json_for_flags(true, true);
+        let enforcing = delivery_record_rollout_health_json_for_flags(
+            FlagResolution::compiled_default(true),
+            FlagResolution::compiled_default(true),
+        );
         assert_eq!(enforcing["mode"], "shadow_and_authority");
         assert_eq!(
             enforcing["dedup_authority"],
@@ -3281,6 +3392,110 @@ mod tests {
             "enforcing"
         );
         assert_eq!(enforcing["warning_count"], 0);
+    }
+
+    #[test]
+    fn rollout_flag_resolvers_separate_provenance_from_value() {
+        // #5071 T1 S8-1r2 gate (a): absence and an explicit off are the SAME
+        // value and DIFFERENT provenance. Once the compiled default flips ON, a
+        // stale `=1` pin becomes invisible to `enabled` alone, so provenance is
+        // the only thing that can still name it.
+        assert_eq!(
+            resolve_authority_flag(None),
+            FlagResolution::compiled_default(false)
+        );
+        assert_eq!(
+            resolve_authority_flag(Some("1")),
+            FlagResolution::env_override(true)
+        );
+        assert_eq!(
+            resolve_authority_flag(Some("0")),
+            FlagResolution::env_override(false)
+        );
+
+        // Shadow resolves identically today; S8-2r2 moves only the authority axis.
+        assert_eq!(
+            resolve_shadow_flag(None),
+            FlagResolution::compiled_default(false)
+        );
+        assert_eq!(
+            resolve_shadow_flag(Some("1")),
+            FlagResolution::env_override(true)
+        );
+        assert_eq!(
+            resolve_shadow_flag(Some("0")),
+            FlagResolution::env_override(false)
+        );
+
+        // Value parsing is unchanged from the pre-extraction inline reads: trimmed,
+        // case-insensitive, and ON only for `1`/`true`.
+        assert_eq!(
+            resolve_authority_flag(Some(" TRUE ")),
+            FlagResolution::env_override(true)
+        );
+        assert_eq!(
+            resolve_authority_flag(Some(" 1 ")),
+            FlagResolution::env_override(true)
+        );
+        // Every other present value is off BUT still an override, including the
+        // empty string that an exported-but-blank `launchd.env` line produces.
+        for raw in ["", "  ", "yes", "false", "2"] {
+            assert_eq!(
+                resolve_authority_flag(Some(raw)),
+                FlagResolution::env_override(false),
+                "present value {raw:?} must stay an override"
+            );
+        }
+    }
+
+    #[test]
+    fn delivery_record_rollout_health_reports_flag_source_across_truth_table() {
+        // #5071 T1 S8-1r2 gate (b): provenance is emitted per axis, independently
+        // of the mode the two values combine into.
+        for (shadow_enabled, authority_enabled) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let compiled = delivery_record_rollout_health_json_for_flags(
+                FlagResolution::compiled_default(shadow_enabled),
+                FlagResolution::compiled_default(authority_enabled),
+            );
+            assert_eq!(
+                compiled["flag_source"],
+                serde_json::json!({"shadow": "compiled_default", "authority": "compiled_default"}),
+                "compiled-branch row ({shadow_enabled}, {authority_enabled})"
+            );
+
+            let pinned = delivery_record_rollout_health_json_for_flags(
+                FlagResolution::env_override(shadow_enabled),
+                FlagResolution::env_override(authority_enabled),
+            );
+            assert_eq!(
+                pinned["flag_source"],
+                serde_json::json!({"shadow": "env_override", "authority": "env_override"}),
+                "pinned row ({shadow_enabled}, {authority_enabled})"
+            );
+
+            // The two axes are reported independently, which is what lets health
+            // name mac-book's half-recovered state after only one pin is dropped.
+            let mixed = delivery_record_rollout_health_json_for_flags(
+                FlagResolution::env_override(shadow_enabled),
+                FlagResolution::compiled_default(authority_enabled),
+            );
+            assert_eq!(
+                mixed["flag_source"],
+                serde_json::json!({"shadow": "env_override", "authority": "compiled_default"}),
+                "mixed row ({shadow_enabled}, {authority_enabled})"
+            );
+
+            // Provenance never perturbs the five rollout facts it accompanies.
+            assert_eq!(compiled["mode"], pinned["mode"]);
+            assert_eq!(compiled["dedup_authority"], pinned["dedup_authority"]);
+            assert_eq!(
+                compiled["same_turn_backward_write_enforcement"],
+                pinned["same_turn_backward_write_enforcement"]
+            );
+            assert_eq!(compiled["warning_count"], pinned["warning_count"]);
+        }
     }
 
     #[test]
