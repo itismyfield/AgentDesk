@@ -34,8 +34,8 @@
 //! expected against the 25% bound, where the low-bit population's worst bucket
 //! sits 0.5% off — so stating the closure on the timestamp-adjacent shape is the
 //! conservative reading. What is closed is those two measured shapes; neither is
-//! an observed census of live channel ids, so a real guild's mix is bounded by
-//! them rather than measured directly.
+//! an observed census of live channel ids, and a real guild's mix remains
+//! unmeasured.
 
 use serde::Serialize;
 
