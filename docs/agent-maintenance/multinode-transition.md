@@ -621,7 +621,7 @@ decides that provenance, so an explicit `=0` still reports `env_override`.
 
 | observed | reading |
 | --- | --- |
-| `authority_enabled: false`, `compiled_default` | rollout has not landed on this node |
+| `authority_enabled: false`, `compiled_default` | the binary predates the #5071 T1 S8-2 flip — the promoted commit is not deployed on this node |
 | `authority_enabled: true`, `env_override` | on by node-local pin only — the #5262 pathology |
 | `authority_enabled: true`, `compiled_default` | compiled branch, the target state (verify no non-Unicode env ambiguity) |
 | `authority_enabled: false`, `env_override` | someone pinned an explicit rollback |
@@ -656,10 +656,20 @@ the deploy gate reads its existing top-level readiness predicates, including
 }
 ```
 
-This is the target, not the current state. The observation fields land first as a
-deploy no-op; the compiled default is still OFF and `warning_count` is still 1
-until the promotion slice ships. Reaching `compiled_default` on both axes also
-requires deleting the two `AGENTDESK_DELIVERY_RECORD_*` lines from mac-book's
+This is the target, not the current state. The observation fields landed first as
+a deploy no-op; #5071 T1 S8-2 then flipped the AUTHORITY compiled default ON, so
+an unpinned node now reports `authority_enabled: true` with
+`flag_source.authority: compiled_default`. `warning_count` is still 1, but the
+warning changed identity: `delivery_record_authority_disabled` is gone and
+`delivery_record_shadow_disabled` took its place, because the SHADOW compiled
+default is deliberately still OFF. The block above therefore names two remaining
+steps, not one — reaching `warning_count: 0` needs the shadow axis on as well,
+which contradicts its own `shadow_enabled: false` row; whichever way S8 closes
+that (promote shadow, or accept the shadow warning and keep the count at 1), the
+acceptance block has to be edited to say so.
+
+Reaching `compiled_default` on both axes also requires
+deleting the two `AGENTDESK_DELIVERY_RECORD_*` lines from mac-book's
 `launchd.env` — and that deletion is only safe after both nodes report the
 promoted commit as `deployed_repo_head`. Removing the pins while the old binary
 is running regresses mac-book to in-memory authority, the opposite of the

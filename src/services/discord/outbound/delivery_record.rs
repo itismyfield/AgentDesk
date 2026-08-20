@@ -1191,13 +1191,14 @@ impl FlagResolution {
     }
 }
 
-/// The opt-in reading shared by both rollout flags today: absent → compiled
-/// default OFF, present → `EnvOverride` whose value is ON only for `1`/`true`
-/// (trimmed, case-insensitive). Provenance is decided by presence ALONE, so an
-/// explicit `=0` still reports `EnvOverride` — that is the whole point of the
-/// distinction, since a pin that agrees with the compiled default is otherwise
-/// invisible. The two named wrappers below exist so a later slice can move one
-/// flag's default without touching the other.
+/// The opt-in reading: absent → compiled default OFF, present → `EnvOverride`
+/// whose value is ON only for `1`/`true` (trimmed, case-insensitive). Provenance
+/// is decided by presence ALONE, so an explicit `=0` still reports `EnvOverride`
+/// — that is the whole point of the distinction, since a pin that agrees with the
+/// compiled default is otherwise invisible. Only the shadow flag still reads
+/// this: #5071 T1 S8-2 moved the authority axis to a compiled default ON, which
+/// is exactly the per-flag divergence the two named wrappers below were split to
+/// allow.
 fn resolve_opt_in_flag(raw: Option<&str>) -> FlagResolution {
     match raw {
         Some(value) => {
@@ -1213,9 +1214,22 @@ fn resolve_shadow_flag(raw: Option<&str>) -> FlagResolution {
     resolve_opt_in_flag(raw)
 }
 
-/// Pure resolver for `AGENTDESK_DELIVERY_RECORD_AUTHORITY` (compiled default OFF).
+/// Pure resolver for `AGENTDESK_DELIVERY_RECORD_AUTHORITY` (compiled default ON
+/// since #5071 T1 S8-2). Value parsing is identical to [`resolve_opt_in_flag`] —
+/// a present value is ON only for `1`/`true` (trimmed, case-insensitive) and is
+/// ALWAYS `EnvOverride`, including an explicit `=0` — but ABSENCE now resolves to
+/// `compiled_default(true)`. That is the promotion: the durable delivered
+/// frontier is the repo-owned dedup authority (#5262), so a node needs no
+/// `launchd.env` pin to get it, and `=0` is the rollback rather than the pin
+/// being the rollout.
 fn resolve_authority_flag(raw: Option<&str>) -> FlagResolution {
-    resolve_opt_in_flag(raw)
+    match raw {
+        Some(value) => {
+            let normalized = value.trim().to_ascii_lowercase();
+            FlagResolution::env_override(normalized == "1" || normalized == "true")
+        }
+        None => FlagResolution::compiled_default(true),
+    }
 }
 
 /// #3089 B1 shadow-write flag (`AGENTDESK_DELIVERY_RECORD_SHADOW`, OnceLock,
@@ -1281,16 +1295,19 @@ pub(in crate::services::discord) mod shadow_test_seam {
 }
 
 /// #3089 B2b read-authority flag (`AGENTDESK_DELIVERY_RECORD_AUTHORITY`, OnceLock,
-/// default OFF). When OFF (default) the dedup gates read the legacy in-memory
-/// `committed_relay_offset` verbatim → byte-identical, deploy no-op. When ON the
-/// gates consult the durable `delivered_frontier` (fused with in-memory) so the
+/// compiled default ON since #5071 T1 S8-2). When ON (default) the dedup gates
+/// consult the durable `delivered_frontier` (fused with in-memory) so the
 /// "already-relayed → skip" decision survives a restart / cross-actor boundary.
+/// An explicit `=0` is the rollback: the gates then read the legacy in-memory
+/// `committed_relay_offset` verbatim.
 fn delivery_record_authority_resolution() -> FlagResolution {
     // #3933: a per-thread test override (see `authority_test_seam`) lets a unit
-    // test drive the authority-ON enforce path (the release config) through the
-    // real save path WITHOUT poisoning the env-global `OnceLock` cache for
-    // sibling tests that assume the compiled-default OFF. Production strips this
-    // branch entirely (`cfg(test)`), so the flag stays byte-identical at runtime.
+    // test drive a chosen authority state through the real save path WITHOUT
+    // poisoning the env-global `OnceLock` cache for sibling tests. Since #5071 T1
+    // S8-2 the compiled default is ON, so the seam's remaining jobs are (a) pinning
+    // the legacy OFF path explicitly and (b) staying deterministic when a developer
+    // shell exports its own `=0`/`=1`. Production strips this branch entirely
+    // (`cfg(test)`), so the flag stays byte-identical at runtime.
     #[cfg(test)]
     if let Some(forced) = authority_test_seam::current_override() {
         // Reported as `EnvOverride` for the same reason as the shadow seam: the
@@ -1421,9 +1438,10 @@ fn delivery_record_rollout_health_json_for_flags(
 /// enforce decision. Returns `true` (block the backward inflight write) ONLY when
 /// the durable delivered-frontier authority is ON, a same-turn offset moved
 /// backward (`response_sent_offset` or `last_offset`), **and** the backward move
-/// is NOT a legitimate full reset. Authority OFF (default) → always `false` → the
-/// guard stays observe-only and the write proceeds byte-identically (deploy
-/// no-op). Gated by the SAME flag as the read-authority flip so the single offset
+/// is NOT a legitimate full reset. Authority OFF — since the #5071 T1 S8-2 flip
+/// that means an explicit `=0` rollback, no longer the compiled default → always
+/// `false` → the guard stays observe-only and the write proceeds byte-identically.
+/// Gated by the SAME flag as the read-authority flip so the single offset
 /// authority + its enforcement cut over atomically.
 ///
 /// #3933: `is_legitimate_full_reset` carves the legitimate Gemini/Qwen
@@ -1659,10 +1677,11 @@ pub(in crate::services::discord) fn reanchor_current_generation_frontier(
 }
 
 /// #3089 B2b: the effective "already-committed" offset the dedup/skip gates read.
-/// Flag OFF (default) → the legacy in-memory `committed_relay_offset` verbatim
-/// (no record read → deploy no-op). Flag ON → `max(delivered_frontier.end,
-/// in_memory)` (I3: missing/malformed record → in-memory only, never assume
-/// delivered), but ONLY when the durable frontier is from the CURRENT wrapper
+/// Flag ON (the compiled default since #5071 T1 S8-2) →
+/// `max(delivered_frontier.end, in_memory)` (I3: missing/malformed record →
+/// in-memory only, never assume delivered). Flag OFF (an explicit `=0` rollback)
+/// → the legacy in-memory `committed_relay_offset` verbatim, no record read. The
+/// fused answer holds ONLY when the durable frontier is from the CURRENT wrapper
 /// generation (#1270 guard — a stale prior-generation frontier is treated as
 /// `None`) and physically within the current transcript EOF (#4188 guard). The
 /// in-memory authority is the relay coord's `confirmed_end_offset` for
@@ -1696,7 +1715,8 @@ pub(in crate::services::discord) fn effective_committed_offset(
 /// current-generation durable frontier ([`delivered_frontier_end_current_generation`]).
 ///
 /// Why fuse here and not rely on `effective_committed_offset` alone: under
-/// `AGENTDESK_DELIVERY_RECORD_AUTHORITY=OFF` (the default), `effective_committed_offset`
+/// `AGENTDESK_DELIVERY_RECORD_AUTHORITY=OFF` — since the #5071 T1 S8-2 flip an
+/// explicit `=0` rollback rather than the default — `effective_committed_offset`
 /// returns ONLY the in-memory `committed_relay_offset`. On a restart / synthetic
 /// resume that in-memory value is reset to `0`, while the durable frontier still
 /// holds the current-generation high watermark (e.g. 443154). With the in-memory
@@ -3397,23 +3417,26 @@ mod tests {
     #[test]
     fn rollout_flag_resolvers_separate_provenance_from_value() {
         // #5071 T1 S8-1r2 gate (a): absence and an explicit off are the SAME
-        // value and DIFFERENT provenance. Once the compiled default flips ON, a
-        // stale `=1` pin becomes invisible to `enabled` alone, so provenance is
-        // the only thing that can still name it.
+        // value and DIFFERENT provenance. #5071 T1 S8-2 flipped the authority
+        // compiled default ON, so absence and a stale `=1` pin now agree on
+        // `enabled` and provenance is the only thing that can still name the pin —
+        // which is why gate (a) had to exist before this flip.
         assert_eq!(
             resolve_authority_flag(None),
-            FlagResolution::compiled_default(false)
+            FlagResolution::compiled_default(true)
         );
         assert_eq!(
             resolve_authority_flag(Some("1")),
             FlagResolution::env_override(true)
         );
+        // The rollback direction: an explicit `=0` still wins over the ON default.
         assert_eq!(
             resolve_authority_flag(Some("0")),
             FlagResolution::env_override(false)
         );
 
-        // Shadow resolves identically today; S8-2r2 moves only the authority axis.
+        // The two axes now diverge on absence ONLY: shadow keeps its compiled
+        // default OFF, and its present-value parsing is unchanged.
         assert_eq!(
             resolve_shadow_flag(None),
             FlagResolution::compiled_default(false)
@@ -3439,6 +3462,9 @@ mod tests {
         );
         // Every other present value is off BUT still an override, including the
         // empty string that an exported-but-blank `launchd.env` line produces.
+        // Against the S8-2 ON default this is load-bearing in a way it was not
+        // before: such a line is now a silent ROLLBACK, not a no-op, and
+        // `flag_source: env_override` is the only signal that names it.
         for raw in ["", "  ", "yes", "false", "2"] {
             assert_eq!(
                 resolve_authority_flag(Some(raw)),
@@ -5421,9 +5447,11 @@ mod tests {
     // The pure helpers above (fuse / #1270 generation gate / range_already_committed)
     // are covered, but no test drove the ENV-RESOLVED public gates
     // (`effective_committed_offset` / `committed_floor_for_resend_dedup`) with the
-    // flag FORCED ON — the release config (AGENTDESK_DELIVERY_RECORD_AUTHORITY=1)
-    // the compiled default (OFF) never exercises. These tests force it ON via the
-    // #3993 per-thread seam and verify the whole wiring end-to-end (not by
+    // flag FORCED ON — at the time, the release config
+    // (AGENTDESK_DELIVERY_RECORD_AUTHORITY=1) that the then-OFF compiled default
+    // never exercised; since #5071 T1 S8-2 the compiled default supplies it too.
+    // These tests keep forcing it ON via the #3993 per-thread seam (deterministic
+    // against a developer-shell `=0`) and verify the whole wiring end-to-end (not by
     // hand-computing the fusion): the dedup floor is `max(durable, in_memory)` so it
     // never over-suppresses, the #1270 gate distrusts a stale generation, and the
     // #3871 / #3885 duplicate-relay scenarios are correctly suppressed. This closes

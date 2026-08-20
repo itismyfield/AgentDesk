@@ -1667,9 +1667,10 @@ mod stall_recovery_tests {
     /// `RetryBoundary` reset (`full_response` cleared + `response_sent_offset`→0 for
     /// the SAME turn identity to re-stream) must NOT be enforce-skipped, so the
     /// re-streamed answer survives. Before the `is_legitimate_full_reset` carve-out
-    /// the coarse guard returned `false` here and dropped the body live. The suite
-    /// default is authority-OFF, so this path is only exercised by forcing the flag
-    /// ON via the per-thread test seam.
+    /// the coarse guard returned `false` here and dropped the body live. Since
+    /// #5071 T1 S8-2 the compiled default is authority-ON, so this path is the
+    /// default one; the per-thread seam force stays for determinism against a
+    /// developer-shell `=0`.
     #[test]
     fn authority_on_permits_legit_retry_reset_3933() {
         use crate::services::discord::outbound::delivery_record as dr;
@@ -3555,7 +3556,8 @@ mod stall_recovery_tests {
         assert!(dr::authority_blocks_backward_inflight_write(
             true, true, false, false
         ));
-        // authority OFF (compiled default) → never blocks, reset flag irrelevant.
+        // authority OFF (an explicit `=0` rollback since the #5071 T1 S8-2 flip)
+        // → never blocks, reset flag irrelevant.
         assert!(!dr::authority_blocks_backward_inflight_write(
             false, false, true, false
         ));
