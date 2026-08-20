@@ -162,12 +162,22 @@ mod dispatched_origin_ghost_order_pg_tests {
         pg_db.drop().await;
     }
 
-    /// [ERRATUM R3-E1] A readopted/live row rewritten by the current process
-    /// can still satisfy the durable ghost predicate. The S2 generation fence
-    /// must preserve it and force restore to continue rather than consuming the
-    /// marker or skipping watcher re-registration.
+    /// [ERRATUM R3-E1] A row born in the running process — the shape intake
+    /// mints while the reconcile window is still open — can still satisfy the
+    /// durable ghost predicate, which reads `sessions` and knows nothing about
+    /// generations. The S2 fence is what preserves it and forces restore to
+    /// continue rather than consuming the marker or skipping watcher
+    /// re-registration. The fixture is born through `InflightTurnState::new`
+    /// under a pinned generation, so `born_generation` is stamped by the real
+    /// birth path rather than asserted into place.
+    ///
+    /// Scope, stated because the fence is easy to over-read: it covers rows this
+    /// process *authored*. A row readopted from an earlier generation keeps that
+    /// earlier `born_generation` — readoption does not restamp it — so the fence
+    /// passes it through to the clear. That population is §9-1's open hole,
+    /// deferred to α/β, and no test here covers it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn current_generation_readopted_row_is_not_consumed() {
+    async fn current_generation_live_row_is_not_consumed() {
         let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -182,14 +192,14 @@ mod dispatched_origin_ghost_order_pg_tests {
         ));
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
-        let session_key = "claude/test/readopted-live-5462";
+        let session_key = "claude/test/current-generation-live-5462";
         let channel_id = 546_200_005_u64;
-        let turn_nonce = "readopted-live-nonce-5462";
+        let turn_nonce = "current-generation-live-nonce-5462";
         write_turn_start_marker(&pool, session_key, channel_id, turn_nonce, true).await;
 
         let mut state = inflight_row(channel_id, session_key, 546_200_501, turn_nonce);
         state.born_generation = current_generation;
-        save_inflight_state(&state).expect("seed current-generation readopted row");
+        save_inflight_state(&state).expect("seed current-generation live row");
 
         assert!(
             !consume_dispatched_origin_ghost_if_current(Some(&pool), &state).await,

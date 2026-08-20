@@ -5383,7 +5383,7 @@ services::discord::tmux::watcher_lifecycle::claude_restore::claude_tui_transcrip
 services::discord::tmux::watcher_lifecycle::claude_restore::claude_tui_transcript_fallback_tests::returns_none_without_transcript
 services::discord::tmux::watcher_lifecycle::codex_restore::codex_direct_resume_args_tests::extracts_resume_session_id_from_direct_codex_pane_args
 services::discord::tmux::watcher_lifecycle::codex_restore::codex_direct_resume_args_tests::ignores_wrapper_and_exec_shapes
-services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::current_generation_readopted_row_is_not_consumed
+services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::current_generation_live_row_is_not_consumed
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::failed_ownership_proof_withholds_the_session_release
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::live_turn_without_dispatch_keeps_its_inflight_row
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::real_dispatched_origin_ghost_is_consumed_after_the_probe

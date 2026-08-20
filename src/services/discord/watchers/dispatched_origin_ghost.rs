@@ -34,10 +34,17 @@ const DISPATCHED_ORIGIN_GHOST_PREDICATE: &str = "session_key = $1
 /// Returns `true` only when the step-3 CAS took exactly one row: this turn
 /// consumed the durable dispatched-origin marker. The caller currently uses
 /// that result to skip watcher spawn and turn re-registration, but the CAS is
-/// not a liveness proof for the channel. In particular, a live row readopted
-/// from an earlier generation can still satisfy this S1 predicate; the S2
-/// `born_generation` gate owns that defense. A clear followed by a zero-row CAS
-/// returns `false` and lets restore continue.
+/// not a liveness proof for the channel: the predicate reads `sessions` alone,
+/// so a live turn's row can satisfy it. What actually spares such a row is the
+/// step-2 reconcile clear, whose S2 `born_generation` fence refuses rows the
+/// running process authored. The fence's reach is exactly that — authorship.
+/// `born_generation` is stamped once, by `InflightTurnState::new`, and readoption
+/// does not restamp it (`persist_readopted_under_lock` rewrites
+/// `readopted_from_inflight` and `restart_mode` only), so a row readopted from an
+/// earlier generation keeps the earlier value and passes the fence. That gap is
+/// §9-1's open hole, deferred to a follow-up (α: restamp on readoption, β: a
+/// separate `adopted_generation`); nothing here closes it. A clear followed by a
+/// zero-row CAS returns `false` and lets restore continue.
 pub(super) async fn consume_dispatched_origin_ghost_if_current(
     pg_pool: Option<&sqlx::PgPool>,
     state: &crate::services::discord::inflight::InflightTurnState,
