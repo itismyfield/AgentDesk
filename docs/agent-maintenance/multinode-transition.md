@@ -1471,24 +1471,34 @@ without a redeploy leaves the old values live in the plist.
   the managed root (`worktrees/<repo_name>/`) that the flat 1-depth scan missed,
   removing terminal dispatch/automation worktrees via the existing
   `cleanup_managed_worktree` guards (dirty/unmerged skip). **Multinode class:
-  WORKER-LOCAL maintenance job.** It is one of the `services::maintenance::jobs`
-  registered on the dynamic (non-leader) maintenance scheduler (peer of
-  `storage.target_sweep` / `reconcile.zombie_resources`), NOT the leader-only
-  `worker_registry::MaintenanceScheduler` that owns persistent PG-lease state
+  LEADER-ONLY maintenance job with worker-local side effects.** It is one of the
+  `services::maintenance::jobs` registered on the production leader-only
+  `worker_registry::MaintenanceScheduler`, alongside `storage.target_sweep` and
+  maintenance jobs that own persistent PG-lease state
   (`voice.turn_link_gc` / `storage.cancel_tombstone_prune`). The sweep reads PG
   read-only (the active-dispatch + resumable-GUID keep-set), probes the
   **process-local** tmux server for live AgentDesk panes (fail-closed on query
-  failure), and deletes only directories on the local filesystem under this host's
-  `~/.adk/release/worktrees`. It acquires no lease, owns no durable queue, and
-  asserts no singleton — each node sweeps its OWN worktree root. The keep/discard
-  predicates derive solely from PG rows + this host's tmux + local disk, so the
-  job stays worker-local and introduces no new multinode
-  ownership/singleton/lease assumption. (Caveat for multinode: the keep-set is
+  failure), and deletes only directories on the local filesystem under the leader
+  host's `~/.adk/release/worktrees`. It acquires no job-specific lease and owns no
+  durable queue; the worker registry's leader epoch supplies the singleton. The
+  keep/discard predicates derive solely from PG rows + the leader host's tmux +
+  local disk. (Caveat for multinode: the keep-set is
   global PG state but the live-tmux owner check is host-local — a worktree owned by
-  a pane on ANOTHER node would not be protected by THIS node's tmux probe; today
-  each host only provisions worktrees under its own root, so the sweep never sees
-  another node's directories. If worktree roots ever become shared storage, the
+  a pane on a non-leader node is not protected by the leader's tmux probe. Today
+  each host provisions worktrees under its own root, so the leader sweep does not
+  see another node's directories. If worktree roots ever become shared storage, the
   live-owner check would need to fan out cross-node.)
+  **Coverage consequence of the LEADER-ONLY class:** a non-leader host's
+  `~/.adk/release/worktrees` is never orphan-swept at all — the periodic backstop
+  runs only where the leader epoch is held (`register_leader_tokio`), and no other
+  live path substitutes for it. The only reclaimer that still runs off-leader is
+  the inline per-card `kanban::terminal_cleanup` (`cleanup_managed_worktree` on a
+  terminal kanban transition), which removes the worktree paths a dispatch
+  recorded but is not a backstop for the leaks that path misses. This is a
+  documentation correction rather than a regression: the pre-#5463 "each node
+  sweeps its OWN worktree root" wording described the dynamic (non-leader)
+  scheduler, which had zero registered jobs and zero callers, so per-node
+  coverage never actually ran.
 - #3037 (backflow hotfile re-point): `tmux_watcher.rs` changed by a **pure import
   path correction** — the single `global_monitoring_store()` call in the
   suppressed-placeholder monitor-entry-key snapshot now resolves the function via
