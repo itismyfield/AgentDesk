@@ -197,8 +197,11 @@ mod dispatched_origin_ghost_order_pg_tests {
         let turn_nonce = "current-generation-live-nonce-5462";
         write_turn_start_marker(&pool, session_key, channel_id, turn_nonce, true).await;
 
-        let mut state = inflight_row(channel_id, session_key, 546_200_501, turn_nonce);
-        state.born_generation = current_generation;
+        let state = inflight_row(channel_id, session_key, 546_200_501, turn_nonce);
+        assert_eq!(
+            state.born_generation, current_generation,
+            "InflightTurnState::new must stamp the pinned process generation at birth"
+        );
         save_inflight_state(&state).expect("seed current-generation live row");
 
         assert!(
