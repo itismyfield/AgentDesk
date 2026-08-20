@@ -4747,6 +4747,14 @@ mod stall_watchdog_auto_heal_tests {
     /// history by the stall-liveness first-threshold regression.
     #[tokio::test(flavor = "current_thread")]
     async fn pre_backstop_capture_advance_has_defense_in_depth_suppression_pg() {
+        // Lock hierarchy `E -> P`: the env lock precedes the postgres
+        // lifecycle lock that `try_create` parks in `pg_db`.
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let tempdir = tempfile::tempdir().expect("runtime root tempdir");
+        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tempdir.path(),
+        );
         let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
             "agentdesk_stall_watchdog_producer_live",
             "stall watchdog producer-live suppression tests",
@@ -4756,12 +4764,6 @@ mod stall_watchdog_auto_heal_tests {
             return;
         };
         let pool = pg_db.connect_and_migrate().await;
-        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-        let tempdir = tempfile::tempdir().expect("runtime root tempdir");
-        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
-            "AGENTDESK_ROOT_DIR",
-            tempdir.path(),
-        );
         let provider = ProviderKind::Codex;
         let mut registry = HealthRegistry::new();
         registry.started_at_unix =
@@ -4870,6 +4872,14 @@ mod stall_watchdog_auto_heal_tests {
     /// still preserves every live-turn authority.
     #[tokio::test(flavor = "current_thread")]
     async fn branch4_absolute_backstop_pages_without_cleaning_live_turn_pg() {
+        // Lock hierarchy `E -> P`: the env lock precedes the postgres
+        // lifecycle lock that `try_create` parks in `pg_db`.
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let tempdir = tempfile::tempdir().expect("runtime root tempdir");
+        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tempdir.path(),
+        );
         let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
             "agentdesk_stall_watchdog_absolute_backstop",
             "stall watchdog absolute-backstop paging tests",
@@ -4879,12 +4889,6 @@ mod stall_watchdog_auto_heal_tests {
             return;
         };
         let pool = pg_db.connect_and_migrate().await;
-        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-        let tempdir = tempfile::tempdir().expect("runtime root tempdir");
-        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
-            "AGENTDESK_ROOT_DIR",
-            tempdir.path(),
-        );
         let provider = ProviderKind::Codex;
         let mut registry = HealthRegistry::new();
         registry.started_at_unix = chrono::Utc::now().timestamp()
@@ -5016,6 +5020,14 @@ mod stall_watchdog_auto_heal_tests {
     /// fail because the page is incorrectly suppressed.
     #[tokio::test(flavor = "current_thread")]
     async fn pre_backstop_flat_capture_pages_genuine_stall_pg() {
+        // Lock hierarchy `E -> P`: the env lock precedes the postgres
+        // lifecycle lock that `try_create` parks in `pg_db`.
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let tempdir = tempfile::tempdir().expect("runtime root tempdir");
+        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tempdir.path(),
+        );
         let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
             "agentdesk_stall_watchdog_genuine_stall",
             "stall watchdog genuine-stall paging tests",
@@ -5025,12 +5037,6 @@ mod stall_watchdog_auto_heal_tests {
             return;
         };
         let pool = pg_db.connect_and_migrate().await;
-        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-        let tempdir = tempfile::tempdir().expect("runtime root tempdir");
-        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
-            "AGENTDESK_ROOT_DIR",
-            tempdir.path(),
-        );
         let provider = ProviderKind::Codex;
         let mut registry = HealthRegistry::new();
         registry.started_at_unix =

@@ -3780,8 +3780,25 @@ pub fn load_graceful() -> Config {
 /// mechanically forbids the next one: the poison gate above checks lock
 /// acquisition, not restoration shape, so "no hand-rolled sites remain" is a
 /// statement about a review, not about a check.
+///
+/// # Lock hierarchy
+///
+/// This mutex (`E`) is the **outer** lock of the pair it is routinely held
+/// with. `db::postgres::POSTGRES_TEST_LIFECYCLE_LOCK` (`P`) is the inner one,
+/// so the canonical order is `E -> P`: acquire the environment before building
+/// a PostgreSQL test database, never the other way round. Reversing it in even
+/// one test is enough to deadlock the suite, because a concurrently in-flight
+/// `E -> P` test closes the cycle and both locks are plain `std::sync::Mutex`
+/// with no timeout and no deadlock detection.
+///
+/// The accessor enforces that: it trips before handing out the mutex if the
+/// caller already holds `P`. The check lives here rather than in
+/// `test_env_lock::acquire_shared_test_env_lock` so it also covers the direct
+/// `shared_test_env_lock().lock()` sites, which the re-entry tripwire below
+/// cannot reach.
 #[cfg(test)]
 pub(crate) fn shared_test_env_lock() -> &'static std::sync::Mutex<()> {
+    crate::db::postgres::assert_test_lifecycle_lock_not_held_before_env_lock();
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
@@ -3808,15 +3825,18 @@ pub(crate) mod test_env_lock {
     }
 
     pub(crate) fn acquire_shared_test_env_lock() -> SharedTestEnvLockGuard {
+        // Resolve the mutex first: the accessor carries the `E`-after-`P`
+        // ordering tripwire, and running it before the re-entry flag is armed
+        // keeps an ordering panic from stranding `SHARED_TEST_ENV_LOCK_HELD`
+        // set on a thread that never got a guard to clear it.
+        let mutex = super::shared_test_env_lock();
         SHARED_TEST_ENV_LOCK_HELD.with(|held| {
             if held.get() {
                 panic!("shared_test_env_lock re-entry detected before mutex acquisition");
             }
             held.set(true);
         });
-        let lock = super::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let lock = mutex.lock().unwrap_or_else(|poison| poison.into_inner());
         SharedTestEnvLockGuard { _lock: lock }
     }
 }

@@ -499,6 +499,7 @@ db::postgres::tests::core_status_constraints_reject_invalid_values_and_allow_val
 db::postgres::tests::deploy_gate_constraint_allows_supported_legacy_values_and_rejects_deploy_gate
 db::postgres::tests::deploy_gate_constraint_migration_blocks_existing_deploy_gate_rows
 db::postgres::tests::deploy_gate_constraint_serializes_concurrent_legacy_writer
+db::postgres::tests::env_lock_after_lifecycle_lock_trips_the_order_tripwire
 db::postgres::tests::ownership_registry_key_matches_between_admin_url_and_config_options
 db::postgres::tests::postgres_advisory_lock_lease_allows_only_one_live_holder
 db::postgres::tests::postgres_advisory_lock_lease_does_not_exhaust_shared_pool

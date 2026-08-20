@@ -1261,6 +1261,11 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn pg_alert_is_actionable_and_durably_one_shot_per_episode() {
+        // Lock hierarchy `E -> P`: `set_agentdesk_root_for_test` takes the
+        // shared env lock, so it has to run before the postgres lifecycle lock
+        // that `try_create` parks in `pg_db`.
+        let temp = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(temp.path());
         let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
             "agentdesk_relay_reattach_circuit_alert",
             "relay reattach circuit alert tests",
@@ -1270,8 +1275,6 @@ mod tests {
             return;
         };
         let pool = pg_db.connect_and_migrate().await;
-        let temp = tempfile::tempdir().expect("runtime root");
-        let _env = crate::config::set_agentdesk_root_for_test(temp.path());
         let shared =
             super::super::super::make_shared_data_for_tests_with_storage(Some(pool.clone()));
         let provider = ProviderKind::Codex;
@@ -1615,6 +1618,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn progress_during_pg_stage_cancels_stale_alert_and_reopen_is_distinct() {
+        // Lock hierarchy `E -> P`: `set_agentdesk_root_for_test` takes the
+        // shared env lock, so it has to run before the postgres lifecycle lock
+        // that `try_create` parks in `pg_db`.
+        let temp = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(temp.path());
         let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
             "agentdesk_relay_reattach_circuit_linearization",
             "relay reattach circuit linearization test",
@@ -1624,8 +1632,6 @@ mod tests {
             return;
         };
         let pool = pg_db.connect_and_migrate().await;
-        let temp = tempfile::tempdir().expect("runtime root");
-        let _env = crate::config::set_agentdesk_root_for_test(temp.path());
         let shared =
             super::super::super::make_shared_data_for_tests_with_storage(Some(pool.clone()));
         let provider = ProviderKind::Codex;

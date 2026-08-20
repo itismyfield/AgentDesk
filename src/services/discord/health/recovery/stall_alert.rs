@@ -279,6 +279,14 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn pg_outbox_routes_dm_alerts_and_dedupes_without_synthetic_owner_mentions() {
+        // Lock hierarchy `E -> P`: the env lock precedes the postgres
+        // lifecycle lock that `try_create` parks in `pg_db`.
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let tempdir = tempfile::tempdir().expect("runtime root tempdir");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tempdir.path(),
+        );
         let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
             "agentdesk_stall_watchdog_alert_authority",
             "stall watchdog alert authority tests",
@@ -288,12 +296,6 @@ mod tests {
             return;
         };
         let pool = pg_db.connect_and_migrate().await;
-        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-        let tempdir = tempfile::tempdir().expect("runtime root tempdir");
-        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-            "AGENTDESK_ROOT_DIR",
-            tempdir.path(),
-        );
         let shared = discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
 
         #[derive(Clone, Copy)]

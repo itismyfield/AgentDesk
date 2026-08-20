@@ -17,7 +17,7 @@ done
 unset index
 readonly -a PG_INCLUDE_ARGS
 
-# The broad substring filter also matches these 14 source-verified library
+# The broad substring filter also matches these 15 source-verified library
 # tests even though their bodies do not connect to PostgreSQL. Replay all of
 # them in the full non-PG sweeps to preserve their macOS/Windows coverage.
 NON_PG_FILTER_FALSE_POSITIVES=(
@@ -30,6 +30,7 @@ NON_PG_FILTER_FALSE_POSITIVES=(
   db::postgres::tests::checksum_hex_formats_lowercase_byte_pairs
   db::postgres::tests::checksum_resolution_filters_down_migrations_to_avoid_false_positive
   db::postgres::tests::clamp_foreground_reserve_always_leaves_a_background_slot
+  db::postgres::tests::env_lock_after_lifecycle_lock_trips_the_order_tripwire
   db::postgres::tests::runtime_pool_settings_enable_dead_peer_detection
   db::postgres::tests::startup_pool_settings_raise_pool_size_and_acquire_timeout
   reconcile::dispatch_delivery_reconcile_tests::dispatch_delivery_reconcile_classifies_rows_without_postgres

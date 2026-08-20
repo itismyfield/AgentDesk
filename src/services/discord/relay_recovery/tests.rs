@@ -10,9 +10,10 @@ mod circuit_breaker_apply;
 
 fn isolated_agentdesk_root() -> (AgentdeskRootGuard, tempfile::TempDir) {
     let temp = tempfile::TempDir::new().unwrap();
-    let lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
+    // Canonical acquisition path: locking `shared_test_env_lock` directly
+    // skipped both the re-entry tripwire and the `E`-after-`P` order tripwire,
+    // and this helper is on the blast radius of the #5305 ABBA cycle.
+    let lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let guard = AgentdeskRootGuard {
         previous: std::env::var_os("AGENTDESK_ROOT_DIR"),
         _lock: lock,
@@ -2652,7 +2653,7 @@ async fn auto_apply_is_limited_to_requested_action_kind() {
 // existing clear behavior is preserved.
 struct AgentdeskRootGuard {
     previous: Option<std::ffi::OsString>,
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
 }
 impl Drop for AgentdeskRootGuard {
     fn drop(&mut self) {
