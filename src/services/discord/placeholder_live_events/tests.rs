@@ -6953,7 +6953,14 @@ fn task_notification_xml_background_flips_matching_slot_but_suppresses_card() {
         ),
         "background lifecycle XML should stay quiet even when footer mode is off"
     );
-    events.bridge_task_notification_xml(channel_id, raw_background);
+    // Push the footer-mode-injected bridge output asserted above rather than the
+    // flag-reading `bridge_task_notification_xml` wrapper. That wrapper resolves
+    // footer mode from `AGENTDESK_SINGLE_MESSAGE_PANEL`, whose documented opt-out
+    // (`0`/`false`, #3560) correctly makes the bridge emit nothing so the legacy
+    // separate-panel path stays untouched — so reading it here made this
+    // footer-mode assertion depend on the ambient environment. Every sibling XML
+    // bridge test injects the mode explicitly; this seam was the only one left.
+    events.push_status_events(channel_id, bridged);
 
     let failed = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
     let failed_block = failed
