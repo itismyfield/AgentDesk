@@ -372,7 +372,14 @@ time for diagnostics; neither is a stored approval value.
     the #4081 bounded recent-content fingerprint guard; +133 from #4508 adding the
     edit-failure stable pre-edit path/generation identity plus locked,
     double-validated EOF/frontier snapshot seam and fail-open rotate regression
-    coverage; bugfix only until split under #3405).
+    coverage; +20 from #5071 T1 S8-2 promoting the read-authority flag to a
+    compiled default ON — `resolve_authority_flag` stops delegating to
+    `resolve_opt_in_flag` and owns its own `match` so absence resolves to
+    `compiled_default(true)` (+6 of body; the balance is the docstrings that
+    described the old default OFF across the resolver, the `OnceLock` resolution,
+    the backward-write guard, and `effective_committed_offset`); no read/write
+    path, guard, or health-field shape changed; bugfix only until split under
+    #3405).
   - `src/services/message_outbox.rs` is the PG-backed message outbox
     enqueue/claim/accounting surface. #4465 adds a deduplicated `held` staging
     state that workers cannot claim; callers activate it to `pending` only

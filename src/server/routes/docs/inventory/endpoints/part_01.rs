@@ -26,10 +26,10 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 },
                 "delivery_record_rollout": {
                     "shadow_enabled": false,
-                    "authority_enabled": false,
-                    "mode": "off",
-                    "dedup_authority": "in_memory_committed_offset",
-                    "same_turn_backward_write_enforcement": "observe_only",
+                    "authority_enabled": true,
+                    "mode": "authority_only",
+                    "dedup_authority": "durable_delivery_record_frontier",
+                    "same_turn_backward_write_enforcement": "enforcing",
                     "flag_source": {
                         "shadow": "compiled_default",
                         "authority": "compiled_default"

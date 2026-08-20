@@ -744,3 +744,29 @@ changing runtime behavior.
 > `env_override`, so provenance assertions test the pure resolvers rather than the seams. No
 > new delivery verb, transport, target grammar, dedup identity, or direct-send callsite: the
 > production callsite coverage map is unchanged.)
+
+> Last refreshed: 2026-08-21 (#5071 T1 S8-2 — `outbound/delivery_record.rs` promotes the relay
+> authority rollout to a compiled default ON. `resolve_authority_flag` stops delegating to
+> `resolve_opt_in_flag` and resolves `None` to `FlagResolution::compiled_default(true)`; the
+> present-value branch is copied verbatim, so a present value is still `EnvOverride` and still
+> ON only for `1`/`true` (trimmed, case-insensitive). NOT a deploy no-op — this is the rollout
+> itself: on an unpinned node `effective_committed_offset` now fuses the current-generation
+> durable `delivered_frontier` with the in-memory `committed_relay_offset` (`max`, so the dedup
+> floor can only rise), and `authority_blocks_backward_inflight_write` now enforces the
+> same-turn backward-write skip instead of observing it. Both were already reachable in
+> production via the release node's `AGENTDESK_DELIVERY_RECORD_AUTHORITY=1` pin, which is what
+> this flip makes repo-owned per #5262; `=0` becomes the rollback lever, and a blank or typo'd
+> `launchd.env` line is now a silent rollback whose only signal is `flag_source: env_override`.
+> The shadow axis is untouched (compiled default still OFF, still `resolve_opt_in_flag`), so an
+> unpinned node reports `mode: authority_only` and swaps its one configuration warning from
+> `delivery_record_authority_disabled` to `delivery_record_shadow_disabled`. No new delivery
+> verb, transport, target grammar, dedup identity, or direct-send callsite, and no read/write
+> path or health-field shape change: the production callsite coverage map is unchanged. Teardown
+> accounting: **pure default transition — 0 legacy paths replaced, 0 `deprecated` markings.** The
+> legacy in-memory `committed_relay_offset` read stays live as the `=0` rollback branch, so
+> nothing was demoted and there is no T6 removal candidate here. (The §12-2 slice-DoD inventory
+> in `t5-t6-removal-inventory.md` is scoped to #5071 T5 slices and is deliberately not amended by
+> this T1 slice; this paragraph is the T1 equivalent record.) The
+> `AGENTDESK_DELIVERY_RECORD_AUTHORITY=OFF, the default` clauses in the 2026-06-20 and
+> 2026-06-28 entries above are superseded from this date — they remain accurate as of their own
+> dates.)
