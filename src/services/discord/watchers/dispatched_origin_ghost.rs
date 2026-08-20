@@ -31,11 +31,13 @@ const DISPATCHED_ORIGIN_GHOST_PREDICATE: &str = "session_key = $1
 ///    predicate as the probe. A session that changed hands between steps 1 and
 ///    3 matches zero rows there.
 ///
-/// Returns `true` only when the step-3 CAS took exactly one row. The caller
-/// reads `true` as "this channel has nothing left to restore" and skips watcher
-/// spawn and turn re-registration entirely, so nothing weaker may claim it: a
-/// clear that succeeded while the CAS matched nothing still returns `false` and
-/// lets the restore continue.
+/// Returns `true` only when the step-3 CAS took exactly one row: this turn
+/// consumed the durable dispatched-origin marker. The caller currently uses
+/// that result to skip watcher spawn and turn re-registration, but the CAS is
+/// not a liveness proof for the channel. In particular, a live row readopted
+/// from an earlier generation can still satisfy this S1 predicate; the S2
+/// `born_generation` gate owns that defense. A clear followed by a zero-row CAS
+/// returns `false` and lets restore continue.
 pub(super) async fn consume_dispatched_origin_ghost_if_current(
     pg_pool: Option<&sqlx::PgPool>,
     state: &crate::services::discord::inflight::InflightTurnState,

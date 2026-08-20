@@ -96,10 +96,10 @@ mod dispatched_origin_ghost_order_pg_tests {
     /// and the caller is told the channel is done.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn real_dispatched_origin_ghost_is_consumed_after_the_probe() {
-        let pg_db = TestPostgresDb::create().await;
-        let pool = pg_db.connect_and_migrate().await;
         let root = tempfile::tempdir().expect("runtime root");
         let _root_env = crate::config::set_agentdesk_root_for_test(root.path());
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let session_key = "claude/test/ghost-consume-5462";
         let channel_id = 546_200_001_u64;
         let turn_nonce = "ghost-nonce-5462";
@@ -133,10 +133,10 @@ mod dispatched_origin_ghost_order_pg_tests {
     /// stays on disk so the turn keeps a delivery owner.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn live_turn_without_dispatch_keeps_its_inflight_row() {
-        let pg_db = TestPostgresDb::create().await;
-        let pool = pg_db.connect_and_migrate().await;
         let root = tempfile::tempdir().expect("runtime root");
         let _root_env = crate::config::set_agentdesk_root_for_test(root.path());
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let session_key = "claude/test/live-interactive-5462";
         let channel_id = 546_200_002_u64;
         let turn_nonce = "live-nonce-5462";
@@ -167,10 +167,10 @@ mod dispatched_origin_ghost_order_pg_tests {
     /// clear that did not happen.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn failed_ownership_proof_withholds_the_session_release() {
-        let pg_db = TestPostgresDb::create().await;
-        let pool = pg_db.connect_and_migrate().await;
         let root = tempfile::tempdir().expect("runtime root");
         let _root_env = crate::config::set_agentdesk_root_for_test(root.path());
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let session_key = "claude/test/ghost-superseded-5462";
         let channel_id = 546_200_003_u64;
         let ghost_nonce = "ghost-nonce-superseded-5462";
@@ -204,10 +204,10 @@ mod dispatched_origin_ghost_order_pg_tests {
     /// watcher after the row is gone.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn release_that_takes_no_session_row_reports_no_consumed_ghost() {
-        let pg_db = TestPostgresDb::create().await;
-        let pool = pg_db.connect_and_migrate().await;
         let root = tempfile::tempdir().expect("runtime root");
         let _root_env = crate::config::set_agentdesk_root_for_test(root.path());
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let session_key = "claude/test/ghost-release-lost-5462";
         let channel_id = 546_200_004_u64;
         let turn_nonce = "ghost-nonce-release-lost-5462";
